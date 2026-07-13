@@ -18,10 +18,10 @@ Postgres is the test database for persistence behavior. Integration tests may st
 - Use table-driven state-machine cases for turn, attempt, model-call, tool, approval, input-delivery, delegation, and archival lifecycles.
 - Property-test invariants such as distinct identity preservation, terminal-state monotonicity, and “at most one progressing turn” at the pure decision level.
 - Prove that typed delivery and recovery commands determine turn identity without comparing or classifying natural-language objective text.
-- Prove that `Active(Running)` always has exactly one current nonterminal attempt, waiting phases have none, and activation or wait resolution cannot commit one fact without the other.
+- Prove that `Active(Running)` always carries exactly one current nonterminal attempt plus cancellation status, that requested cancellation pairs atomically with the attempt's `CancellationRequested` state while a prepared attempt ends atomically, and that waiting phases carry their exact wait subject and no attempt and close atomically on cancellation.
 - Reject terminalization while any issued physical operation is unclassified, a current attempt is nonterminal, or a durable wait remains open.
 - Treat queue eligibility as a deterministic predicate over durable lineage and slot ownership; a queued failure must inherit its predecessor frontier before it can terminalize.
-- Compare the complete typed effective configuration for identity and recovery; safe-point input cannot supply an independent configuration.
+- Compare semantic values across the complete closed effective-configuration categories for identity and recovery; do not substitute record-identifier equality, and prove that explicitly excluded operational changes preserve turn identity while safe-point input cannot supply independent configuration.
 - Model effects as requested decisions rather than performing I/O, so tests can assert ordering such as “persist before provider send.”
 
 These tests are required with the first implementation of each state machine.
@@ -32,6 +32,7 @@ These tests are required with the first implementation of each state machine.
 - Race two queued turns to activate work in the same session and prove only one atomically acquires the slot, fixes its frontier, and creates its initial attempt.
 - Crash or terminate orchestration at transaction boundaries and verify acknowledged input, queued work, confirmation waits, and, once ADR-0002 defines them, delegation waits reconstruct correctly.
 - Make a queued turn unexecutable while its predecessor remains active; prove it cannot terminalize early and that its eventual failure frontier includes the predecessor's terminal outcome.
+- Accept safe-point steering, ordinary after-current input, and then an interrupt; terminate before steering consumption and prove the interrupt-created turn is first while every remaining successor retains original accepted-input order.
 - Deliver duplicate commands/results and stale generations in different orders; prove state advances at most once and current state is not overwritten.
 - Keep storage records behind explicit mappings and test unknown/corrupt values fail visibly.
 
@@ -52,6 +53,8 @@ Adapter contract tests should run the same provenance cases for every real provi
 Retry fixtures must consume steering into a prepared call and fail that call both before and after send. Every later retry or continuation must retain the consumed steering in its recorded frontier, while a call that fails before send still retains its own model-call identity.
 
 An after-send unknown-acceptance fixture must end the current attempt as ambiguous, place a non-cancelled turn in `AwaitingRecoveryDecision`, retain the session slot across restart, and reject automatic retry. Separate cases must prove that new evidence, explicit owner-authorized continuation, and owner-selected terminal reconciliation are the only exits. Cancellation plus the same ambiguity must instead terminalize as reconciliation required.
+
+A refusal fixture must preserve the call's `Refused` disposition, end the attempt as `TurnRefused`, commit explicit refusal content, terminalize the turn as `Refused` rather than completed or failed, release the slot, and reject implicit retry or fallback.
 
 ### Outbound runners and tools
 
@@ -95,7 +98,7 @@ Recovery tests should stop the hub at named boundaries rather than random sleeps
 5. while waiting for approval or, once implemented, a delegated result;
 6. after outcome persistence but before client acknowledgement.
 
-On restart, assert both the final state and the absence of forbidden effects. Every nonterminal pre-restart turn attempt must be ended or fenced before continuation. Provider and tool tests must distinguish a known failure from an ambiguous outcome; they must not assume that losing a connection means the external operation failed. A non-cancelled ambiguity must retain the active slot in `AwaitingRecoveryDecision`; cancellation plus ambiguity must terminalize the turn as reconciliation required rather than entering that wait.
+On restart, assert both the final state and the absence of forbidden effects. Every nonterminal pre-restart turn attempt must be ended or fenced before continuation. Provider and tool tests must distinguish a known failure from an ambiguous outcome; they must not assume that losing a connection means the external operation failed. A non-cancelled ambiguity must retain the active slot in `AwaitingRecoveryDecision` with exact operation references. Cancellation must preserve the physical ambiguity while closing any recovery wait and terminalizing the turn as reconciliation required.
 
 Boundary recovery tests are required with each durable effect. Long soak tests, repeated pod eviction, database failover, and Kubernetes disruption suites are later deployment work.
 

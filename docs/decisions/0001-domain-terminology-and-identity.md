@@ -52,13 +52,24 @@ opaque ToolAttemptId
 InitialTurnOrigin =
     AcceptedInput(AcceptedInputId)
 
-AcceptedInputUse =
+AcceptedInputDisposition =
     OriginOf(TurnId)
-  | SteeringFor(TurnId, ModelCallId, ContextFrontier)
-  | PendingSteeringFor(TurnId)
+  | PendingSteering {
+        turn: TurnId,
+        fallback_configuration: EffectiveConfiguration
+    }
+  | ConsumedAsSteering {
+        turn: TurnId,
+        call: ModelCallId,
+        frontier: ContextFrontier
+    }
+  | ReclassifiedAsTurnOrigin {
+        turn: TurnId,
+        reason: NoSafePointBeforeTerminal
+    }
 ```
 
-Future origin variants, including a typed regeneration relation, require explicit domain additions; the pseudocode does not use a catch-all variant that would hide an unknown semantic case or an origin whose context rules are still unresolved.
+These are the complete baseline disposition categories defined with ADR-0027. Reclassification is distinct from an input originally accepted as turn-origin work so recovery and presentation can explain that the target turn terminated without consuming the steering. Future origin or disposition variants, including a typed regeneration relation, require explicit domain additions; the pseudocode does not use a catch-all variant that would hide an unknown semantic case or an origin whose context rules are still unresolved.
 
 **Accepted input** describes durable user-originated semantic content and its delivery request. It is distinct from a transport command, which may be delivered more than once, and from a transcript entry, which is a semantic projection created when the input is used.
 

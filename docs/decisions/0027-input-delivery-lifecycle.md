@@ -6,7 +6,7 @@
 - Reviewers: Domain, lifecycle, configuration, protocol, and reliability reviewers unassigned
 - Supersedes: none
 - Superseded by: none
-- Decision-ledger questions: no-active-turn input; safe points, configuration inheritance, and terminal disposition; queued work creation, derived eligibility, and configuration freeze; successor context frontiers; baseline queue mutation scope
+- Decision-ledger questions: no-active-turn input; safe points, configuration inheritance, and terminal disposition; queued work creation, derived eligibility, closed effective-configuration boundary, and configuration freeze; interrupt-first successor order and context frontiers; baseline queue mutation scope
 
 ## Context
 
@@ -40,13 +40,26 @@ SubmitInput = {
 }
 ```
 
-This is typed pseudocode, not a protocol or final Rust API. Application orchestration resolves the requested configuration to a complete typed `EffectiveConfiguration` before invoking the atomic domain acceptance transition. The transition persists both requested and effective provenance. Every field inside `EffectiveConfiguration` is identity-significant in the baseline; a later ADR must place any explicitly operational late-bound value outside it.
+This is typed pseudocode, not a protocol or final Rust API. Application orchestration resolves the requested configuration to a complete typed `EffectiveConfiguration` before invoking the atomic domain acceptance transition. The transition persists both requested and effective provenance.
+
+The version-one `EffectiveConfiguration` boundary is closed over these semantic categories:
+
+- requested model selection, model parameters, and any semantic instruction or prompt-policy snapshot applied to the turn;
+- enabled tools, their turn-visible semantic configuration, and requested placement or execution constraints;
+- owner-visible recovery, fallback, cost, or resource policy choices that authorize or prohibit semantic execution paths; and
+- immutable versions or value snapshots needed to interpret those choices later.
+
+An unimplemented capability is represented explicitly as disabled or absent inside the relevant typed category; it is not omitted and later filled from mutable defaults. Nested configuration owned by a later subsystem ADR may remain an opaque immutable typed value until that ADR defines its fields, but whether it belongs inside this identity-significant boundary is decided here.
+
+The exact provider/model target resolved for the first call is a separate pinned turn fact under ADR-0005, not an `EffectiveConfiguration` field. Also outside this boundary are provider credentials, live endpoints and connections, scheduler locks and leases, process or runner connection identity, telemetry, transient availability, and transport timing such as wake-up or backoff intervals. Those late-bound operational facts must be recorded when relevant but may not change requested model selection, semantic context, enabled tool behavior, placement constraints, approval binding, or authorized retry/fallback paths. A value that can change one of those semantic choices belongs inside `EffectiveConfiguration` and requires new logical work when changed.
+
+Configuration equality is semantic value equality over this complete immutable typed value. Equality of database identifiers alone is insufficient unless an identifier names one immutable version with stable meaning; two separately stored values with the same normalized semantic content compare equal.
 
 The hub validates the delivery request against authoritative session state in the same transaction that would accept it:
 
 - `StartWhenNoActiveTurn` is valid only when the session has no active turn. If earlier queued turns exist during a scheduler gap, the new turn joins their FIFO tail rather than bypassing them.
 - The three active-work modes are valid only when `expected_active_turn` is the session's current active turn.
-- `Interrupt` and `NextSafePoint` are rejected if that turn is already in `CancellationRequested`.
+- `Interrupt` and `NextSafePoint` are rejected if that turn is running with cancellation already requested.
 - `AfterCurrentTurn` remains valid while cancellation is pending because it makes no promise of steering or initiating cancellation.
 
 If validation loses a race, the command fails before acceptance and no `AcceptedInputId` is acknowledged. The client may refresh and submit a new explicit choice. The hub never silently normalizes a stale active-work request into no-active-turn or queued behavior.
@@ -65,7 +78,7 @@ AcceptedInputDisposition =
 
 `StartWhenNoActiveTurn`, `Interrupt`, and `AfterCurrentTurn` each create a turn and freeze its effective configuration in the same transaction that accepts the input. The accepted input immediately becomes that turn's origin. Input submitted with no active turn is eligible immediately only if no earlier queued turn exists; otherwise it joins the FIFO tail. `Interrupt` and `AfterCurrentTurn` create queued turns.
 
-Effective configuration freezes requested model selection, model parameters, tool availability/configuration, and the policy references or versions needed to explain later decisions. Its typed equality is total: any field difference requires new logical work. Exact provider/model resolution still occurs as defined by ADR-0005. If a frozen configuration later cannot execute, the already-created turn waits in queue until its predecessors terminate, fixes its starting frontier when it becomes eligible, and then fails explicitly; the input does not disappear, adopt newer defaults, or terminalize ahead of its lineage.
+Effective configuration freezes every semantic category defined above. Its typed equality is total: any field difference requires new logical work, while changes to explicitly excluded operational facts do not. Exact provider/model resolution still occurs as defined by ADR-0005. If a frozen configuration later cannot execute, the already-created turn waits in queue until its predecessors terminate, fixes its starting frontier when it becomes eligible, and then fails explicitly; the input does not disappear, adopt newer defaults, or terminalize ahead of its lineage.
 
 `NextSafePoint` initially creates no turn. Its command variant contains no independent configuration request. It binds the accepted input to the active turn, inherits that turn's effective configuration, and captures the same value as the immutable fallback configuration. Any model or configuration change must instead be submitted as origin input for new logical work. The explicit delivery request determines identity: the hub does not inspect natural-language content to decide whether steering expresses the “same” or a “materially different” objective.
 
@@ -74,11 +87,11 @@ Effective configuration freezes requested model selection, model parameters, too
 | Mode | Durable acceptance effect | Logical work | Interaction with issued work | Restart behavior |
 | --- | --- | --- | --- | --- |
 | Start with no active turn | Persist input, origin turn, configuration, and FIFO position; derived eligibility holds if no predecessor is queued | New turn immediately | None is active | Reconstruct queued or active work and derive eligibility from durable lineage and slot ownership |
-| Interrupt | Persist input, successor turn/configuration, and cancellation request atomically | New turn, designated as the active turn's next successor | Best-effort cancel current calls/attempts; never roll back or mutate them | Reconstruct cancellation, issued-effect evidence, and queued successor |
+| Interrupt | Persist input and successor configuration plus either running cancellation or the wait-closing terminal transition atomically | New turn, designated as the active turn's immediate successor | Best-effort cancel current calls/attempts when running; close the exact wait otherwise; never roll back or mutate issued work | Reconstruct cancellation or the terminal wait disposition, issued-effect evidence, and queued successor |
 | Next safe point | Persist input as pending steering with fallback configuration | No new turn unless reclassified | Does not mutate an issued provider call, tool request, approval, or tool attempt | Reconstruct pending steering and its target; consume or reclassify durably |
 | After current turn | Persist input, FIFO successor turn, and configuration | New queued turn | Does not cancel or alter current work | Reconstruct exact queue order and frozen configuration |
 
-The first accepted interrupt becomes the designated successor ahead of ordinary after-current turns already queued behind the active turn. Because the active turn immediately enters `CancellationRequested`, another interrupt is rejected until authoritative state changes. Existing queued turns retain their relative FIFO order after the interrupt-created successor and consequently observe its terminal semantic outcome before they run. This defined priority insertion is part of interrupt semantics, not a general queue-reordering command.
+The first accepted interrupt becomes the designated immediate successor ahead of every other successor candidate for the active turn. This includes ordinary after-current turns already queued and any pending safe-point input that may be reclassified when the interrupted turn terminalizes. A running active turn records cancellation on its existing running state and attempt; cancellation from an approval or recovery wait closes that exact wait and terminalizes atomically under ADR-0004. Another interrupt is rejected once running cancellation is pending, and a later request must target the new authoritative active state. After the interrupt-created successor, reclassified steering and ordinary queued turns retain their original accepted-input order. This defined priority insertion is part of interrupt semantics, not a general queue-reordering command.
 
 ### Safe points
 
@@ -95,13 +108,13 @@ At that boundary, the hub atomically:
 
 Pending steering does not change an already-issued model call. It also does not change a tool request, its normalized arguments, an approval, or an in-flight tool attempt. If orchestration later reaches another model call after the tool outcome is durable, that call consumes the steering.
 
-If the turn becomes terminal without another safe point, the same terminal transaction reclassifies every pending steering input as the origin of a new after-current queued turn using its captured fallback configuration. The reclassified turns and ordinary after-current turns are ordered by their original accepted-input positions; interrupt priority remains the one exception described above. Each input receives a durable `ReclassifiedAsTurnOrigin` disposition. Reclassification is visible; it is never described as having steered the completed turn.
+If the turn becomes terminal without another safe point, the same terminal transaction reclassifies every pending steering input as the origin of a new after-current queued turn using its captured fallback configuration. An interrupt-created successor, if one exists, is first. After it, reclassified turns and ordinary after-current turns are ordered together by their original accepted-input positions. Each input receives a durable `ReclassifiedAsTurnOrigin` disposition. Reclassification is visible; it is never described as having steered the terminal predecessor.
 
 ### Interrupt completion and successor eligibility
 
-Interrupt records a cancellation request but does not free the progressing-turn slot. The hub attempts to stop current provider and tool work and classifies every issued outcome honestly. The interrupted turn then becomes `Completed`, `Cancelled`, `Failed`, or `ReconciliationRequired` as required by evidence; a completion that races cancellation is not relabeled. Only then may the interrupt-created successor activate.
+Interrupt does not free the progressing-turn slot. For a running turn it records cancellation while retaining the exact current attempt, then the hub attempts to stop current provider and tool work and classifies every issued outcome honestly. Cancellation from approval atomically closes that wait and yields `Cancelled`; cancellation from recovery atomically closes that wait and yields `ReconciliationRequired`. The interrupted turn becomes `Completed`, `Refused`, `Cancelled`, `Failed`, or `ReconciliationRequired` as required by evidence; a completion or refusal that races cancellation is not relabeled. Only then may the interrupt-created successor activate.
 
-An ambiguous prior external effect is represented in the predecessor's terminal disposition and semantic outcome marker. The successor may proceed with that uncertainty in context; interrupt never asserts rollback.
+An ambiguous prior external effect remains terminally `Ambiguous` on its physical operation while the predecessor uses `ReconciliationRequired` and an explicit semantic outcome marker. The successor may proceed with that uncertainty in context; interrupt never asserts rollback.
 
 ### Successor context frontier
 
@@ -116,7 +129,8 @@ starting_frontier(turn) =
 The predecessor terminal frontier contains, in order:
 
 - all semantic entries committed before and by the predecessor;
-- committed assistant, tool-result, and explicit refusal content for a completed predecessor;
+- committed assistant and tool-result content for a completed predecessor;
+- explicit refusal content and a refusal marker for a refused predecessor;
 - an explicit failure marker for a failed predecessor;
 - committed effects plus an explicit cancellation marker for a cancelled predecessor; or
 - an explicit ambiguity/reconciliation-required marker for that disposition.
@@ -188,7 +202,7 @@ Interrupt is responsive in cancellation signaling but conservative in activation
 
 - **S01:** The client submits `StartWhenNoActiveTurn`; with no earlier queued work, acceptance creates a queued turn for which eligibility is immediately derivable. Activation atomically fixes a frontier based on no ancestry or one immutable ancestry source and creates its initial attempt.
 - **S03:** Restart finds the accepted input, already-created queued turn, configuration, queue lineage, and disposition, then derives eligibility. An unexecutable queued turn waits for its predecessors and fixes its frontier before failing. No default is re-read to reconstruct intent.
-- **S07:** Interrupt atomically creates the successor and requests cancellation. The successor waits, then fixes a frontier containing the predecessor's cancellation, failure, or ambiguity outcome.
+- **S07:** Interrupt atomically creates the immediate successor and either requests running cancellation or closes the exact wait. The successor waits, then fixes a frontier containing the predecessor's completion, refusal, cancellation, failure, or ambiguity outcome.
 - **S08:** Steering accepted during a provider call remains pending and inherits the target turn's configuration. After every earlier issued physical operation is classified, the next provider-call boundary consumes and commits it, after which retries and continuations retain it; if no such boundary occurs, terminalization reclassifies it into visible queued work.
 - **S09:** After-current input creates a FIFO queued turn immediately. Its configuration is fixed at acceptance; its context is fixed after its immediate predecessor terminates.
 - **S10:** Steering can remain pending through an approval wait. It neither alters the approved request nor releases the active turn's slot.
@@ -198,13 +212,13 @@ Interrupt is responsive in cancellation signaling but conservative in activation
 
 Future safe-point kinds can be added as typed boundaries after defining what may consume steering and how each affects tool or approval identity. Future non-input origins, including regeneration, must add origin-specific starting-frontier rules rather than weakening queue-lineage semantics for accepted input. Queue-management commands can add new dispositions without rewriting historical acceptance records.
 
-Future configuration design may define explicitly late-bound operational values outside `EffectiveConfiguration`, but each must be named, policy-governed, and durably resolved. A late-bound value cannot be introduced as an implicit default lookup or excluded ad hoc from effective-configuration equality.
+A future ADR may add a new explicitly late-bound operational category only by showing that it cannot change any semantic choice assigned above to `EffectiveConfiguration`; each such value must still be named, policy-governed, and durably resolved when relevant. A late-bound value cannot be introduced as an implicit default lookup or excluded ad hoc from effective-configuration equality.
 
 The outcome-aware frontier rule supports later reconciliation entries and richer semantic projections without making raw operational logs the transcript.
 
 ## Open questions
 
-- Exact configuration fields and policy-version representations remain for a configuration ADR or the first relevant domain design; whatever fields enter `EffectiveConfiguration` participate in total equality.
+- Concrete nested field spellings and policy-reference encodings remain for the relevant subsystem ADRs, but the semantic categories included in `EffectiveConfiguration`, the operational exclusions, and semantic value-equality rule are fixed above and may not be reclassified by implementation.
 - Raw audit evidence selection and semantic outcome-marker rendering remain open, although their required presence and ordering are decided here.
 - Queue size, admission limits, and resource governance remain open.
 - UI defaults may be chosen later, but the submitted command must carry an explicit resulting delivery request.

@@ -9,10 +9,10 @@ These records are under review and are not authoritative until accepted:
 | ADR | Scope |
 | --- | --- |
 | [ADR-0001](0001-domain-terminology-and-identity.md) | Core domain terminology and durable identity boundaries |
-| [ADR-0003](0003-session-creation-and-transcript-ancestry.md) | Independent session creation cause and initial transcript ancestry |
-| [ADR-0004](0004-turn-and-attempt-lifecycle.md) | Turn/attempt lifecycle, atomic running-attempt ownership, terminal guards, recovery, regeneration identity boundary, cancellation, and ambiguity; regeneration command/context and child waits remain later scope |
-| [ADR-0005](0005-model-call-retry-semantics.md) | Model-call retry, ambiguous-call wait behavior, continuation, and complete configuration identity |
-| [ADR-0027](0027-input-delivery-lifecycle.md) | No-active-turn and active-work input delivery, configuration inheritance/freeze, derived queue eligibility, and context frontiers |
+| [ADR-0003](0003-session-creation-and-transcript-ancestry.md) | Independent session creation cause, owner-initiated baseline with typed future extension, and initial transcript ancestry |
+| [ADR-0004](0004-turn-and-attempt-lifecycle.md) | Turn/attempt lifecycle, atomic running-attempt ownership, typed cancellation subjects, terminal guards, recovery, regeneration identity boundary, and ambiguity; regeneration command/context and child waits remain later scope |
+| [ADR-0005](0005-model-call-retry-semantics.md) | Model-call retry, ambiguous-call wait behavior, continuation, refusal disposition, and complete configuration identity |
+| [ADR-0027](0027-input-delivery-lifecycle.md) | No-active-turn and active-work input delivery, closed effective-configuration boundary, configuration inheritance/freeze, interrupt-first successor ordering, derived queue eligibility, and context frontiers |
 
 ## When to write an ADR
 

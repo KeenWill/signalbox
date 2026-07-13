@@ -53,10 +53,10 @@ This glossary recommends working language for design discussion. “Accepted” 
 
 ## Creation cause
 
-- **Definition:** The reason a session exists, such as direct user creation, application creation, schedule, or delegation from parent work.
-- **Status:** The independent concept is accepted; typed immutable representation and initial labels are proposed by [ADR-0003](decisions/0003-session-creation-and-transcript-ancestry.md).
+- **Definition:** The typed reason a session exists. The first implementable value is owner-initiated; application, schedule, delegation, or other causes require feature ADRs that define their exact durable initiator identities.
+- **Status:** The independent concept is accepted; immutable owner-initiated baseline and typed extension rule are proposed by [ADR-0003](decisions/0003-session-creation-and-transcript-ancestry.md).
 - **Do not confuse with:** Transcript ancestry. Cause answers “why created,” not “where initial context came from.”
-- **Example:** A delegated child session has delegation as its cause even if it starts with an empty transcript and only a task brief.
+- **Example:** An owner-created fork has owner initiation as its cause and a separate source frontier as ancestry. After ADR-0002 defines delegation, a child may instead carry its newly defined delegated cause without necessarily inheriting transcript context.
 
 ## Transcript ancestry
 
@@ -123,7 +123,7 @@ This glossary recommends working language for design discussion. “Accepted” 
 
 ## Ambiguous outcome
 
-- **Definition:** A physical outcome where available evidence cannot establish whether an external effect occurred, usually because acknowledgement or observation was lost. A non-cancelled turn with such an issued outcome retains its active slot while awaiting an explicit recovery decision; cancellation plus ambiguity terminalizes for reconciliation.
+- **Definition:** A physical outcome where available evidence cannot establish whether an external effect occurred, usually because acknowledgement or observation was lost. A non-cancelled turn with such an issued outcome retains its active slot while awaiting an explicit recovery decision; cancellation preserves the physical `Ambiguous` outcome while the turn terminalizes as reconciliation required.
 - **Status:** Concept and no-blind-retry rule accepted; reconciliation states provisional.
 - **Do not confuse with:** A known failure, an ordinary retryable read, or “probably failed.”
 - **Example:** A runner loses connectivity immediately after submitting a payment-like external write; the hub records ambiguity and requires reconciliation instead of dispatching it again.
@@ -137,8 +137,8 @@ This glossary recommends working language for design discussion. “Accepted” 
 
 ## Effective configuration
 
-- **Definition:** The durable configuration governing one logical turn's semantic execution choices, including requested model selection, model parameters, tool availability/configuration, and explanatory policy references. Every field in the typed value is identity-significant in the baseline and equality is total.
-- **Status:** Durable provenance is accepted; immutability and the freeze boundary are proposed by [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md), [ADR-0005](decisions/0005-model-call-retry-semantics.md), and [ADR-0027](decisions/0027-input-delivery-lifecycle.md). Exact fields and representation remain open.
+- **Definition:** The complete immutable semantic configuration governing one turn: requested model selection and parameters, semantic instruction policy, enabled tool behavior and placement constraints, owner-visible recovery/fallback/resource choices, and the immutable policy versions needed to interpret them. Every field is identity-significant and equality is semantic value equality.
+- **Status:** Durable provenance is accepted; the closed semantic categories, operational exclusions, immutability, equality, and freeze boundary are proposed by [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md), [ADR-0005](decisions/0005-model-call-retry-semantics.md), and [ADR-0027](decisions/0027-input-delivery-lifecycle.md). Nested subsystem representations remain open without reopening whether they are identity-significant.
 - **Do not confuse with:** The exact provider/model target resolved for a model call, current hub defaults, or a client-side draft selection.
 - **Example:** A queued turn keeps the complete model and tool configuration accepted with it even if hub defaults change before the predecessor finishes; safe-point steering inherits that value rather than supplying another configuration.
 

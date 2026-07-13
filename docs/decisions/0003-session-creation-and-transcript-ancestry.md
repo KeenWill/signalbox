@@ -6,7 +6,7 @@
 - Reviewers: Domain and lifecycle reviewers unassigned
 - Supersedes: none
 - Superseded by: none
-- Decision-ledger questions: session creation cause and transcript ancestry; future multiple ancestry sources or merge
+- Decision-ledger questions: owner-initiated baseline and typed extension of session creation cause; independent transcript ancestry; future multiple ancestry sources or merge
 
 ## Context
 
@@ -21,7 +21,7 @@ Every session records two required, independent, immutable creation facts:
 1. **Creation cause** answers why this session exists.
 2. **Transcript ancestry** answers where its initial semantic conversation context came from.
 
-Creation cause is a typed value. The initial conceptual causes are owner-initiated, application-initiated, scheduled, and delegated. Each non-owner cause carries a durable reference to the initiating domain fact appropriate to that cause. The exact set may be extended by ADR; an unstructured string is not a substitute for a typed cause.
+Creation cause is a typed value. The first implementable cause is `OwnerInitiated`. Application-initiated, scheduled, delegated, and any other causes are reserved extension examples rather than valid baseline values. The ADR that enables one must add a typed variant carrying the exact durable initiating domain identity; an unstructured string or generic placeholder reference is not a substitute.
 
 Transcript ancestry in version one is either `None` or one immutable source consisting of a source session and an exact source transcript frontier. `None` explicitly means that no prior session transcript supplied initial semantic context; it does not mean that the session lacks task input, configuration, or a creation cause.
 
@@ -33,8 +33,8 @@ Cause and ancestry may vary independently. For example:
 | --- | --- | --- |
 | Owner-initiated | None | Start an empty conversation |
 | Owner-initiated | Single source frontier | Fork an earlier conversation |
-| Delegated | None | Create a child from an explicit task brief without transcript inheritance |
-| Delegated | Single source frontier | Delegate work and deliberately seed it from one transcript frontier |
+| Future delegated cause | None | After ADR-0002 defines its initiator identity, create a child from an explicit task brief without transcript inheritance |
+| Future delegated cause | Single source frontier | After ADR-0002 defines its initiator identity, delegate work and deliberately seed it from one transcript frontier |
 
 Initial ancestry has exactly one source or none. Signalbox does not infer ancestry from related-session links, task briefs, copied text, or delegation.
 
@@ -48,9 +48,6 @@ SessionCreationProvenance = {
 
 CreationCause =
     OwnerInitiated
-  | ApplicationInitiated(DurableInitiatorRef)
-  | Scheduled(DurableScheduleRef)
-  | Delegated(DurableParentWorkRef)
 
 TranscriptAncestry =
     None
@@ -60,14 +57,14 @@ TranscriptAncestry =
     }
 ```
 
-The pseudocode states domain distinctions, not final enum variants or identifier shapes.
+The pseudocode states the complete first implementable cause set, not final Rust spelling. New variants are additive domain decisions made with the feature that defines their initiating identity; the initial type does not contain uninhabitable placeholders.
 
 **Transcript frontier** here identifies an immutable source boundary in semantic history. It is related to, but need not share the storage representation of, the per-model-call context frontier.
 
 ## Invariants
 
 - INV-003 and INV-030 are preserved and made precise by this ADR.
-- Session creation must atomically validate the cause reference, ancestry source, and source frontier before acknowledgement.
+- Session creation must atomically validate the cause value, any reference required by a future accepted cause variant, the ancestry source, and the source frontier before acknowledgement.
 - A source session cannot later rewrite a created session's initial context by advancing, archiving, or changing presentation.
 - No creation-cause variant implies ancestry, and ancestry never implies a creation cause.
 - Initial context has at most one transcript ancestry source.
@@ -96,7 +93,7 @@ Fork and delegation can evolve independently. Provenance remains inspectable eve
 
 - **S01:** `OwnerInitiated` plus `None` creates an empty interactive session. The first accepted input is not ancestry.
 - **S17:** An owner-created fork stores `OwnerInitiated` and the selected source session/frontier. Later source activity cannot change the fork.
-- **S18:** Once ADR-0002 defines delegation lifecycle, a delegated child stores a durable parent-work reference in its cause. It may have no ancestry and receive a task brief as new input, or it may explicitly select one source frontier.
+- **S18:** ADR-0002 must add the delegated-cause variant and define its exact durable parent-work identity together with delegation lifecycle. The child may then have no ancestry and receive a task brief as new input, or explicitly select one source frontier.
 - **S19:** Parent cancellation cannot erase or rewrite the child's cause or ancestry. ADR-0002 remains blocking before a child-wait phase or parent-cancellation transition is exposed.
 
 ## Extension implications
@@ -107,11 +104,11 @@ Related-session links may be added for navigation, results, or lifecycle policy 
 
 ## Open questions
 
-- The exact durable reference types for applications, schedules, and parent work remain to be designed with those features.
+- Application, schedule, and delegation ADRs must decide whether they add creation causes and, if so, the exact durable initiating identity carried by each new variant.
 - Copy, reference, or hybrid transcript storage remains open under the persistence ADR.
 - Retention behavior when an ancestry source is later subject to destructive deletion remains open.
 - Multiple-source ancestry and merge remain future ledger scope.
 
 ## Explicit non-decisions
 
-This ADR does not decide delegation-result representation, cancellation propagation, detached children, archive coupling, transcript merge, destructive retention, session ownership, authentication, or storage schema. It does not require every creation cause to ship in version one.
+This ADR does not decide delegation-result representation, cancellation propagation, detached children, archive coupling, transcript merge, destructive retention, session ownership, authentication, or storage schema. It does not define placeholder application, schedule, or delegation variants before their initiating identities exist.

@@ -39,7 +39,7 @@ These scenarios test architectural boundaries; quoted commands and state names a
 
 - **User intent:** Recover honestly without claiming to resume the lost network stream.
 - **Durable commands:** Before send, persist model-call identity, exact hub-resolved provider/model target, frontier, and in-flight state; after restart, record the recovered outcome classification and a recovery decision.
-- **State transitions:** Model call in flight → completed/known failed/cancelled/ambiguous according to recovered evidence; restart ends or fences the turn attempt. A non-cancelled ambiguous call deterministically leaves the turn active awaiting a recovery decision; cancellation plus ambiguity terminalizes as reconciliation-required.
+- **State transitions:** Model call in flight → completed/known failed/cancelled/ambiguous according to recovered evidence; restart ends or fences the turn attempt. A non-cancelled ambiguous call remains physically `Ambiguous` and deterministically leaves the turn active awaiting a recovery decision carrying that call reference; cancellation preserves the call outcome and terminalizes the turn as reconciliation-required.
 - **Transient updates:** Uncommitted deltas and the live provider connection are lost; clients replace drafts from an authoritative snapshot.
 - **Owning component:** Hub provider adapter reports evidence; hub recovery classifies it; Postgres records it.
 - **Failure behavior:** Do not imply exact-token continuation. Another external call is a new model-call record. It stays in the same turn only through an explicit owner-authorized recovery transition preserving the exact origin, complete configuration, committed context, and effect evidence under ADR-0004 and ADR-0005; the turn retains its slot until that decision and no semantic “same intent” comparison is performed.
@@ -61,7 +61,7 @@ These scenarios test architectural boundaries; quoted commands and state names a
 
 - **User intent:** Avoid accidentally repeating an external write whose result was lost.
 - **Durable commands:** Persist the approved tool request, attempt, dispatch generation, and disconnect evidence; record `ambiguous` when completion cannot be established.
-- **State transitions:** Tool attempt in flight → ambiguous and current turn attempt → ambiguous; the non-cancelled turn retains its slot in `AwaitingRecoveryDecision` until explicit owner action or evidence sends it to reconciliation or another permitted disposition.
+- **State transitions:** Tool attempt in flight → terminal/ambiguous and current turn attempt → ambiguous; the physical outcome remains `Ambiguous`. The non-cancelled turn retains its slot in `AwaitingRecoveryDecision` carrying that tool-attempt reference until explicit owner action or evidence continues the turn or gives it the separate `ReconciliationRequired` disposition.
 - **Transient updates:** Last progress text may be shown only as non-authoritative evidence.
 - **Owning component:** Hub classifies and blocks automatic retry; the selected runner may later provide evidence; the owner resolves uncertainty.
 - **Failure behavior:** No blind retry and no claim that interrupt or disconnect undid the effect. The owner may end the turn as reconciliation-required, but any future authorization to continue must preserve the ambiguous attempt and follow the later tool-effect policy. Reconciliation records why the final classification changed.
@@ -71,11 +71,11 @@ These scenarios test architectural boundaries; quoted commands and state names a
 ## S07 — Submit an interrupting message
 
 - **User intent:** Stop current progress and begin different logical work from new input.
-- **Durable commands:** Under proposed ADR-0027, atomically persist the interrupting accepted input, its successor turn and frozen configuration, and a cancellation request against the expected active turn.
-- **State transitions:** Active turn → cancellation requested → completed/cancelled/failed/reconciliation-required terminal according to raced evidence; interrupt-created turn remains queued, then fixes its successor frontier and becomes eligible.
+- **Durable commands:** Under proposed ADR-0027, atomically persist the interrupting accepted input and its successor turn/configuration plus either running cancellation against the expected attempt or the exact wait-closing terminal transition.
+- **State transitions:** A running turn retains its exact attempt and records cancellation requested; an approval wait closes directly to cancelled, and a recovery wait closes directly to reconciliation-required. The predecessor then reaches completed/refused/cancelled/failed/reconciliation-required terminal according to raced evidence. The interrupt-created turn is always the immediate queued successor, then fixes its successor frontier and becomes eligible.
 - **Transient updates:** Cancellation signals to provider or runner and “stopping” progress.
 - **Owning component:** Hub owns ordering and state; adapters attempt prompt cancellation; client states intent.
-- **Failure behavior:** Issued effects are not rolled back. The interrupted turn retains the progressing slot until every issued operation is classified, its current attempt ends, and any wait is closed. An ambiguous issued effect makes it terminal reconciliation-required; it cannot enter a recovery wait after cancellation. The successor frontier includes completion, cancellation, failure, or ambiguity rather than relying on transient drafts.
+- **Failure behavior:** Issued effects are not rolled back. The interrupted turn retains the progressing slot until every issued operation is classified, its current attempt ends, and any wait is closed. An ambiguous issued effect remains physically ambiguous while the turn becomes reconciliation-required; it cannot enter a recovery wait after cancellation. The interrupt successor runs ahead of any reclassified steering or ordinary queued work and observes completion, refusal, cancellation, failure, or ambiguity rather than transient drafts.
 - **Required invariants:** INV-007, INV-009, INV-025, INV-028, INV-029.
 - **Remaining questions:** Acceptance of ADR-0004, ADR-0005, and ADR-0027; provider/tool-specific cancellation evidence remains open. Child-cancellation propagation is excluded from the baseline and reserved for ADR-0002.
 
@@ -86,7 +86,7 @@ These scenarios test architectural boundaries; quoted commands and state names a
 - **State transitions:** Accepted input → pending steering → consumed by a later model call, or visibly reclassified as a queued turn origin if the target turn terminates first. Every active wait retains the turn's session slot under proposed ADR-0004.
 - **Transient updates:** Client shows “will apply at next safe point”; no mutation of the current provider stream.
 - **Owning component:** Hub decides safe-point boundaries and builds context; clients only request and display treatment.
-- **Failure behavior:** Restart preserves pending steering. It cannot be consumed while an earlier call or tool attempt is unclassified. If the consuming call later fails before send or ends ambiguously, every retry or continuation retains the consumed steering. If the turn becomes terminal before consumption, the terminal transaction creates FIFO queued work with the captured fallback configuration and records why steering was reclassified.
+- **Failure behavior:** Restart preserves pending steering. It cannot be consumed while an earlier call or tool attempt is unclassified. If the consuming call later fails before send or ends ambiguously, every retry or continuation retains the consumed steering. If the turn becomes terminal before consumption, the terminal transaction creates queued work with the captured fallback configuration and records why steering was reclassified. Any interrupt-created successor is first; after it, reclassified steering and ordinary queued work follow original acceptance order.
 - **Required invariants:** INV-007, INV-015, INV-016, INV-028, INV-034.
 - **Remaining questions:** Acceptance of ADR-0004 and ADR-0027; future safe-point kinds and client rendering of reclassification. Version one does not let tool or orchestration steps consume steering directly.
 
@@ -97,7 +97,7 @@ These scenarios test architectural boundaries; quoted commands and state names a
 - **State transitions:** Turn B is queued while turn A remains active; after A reaches a terminal disposition, B fixes an outcome-aware frontier through A and becomes eligible.
 - **Transient updates:** Queue position and projected start time may change.
 - **Owning component:** Hub owns durable ordering and scheduler eligibility.
-- **Failure behavior:** Restart preserves order, identity, and configuration. Cancellation of A does not erase B; B sees committed semantic history plus an explicit completed, failed, cancelled, or reconciliation-required predecessor marker. If B itself cannot execute, it still waits for A, fixes that complete frontier, and only then fails so later C cannot omit A.
+- **Failure behavior:** Restart preserves order, identity, and configuration. Cancellation of A does not erase B; B sees committed semantic history plus an explicit completed, refused, failed, cancelled, or reconciliation-required predecessor marker. An interrupt-created successor precedes B and all reclassified steering; otherwise queued and reclassified inputs retain acceptance order. If B itself cannot execute, it still waits for A, fixes that complete frontier, and only then fails so later C cannot omit A.
 - **Required invariants:** INV-007, INV-009, INV-010, INV-012, INV-028.
 - **Remaining questions:** Acceptance of ADR-0027; queue admission/resource limits and the semantic rendering of outcome markers. Editing, cancellation, reordering, delivery-policy change, and configuration change remain explicitly unsupported baseline operations.
 
@@ -192,7 +192,7 @@ These scenarios test architectural boundaries; quoted commands and state names a
 ## S18 — Delegate to a child session
 
 - **User intent:** Assign related work to an independently browsable child and receive an explicit result.
-- **Durable commands:** Future ADR-0002 commands must create the child with delegation cause and parent-work relation, persist task input, record a typed parent wait/reference, and later persist explicit result delivery.
+- **Durable commands:** Future ADR-0002 commands must add a delegated creation-cause variant with an exact durable parent-work identity, create the child with that cause and a parent-work relation, persist task input, record a typed parent wait/reference, and later persist explicit result delivery.
 - **State transitions:** Child creation and execution use a distinct session. Parent wait, resume, result, and cancellation transitions are intentionally not part of the first implementable turn state machine; ADR-0002 must add a typed child-wait phase before delegation ships.
 - **Transient updates:** Child progress summaries and presence indicators.
 - **Owning component:** Hub owns relationships and scheduling; each session retains independent history.
@@ -248,10 +248,10 @@ These scenarios test architectural boundaries; quoted commands and state names a
 
 - **User intent:** Understand that the selected model refused and avoid hidden policy evasion.
 - **Durable commands:** Persist the model call, requested selection, exact hub-resolved target, observable provider identity or mismatch when available, provider response classification, and refusal outcome; create any follow-up only through an explicit user/policy decision.
-- **State transitions:** Model call in flight → refused; in the baseline the refusal becomes an explicit committed conversational outcome and the turn becomes terminal/completed. A future remediation ADR may add a typed wait or continuation policy.
+- **State transitions:** Model call in flight → refused; the attempt ends turn-refused, and the explicit committed refusal outcome makes the turn terminal/refused, distinct from completed, failed, cancelled, or reconciliation-required. A future remediation ADR may add a typed wait or continuation policy.
 - **Transient updates:** Refusal text may stream but becomes authoritative only when committed.
 - **Owning component:** Provider adapter reports; hub classifies and exposes provenance.
-- **Failure behavior:** Refusal is not treated as availability failure, does not automatically fall back merely because another model exists, and does not retain the active slot in an undefined wait for input.
+- **Failure behavior:** Refusal is not treated as successful completion or availability failure, does not automatically fall back merely because another model exists, and does not retain the active slot in an undefined wait for input.
 - **Required invariants:** INV-014, INV-017, INV-018, INV-032.
 - **Remaining questions:** Refusal taxonomy, user-facing remediation, whether any explicit fallback is ever allowed, and provider-reported substitution or mismatch.
 
