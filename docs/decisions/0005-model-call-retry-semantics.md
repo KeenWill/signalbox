@@ -6,6 +6,7 @@
 - Reviewers: Provider, domain, and reliability reviewers unassigned
 - Supersedes: none
 - Superseded by: none
+- Acceptance dependency: must be accepted atomically with ADR-0001, ADR-0003, ADR-0004, and ADR-0027 in the current foundation set
 - Decision-ledger questions: target-before-call creation; no automatic known-failure retry; ambiguous provider-call disposition; acceptance-time alias meaning; model or configuration change identity; turn disposition after provider refusal
 
 ## Context
@@ -33,7 +34,15 @@ ModelCallDisposition =
   | Refused
   | Cancelled
   | Ambiguous
+
+ProviderOutcomeAuthorityTransfer = {
+    decision_command: DurableCommandId,
+    from_call: ModelCallId,
+    to_replacement_call: ModelCallId
+}
 ```
+
+The initial call for a provider interaction is outcome-eligible. When an owner-authorized duplicate-risk retry creates its replacement call, the same atomic transition records `ProviderOutcomeAuthorityTransfer`; the replacement becomes the sole call whose completion, refusal, failure, or cancellation may determine the turn's conversational outcome for that interaction. The prior call and every later fact learned about it remain durable physical and audit/reconciliation evidence, but its response content or refusal can no longer change turn disposition, authoritative assistant content, or a successor frontier. A further replacement transfers authority again along the explicit call chain. This relation changes no call identity or terminal physical disposition.
 
 | From | To | Rule |
 | --- | --- | --- |
@@ -49,9 +58,10 @@ A provider-call retry may remain in the same turn only when an owner has explici
 - the prior call is terminally `Ambiguous`, and the exact-set owner decision accepts the duplicate-provider-effect risk;
 - the new call uses the same complete frozen effective configuration and exact hub-resolved provider/model target;
 - the new call records its own immutable context frontier containing every accepted input and committed semantic fact present in the prior call's frontier, including steering already marked consumed, plus any newly classified failure evidence or later eligible context; and
-- retry policy and resource limits authorize another call.
+- retry policy and resource limits authorize another call; and
+- creation of the new call atomically transfers outcome authority from the prior call to that replacement.
 
-Version one performs no automatic retry after a known provider failure. While orchestration tenure is still live, a known failure ends the current attempt as `KnownFailure` and the turn as `Failed`, including when cancellation was previously requested: the request does not rewrite known failure as cancellation. If startup recovery discovers the call failure, the abandoned attempt remains `Lost` and the turn likewise becomes `Failed`. A future ADR may introduce an explicit known-failure retry command and resource policy, but it must preserve the identity and provenance rules in this record.
+Version one performs no automatic retry after a known provider failure. While orchestration tenure is still live, a known failure ends the current attempt as `KnownFailure` and the turn as `Failed`, including when cancellation was previously requested: the request does not rewrite known failure as cancellation. If startup recovery discovers the call failure, the abandoned attempt remains `Lost` and the turn likewise becomes `Failed`. A future ADR may introduce an explicit or automatic known-failure replacement policy, but every replacement call must use the same outcome-authority transfer rule unless that ADR explicitly introduces and fully defines a typed multi-result lifecycle.
 
 A later model call in the same turn is **continuation**, not retry, when it intentionally consumes a newer context frontier containing safe-point steering, tool results, or other committed turn history. It still gets a new model-call identity and uses the same frozen configuration and exact target. No retry or continuation frontier may silently omit accepted steering already consumed by an earlier call, even if that earlier call failed before send or ended ambiguously.
 
@@ -59,9 +69,9 @@ The turn's complete effective configuration, including requested model selection
 
 An execution fingerprint or digest may detect equal request material, but it never determines whether a call, attempt, or turn retains identity.
 
-While orchestration tenure is live, `Refused` is a terminal model-call disposition that becomes an explicit committed refusal outcome, ends the current turn attempt `TurnRefused`, and makes the turn `Terminal(Refused)`. If startup recovery first observes refusal for an in-flight call, the call becomes `Refused`, the abandoned attempt remains `Lost`, and the turn becomes `Refused`. If a call and attempt already ended `Ambiguous`, later resolving evidence leaves those terminal physical records unchanged while allowing the waiting turn to become `Refused`. All three paths remain distinct from successful completion, infrastructure failure, cancellation, and ambiguity. A future refusal-remediation ADR may add a typed durable wait or another explicit continuation policy, with corresponding progressing-slot and input-delivery rules.
+While orchestration tenure is live, `Refused` on the outcome-eligible call is a terminal model-call disposition that becomes an explicit committed refusal outcome, ends the current turn attempt `TurnRefused`, and makes the turn `Terminal(Refused)`. If startup recovery first observes refusal for an outcome-eligible in-flight call, the call becomes `Refused`, the abandoned attempt remains `Lost`, and the turn becomes `Refused`. If an outcome-eligible call and attempt already ended `Ambiguous`, later resolving evidence leaves those terminal physical records unchanged while allowing the waiting turn to become `Refused`. After authority transfers to a replacement, the same late evidence for the prior call is audit/reconciliation evidence only and cannot compete with the replacement's outcome. These paths remain distinct from successful completion, infrastructure failure, cancellation, and ambiguity. A future refusal-remediation ADR may add a typed durable wait or another explicit continuation policy, with corresponding progressing-slot and input-delivery rules.
 
-A non-cancelled `Ambiguous` model call deterministically ends its current turn attempt as `Ambiguous` and places the turn in `Active(AwaitingRecoveryDecision)` carrying that call as an exact wait subject. The turn retains the session slot. No retry occurs until an explicit owner decision authorizes a new call and accepts the duplicate-provider-effect risk, or separately recorded evidence resolves what happened for turn-level decision-making. Owner-authorized continuation preserves the terminal `Ambiguous` call and adds a separate durable `DuplicateRiskAccepted` marker; a later retry outcome may then terminalize the turn normally without pretending the original call was resolved. The owner may instead terminalize the turn as `ReconciliationRequired`. If cancellation was already requested on the running turn, ADR-0004 terminalizes it as `ReconciliationRequired` without entering the wait; cancellation of an existing recovery wait closes that wait and reaches the same terminal disposition atomically.
+A non-cancelled `Ambiguous` model call deterministically ends its current turn attempt as `Ambiguous` and places the turn in `Active(AwaitingRecoveryDecision)` carrying that call as an exact wait subject. The turn retains the session slot. No retry occurs until an explicit owner decision authorizes a new call and accepts the duplicate-provider-effect risk, or separately recorded evidence resolves what happened for turn-level decision-making. Owner-authorized continuation preserves the terminal `Ambiguous` call, adds a durable `DuplicateRiskAccepted` marker, and transfers outcome authority when the replacement call is created. The replacement outcome may then terminalize the turn normally; late completion or refusal evidence from the prior call remains inspectable but non-authoritative. The owner may instead terminalize the turn as `ReconciliationRequired`. If cancellation was already requested on the running turn, ADR-0004 terminalizes it as `ReconciliationRequired` without entering the wait; cancellation of an existing recovery wait closes that wait and reaches the same terminal disposition atomically.
 
 ## Terminology
 
@@ -70,6 +80,7 @@ A non-cancelled `Ambiguous` model call deterministically ends its current turn a
 - **Continuation call:** A new model call in the same turn that intentionally consumes a later context frontier.
 - **Known failure:** Evidence adequately establishes that no usable provider response completed; exact provider acceptance or billing may still be recorded separately when observable.
 - **Ambiguous model-call outcome:** Evidence cannot establish whether the provider accepted or completed the request. It is not automatically retryable.
+- **Outcome-authority transfer:** A durable relation designating a replacement call as the sole provider call eligible to determine that interaction's conversational outcome while preserving every prior call as physical and audit evidence.
 - **Effective-configuration equality:** Semantic value equality over the complete frozen typed configuration value. The baseline has no partially material subset; a value is either inside ADR-0027's closed semantic categories and identity-significant or inside its explicit operational exclusions. A future ADR may add an operational category only by proving that it cannot alter those semantic choices.
 
 ## Invariants
@@ -77,12 +88,13 @@ A non-cancelled `Ambiguous` model call deterministically ends its current turn a
 - INV-004, INV-006, INV-014–INV-018, INV-025, INV-029, and INV-034 are preserved and made precise.
 - Every externally issued provider interaction has one model-call identity and immutable recorded frontier.
 - A retry never overwrites the prior call or its cost, timing, provenance, partial evidence, or disposition.
+- Creating a replacement call atomically transfers provider-outcome authority to it; later evidence from the prior call cannot change the turn's outcome or successor context.
 - Every retry or continuation preserves accepted steering already committed into the turn's semantic history.
 - No automatic retry follows an ambiguous call outcome.
 - No automatic retry follows a known provider failure in version one; it fails the attempt and turn.
 - Every model call has an exact target at creation; target-resolution failure creates no model call.
 - A call with a different exact resolved target or any different effective-configuration field cannot remain in the same turn under the baseline policy.
-- A live refused call ends its attempt as `TurnRefused`; startup-observed refusal leaves the abandoned attempt `Lost`; and evidence arriving after terminal ambiguity leaves call and attempt unchanged. Every path may make the turn `Refused` and none is rewritten as completion or known failure.
+- A live outcome-authoritative refused call ends its attempt as `TurnRefused`; startup-observed refusal leaves the abandoned attempt `Lost`; and evidence arriving after terminal ambiguity leaves call and attempt unchanged. Only an outcome-eligible call may make the turn `Refused`; evidence from a replaced call remains audit/reconciliation evidence and is never rewritten as completion or known failure.
 - Cancellation request is nonterminal until outcome evidence is classified.
 - A non-cancelled ambiguous call retains the turn's active slot in `AwaitingRecoveryDecision`; an ambiguous call is never mapped to failure or terminal reconciliation by scheduler timing alone.
 
@@ -112,7 +124,7 @@ Conservative ambiguous-call handling may require owner action and can delay comp
 ## Scenario walkthroughs
 
 - **S02:** The initial call completes normally. If safe-point steering later requires another call, it is a continuation with a newer frontier, not a retry.
-- **S04:** Restart ends the abandoned attempt `Lost` and classifies the in-flight call. Known failure fails the turn without retry; recovered completion or refusal may complete or refuse it; ambiguity puts a non-cancelled turn in `AwaitingRecoveryDecision`. Owner-authorized recovery is explicit and retains all evidence and previously consumed steering in the replacement frontier.
+- **S04:** Restart ends the abandoned attempt `Lost` and classifies the in-flight call. Known failure fails the turn without retry; recovered completion or refusal may complete or refuse it while that call remains outcome-eligible; ambiguity puts a non-cancelled turn in `AwaitingRecoveryDecision`. Owner-authorized recovery retains all evidence and previously consumed steering, and creation of the replacement call transfers outcome authority to it. Late prior-call completion or refusal is audit/reconciliation evidence only.
 - **S20:** The requested alias and its definition version or value snapshot freeze at turn acceptance. The exact target is resolved and pinned before the first model call is created; a later alias-definition change does not alter this turn.
 - **S21:** A pinned model remains pinned. Provider-reported substitution is recorded separately and handled by ADR-0007 rather than rewritten as the requested target.
 - **S22:** Automatic fallback remains unsupported until ADR-0006. If later accepted, each fallback interaction is still a distinct model call with explicit provenance.
@@ -120,7 +132,7 @@ Conservative ambiguous-call handling may require owner action and can delay comp
 
 ## Extension implications
 
-An accepted fallback ADR may define a frozen target-selection policy whose authorized target transitions remain within one turn. It must update this ADR's baseline same-target rule, expose the reason, and preserve a separate model-call identity for every interaction.
+An accepted fallback or automatic-retry ADR may define a frozen target-selection policy whose authorized target transitions remain within one turn. It must update this ADR's baseline same-target rule, expose the reason, preserve a separate model-call identity for every interaction, and transfer outcome authority to each replacement unless it defines a complete typed multi-result lifecycle.
 
 Provider idempotency keys or request-status APIs can reduce ambiguity, but they add evidence; they do not merge calls or determine logical identity. A dedicated provider service may later own physical execution while preserving the same hub-owned call records and policy.
 

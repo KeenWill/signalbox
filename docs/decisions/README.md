@@ -14,6 +14,8 @@ These records are under review and are not authoritative until accepted:
 | [ADR-0005](0005-model-call-retry-semantics.md) | Target-before-call identity, no automatic known-failure retry, ambiguous-call recovery, continuation, refusal disposition, and configuration identity |
 | [ADR-0027](0027-input-delivery-lifecycle.md) | Input delivery, versioned session defaults, constructible effective configuration, explicit configuration provenance, command deduplication, queue eligibility, and context frontiers |
 
+The five records form one normatively coupled baseline: their identity algebras, lifecycle transitions, configuration boundary, and context rules reference one another. In their current form they must be accepted or rejected atomically. Accepting an individual record requires first revising it so every normative dependency is either accepted already or explicitly conditional and non-authoritative.
+
 ## When to write an ADR
 
 Write an ADR before closing a foundational ledger question, changing accepted direction, weakening an invariant, or introducing a technology that constrains several components. Do not use an ADR for local implementation details that are easy to reverse and do not alter a public boundary.

@@ -6,6 +6,7 @@
 - Reviewers: Domain reviewer pending; provider and tool-safety reviewers unassigned
 - Supersedes: none
 - Superseded by: none
+- Acceptance dependency: must be accepted atomically with ADR-0003, ADR-0004, ADR-0005, and ADR-0027 in the current foundation set
 - Decision-ledger questions: final names and boundaries for session, accepted input, turn, turn attempt, model call, tool request, and tool attempt
 
 ## Context
@@ -32,7 +33,7 @@ The identity boundary is semantic rather than representational:
 
 An accepted input can originate a turn or steer an existing turn. A turn has exactly one durable typed origin and can consume zero or more additional accepted inputs as steering. The first implementable origin variant is accepted input. Manual regeneration and future scheduled or delegated work require explicit typed variants together with the lifecycle and context rules that make those variants implementable; they are not catch-all values in the first turn state machine.
 
-A model call belongs to exactly one turn attempt and therefore one turn. A turn attempt belongs to exactly one turn. Tool-request and tool-attempt ownership must likewise be explicit, but their detailed lifecycle is outside this ADR.
+A model call belongs to exactly one turn attempt and therefore one turn. A turn attempt belongs to exactly one turn. A tool request belongs to exactly one turn and may survive across that turn's durable waits and replacement attempts. Each tool attempt belongs to exactly one tool request and exactly one issuing turn attempt; one logical request may own more than one policy-authorized attempt across tenures. Detailed tool states and retry eligibility remain outside this ADR, but these ownership cardinalities do not.
 
 Identifiers are opaque domain values. Whether their stored encodings are UUIDs, integers, or another format is not part of the decision.
 

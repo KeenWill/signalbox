@@ -6,6 +6,7 @@
 - Reviewers: Domain, lifecycle, configuration, protocol, and reliability reviewers unassigned
 - Supersedes: none
 - Superseded by: none
+- Acceptance dependency: must be accepted atomically with ADR-0001, ADR-0003, ADR-0004, and ADR-0005 in the current foundation set
 - Decision-ledger questions: no-active-turn input; durable-command deduplication; versioned session defaults; safe points, inherited configuration provenance, and terminal disposition; queued work creation, constructible effective configuration, and configuration freeze; state-specific interrupt and successor order; context frontiers; baseline queue mutation scope
 
 ## Context
@@ -141,7 +142,7 @@ The first accepted interrupt becomes the designated immediate successor ahead of
 
 ### Safe points
 
-A version-one **safe point** exists only immediately before the hub prepares a new model call for the target turn, after every earlier model call, tool attempt, or other issued physical operation for that turn has reached a durable classified state. It is not a point inside a provider stream or tool execution. Version one has no implicit “not needed for this call” exception; a future concurrency ADR may add explicit durable dependency edges without weakening this baseline.
+A version-one **safe point** exists only immediately before the hub prepares a new model call for the target turn, after every earlier model call, tool attempt, or other issued physical operation for that turn has reached a durable classified state and every earlier logical tool request or approval dependency has a durable outcome. An approved tool request remains blocking while authorized-but-undispatched; scheduling delay cannot make it invisible merely because no `ToolAttemptId` exists yet. It is not a point inside a provider stream, tool execution, or unresolved approval/tool dependency. Version one has no implicit “not needed for this call” exception; a future concurrency ADR may add explicit durable dependency edges without weakening this baseline.
 
 At that boundary, the hub atomically:
 
@@ -179,13 +180,13 @@ The predecessor terminal frontier contains, in order:
 
 - all semantic entries committed before and by the predecessor;
 - every `DuplicateRiskAccepted` marker for a physically ambiguous operation, regardless of the predecessor's later terminal disposition;
-- committed assistant and tool-result content for a completed predecessor;
+- committed assistant and tool-result content plus an explicit completion marker for a completed predecessor;
 - explicit refusal content and a refusal marker for a refused predecessor;
 - an explicit failure marker for a failed predecessor;
 - committed effects plus an explicit cancellation marker for a cancelled predecessor; or
 - an explicit ambiguity/reconciliation-required marker for that disposition.
 
-It excludes transient provider drafts, uncommitted partial tool output, later queued accepted inputs, and assumptions about an ambiguous effect's result. Raw audit evidence may be referenced without copying it wholesale into model context.
+It excludes transient provider drafts, uncommitted partial tool output, later queued accepted inputs, assumptions about an ambiguous effect's result, and response/refusal content learned from a provider call after outcome authority transferred to its replacement. Those prior-call facts remain audit/reconciliation evidence and may be referenced as such without becoming authoritative conversational content.
 
 Thus queued and interrupt-created work observe the same outcome-aware rule. They do not freeze a prematurely incomplete transcript at acceptance, and later activity cannot rewrite the frontier after eligibility. A first turn begins from the session's immutable transcript ancestry frontier, if any, plus its origin input. Later input submitted with no active turn joins any queued lineage; its frontier is fixed through its immediate predecessor after that predecessor terminates.
 
@@ -224,7 +225,7 @@ Version one does not support editing accepted input, reordering queued turns, ch
 - A queued turn cannot terminalize before its lineage predecessors; activation or eligible failure fixes its starting frontier atomically.
 - Consuming steering commits it to turn semantic history; later calls in that turn cannot silently omit it because the first prepared call failed or was ambiguous.
 - Issued provider calls, tool requests, approvals, and tool attempts are immutable with respect to later steering.
-- A safe point requires every earlier issued physical operation for the turn to have a durable classified outcome.
+- A safe point requires every earlier issued physical operation for the turn to have a durable classified outcome and every earlier logical tool/approval dependency to have a durable outcome; an authorized-but-undispatched tool request still blocks it.
 
 ## Strongest alternative
 
@@ -256,7 +257,7 @@ Interrupt is responsive in cancellation signaling but conservative in activation
 - **S01:** The client submits `StartWhenNoActiveTurn`; with no earlier queued work, acceptance creates a queued turn for which eligibility is immediately derivable. Activation atomically fixes a frontier based on no ancestry or one immutable ancestry source and creates its initial attempt.
 - **S03:** Restart finds the accepted input, already-created queued turn, configuration provenance, queue lineage, and disposition, then derives eligibility. An unexecutable queued turn waits for its predecessors and fixes its frontier before failing. No session default is re-read to reconstruct intent.
 - **S07:** Interrupt atomically creates the immediate successor and ends an unsent prepared predecessor, requests cancellation of an already-running predecessor, or closes the exact wait. The successor waits when necessary, then fixes a frontier containing the predecessor's completion, refusal, cancellation, failure, or ambiguity outcome. Startup classification creates no cancellation-only attempt.
-- **S08:** Steering accepted during a provider call remains pending and captures inherited configuration provenance from the target turn. After every earlier issued physical operation is classified, the next provider-call boundary consumes and commits it, after which every future authorized call retains it; if no such boundary occurs, terminalization reclassifies it into visible queued work with that provenance.
+- **S08:** Steering accepted during a provider call remains pending and captures inherited configuration provenance from the target turn. After every earlier issued physical operation is classified and every earlier tool/approval dependency has a durable outcome, the next provider-call boundary consumes and commits it; an authorized-but-undispatched tool request cannot be bypassed. Every future authorized call retains the steering, and if no such boundary occurs, terminalization reclassifies it into visible queued work with that provenance.
 - **S09:** After-current input creates a FIFO queued turn immediately. Its configuration is fixed at acceptance; its context is fixed after its immediate predecessor terminates.
 - **S10:** Steering can remain pending through an approval wait. It neither alters the approved request nor releases the active turn's slot.
 - **S24:** Reconnecting clients reconstruct accepted-input dispositions and replace any transient draft; pending steering is not inferred from client state.

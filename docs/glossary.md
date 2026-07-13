@@ -25,7 +25,7 @@ This glossary recommends working language for design discussion. “Accepted” 
 
 ## Turn attempt
 
-- **Definition:** One exclusive physical orchestration tenure that advances an active running turn until it ends or yields to a durable wait. Activation, or closure of a wait by resolving evidence or a valid decision, atomically creates it; a startup recovery scan is not an attempt.
+- **Definition:** One exclusive physical orchestration tenure that advances an active running turn until it ends or yields to a durable wait. Activation creates it; closing a wait creates one only when unfinished work remains and the applicable policy permits continuation, while a closure supported by a terminal outcome creates none. A startup recovery scan is not an attempt.
 - **Status:** The physical identity distinction is accepted; the name and lifecycle are proposed by [ADR-0001](decisions/0001-domain-terminology-and-identity.md) and [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md). “Turn attempt” is preferred to generic “run,” which collides with runners and says little about logical ownership.
 - **Do not confuse with:** The durable turn, an individual model call, or an individual tool attempt.
 - **Example:** An attempt ends when orchestration enters a durable approval wait; a new attempt continues the same active turn after approval.
@@ -36,6 +36,13 @@ This glossary recommends working language for design discussion. “Accepted” 
 - **Status:** Required provenance is accepted; the name, identity, and retry boundary are proposed by [ADR-0001](decisions/0001-domain-terminology-and-identity.md) and [ADR-0005](decisions/0005-model-call-retry-semantics.md). “Model call” is clearer than “completion” because providers and response shapes vary.
 - **Do not confuse with:** A turn, an alias resolution, all provider retries as a group, or the assistant message eventually committed to history.
 - **Example:** A safe-point steering message leads to a second model call in the same turn; each call records the precise context it consumed.
+
+## Outcome-authoritative provider call
+
+- **Definition:** The sole model call currently eligible to determine one provider interaction's conversational completion, refusal, failure, or cancellation. Creating a duplicate-risk replacement atomically transfers this role to the replacement without deleting or reopening the prior call.
+- **Status:** Proposed by [ADR-0005](decisions/0005-model-call-retry-semantics.md) as the deterministic replacement rule.
+- **Do not confuse with:** The most recently observed result, every continuation call in a turn, or suppression of audit/reconciliation evidence.
+- **Example:** After the owner authorizes a replacement for an ambiguous call, a late answer from the prior call remains visible evidence, while only the replacement can supply the turn's authoritative outcome.
 
 ## Tool request
 
@@ -49,7 +56,7 @@ This glossary recommends working language for design discussion. “Accepted” 
 - **Definition:** One physical effort by a hub-local or runner-local executor to perform a tool request, including dispatch identity, executor placement, timing, output, and outcome classification.
 - **Status:** The logical/physical distinction is accepted; the name and boundary are proposed by [ADR-0001](decisions/0001-domain-terminology-and-identity.md). This is preferred to “tool call,” which can obscure the difference between logical request and physical effect.
 - **Do not confuse with:** The logical tool request, provider-native function-call syntax, or a scheduler's delivery retry.
-- **Example:** A read-only file search attempt is lost with its runner connection; policy may allow a second attempt for the same tool request.
+- **Example:** A read-only file search loses its runner connection; the tool attempt is `KnownFailed` if evidence proves no effect occurred and otherwise `Ambiguous`, after which policy may allow a second attempt for the same tool request.
 
 ## Creation cause
 
@@ -132,7 +139,7 @@ This glossary recommends working language for design discussion. “Accepted” 
 
 ## Context frontier
 
-- **Definition:** An immutable reference to the exact ordered semantic content consumed by one model call, including applicable user inputs, consumed steering, committed assistant or tool content, and explicit failure, cancellation, or ambiguity markers.
+- **Definition:** An immutable reference to the exact ordered semantic content consumed by one model call, including applicable user inputs, consumed steering, committed assistant or tool content, and explicit completion, refusal, failure, cancellation, accepted-risk, or ambiguity markers.
 - **Status:** Per-call provenance is accepted; the starting-frontier and safe-point selection rules are proposed by [ADR-0027](decisions/0027-input-delivery-lifecycle.md). Representation remains provisional.
 - **Do not confuse with:** The latest session transcript, an entire turn, or client rendering state.
 - **Example:** Model call 1 consumes frontier 42; steering and a tool result become committed, so model call 2 consumes frontier 47 within the same turn. If call 2 fails, any future explicitly authorized call still retains that committed content.

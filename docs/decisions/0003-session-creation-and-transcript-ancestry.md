@@ -6,6 +6,7 @@
 - Reviewers: Domain and lifecycle reviewers unassigned
 - Supersedes: none
 - Superseded by: none
+- Acceptance dependency: must be accepted atomically with ADR-0001, ADR-0004, ADR-0005, and ADR-0027 in the current foundation set
 - Decision-ledger questions: owner-initiated baseline and typed extension of session creation cause; independent transcript ancestry; separation from versioned session configuration defaults; future multiple ancestry sources or merge
 
 ## Context
