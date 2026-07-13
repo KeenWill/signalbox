@@ -88,7 +88,7 @@ A logical turn need not have one immutable context frontier. Safe-point steering
 
 1. The hub durably creates a logical tool request with exact normalized arguments.
 2. Hub policy decides whether it may proceed, must wait for human approval, or is denied.
-3. An approval, if required, binds to that exact request and argument set.
+3. An approval, if required, binds to that exact request, its normalized arguments, and its material execution constraints. A material change, including a change in placement constraints, invalidates the approval and requires policy reevaluation before dispatch.
 4. The hub creates a physical tool attempt and dispatches it either to a hub-local executor or to a selected runner with a fenced dispatch generation.
 5. The hub validates the returned attempt identity and generation, classifies its outcome, and durably advances conversation and operational state.
 
@@ -120,7 +120,7 @@ These are architectural dependency rules, not a commitment to a specific Rust mo
 
 ## Recovery posture
 
-Acknowledged work must not vanish. On restart, the hub reconstructs queued work, confirmation waits, delegation waits, and interrupted attempts from Postgres. A new process does not pretend to resume an old provider stream or unknown runner effect. It marks the physical attempt with a known failure or ambiguous outcome, then applies the eventual retry or reconciliation policy without changing the identity of accepted input.
+Acknowledged work must not vanish. On restart, the hub reconstructs queued work, confirmation waits, delegation waits, and interrupted attempts from Postgres. A new process does not pretend to resume an old provider stream or unknown runner effect. Using the available evidence, it durably classifies interrupted physical work as completed, known failed or lost, ambiguous, or awaiting reconciliation, then applies the eventual retry or reconciliation policy without changing the identity of accepted input.
 
 At most one logical turn actively progresses per session initially. “Active” needs an exact state definition before implementation; queued messages and durable waits do not disappear merely because nothing is executing.
 
