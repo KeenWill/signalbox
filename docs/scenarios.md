@@ -131,7 +131,7 @@ These scenarios test architectural boundaries; quoted commands and state names a
 - **Transient updates:** Runner acknowledgement may state “duplicate” or “stale.”
 - **Owning component:** Hub transaction and database constraints enforce fencing; runner retries delivery until acknowledged.
 - **Failure behavior:** A stale success cannot overwrite a newer failure, result, cancellation, or reconciliation state.
-- **Required invariants:** INV-011, INV-012, INV-021, INV-033.
+- **Required invariants:** INV-011, INV-012, INV-021.
 - **Remaining questions:** Fence representation, retention of rejected evidence, result acknowledgement protocol, and compatibility window.
 
 ## S13 — Use an ambient-user runner
