@@ -39,7 +39,7 @@ This glossary recommends working language for design discussion. “Accepted” 
 
 ## Outcome-authoritative provider call
 
-- **Definition:** The sole model call currently eligible to determine one provider interaction's conversational completion, refusal, failure, or cancellation. Creating a duplicate-risk replacement atomically transfers this role to the replacement without deleting or reopening the prior call.
+- **Definition:** The sole model call currently eligible to determine one provider interaction's conversational completion, refusal, failure, or cancellation. Closing a duplicate-risk provider wait atomically creates the replacement attempt and prepared call and transfers this role without deleting or reopening the prior call.
 - **Status:** Proposed by [ADR-0005](decisions/0005-model-call-retry-semantics.md) as the deterministic replacement rule.
 - **Do not confuse with:** The most recently observed result, every continuation call in a turn, or suppression of audit/reconciliation evidence.
 - **Example:** After the owner authorizes a replacement for an ambiguous call, a late answer from the prior call remains visible evidence, while only the replacement can supply the turn's authoritative outcome.
@@ -140,7 +140,7 @@ This glossary recommends working language for design discussion. “Accepted” 
 ## Context frontier
 
 - **Definition:** An immutable reference to the exact ordered semantic content consumed by one model call, including applicable user inputs, consumed steering, committed assistant or tool content, and explicit completion, refusal, failure, cancellation, accepted-risk, or ambiguity markers.
-- **Status:** Per-call provenance is accepted; the starting-frontier and safe-point selection rules are proposed by [ADR-0027](decisions/0027-input-delivery-lifecycle.md). Representation remains provisional.
+- **Status:** Per-call provenance is accepted; accepted-input-origin starting-frontier and safe-point selection rules are proposed by [ADR-0027](decisions/0027-input-delivery-lifecycle.md). Future non-input origins must define their own starting-frontier rules. Representation remains provisional.
 - **Do not confuse with:** The latest session transcript, an entire turn, or client rendering state.
 - **Example:** Model call 1 consumes frontier 42; steering and a tool result become committed, so model call 2 consumes frontier 47 within the same turn. If call 2 fails, any future explicitly authorized call still retains that committed content.
 

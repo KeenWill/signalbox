@@ -168,13 +168,24 @@ An unacknowledged ambiguous prior external effect remains terminally `Ambiguous`
 Every accepted-input-origin turn has an immutable **starting context frontier**, selected when the turn becomes eligible, not when queued input was accepted. Eligibility is the derived predicate defined by ADR-0004: every queue predecessor is terminal and the session has no active turn. The selection uses queue lineage rather than wall-clock “latest” state:
 
 ```text
+AcceptedInputTurnLineage =
+    FirstInSession
+  | After { immediate_predecessor: TurnId }
+
 starting_frontier(turn) =
-    match turn.immediate_predecessor_terminal {
-        None => session_ancestry_frontier_or_empty(turn.session),
-        Some(predecessor) => semantic_frontier_through(predecessor)
+    match turn.accepted_input_turn_lineage {
+        FirstInSession
+            if session_has_no_prior_turn(turn.session)
+            => session_ancestry_frontier_or_empty(turn.session),
+        After { immediate_predecessor }
+            if immediate_predecessor.is_terminal
+            => semantic_frontier_through(immediate_predecessor),
+        _ => invalid_lineage
     }
   + turn.origin_accepted_input
 ```
+
+For an accepted-input-origin turn, `FirstInSession` is valid if and only if the session has no earlier turn. Every such turn created after an earlier turn, including `StartWhenNoActiveTurn` accepted after all earlier work became terminal, carries `After` pointing to its immediate queue predecessor. It cannot restart from session ancestry merely because no turn is currently active. This algebra does not decide lineage or context rules for future non-input origins.
 
 The predecessor terminal frontier contains, in order:
 
@@ -186,7 +197,7 @@ The predecessor terminal frontier contains, in order:
 - committed effects plus an explicit cancellation marker for a cancelled predecessor; or
 - an explicit ambiguity/reconciliation-required marker for that disposition.
 
-It excludes transient provider drafts, uncommitted partial tool output, later queued accepted inputs, assumptions about an ambiguous effect's result, and response/refusal content learned from a provider call after outcome authority transferred to its replacement. Those prior-call facts remain audit/reconciliation evidence and may be referenced as such without becoming authoritative conversational content.
+It excludes transient provider drafts, uncommitted partial tool output, later queued accepted inputs, assumptions about an ambiguous effect's result, and every completion, refusal, known-failure, or cancellation fact learned from a provider call after outcome authority transferred to its replacement. Those prior-call facts remain audit/reconciliation evidence and may be referenced as such without determining turn disposition or becoming authoritative conversational content.
 
 Thus queued and interrupt-created work observe the same outcome-aware rule. They do not freeze a prematurely incomplete transcript at acceptance, and later activity cannot rewrite the frontier after eligibility. A first turn begins from the session's immutable transcript ancestry frontier, if any, plus its origin input. Later input submitted with no active turn joins any queued lineage; its frontier is fixed through its immediate predecessor after that predecessor terminates.
 
@@ -222,6 +233,7 @@ Version one does not support editing accepted input, reordering queued turns, ch
 - Every origin turn carries either explicit request/default-version/effective provenance or inherited reclassification provenance; no reclassified steering input invents a configuration request.
 - Updating session defaults affects only origin input accepted after the new version becomes current.
 - Every queued or interrupt-created turn fixes one explicit starting frontier before activation.
+- For accepted-input-origin turns, `FirstInSession` lineage is constructible if and only if the session has no prior turn; every such turn created later names its immediate predecessor even when accepted while no turn is active. Future non-input origins retain their own explicit extension boundary.
 - A queued turn cannot terminalize before its lineage predecessors; activation or eligible failure fixes its starting frontier atomically.
 - Consuming steering commits it to turn semantic history; later calls in that turn cannot silently omit it because the first prepared call failed or was ambiguous.
 - Issued provider calls, tool requests, approvals, and tool attempts are immutable with respect to later steering.
