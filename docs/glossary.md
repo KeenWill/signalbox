@@ -5,28 +5,35 @@ This glossary recommends working language for design discussion. “Accepted” 
 ## Session
 
 - **Definition:** A durable, independently browsable conversation with configuration, ordered semantic history, operational work, and archival state.
-- **Status:** Name provisional; concept accepted. “Session” is preferred over “thread” because it emphasizes durable continuity across clients, though it can be confused with a login session.
+- **Status:** Concept accepted; the name and identity boundary are proposed by [ADR-0001](decisions/0001-domain-terminology-and-identity.md). “Session” is preferred over “thread” because it emphasizes durable continuity across clients, though it can be confused with a login session.
 - **Do not confuse with:** A client connection, one model context window, one turn, or a runner process.
 - **Example:** A user starts “repair garden sensor” on a phone, continues it from a terminal, and archives it next week without losing its history.
 
+## Accepted input
+
+- **Definition:** One user submission made durable with its explicit delivery request and recoverable disposition before acknowledgement.
+- **Status:** The durability requirement is accepted; the name, identity boundary, and dispositions are proposed by [ADR-0001](decisions/0001-domain-terminology-and-identity.md) and [ADR-0027](decisions/0027-input-delivery-lifecycle.md).
+- **Do not confuse with:** A transport command, transcript entry, turn, or model call. One accepted input may originate a turn or steer an existing turn.
+- **Example:** “Use the new log” remains the same accepted input whether it is consumed at a safe point or visibly reclassified as queued work because the active turn ends first.
+
 ## Turn
 
-- **Definition:** One durable logical unit of accepted conversational work. It normally begins from user intent and reaches an explicit terminal state, while surviving zero or more physical orchestration attempts.
-- **Status:** Name and exact retry boundary provisional; distinction from physical execution accepted. “Turn” is concise, but an ADR must define how regeneration and configuration changes relate to it.
+- **Definition:** One durable logical request for Signalbox to produce a conversational outcome from one typed origin under one frozen effective configuration. It reaches one explicit terminal disposition while surviving zero or more physical orchestration attempts and may use several context frontiers.
+- **Status:** The logical/physical distinction is accepted; the name and exact lifecycle are proposed by [ADR-0001](decisions/0001-domain-terminology-and-identity.md) and [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md).
 - **Do not confuse with:** The user message itself, a provider call, an orchestration process, or every item displayed in a transcript.
-- **Example:** “Summarize these changes” remains the same logical turn when the hub restarts and starts a replacement physical attempt, if the eventual retry policy permits that recovery.
+- **Example:** “Summarize these changes” remains the same logical turn when the hub replaces a lost physical attempt without changing its origin, frozen configuration, or committed effect history.
 
 ## Turn attempt
 
-- **Definition:** One physical orchestration effort to advance a turn, with its own identity, start/end state, failures, and consumed or produced effects.
-- **Status:** Provisional. “Turn attempt” is preferred to generic “run,” which collides with runners and says little about logical ownership.
+- **Definition:** One exclusive physical orchestration tenure that advances an active turn until it ends, yields to a durable wait, or is fenced and replaced.
+- **Status:** The physical identity distinction is accepted; the name and lifecycle are proposed by [ADR-0001](decisions/0001-domain-terminology-and-identity.md) and [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md). “Turn attempt” is preferred to generic “run,” which collides with runners and says little about logical ownership.
 - **Do not confuse with:** The durable turn, an individual model call, or an individual tool attempt.
-- **Example:** Attempt 1 loses its provider connection after a hub crash; attempt 2 later reconstructs context and continues the same turn under a permitted recovery rule.
+- **Example:** An attempt ends when orchestration enters a durable approval wait; a new attempt continues the same active turn after approval.
 
 ## Model call
 
 - **Definition:** One physical interaction initiated by the hub with a model provider, recording requested selection, exact hub-resolved provider/model target, context frontier, provider-reported or otherwise observable identity when available, response metadata, and outcome.
-- **Status:** Provisional name; required provenance accepted. “Model call” is clearer than “completion” because providers and response shapes vary.
+- **Status:** Required provenance is accepted; the name, identity, and retry boundary are proposed by [ADR-0001](decisions/0001-domain-terminology-and-identity.md) and [ADR-0005](decisions/0005-model-call-retry-semantics.md). “Model call” is clearer than “completion” because providers and response shapes vary.
 - **Do not confuse with:** A turn, an alias resolution, all provider retries as a group, or the assistant message eventually committed to history.
 - **Example:** A safe-point steering message leads to a second model call in the same turn; each call records the precise context it consumed.
 
@@ -47,21 +54,21 @@ This glossary recommends working language for design discussion. “Accepted” 
 ## Creation cause
 
 - **Definition:** The reason a session exists, such as direct user creation, application creation, schedule, or delegation from parent work.
-- **Status:** Concept accepted; labels and representation provisional.
+- **Status:** The independent concept is accepted; typed immutable representation and initial labels are proposed by [ADR-0003](decisions/0003-session-creation-and-transcript-ancestry.md).
 - **Do not confuse with:** Transcript ancestry. Cause answers “why created,” not “where initial context came from.”
 - **Example:** A delegated child session has delegation as its cause even if it starts with an empty transcript and only a task brief.
 
 ## Transcript ancestry
 
 - **Definition:** The source frontier from which a session's initial semantic conversation context was derived, or an explicit absence of such a source.
-- **Status:** Single-source initial concept accepted; final name and any future multi-source model provisional. “Transcript ancestry” is preferred to “parent session,” because delegation and ancestry are independent.
+- **Status:** Single-source initial concept is accepted; the immutable `none` or one-source boundary is proposed by [ADR-0003](decisions/0003-session-creation-and-transcript-ancestry.md). Any future multi-source model remains open. “Transcript ancestry” is preferred to “parent session,” because delegation and ancestry are independent.
 - **Do not confuse with:** Creation cause, ongoing related-session links, or ownership.
 - **Example:** A user-created session forks session A through message 18; its cause is user creation and its ancestry is A at frontier 18.
 
 ## Input delivery policy
 
-- **Definition:** The accepted instruction for handling user input submitted while a turn is active: interrupt, next safe point, or after current turn.
-- **Status:** Three active-work policy intents accepted; name, exact lifecycle semantics, and default presentation provisional under ADR-0027. ADR-0027 must also define the command and treatment for input submitted when no turn is active; no active-work policy is implicitly reused for that case yet. “Delivery policy” is preferred to “message priority,” which would not express lifecycle semantics.
+- **Definition:** The explicit instruction for handling user input relative to authoritative session state: start when no turn is active or, while a turn is active, interrupt, next safe point, or after current turn.
+- **Status:** The three active-work intents and durable treatment are accepted; the explicit no-active-turn command and exact lifecycle are proposed by [ADR-0027](decisions/0027-input-delivery-lifecycle.md). “Delivery policy” is preferred to “message priority,” which would not express lifecycle semantics.
 - **Do not confuse with:** Transport delivery guarantees or the final determination of which model context consumes the message.
 - **Example:** “Use the new error log” with next-safe-point policy becomes durable immediately and is considered before the next model call, not injected into the current request.
 
@@ -124,9 +131,16 @@ This glossary recommends working language for design discussion. “Accepted” 
 ## Context frontier
 
 - **Definition:** An immutable reference to the exact ordered semantic inputs and eligible steering content consumed by one model call.
-- **Status:** Provisional representation; per-call provenance requirement accepted.
+- **Status:** Per-call provenance is accepted; the starting-frontier and safe-point selection rules are proposed by [ADR-0027](decisions/0027-input-delivery-lifecycle.md). Representation remains provisional.
 - **Do not confuse with:** The latest session transcript, an entire turn, or client rendering state.
 - **Example:** Model call 1 consumes frontier 42; steering becomes eligible, so model call 2 consumes frontier 47 within the same turn.
+
+## Effective configuration
+
+- **Definition:** The durable configuration governing one logical turn's semantic execution choices, including requested model selection, material parameters, tool availability/configuration, and explanatory policy references.
+- **Status:** Durable provenance is accepted; immutability and the freeze boundary are proposed by [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md), [ADR-0005](decisions/0005-model-call-retry-semantics.md), and [ADR-0027](decisions/0027-input-delivery-lifecycle.md). Exact fields and representation remain open.
+- **Do not confuse with:** The exact provider/model target resolved for a model call, current hub defaults, or a client-side draft selection.
+- **Example:** A queued turn keeps the model selection and tool configuration accepted with it even if hub defaults change before the predecessor finishes.
 
 ## Dispatch generation
 

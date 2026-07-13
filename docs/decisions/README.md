@@ -2,6 +2,18 @@
 
 Architecture decision records (ADRs) explain durable design choices that affect boundaries, identities, invariants, compatibility, or several future features. The [decision ledger](../decision-ledger.md) lists proposed records; no substantive ADR has yet been accepted.
 
+## Proposed foundation set
+
+These records are under review and are not authoritative until accepted:
+
+| ADR | Scope |
+| --- | --- |
+| [ADR-0001](0001-domain-terminology-and-identity.md) | Core domain terminology and durable identity boundaries |
+| [ADR-0003](0003-session-creation-and-transcript-ancestry.md) | Independent session creation cause and initial transcript ancestry |
+| [ADR-0004](0004-turn-and-attempt-lifecycle.md) | Turn/attempt lifecycle, progressing-slot states, recovery, regeneration, cancellation, and ambiguity |
+| [ADR-0005](0005-model-call-retry-semantics.md) | Model-call retry, continuation, and configuration identity |
+| [ADR-0027](0027-input-delivery-lifecycle.md) | No-active-turn and active-work input delivery, configuration freeze, and context frontiers |
+
 ## When to write an ADR
 
 Write an ADR before closing a foundational ledger question, changing accepted direction, weakening an invariant, or introducing a technology that constrains several components. Do not use an ADR for local implementation details that are easy to reverse and do not alter a public boundary.

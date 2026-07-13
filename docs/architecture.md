@@ -1,6 +1,6 @@
 # Architecture
 
-This document records current high-level boundaries, not an implemented system or final API. Candidate names are defined in the [glossary](glossary.md); unresolved choices remain in the [decision ledger](decision-ledger.md).
+This document records current high-level boundaries, not an implemented system or final API. Candidate names are defined in the [glossary](glossary.md); unresolved choices remain in the [decision ledger](decision-ledger.md). The first domain/lifecycle choices are under review in the [proposed ADR foundation set](decisions/README.md) and are called out below rather than treated as accepted.
 
 ## Component view
 
@@ -38,7 +38,7 @@ Clients never need a direct provider or runner connection. Provider calls origin
 | Component | Owns | Does not own |
 | --- | --- | --- |
 | Clients | User interaction, presentation, explicit input-delivery intent, replaceable transient views | Canonical transcripts, scheduling, provider credentials, or approval truth |
-| Central hub | Durable session semantics, logical turns, effective configuration, model resolution, provider calls, tool policy, approvals, scheduling, reconstruction, recovery decisions, per-dispatch effective runner properties, and enforcement of the single-owner access boundary | Machine-local capabilities it cannot truthfully provide or an authentication, enrollment, or attestation mechanism selected by this document |
+| Central hub | Durable session semantics, accepted-input dispositions, logical turns, effective configuration, model resolution, provider calls, tool policy, approvals, scheduling, reconstruction, recovery decisions, per-dispatch effective runner properties, and enforcement of the single-owner access boundary | Machine-local capabilities it cannot truthfully provide or an authentication, enrollment, or attestation mechanism selected by this document |
 | Postgres | Canonical durable records and transactional constraints | Domain policy, live provider streams, or runner execution |
 | Provider adapters | Translation between hub model-call intent and provider APIs; observed provider response metadata | Session lifecycle, fallback policy, or historical alias meaning |
 | Central scheduler | Choosing eligible runners, durable dispatch coordination, fencing, and at-most-one progressing turn policy | Tool implementation or an assumed distributed broker |
@@ -53,9 +53,9 @@ The hub may initially be one deployable modular monolith. Rows in this table are
 | Subject | Authoritative source | Replicas or transient projections |
 | --- | --- | --- |
 | Session content and ancestry | Postgres records governed by hub domain rules | Client caches and model-context projections |
-| Accepted user input and intended treatment | Postgres | Client optimistic state |
+| Accepted user input, explicit delivery request, queue lineage, and durable disposition | Postgres | Client optimistic state |
 | Logical turn and attempt state | Postgres | Scheduler memory and client progress views |
-| Effective turn configuration | Durable hub record | Client display and orchestration memory |
+| Effective turn configuration | Durable hub record frozen at the boundary proposed by ADR-0027 | Client display and orchestration memory; never mutable defaults used as historical intent |
 | Model alias definition now | Hub configuration | Client selector lists |
 | Requested, resolved, and provider-reported model provenance | Per-call durable record containing the requested selection, exact hub-resolved provider/model target, and observable provider identity or mismatch when available | Transcript/audit presentation; no claim about a hidden physical backend the provider does not reveal |
 | Tool request, policy decision, and approval | Postgres | Confirmation UI and executor envelope |
@@ -76,13 +76,16 @@ A declaration is an operationally required claim, not proof of the claimed capab
 
 ### Accepted input and model execution
 
-1. While a turn is active, a client submits content plus a delivery policy: interrupt, next safe point, or after current turn. ADR-0027 defines the command and treatment when no turn is active.
-2. The hub validates the session and atomically makes the message and its intended treatment durable before acknowledging acceptance.
-3. Domain transitions either create logical work, queue it, or make it eligible as steering at a future orchestration boundary.
-4. Before each provider call, the hub fixes the exact context frontier consumed, resolves the requested model selection to an exact hub-resolved provider/model target, and records the physical call identity.
-5. Provider deltas may stream transiently. The final assistant content, call outcome, and any provider-reported identity or observed mismatch become durable before being treated as authoritative. These facts supplement the already-recorded requested selection and exact hub-resolved target; they do not prove an undisclosed physical backend.
+The proposed [ADR-0027](decisions/0027-input-delivery-lifecycle.md) exercises the accepted durability direction as follows:
 
-A logical turn need not have one immutable context frontier. Safe-point steering can extend context between provider calls, but it cannot mutate the input of a provider request already in flight. Each physical call therefore records its own context frontier.
+1. A client submits content with `start when no turn is active` or, against an expected active turn, interrupt, next safe point, or after current turn. A no-active submission joins any existing queued FIFO tail rather than bypassing it.
+2. The hub validates authoritative session state and atomically makes the accepted-input identity, content, explicit treatment, ordering, initial disposition, and required configuration material durable before acknowledgement. A stale state race fails rather than silently changing treatment.
+3. No-active-turn, interrupt, and after-current input create origin turns and freeze their effective configuration at acceptance. Safe-point input binds to the active turn and captures fallback configuration in case it must be reclassified.
+4. A queued or interrupt-created turn fixes its outcome-aware starting context frontier only after its immediate predecessor becomes terminal. Configuration is therefore stable from acceptance while context can honestly include predecessor success, failure, cancellation, or ambiguity.
+5. Immediately before each provider call, the hub fixes the exact context frontier consumed and records the physical call identity. The first call resolves the requested selection to an exact hub-resolved provider/model target; proposed ADR-0005 pins that target for later calls in the same turn unless a future accepted policy explicitly authorizes a change.
+6. Provider deltas may stream transiently. The final assistant content, call outcome, and any provider-reported identity or observed mismatch become durable before being treated as authoritative. These facts supplement the already-recorded requested selection and exact hub-resolved target; they do not prove an undisclosed physical backend.
+
+A logical turn need not have one immutable context frontier. Under the proposal, a safe point occurs only before preparing a later provider call. Steering can extend that call's context but cannot mutate an issued provider call, tool request, approval, or tool attempt. If the target turn terminates before another call, pending steering becomes visibly queued origin work rather than disappearing.
 
 ### Logical tools with two placements
 
@@ -96,7 +99,7 @@ Placement changes where an effect occurs, not who owns policy or history. A lost
 
 ### Delegation and ancestry
 
-Session creation cause and transcript ancestry are independent facts. Delegation creates a related, independently browsable session and a parent-side wait or reference. Forking initializes a session from a selected transcript frontier without claiming that the new session was delegated. Initial ancestry is limited to one source frontier; future merging is open.
+Session creation cause and transcript ancestry are independent facts. Proposed [ADR-0003](decisions/0003-session-creation-and-transcript-ancestry.md) makes both immutable at session creation and represents ancestry as none or one exact source frontier. Delegation creates a related, independently browsable session and a parent-side wait or reference. Forking initializes a session from a selected transcript frontier without claiming that the new session was delegated. Future merging remains open.
 
 ## Dependency direction
 
@@ -120,9 +123,9 @@ These are architectural dependency rules, not a commitment to a specific Rust mo
 
 ## Recovery posture
 
-Acknowledged work must not vanish. On restart, the hub reconstructs queued work, confirmation waits, delegation waits, and interrupted attempts from Postgres. A new process does not pretend to resume an old provider stream or unknown runner effect. Using the available evidence, it durably classifies interrupted physical work as completed, known failed or lost, ambiguous, or awaiting reconciliation, then applies the eventual retry or reconciliation policy without changing the identity of accepted input.
+Acknowledged work must not vanish. On restart, the hub reconstructs accepted-input dispositions, queued work with frozen configuration, confirmation waits, delegation waits, and interrupted attempts from Postgres. A new process does not pretend to resume an old provider stream or unknown runner effect. Using the available evidence, it durably classifies interrupted physical work as completed, known failed or lost, cancelled, ambiguous, or requiring reconciliation, then applies an authorized retry or reconciliation policy without changing the identity of accepted input.
 
-At most one logical turn actively progresses per session initially. “Active” needs an exact state definition before implementation; queued messages and durable waits do not disappear merely because nothing is executing.
+At most one logical turn actively progresses per session initially. Proposed [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md) defines every active phase, including approval, child, recovery, and cancellation waits, as retaining the session slot. A durable wait normally has no live turn attempt; resolving it creates a new physical attempt for the same active turn. Scheduler mechanics remain open.
 
 ## Explicitly open boundaries
 
