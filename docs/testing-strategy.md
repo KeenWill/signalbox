@@ -18,6 +18,10 @@ Postgres is the test database for persistence behavior. Integration tests may st
 - Use table-driven state-machine cases for turn, attempt, model-call, tool, approval, input-delivery, delegation, and archival lifecycles.
 - Property-test invariants such as distinct identity preservation, terminal-state monotonicity, and “at most one progressing turn” at the pure decision level.
 - Prove that typed delivery and recovery commands determine turn identity without comparing or classifying natural-language objective text.
+- Prove that `Active(Running)` always has exactly one current nonterminal attempt, waiting phases have none, and activation or wait resolution cannot commit one fact without the other.
+- Reject terminalization while any issued physical operation is unclassified, a current attempt is nonterminal, or a durable wait remains open.
+- Treat queue eligibility as a deterministic predicate over durable lineage and slot ownership; a queued failure must inherit its predecessor frontier before it can terminalize.
+- Compare the complete typed effective configuration for identity and recovery; safe-point input cannot supply an independent configuration.
 - Model effects as requested decisions rather than performing I/O, so tests can assert ordering such as “persist before provider send.”
 
 These tests are required with the first implementation of each state machine.
@@ -25,8 +29,9 @@ These tests are required with the first implementation of each state machine.
 ### Postgres integration
 
 - Exercise real migrations, constraints, transactions, isolation behavior, idempotency keys, and compare-and-set fencing against ephemeral Postgres containers.
-- Race two attempts to activate work in the same session and prove only one wins.
+- Race two queued turns to activate work in the same session and prove only one atomically acquires the slot, fixes its frontier, and creates its initial attempt.
 - Crash or terminate orchestration at transaction boundaries and verify acknowledged input, queued work, confirmation waits, and, once ADR-0002 defines them, delegation waits reconstruct correctly.
+- Make a queued turn unexecutable while its predecessor remains active; prove it cannot terminalize early and that its eventual failure frontier includes the predecessor's terminal outcome.
 - Deliver duplicate commands/results and stale generations in different orders; prove state advances at most once and current state is not overwritten.
 - Keep storage records behind explicit mappings and test unknown/corrupt values fail visibly.
 
@@ -46,6 +51,8 @@ Adapter contract tests should run the same provenance cases for every real provi
 
 Retry fixtures must consume steering into a prepared call and fail that call both before and after send. Every later retry or continuation must retain the consumed steering in its recorded frontier, while a call that fails before send still retains its own model-call identity.
 
+An after-send unknown-acceptance fixture must end the current attempt as ambiguous, place a non-cancelled turn in `AwaitingRecoveryDecision`, retain the session slot across restart, and reject automatic retry. Separate cases must prove that new evidence, explicit owner-authorized continuation, and owner-selected terminal reconciliation are the only exits. Cancellation plus the same ambiguity must instead terminalize as reconciliation required.
+
 ### Outbound runners and tools
 
 Use fake outbound runners with controlled declarations, trusted deployment configuration, verification evidence, effective properties, connection loss, delayed results, duplicate results, and stale dispatch generations. Tests must prove that an unsupported declaration cannot become a stronger effective guarantee. A fake executor must distinguish:
@@ -56,13 +63,13 @@ Use fake outbound runners with controlled declarations, trusted deployment confi
 - a write whose acknowledgement is lost; and
 - a late result after reassignment or cancellation.
 
-Tool ambiguity tests must prove that ambiguous writes enter reconciliation and are never automatically retried. Approval tests must mutate one argument or material constraint and prove the prior approval no longer authorizes execution. Run the same logical lifecycle contract against hub-local and runner-local executors.
+Tool ambiguity tests must prove that ambiguous writes enter `AwaitingRecoveryDecision`, retain the active slot, and are never automatically retried. Explicit owner action may terminalize for reconciliation, while any future continuation remains governed by the tool-effect policy. Approval tests must mutate one argument or material constraint and prove the prior approval no longer authorizes execution. Run the same logical lifecycle contract against hub-local and runner-local executors.
 
 These tests are required with tool and runner behavior. Real sandbox escape testing and platform-specific containment certification are required before claiming a production isolation profile, but are later than the first fake-runner slice.
 
 ### Streaming and client fixtures
 
-Deterministic streaming tests should assign a draft identity and version, disconnect clients at every chunk boundary, then reconcile from an authoritative snapshot. They must prove that missing deltas are not promoted to final content, that safe-point steering only affects later provider calls, and that consumed steering remains in later call frontiers after the first consuming call fails.
+Deterministic streaming tests should assign a draft identity and version, disconnect clients at every chunk boundary, then reconcile from an authoritative snapshot. They must prove that missing deltas are not promoted to final content, that safe-point steering only affects later provider calls after all earlier issued operations are classified, and that consumed steering remains in later call frontiers after the first consuming call fails.
 
 Protocol compatibility fixtures should be language-neutral and cover:
 
@@ -88,7 +95,7 @@ Recovery tests should stop the hub at named boundaries rather than random sleeps
 5. while waiting for approval or, once implemented, a delegated result;
 6. after outcome persistence but before client acknowledgement.
 
-On restart, assert both the final state and the absence of forbidden effects. Provider and tool tests must distinguish a known failure from an ambiguous outcome; they must not assume that losing a connection means the external operation failed. Cancellation plus an ambiguous issued effect must terminalize the turn as reconciliation required rather than entering a recovery wait.
+On restart, assert both the final state and the absence of forbidden effects. Every nonterminal pre-restart turn attempt must be ended or fenced before continuation. Provider and tool tests must distinguish a known failure from an ambiguous outcome; they must not assume that losing a connection means the external operation failed. A non-cancelled ambiguity must retain the active slot in `AwaitingRecoveryDecision`; cancellation plus ambiguity must terminalize the turn as reconciliation required rather than entering that wait.
 
 Boundary recovery tests are required with each durable effect. Long soak tests, repeated pod eviction, database failover, and Kubernetes disruption suites are later deployment work.
 

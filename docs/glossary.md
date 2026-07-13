@@ -25,7 +25,7 @@ This glossary recommends working language for design discussion. “Accepted” 
 
 ## Turn attempt
 
-- **Definition:** One exclusive physical orchestration tenure that advances an active turn until it ends, yields to a durable wait, or is fenced and replaced.
+- **Definition:** One exclusive physical orchestration tenure that advances an active running turn until it ends, yields to a durable wait, or is fenced and replaced. Activation and wait resolution atomically create it; a running turn never exists without one.
 - **Status:** The physical identity distinction is accepted; the name and lifecycle are proposed by [ADR-0001](decisions/0001-domain-terminology-and-identity.md) and [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md). “Turn attempt” is preferred to generic “run,” which collides with runners and says little about logical ownership.
 - **Do not confuse with:** The durable turn, an individual model call, or an individual tool attempt.
 - **Example:** An attempt ends when orchestration enters a durable approval wait; a new attempt continues the same active turn after approval.
@@ -123,7 +123,7 @@ This glossary recommends working language for design discussion. “Accepted” 
 
 ## Ambiguous outcome
 
-- **Definition:** A physical outcome where available evidence cannot establish whether an external effect occurred, usually because acknowledgement or observation was lost.
+- **Definition:** A physical outcome where available evidence cannot establish whether an external effect occurred, usually because acknowledgement or observation was lost. A non-cancelled turn with such an issued outcome retains its active slot while awaiting an explicit recovery decision; cancellation plus ambiguity terminalizes for reconciliation.
 - **Status:** Concept and no-blind-retry rule accepted; reconciliation states provisional.
 - **Do not confuse with:** A known failure, an ordinary retryable read, or “probably failed.”
 - **Example:** A runner loses connectivity immediately after submitting a payment-like external write; the hub records ambiguity and requires reconciliation instead of dispatching it again.
@@ -137,10 +137,10 @@ This glossary recommends working language for design discussion. “Accepted” 
 
 ## Effective configuration
 
-- **Definition:** The durable configuration governing one logical turn's semantic execution choices, including requested model selection, material parameters, tool availability/configuration, and explanatory policy references.
+- **Definition:** The durable configuration governing one logical turn's semantic execution choices, including requested model selection, model parameters, tool availability/configuration, and explanatory policy references. Every field in the typed value is identity-significant in the baseline and equality is total.
 - **Status:** Durable provenance is accepted; immutability and the freeze boundary are proposed by [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md), [ADR-0005](decisions/0005-model-call-retry-semantics.md), and [ADR-0027](decisions/0027-input-delivery-lifecycle.md). Exact fields and representation remain open.
 - **Do not confuse with:** The exact provider/model target resolved for a model call, current hub defaults, or a client-side draft selection.
-- **Example:** A queued turn keeps the model selection and tool configuration accepted with it even if hub defaults change before the predecessor finishes.
+- **Example:** A queued turn keeps the complete model and tool configuration accepted with it even if hub defaults change before the predecessor finishes; safe-point steering inherits that value rather than supplying another configuration.
 
 ## Dispatch generation
 

@@ -6,7 +6,7 @@
 - Reviewers: Provider, domain, and reliability reviewers unassigned
 - Supersedes: none
 - Superseded by: none
-- Decision-ledger questions: provider-call retry versus turn retry; model or configuration change identity
+- Decision-ledger questions: provider-call retry versus turn retry; ambiguous provider-call disposition; model or configuration change identity
 
 ## Context
 
@@ -47,19 +47,21 @@ A provider-call retry may remain in the same turn when it is recovery of unfinis
 
 - the prior call produced no committed assistant outcome;
 - its failure is known, or an owner explicitly authorizes recovery from a recorded ambiguous outcome;
-- the new call uses the same frozen requested model selection, material provider parameters, tool availability/configuration, and exact hub-resolved provider/model target;
+- the new call uses the same complete frozen effective configuration and exact hub-resolved provider/model target;
 - the new call records its own immutable context frontier containing every accepted input and committed semantic fact present in the prior call's frontier, including steering already marked consumed, plus any newly classified failure evidence or later eligible context; and
 - retry policy and resource limits authorize another call.
 
-If the hub process and turn attempt remain valid after a known failure, the new model call may belong to the same turn attempt. If orchestration tenure ended or was fenced, ADR-0004 requires a replacement turn attempt first.
+If the hub process and turn attempt remain valid after a known failure, the new model call may belong to the same turn attempt. If orchestration tenure ended, was fenced, or was lost on process restart, ADR-0004 requires a replacement turn attempt first.
 
 A later model call in the same turn is **continuation**, not retry, when it intentionally consumes a newer context frontier containing safe-point steering, tool results, or other committed turn history. It still gets a new model-call identity and uses the same frozen configuration and exact target. No retry or continuation frontier may silently omit accepted steering already consumed by an earlier call, even if that earlier call failed before send or ended ambiguously.
 
-The turn's requested model selection and material provider configuration freeze when the turn is created. The first model call durably resolves that selection to an exact target. All later calls and retries in that turn use that target in the baseline design. Re-resolving an alias to a different target, manually choosing another model, changing material provider parameters, or changing available tools/configuration creates a new logical turn. A future explicitly frozen fallback policy could permit a target change within a turn only after a separate ADR; version one does not infer such permission.
+The turn's complete effective configuration, including requested model selection, freezes when the turn is created. Every field in that value is identity-significant in the baseline; recovery compares the typed value for equality rather than asking whether a difference is “material.” The first model call durably resolves the requested selection to an exact target. All later calls and retries in that turn use that target. Re-resolving an alias to a different target, manually choosing another model, or changing any effective-configuration field creates a new logical turn. A future explicitly frozen fallback policy could permit a target change within a turn only after a separate ADR; version one does not infer such permission.
 
 An execution fingerprint or digest may detect equal request material, but it never determines whether a call, attempt, or turn retains identity.
 
 In the baseline lifecycle, `Refused` is a terminal model-call disposition that becomes an explicit committed refusal outcome for the turn. That conversational outcome makes the turn `Terminal(Completed)` rather than failed or waiting for more input. A future refusal-remediation ADR may add a typed durable wait or another explicit continuation policy, with corresponding progressing-slot and input-delivery rules.
+
+A non-cancelled `Ambiguous` model call deterministically ends its current turn attempt as `Ambiguous` and places the turn in `Active(AwaitingRecoveryDecision)`. The turn retains the session slot. No retry occurs until an explicit owner decision authorizes a new call and accepts the duplicate-provider-effect risk, or separately recorded evidence resolves what happened for turn-level decision-making. The terminal call record remains `Ambiguous`. The owner may instead terminalize the turn as `ReconciliationRequired`. If cancellation was already requested, ADR-0004 terminalizes the turn as `ReconciliationRequired` without entering the wait.
 
 ## Terminology
 
@@ -68,7 +70,7 @@ In the baseline lifecycle, `Refused` is a terminal model-call disposition that b
 - **Continuation call:** A new model call in the same turn that intentionally consumes a later context frontier.
 - **Known failure:** Evidence adequately establishes that no usable provider response completed; exact provider acceptance or billing may still be recorded separately when observable.
 - **Ambiguous model-call outcome:** Evidence cannot establish whether the provider accepted or completed the request. It is not automatically retryable.
-- **Material provider configuration:** Requested model selection, parameters that can change semantic output, enabled tool interface/configuration, and other choices designated material by future configuration design.
+- **Effective-configuration equality:** Equality over the complete frozen typed configuration value. The baseline has no partially material subset; a field is either part of effective configuration and identity-significant or explicitly defined later as operational and late-bound outside it.
 
 ## Invariants
 
@@ -77,8 +79,9 @@ In the baseline lifecycle, `Refused` is a terminal model-call disposition that b
 - A retry never overwrites the prior call or its cost, timing, provenance, partial evidence, or disposition.
 - Every retry or continuation preserves accepted steering already committed into the turn's semantic history.
 - No automatic retry follows an ambiguous call outcome.
-- A call with a different exact resolved target or material configuration cannot remain in the same turn under the baseline policy.
+- A call with a different exact resolved target or any different effective-configuration field cannot remain in the same turn under the baseline policy.
 - Cancellation request is nonterminal until outcome evidence is classified.
+- A non-cancelled ambiguous call retains the turn's active slot in `AwaitingRecoveryDecision`; an ambiguous call is never mapped to failure or terminal reconciliation by scheduler timing alone.
 
 ## Strongest alternative
 
@@ -106,7 +109,7 @@ Conservative ambiguous-call handling may require owner action and can delay comp
 ## Scenario walkthroughs
 
 - **S02:** The initial call completes normally. If safe-point steering later requires another call, it is a continuation with a newer frontier, not a retry.
-- **S04:** Restart classifies the in-flight call. A known failure may lead to a new call, usually in a replacement turn attempt. An ambiguous outcome blocks automatic retry; owner-authorized recovery is explicit and retains all evidence and previously consumed steering in the replacement frontier.
+- **S04:** Restart classifies the in-flight call. A known failure may lead to a new call, usually in a replacement turn attempt. A non-cancelled ambiguous outcome ends the attempt and puts the turn in `AwaitingRecoveryDecision`; owner-authorized recovery is explicit and retains all evidence and previously consumed steering in the replacement frontier.
 - **S20:** An alias is frozen as the requested selection and resolved for the first call. The exact target is pinned for the rest of the turn; a later alias-definition change does not alter retries or continuation calls.
 - **S21:** A pinned model remains pinned. Provider-reported substitution is recorded separately and handled by ADR-0007 rather than rewritten as the requested target.
 - **S22:** Automatic fallback remains unsupported until ADR-0006. If later accepted, each fallback interaction is still a distinct model call with explicit provenance.
