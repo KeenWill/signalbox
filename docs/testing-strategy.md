@@ -17,6 +17,7 @@ Postgres is the test database for persistence behavior. Integration tests may st
 - Test each allowed state transition and reject every invalid predecessor/state combination.
 - Use table-driven state-machine cases for turn, attempt, model-call, tool, approval, input-delivery, delegation, and archival lifecycles.
 - Property-test invariants such as distinct identity preservation, terminal-state monotonicity, and “at most one progressing turn” at the pure decision level.
+- Prove that typed delivery and recovery commands determine turn identity without comparing or classifying natural-language objective text.
 - Model effects as requested decisions rather than performing I/O, so tests can assert ordering such as “persist before provider send.”
 
 These tests are required with the first implementation of each state machine.
@@ -25,7 +26,7 @@ These tests are required with the first implementation of each state machine.
 
 - Exercise real migrations, constraints, transactions, isolation behavior, idempotency keys, and compare-and-set fencing against ephemeral Postgres containers.
 - Race two attempts to activate work in the same session and prove only one wins.
-- Crash or terminate orchestration at transaction boundaries and verify acknowledged input, queued work, confirmation waits, and delegation waits reconstruct correctly.
+- Crash or terminate orchestration at transaction boundaries and verify acknowledged input, queued work, confirmation waits, and, once ADR-0002 defines them, delegation waits reconstruct correctly.
 - Deliver duplicate commands/results and stale generations in different orders; prove state advances at most once and current state is not overwritten.
 - Keep storage records behind explicit mappings and test unknown/corrupt values fail visibly.
 
@@ -43,6 +44,8 @@ Use scripted fake provider adapters that can:
 
 Adapter contract tests should run the same provenance cases for every real provider. Live-provider smoke tests may exist behind explicit credentials but are not the sole correctness test and should not be mandatory for ordinary contributions.
 
+Retry fixtures must consume steering into a prepared call and fail that call both before and after send. Every later retry or continuation must retain the consumed steering in its recorded frontier, while a call that fails before send still retains its own model-call identity.
+
 ### Outbound runners and tools
 
 Use fake outbound runners with controlled declarations, trusted deployment configuration, verification evidence, effective properties, connection loss, delayed results, duplicate results, and stale dispatch generations. Tests must prove that an unsupported declaration cannot become a stronger effective guarantee. A fake executor must distinguish:
@@ -59,7 +62,7 @@ These tests are required with tool and runner behavior. Real sandbox escape test
 
 ### Streaming and client fixtures
 
-Deterministic streaming tests should assign a draft identity and version, disconnect clients at every chunk boundary, then reconcile from an authoritative snapshot. They must prove that missing deltas are not promoted to final content and that safe-point steering only affects later provider calls.
+Deterministic streaming tests should assign a draft identity and version, disconnect clients at every chunk boundary, then reconcile from an authoritative snapshot. They must prove that missing deltas are not promoted to final content, that safe-point steering only affects later provider calls, and that consumed steering remains in later call frontiers after the first consuming call fails.
 
 Protocol compatibility fixtures should be language-neutral and cover:
 
@@ -82,10 +85,10 @@ Recovery tests should stop the hub at named boundaries rather than random sleeps
 2. after durable acceptance but before scheduling;
 3. after attempt creation but before external send;
 4. after send but before outcome persistence;
-5. while waiting for approval or a delegated result;
+5. while waiting for approval or, once implemented, a delegated result;
 6. after outcome persistence but before client acknowledgement.
 
-On restart, assert both the final state and the absence of forbidden effects. Provider and tool tests must distinguish a known failure from an ambiguous outcome; they must not assume that losing a connection means the external operation failed.
+On restart, assert both the final state and the absence of forbidden effects. Provider and tool tests must distinguish a known failure from an ambiguous outcome; they must not assume that losing a connection means the external operation failed. Cancellation plus an ambiguous issued effect must terminalize the turn as reconciliation required rather than entering a recovery wait.
 
 Boundary recovery tests are required with each durable effect. Long soak tests, repeated pod eviction, database failover, and Kubernetes disruption suites are later deployment work.
 

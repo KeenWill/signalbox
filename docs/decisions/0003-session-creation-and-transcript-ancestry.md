@@ -96,8 +96,8 @@ Fork and delegation can evolve independently. Provenance remains inspectable eve
 
 - **S01:** `OwnerInitiated` plus `None` creates an empty interactive session. The first accepted input is not ancestry.
 - **S17:** An owner-created fork stores `OwnerInitiated` and the selected source session/frontier. Later source activity cannot change the fork.
-- **S18:** A delegated child stores a durable parent-work reference in its cause. It may have no ancestry and receive a task brief as new input, or it may explicitly select one source frontier.
-- **S19:** Parent cancellation cannot erase or rewrite the child's cause or ancestry. The cancellation disposition remains a separate future decision.
+- **S18:** Once ADR-0002 defines delegation lifecycle, a delegated child stores a durable parent-work reference in its cause. It may have no ancestry and receive a task brief as new input, or it may explicitly select one source frontier.
+- **S19:** Parent cancellation cannot erase or rewrite the child's cause or ancestry. ADR-0002 remains blocking before a child-wait phase or parent-cancellation transition is exposed.
 
 ## Extension implications
 

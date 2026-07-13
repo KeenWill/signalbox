@@ -16,7 +16,7 @@ Retry rules must preserve user intent without assuming that one turn has one con
 
 ## Decision
 
-Every hub authorization to initiate a provider interaction creates a distinct durable **model call** before the request may be sent. A provider-call retry always creates a new `ModelCallId`; no externally issued interaction is overwritten or grouped as though it never occurred.
+Every hub authorization to attempt a provider interaction creates a distinct durable **model call** before the request may be sent. A call therefore exists even if preparation later proves that no request reached the provider. A provider-call retry always creates a new `ModelCallId`; no externally issued interaction is overwritten or grouped as though it never occurred.
 
 Provider adapters must not perform hidden automatic retries after the point at which the provider could have accepted a request. A low-level operation proven not to have crossed that boundary may continue preparing the same durable call, but uncertainty about whether the provider accepted it is an ambiguous outcome, not proof that it was unsent.
 
@@ -48,19 +48,22 @@ A provider-call retry may remain in the same turn when it is recovery of unfinis
 - the prior call produced no committed assistant outcome;
 - its failure is known, or an owner explicitly authorizes recovery from a recorded ambiguous outcome;
 - the new call uses the same frozen requested model selection, material provider parameters, tool availability/configuration, and exact hub-resolved provider/model target;
-- the new call records its own immutable context frontier; and
+- the new call records its own immutable context frontier containing every accepted input and committed semantic fact present in the prior call's frontier, including steering already marked consumed, plus any newly classified failure evidence or later eligible context; and
 - retry policy and resource limits authorize another call.
 
 If the hub process and turn attempt remain valid after a known failure, the new model call may belong to the same turn attempt. If orchestration tenure ended or was fenced, ADR-0004 requires a replacement turn attempt first.
 
-A later model call in the same turn is **continuation**, not retry, when it intentionally consumes a newer context frontier containing safe-point steering, tool results, or other committed turn history. It still gets a new model-call identity and uses the same frozen configuration and exact target.
+A later model call in the same turn is **continuation**, not retry, when it intentionally consumes a newer context frontier containing safe-point steering, tool results, or other committed turn history. It still gets a new model-call identity and uses the same frozen configuration and exact target. No retry or continuation frontier may silently omit accepted steering already consumed by an earlier call, even if that earlier call failed before send or ended ambiguously.
 
 The turn's requested model selection and material provider configuration freeze when the turn is created. The first model call durably resolves that selection to an exact target. All later calls and retries in that turn use that target in the baseline design. Re-resolving an alias to a different target, manually choosing another model, changing material provider parameters, or changing available tools/configuration creates a new logical turn. A future explicitly frozen fallback policy could permit a target change within a turn only after a separate ADR; version one does not infer such permission.
 
 An execution fingerprint or digest may detect equal request material, but it never determines whether a call, attempt, or turn retains identity.
 
+In the baseline lifecycle, `Refused` is a terminal model-call disposition that becomes an explicit committed refusal outcome for the turn. That conversational outcome makes the turn `Terminal(Completed)` rather than failed or waiting for more input. A future refusal-remediation ADR may add a typed durable wait or another explicit continuation policy, with corresponding progressing-slot and input-delivery rules.
+
 ## Terminology
 
+- **Model call:** One durable hub authorization to attempt a provider interaction; it may terminate before send.
 - **Provider-call retry:** A new model call intended to recover a prior model call that did not yield a committed conversational outcome.
 - **Continuation call:** A new model call in the same turn that intentionally consumes a later context frontier.
 - **Known failure:** Evidence adequately establishes that no usable provider response completed; exact provider acceptance or billing may still be recorded separately when observable.
@@ -72,6 +75,7 @@ An execution fingerprint or digest may detect equal request material, but it nev
 - INV-004, INV-006, INV-014–INV-018, INV-025, INV-029, and INV-034 are preserved and made precise.
 - Every externally issued provider interaction has one model-call identity and immutable recorded frontier.
 - A retry never overwrites the prior call or its cost, timing, provenance, partial evidence, or disposition.
+- Every retry or continuation preserves accepted steering already committed into the turn's semantic history.
 - No automatic retry follows an ambiguous call outcome.
 - A call with a different exact resolved target or material configuration cannot remain in the same turn under the baseline policy.
 - Cancellation request is nonterminal until outcome evidence is classified.
@@ -102,11 +106,11 @@ Conservative ambiguous-call handling may require owner action and can delay comp
 ## Scenario walkthroughs
 
 - **S02:** The initial call completes normally. If safe-point steering later requires another call, it is a continuation with a newer frontier, not a retry.
-- **S04:** Restart classifies the in-flight call. A known failure may lead to a new call, usually in a replacement turn attempt. An ambiguous outcome blocks automatic retry; owner-authorized recovery is explicit and retains all evidence.
+- **S04:** Restart classifies the in-flight call. A known failure may lead to a new call, usually in a replacement turn attempt. An ambiguous outcome blocks automatic retry; owner-authorized recovery is explicit and retains all evidence and previously consumed steering in the replacement frontier.
 - **S20:** An alias is frozen as the requested selection and resolved for the first call. The exact target is pinned for the rest of the turn; a later alias-definition change does not alter retries or continuation calls.
 - **S21:** A pinned model remains pinned. Provider-reported substitution is recorded separately and handled by ADR-0007 rather than rewritten as the requested target.
 - **S22:** Automatic fallback remains unsupported until ADR-0006. If later accepted, each fallback interaction is still a distinct model call with explicit provenance.
-- **S23:** A refusal is terminal for that call and is not a retryable availability failure by itself.
+- **S23:** A refusal is terminal for that call and makes the turn `Terminal(Completed)` with an explicit refusal outcome in the baseline; it is not a retryable availability failure or an implicit wait for input.
 
 ## Extension implications
 

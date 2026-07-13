@@ -6,7 +6,7 @@
 - Reviewers: Domain, lifecycle, and reliability reviewers unassigned
 - Supersedes: none
 - Superseded by: none
-- Decision-ledger questions: recovery attempt identity; manual regeneration; actively progressing state set; waiting-state slot ownership
+- Decision-ledger questions: recovery attempt identity; manual-regeneration identity boundary and later scope; actively progressing state set; waiting-state slot ownership
 
 ## Context
 
@@ -31,7 +31,6 @@ TurnState =
 ActivePhase =
     Running
   | AwaitingApproval
-  | AwaitingChild
   | AwaitingRecoveryDecision
   | CancellationRequested
 
@@ -44,13 +43,13 @@ TurnDisposition =
 
 The names are typed pseudocode, not a final Rust API.
 
-Additional durable waits require explicit typed variants and transition review; there is no catch-all wait state.
+Additional durable waits, including delegated-child waits, require explicit typed variants and transition review; there is no catch-all wait state. A future wait retains the progressing slot unless the ADR that introduces it also defines branching or rebasing semantics that justify an exception.
 
-For the one-active-turn rule, **actively progressing means `TurnState::Active` in any phase**. It describes ownership of the session's ordered-progress slot, not continuous execution. A turn awaiting approval, child work, recovery authorization, or cancellation retains the slot. Queued and terminal turns do not.
+For the one-active-turn rule, **actively progressing means `TurnState::Active` in any phase**. It describes ownership of the session's ordered-progress slot, not continuous execution. A turn awaiting approval, recovery authorization, or cancellation retains the slot. Queued and terminal turns do not.
 
 At most one turn per session may be `Active`. Activating a queued successor is prohibited until the current active turn reaches a terminal disposition. The enforcement mechanism is left to scheduler and persistence design, but process memory alone is insufficient.
 
-When an active turn reaches a durable approval or child-result wait, its current physical attempt ends with a typed suspended/yielded disposition. The turn remains active and retains the session slot without retaining a live attempt. When the wait resolves, a new turn attempt continues the same turn. A hub restart while the turn is waiting therefore reconstructs the wait; it does not pretend that a process-local attempt remains alive.
+When an active turn reaches a durable approval or recovery-decision wait, its current physical attempt ends with a typed suspended/yielded disposition. The turn remains active and retains the session slot without retaining a live attempt. When the wait resolves, a new turn attempt continues the same turn. A hub restart while the turn is waiting therefore reconstructs the wait; it does not pretend that a process-local attempt remains alive.
 
 ### Allowed turn transitions
 
@@ -58,9 +57,9 @@ When an active turn reaches a durable approval or child-result wait, its current
 | --- | --- | --- |
 | Queued | Active(Running) | Scheduler atomically acquires the session slot |
 | Queued | Terminal(Failed) | Work cannot become executable and records an explicit failure |
-| Active(Running) | Active(AwaitingApproval or AwaitingChild or AwaitingRecoveryDecision) | The current attempt ends with a durable typed wait |
+| Active(Running) | Active(AwaitingApproval or AwaitingRecoveryDecision) | The current attempt ends with a durable typed wait |
 | Active(Running or a waiting phase) | Active(CancellationRequested) | The hub durably accepts a cancellation request |
-| Active(AwaitingApproval or AwaitingChild or AwaitingRecoveryDecision) | Active(Running) | The wait resolves and a new attempt is created atomically |
+| Active(AwaitingApproval or AwaitingRecoveryDecision) | Active(Running) | The wait resolves and a new attempt is created atomically |
 | Active(Running or a waiting phase) | Terminal(Completed or Failed or ReconciliationRequired) | Durable outcome evidence permits the exact disposition |
 | Active(CancellationRequested) | Terminal(Completed, Cancelled, Failed, or ReconciliationRequired) | Issued work reaches honest terminal classification after cancellation; a raced completion is not rewritten as cancellation |
 | Terminal(any) | any state | Prohibited |
@@ -103,38 +102,39 @@ A **recovery retry** is a hub or owner-authorized decision to continue the same 
 
 Recovery remains in the same turn only when all of the following hold:
 
-- the typed turn origin and requested objective are unchanged;
+- the exact typed turn origin and its immutable origin content are unchanged;
 - the frozen effective configuration is unchanged;
 - all previously committed semantic content and effect evidence remain part of the turn history rather than being overwritten;
 - no already-issued effect would be blindly repeated; and
 - no terminal conversational outcome has been committed.
 
-Context is not required to be byte-for-byte immutable. The replacement continues from the turn's latest durable context, including eligible steering and committed tool or failure outcomes. It may not silently discard those facts to recreate an earlier prompt.
+Context is not required to be byte-for-byte immutable. The replacement continues from the turn's latest durable context, including pending or already-consumed steering and committed tool or failure outcomes. It may not silently discard those facts to recreate an earlier prompt.
+
+Turn identity is selected by typed domain transitions, not by comparing free-form intent. Input explicitly accepted as safe-point steering remains in the current turn. Input accepted as a no-active-turn, interrupt, or after-current origin creates a new turn. Recovery commands may reference an unfinished turn but cannot replace its origin content. No transition asks an implementation to decide whether two natural-language objectives have the “same intent” or are “materially different.”
 
 The following create **new logical work** and therefore a new turn identity:
 
 - a new accepted input used as a turn origin;
-- manual regeneration of a terminal or already-answered turn;
 - an owner-requested model or material configuration change;
-- a request to pursue a materially different objective; or
-- an explicit request to produce another alternative outcome rather than recover an unfinished one.
+- an explicit future regeneration command requesting another alternative outcome; or
+- any future typed origin-creation command rather than a recovery command referencing unfinished work.
 
-Manual regeneration always creates a new turn linked by `RegenerationOf(original_turn)`. It never reopens, overwrites, or adds another attempt to the original turn, even when input and configuration are identical.
+Manual regeneration, if introduced, always creates a new turn and never reopens, overwrites, or adds another attempt to the original turn, even when input and configuration are identical. Version one does not yet expose that command or include a regeneration origin variant in the implementable state machine. A future ADR must define its immutable source frontier, queue placement, configuration-freeze boundary, and typed relation before adding it.
 
 ### Cancellation and ambiguity
 
 Cancellation is a forward-only request to stop future progress. It sends best-effort cancellation to current model calls and tool attempts and prevents new effects unless needed to classify already-issued work. It does not roll back, compensate, or declare an external effect absent.
 
-The turn cannot become `Cancelled` while an issued effect's outcome is still ambiguous. The physical attempt ends `Ambiguous`. If an applicable effect policy permits an explicit owner recovery decision, the turn may remain `Active(AwaitingRecoveryDecision)` and retain the session slot; authorization creates a new attempt without changing or repeating the ambiguous attempt record. Otherwise, including interruption whose requested goal is to stop the old work, the turn reaches `Terminal(ReconciliationRequired)`. Later reconciliation of a terminal turn records new evidence separately; it does not return a terminal attempt or turn to `Running`.
+The turn cannot become `Cancelled` while an issued effect's outcome is still ambiguous. The physical attempt ends `Ambiguous`. If no cancellation request is active and an applicable effect policy permits explicit owner-directed continuation, the turn may enter `Active(AwaitingRecoveryDecision)` and retain the session slot; authorization creates a new attempt without changing or repeating the ambiguous attempt record. Once the turn is in `CancellationRequested`, an ambiguous issued effect leads to `Terminal(ReconciliationRequired)`, not to a recovery wait. Later reconciliation of a terminal turn records new evidence separately; it does not return a terminal attempt or turn to `Running`.
 
 ## Terminology
 
 - **Effective configuration:** The durable, immutable configuration governing a turn's semantic execution choices. ADR-0027 fixes its creation boundary; ADR-0005 defines model-selection implications.
 - **Progressing slot:** The per-session exclusivity right held by an active turn, including while durably waiting.
-- **Durable wait:** A typed state whose continuation depends on separately arriving evidence or a decision, such as approval or a child result.
+- **Durable wait:** A typed state whose continuation depends on separately arriving evidence or a decision, such as approval or a future child result.
 - **Recovery retry:** Continuation of unfinished logical work without changing its semantic identity.
 - **Physical attempt replacement:** A new attempt identity authorized after an earlier attempt ended or was fenced.
-- **Manual regeneration:** New logical work requesting another outcome related to a prior turn.
+- **Manual regeneration:** A future typed command for new logical work requesting another outcome related to a prior turn; its identity rule is decided here, while its command and context lifecycle remain unimplemented.
 - **Ambiguous outcome:** Evidence is insufficient to establish whether an external effect occurred; it is not a known failure.
 
 ## Invariants
@@ -145,10 +145,11 @@ The turn cannot become `Cancelled` while an issued effect's outcome is still amb
 - No terminal turn or attempt returns to a nonterminal state.
 - No recovery retry changes origin, effective configuration, committed semantic history, or known effect evidence.
 - Ambiguity is never coerced to cancellation or known failure to free the session slot.
+- No cancellation transition enters `AwaitingRecoveryDecision`; cancellation plus unresolved ambiguity terminalizes as reconciliation required.
 
 ## Strongest alternative
 
-Release the progressing slot whenever a turn is not executing a provider or tool call, allowing queued turns to run while the earlier turn awaits approval or a child. This improves apparent concurrency and avoids blocking a session on a slow decision.
+Release the progressing slot whenever a turn is not executing a provider or tool call, allowing queued turns to run while the earlier turn awaits approval or another future durable dependency. This improves apparent concurrency and avoids blocking a session on a slow decision.
 
 It is rejected for the initial architecture because later turns could advance the transcript and external state before the earlier turn resumes, changing its context and making approval or child results apply across interleaved logical work. Supporting that behavior would require explicit branching or rebase semantics, not an “inactive” label on waits.
 
@@ -164,7 +165,7 @@ It is rejected for the initial architecture because later turns could advance th
 
 ## Consequences
 
-An approval or delegated-result wait blocks later turns in the same session in version one. Independent work can use another session. This is deliberately conservative and keeps transcript ordering testable.
+An approval or recovery-decision wait blocks later turns in the same session in version one. A future delegated-result wait will do the same unless its defining ADR introduces explicit branching or rebasing. Independent work can use another session. This is deliberately conservative and keeps transcript ordering testable.
 
 Attempt records become more numerous around waits and restarts, but each describes an actual physical tenure. Recovery code must classify evidence before replacement and cannot use “retry” as a generic state reset.
 
@@ -177,23 +178,23 @@ Terminal reconciliation-required turns release the progressing slot while preser
 - **S07:** The interrupted turn enters `CancellationRequested` and retains the slot until `Cancelled`, `Failed`, or `ReconciliationRequired`; the interrupt-created successor remains queued.
 - **S08:** Pending safe-point steering belongs to the active turn. The turn retains its slot through waits, and later calls may consume a newer frontier.
 - **S10:** Entering `AwaitingApproval` ends the current attempt with `YieldedToDurableWait`; approval creates a new attempt for the same active turn.
-- **S18:** `AwaitingChild` behaves like approval waiting for slot and attempt purposes without deciding child-result or cancellation policy.
-- **S26:** Manual regeneration creates a linked queued turn and leaves the original terminal state and attempts unchanged.
+- **S18:** A future typed child wait must retain the parent session slot and end the current attempt, but ADR-0002 must define that variant and its cancellation/result transitions before implementation.
+- **S26:** Manual regeneration is new logical work and leaves the original terminal state and attempts unchanged, but it remains outside the implementable state machine until its command, queue, and source-frontier rules are accepted.
 
 ## Extension implications
 
-Future interleaving could add branching or explicitly rebased turns, but cannot redefine a version-one wait as non-progressing without revisiting context and approval semantics. Additional typed waits may be added and automatically retain the slot under this rule unless a later ADR defines a different concurrency model.
+Future interleaving could add branching or explicitly rebased turns, but cannot redefine a version-one wait as non-progressing without revisiting context and approval semantics. Additional typed waits may be added and retain the slot under this rule unless a later ADR defines a different concurrency model.
 
 Attempt lineage supports recovery across process or scheduler changes without selecting a workflow engine. Reconciliation can later gain its own typed records and owner actions while preserving terminal attempt evidence.
 
 ## Open questions
 
 - Scheduler locking, wake-up, leases, and Postgres coordination remain under ADR-0010.
-- Approval expiry and child-result delivery remain in their respective future ADRs.
+- Approval expiry and child-result delivery remain in their respective future ADRs; ADR-0002 must add any child-wait phase and parent-cancellation transitions.
 - The evidence threshold for `Lost` versus `Ambiguous` is effect-specific and remains with provider and tool policies.
 - Resource limits may constrain how long a turn can retain a slot, but timeout disposition requires a later policy.
-- The exact historical frontier chosen for manual regeneration remains open and must be explicit when the feature is designed.
+- Manual-regeneration command acceptance, queue placement, configuration freeze, and exact historical frontier remain open and block that feature, but not the initial accepted-input-origin turn state machine.
 
 ## Explicit non-decisions
 
-This ADR does not choose scheduler infrastructure, persistence schema, tool retry eligibility, tool-risk taxonomy, delegation cancellation, model fallback, archive behavior, or any process protocol. It does not define compensation for external effects or promise that cancellation succeeds.
+This ADR does not choose scheduler infrastructure, persistence schema, tool retry eligibility, tool-risk taxonomy, delegation waits or cancellation, model fallback, archive behavior, manual-regeneration command/context semantics, or any process protocol. It does not define compensation for external effects or promise that cancellation succeeds.

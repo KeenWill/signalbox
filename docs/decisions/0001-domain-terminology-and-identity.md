@@ -26,11 +26,11 @@ The identity boundary is semantic rather than representational:
 | Accepted input | One user submission durably accepted with its requested delivery treatment | A transcript entry, turn, provider request, or transport command retry |
 | Turn | One logical request for Signalbox to produce a conversational outcome under one frozen effective configuration | A message, every orchestration process, or one immutable model context |
 | Turn attempt | One exclusive physical orchestration tenure that advances one turn until it ends, yields to a durable wait, or is replaced | A runner, model call, tool attempt, or logical retry |
-| Model call | One hub-authorized physical interaction with a model provider | A turn, a provider SDK's hidden retry group, or committed assistant content |
+| Model call | One durable hub authorization to attempt a physical interaction with a model provider, whether it reaches the provider or terminates before send | A turn, a provider SDK's hidden retry group, or committed assistant content |
 | Tool request | One logical request for a normalized tool operation whose policy and outcome are tracked | Model-generated syntax, approval presentation, or executor dispatch |
 | Tool attempt | One physical effort to execute one tool request at one placement | The logical tool request or a scheduler delivery retry |
 
-An accepted input can originate a turn or steer an existing turn. A turn has exactly one durable origin, but that origin need not always be an accepted textual input; manual regeneration and future scheduled or delegated work can be typed origins. A turn can consume zero or more additional accepted inputs as steering. Every such relationship is explicit.
+An accepted input can originate a turn or steer an existing turn. A turn has exactly one durable typed origin and can consume zero or more additional accepted inputs as steering. The first implementable origin variant is accepted input. Manual regeneration and future scheduled or delegated work require explicit typed variants together with the lifecycle and context rules that make those variants implementable; they are not catch-all values in the first turn state machine.
 
 A model call belongs to exactly one turn attempt and therefore one turn. A turn attempt belongs to exactly one turn. Tool-request and tool-attempt ownership must likewise be explicit, but their detailed lifecycle is outside this ADR.
 
@@ -49,9 +49,8 @@ opaque ModelCallId
 opaque ToolRequestId
 opaque ToolAttemptId
 
-TurnOrigin =
+InitialTurnOrigin =
     AcceptedInput(AcceptedInputId)
-  | RegenerationOf(TurnId)
 
 AcceptedInputUse =
     OriginOf(TurnId)
@@ -59,7 +58,7 @@ AcceptedInputUse =
   | PendingSteeringFor(TurnId)
 ```
 
-Future origin variants require explicit domain additions; the pseudocode does not use a catch-all variant that would hide an unknown semantic case.
+Future origin variants, including a typed regeneration relation, require explicit domain additions; the pseudocode does not use a catch-all variant that would hide an unknown semantic case or an origin whose context rules are still unresolved.
 
 **Accepted input** describes durable user-originated semantic content and its delivery request. It is distinct from a transport command, which may be delivered more than once, and from a transcript entry, which is a semantic projection created when the input is used.
 
@@ -105,7 +104,7 @@ In return, stale results, retries, steering, and regeneration can be tested agai
 
 ## Extension implications
 
-Typed turn origins leave room for scheduled and delegated work without changing the identity of accepted input. Additional physical call kinds can follow the logical/physical split. A future merge model would need its own identity and provenance rather than overloading session or turn identifiers.
+Typed turn origins leave room for regeneration, scheduled work, and delegated work without changing the identity of accepted input. Adding one requires its acceptance, ordering, and starting-context rules to be decided at the same time. Additional physical call kinds can follow the logical/physical split. A future merge model would need its own identity and provenance rather than overloading session or turn identifiers.
 
 Names used in public protocols may still be versioned before such a protocol is accepted, but mappings must preserve these semantic distinctions.
 

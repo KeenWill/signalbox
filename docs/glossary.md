@@ -18,7 +18,7 @@ This glossary recommends working language for design discussion. “Accepted” 
 
 ## Turn
 
-- **Definition:** One durable logical request for Signalbox to produce a conversational outcome from one typed origin under one frozen effective configuration. It reaches one explicit terminal disposition while surviving zero or more physical orchestration attempts and may use several context frontiers.
+- **Definition:** One durable logical request for Signalbox to produce a conversational outcome from one typed origin under one frozen effective configuration. Typed input-delivery or recovery transitions, never semantic comparison of natural-language intent, determine whether its identity is preserved. It reaches one explicit terminal disposition while surviving zero or more physical orchestration attempts and may use several context frontiers.
 - **Status:** The logical/physical distinction is accepted; the name and exact lifecycle are proposed by [ADR-0001](decisions/0001-domain-terminology-and-identity.md) and [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md).
 - **Do not confuse with:** The user message itself, a provider call, an orchestration process, or every item displayed in a transcript.
 - **Example:** “Summarize these changes” remains the same logical turn when the hub replaces a lost physical attempt without changing its origin, frozen configuration, or committed effect history.
@@ -32,7 +32,7 @@ This glossary recommends working language for design discussion. “Accepted” 
 
 ## Model call
 
-- **Definition:** One physical interaction initiated by the hub with a model provider, recording requested selection, exact hub-resolved provider/model target, context frontier, provider-reported or otherwise observable identity when available, response metadata, and outcome.
+- **Definition:** One durable hub authorization to attempt a physical interaction with a model provider, recording requested selection, exact hub-resolved provider/model target, context frontier, provider-reported or otherwise observable identity when available, response metadata, and outcome. It may terminate before any request reaches the provider.
 - **Status:** Required provenance is accepted; the name, identity, and retry boundary are proposed by [ADR-0001](decisions/0001-domain-terminology-and-identity.md) and [ADR-0005](decisions/0005-model-call-retry-semantics.md). “Model call” is clearer than “completion” because providers and response shapes vary.
 - **Do not confuse with:** A turn, an alias resolution, all provider retries as a group, or the assistant message eventually committed to history.
 - **Example:** A safe-point steering message leads to a second model call in the same turn; each call records the precise context it consumed.
@@ -130,10 +130,10 @@ This glossary recommends working language for design discussion. “Accepted” 
 
 ## Context frontier
 
-- **Definition:** An immutable reference to the exact ordered semantic inputs and eligible steering content consumed by one model call.
+- **Definition:** An immutable reference to the exact ordered semantic content consumed by one model call, including applicable user inputs, consumed steering, committed assistant or tool content, and explicit failure, cancellation, or ambiguity markers.
 - **Status:** Per-call provenance is accepted; the starting-frontier and safe-point selection rules are proposed by [ADR-0027](decisions/0027-input-delivery-lifecycle.md). Representation remains provisional.
 - **Do not confuse with:** The latest session transcript, an entire turn, or client rendering state.
-- **Example:** Model call 1 consumes frontier 42; steering becomes eligible, so model call 2 consumes frontier 47 within the same turn.
+- **Example:** Model call 1 consumes frontier 42; steering and a tool result become committed, so model call 2 consumes frontier 47 within the same turn. If call 2 fails before send, its retry still retains that committed content.
 
 ## Effective configuration
 

@@ -80,12 +80,12 @@ The proposed [ADR-0027](decisions/0027-input-delivery-lifecycle.md) exercises th
 
 1. A client submits content with `start when no turn is active` or, against an expected active turn, interrupt, next safe point, or after current turn. A no-active submission joins any existing queued FIFO tail rather than bypassing it.
 2. The hub validates authoritative session state and atomically makes the accepted-input identity, content, explicit treatment, ordering, initial disposition, and required configuration material durable before acknowledgement. A stale state race fails rather than silently changing treatment.
-3. No-active-turn, interrupt, and after-current input create origin turns and freeze their effective configuration at acceptance. Safe-point input binds to the active turn and captures fallback configuration in case it must be reclassified.
+3. No-active-turn, interrupt, and after-current input create origin turns and freeze their effective configuration at acceptance. Safe-point input binds to the active turn and captures fallback configuration in case it must be reclassified. These typed delivery transitions determine turn identity; the hub does not compare natural-language intent to choose an identity.
 4. A queued or interrupt-created turn fixes its outcome-aware starting context frontier only after its immediate predecessor becomes terminal. Configuration is therefore stable from acceptance while context can honestly include predecessor success, failure, cancellation, or ambiguity.
-5. Immediately before each provider call, the hub fixes the exact context frontier consumed and records the physical call identity. The first call resolves the requested selection to an exact hub-resolved provider/model target; proposed ADR-0005 pins that target for later calls in the same turn unless a future accepted policy explicitly authorizes a change.
+5. Immediately before each provider call, the hub fixes the exact ordered semantic context frontier consumed and records the physical call identity. Consumed steering becomes committed turn history and remains in later retry or continuation frontiers even if the first prepared call fails. The first call resolves the requested selection to an exact hub-resolved provider/model target; proposed ADR-0005 pins that target for later calls in the same turn unless a future accepted policy explicitly authorizes a change.
 6. Provider deltas may stream transiently. The final assistant content, call outcome, and any provider-reported identity or observed mismatch become durable before being treated as authoritative. These facts supplement the already-recorded requested selection and exact hub-resolved target; they do not prove an undisclosed physical backend.
 
-A logical turn need not have one immutable context frontier. Under the proposal, a safe point occurs only before preparing a later provider call. Steering can extend that call's context but cannot mutate an issued provider call, tool request, approval, or tool attempt. If the target turn terminates before another call, pending steering becomes visibly queued origin work rather than disappearing.
+A logical turn need not have one immutable context frontier. Under the proposal, a safe point occurs only before preparing a later provider call. Steering can extend that call's context but cannot mutate an issued provider call, tool request, approval, or tool attempt. Once consumed it remains committed context for later calls; if the target turn terminates before consumption, pending steering becomes visibly queued origin work rather than disappearing.
 
 ### Logical tools with two placements
 
@@ -99,7 +99,7 @@ Placement changes where an effect occurs, not who owns policy or history. A lost
 
 ### Delegation and ancestry
 
-Session creation cause and transcript ancestry are independent facts. Proposed [ADR-0003](decisions/0003-session-creation-and-transcript-ancestry.md) makes both immutable at session creation and represents ancestry as none or one exact source frontier. Delegation creates a related, independently browsable session and a parent-side wait or reference. Forking initializes a session from a selected transcript frontier without claiming that the new session was delegated. Future merging remains open.
+Session creation cause and transcript ancestry are independent facts. Proposed [ADR-0003](decisions/0003-session-creation-and-transcript-ancestry.md) makes both immutable at session creation and represents ancestry as none or one exact source frontier. Delegation creates a related, independently browsable session, but its parent-side wait, result, and cancellation transitions remain reserved for ADR-0002 and are not variants in the first implementable turn state machine. Forking initializes a session from a selected transcript frontier without claiming that the new session was delegated. Future merging remains open.
 
 ## Dependency direction
 
@@ -123,9 +123,9 @@ These are architectural dependency rules, not a commitment to a specific Rust mo
 
 ## Recovery posture
 
-Acknowledged work must not vanish. On restart, the hub reconstructs accepted-input dispositions, queued work with frozen configuration, confirmation waits, delegation waits, and interrupted attempts from Postgres. A new process does not pretend to resume an old provider stream or unknown runner effect. Using the available evidence, it durably classifies interrupted physical work as completed, known failed or lost, cancelled, ambiguous, or requiring reconciliation, then applies an authorized retry or reconciliation policy without changing the identity of accepted input.
+Acknowledged work must not vanish. On restart, the hub reconstructs accepted-input dispositions, queued work with frozen configuration, confirmation waits, any future accepted delegation waits, and interrupted attempts from Postgres. A new process does not pretend to resume an old provider stream or unknown runner effect. Using the available evidence, it durably classifies interrupted physical work as completed, known failed or lost, cancelled, ambiguous, or requiring reconciliation, then applies an authorized retry or reconciliation policy without changing the identity of accepted input.
 
-At most one logical turn actively progresses per session initially. Proposed [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md) defines every active phase, including approval, child, recovery, and cancellation waits, as retaining the session slot. A durable wait normally has no live turn attempt; resolving it creates a new physical attempt for the same active turn. Scheduler mechanics remain open.
+At most one logical turn actively progresses per session initially. Proposed [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md) defines every implemented active phase, including approval, recovery, and cancellation waits, as retaining the session slot. A durable wait normally has no live turn attempt; resolving it creates a new physical attempt for the same active turn. Future child waits require ADR-0002 and will retain the slot unless that ADR defines explicit branching semantics. Scheduler mechanics remain open.
 
 ## Explicitly open boundaries
 

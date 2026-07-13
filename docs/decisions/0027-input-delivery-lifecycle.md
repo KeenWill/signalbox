@@ -63,7 +63,7 @@ AcceptedInputDisposition =
 
 Effective configuration freezes requested model selection, material model parameters, tool availability/configuration, and the policy references or versions needed to explain later decisions. Exact provider/model resolution still occurs as defined by ADR-0005. If a frozen configuration later cannot execute, the already-created turn fails explicitly; the input does not disappear or adopt newer defaults.
 
-`NextSafePoint` initially creates no turn. It binds the accepted input to the active turn and captures that turn's effective configuration as the immutable fallback configuration. Steering cannot alter the active turn's effective configuration. A submission that requests a material configuration or model change is invalid as safe-point steering and must use new logical work.
+`NextSafePoint` initially creates no turn. It binds the accepted input to the active turn and captures that turn's effective configuration as the immutable fallback configuration. Steering cannot alter the active turn's effective configuration. A submission that requests a material configuration or model change is invalid as safe-point steering and must use new logical work. Otherwise, the explicit delivery request determines identity: the hub does not inspect natural-language content to decide whether steering expresses the “same” or a “materially different” objective.
 
 ### Delivery-mode behavior
 
@@ -83,9 +83,11 @@ A version-one **safe point** exists only immediately before the hub prepares a n
 At that boundary, the hub atomically:
 
 1. selects all pending safe-point inputs for the turn in session acceptance order;
-2. extends the call's context frontier with those semantic inputs;
+2. commits those semantic inputs into the turn's ordered semantic history and extends the call's context frontier with them;
 3. marks each input consumed with the target turn, model call, and frontier; and
 4. prepares the model call under the turn's unchanged effective configuration.
+
+`ConsumedAsSteering` means that the input became durable semantic history and was included in the identified call frontier; it does not claim that the provider accepted or observed the prepared request. If that call fails before send, fails after send, or ends ambiguously, every later retry or continuation in the same turn must retain the consumed input in its own frontier. The input never becomes pending again and is not reclassified merely because one physical call failed.
 
 Pending steering does not change an already-issued model call. It also does not change a tool request, its normalized arguments, an approval, or an in-flight tool attempt. If orchestration later reaches another model call after the tool outcome is durable, that call consumes the steering.
 
@@ -99,7 +101,7 @@ An ambiguous prior external effect is represented in the predecessor's terminal 
 
 ### Successor context frontier
 
-Every origin turn has an immutable **starting context frontier**, selected when the turn becomes eligible, not when queued input was accepted. The selection uses queue lineage rather than wall-clock “latest” state:
+Every accepted-input-origin turn has an immutable **starting context frontier**, selected when the turn becomes eligible, not when queued input was accepted. The selection uses queue lineage rather than wall-clock “latest” state:
 
 ```text
 starting_frontier(turn) =
@@ -110,7 +112,7 @@ starting_frontier(turn) =
 The predecessor terminal frontier contains, in order:
 
 - all semantic entries committed before and by the predecessor;
-- committed assistant and tool-result content for a completed predecessor;
+- committed assistant, tool-result, and explicit refusal content for a completed predecessor;
 - an explicit failure marker for a failed predecessor;
 - committed effects plus an explicit cancellation marker for a cancelled predecessor; or
 - an explicit ambiguity/reconciliation-required marker for that disposition.
@@ -119,7 +121,9 @@ It excludes transient provider drafts, uncommitted partial tool output, later qu
 
 Thus queued and interrupt-created work observe the same outcome-aware rule. They do not freeze a prematurely incomplete transcript at acceptance, and later activity cannot rewrite the frontier after eligibility. A first turn begins from the session's immutable transcript ancestry frontier, if any, plus its origin input. Later input submitted with no active turn joins any queued lineage; its frontier is fixed through its immediate predecessor after that predecessor terminates.
 
-Every individual model call still records its own context frontier. Within a turn, continuation calls may extend the starting frontier with committed turn history and consumed safe-point steering.
+Every individual model call still records its own context frontier. Within a turn, retry and continuation frontiers retain all previously committed accepted inputs and may extend the starting frontier with later committed turn history, tool results, outcome markers, and newly consumed safe-point steering.
+
+This ADR defines starting frontiers only for turns whose origin is an accepted input. Future typed origins such as manual regeneration must define their own immutable context contribution, acceptance boundary, and queue interaction before becoming implementable; they do not substitute a missing `origin_accepted_input` into this formula.
 
 ### Baseline queue scope
 
@@ -130,6 +134,7 @@ Version one does not support editing accepted input, reordering queued turns, ch
 - **Delivery request:** The explicit treatment requested when input is submitted relative to authoritative session state.
 - **Accepted input:** Durable user content with one recoverable disposition; transport acceptance alone is insufficient.
 - **Safe point:** The version-one provider-call preparation boundary at which pending steering can enter a new immutable context frontier.
+- **Context frontier:** An immutable reference to the exact ordered semantic content consumed by one model call, including applicable user inputs, consumed steering, committed assistant or tool content, and explicit terminal-outcome markers.
 - **Fallback configuration:** The active turn configuration captured for pending steering in case that input must become new logical work.
 - **Starting context frontier:** The immutable outcome-aware semantic frontier fixed when an origin turn becomes eligible.
 - **Queue lineage:** Durable predecessor ordering used to select a starting frontier independently of recovery timing.
@@ -142,6 +147,7 @@ Version one does not support editing accepted input, reordering queued turns, ch
 - INV-016 fixes version-one safe points at model-call preparation boundaries.
 - Every acknowledged input is either a turn origin, pending steering, consumed steering, or visibly reclassified as a turn origin; no state permits silent disappearance.
 - Every queued or interrupt-created turn fixes one explicit starting frontier before activation.
+- Consuming steering commits it to turn semantic history; later calls in that turn cannot silently omit it because the first prepared call failed or was ambiguous.
 - Issued provider calls, tool requests, approvals, and tool attempts are immutable with respect to later steering.
 
 ## Strongest alternative
@@ -165,7 +171,7 @@ It is rejected because restart timing or administrator changes could silently al
 
 Origin turns and their effective configurations exist while queued, increasing durable state but making acknowledgement and recovery explainable. Starting context is intentionally fixed later than configuration: configuration expresses accepted execution intent, while context must include the predecessor's eventual outcome.
 
-Safe-point steering has a narrow, testable meaning. It may become a visibly separate turn when no later provider call exists, which is more explicit than pretending it was consumed.
+Safe-point steering has a narrow, testable meaning. Once consumed, it remains in every later call frontier for the turn even if the consuming physical call fails. If it is never consumed, it may become a visibly separate turn when no later provider call exists, which is more explicit than pretending it was consumed.
 
 Interrupt is responsive in cancellation signaling but conservative in activation. Ambiguous effects can delay termination classification, and successors must see uncertainty rather than a fabricated rollback.
 
@@ -174,14 +180,14 @@ Interrupt is responsive in cancellation signaling but conservative in activation
 - **S01:** The client submits `StartWhenNoActiveTurn`; with no earlier queued work, acceptance creates an eligible turn with frozen configuration and a frontier based on no ancestry or one immutable ancestry source.
 - **S03:** Restart finds the accepted input, already-created queued turn, configuration, queue lineage, and disposition. No default is re-read to reconstruct intent.
 - **S07:** Interrupt atomically creates the successor and requests cancellation. The successor waits, then fixes a frontier containing the predecessor's cancellation, failure, or ambiguity outcome.
-- **S08:** Steering accepted during a provider call remains pending. The next provider-call boundary consumes it, or terminalization reclassifies it into visible queued work.
+- **S08:** Steering accepted during a provider call remains pending. The next provider-call boundary consumes and commits it, after which retries and continuations retain it; if no such boundary occurs, terminalization reclassifies it into visible queued work.
 - **S09:** After-current input creates a FIFO queued turn immediately. Its configuration is fixed at acceptance; its context is fixed after its immediate predecessor terminates.
 - **S10:** Steering can remain pending through an approval wait. It neither alters the approved request nor releases the active turn's slot.
 - **S24:** Reconnecting clients reconstruct accepted-input dispositions and replace any transient draft; pending steering is not inferred from client state.
 
 ## Extension implications
 
-Future safe-point kinds can be added as typed boundaries after defining what may consume steering and how each affects tool or approval identity. Queue-management commands can add new dispositions without rewriting historical acceptance records.
+Future safe-point kinds can be added as typed boundaries after defining what may consume steering and how each affects tool or approval identity. Future non-input origins, including regeneration, must add origin-specific starting-frontier rules rather than weakening queue-lineage semantics for accepted input. Queue-management commands can add new dispositions without rewriting historical acceptance records.
 
 Future configuration may distinguish fields frozen at acceptance from explicitly late-bound operational values, but every late-bound field must be named, policy-governed, and durably resolved. It cannot be introduced as an implicit default lookup.
 
@@ -197,4 +203,4 @@ The outcome-aware frontier rule supports later reconciliation entries and richer
 
 ## Explicit non-decisions
 
-This ADR does not choose a process protocol, client technology, storage schema, model fallback, tool-risk taxonomy, approval policy, detailed runner capability schema, authentication, archive/restore behavior, destructive retention, or implementation layout. It does not decide delegation-result or delegation-cancellation semantics beyond preserving an active wait and future compatibility.
+This ADR does not choose a process protocol, client technology, storage schema, model fallback, tool-risk taxonomy, approval policy, detailed runner capability schema, authentication, archive/restore behavior, destructive retention, or implementation layout. It does not define a delegated-child wait or any delegation-result or delegation-cancellation transition; ADR-0002 must add those while preserving accepted-input dispositions and progressing-slot compatibility.
