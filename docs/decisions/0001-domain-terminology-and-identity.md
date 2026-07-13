@@ -25,7 +25,7 @@ The identity boundary is semantic rather than representational:
 | Session | One durable, independently browsable conversation | A connection, context window, turn, or login session |
 | Accepted input | One user submission durably accepted with its requested delivery treatment | A transcript entry, turn, provider request, or transport command retry |
 | Turn | One logical request for Signalbox to produce a conversational outcome under one frozen effective configuration | A message, every orchestration process, or one immutable model context |
-| Turn attempt | One exclusive physical orchestration tenure that advances one turn until it ends, yields to a durable wait, or is replaced | A runner, model call, tool attempt, or logical retry |
+| Turn attempt | One exclusive physical orchestration tenure that advances one turn until it ends or yields to a durable wait | A startup recovery scan, runner, model call, tool attempt, or logical retry |
 | Model call | One durable hub authorization to attempt a physical interaction with a model provider, whether it reaches the provider or terminates before send | A turn, a provider SDK's hidden retry group, or committed assistant content |
 | Tool request | One logical request for a normalized tool operation whose policy and outcome are tracked | Model-generated syntax, approval presentation, or executor dispatch |
 | Tool attempt | One physical effort to execute one tool request at one placement | The logical tool request or a scheduler delivery retry |
@@ -56,7 +56,7 @@ AcceptedInputDisposition =
     OriginOf(TurnId)
   | PendingSteering {
         turn: TurnId,
-        fallback_configuration: EffectiveConfiguration
+        fallback_provenance: ReclassifiedSteeringConfiguration
     }
   | ConsumedAsSteering {
         turn: TurnId,
@@ -108,7 +108,7 @@ In return, stale results, retries, steering, and regeneration can be tested agai
 
 - **S01:** The session and first accepted input have different identities. The input later originates a turn without becoming the session or the transcript row.
 - **S02:** One turn and turn attempt can own several model calls. Final assistant content is correlated with those calls but is not a call identity.
-- **S04:** Recovery may create a replacement turn attempt and model call while retaining the original turn and accepted-input identities.
+- **S04:** Startup recovery ends a lost attempt without creating another. Where operation-specific policy permits, later resolving evidence may create a continuation attempt for other unfinished work, or an exact-set owner decision may authorize a duplicate-risk retry; both retain the original turn and accepted-input identities. ADR-0005 separately forbids known-provider-failure retry in version one.
 - **S08:** A safe-point accepted input is used as steering for the existing turn and does not create a turn merely because it is durable.
 - **S10:** A tool request retains its identity through approval and owns a separately identified physical attempt.
 - **S12:** A late result is rejected using tool-attempt ownership and fencing without guessing from its arguments.

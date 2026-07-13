@@ -6,7 +6,7 @@
 - Reviewers: Domain and lifecycle reviewers unassigned
 - Supersedes: none
 - Superseded by: none
-- Decision-ledger questions: owner-initiated baseline and typed extension of session creation cause; independent transcript ancestry; future multiple ancestry sources or merge
+- Decision-ledger questions: owner-initiated baseline and typed extension of session creation cause; independent transcript ancestry; separation from versioned session configuration defaults; future multiple ancestry sources or merge
 
 ## Context
 
@@ -27,6 +27,8 @@ Transcript ancestry in version one is either `None` or one immutable source cons
 
 The pair is validated and stored atomically when the session is created. Neither value can be rewritten after the session identity becomes durable. Later changes to the source session do not change the descendant's initial context.
 
+Session creation also establishes the first immutable version of `SessionConfigurationDefaults`, as defined by ADR-0027. Those defaults are operationally associated with the session but are not a third creation-provenance fact: an explicit owner command may install a new defaults version for future accepted origin input. Changing defaults never rewrites creation cause, transcript ancestry, or already accepted work.
+
 Cause and ancestry may vary independently. For example:
 
 | Creation cause | Transcript ancestry | Meaning |
@@ -41,6 +43,12 @@ Initial ancestry has exactly one source or none. Signalbox does not infer ancest
 ## Terminology
 
 ```text
+CreateSession = {
+    command_id: DurableCommandId,
+    provenance: SessionCreationProvenance,
+    initial_configuration_defaults: SessionConfigurationDefaults
+}
+
 SessionCreationProvenance = {
     cause: CreationCause,
     ancestry: TranscriptAncestry
@@ -68,6 +76,7 @@ The pseudocode states the complete first implementable cause set, not final Rust
 - A source session cannot later rewrite a created session's initial context by advancing, archiving, or changing presentation.
 - No creation-cause variant implies ancestry, and ancestry never implies a creation cause.
 - Initial context has at most one transcript ancestry source.
+- Session defaults are explicitly versioned separately from immutable creation provenance; later versions affect only future input acceptance.
 
 ## Strongest alternative
 
@@ -91,7 +100,7 @@ Fork and delegation can evolve independently. Provenance remains inspectable eve
 
 ## Scenario walkthroughs
 
-- **S01:** `OwnerInitiated` plus `None` creates an empty interactive session. The first accepted input is not ancestry.
+- **S01:** `OwnerInitiated` plus `None` creates an empty interactive session and its initial configuration-defaults version. The first accepted input is not ancestry and freezes its own effective configuration from an exact defaults version.
 - **S17:** An owner-created fork stores `OwnerInitiated` and the selected source session/frontier. Later source activity cannot change the fork.
 - **S18:** ADR-0002 must add the delegated-cause variant and define its exact durable parent-work identity together with delegation lifecycle. The child may then have no ancestry and receive a task brief as new input, or explicitly select one source frontier.
 - **S19:** Parent cancellation cannot erase or rewrite the child's cause or ancestry. ADR-0002 remains blocking before a child-wait phase or parent-cancellation transition is exposed.

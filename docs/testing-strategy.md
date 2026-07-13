@@ -18,10 +18,13 @@ Postgres is the test database for persistence behavior. Integration tests may st
 - Use table-driven state-machine cases for turn, attempt, model-call, tool, approval, input-delivery, delegation, and archival lifecycles.
 - Property-test invariants such as distinct identity preservation, terminal-state monotonicity, and “at most one progressing turn” at the pure decision level.
 - Prove that typed delivery and recovery commands determine turn identity without comparing or classifying natural-language objective text.
-- Prove that `Active(Running)` always carries exactly one current nonterminal attempt plus cancellation status, that requested cancellation pairs atomically with the attempt's `CancellationRequested` state while a prepared attempt ends atomically, and that waiting phases carry their exact wait subject and no attempt and close atomically on cancellation.
-- Reject terminalization while any issued physical operation is unclassified, a current attempt is nonterminal, or a durable wait remains open.
+- Model the turn and its current attempt as one aggregate transition even if persistence later separates their records. Prove that `Active(Running)` carries exactly one `Prepared`, `Running`, or `CancellationRequested` current-attempt variant with no duplicate cancellation flag, that a prepared attempt ends with the turn on cancellation, and that waiting phases carry their exact subject and no attempt.
+- Reject every transition from running to any durable wait until all operations already issued by the attempt are terminally classified; cancellation-requested running work cannot enter a wait.
+- Reject terminalization while any issued physical operation is unclassified, a current attempt is nonterminal, a durable wait remains open, or a physical ambiguity has neither resolving evidence nor an exact owner-accepted-risk marker.
 - Treat queue eligibility as a deterministic predicate over durable lineage and slot ownership; a queued failure must inherit its predecessor frontier before it can terminalize.
-- Compare semantic values across the complete closed effective-configuration categories for identity and recovery; do not substitute record-identifier equality, and prove that explicitly excluded operational changes preserve turn identity while safe-point input cannot supply independent configuration.
+- Construct every minimum effective-configuration variant, including absent instructions, disabled tools, unconstrained placement, disabled known-failure retry/fallback, and resource policy. Compare full semantic values rather than record identifiers.
+- Prove session-default updates affect only later accepted origins; explicit origins retain request/default-version/effective provenance, while reclassified steering retains source-turn/inherited-effective provenance without an invented request.
+- For every durable command, prove same-identifier/same-payload replay returns the stored result before current-state validation, while same-identifier/different-payload reuse is rejected.
 - Model effects as requested decisions rather than performing I/O, so tests can assert ordering such as “persist before provider send.”
 
 These tests are required with the first implementation of each state machine.
@@ -34,6 +37,9 @@ These tests are required with the first implementation of each state machine.
 - Make a queued turn unexecutable while its predecessor remains active; prove it cannot terminalize early and that its eventual failure frontier includes the predecessor's terminal outcome.
 - Accept safe-point steering, ordinary after-current input, and then an interrupt; terminate before steering consumption and prove the interrupt-created turn is first while every remaining successor retains original accepted-input order.
 - Deliver duplicate commands/results and stale generations in different orders; prove state advances at most once and current state is not overwritten.
+- Replay an accepted interrupt and an accepted ambiguity decision after the session has advanced; prove deduplication returns the original result rather than applying stale-state validation. Reuse each command identifier with changed payload and prove rejection.
+- Accept an origin `SubmitInput`, lose its reply, update session defaults, aliases, and interpreting policies, then replay the identical caller payload; prove lookup returns the original accepted-input identity and stored `OriginConfiguration` before resolver or compare-and-set validation. Reusing its identifier with changed caller choices is rejected.
+- Race an unseen input's precomputed configuration candidate against a session-default, alias-definition, or interpreting-policy update. Prove a defaults-version mismatch fails without adopting the replacement, while any other changed resolver input is recomputed against a transactionally validated read set or produces a retryable conflict.
 - Keep storage records behind explicit mappings and test unknown/corrupt values fail visibly.
 
 These tests are required for any persistence or concurrency behavior before merge. High-volume contention and multi-region database behavior are later deployment work.
@@ -50,11 +56,15 @@ Use scripted fake provider adapters that can:
 
 Adapter contract tests should run the same provenance cases for every real provider. Live-provider smoke tests may exist behind explicit credentials but are not the sole correctness test and should not be mandatory for ordinary contributions.
 
-Retry fixtures must consume steering into a prepared call and fail that call both before and after send. Every later retry or continuation must retain the consumed steering in its recorded frontier, while a call that fails before send still retains its own model-call identity.
+Target-resolution fixtures must freeze an alias definition at input acceptance, mutate the current alias, and prove the queued turn still resolves from its frozen meaning during its initial prepared attempt. Resolution failure creates no `ModelCallId`, ends that attempt as known failure, and fails the turn. Separate static pre-activation rejection creates no attempt. Send-preparation failure occurs only after a fully targeted call exists and retains that call identity.
 
-An after-send unknown-acceptance fixture must end the current attempt as ambiguous, place a non-cancelled turn in `AwaitingRecoveryDecision`, retain the session slot across restart, and reject automatic retry. Separate cases must prove that new evidence, explicit owner-authorized continuation, and owner-selected terminal reconciliation are the only exits. Cancellation plus the same ambiguity must instead terminalize as reconciliation required.
+Known-provider-failure fixtures must terminalize the call as known failed, the attempt as known failure, and the turn as failed without creating another call or attempt, including after a prior cancellation request. Continuation fixtures must prove that later authorized calls retain steering already committed to turn history.
 
-A refusal fixture must preserve the call's `Refused` disposition, end the attempt as `TurnRefused`, commit explicit refusal content, terminalize the turn as `Refused` rather than completed or failed, release the slot, and reject implicit retry or fallback.
+An after-send unknown-acceptance fixture must end the current attempt as ambiguous, place a non-cancelled turn in `AwaitingRecoveryDecision`, retain the session slot across restart, and reject automatic retry. Owner decisions must carry the exact nonempty operation set with order-insensitive equality and no duplicates: exact match may continue or stop, while stale, partial, expanded, or duplicate-bearing sets are rejected. With several ambiguities, separate evidence must refine the wait to the exact nonempty subset; resolving the final reference terminalizes a known provider failure under the version-one policy, and creates a new attempt only for other unfinished work whose operation-specific policy permits continuation. Cancellation plus unacknowledged ambiguity instead terminalizes as reconciliation required.
+
+Run one table-driven classification matrix both live and through startup recovery. Unacknowledged ambiguity wins first and yields a wait or, with cancellation, reconciliation; otherwise sufficient completion and refusal retain those outcomes, known failure yields failure even after cancellation was requested, and evidence that cancellation prevented all remaining work yields cancellation. Exercise `ContinueAcceptingDuplicateRisk` followed by completed, refused, failed, and cancelled outcomes, including the direct-terminal case where no work remains. Every case must preserve the physical `Ambiguous` record, record the risk marker once under command replay, and expose that marker in the next turn's frontier.
+
+A live refusal fixture must preserve the call's `Refused` disposition and end the attempt `TurnRefused`. A startup fixture must classify the in-flight call `Refused` while leaving the abandoned attempt `Lost`. A late-evidence fixture must keep an already-ambiguous call and attempt terminal. Every path commits explicit refusal content, makes the turn `Refused`, releases the slot, and rejects implicit retry or fallback.
 
 ### Outbound runners and tools
 
@@ -66,7 +76,9 @@ Use fake outbound runners with controlled declarations, trusted deployment confi
 - a write whose acknowledgement is lost; and
 - a late result after reassignment or cancellation.
 
-Tool ambiguity tests must prove that ambiguous writes enter `AwaitingRecoveryDecision`, retain the active slot, and are never automatically retried. Explicit owner action may terminalize for reconciliation, while any future continuation remains governed by the tool-effect policy. Approval tests must mutate one argument or material constraint and prove the prior approval no longer authorizes execution. Run the same logical lifecycle contract against hub-local and runner-local executors.
+Tool ambiguity tests must prove that ambiguous writes enter `AwaitingRecoveryDecision`, retain the active slot, and are never automatically retried. Explicit owner action may terminalize for reconciliation; accepted-risk continuation must preserve the ambiguous write and its marker, and remains governed by the tool-effect policy. Approval tests must mutate one argument or material constraint and prove the prior approval no longer authorizes execution. Run the same logical lifecycle contract against hub-local and runner-local executors.
+
+Denial tests must close the exact approval wait, commit the denial to turn history, create a new turn attempt for conversational continuation, and prove that no physical tool attempt is created. Duplicate or late approval cannot reverse the denial.
 
 These tests are required with tool and runner behavior. Real sandbox escape testing and platform-specific containment certification are required before claiming a production isolation profile, but are later than the first fake-runner slice.
 
@@ -98,7 +110,11 @@ Recovery tests should stop the hub at named boundaries rather than random sleeps
 5. while waiting for approval or, once implemented, a delegated result;
 6. after outcome persistence but before client acknowledgement.
 
-On restart, assert both the final state and the absence of forbidden effects. Every nonterminal pre-restart turn attempt must be ended or fenced before continuation. Provider and tool tests must distinguish a known failure from an ambiguous outcome; they must not assume that losing a connection means the external operation failed. A non-cancelled ambiguity must retain the active slot in `AwaitingRecoveryDecision` with exact operation references. Cancellation must preserve the physical ambiguity while closing any recovery wait and terminalizing the turn as reconciliation required.
+On restart, assert both the final state and the absence of forbidden effects. The idempotent startup scan ends every nonterminal prior-process attempt as `Lost`, classifies each recorded operation as completed, known failed/lost, refused where applicable, cancelled, or ambiguous, and creates no turn attempt. Separate fixtures prove sufficient recovered result evidence can complete or refuse the turn once no blocking ambiguity remains; otherwise loss without ambiguity fails a non-cancelled turn, ambiguity retains the slot in `AwaitingRecoveryDecision`, and cancellation plus unacknowledged ambiguity terminalizes for reconciliation. Re-running the scan changes nothing.
+
+Include a crash immediately after activation creates a `Prepared` attempt but before it runs. Startup must end that attempt `Lost`, create no model call or replacement attempt, and fail the turn when no ambiguity or stronger outcome evidence exists.
+
+Interrupt recovery tests must separately cover an unsent prepared attempt, an already-running attempt, an approval wait, and a recovery wait. Crash after durable running cancellation but before classification; prove startup creates no cancellation-only attempt, preserves any ambiguous operation, terminalizes the predecessor appropriately, and does not activate its immediate successor before the scan's classification transaction completes.
 
 Boundary recovery tests are required with each durable effect. Long soak tests, repeated pod eviction, database failover, and Kubernetes disruption suites are later deployment work.
 

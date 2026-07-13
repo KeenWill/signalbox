@@ -4,7 +4,7 @@ This glossary recommends working language for design discussion. “Accepted” 
 
 ## Session
 
-- **Definition:** A durable, independently browsable conversation with configuration, ordered semantic history, operational work, and archival state.
+- **Definition:** A durable, independently browsable conversation with versioned configuration defaults, ordered semantic history, operational work, and archival state.
 - **Status:** Concept accepted; the name and identity boundary are proposed by [ADR-0001](decisions/0001-domain-terminology-and-identity.md). “Session” is preferred over “thread” because it emphasizes durable continuity across clients, though it can be confused with a login session.
 - **Do not confuse with:** A client connection, one model context window, one turn, or a runner process.
 - **Example:** A user starts “repair garden sensor” on a phone, continues it from a terminal, and archives it next week without losing its history.
@@ -21,18 +21,18 @@ This glossary recommends working language for design discussion. “Accepted” 
 - **Definition:** One durable logical request for Signalbox to produce a conversational outcome from one typed origin under one frozen effective configuration. Typed input-delivery or recovery transitions, never semantic comparison of natural-language intent, determine whether its identity is preserved. It reaches one explicit terminal disposition while surviving zero or more physical orchestration attempts and may use several context frontiers.
 - **Status:** The logical/physical distinction is accepted; the name and exact lifecycle are proposed by [ADR-0001](decisions/0001-domain-terminology-and-identity.md) and [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md).
 - **Do not confuse with:** The user message itself, a provider call, an orchestration process, or every item displayed in a transcript.
-- **Example:** “Summarize these changes” remains the same logical turn when the hub replaces a lost physical attempt without changing its origin, frozen configuration, or committed effect history.
+- **Example:** “Summarize these changes” remains the same logical turn while awaiting an ambiguity decision; resolving evidence or an owner decision may later create a replacement attempt for unfinished work.
 
 ## Turn attempt
 
-- **Definition:** One exclusive physical orchestration tenure that advances an active running turn until it ends, yields to a durable wait, or is fenced and replaced. Activation and wait resolution atomically create it; a running turn never exists without one.
+- **Definition:** One exclusive physical orchestration tenure that advances an active running turn until it ends or yields to a durable wait. Activation, or closure of a wait by resolving evidence or a valid decision, atomically creates it; a startup recovery scan is not an attempt.
 - **Status:** The physical identity distinction is accepted; the name and lifecycle are proposed by [ADR-0001](decisions/0001-domain-terminology-and-identity.md) and [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md). “Turn attempt” is preferred to generic “run,” which collides with runners and says little about logical ownership.
 - **Do not confuse with:** The durable turn, an individual model call, or an individual tool attempt.
 - **Example:** An attempt ends when orchestration enters a durable approval wait; a new attempt continues the same active turn after approval.
 
 ## Model call
 
-- **Definition:** One durable hub authorization to attempt a physical interaction with a model provider, recording requested selection, exact hub-resolved provider/model target, context frontier, provider-reported or otherwise observable identity when available, response metadata, and outcome. It may terminate before any request reaches the provider.
+- **Definition:** One durable hub authorization to attempt a physical interaction with a model provider, created only after requested selection, frozen alias meaning when applicable, exact hub-resolved provider/model target, and context frontier are known. It may terminate during send preparation before any request reaches the provider.
 - **Status:** Required provenance is accepted; the name, identity, and retry boundary are proposed by [ADR-0001](decisions/0001-domain-terminology-and-identity.md) and [ADR-0005](decisions/0005-model-call-retry-semantics.md). “Model call” is clearer than “completion” because providers and response shapes vary.
 - **Do not confuse with:** A turn, an alias resolution, all provider retries as a group, or the assistant message eventually committed to history.
 - **Example:** A safe-point steering message leads to a second model call in the same turn; each call records the precise context it consumed.
@@ -40,14 +40,14 @@ This glossary recommends working language for design discussion. “Accepted” 
 ## Tool request
 
 - **Definition:** A logical request for one named tool operation with normalized arguments, policy state, and eventual logical outcome.
-- **Status:** Provisional name; logical/physical split accepted.
+- **Status:** The logical/physical distinction is accepted; the name and boundary are proposed by [ADR-0001](decisions/0001-domain-terminology-and-identity.md).
 - **Do not confuse with:** The model's unvalidated text, an approval prompt, an executor dispatch, or a physical retry.
 - **Example:** The request “delete branch `old-demo`” retains one identity while awaiting approval and while a single approved execution is dispatched.
 
 ## Tool attempt
 
 - **Definition:** One physical effort by a hub-local or runner-local executor to perform a tool request, including dispatch identity, executor placement, timing, output, and outcome classification.
-- **Status:** Provisional. This is preferred to “tool call,” which can obscure the difference between logical request and physical effect.
+- **Status:** The logical/physical distinction is accepted; the name and boundary are proposed by [ADR-0001](decisions/0001-domain-terminology-and-identity.md). This is preferred to “tool call,” which can obscure the difference between logical request and physical effect.
 - **Do not confuse with:** The logical tool request, provider-native function-call syntax, or a scheduler's delivery retry.
 - **Example:** A read-only file search attempt is lost with its runner connection; policy may allow a second attempt for the same tool request.
 
@@ -121,9 +121,11 @@ This glossary recommends working language for design discussion. “Accepted” 
 - **Do not confuse with:** A timeout whose external effect is unknown.
 - **Example:** A provider returns a validated authentication error before accepting the request; the call is recorded as a known failure.
 
+- **Version-one behavior:** A known provider-call failure is not retried automatically; the turn fails explicitly. Tool retry policy remains effect-specific later scope.
+
 ## Ambiguous outcome
 
-- **Definition:** A physical outcome where available evidence cannot establish whether an external effect occurred, usually because acknowledgement or observation was lost. A non-cancelled turn with such an issued outcome retains its active slot while awaiting an explicit recovery decision; cancellation preserves the physical `Ambiguous` outcome while the turn terminalizes as reconciliation required.
+- **Definition:** A physical outcome where available evidence cannot establish whether an external effect occurred, usually because acknowledgement or observation was lost. An unacknowledged non-cancelled ambiguity retains the turn's active slot while awaiting evidence or an explicit recovery decision. Owner-authorized continuation preserves the physical `Ambiguous` outcome and adds a separate accepted-risk marker; cancellation before such acknowledgement terminalizes the turn as reconciliation required.
 - **Status:** Concept and no-blind-retry rule accepted; reconciliation states provisional.
 - **Do not confuse with:** A known failure, an ordinary retryable read, or “probably failed.”
 - **Example:** A runner loses connectivity immediately after submitting a payment-like external write; the hub records ambiguity and requires reconciliation instead of dispatching it again.
@@ -133,14 +135,21 @@ This glossary recommends working language for design discussion. “Accepted” 
 - **Definition:** An immutable reference to the exact ordered semantic content consumed by one model call, including applicable user inputs, consumed steering, committed assistant or tool content, and explicit failure, cancellation, or ambiguity markers.
 - **Status:** Per-call provenance is accepted; the starting-frontier and safe-point selection rules are proposed by [ADR-0027](decisions/0027-input-delivery-lifecycle.md). Representation remains provisional.
 - **Do not confuse with:** The latest session transcript, an entire turn, or client rendering state.
-- **Example:** Model call 1 consumes frontier 42; steering and a tool result become committed, so model call 2 consumes frontier 47 within the same turn. If call 2 fails before send, its retry still retains that committed content.
+- **Example:** Model call 1 consumes frontier 42; steering and a tool result become committed, so model call 2 consumes frontier 47 within the same turn. If call 2 fails, any future explicitly authorized call still retains that committed content.
+
+## Session configuration defaults
+
+- **Definition:** A mutable-by-version session-level value used to resolve configuration requests for future origin input. Creation establishes the first immutable version; each explicit update installs another.
+- **Status:** The user/session-level role and version/freeze relationship are proposed by [ADR-0003](decisions/0003-session-creation-and-transcript-ancestry.md) and [ADR-0027](decisions/0027-input-delivery-lifecycle.md).
+- **Do not confuse with:** A turn's frozen effective configuration. Updating defaults never changes queued, active, waiting, or recovering work.
+- **Example:** The owner changes the session's preferred model after message B was queued; B keeps the defaults version recorded at its acceptance, while message C accepted later uses the new version.
 
 ## Effective configuration
 
-- **Definition:** The complete immutable semantic configuration governing one turn: requested model selection and parameters, semantic instruction policy, enabled tool behavior and placement constraints, owner-visible recovery/fallback/resource choices, and the immutable policy versions needed to interpret them. Every field is identity-significant and equality is semantic value equality.
+- **Definition:** The complete immutable semantic configuration governing one turn. Its minimum algebra explicitly represents direct or frozen-alias model selection, parameters, absent or frozen instructions, disabled or configured tools, placement constraints, disabled known-provider-failure retry and fallback, turn resource policy, and interpreting policy versions. Every field is identity-significant and equality is semantic value equality.
 - **Status:** Durable provenance is accepted; the closed semantic categories, operational exclusions, immutability, equality, and freeze boundary are proposed by [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md), [ADR-0005](decisions/0005-model-call-retry-semantics.md), and [ADR-0027](decisions/0027-input-delivery-lifecycle.md). Nested subsystem representations remain open without reopening whether they are identity-significant.
 - **Do not confuse with:** The exact provider/model target resolved for a model call, current hub defaults, or a client-side draft selection.
-- **Example:** A queued turn keeps the complete model and tool configuration accepted with it even if hub defaults change before the predecessor finishes; safe-point steering inherits that value rather than supplying another configuration.
+- **Example:** A queued turn records its request, exact session-defaults version, and effective value. Reclassified safe-point steering instead records the source turn and inherited effective value without inventing a request.
 
 ## Dispatch generation
 
