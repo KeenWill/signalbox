@@ -38,11 +38,11 @@ Clients never need a direct provider or runner connection. Provider calls origin
 | Component | Owns | Does not own |
 | --- | --- | --- |
 | Clients | User interaction, presentation, explicit input-delivery intent, replaceable transient views | Canonical transcripts, scheduling, provider credentials, or approval truth |
-| Central hub | Durable session semantics, logical turns, effective configuration, model resolution, provider calls, tool policy, approvals, scheduling, reconstruction, recovery decisions, and enforcement of the single-owner access boundary | Machine-local capabilities it cannot truthfully provide or an authentication mechanism selected by this document |
+| Central hub | Durable session semantics, logical turns, effective configuration, model resolution, provider calls, tool policy, approvals, scheduling, reconstruction, recovery decisions, per-dispatch effective runner properties, and enforcement of the single-owner access boundary | Machine-local capabilities it cannot truthfully provide or an authentication, enrollment, or attestation mechanism selected by this document |
 | Postgres | Canonical durable records and transactional constraints | Domain policy, live provider streams, or runner execution |
 | Provider adapters | Translation between hub model-call intent and provider APIs; observed provider response metadata | Session lifecycle, fallback policy, or historical alias meaning |
 | Central scheduler | Choosing eligible runners, durable dispatch coordination, fencing, and at-most-one progressing turn policy | Tool implementation or an assumed distributed broker |
-| Outbound runners | Truthful capability/isolation advertisement and execution under one deployment identity | Conversation truth, provider credentials, or final policy decisions |
+| Outbound runners | Declaring capabilities and execution-boundary properties, and executing under one deployment identity | Proof of their own claims, conversation truth, provider credentials, or final policy decisions |
 | Hub-local tool executors | Centrally placed integrations and centrally credentialed actions | Workstation-local state or automatic privilege on runners |
 | Runner-local tool executors | Shell, filesystem, Git, applications, local MCP, hardware, or workspace-specific effects | Approval authority or durable conversation updates |
 
@@ -57,15 +57,20 @@ The hub may initially be one deployable modular monolith. Rows in this table are
 | Logical turn and attempt state | Postgres | Scheduler memory and client progress views |
 | Effective turn configuration | Durable hub record | Client display and orchestration memory |
 | Model alias definition now | Hub configuration | Client selector lists |
-| Exact model used historically | Per-call durable record, including observable substitution | Transcript/audit presentation |
+| Requested, resolved, and provider-reported model provenance | Per-call durable record containing the requested selection, exact hub-resolved provider/model target, and observable provider identity or mismatch when available | Transcript/audit presentation; no claim about a hidden physical backend the provider does not reveal |
 | Tool request, policy decision, and approval | Postgres | Confirmation UI and executor envelope |
 | Dispatch generation and current attempt | Postgres | Live runner connection state |
-| Runner capabilities and execution boundary | Runner advertisement accepted by the hub; durable snapshot when used | Current connection registry and client display |
+| Declared runner properties | Runner advertisement; records what the runner declared, not the truth of the property | Current connection registry and client display |
+| Configured runner properties | Trusted deployment configuration; records what the deployment says should be true, not proof of the physical boundary | Registration inputs and operator-facing deployment views |
+| Verified runner properties | Evidence established through an accepted enrollment, attestation, policy, or other verification mechanism; the mechanism remains open | Verification cache and client explanation |
+| Effective runner properties for a dispatch | Hub policy applied to available declarations, trusted configuration, and verified evidence; durable snapshot with the attempt | Scheduler memory and client display |
 | Final tool result and outcome classification | Hub-accepted durable record | Runner delivery buffer and client presentation |
 | Streaming drafts and progress | Live hub process unless selectively checkpointed | Client transient view; never authoritative final content |
 | Provider credentials | Hub-controlled secret storage; exact mechanism open | Never client or runner session state |
 
 Postgres is the canonical durable store in development, testing, and production. This does not mean every transient token delta is stored or that database records themselves are domain types.
+
+A declaration is an operationally required claim, not proof of the claimed capability or isolation. Configured properties describe trusted deployment intent, while verified properties are limited to what an accepted mechanism can establish. The scheduler and clients may rely only on the effective properties derived for a particular dispatch, and those properties must never express a stronger execution guarantee than the available evidence supports. Runner enrollment, authentication, verification, and attestation remain unresolved.
 
 ## Core flows
 
@@ -74,8 +79,8 @@ Postgres is the canonical durable store in development, testing, and production.
 1. A client submits content plus a delivery policy: interrupt, next safe point, or after current turn.
 2. The hub validates the session and atomically makes the message and its intended treatment durable before acknowledging acceptance.
 3. Domain transitions either create logical work, queue it, or make it eligible as steering at a future orchestration boundary.
-4. Before each provider call, the hub fixes the exact context frontier consumed, resolves the requested model selection to an exact provider/model reference, and records the physical call identity.
-5. Provider deltas may stream transiently. The final assistant content and exact observed model provenance become durable before being treated as authoritative.
+4. Before each provider call, the hub fixes the exact context frontier consumed, resolves the requested model selection to an exact hub-resolved provider/model target, and records the physical call identity.
+5. Provider deltas may stream transiently. The final assistant content, call outcome, and any provider-reported identity or observed mismatch become durable before being treated as authoritative. These facts supplement the already-recorded requested selection and exact hub-resolved target; they do not prove an undisclosed physical backend.
 
 A logical turn need not have one immutable context frontier. Safe-point steering can extend context between provider calls, but it cannot mutate the input of a provider request already in flight. Each physical call therefore records its own context frontier.
 

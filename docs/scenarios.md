@@ -27,18 +27,18 @@ These scenarios test architectural boundaries; quoted commands and state names a
 ## S03 — Hub restarts after accepting queued work
 
 - **User intent:** Trust an acknowledgement even if the service restarts before work starts.
-- **Durable commands:** Persist the message, delivery policy, effective configuration, and queued logical turn before acknowledgement.
-- **State transitions:** Accepted/queued remains accepted/queued across restart; recovery makes it eligible and begins an authorized attempt.
+- **Durable commands:** Persist the message, delivery policy, and enough information to recover its pending treatment before acknowledgement; persist logical work and effective configuration at the boundary later selected by ADR-0027.
+- **State transitions:** Accepted pending treatment or queued work remains durably represented across restart; recovery applies the eventual queued-turn rules, makes eligible work eligible, and begins an authorized attempt.
 - **Transient updates:** Pre-restart queue position and process-local wakeups disappear and are reconstructed.
 - **Owning component:** Hub recovery and scheduler coordinate from Postgres.
 - **Failure behavior:** Work eventually continues, fails explicitly, is canceled, or requests reconciliation; it never silently vanishes. Duplicate recovery scans do not create duplicate turns.
 - **Required invariants:** INV-007–INV-012, INV-034.
-- **Remaining questions:** Postgres scheduler mechanics, active-state definition, wake-up strategy, and retry identity if an attempt had only been prepared.
+- **Remaining questions:** Postgres scheduler mechanics, active-state definition, wake-up strategy, retry identity if an attempt had only been prepared, and the ADR-0027 work-creation/configuration boundary exercised by S09.
 
 ## S04 — Hub restarts during a provider call
 
 - **User intent:** Recover honestly without claiming to resume the lost network stream.
-- **Durable commands:** Before send, persist model-call identity, exact resolved model, frontier, and in-flight state; after restart, record the observed interruption classification and a recovery decision.
+- **Durable commands:** Before send, persist model-call identity, exact hub-resolved provider/model target, frontier, and in-flight state; after restart, record the observed interruption classification and a recovery decision.
 - **State transitions:** Model call in flight → lost/known failed/ambiguous; turn attempt → interrupted; logical turn → recoverable, failed, or reconciliation-required according to policy.
 - **Transient updates:** Uncommitted deltas and the live provider connection are lost; clients replace drafts from an authoritative snapshot.
 - **Owning component:** Hub provider adapter reports evidence; hub recovery classifies it; Postgres records it.
@@ -77,18 +77,18 @@ These scenarios test architectural boundaries; quoted commands and state names a
 - **Owning component:** Hub owns ordering and state; adapters attempt prompt cancellation; client states intent.
 - **Failure behavior:** Issued effects are not rolled back. Their attempts receive honest terminal or ambiguous states before replacement work relies on them.
 - **Required invariants:** INV-007, INV-009, INV-025, INV-028, INV-029.
-- **Remaining questions:** Exact transcript frontier for the new work, cancellation timeout, provider billing/outcome handling, and child propagation.
+- **Remaining questions:** ADR-0027 must define the exact transcript frontier for the new work. ADR-0004/ADR-0005 cover cancellation and provider outcome handling; ADR-0002 covers child propagation.
 
 ## S08 — Submit safe-point steering
 
 - **User intent:** Refine active work without creating a separate future turn.
-- **Durable commands:** Persist the message with `next_safe_point`; record eligibility for the active turn; before the next provider call, create a new frontier that includes it.
-- **State transitions:** Steering message accepted → pending safe point → consumed by a later orchestration step; active logical turn remains active.
+- **Durable commands:** Persist the message with `next_safe_point`; record its pending relationship to the active turn; when the future safe-point policy makes it eligible for a provider call, create a new frontier that includes it.
+- **State transitions:** Steering message accepted → pending safe point → consumed or explicitly reclassified according to future policy; the active logical turn's slot behavior remains open.
 - **Transient updates:** Client shows “will apply at next safe point”; no mutation of the current provider stream.
 - **Owning component:** Hub decides safe-point boundaries and builds context; clients only request and display treatment.
-- **Failure behavior:** Restart preserves pending steering. If the turn becomes terminal before a safe point, the hub exposes an explicit unconsumed disposition rather than silently dropping it.
+- **Failure behavior:** Restart preserves pending steering. If the turn becomes terminal before consumption, the hub does not silently drop the message; its exposure or reclassification follows the unresolved input-delivery lifecycle policy.
 - **Required invariants:** INV-007, INV-015, INV-016, INV-028, INV-034.
-- **Remaining questions:** Exact safe-point set, handling when no later call occurs, and whether tools may consume steering before a model does.
+- **Remaining questions:** ADR-0027 must define the safe-point set, terminal-before-consumption behavior, whether a tool or orchestration step may consume steering before another model call, and how unconsumed steering is exposed or reclassified. ADR-0010 must decide whether pending steering retains the session's single-progressing-turn slot.
 
 ## S09 — Queue input for the next turn
 
@@ -99,7 +99,7 @@ These scenarios test architectural boundaries; quoted commands and state names a
 - **Owning component:** Hub owns durable ordering and scheduler eligibility.
 - **Failure behavior:** Restart preserves order. Cancellation of A does not erase B; policy determines the context B sees after A's terminal outcome.
 - **Required invariants:** INV-007, INV-009, INV-010, INV-012, INV-028.
-- **Remaining questions:** When full execution configuration is frozen, queue editing, and context after failed/canceled predecessors. The accepted input and its pending logical treatment are durable immediately regardless.
+- **Remaining questions:** ADR-0027 must define when logical work and effective configuration are fixed and which context frontier follows each predecessor outcome. Editing, cancellation, reordering, and delivery-policy changes for queued input are explicitly later client-queue scope under ADR-0027 unless brought forward. The accepted input and enough information to recover its pending treatment are durable immediately regardless.
 
 ## S10 — Approve a risky tool
 
@@ -137,22 +137,22 @@ These scenarios test architectural boundaries; quoted commands and state names a
 ## S13 — Use an ambient-user runner
 
 - **User intent:** Intentionally run a workspace tool with the same OS authority as the owner.
-- **Durable commands:** Select the runner explicitly; snapshot its advertised execution boundary and relevant capabilities with the attempt; apply tool policy and approval rules.
+- **Durable commands:** Select the runner explicitly; snapshot the declared, configured, and verified evidence relevant to the attempt together with the effective ambient boundary; apply tool policy and approval rules.
 - **State transitions:** Eligible tool request → placement selected as ambient → authorized/denied → attempted.
 - **Transient updates:** UI warning and runner availability.
-- **Owning component:** Runner truthfully advertises; hub validates placement and policy; client displays the boundary.
-- **Failure behavior:** The system never labels this runner isolated. Loss or side effects follow the same ambiguity rules, potentially with stricter confirmation.
+- **Owning component:** Runner declares its properties; deployment configuration and any accepted verification supply other evidence; hub derives placement and policy; client displays only the effective boundary it may rely on.
+- **Failure behavior:** An unsupported isolation claim does not change the effective ambient boundary, and the system never labels this runner isolated on the strength of that claim. Loss or side effects follow the same ambiguity rules, potentially with stricter confirmation.
 - **Required invariants:** INV-019, INV-022–INV-026.
 - **Remaining questions:** Required warnings, policy differences, verification/attestation, and minimum sandbox requirements for other profiles.
 
 ## S14 — Use a restricted runner
 
 - **User intent:** Execute in a deliberately constrained account, container, sandbox, or VM.
-- **Durable commands:** Select a runner whose typed capabilities satisfy the request; persist the relevant boundary snapshot and dispatch.
+- **Durable commands:** Select a runner whose effective typed properties satisfy the request; persist the relevant declarations, configuration, verified evidence, effective-boundary snapshot, and dispatch.
 - **State transitions:** Placement evaluation → restricted runner selected → authorized attempt → outcome.
 - **Transient updates:** Resource use and progress reported by the runner.
-- **Owning component:** Deployment supplies actual controls; runner advertises them; hub matches and records; client explains them.
-- **Failure behavior:** A missing capability fails placement explicitly. A “restricted” label is insufficient if actual constraints cannot be represented truthfully.
+- **Owning component:** Deployment supplies the controls and trusted configuration; runner declares properties; accepted mechanisms may verify them; hub derives and records effective properties; client explains the effective boundary and evidence level.
+- **Failure behavior:** A missing or insufficiently evidenced property fails restricted placement explicitly. A “restricted” label or runner declaration alone cannot justify a stronger execution guarantee.
 - **Required invariants:** INV-021–INV-024.
 - **Remaining questions:** Capability schema, attestation, minimum profiles, resource limits, and whether constraints can change during a connection.
 
@@ -213,30 +213,30 @@ These scenarios test architectural boundaries; quoted commands and state names a
 
 ## S20 — Resolve a curated model alias
 
-- **User intent:** Use a convenient selection such as “latest preferred” while retaining exact history.
-- **Durable commands:** Persist requested alias and effective configuration; at call time resolve it through hub policy; persist exact provider/model and resolution metadata before send.
+- **User intent:** Use a convenient selection such as “latest preferred” while retaining precise requested, resolved, and provider-reported provenance.
+- **Durable commands:** Persist requested alias and effective configuration; at call time resolve it through hub policy; persist the exact hub-resolved provider/model target and resolution metadata before send; append observable provider identity or mismatch when available.
 - **State transitions:** Model call prepared with selection → resolved exact target → in flight → terminal.
 - **Transient updates:** Client may show current alias target, clearly separate from historical call facts.
 - **Owning component:** Hub model resolver and provider adapter; Postgres stores per-call provenance.
-- **Failure behavior:** Alias changes never rewrite previous calls. Resolution failure is explicit and does not silently choose another model.
+- **Failure behavior:** Alias changes never rewrite previous calls. Resolution failure is explicit and does not silently choose another model. Historical provenance does not claim which hidden physical backend executed the call when the provider does not reveal it.
 - **Required invariants:** INV-008, INV-014, INV-017.
 - **Remaining questions:** Alias versioning, cache/transaction boundaries, visibility, and whether alias policy may include fallback.
 
 ## S21 — Execute an exact pinned model
 
 - **User intent:** Call one exact provider/model reference for reproducibility or control.
-- **Durable commands:** Persist the exact requested selection, frontier, and model-call record; capture observable provider-reported model metadata.
+- **Durable commands:** Persist the exact requested selection, exact hub-resolved provider/model target, frontier, and model-call record; capture observable provider-reported model identity and mismatch metadata when available.
 - **State transitions:** Pinned call prepared → validated/issued → completed, failed, refused, or mismatch-observed.
 - **Transient updates:** Provider stream and timing.
 - **Owning component:** Hub validates selection and calls provider; adapter reports observed metadata.
-- **Failure behavior:** Hub-controlled fallback does not occur unless separately and explicitly authorized. Provider-side substitution is recorded rather than rewritten as the pinned target.
+- **Failure behavior:** Hub-controlled fallback does not occur unless separately and explicitly authorized. Provider-reported substitution is recorded rather than rewritten as the pinned target; absent provider evidence, Signalbox does not claim knowledge of the hidden physical backend.
 - **Required invariants:** INV-014, INV-015, INV-017, INV-018.
 - **Remaining questions:** Whether observable substitution fails the call, provider identifier normalization, and reproducibility claims beyond model identity.
 
 ## S22 — Apply an availability fallback
 
 - **User intent:** If explicitly configured, continue through a classified capacity/availability failure using an allowed alternate model.
-- **Durable commands:** Record primary call and failure classification; evaluate explicit fallback policy; create a distinct model call with exact fallback target and reason.
+- **Durable commands:** Record the primary call's requested selection, exact hub-resolved target, provider-reported identity when available, and failure classification; evaluate explicit fallback policy; create a distinct model call with an exact hub-resolved fallback target and reason. Each call appends provider-reported identity or mismatch when available.
 - **State transitions:** Primary call → known availability failure; turn/attempt → fallback eligible; fallback call → terminal.
 - **Transient updates:** Client shows that fallback is being considered/applied.
 - **Owning component:** Hub policy authorizes; provider adapters classify evidence but do not silently select targets.
@@ -247,13 +247,13 @@ These scenarios test architectural boundaries; quoted commands and state names a
 ## S23 — Encounter a model safety refusal
 
 - **User intent:** Understand that the selected model refused and avoid hidden policy evasion.
-- **Durable commands:** Persist the model call, exact target, provider response classification, and refusal outcome; create any follow-up only through an explicit user/policy decision.
+- **Durable commands:** Persist the model call, requested selection, exact hub-resolved target, observable provider identity or mismatch when available, provider response classification, and refusal outcome; create any follow-up only through an explicit user/policy decision.
 - **State transitions:** Model call in flight → refused; turn may complete with refusal, wait for input, or follow a future explicit policy.
 - **Transient updates:** Refusal text may stream but becomes authoritative only when committed.
 - **Owning component:** Provider adapter reports; hub classifies and exposes provenance.
 - **Failure behavior:** Refusal is not treated as availability failure and does not automatically fall back merely because another model exists.
 - **Required invariants:** INV-014, INV-017, INV-018, INV-032.
-- **Remaining questions:** Refusal taxonomy, user-facing remediation, whether any explicit fallback is ever allowed, and provider-side substitution.
+- **Remaining questions:** Refusal taxonomy, user-facing remediation, whether any explicit fallback is ever allowed, and provider-reported substitution or mismatch.
 
 ## S24 — Reconnect a client during active streaming
 
@@ -269,13 +269,13 @@ These scenarios test architectural boundaries; quoted commands and state names a
 ## S25 — Archive and restore a session
 
 - **User intent:** Remove a conversation from the active list without losing its identity, provenance, or ability to return.
-- **Durable commands:** Persist `ArchiveSession`; later persist `RestoreSession`, each idempotently against the same session identity.
-- **State transitions:** Active/inactive → archived → restored inactive or active according to future policy.
+- **Durable commands:** Subject to the future archive lifecycle policy, persist `ArchiveSession`; later persist `RestoreSession`, each idempotently against the same session identity.
+- **State transitions:** An eligible lifecycle state → archived → a policy-selected restored state; eligibility, nonterminal-work handling, and the restore target remain unresolved.
 - **Transient updates:** Client list filtering and confirmation.
 - **Owning component:** Hub validates lifecycle; Postgres preserves history; clients present archive state.
-- **Failure behavior:** Restart preserves archive status. Archiving while work is nonterminal must fail or follow an explicit cancellation policy; it never silently abandons work.
+- **Failure behavior:** Restart preserves archive status. A request made while work is active or otherwise nonterminal must explicitly fail, wait, or request cancellation according to future policy; it never silently abandons work.
 - **Required invariants:** INV-010, INV-012, INV-013, INV-034.
-- **Remaining questions:** Whether active work blocks archive, restore target state, retention/deletion policy, and delegated-child visibility.
+- **Remaining questions:** ADR-0028 must define archive eligibility, nonterminal-work handling, restored lifecycle state, and effects on delegated children or related sessions. Destructive retention and purge are separate later scope under ADR-0029, not ordinary archive behavior.
 
 ## Coverage note
 

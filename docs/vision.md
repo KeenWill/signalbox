@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Signalbox is a personal, single-owner platform for LLM-assisted work that remains durable, inspectable, and resumable across clients and execution environments. The product should let its owner begin a conversation on one device, continue elsewhere, choose where tools execute, approve risky actions, delegate related work, and reconstruct what models and tools actually did.
+Signalbox is a personal, single-owner platform for LLM-assisted work that remains durable, inspectable, and resumable across clients and execution environments. The product should let its owner begin a conversation on one device, continue elsewhere, choose where tools execute, approve risky actions, delegate related work, and reconstruct the observable provenance and outcomes of model and tool interactions.
 
 “Single-owner” describes the account and product scope. It does not grant every process the owner's full operating-system authority, collapse all execution onto one machine, or remove the need for authentication, provenance, audit, and resource controls.
 
@@ -20,7 +20,7 @@ The initial hub may be a modular monolith. This boundary does not require micros
 
 ## Why runners are separate
 
-Tools need capabilities and locality that the hub should not assume: a checked-out workspace, a user's desktop applications, special hardware, or a deliberately restricted sandbox. A runner connects outbound, advertises truthful capabilities and its execution boundary, and performs work selected by the hub. The runner does not become the source of truth for conversation or policy.
+Tools need capabilities and locality that the hub should not assume: a checked-out workspace, a user's desktop applications, special hardware, or a deliberately restricted sandbox. A runner connects outbound, declares capabilities and its execution boundary, and performs work selected by the hub. Deployments are expected to configure and report those properties truthfully, but a declaration is not proof; scheduling and presentation may rely only on execution properties supported by the available deployment and verification evidence. The runner does not become the source of truth for conversation or policy.
 
 Separation makes execution identity explicit. One deployment may intentionally run as the human user; another may run as an unprivileged account or inside a sandbox. The user must be able to see which boundary applies. The initial preference is one process per execution identity, without in-process multi-user privilege switching.
 

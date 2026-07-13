@@ -25,7 +25,7 @@ This glossary recommends working language for design discussion. “Accepted” 
 
 ## Model call
 
-- **Definition:** One physical interaction initiated by the hub with a model provider, recording requested selection, exact resolved provider/model, context frontier, response metadata, and outcome.
+- **Definition:** One physical interaction initiated by the hub with a model provider, recording requested selection, exact hub-resolved provider/model target, context frontier, provider-reported or otherwise observable identity when available, response metadata, and outcome.
 - **Status:** Provisional name; required provenance accepted. “Model call” is clearer than “completion” because providers and response shapes vary.
 - **Do not confuse with:** A turn, an alias resolution, all provider retries as a group, or the assistant message eventually committed to history.
 - **Example:** A safe-point steering message leads to a second model call in the same turn; each call records the precise context it consumed.
@@ -61,23 +61,30 @@ This glossary recommends working language for design discussion. “Accepted” 
 ## Input delivery policy
 
 - **Definition:** The accepted instruction for handling user input submitted while a turn is active: interrupt, next safe point, or after current turn.
-- **Status:** Three policy meanings accepted; name and default presentation provisional. “Delivery policy” is preferred to “message priority,” which would not express lifecycle semantics.
+- **Status:** Three policy intents accepted; name, exact lifecycle semantics, and default presentation provisional under ADR-0027. “Delivery policy” is preferred to “message priority,” which would not express lifecycle semantics.
 - **Do not confuse with:** Transport delivery guarantees or the final determination of which model context consumes the message.
 - **Example:** “Use the new error log” with next-safe-point policy becomes durable immediately and is considered before the next model call, not injected into the current request.
 
 ## Runner
 
-- **Definition:** An outbound-connected process that advertises capabilities and an execution boundary, then performs selected runner-local tool attempts under one deployment identity.
+- **Definition:** An outbound-connected process that declares capabilities and execution-boundary properties, then performs selected runner-local tool attempts under one deployment identity.
 - **Status:** Name and boundary accepted at the architecture level; exact protocol provisional.
 - **Do not confuse with:** A turn attempt, the central scheduler, a client, or a guarantee of sandboxing.
-- **Example:** A runner on a laptop advertises access to `/Users/me/project` and truthfully states that commands execute as the logged-in user.
+- **Example:** A runner on a laptop declares access to `/Users/me/project` and truthfully states that commands execute as the logged-in user.
+
+## Runner property evidence
+
+- **Definition:** The evidence distinctions used when selecting and explaining a runner: **declared** properties are reported by the runner; **configured** properties are stated by trusted deployment configuration; **verified** properties are established through an accepted enrollment, attestation, policy, or other mechanism; and **effective** properties are what hub policy permits the scheduler and client to rely on for one dispatch.
+- **Status:** Distinctions accepted; evidence formats, enrollment, verification, and attestation mechanisms provisional.
+- **Do not confuse with:** Treating a runner's declaration as proof, or assuming configured intent necessarily establishes the deployed physical boundary.
+- **Example:** A runner may declare that it uses a container, while the effective boundary shown for dispatch remains no stronger than the configuration and verification evidence support.
 
 ## Execution boundary
 
 - **Definition:** The actual identity and isolation properties of a runner deployment, including relevant OS user, container, sandbox, VM, filesystem scope, and other enforceable constraints.
 - **Status:** Concept accepted; capability vocabulary provisional. This term is preferred to a single “sandboxed” Boolean.
-- **Do not confuse with:** Tool approval, claimed capability alone, or the trustworthiness of command content.
-- **Example:** A restricted runner executes as a dedicated account inside a container with one mounted workspace; the UI shows those facts before selection.
+- **Do not confuse with:** Tool approval, a declared or configured property alone, the effective properties justified for a dispatch, or the trustworthiness of command content.
+- **Example:** A restricted runner executes as a dedicated account inside a container with one mounted workspace; the UI shows the effective boundary and the evidence supporting that description before selection.
 
 ## Tool policy
 

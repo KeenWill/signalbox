@@ -37,7 +37,7 @@ Use scripted fake provider adapters that can:
 
 - stream deterministic chunks and finish normally;
 - fail before send, after send, or after selected chunks;
-- report an exact model, a substitution, a safety refusal, capacity failure, or malformed response;
+- report a model identity, a substitution or mismatch, a safety refusal, capacity failure, or malformed response;
 - block until cancellation or simulate an unresponsive connection; and
 - expose received context so each call's frontier can be asserted.
 
@@ -45,7 +45,7 @@ Adapter contract tests should run the same provenance cases for every real provi
 
 ### Outbound runners and tools
 
-Use fake outbound runners with controlled capabilities, execution-boundary advertisements, connection loss, delayed results, duplicate results, and stale dispatch generations. A fake executor must distinguish:
+Use fake outbound runners with controlled declarations, trusted deployment configuration, verification evidence, effective properties, connection loss, delayed results, duplicate results, and stale dispatch generations. Tests must prove that an unsupported declaration cannot become a stronger effective guarantee. A fake executor must distinguish:
 
 - a proven no-effect failure;
 - a repeatable read;
@@ -67,8 +67,8 @@ Protocol compatibility fixtures should be language-neutral and cover:
 - required versus unknown fields;
 - snapshots, transient deltas, and duplicate delivery;
 - approval binding and tool arguments;
-- runner capability/boundary advertisement and fenced results; and
-- exact model provenance, refusal, and substitution.
+- runner declaration/evidence distinctions, effective boundaries, and fenced results; and
+- requested, hub-resolved, and provider-reported model provenance, refusal, and substitution.
 
 Swift, web, and terminal clients should consume the same canonical fixtures while mapping wire types into client-owned types. Add rendering/UI tests only for client responsibilities: delivery-intent selection, boundary disclosure, confirmation content, draft replacement, and provenance display.
 
