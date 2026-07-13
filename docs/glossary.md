@@ -61,7 +61,7 @@ This glossary recommends working language for design discussion. “Accepted” 
 ## Input delivery policy
 
 - **Definition:** The accepted instruction for handling user input submitted while a turn is active: interrupt, next safe point, or after current turn.
-- **Status:** Three policy intents accepted; name, exact lifecycle semantics, and default presentation provisional under ADR-0027. “Delivery policy” is preferred to “message priority,” which would not express lifecycle semantics.
+- **Status:** Three active-work policy intents accepted; name, exact lifecycle semantics, and default presentation provisional under ADR-0027. ADR-0027 must also define the command and treatment for input submitted when no turn is active; no active-work policy is implicitly reused for that case yet. “Delivery policy” is preferred to “message priority,” which would not express lifecycle semantics.
 - **Do not confuse with:** Transport delivery guarantees or the final determination of which model context consumes the message.
 - **Example:** “Use the new error log” with next-safe-point policy becomes durable immediately and is considered before the next model call, not injected into the current request.
 

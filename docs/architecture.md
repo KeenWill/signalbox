@@ -53,7 +53,7 @@ The hub may initially be one deployable modular monolith. Rows in this table are
 | Subject | Authoritative source | Replicas or transient projections |
 | --- | --- | --- |
 | Session content and ancestry | Postgres records governed by hub domain rules | Client caches and model-context projections |
-| Accepted user input and delivery policy | Postgres | Client optimistic state |
+| Accepted user input and intended treatment | Postgres | Client optimistic state |
 | Logical turn and attempt state | Postgres | Scheduler memory and client progress views |
 | Effective turn configuration | Durable hub record | Client display and orchestration memory |
 | Model alias definition now | Hub configuration | Client selector lists |
@@ -76,7 +76,7 @@ A declaration is an operationally required claim, not proof of the claimed capab
 
 ### Accepted input and model execution
 
-1. A client submits content plus a delivery policy: interrupt, next safe point, or after current turn.
+1. While a turn is active, a client submits content plus a delivery policy: interrupt, next safe point, or after current turn. ADR-0027 defines the command and treatment when no turn is active.
 2. The hub validates the session and atomically makes the message and its intended treatment durable before acknowledging acceptance.
 3. Domain transitions either create logical work, queue it, or make it eligible as steering at a future orchestration boundary.
 4. Before each provider call, the hub fixes the exact context frontier consumed, resolves the requested model selection to an exact hub-resolved provider/model target, and records the physical call identity.

@@ -17,7 +17,7 @@ This catalog states constraints the future design must make enforceable. “Acce
 
 | ID | Invariant | Class | Status | Expected enforcement |
 | --- | --- | --- | --- | --- |
-| INV-007 | Once the hub acknowledges a user message, the message, session identity, delivery policy, and enough information to recover its pending treatment are durable. | Transaction-level | Accepted | Persist in one committed transaction before acknowledgement. |
+| INV-007 | Once the hub acknowledges a user message, the message, session identity, intended treatment, and enough information to recover its pending treatment are durable. ADR-0027 defines the treatment required when no turn is active. | Transaction-level | Accepted; idle-session treatment provisional | Persist in one committed transaction before acknowledgement. |
 | INV-008 | Accepted logical work has a durable effective-configuration reference sufficient to explain later model and policy choices. | Transaction-level | Accepted; configuration shape provisional | Create logical work and configuration snapshot/reference atomically. |
 | INV-009 | At most one logical turn actively progresses in a session. | Database-level | Accepted for the initial architecture; exact “active” states provisional | Database uniqueness/exclusion or serialized transition, not process memory alone. |
 | INV-010 | Queued work, confirmation waits, and delegated-result waits remain durably represented across hub restart. | Database-level | Accepted | Nonterminal states and referenced inputs persist without dependence on a live connection. |

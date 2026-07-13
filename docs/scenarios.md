@@ -5,13 +5,13 @@ These scenarios test architectural boundaries; quoted commands and state names a
 ## S01 — Create a new interactive session
 
 - **User intent:** Start an empty conversation from a terminal and make it available on every client.
-- **Durable commands:** `CreateSession(cause: user, ancestry: none, configuration)` followed by the first accepted `SubmitInput(..., after_current_turn)`.
-- **State transitions:** No session → active session; accepted input → queued turn → eligible turn.
+- **Durable commands:** `CreateSession(cause: user, ancestry: none, configuration)` followed by the first accepted `SubmitInput(...)`; persist enough information to apply the idle-session treatment later selected by ADR-0027.
+- **State transitions:** No session → active session; accepted input → durably pending treatment or eligible work according to the eventual idle-session rule.
 - **Transient updates:** Optimistic client placeholder and scheduling progress.
 - **Owning component:** Hub owns creation and acceptance; Postgres stores the result; the client owns presentation.
 - **Failure behavior:** Before commit, return a visible failure and no session identity. After commit, retrying the command returns the same result through idempotency rather than creating a duplicate.
 - **Required invariants:** INV-001, INV-003, INV-007, INV-012.
-- **Remaining questions:** Final names, creation-cause labels, idempotency scope, first client, and protocol.
+- **Remaining questions:** ADR-0027 must define the command and delivery treatment when no turn is active. Final names, creation-cause labels, idempotency scope, first client, and protocol also remain open.
 
 ## S02 — Stream a centrally called provider response
 
@@ -38,8 +38,8 @@ These scenarios test architectural boundaries; quoted commands and state names a
 ## S04 — Hub restarts during a provider call
 
 - **User intent:** Recover honestly without claiming to resume the lost network stream.
-- **Durable commands:** Before send, persist model-call identity, exact hub-resolved provider/model target, frontier, and in-flight state; after restart, record the observed interruption classification and a recovery decision.
-- **State transitions:** Model call in flight → lost/known failed/ambiguous; turn attempt → interrupted; logical turn → recoverable, failed, or reconciliation-required according to policy.
+- **Durable commands:** Before send, persist model-call identity, exact hub-resolved provider/model target, frontier, and in-flight state; after restart, record the recovered outcome classification and a recovery decision.
+- **State transitions:** Model call in flight → completed/known failed/lost/ambiguous/awaiting reconciliation according to recovered evidence; the turn attempt and logical turn then complete or enter interrupted, recoverable, failed, or reconciliation-required handling according to policy.
 - **Transient updates:** Uncommitted deltas and the live provider connection are lost; clients replace drafts from an authoritative snapshot.
 - **Owning component:** Hub provider adapter reports evidence; hub recovery classifies it; Postgres records it.
 - **Failure behavior:** Do not imply exact-token continuation. Another external call is a new model-call record, even if it advances the same turn.
