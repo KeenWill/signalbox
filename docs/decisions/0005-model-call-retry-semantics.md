@@ -1,12 +1,12 @@
 # ADR-0005: Model-call retry and configuration identity
 
-- Status: Proposed
-- Date: 2026-07-12
+- Status: Accepted
+- Date: 2026-07-13
 - Owners: Repository owner
-- Reviewers: Provider, domain, and reliability reviewers unassigned
+- Reviewers: Codex (independent adversarial architecture review); no specialist human reviewer assigned
 - Supersedes: none
 - Superseded by: none
-- Acceptance dependency: must be accepted atomically with ADR-0001, ADR-0003, ADR-0004, and ADR-0027 in the current foundation set
+- Accepted with: ADR-0001, ADR-0003, ADR-0004, and ADR-0027 as one atomic foundation set
 - Decision-ledger questions: target-before-call creation; provider-reported target mismatch; no automatic known-failure retry; ambiguous provider-call disposition; acceptance-time alias meaning; model or configuration change identity; turn disposition after provider refusal
 
 ## Context

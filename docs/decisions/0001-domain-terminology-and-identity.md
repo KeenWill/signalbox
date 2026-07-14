@@ -1,12 +1,12 @@
 # ADR-0001: Core domain terminology and identity boundaries
 
-- Status: Proposed
-- Date: 2026-07-12
+- Status: Accepted
+- Date: 2026-07-13
 - Owners: Repository owner
-- Reviewers: Domain, provider, and tool-safety reviewers unassigned
+- Reviewers: Codex (independent adversarial architecture review); no specialist human reviewer assigned
 - Supersedes: none
 - Superseded by: none
-- Acceptance dependency: must be accepted atomically with ADR-0003, ADR-0004, ADR-0005, and ADR-0027 in the current foundation set
+- Accepted with: ADR-0003, ADR-0004, ADR-0005, and ADR-0027 as one atomic foundation set
 - Decision-ledger questions: owner-global durable-command identity scope; final names and boundaries for session, accepted input, turn, turn attempt, model call, tool request, and tool attempt
 
 ## Context

@@ -1,12 +1,12 @@
 # ADR-0004: Logical turn and physical attempt lifecycle
 
-- Status: Proposed
-- Date: 2026-07-12
+- Status: Accepted
+- Date: 2026-07-13
 - Owners: Repository owner
-- Reviewers: Domain, lifecycle, and reliability reviewers unassigned
+- Reviewers: Codex (independent adversarial architecture review); no specialist human reviewer assigned
 - Supersedes: none
 - Superseded by: none
-- Acceptance dependency: must be accepted atomically with ADR-0001, ADR-0003, ADR-0005, and ADR-0027 in the current foundation set
+- Accepted with: ADR-0001, ADR-0003, ADR-0005, and ADR-0027 as one atomic foundation set
 - Decision-ledger questions: startup scan versus recovery attempt identity; manual-regeneration identity boundary and later scope; actively progressing state set; aggregate running-attempt and terminalization guards; state-specific cancellation; exact-set ambiguity decisions; refusal attempt/turn disposition with ADR-0005
 
 ## Context

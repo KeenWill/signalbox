@@ -1,12 +1,12 @@
 # ADR-0027: Accepted-input delivery and context frontiers
 
-- Status: Proposed
-- Date: 2026-07-12
+- Status: Accepted
+- Date: 2026-07-13
 - Owners: Repository owner
-- Reviewers: Domain, lifecycle, configuration, protocol, and reliability reviewers unassigned
+- Reviewers: Codex (independent adversarial architecture review); no specialist human reviewer assigned
 - Supersedes: none
 - Superseded by: none
-- Acceptance dependency: must be accepted atomically with ADR-0001, ADR-0003, ADR-0004, and ADR-0005 in the current foundation set
+- Accepted with: ADR-0001, ADR-0003, ADR-0004, and ADR-0005 as one atomic foundation set
 - Decision-ledger questions: no-active-turn input; durable-command deduplication; versioned session defaults; safe points, inherited configuration provenance, and terminal disposition; queued work creation, constructible effective configuration, and configuration freeze; state-specific interrupt and successor order; context frontiers; baseline queue mutation scope
 
 ## Context

@@ -1,12 +1,12 @@
 # ADR-0003: Session creation cause and transcript ancestry
 
-- Status: Proposed
-- Date: 2026-07-12
+- Status: Accepted
+- Date: 2026-07-13
 - Owners: Repository owner
-- Reviewers: Domain and lifecycle reviewers unassigned
+- Reviewers: Codex (independent adversarial architecture review); no specialist human reviewer assigned
 - Supersedes: none
 - Superseded by: none
-- Acceptance dependency: must be accepted atomically with ADR-0001, ADR-0004, ADR-0005, and ADR-0027 in the current foundation set
+- Accepted with: ADR-0001, ADR-0004, ADR-0005, and ADR-0027 as one atomic foundation set
 - Decision-ledger questions: owner-initiated baseline and typed extension of session creation cause; independent transcript ancestry; separation from versioned session configuration defaults; future multiple ancestry sources or merge
 
 ## Context
