@@ -16,6 +16,13 @@ This glossary recommends working language for design discussion. “Accepted” 
 - **Do not confuse with:** A transport command, transcript entry, turn, or model call. One accepted input may originate a turn or steer an existing turn.
 - **Example:** “Use the new log” remains the same accepted input whether it is consumed at a safe point or visibly reclassified as queued work because the active turn ends first.
 
+## Durable command identity
+
+- **Definition:** One owner-global idempotency identity for a durably handled discriminated caller command across all command kinds, sessions, and clients under that owner. The command variant and every caller-supplied field other than the identifier form its structural comparison payload; first committed handling records that payload and a terminal applied-or-rejected result.
+- **Status:** Lookup-before-validation is accepted in principle; the owner-global namespace and cross-kind/session mismatch rule are proposed by [ADR-0001](decisions/0001-domain-terminology-and-identity.md) and [ADR-0027](decisions/0027-input-delivery-lifecycle.md).
+- **Do not confuse with:** Accepted-input identity, logical-work identity, a provider idempotency key, or a token reusable in separate session/command namespaces.
+- **Example:** Replaying one `SubmitInput` identifier and payload returns its stored acceptance or rejection even after state changes, while reusing that identifier for `ResolveAmbiguity` or another session is rejected before state validation. Corrected intent after rejection uses a new identifier.
+
 ## Turn
 
 - **Definition:** One durable logical request for Signalbox to produce a conversational outcome from one typed origin under one frozen effective configuration. Typed input-delivery or recovery transitions, never semantic comparison of natural-language intent, determine whether its identity is preserved. It reaches one explicit terminal disposition while surviving zero or more physical orchestration attempts and may use several context frontiers.
@@ -174,7 +181,7 @@ This glossary recommends working language for design discussion. “Accepted” 
 
 ## Effective configuration
 
-- **Definition:** The complete immutable semantic configuration governing one turn. Its minimum algebra explicitly represents direct or frozen-alias model selection, parameters, absent or frozen instructions, disabled tools or enabled tools with placement constraints, disabled known-provider-failure retry and fallback, turn resource policy, and interpreting policy versions. Placement has no variant when tools are disabled. Every constructible field is identity-significant and equality is semantic value equality.
+- **Definition:** The complete immutable semantic configuration governing one turn. Its minimum algebra explicitly represents direct or frozen-alias model selection, parameters, absent or frozen instructions, disabled tools or a normalized nonempty enabled-tool set with unconstrained/canonical nonempty placement constraints, disabled known-provider-failure retry and fallback, turn resource policy, and interpreting policy versions. Placement has no variant when tools are disabled; empty/no-op forms normalize to `Disabled` or `Unconstrained`. Every constructible field is identity-significant and equality is semantic value equality.
 - **Status:** Durable provenance is accepted; the closed semantic categories, operational exclusions, immutability, equality, and freeze boundary are proposed by [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md), [ADR-0005](decisions/0005-model-call-retry-semantics.md), and [ADR-0027](decisions/0027-input-delivery-lifecycle.md). Nested subsystem representations remain open without reopening whether they are identity-significant.
 - **Do not confuse with:** The exact provider/model target resolved for a model call, current hub defaults, or a client-side draft selection.
 - **Example:** A queued turn records its request, exact session-defaults version, and effective value. Pending safe-point steering records only its source turn; if reclassified, the new turn derives that source turn's canonical immutable effective value without inventing a request or accepting a conflicting copy.

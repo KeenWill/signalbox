@@ -7,7 +7,7 @@
 - Supersedes: none
 - Superseded by: none
 - Acceptance dependency: must be accepted atomically with ADR-0003, ADR-0004, ADR-0005, and ADR-0027 in the current foundation set
-- Decision-ledger questions: final names and boundaries for session, accepted input, turn, turn attempt, model call, tool request, and tool attempt
+- Decision-ledger questions: owner-global durable-command identity scope; final names and boundaries for session, accepted input, turn, turn attempt, model call, tool request, and tool attempt
 
 ## Context
 
@@ -17,12 +17,13 @@ The repository already accepts most of these conceptual distinctions, but severa
 
 ## Decision
 
-Signalbox uses the domain terms **session**, **accepted input**, **turn**, **turn attempt**, **model call**, **tool request**, and **tool attempt**. Each has a distinct durable identity type. None may be substituted for another at a domain boundary, even if an initial workflow happens to create them one-to-one.
+Signalbox uses the domain terms **session**, **accepted input**, **turn**, **turn attempt**, **model call**, **tool request**, and **tool attempt**. Each has a distinct durable semantic identity type. None may be substituted for another at a domain boundary, even if an initial workflow happens to create them one-to-one. A separate **durable command identity** is an owner-global idempotency identity, not a semantic work identity.
 
 The identity boundary is semantic rather than representational:
 
 | Concept | Identity denotes | Identity does not denote |
 | --- | --- | --- |
+| Durable command | One owner-global, durably handled command submission and its terminal applied-or-rejected result across all command kinds, sessions, and clients within the hub's owner authority | An accepted input, turn, effect, transport failure, or reusable per-session/per-command token |
 | Session | One durable, independently browsable conversation | A connection, context window, turn, or login session |
 | Accepted input | One user submission durably accepted with its requested delivery treatment | A transcript entry, turn, provider request, or transport command retry |
 | Turn | One logical request for Signalbox to produce a conversational outcome under one frozen effective configuration | A message, every orchestration process, or one immutable model context |
@@ -35,6 +36,10 @@ An accepted input can originate a turn or steer an existing turn. A turn has exa
 
 A model call belongs to exactly one turn attempt and therefore one turn. A turn attempt belongs to exactly one turn. A tool request belongs to exactly one turn and may survive across that turn's durable waits and replacement attempts. Each tool attempt belongs to exactly one tool request and exactly one issuing turn attempt; one logical request may own more than one policy-authorized attempt across tenures. Detailed tool states and retry eligibility remain outside this ADR, but these ownership cardinalities do not.
 
+`DurableCommandId` has one namespace across all command kinds, sessions, and clients for the single owner. Its comparison payload is a typed discriminated command variant containing every caller-supplied field except the identifier itself; the variant discriminator and session or other owner reference are part of structural equality. The first transaction that commits handling of an unseen identifier atomically stores that payload and one terminal typed command result: either the command was applied, or authoritative domain validation rejected it. The latter creates no semantic work identity, but it still claims the command identifier. Replaying the same payload returns that recorded result even after domain state changes; correcting or refreshing rejected intent requires a new command identifier. Reusing one identifier for another kind, session, or payload is conflicting reuse, even if those commands would otherwise be independently valid.
+
+A malformed transport request, a request for which owner authority cannot be established, or an infrastructure/transaction failure before that atomic record commits does not claim the identifier. These exclusions define the domain boundary without selecting an authentication mechanism or transport error model. The rule keeps command references in cancellation, ambiguity, and authority-transfer history unambiguous and prevents rejected commands from acquiring different meanings later. It does not choose a wire representation or require one storage table.
+
 Identifiers are opaque domain values. Whether their stored encodings are UUIDs, integers, or another format is not part of the decision.
 
 ## Terminology
@@ -42,6 +47,7 @@ Identifiers are opaque domain values. Whether their stored encodings are UUIDs, 
 The following typed pseudocode is conceptual and is not a final Rust, storage, or wire API:
 
 ```text
+opaque DurableCommandId
 opaque SessionId
 opaque AcceptedInputId
 opaque TurnId
@@ -79,10 +85,10 @@ These are the complete baseline disposition categories defined with ADR-0027. A 
 
 ## Invariants
 
-- INV-001 is changed to include accepted-input identifiers explicitly and to name every identity in this ADR.
+- INV-001 is changed to include durable-command and accepted-input identifiers explicitly and to name every identity in this ADR.
 - INV-002, INV-004, and INV-005 are preserved.
 - A new constraint is added to INV-004: every turn has one typed durable origin, while accepted steering remains separately identified.
-- Boundary mappings must validate both identifier kind and ownership relationship. Matching underlying bytes do not make two domain identities interchangeable.
+- Boundary mappings must validate identifier kind, namespace, and ownership relationship. Matching underlying bytes do not make two domain identities interchangeable; command lookup is owner-global over a discriminated typed payload.
 - No execution digest, request hash, or “fingerprint” defines semantic identity. Such values may support deduplication or comparison only after the relevant domain identities and transitions are known.
 
 ## Strongest alternative
@@ -123,7 +129,7 @@ Names used in public protocols may still be versioned before such a protocol is 
 
 ## Open questions
 
-- Global versus owner-scoped identifier uniqueness and concrete encoding remain part of persistence and protocol design.
+- Global versus owner-scoped uniqueness for non-command identities, cross-owner physical encoding, and concrete identifier formats remain part of persistence and protocol design. `DurableCommandId` is explicitly owner-global within one established owner authority; this open question does not reopen that namespace.
 - Tool-request and tool-attempt state machines remain assigned to later tool ADRs.
 - The exact transcript-entry model and assistant-content commit granularity remain open.
 - Whether non-text user commands share an accepted-input envelope is a later command-model question; they must not erase the distinction decided here.

@@ -8,7 +8,7 @@ These records are under review and are not authoritative until accepted:
 
 | ADR | Scope |
 | --- | --- |
-| [ADR-0001](0001-domain-terminology-and-identity.md) | Core domain terminology and durable identity boundaries |
+| [ADR-0001](0001-domain-terminology-and-identity.md) | Core terminology, owner-global applied-or-rejected command identity, and durable semantic identity boundaries |
 | [ADR-0003](0003-session-creation-and-transcript-ancestry.md) | Independent session creation cause, owner-initiated baseline, initial transcript ancestry, and separation from versioned session defaults |
 | [ADR-0004](0004-turn-and-attempt-lifecycle.md) | Turn/attempt lifecycle, aggregate attempt ownership, typed stop causes, startup recovery scan, terminal guards, ambiguity decisions, and regeneration identity boundary |
 | [ADR-0005](0005-model-call-retry-semantics.md) | Target-before-call identity, typed reported-target mismatch failure/invalidation, no automatic known-failure retry, ambiguous-call recovery, continuation, refusal disposition, and configuration identity |

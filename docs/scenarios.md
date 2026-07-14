@@ -9,9 +9,9 @@ These scenarios test architectural boundaries; quoted commands and state names a
 - **State transitions:** No session → active session; no turn → queued origin turn with derived eligibility → atomically fixed starting frontier plus `Active(Running)` and initial prepared attempt.
 - **Transient updates:** Optimistic client placeholder and scheduling progress.
 - **Owning component:** Hub owns creation and acceptance; Postgres stores the result; the client owns presentation.
-- **Failure behavior:** Before commit, return a visible failure and no session identity. After commit, command deduplication returns the same result before current-state validation. Reusing the identifier with another payload is rejected rather than creating a duplicate.
+- **Failure behavior:** A malformed transport, pre-authority, or pre-commit infrastructure failure that does not reach committed domain handling returns visibly and claims no command identifier. The first committed handling of a well-formed typed command under established owner authority records either its applied result or a typed domain rejection. Replay returns that same result before current-state validation; a rejected command cannot later become valid under the same identifier. Corrected intent needs a new identifier, and reuse for another command kind, session, or payload is rejected rather than creating a duplicate.
 - **Required invariants:** INV-001, INV-003, INV-007, INV-008, INV-012.
-- **Remaining questions:** Acceptance of ADR-0001, ADR-0003, and ADR-0027; final command representation, idempotency scope, first client, and protocol.
+- **Remaining questions:** Acceptance of ADR-0001, ADR-0003, and ADR-0027; final command representation, first client, and protocol. The owner-global idempotency scope is proposed by this set.
 
 ## S02 — Stream a centrally called provider response
 
