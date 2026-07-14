@@ -1,6 +1,20 @@
 # Architecture decision records
 
-Architecture decision records (ADRs) explain durable design choices that affect boundaries, identities, invariants, compatibility, or several future features. The [decision ledger](../decision-ledger.md) lists proposed records; no substantive ADR has yet been accepted.
+Architecture decision records (ADRs) explain durable design choices that affect boundaries, identities, invariants, compatibility, or several future features. The [decision ledger](../decision-ledger.md) inventories accepted decisions and unresolved foundational questions.
+
+## Accepted foundation set
+
+The repository owner accepted these records atomically on 2026-07-13 after independent adversarial architecture review. They are authoritative together:
+
+| ADR | Scope |
+| --- | --- |
+| [ADR-0001](0001-domain-terminology-and-identity.md) | Core terminology, owner-global applied-or-rejected command identity, purpose-specific applied-command proofs, and durable semantic identity boundaries |
+| [ADR-0003](0003-session-creation-and-transcript-ancestry.md) | Independent session creation cause, owner-initiated baseline, initial transcript ancestry, and separation from versioned session defaults |
+| [ADR-0004](0004-turn-and-attempt-lifecycle.md) | Turn/attempt lifecycle, aggregate attempt ownership, typed stop causes, applied-interrupt cancellation, proof-bearing reconciliation, startup recovery scan, terminal guards, ambiguity decisions, and regeneration identity boundary |
+| [ADR-0005](0005-model-call-retry-semantics.md) | Target-before-call identity, typed reported-target mismatch failure/invalidation, no automatic known-failure retry, ambiguous-call recovery, continuation, refusal disposition, and configuration identity |
+| [ADR-0027](0027-input-delivery-lifecycle.md) | Input delivery, versioned model-selection session defaults, constructible baseline effective configuration, explicit steering/configuration provenance, command deduplication, durable queue ordering, eligibility-fixed starting lineage, and context frontiers |
+
+The five records form one normatively coupled baseline: their identity algebras, lifecycle transitions, configuration boundary, and context rules reference one another. A future change may correct or supersede an individual record only while preserving or explicitly revising its accepted dependencies.
 
 ## When to write an ADR
 
