@@ -30,7 +30,19 @@ DeliveryRequest =
 
 PerInputConfigurationChoices = {
     expected_session_defaults_version: SessionConfigurationDefaultsVersion,
-    overrides: TypedConfigurationOverrides
+    model: ModelSelectionOverride
+}
+
+ModelSelectionOverride =
+    UseSessionDefault
+  | ReplaceWith(ModelSelectionRequest)
+
+SessionConfigurationDefaults = {
+    model: ModelSelectionRequest
+}
+
+ConfigurationRequest = {
+    model: ModelSelectionRequest
 }
 
 OriginConfiguration = {
@@ -47,59 +59,47 @@ SubmitInput = {
 }
 ```
 
-This is typed pseudocode, not a protocol or final Rust API. `SubmitInput` is one discriminated caller-command variant used for idempotency; comparison excludes `command_id` itself but includes the `SubmitInput` discriminator and the canonical typed value of every other caller-supplied semantic field, never server-derived `OriginConfiguration`. Equivalent boundary forms compare equal after purpose-specific normalization, while a form that cannot construct `SubmitInput` fails before durable command lookup. Each immutable `SessionConfigurationDefaults` version contains a complete normalized `ConfigurationRequest` template over the same semantic categories below. Session creation establishes version one, and a separate idempotent owner command may install a complete replacement template.
+This is typed pseudocode, not a protocol or final Rust API. `SubmitInput` is one discriminated caller-command variant used for idempotency; comparison excludes `command_id` itself but includes the `SubmitInput` discriminator and the canonical typed value of every other caller-supplied semantic field, never server-derived `OriginConfiguration`. `UseSessionDefault` and `ReplaceWith(X)` remain structurally distinct even when the current default is `X`, because canonical construction cannot consult mutable aggregate state before command lookup. A form that cannot construct `SubmitInput` fails before that lookup. Each immutable `SessionConfigurationDefaults` version contains one complete normalized model-selection request. Session creation establishes version one, and a separate idempotent owner command may install a complete replacement.
 
-For an unseen command, atomic input acceptance requires the caller's expected defaults version still to be current, selects every current mutable resolver input needed by those choices—including alias definitions and interpreting-policy snapshots—applies the overrides to produce a complete `ConfigurationRequest`, resolves it to `EffectiveConfiguration`, and persists the derived `OriginConfiguration`. Application orchestration may calculate a candidate outside the transaction, but the commit must compare-and-set the expected defaults version and the version or immutable value of every mutable resolver input it read. A defaults mismatch is an authoritative acceptance rejection, is recorded as the command result, and cannot silently adopt a newer version for the same caller payload; the client must submit a new command to select it. A race in another resolver input may be recomputed before commit or abort handling as a retryable pre-commit transaction conflict that claims no command identifier. Thus all derived semantic meaning is linearized at successful acceptance rather than at an earlier read.
+For an unseen command, atomic input acceptance requires the caller's expected defaults version still to be current, derives one complete `ConfigurationRequest` from the explicit model override or named default, selects the current immutable alias definition when an alias was requested, resolves that request to `EffectiveConfiguration`, and persists the derived `OriginConfiguration`. Application orchestration may calculate a candidate outside the transaction, but the commit must compare-and-set the expected defaults version and the version or immutable value of every alias definition it read. A defaults mismatch is an authoritative acceptance rejection, is recorded as the command result, and cannot silently adopt a newer version for the same caller payload; the client must submit a new command to select it. An alias-definition race may be recomputed before commit or abort handling as a retryable pre-commit transaction conflict that claims no command identifier. Thus all derived semantic meaning is linearized at successful acceptance rather than at an earlier read.
 
-Updating session defaults creates a new immutable defaults version and affects only origin inputs accepted afterward. It does not create a turn, mutate queued or active work, alter pending steering, or change recovery. The conceptual update command carries a durable command identifier, the session identifier, the expected current defaults version, and the replacement typed defaults. Its deduplication and compare-and-set behavior follow the command rule below.
+Updating session defaults creates a new immutable model-selection defaults version and affects only origin inputs accepted afterward. It does not create a turn, mutate queued or active work, alter pending steering, or change recovery. The conceptual update command carries a durable command identifier, the session identifier, the expected current defaults version, and the replacement typed model request. Its deduplication and compare-and-set behavior follow the command rule below.
 
-The version-one `EffectiveConfiguration` boundary is closed over these semantic categories:
-
-- requested model selection, model parameters, and any semantic instruction or prompt-policy snapshot applied to the turn;
-- enabled tools, their turn-visible semantic configuration, and requested placement or execution constraints;
-- owner-visible recovery, fallback, cost, or resource policy choices that authorize or prohibit semantic execution paths; and
-- immutable versions or value snapshots needed to interpret those choices later.
-
-The minimum constructible algebra is:
+The first implementable `EffectiveConfiguration` is deliberately model-selection-only. Its complete constructible algebra is:
 
 ```text
+ModelSelectionRequest =
+    Direct(DirectModelSelection)
+  | Alias(ModelAlias)
+
+FrozenModelSelection =
+    Direct(DirectModelSelection)
+  | FrozenAlias {
+        alias: ModelAlias,
+        definition: FrozenAliasDefinition
+    }
+
 EffectiveConfiguration = {
-    model: ModelConfiguration {
-        requested_selection: DirectModel | FrozenAlias {
-            alias: ModelAlias,
-            definition: FrozenAliasDefinition
-        },
-        parameters: ProviderDefaults | FrozenModelParameters
-    },
-    instructions: None | FrozenInstructionSnapshot,
-    tools: Disabled | Enabled {
-        configuration: NonEmptyFrozenToolConfiguration,
-        placement: Unconstrained | Constrained(NonEmptyFrozenPlacementConstraints)
-    },
-    recovery: RecoveryConfiguration {
-        known_provider_failure_retry: Disabled,
-        model_fallback: Disabled,
-        turn_resource_policy: NoTurnSpecificLimit | FrozenResourcePolicy
-    },
-    interpreting_policies: FrozenPolicyVersions
+    model: FrozenModelSelection,
+    parameters: ProviderDefaults,
+    known_provider_failure_retry: Disabled,
+    model_fallback: Disabled
 }
 ```
 
-`FrozenAliasDefinition` is the immutable definition version or value snapshot used to interpret the alias; its current version is selected by the atomic acceptance transition. `ProviderDefaults` means provider-defined parameter defaults selected as part of this frozen semantic value, not a later Signalbox lookup. `FrozenPolicyVersions` may be empty only when no interpreting policy applies. Each snapshot is a purpose-specific immutable domain value rather than JSON or a generic key-value map. Later subsystem ADRs may refine its internals without changing the variants or moving the category across the identity boundary.
+`DirectModelSelection` is a canonical domain-owned key with immutable semantic meaning that names exactly one configured provider/model selection. Deployment may make that selection unavailable, causing resolution failure, but cannot retarget the same key. It is never an alias, policy, fallback set, provider-native unnormalized identifier, or provider-reported identity. `FrozenAliasDefinition` is an immutable definition version or value selecting exactly one `DirectModelSelection`; its current version is selected by the atomic acceptance transition. Resolution later validates that frozen selection and pins one exact target or fails—it cannot reread mutable alias policy, availability, or fallback to choose another selection. Concrete storage encodings and provider-reported identifier normalization remain outside this ADR.
 
-`TypedConfigurationOverrides`, `ConfigurationRequest`, and `SessionConfigurationDefaults` use corresponding purpose-specific typed variants rather than generic maps. Overrides express only caller-selected differences from the named defaults version; the normalized request itself contains no optional “fill this later” fields and is complete inside the domain acceptance transition. `EffectiveConfiguration` differs by capturing immutable alias meaning and the policy snapshots required to execute that request. `NonEmptyFrozenToolConfiguration` is a normalized nonempty enabled-tool set. `NonEmptyFrozenPlacementConstraints` is a canonical nonempty value that excludes semantic no-ops; an absent/no-op constraint is `Unconstrained`. Before durable command lookup, corresponding caller-field constructors normalize empty tool selection to `Disabled` and absent/no-op placement to `Unconstrained`, so those equivalent forms produce the same comparison payload. A structurally conflicting form cannot construct the typed command, fails at the nonclaiming boundary, and may be corrected under the same still-unclaimed identifier. Placement constrains tool execution and therefore exists only inside `Enabled`; no constructible value may differ only by an empty tool set or inert placement constraint.
+`ProviderDefaults` is one unit choice meaning Signalbox supplies no model-parameter overrides. Custom parameters, instructions, tool enablement/configuration, placement constraints, per-turn resource choices, and interpreting-policy selections are unavailable baseline capabilities, not latent optional fields or values filled from mutable state. The disabled known-provider-failure retry and model-fallback fields make the two lifecycle prohibitions explicit. A future subsystem ADR must extend the request, session-default, override, and effective-value algebras together before exposing another semantic category.
 
-An unimplemented capability is represented explicitly as disabled or absent inside this algebra; it is not omitted and later filled from mutable defaults. In particular, version one has no known-provider-failure retry and no model fallback.
+The exact provider/model target is resolved from the frozen selection meaning and pinned as a separate turn fact under ADR-0005 before the first model call is created; it is not an `EffectiveConfiguration` field. Also outside this boundary are provider credentials, live endpoints and connections, scheduler locks and leases, process or runner connection identity, telemetry, transient availability, and transport timing. Those late-bound operational facts must be recorded when relevant but may not change the requested model selection or authorize retry/fallback. A future value that changes semantic execution belongs in an explicitly extended `EffectiveConfiguration` and requires new logical work when changed.
 
-The exact provider/model target is resolved from the frozen selection meaning and pinned as a separate turn fact under ADR-0005 before the first model call is created; it is not an `EffectiveConfiguration` field. Also outside this boundary are provider credentials, live endpoints and connections, scheduler locks and leases, process or runner connection identity, telemetry, transient availability, and transport timing. Those late-bound operational facts must be recorded when relevant but may not change requested model selection, semantic context, enabled tool behavior, placement constraints, approval binding, or authorized retry/fallback paths. A value that can change one of those semantic choices belongs inside `EffectiveConfiguration` and requires new logical work when changed.
-
-Configuration equality is semantic value equality over this complete immutable typed value. Equality of database identifiers alone is insufficient unless an identifier names one immutable version with stable meaning; two separately stored values with the same normalized semantic content compare equal.
+Configuration equality is structural semantic value equality over `FrozenModelSelection` and the unit policy values. Direct and alias selection remain unequal even when they resolve to the same exact target because requested selection and alias provenance differ. The defaults version belongs to `OriginConfiguration` provenance, not effective-value equality. Equality of database identifiers alone is insufficient unless an identifier names one immutable version with stable meaning.
 
 For any successfully constructed durable command, the hub first looks up owner-global `command_id` before validating current session state or deriving server-owned values. Transport decoding, establishment of owner authority, and purpose-specific canonical construction of caller fields precede that lookup; none consults mutable aggregate state or server-derived configuration. The lookup spans every command kind, session, and client under that owner. A recorded identifier with the same canonical discriminated typed command payload returns its terminal applied-or-rejected result even if session state, defaults, or aliases have since changed. Reusing the identifier for a different command variant, session, or canonical payload is rejected. Equality is structural domain equality over the discriminator and canonical caller fields, not equality of serialized bytes. Only an unseen owner-global identifier proceeds to state validation and configuration derivation. The first handling transaction that commits atomically stores the comparison payload and either the applied result or a typed authoritative domain rejection. A malformed transport request, failure to establish owner authority, caller fields that cannot construct the typed command, or infrastructure/transaction failure before this commit stores no durable command result and does not claim the identifier. The hub validates the delivery request against authoritative session state inside that handling transaction:
 
 - `StartWhenNoActiveTurn` is valid only when the session has no active turn. If earlier queued turns exist during a scheduler gap, the new turn joins their FIFO tail rather than bypassing them.
 - The three active-work modes are valid only when `expected_active_turn` is the session's current active turn.
-- `NextSafePoint` is rejected if that turn carries `CurrentTurnAttempt::StopRequested`. `Interrupt` is rejected when the stop value is `CancellationOnly` or its `FatalMismatch.cancellation` is already present; a fatal-mismatch-only stop may still accept the first interrupt, create its immediate successor, and populate that cancellation field without reauthorizing predecessor work.
+- `NextSafePoint` is rejected if that turn carries `CurrentTurnAttempt::StopRequested`. `Interrupt` is rejected when the stop value is `CancellationOnly` or its `FatalMismatch.interrupt` is already `Applied`; a fatal-mismatch-only stop may still accept the first interrupt, create its immediate successor, and populate that proof without reauthorizing predecessor work.
 - `AfterCurrentTurn` remains valid while stop is pending because it makes no promise of steering or initiating cancellation.
 
 If authoritative validation rejects stale state or loses a state race, the transaction records that typed rejection under the command identifier; no `AcceptedInputId` is created or acknowledged. Replaying the same identifier and payload returns the recorded rejection rather than revalidating against newer state. The client may refresh and submit a new explicit choice with a new command identifier. The hub never silently normalizes a stale active-work request into no-active-turn or queued behavior.
@@ -126,7 +126,7 @@ TurnConfigurationProvenance =
 
 `StartWhenNoActiveTurn`, `Interrupt`, and `AfterCurrentTurn` each create a turn and freeze its effective configuration in the same transaction that accepts the input. The accepted input immediately becomes that turn's origin. Input submitted with no active turn is eligible immediately only if no earlier queued turn exists; otherwise it joins the FIFO tail. `Interrupt` and `AfterCurrentTurn` create queued turns.
 
-Effective configuration freezes every semantic category defined above. Its typed equality is total: any field difference requires new logical work, while changes to explicitly excluded operational facts do not. The alias definition is already frozen, and exact target resolution occurs during the initial prepared attempt but before model-call creation as defined by ADR-0005. If static pre-activation validation proves a frozen configuration structurally unsupported, the already-created turn waits until its predecessors terminate, fixes its starting frontier, and fails without an attempt. If target resolution then fails after activation, the prepared attempt ends `KnownFailure` and the turn fails. Neither path lets input disappear, adopt newer session defaults, or terminalize ahead of its lineage.
+Effective configuration freezes the complete baseline algebra above. Its typed equality is total: any model-selection difference requires new logical work, while changes to explicitly excluded operational facts do not. The alias definition is already frozen, and exact target resolution occurs during the initial prepared attempt but before model-call creation as defined by ADR-0005. If static pre-activation validation proves a frozen configuration structurally unsupported, the already-created turn waits until its predecessors terminate, fixes its starting frontier, and fails without an attempt. If target resolution then fails after activation, the prepared attempt ends `KnownFailure` and the turn fails. Neither path lets input disappear, adopt newer session defaults, or terminalize ahead of its lineage.
 
 `NextSafePoint` initially creates no turn. Its command variant contains no independent configuration request. It captures one `SteeringBinding` containing only the exact source turn; that turn already owns the canonical immutable effective configuration. If terminalization later reclassifies the input, the new origin reuses that binding as `InheritedForReclassifiedSteering` and atomically sets its own required effective configuration equal to the referenced source turn's canonical value. It does not store a second source configuration in the binding, duplicate a source-turn field, invent a request, or claim that current session defaults produced the value. A missing source turn or any attempt to supply a different configuration is invalid. Any model or configuration change must instead be submitted as origin input for new logical work. The explicit delivery request determines identity: the hub does not inspect natural-language content to decide whether steering expresses the “same” or a “materially different” objective.
 
@@ -144,11 +144,11 @@ Accepted origin turns persist `AcceptedInputQueueOrder`, not a direct predecesso
 | Mode | Durable acceptance effect | Logical work | Interaction with issued work | Restart behavior |
 | --- | --- | --- | --- | --- |
 | Start with no active turn | Persist input, origin turn, configuration, and acceptance position; derived eligibility holds if no predecessor is queued | New turn immediately | None is active | Reconstruct queued or active work and derive eligibility from durable queue order and slot ownership |
-| Interrupt | Persist input and successor configuration plus the exact predecessor transition atomically | New turn, designated as the active turn's immediate successor | End an unsent `Prepared` attempt and turn; directly end a `Running` attempt only when accepted cancellation is already proven and every terminal guard holds, otherwise request best-effort cancellation; or close the exact durable wait; never roll back issued work | Reconstruct cancellation or terminal disposition, issued-effect evidence, and queued successor; startup scans abandoned attempts without creating recovery work |
+| Interrupt | Persist input and successor configuration plus an `AppliedInterruptProof` and the exact predecessor transition atomically | New turn, designated as the active turn's immediate successor | End an unsent `Prepared` attempt and turn; directly end a `Running` attempt only when the interrupt is already proven to have prevented remaining work and every terminal guard holds, otherwise request best-effort cancellation; or close the exact durable wait; never roll back issued work | Reconstruct the applied proof, cancellation or reconciliation marker, issued-effect evidence, and queued successor; startup scans abandoned attempts without creating recovery work |
 | Next safe point | Persist input as pending steering with a canonical source-turn reference | No new turn unless reclassified | Does not mutate an issued provider call, tool request, approval, or tool attempt | Reconstruct pending steering and derive immutable inherited configuration from its source turn; consume or reclassify durably |
 | After current turn | Persist input, queued turn, immutable acceptance position, and configuration | New queued turn | Does not cancel or alter current work | Reconstruct exact queue order and frozen configuration |
 
-The first accepted interrupt records a typed priority relation designating its origin turn as the immediate successor of the active turn, ahead of every other successor candidate. This includes ordinary after-current turns already queued and any pending safe-point input that may be reclassified when the interrupted turn terminalizes. It does not rewrite a direct predecessor because queued turns do not fix one before eligibility. If the current attempt is `Prepared`, acceptance atomically ends the unsent attempt and predecessor as `Cancelled` with `AcceptedCancellationCause { command: command_id }` in both attempt and turn disposition. If it is `Running` and every terminal guard already holds with proof that cancellation prevented all remaining work, the same acceptance transaction persists the interrupt input and immediate-successor turn, ends the attempt `AfterCancellation(Cancelled)`, terminalizes the predecessor `Cancelled { cause }`, reclassifies pending steering in the required order, and releases the slot without persisting `StopRequested`. Otherwise a `Running` attempt atomically changes to `StopRequested(CancellationOnly)` with that cause and retains the slot through honest classification. If it is already `StopRequested(FatalMismatch)` without cancellation, acceptance populates its cancellation field and creates the successor without reauthorizing any predecessor effect. Cancellation from an approval or recovery wait closes that exact wait and terminalizes atomically under ADR-0004. Another interrupt is rejected once accepted cancellation is present, and a later request must target the new authoritative active state. After the interrupt-created successor, reclassified steering and ordinary queued turns retain their original accepted-input order. This defined priority insertion is part of interrupt semantics, not a general queue-reordering command.
+The first applied interrupt records a typed priority relation designating its origin turn as the immediate successor of the active turn, ahead of every other successor candidate. This includes ordinary after-current turns already queued and any pending safe-point input that may be reclassified when the interrupted turn terminalizes. It does not rewrite a direct predecessor because queued turns do not fix one before eligibility. The applied command result constructs `AppliedInterruptProof { command: command_id, predecessor: expected_active_turn }`; construction validates the command is the applied `SubmitInput::Interrupt` for that exact predecessor and that the same transaction created the accepted input and successor. A rejected, non-interrupt, cross-session, or differently targeted command cannot construct the proof. If the current attempt is `Prepared`, application atomically ends the unsent attempt and predecessor as `Cancelled` with that proof in both attempt and turn disposition. If it is `Running` and every terminal guard already holds with proof that the interrupt prevented all remaining work, the same transaction ends the attempt `AfterCancellation(Cancelled)`, terminalizes the predecessor `Cancelled { cause }`, reclassifies pending steering in the required order, and releases the slot without persisting `StopRequested`. Otherwise a `Running` attempt atomically changes to `StopRequested(CancellationOnly)` with that proof and retains the slot through honest classification. If it is already `StopRequested(FatalMismatch)` without an interrupt, application populates its interrupt field and creates the successor without reauthorizing any predecessor effect. From approval it closes that exact wait and cancels the turn; from recovery it closes the exact wait and constructs `InterruptRequiresReconciliation` with the wait's exact operation set. Another interrupt is rejected once a proof is present, and a later request must target the new authoritative active state. After the interrupt-created successor, reclassified steering and ordinary queued turns retain their original accepted-input order. This defined priority insertion is part of interrupt semantics, not a general queue-reordering command.
 
 ### Safe points
 
@@ -171,9 +171,9 @@ If the turn becomes terminal without another safe point, the same terminal trans
 
 ### Interrupt completion and successor eligibility
 
-Interrupt frees the progressing-turn slot immediately only when its acceptance transaction terminalizes an unsent `Prepared` attempt, a `Running` attempt for which accepted cancellation is already proven and every terminal guard holds, or a durable wait. The direct running path ends the attempt `AfterCancellation(Cancelled)`, records turn `Cancelled { cause }`, and completes pending-steering reclassification before release. Every other already-running attempt constructs `StopRequested(CancellationOnly)` or populates the cancellation field of existing `StopRequested(FatalMismatch)`, retaining the exact attempt and every earlier fatal failure while the hub attempts to stop current provider and tool work and classifies every issued outcome honestly. Cancellation from approval atomically closes that wait and yields `Cancelled { cause }`; cancellation from recovery atomically closes that wait and yields `ReconciliationRequired`. The interrupted turn becomes `Completed`, `Refused`, `Cancelled`, `Failed`, or `ReconciliationRequired` under ADR-0004's common precedence; cancellation-only does not relabel raced completion, refusal, or known failure, while fatal mismatch still forces failure or reconciliation. If the hub restarts before classification, the startup scan ends the abandoned attempt as `Lost`, preserves its typed stop value, and applies the same precedence without creating a cancellation-only attempt. Only after predecessor terminalization may the interrupt-created successor activate.
+Interrupt frees the progressing-turn slot immediately only when its application transaction terminalizes an unsent `Prepared` attempt, a `Running` attempt for which prevention of all remaining work is already proven and every terminal guard holds, or a durable wait. The direct running path ends the attempt `AfterCancellation(Cancelled)`, records turn `Cancelled { cause: AppliedInterruptProof }`, and completes pending-steering reclassification before release. Every other already-running attempt constructs `StopRequested(CancellationOnly)` or populates the interrupt field of existing `StopRequested(FatalMismatch)`, retaining the exact attempt and every earlier fatal failure while the hub attempts to stop current provider and tool work and classifies every issued outcome honestly. Interruption from approval atomically closes that wait and yields `Cancelled { cause }`; interruption from recovery atomically closes that wait and yields `ReconciliationRequired` with `InterruptRequiresReconciliation` and the wait's exact set. The interrupted turn becomes `Completed`, `Refused`, `Cancelled`, `Failed`, or proof-bearing `ReconciliationRequired` under ADR-0004's common precedence; interrupt-only stop does not relabel raced completion, refusal, or known failure, while fatal mismatch still forces failure or reconciliation. If the hub restarts before classification, the startup scan ends the abandoned attempt as `Lost`, preserves its typed stop value, and applies the same precedence without creating a cancellation-only attempt. Only after predecessor terminalization may the interrupt-created successor activate.
 
-An unacknowledged ambiguous prior external effect remains terminally `Ambiguous` on its physical operation while the predecessor uses `ReconciliationRequired` and an explicit semantic outcome marker. If an owner had already accepted its duplicate risk and orchestration resumed, interruption is classified normally while preserving both the physical `Ambiguous` outcome and its `DuplicateRiskAccepted` marker. The successor observes either form of uncertainty in context; interrupt never asserts rollback.
+An unacknowledged ambiguous prior external effect remains terminally `Ambiguous` on its physical operation while the predecessor uses `ReconciliationRequired` with a complete marker containing the exact unacknowledged set and typed reason. If an owner had already accepted its duplicate risk and orchestration resumed, interruption is classified normally while preserving both the physical `Ambiguous` outcome and its `DuplicateRiskAccepted` marker. The successor observes either form of uncertainty in context; interrupt never asserts rollback.
 
 ### Successor context frontier
 
@@ -214,7 +214,7 @@ The predecessor terminal frontier contains, in order:
 - explicit refusal content and a refusal marker for a refused predecessor;
 - an explicit failure marker for a failed predecessor;
 - committed effects plus an explicit cancellation marker for a cancelled predecessor; or
-- an explicit ambiguity/reconciliation-required marker for that disposition.
+- the complete immutable `ReconciliationMarker`, including its exact nonempty operation set and typed reason, for a reconciliation-required predecessor.
 
 It excludes transient provider drafts, uncommitted partial tool output, later queued accepted inputs, assumptions about an ambiguous effect's result, and every completion, refusal, known-failure, or cancellation fact learned from a provider call after outcome authority transferred to its replacement. Those prior-call facts remain audit/reconciliation evidence and may be referenced as such without determining turn disposition or becoming authoritative conversational content.
 
@@ -228,7 +228,7 @@ This ADR defines starting frontiers only for turns whose origin is an accepted i
 
 ### Baseline queue scope
 
-Version one does not support editing accepted input, reordering queued turns, changing delivery policy, changing frozen configuration, or cancelling queued input. A future ADR must define identity, client convergence, and disposition rules before adding any of these commands.
+Version one does not support editing accepted input, reordering queued turns, changing delivery policy, changing frozen configuration, cancelling queued input, or cancelling an active turn without the interrupt-created immediate successor. A future ADR must define identity, client convergence, proof, and disposition rules before adding any of these commands.
 
 ## Terminology
 
@@ -236,7 +236,8 @@ Version one does not support editing accepted input, reordering queued turns, ch
 - **Accepted input:** Durable user content with one recoverable disposition; transport acceptance alone is insufficient.
 - **Safe point:** The version-one provider-call preparation boundary at which pending steering can enter a new immutable context frontier.
 - **Context frontier:** An immutable reference to the exact ordered semantic content consumed by one model call, including applicable user inputs, consumed steering, committed assistant or tool content, and explicit terminal-outcome markers.
-- **Session configuration defaults:** Mutable, explicitly versioned user/session-level defaults used only while accepting future origin input.
+- **Session configuration defaults:** Mutable, explicitly versioned user/session-level model-selection defaults used only while accepting future origin input.
+- **Reconciliation marker:** The immutable terminal proof carrying the exact nonempty set of still-unacknowledged ambiguous operations and the applied owner-choice, interrupt, or fatal-mismatch reason that released the active slot.
 - **Inherited reclassification provenance:** The exact source-turn reference captured for pending steering, from which reclassification derives that turn's canonical immutable effective configuration when the input must become new logical work without an explicit configuration request.
 - **Starting context frontier:** The immutable outcome-aware semantic frontier fixed with starting lineage when an accepted-input-origin turn becomes eligible.
 - **Queue order:** Immutable accepted-input positions plus typed priority relations that form the durable total order of known work before eligibility.
@@ -264,7 +265,7 @@ Version one does not support editing accepted input, reordering queued turns, ch
 
 Persist only accepted input and delivery policy, then create the turn, choose current configuration, and use the latest transcript when the scheduler eventually starts it. This keeps queues lightweight and lets queued work benefit automatically from configuration updates.
 
-It is rejected because restart timing or administrator changes could silently alter model choice, tools, policy, and context after acknowledgement. Two identical accepted queues could execute differently without a durable domain decision explaining why.
+It is rejected because restart timing or administrator changes could silently alter model choice after acknowledgement; future configuration categories would create the same problem. Two identical accepted queues could execute differently without a durable domain decision explaining why.
 
 ## Rejected alternatives
 
@@ -299,13 +300,13 @@ Interrupt is responsive in cancellation signaling but conservative in activation
 
 Future safe-point kinds can be added as typed boundaries after defining what may consume steering and how each affects tool or approval identity. Future non-input origins, including regeneration, must add origin-specific starting-frontier rules rather than weakening queue-lineage semantics for accepted input. Queue-management commands can add new dispositions without rewriting historical acceptance records.
 
-A future ADR may add a new explicitly late-bound operational category only by showing that it cannot change any semantic choice assigned above to `EffectiveConfiguration`; each such value must still be named, policy-governed, and durably resolved when relevant. A late-bound value cannot be introduced as an implicit default lookup or excluded ad hoc from effective-configuration equality.
+A future subsystem ADR may add instructions, custom parameters, tools, placement, resources, or another semantic category only by extending the request, default, override, and effective-value algebras together and defining canonical construction and equality. An operational category may remain late-bound only by showing it cannot change any semantic choice. Neither kind may be introduced as an implicit mutable-default lookup.
 
 The outcome-aware frontier rule supports later reconciliation entries and richer semantic projections without making raw operational logs the transcript.
 
 ## Open questions
 
-- Concrete nested field spellings and policy-reference encodings remain for the relevant subsystem ADRs, but the semantic categories included in `EffectiveConfiguration`, the operational exclusions, and semantic value-equality rule are fixed above and may not be reclassified by implementation.
+- Concrete encodings for canonical model-selection keys, alias identifiers, and immutable alias-definition references remain for the provider-provenance ADR. Other semantic configuration categories are absent until their subsystem ADRs define and add them; implementation may not invent generic maps or stringly placeholders meanwhile.
 - Raw audit evidence selection and semantic outcome-marker rendering remain open, although their required presence and ordering are decided here.
 - Queue size, admission limits, and resource governance remain open.
 - UI defaults may be chosen later, but the submitted command must carry an explicit resulting delivery request.

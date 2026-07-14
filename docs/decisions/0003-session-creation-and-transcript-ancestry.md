@@ -28,7 +28,7 @@ Transcript ancestry in version one is either `None` or one immutable source cons
 
 The pair is validated and stored atomically when the session is created. Neither value can be rewritten after the session identity becomes durable. Later changes to the source session do not change the descendant's initial context.
 
-Session creation also establishes the first immutable version of `SessionConfigurationDefaults`, as defined by ADR-0027. Those defaults are operationally associated with the session but are not a third creation-provenance fact: an explicit owner command may install a new defaults version for future accepted origin input. Changing defaults never rewrites creation cause, transcript ancestry, or already accepted work.
+Session creation also establishes the first immutable version of model-selection-only `SessionConfigurationDefaults`, as defined by ADR-0027. Those defaults are operationally associated with the session but are not a third creation-provenance fact: an explicit owner command may install a new model-selection defaults version for future accepted origin input. Changing defaults never rewrites creation cause, transcript ancestry, or already accepted work; future configuration categories require their own ADR before joining this value.
 
 Cause and ancestry may vary independently. For example:
 
@@ -101,7 +101,7 @@ Fork and delegation can evolve independently. Provenance remains inspectable eve
 
 ## Scenario walkthroughs
 
-- **S01:** `OwnerInitiated` plus `None` creates an empty interactive session and its initial configuration-defaults version. The first accepted input is not ancestry and freezes its own effective configuration from an exact defaults version.
+- **S01:** `OwnerInitiated` plus `None` creates an empty interactive session and its initial model-selection-defaults version. The first accepted input is not ancestry and freezes its own effective model configuration from that exact version.
 - **S17:** An owner-created fork stores `OwnerInitiated` and the selected source session/frontier. Later source activity cannot change the fork.
 - **S18:** ADR-0002 must add the delegated-cause variant and define its exact durable parent-work identity together with delegation lifecycle. The child may then have no ancestry and receive a task brief as new input, or explicitly select one source frontier.
 - **S19:** Parent cancellation cannot erase or rewrite the child's cause or ancestry. ADR-0002 remains blocking before a child-wait phase or parent-cancellation transition is exposed.

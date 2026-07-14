@@ -4,7 +4,7 @@ This glossary recommends working language for design discussion. “Accepted” 
 
 ## Session
 
-- **Definition:** A durable, independently browsable conversation with versioned configuration defaults, ordered semantic history, operational work, and archival state.
+- **Definition:** A durable, independently browsable conversation with versioned model-selection defaults in the first baseline, ordered semantic history, operational work, and archival state.
 - **Status:** Concept accepted; the name and identity boundary are proposed by [ADR-0001](decisions/0001-domain-terminology-and-identity.md). “Session” is preferred over “thread” because it emphasizes durable continuity across clients, though it can be confused with a login session.
 - **Do not confuse with:** A client connection, one model context window, one turn, or a runner process.
 - **Example:** A user starts “repair garden sensor” on a phone, continues it from a terminal, and archives it next week without losing its history.
@@ -93,6 +93,13 @@ This glossary recommends working language for design discussion. “Accepted” 
 - **Do not confuse with:** Transport delivery guarantees or the final determination of which model context consumes the message.
 - **Example:** “Use the new error log” with next-safe-point policy becomes durable immediately and is considered before the next model call, not injected into the current request.
 
+## Applied interrupt proof
+
+- **Definition:** A purpose-specific causal value constructible only from the committed applied result of `SubmitInput::Interrupt` for one exact predecessor turn. The same application creates the interrupting input and immediate-successor turn.
+- **Status:** Proposed by [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md) and [ADR-0027](decisions/0027-input-delivery-lifecycle.md). Interrupt is the only baseline owner action that can authorize active-turn cancellation; standalone cancellation remains later scope.
+- **Do not confuse with:** A raw durable-command identifier, a rejected command, best-effort provider/runner cancellation, or proof that an external operation stopped.
+- **Example:** Applying interrupt command C against turn T creates a proof for T; C cannot be reused as cancellation authority for another turn.
+
 ## Runner
 
 - **Definition:** An outbound-connected process that declares capabilities and execution-boundary properties, then performs selected runner-local tool attempts under one deployment identity.
@@ -142,18 +149,25 @@ This glossary recommends working language for design discussion. “Accepted” 
 - **Do not confuse with:** A timeout whose external effect is unknown.
 - **Example:** A provider returns a validated authentication error before accepting the request; the call is recorded as a known failure.
 
-- **Proposed version-one behavior:** Under [ADR-0005](decisions/0005-model-call-retry-semantics.md), a known provider-call failure is not retried automatically and supplies explicit failure evidence; the turn fails when no unacknowledged ambiguity requires a wait or reconciliation. A physically cancelled provider call without an accepted owner cancellation cause also supplies turn failure while retaining its distinct physical disposition; turn cancellation requires that exact cause plus proof it prevented remaining work. The first trusted provider-reported identity that mismatches the call's exact resolved target while it is nonterminal immediately selects known failure and requests best-effort cancellation. After terminal ambiguity it preserves physical state and fails the turn only when no other unacknowledged ambiguity remains; otherwise the turn requires reconciliation. After completion during an active turn it appends typed invalidation and stops future effects without reopening the call; after terminal known failure/cancellation it preserves that state and existing precedence. Ordinary refusal without fatal stop terminalizes the baseline turn atomically; a continuation refusal under fatal stop remains physical non-authoritative evidence while failure/reconciliation controls. Evidence first learned after authority transfer is audit-only. Tool retry policy remains effect-specific later scope.
+- **Proposed version-one behavior:** Under [ADR-0005](decisions/0005-model-call-retry-semantics.md), a known provider-call failure is not retried automatically and supplies explicit failure evidence; the turn fails when no unacknowledged ambiguity requires a wait or reconciliation. A physically cancelled provider call without an applied interrupt proof for that turn also supplies turn failure while retaining its distinct physical disposition; turn cancellation requires that proof plus evidence the interrupt prevented remaining work. The first trusted provider-reported identity that mismatches the call's exact resolved target while it is nonterminal immediately selects known failure and requests best-effort cancellation. After terminal ambiguity it preserves physical state, adds a typed fatal cause to any still-live attempt while preserving existing causes, and after outstanding classification fails the turn only when no other unacknowledged ambiguity remains; otherwise the turn receives exact proof-bearing reconciliation. An already-ended attempt is not rewritten. After completion during an active turn it appends typed invalidation and stops future effects without reopening the call; after terminal known failure/cancellation it preserves that state and existing precedence. Ordinary refusal without fatal stop terminalizes the baseline turn atomically; a continuation refusal under fatal stop remains physical non-authoritative evidence while failure/reconciliation controls. Evidence first learned after authority transfer is audit-only. Tool retry policy remains effect-specific later scope.
 
 ## Ambiguous outcome
 
-- **Definition:** A physical outcome where available evidence cannot establish whether an external effect occurred, usually because acknowledgement or observation was lost. Under the proposed lifecycle, unacknowledged ambiguity retains the turn's active slot while awaiting evidence or an explicit recovery decision only when neither accepted cancellation nor fatal mismatch prohibits continuation. Owner-authorized continuation preserves the physical `Ambiguous` outcome and adds a separate accepted-risk marker; accepted cancellation or fatal stop before acknowledgement terminalizes the turn as reconciliation required.
+- **Definition:** A physical outcome where available evidence cannot establish whether an external effect occurred, usually because acknowledgement or observation was lost. Under the proposed lifecycle, unacknowledged ambiguity retains the turn's active slot while awaiting evidence or an explicit recovery decision only when neither an applied interrupt nor fatal mismatch prohibits continuation. Owner-authorized continuation preserves the physical `Ambiguous` outcome and adds a separate accepted-risk marker; an applied interrupt or fatal stop before acknowledgement terminalizes the turn with an exact reconciliation marker.
 - **Status:** Concept, no-blind-retry rule, and preservation of the ambiguous physical record are accepted; wait, accepted-risk, and reconciliation transitions are proposed by [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md) and [ADR-0005](decisions/0005-model-call-retry-semantics.md).
 - **Do not confuse with:** A known failure, an ordinary retryable read, or “probably failed.”
 - **Example:** A runner loses connectivity immediately after submitting a payment-like external write; the hub records ambiguity and requires reconciliation instead of dispatching it again.
 
+## Reconciliation marker
+
+- **Definition:** The immutable payload of `TurnDisposition::ReconciliationRequired`, containing the exact canonical nonempty set of still-unacknowledged physically ambiguous operations and one typed reason: applied owner stop choice, applied interrupt, or the complete fatal-mismatch stop-cause value established for terminalization, including any applied interrupt. That value matches a still-live attempt's stop causes or is derived from complete later evidence without rewriting an already-ended attempt.
+- **Status:** Proposed by [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md); provider mismatch reasons are specialized by [ADR-0005](decisions/0005-model-call-retry-semantics.md).
+- **Do not confuse with:** The physical operation's `Ambiguous` disposition, a generic audit note, an empty “needs attention” status, or later resolving evidence.
+- **Example:** Interrupting a turn whose runner write remains ambiguous releases the slot only with a marker naming that exact tool attempt and the applied interrupt proof.
+
 ## Context frontier
 
-- **Definition:** An immutable reference to the exact ordered semantic content consumed by one model call, including applicable user inputs, consumed steering, committed assistant or tool content, and explicit completion, refusal, failure, cancellation, accepted-risk, typed provider-target-invalidation, or ambiguity markers.
+- **Definition:** An immutable reference to the exact ordered semantic content consumed by one model call, including applicable user inputs, consumed steering, committed assistant or tool content, and explicit completion, refusal, failure, cancellation, accepted-risk, typed provider-target-invalidation, or complete reconciliation markers.
 - **Status:** Per-call provenance is accepted; accepted-input-origin starting-frontier and safe-point selection rules are proposed by [ADR-0027](decisions/0027-input-delivery-lifecycle.md). Future non-input origins must define their own starting-frontier rules. Representation remains provisional.
 - **Do not confuse with:** The latest session transcript, an entire turn, or client rendering state.
 - **Example:** Model call 1 consumes frontier 42; steering and a tool result become committed, so model call 2 consumes frontier 47 within the same turn. If call 2 fails, any future explicitly authorized call still retains that committed content.
@@ -174,15 +188,15 @@ This glossary recommends working language for design discussion. “Accepted” 
 
 ## Session configuration defaults
 
-- **Definition:** A mutable-by-version session-level value used to resolve configuration requests for future origin input. Creation establishes the first immutable version; each explicit update installs another.
+- **Definition:** A mutable-by-version session-level model-selection value used to resolve configuration requests for future origin input. Creation establishes the first immutable version; each explicit update installs another. Future semantic categories do not join it until their own ADRs extend the typed configuration layers.
 - **Status:** The user/session-level role and version/freeze relationship are proposed by [ADR-0003](decisions/0003-session-creation-and-transcript-ancestry.md) and [ADR-0027](decisions/0027-input-delivery-lifecycle.md).
 - **Do not confuse with:** A turn's frozen effective configuration. Updating defaults never changes queued, active, waiting, or recovering work.
 - **Example:** The owner changes the session's preferred model after message B was queued; B keeps the defaults version recorded at its acceptance, while message C accepted later uses the new version.
 
 ## Effective configuration
 
-- **Definition:** The complete immutable semantic configuration governing one turn. Its minimum algebra explicitly represents direct or frozen-alias model selection, parameters, absent or frozen instructions, disabled tools or a normalized nonempty enabled-tool set with unconstrained/canonical nonempty placement constraints, disabled known-provider-failure retry and fallback, turn resource policy, and interpreting policy versions. Placement has no variant when tools are disabled; empty/no-op forms normalize to `Disabled` or `Unconstrained`. Every constructible field is identity-significant and equality is semantic value equality.
-- **Status:** Durable provenance is accepted; the closed semantic categories, operational exclusions, immutability, equality, and freeze boundary are proposed by [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md), [ADR-0005](decisions/0005-model-call-retry-semantics.md), and [ADR-0027](decisions/0027-input-delivery-lifecycle.md). Nested subsystem representations remain open without reopening whether they are identity-significant.
+- **Definition:** The complete immutable semantic configuration governing one turn. The first constructible algebra contains one canonical direct model selection or frozen alias definition selecting one direct choice, provider defaults, and disabled known-provider-failure retry/fallback. Direct and alias values remain unequal even when they resolve to the same target. Custom parameters, instructions, tools, placement, per-turn resources, and interpreting-policy choices are absent until their subsystem ADRs extend the typed request, default, override, and effective layers together.
+- **Status:** Durable provenance is accepted; the model-only algebra, operational exclusions, immutability, equality, and freeze boundary are proposed by [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md), [ADR-0005](decisions/0005-model-call-retry-semantics.md), and [ADR-0027](decisions/0027-input-delivery-lifecycle.md).
 - **Do not confuse with:** The exact provider/model target resolved for a model call, current hub defaults, or a client-side draft selection.
 - **Example:** A queued turn records its request, exact session-defaults version, and effective value. Pending safe-point steering records only its source turn; if reclassified, the new turn derives that source turn's canonical immutable effective value without inventing a request or accepting a conflicting copy.
 
