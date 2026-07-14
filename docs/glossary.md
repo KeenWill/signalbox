@@ -44,6 +44,13 @@ This glossary recommends working language for design discussion. “Accepted” 
 - **Do not confuse with:** The most recently observed result, every continuation call in a turn, or suppression of audit/reconciliation evidence.
 - **Example:** After the owner authorizes a replacement for an ambiguous call, a late answer from the prior call remains visible evidence, while only the replacement can supply the turn's authoritative outcome.
 
+## Provider-target mismatch invalidation
+
+- **Definition:** A typed, unique-by-call value recorded when trusted mismatch evidence is first learned after the currently outcome-authoritative call already completed but before its turn terminalized. It binds the invalidated call and first evidence record; the serialized aggregate validates the call's exact target and current authority from canonical call and transfer records instead of copying them into the invalidation. It preserves the call and committed history and prohibits that material from authorizing new semantic effects. An ordinary outcome-authoritative refusal without fatal stop terminalizes its turn atomically and therefore has no corresponding active-turn invalidation window; a continuation refusal raced under fatal stop remains only physical evidence.
+- **Status:** Proposed by [ADR-0005](decisions/0005-model-call-retry-semantics.md).
+- **Do not confuse with:** Reopening the terminal call, deleting its content, an allowed fallback, or late audit evidence after authority transfer or turn terminalization.
+- **Example:** A response commits as completed while a tool is still running; trusted metadata then reports a different model, so the call remains completed but its typed invalidation stops further effects and forces turn failure or reconciliation.
+
 ## Tool request
 
 - **Definition:** A logical request for one named tool operation with normalized arguments, policy state, and eventual logical outcome.
@@ -128,21 +135,35 @@ This glossary recommends working language for design discussion. “Accepted” 
 - **Do not confuse with:** A timeout whose external effect is unknown.
 - **Example:** A provider returns a validated authentication error before accepting the request; the call is recorded as a known failure.
 
-- **Version-one behavior:** A known provider-call failure is not retried automatically; the turn fails explicitly. Tool retry policy remains effect-specific later scope.
+- **Proposed version-one behavior:** Under [ADR-0005](decisions/0005-model-call-retry-semantics.md), a known provider-call failure is not retried automatically and supplies explicit failure evidence; the turn fails when no unacknowledged ambiguity requires a wait or reconciliation. The first trusted provider-reported identity that mismatches the call's exact resolved target while it is nonterminal immediately selects known failure and requests best-effort cancellation. After terminal ambiguity it preserves physical state and fails the turn only when no other unacknowledged ambiguity remains; otherwise the turn requires reconciliation. After completion during an active turn it appends typed invalidation and stops future effects without reopening the call; after terminal known failure/cancellation it preserves that state and existing precedence. Ordinary refusal without fatal stop terminalizes the baseline turn atomically; a continuation refusal under fatal stop remains physical non-authoritative evidence while failure/reconciliation controls. Evidence first learned after authority transfer is audit-only. Tool retry policy remains effect-specific later scope.
 
 ## Ambiguous outcome
 
-- **Definition:** A physical outcome where available evidence cannot establish whether an external effect occurred, usually because acknowledgement or observation was lost. An unacknowledged non-cancelled ambiguity retains the turn's active slot while awaiting evidence or an explicit recovery decision. Owner-authorized continuation preserves the physical `Ambiguous` outcome and adds a separate accepted-risk marker; cancellation before such acknowledgement terminalizes the turn as reconciliation required.
-- **Status:** Concept and no-blind-retry rule accepted; reconciliation states provisional.
+- **Definition:** A physical outcome where available evidence cannot establish whether an external effect occurred, usually because acknowledgement or observation was lost. Under the proposed lifecycle, unacknowledged ambiguity retains the turn's active slot while awaiting evidence or an explicit recovery decision only when neither accepted cancellation nor fatal mismatch prohibits continuation. Owner-authorized continuation preserves the physical `Ambiguous` outcome and adds a separate accepted-risk marker; accepted cancellation or fatal stop before acknowledgement terminalizes the turn as reconciliation required.
+- **Status:** Concept, no-blind-retry rule, and preservation of the ambiguous physical record are accepted; wait, accepted-risk, and reconciliation transitions are proposed by [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md) and [ADR-0005](decisions/0005-model-call-retry-semantics.md).
 - **Do not confuse with:** A known failure, an ordinary retryable read, or “probably failed.”
 - **Example:** A runner loses connectivity immediately after submitting a payment-like external write; the hub records ambiguity and requires reconciliation instead of dispatching it again.
 
 ## Context frontier
 
-- **Definition:** An immutable reference to the exact ordered semantic content consumed by one model call, including applicable user inputs, consumed steering, committed assistant or tool content, and explicit completion, refusal, failure, cancellation, accepted-risk, or ambiguity markers.
+- **Definition:** An immutable reference to the exact ordered semantic content consumed by one model call, including applicable user inputs, consumed steering, committed assistant or tool content, and explicit completion, refusal, failure, cancellation, accepted-risk, typed provider-target-invalidation, or ambiguity markers.
 - **Status:** Per-call provenance is accepted; accepted-input-origin starting-frontier and safe-point selection rules are proposed by [ADR-0027](decisions/0027-input-delivery-lifecycle.md). Future non-input origins must define their own starting-frontier rules. Representation remains provisional.
 - **Do not confuse with:** The latest session transcript, an entire turn, or client rendering state.
 - **Example:** Model call 1 consumes frontier 42; steering and a tool result become committed, so model call 2 consumes frontier 47 within the same turn. If call 2 fails, any future explicitly authorized call still retains that committed content.
+
+## Queue order
+
+- **Definition:** The durable total ordering of known accepted-input-origin work derived from immutable acceptance positions and typed priority relations such as an interrupt's immediate-successor relation.
+- **Status:** Proposed by [ADR-0027](decisions/0027-input-delivery-lifecycle.md); persistence representation remains open.
+- **Do not confuse with:** A direct predecessor pointer fixed when input is accepted, a mutable user-reorderable queue, or wall-clock scheduler order.
+- **Example:** While A is active, after-current B is accepted and then interrupt I is accepted; the priority relation orders I before B without rewriting a fixed predecessor on B.
+
+## Starting lineage
+
+- **Definition:** The immutable first-in-session or exact immediate-predecessor relation fixed for an accepted-input-origin turn when it becomes eligible from durable queue order.
+- **Status:** Proposed by [ADR-0027](decisions/0027-input-delivery-lifecycle.md); future non-input origins must define their own lineage rules.
+- **Do not confuse with:** Queue order before eligibility, transcript ancestry, or turn-attempt lineage.
+- **Example:** After I terminalizes, B fixes `After(I)` and derives its starting context through I even though B was accepted before I.
 
 ## Session configuration defaults
 

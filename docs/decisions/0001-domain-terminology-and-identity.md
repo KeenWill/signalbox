@@ -56,21 +56,23 @@ InitialTurnOrigin =
 AcceptedInputDisposition =
     OriginOf(TurnId)
   | PendingSteering {
-        turn: TurnId,
-        fallback_provenance: ReclassifiedSteeringConfiguration
+        binding: SteeringBinding
     }
   | ConsumedAsSteering {
-        turn: TurnId,
-        call: ModelCallId,
-        frontier: ContextFrontier
+        call: ModelCallId
     }
   | ReclassifiedAsTurnOrigin {
         turn: TurnId,
         reason: NoSafePointBeforeTerminal
     }
+
+SteeringBinding = {
+    source_turn: TurnId,
+    source_effective_configuration: EffectiveConfiguration
+}
 ```
 
-These are the complete baseline disposition categories defined with ADR-0027. Reclassification is distinct from an input originally accepted as turn-origin work so recovery and presentation can explain that the target turn terminated without consuming the steering. Future origin or disposition variants, including a typed regeneration relation, require explicit domain additions; the pseudocode does not use a catch-all variant that would hide an unknown semantic case or an origin whose context rules are still unresolved.
+These are the complete baseline disposition categories defined with ADR-0027. A pending input stores its source turn exactly once in `SteeringBinding`; a consumed input references the immutable model call from which the owning turn and exact frontier are derived. Reclassification is distinct from an input originally accepted as turn-origin work so recovery and presentation can explain that the target turn terminated without consuming the steering. Future origin or disposition variants, including a typed regeneration relation, require explicit domain additions; the pseudocode does not use a catch-all variant that would hide an unknown semantic case or an origin whose context rules are still unresolved.
 
 **Accepted input** describes durable user-originated semantic content and its delivery request. It is distinct from a transport command, which may be delivered more than once, and from a transcript entry, which is a semantic projection created when the input is used.
 

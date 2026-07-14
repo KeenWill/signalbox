@@ -26,10 +26,21 @@ The turn aggregate owns the `Active(Running)` phase together with the complete s
 ### Turn states and the progressing slot
 
 ```text
+AcceptedInputTurnLifecycle = {
+    order: AcceptedInputQueueOrder,
+    state: TurnState
+}
+
 TurnState =
     Queued
-  | Active(ActivePhase)
-  | Terminal(TurnDisposition)
+  | Active {
+        start: AcceptedInputTurnStart,
+        phase: ActivePhase
+    }
+  | Terminal {
+        start: AcceptedInputTurnStart,
+        disposition: TurnDisposition
+    }
 
 ActivePhase =
     Running {
@@ -48,20 +59,42 @@ TurnDisposition =
 CurrentTurnAttempt =
     Prepared { id: TurnAttemptId }
   | Running { id: TurnAttemptId }
-  | CancellationRequested { id: TurnAttemptId }
+  | StopRequested {
+        id: TurnAttemptId,
+        causes: TurnAttemptStopCauses
+    }
+
+AcceptedCancellationCause = {
+    command: DurableCommandId
+}
+
+AcceptedCancellationState =
+    NoAcceptedCancellation
+  | Accepted { cause: AcceptedCancellationCause }
+
+FatalMismatchStopCauses = {
+    failures: NonEmptySet<ProviderTargetMismatchFailureRef>,
+    cancellation: AcceptedCancellationState
+}
+
+TurnAttemptStopCauses =
+    CancellationOnly {
+        cancellation: AcceptedCancellationCause
+    }
+  | FatalMismatch(FatalMismatchStopCauses)
 ```
 
-The names are typed pseudocode, not a final Rust API.
+The names are typed pseudocode, not a final Rust API. ADR-0027 defines `AcceptedInputQueueOrder` and `AcceptedInputTurnStart`. The baseline accepted-input turn retains immutable `order` outside its lifecycle state in every variant. `Queued` carries no start payload, while every `Active` or `Terminal` state carries nonoptional starting lineage and frontier. The transition table uses `Active(X)` and `Terminal(Y)` as shorthand and elides both the aggregate's preserved `order` and the `start` value that every transition after eligibility preserves unchanged. Future non-input origins must introduce their own constructible order/start payloads with their origin lifecycle.
 
 `NonEmptyIssuedOperationRefs` is a nonempty mathematical set whose baseline element is `ModelCall(ModelCallId)` or `ToolAttempt(ToolAttemptId)`. Duplicate elements are invalid, and equality is order-insensitive typed set equality for both wait comparison and structural command deduplication. It is not a stringly generic identifier; a future physical-operation kind must add an explicit tagged case. Carrying the exact references lets recovery and cancellation close the right wait without reconstructing a hidden prior phase.
 
 Additional durable waits, including delegated-child waits, require explicit typed variants and transition review; there is no catch-all wait state. A future wait retains the progressing slot unless the ADR that introduces it also defines branching or rebasing semantics that justify an exception.
 
-For the one-active-turn rule, **actively progressing means `TurnState::Active` in any phase**. It describes ownership of the session's ordered-progress slot, not continuous execution. A turn awaiting approval or recovery authorization, and a turn carrying `CurrentTurnAttempt::CancellationRequested`, retain the slot. Queued and terminal turns do not.
+For the one-active-turn rule, **actively progressing means `TurnState::Active` in any phase**. It describes ownership of the session's ordered-progress slot, not continuous execution. A turn awaiting approval or recovery authorization, and a turn carrying `CurrentTurnAttempt::StopRequested`, retain the slot. Queued and terminal turns do not.
 
 At most one turn per session may be `Active`. Activating a queued successor is prohibited until the current active turn reaches a terminal disposition. The enforcement mechanism is left to scheduler and persistence design, but process memory alone is insufficient.
 
-`Eligible` is a derived scheduling predicate, not another durable `TurnState`. A queued turn is eligible only when every predecessor in its queue lineage is terminal and the session has no active turn. Queue lineage and the active-slot owner are durable, so restart recomputes the same predicate without persisting a second lifecycle state.
+`Eligible` is a derived scheduling predicate, not another durable `TurnState`. A queued turn is eligible only when every turn earlier in ADR-0027's durable total queue order is terminal and the session has no active turn. Immutable acceptance positions, typed priority relations, and the active-slot owner are durable, so restart recomputes the same predicate without persisting a second lifecycle state. The eligibility transition fixes the exact immediate-predecessor starting lineage and context frontier once; queued turns do not carry direct predecessor pointers that priority insertion would have to rewrite.
 
 When an active turn reaches a durable approval or recovery-decision wait, every physical operation already issued by the attempt must first have a durable terminal classification. The current attempt then ends with the cause-specific disposition: approval yields to the wait, while ambiguity retains that classified outcome. The turn remains active and retains the session slot without retaining a live attempt. When resolving evidence or a valid owner decision closes the wait and unfinished work remains, a new turn attempt continues the same turn. Evidence-resolved continuation does not repeat an ambiguous operation and is not an ambiguity retry. A hub restart while the turn is waiting reconstructs the wait; it does not pretend that a process-local attempt remains alive.
 
@@ -69,26 +102,29 @@ When an active turn reaches a durable approval or recovery-decision wait, every 
 
 | From | To | Allowed reason |
 | --- | --- | --- |
-| Queued | Active(Running) | Once eligible, the scheduler atomically fixes the starting frontier, acquires the session slot, and creates the initial `Prepared` attempt |
-| Queued | Terminal(Failed) | Once eligible, the same transition fixes the starting frontier and records why work cannot execute; a queued turn cannot terminalize ahead of a nonterminal predecessor |
+| Queued | Active(Running) | Once eligible, the scheduler preserves immutable `order`, atomically constructs nonoptional `AcceptedInputTurnStart` with the exact starting lineage and frontier, acquires the session slot, and creates the initial `Prepared` attempt |
+| Queued | Terminal(Failed) | Once eligible, the same transition preserves immutable `order`, constructs the exact nonoptional starting lineage/frontier payload, and records why work cannot execute; a queued turn cannot terminalize ahead of an earlier ordered turn |
 | Active(Running with current attempt `Prepared`) | Active(Running with the same attempt `Running`) | Preparation succeeds and the aggregate authorizes external orchestration at the durable boundary |
 | Active(Running with current attempt `Running`) | Active(AwaitingApproval) | Every issued operation is terminally classified, the current attempt ends `YieldedToDurableWait`, and the exact approval request becomes durable |
 | Active(Running with current attempt `Running`) | Active(AwaitingRecoveryDecision) | One or more issued operations are `Ambiguous`, every other issued operation is terminally classified, and the current attempt ends `Ambiguous`; startup classification instead ends the abandoned attempt `Lost` while making the same turn-state transition |
-| Active(Running with current attempt `Running`) | Active(Running with the same attempt `CancellationRequested`) | The hub durably accepts cancellation; the current-attempt variant is the single cancellation state |
-| Active(Running with current attempt `Prepared`) | Terminal(Cancelled) | Cancellation atomically ends the unsent attempt and any prepared physical operations as cancelled, and makes every owned authorized-but-undispatched logical request non-dispatchable with an exact cancellation outcome; no durable cancellation phase is needed |
+| Active(Running with current attempt `Running`) | Active(Running with the same attempt `StopRequested { causes }`) | Unless terminal guards permit an immediate atomic end, the hub durably requests best-effort stop because it accepted cancellation or recorded a fatal current-authority provider-target mismatch; `CancellationOnly` or `FatalMismatch` is persisted in the state that prohibits new effects |
+| Active(Running with current attempt `StopRequested { causes: S }`) | Active(Running with the same attempt `StopRequested { causes: S' }`) | A distinct valid stop cause arrives, `S'` is the typed set union, and no cause is lost; replay of an existing cause is idempotent |
+| Active(Running with current attempt `Prepared`) | Terminal(Cancelled) | Cancellation atomically ends the unsent attempt `AfterCancellation` with its exact accepted-command cause, cancels any prepared physical operations, and makes every owned authorized-but-undispatched logical request non-dispatchable with an exact cancellation outcome; no durable stop phase is needed |
 | Active(AwaitingApproval) | Active(Running) | Approval closes the exact approval wait/dependency, leaves the owned tool request authorized and blocking until its durable outcome, and creates a new turn attempt atomically |
 | Active(AwaitingApproval) | Active(Running) | Denial closes the exact approval wait/dependency, terminally denies the owned tool request, commits that outcome to turn history, and creates a new turn attempt atomically; denial cannot create a tool attempt |
-| Active(AwaitingRecoveryDecision) | Active(Running) | Unfinished work remains, the applicable operation-specific policy permits continuation, and either an exact-set owner decision accepts duplicate risk or new evidence resolves every blocking ambiguity; the wait closes and a new attempt is created atomically. For an owner-authorized replacement of an ambiguous model call, that same transaction also creates the fully targeted `Prepared` replacement call and transfers outcome authority under ADR-0005; no durable intermediate state exposes the new attempt while the prior call remains outcome-authoritative |
+| Active(AwaitingRecoveryDecision) | Active(Running) | No fatal current-authority mismatch invalidation exists; unfinished work remains; the applicable operation-specific policy permits continuation; and either an exact-set owner decision accepts duplicate risk or new evidence resolves every blocking ambiguity. The wait closes and a new attempt is created atomically. For an owner-authorized replacement of an ambiguous model call, that same transaction first applies ADR-0027's safe-point guards and consumes every eligible pending steering input into the replacement frontier, then creates the fully targeted `Prepared` replacement call and transfers outcome authority under ADR-0005; no durable intermediate state exposes the new attempt while the prior call remains outcome-authoritative or steering remains eligible-but-pending |
 | Active(AwaitingRecoveryDecision with set S) | Active(AwaitingRecoveryDecision with set S') | A separate evidence record resolves the blocking uncertainty for one or more references without changing their terminal physical dispositions; `S'` is the exact nonempty strict subset still blocking, and no attempt is created |
 | Active(AwaitingApproval) | Terminal(Cancelled) | Cancellation atomically closes the approval wait and terminally cancels the owned tool request so it is non-dispatchable; no physical attempt exists to cancel |
-| Active(AwaitingRecoveryDecision) | Terminal(ReconciliationRequired) | Cancellation atomically closes the recovery wait while preserving every ambiguous physical outcome |
-| Active(Running with current attempt `Prepared`) | Terminal(Failed) | Preparation fails before running, or startup loses the prepared tenure without ambiguity; the attempt ends `KnownFailure` in the former case and `Lost` in the latter, and neither has a model result that could support completion or refusal |
-| Active(Running with current attempt `Running`) | Terminal(Completed, Refused, or Failed) | The terminalization preconditions below hold and durable evidence permits the exact disposition; startup recovery may leave the abandoned attempt `Lost` while making the same turn-state transition |
+| Active(AwaitingApproval) | Terminal(Failed) | A late current-authority provider-target mismatch atomically appends its invalidation/failure marker, closes the approval wait, terminally cancels the owned tool request so it is non-dispatchable, and fails the turn; no physical attempt exists |
+| Active(AwaitingRecoveryDecision) | Terminal(ReconciliationRequired) | Cancellation, or a fatal mismatch invalidation on a different completed call that prohibits continuing past the still-unresolved wait, atomically closes the recovery wait while preserving every ambiguous physical outcome; the mismatch path also retains its invalidation marker and prior call history |
+| Active(Running with current attempt `Prepared`) | Terminal(Failed) | Preparation fails before running, a late current-authority provider-target mismatch invalidates the work before issue, or startup loses the prepared tenure without ambiguity; ordinary live failure ends `WithoutStop(KnownFailure)`, fatal mismatch ends `AfterFatalMismatch(KnownFailure)` with its exact cause, and startup abandonment ends `WithoutStop(Lost)` |
+| Active(Running with current attempt `Running`) | Terminal(Completed, Refused, or Failed) | The terminalization preconditions below hold and durable evidence permits the exact disposition. Completion/refusal require no fatal stop. A fatal mismatch may end directly as `AfterFatalMismatch(KnownFailure)` when no other work requires an observable stop phase; startup recovery ends the abandoned attempt with disposition `Lost` in `WithoutStop`, `AfterCancellation`, or `AfterFatalMismatch` according to the complete recovered cause set while making the supported turn-state transition |
 | Active(AwaitingRecoveryDecision) | Terminal(Completed, Refused, Failed, Cancelled, or ReconciliationRequired) | Resolving evidence supports an ordinary outcome; or an exact-set owner decision either accepts risk when existing evidence already supports that outcome, or stops for reconciliation. Physical ambiguous records remain terminal and accepted risk is marked separately |
-| Active(Running with current attempt `CancellationRequested`) | Terminal(Completed, Refused, Cancelled, Failed, or ReconciliationRequired) | Issued work reaches honest terminal classification after cancellation; a raced completion or refusal is not rewritten as cancellation |
+| Active(Running with current attempt `StopRequested { causes: CancellationOnly }`) | Terminal(Completed, Refused, Cancelled, Failed, or ReconciliationRequired) | Issued work reaches honest terminal classification after best-effort cancellation; cancellation alone does not rewrite raced completion/refusal or known failure |
+| Active(Running with current attempt `StopRequested { causes: FatalMismatch }`) | Terminal(Failed or ReconciliationRequired) | Issued work reaches honest terminal classification after fatal stop; the typed branch makes completion, refusal, and cancellation unrepresentable |
 | Terminal(any) | any state | Prohibited |
 
-Transitions between different wait variants are prohibited; orchestration must resume through a new attempt before it can reach another kind of wait. The one exception is an evidence-only refinement of `AwaitingRecoveryDecision` to the exact nonempty subset that remains ambiguous. No transition enters a wait while cancellation is requested, and no transition enters any wait until every operation already issued by the attempt is terminally classified. Cancellation never replaces a durable wait with a generic state: approval cancellation closes the exact approval wait, terminally cancels its owned tool request, and terminalizes the turn as `Cancelled`, while recovery-wait cancellation closes that exact wait and terminalizes as `ReconciliationRequired`. Queued-input mutation and cancellation are not baseline features, so no user-driven `Queued -> Cancelled` transition is defined here.
+Transitions between different wait variants are prohibited; orchestration must resume through a new attempt before it can reach another kind of wait. The one exception is an evidence-only refinement of `AwaitingRecoveryDecision` to the exact nonempty subset that remains ambiguous. No transition enters a wait while stop is requested, and no transition enters any wait until every operation already issued by the attempt is terminally classified. Cancellation never replaces a durable wait with a generic state: approval cancellation closes the exact approval wait, terminally cancels its owned tool request, and terminalizes the turn as `Cancelled`, while recovery-wait cancellation closes that exact wait and terminalizes as `ReconciliationRequired`. A fatal current-authority mismatch discovered during a recovery wait either resolves the waited call's own ambiguity and applies the ordinary failure transition, or, when unrelated ambiguity still blocks failure, closes the wait as `ReconciliationRequired` while preserving both facts. No owner continuation is valid after that invalidation. Queued-input mutation and cancellation are not baseline features, so no user-driven `Queued -> Cancelled` transition is defined here.
 
 Before any active turn becomes terminal and releases the progressing slot, one atomic transition must:
 
@@ -107,29 +143,56 @@ An unresolved logical tool/approval dependency or unclassified issued operation 
 TurnAttemptState =
     Prepared
   | Running
-  | CancellationRequested
-  | Ended(AttemptDisposition)
+  | StopRequested { causes: TurnAttemptStopCauses }
+  | Ended(AttemptEnd)
 
-AttemptDisposition =
+AttemptEnd =
+    WithoutStop { disposition: UnstoppedAttemptDisposition }
+  | AfterCancellation {
+        cause: AcceptedCancellationCause,
+        disposition: CancellationStopDisposition
+    }
+  | AfterFatalMismatch {
+        causes: FatalMismatchStopCauses,
+        disposition: FatalMismatchStopDisposition
+    }
+
+UnstoppedAttemptDisposition =
     TurnCompleted
   | TurnRefused
   | YieldedToDurableWait
   | KnownFailure
   | Lost
+  | Ambiguous
+
+CancellationStopDisposition =
+    TurnCompleted
+  | TurnRefused
+  | KnownFailure
+  | Lost
   | Cancelled
+  | Ambiguous
+
+FatalMismatchStopDisposition =
+    KnownFailure
+  | Lost
   | Ambiguous
 ```
 
 | From | To | Rule |
 | --- | --- | --- |
 | Prepared | Running | External orchestration is authorized after the durable preparation boundary |
-| Prepared | Ended(Cancelled, KnownFailure, or Lost) | Cancellation or preparation failure occurs before running, or startup recovery proves the creating process was lost |
-| Running | CancellationRequested | The hub durably requests best-effort cancellation |
-| Running | Ended(TurnCompleted, TurnRefused, YieldedToDurableWait, KnownFailure, Lost, or Ambiguous) | Evidence is classified, the turn completes, startup loses the tenure, or orchestration yields to a durable wait; `Cancelled` requires the aggregate's prior `Running -> CancellationRequested` transition |
-| CancellationRequested | Ended(TurnCompleted, TurnRefused, Cancelled, KnownFailure, Lost, or Ambiguous) | Cancellation evidence is classified without claiming rollback; a raced completion or refusal retains its actual disposition |
+| Prepared | Ended(AfterCancellation(Cancelled)), Ended(AfterFatalMismatch(KnownFailure)), or Ended(WithoutStop(KnownFailure or Lost)) | Cancellation or fatal mismatch atomically records its typed cause in the matching terminal variant; an unrelated preparation failure or startup loss has no stop cause |
+| Running | StopRequested | Accepted cancellation or fatal mismatch records a nonempty singleton cause unless terminal guards permit an immediate end carrying that same cause |
+| Running | Ended(AfterCancellation) or Ended(AfterFatalMismatch) | A stop cause arrives when every terminal guard already permits an immediate atomic end; the matching terminal variant carries that cause even though no durable intermediate `StopRequested` phase is needed |
+| StopRequested(CancellationOnly) | StopRequested(FatalMismatch) | Fatal mismatch adds its nonempty failure set while preserving accepted cancellation |
+| StopRequested(FatalMismatch) | StopRequested(FatalMismatch) | Another fatal failure is added by set union, or the first interrupt adds accepted cancellation; replay is idempotent and either event order constructs the same value |
+| Running | Ended(WithoutStop(TurnCompleted, TurnRefused, YieldedToDurableWait, KnownFailure, Lost, or Ambiguous)) | Evidence is classified, the turn completes, startup loses the tenure, or orchestration yields to a durable wait |
+| StopRequested(CancellationOnly(C)) | Ended(AfterCancellation { cause: C, disposition }) | Evidence is classified without claiming rollback; raced completion/refusal remains possible, while yielding to a durable wait is not |
+| StopRequested(FatalMismatch(F)) | Ended(AfterFatalMismatch { causes: F, disposition }) | The exact fatal causes and optional accepted cancellation are preserved; only known failure, loss, or ambiguity is representable, so completion/refusal/cancellation and durable-wait yield cannot be constructed |
 | Ended | any state | Prohibited |
 
-Exactly one `CurrentTurnAttempt` is carried by `Active(Running)`. Its variant is the sole nonterminal attempt state, so no independent turn-level cancellation flag can disagree with it. Cancellation changes an already-running attempt to `CancellationRequested`; an unsent `Prepared` attempt instead ends atomically with the turn. A waiting active turn has no attempt and carries the exact request or nonempty ambiguous-operation references on which it waits. Cancellation from a wait closes that wait and terminalizes in one transition, so there is no cancellation state with an optional attempt or a hidden prior wait. A new attempt must reference the ended attempt whose wait it continues, and stale attempts cannot advance turn state.
+Exactly one `CurrentTurnAttempt` is carried by `Active(Running)`. Its variant is the sole nonterminal attempt state, so no independent turn-level cancellation flag can disagree with it. `StopRequested` is nonempty by construction: `CancellationOnly` references the accepted command, while `FatalMismatch` contains a nonempty set of exact nonterminal observations or unique terminal-call invalidations and may also retain one accepted cancellation. Adding mismatch then cancellation or cancellation then mismatch constructs the same fatal value, and replay is idempotent. Every stop-requested state prohibits new semantic effects except classification of work already issued. Terminal attempt history preserves the matching typed value: `AfterCancellation` permits honest raced completion/refusal, whereas `AfterFatalMismatch` can represent only known failure, loss, or ambiguity. Neither can yield to a durable wait, and `WithoutStop` cannot claim `Cancelled`; restart therefore cannot construct fatal-stop completion/refusal/cancellation or infer an optional side flag. Cancellation of an unsent `Prepared` attempt ends it atomically with the turn and records the cancellation cause, while late mismatch during `Prepared` records its fatal cause and ends as known failure. A waiting active turn has no attempt and carries the exact request or nonempty ambiguous-operation references on which it waits. Cancellation from a wait closes that wait and terminalizes in one transition, so there is no stop state with an optional attempt or a hidden prior wait. A new attempt must reference the ended attempt whose wait it continues, and stale attempts cannot advance turn state.
 
 If the current attempt ends while the turn remains nonterminal, the same transaction must move the turn into a typed durable wait. Later resolving evidence or a valid owner decision may atomically close that wait and create a new attempt. The domain never leaves the turn in `Active(Running)` without a current attempt, even briefly in durable state.
 
@@ -137,11 +200,11 @@ If the current attempt ends while the turn remains nonterminal, the same transac
 
 A **recovery retry** is an owner-authorized decision to repeat or continue past the same nonterminal turn after accepting unresolved duplicate risk. An **evidence-resolved continuation** resumes unfinished work only after evidence has resolved every blocking ambiguity and does not repeat an operation whose outcome remains unknown. Both remain subject to the operation-specific retry policy: in particular, ADR-0005's version-one ban on known-provider-failure retry cannot be bypassed by calling it continuation. A **physical attempt replacement** is the new turn attempt created after either permitted path closes the recovery wait.
 
-On startup, the hub scans every nonterminal attempt owned by an earlier process incarnation. It ends that attempt as `Lost` and classifies each recorded physical operation from durable evidence as completed, known failed, refused where applicable, cancelled, or ambiguous. The scan is recovery bookkeeping, not a turn attempt, and it cannot issue new semantic provider or tool effects.
+On startup, the hub scans every nonterminal attempt owned by an earlier process incarnation. It classifies each recorded physical operation from durable evidence as completed, known failed, refused where applicable, cancelled, or ambiguous; derives every stop cause established by that complete evidence set; and ends the abandoned attempt with disposition `Lost` in the matching `WithoutStop`, `AfterCancellation`, or `AfterFatalMismatch` terminal variant. A fatal cause first learned during this scan is therefore retained just like one durable before the crash. The scan is one serialized recovery-bookkeeping transition, not a turn attempt, and it cannot issue new semantic provider or tool effects.
 
-Recovery applies one precedence rule whether classification happens live or at startup. First, any unacknowledged ambiguity blocks an ordinary terminal outcome: with cancellation it yields `ReconciliationRequired`, otherwise it enters `AwaitingRecoveryDecision`. Once no blocking ambiguity remains, sufficient conversational completion or refusal evidence from the currently outcome-eligible provider call yields `Completed` or `Refused`; otherwise a known failure that prevents completion yields `Failed`; otherwise evidence that cancellation prevented all remaining work yields `Cancelled`. Evidence from a provider call whose authority transferred to a replacement is retained but does not participate in this precedence or semantic-content selection. A cancellation request alone proves none of those outcomes. A prior-process tenure abandoned with no operation ambiguity and no sufficient authoritative completion, refusal, or confirmed-cancellation evidence fails under the version-one no-automatic-retry policy. The abandoned attempt remains `Lost` regardless of the turn disposition. An already durable wait is simply reconstructed. Startup never creates a cancellation-only or classification-only replacement attempt. A new attempt exists only after resolving evidence or a valid non-cancelled owner decision closes `AwaitingRecoveryDecision`.
+Recovery applies one precedence rule whether classification happens live or at startup. Startup first derives the complete physical-evidence set, target invalidations, and typed stop causes in its single transaction; it does not let whichever recovered fact happened to be examined first choose the turn outcome. First, any remaining unacknowledged ambiguity blocks an ordinary terminal outcome: with an accepted-cancellation cause or a fatal mismatch that prohibits continuation it yields `ReconciliationRequired`, otherwise it enters `AwaitingRecoveryDecision`. Once no blocking ambiguity remains, sufficient conversational completion evidence from the currently outcome-eligible provider call yields `Completed` only if no fatal current-authority mismatch cause or invalidation exists. A non-mismatched refusal without fatal stop terminalizes call and turn atomically under ADR-0005; a continuation refusal raced under a fatal cause already durable or first established in that same startup transaction remains a physical call disposition while the attempt/turn follow failure precedence. A trusted mismatch observed while a call is nonterminal selects call `KnownFailed`; one first learned after its `Completed` disposition while the turn remains active preserves that call state but appends `ProviderTargetMismatchInvalidation`. Either supplies turn-level failure evidence. Otherwise a known failure that prevents completion yields `Failed`; otherwise evidence that cancellation prevented all remaining work yields `Cancelled`. Evidence from a provider call whose authority transferred to a replacement is retained but does not participate in this precedence or semantic-content selection. An accepted-cancellation cause alone proves none of those outcomes; a fatal-mismatch cause references the separate exact failure evidence that does. A prior-process tenure abandoned with no operation ambiguity and no sufficient authoritative completion, refusal, or confirmed-cancellation evidence fails under the version-one no-automatic-retry policy. The abandoned attempt has disposition `Lost` regardless of the turn disposition, in the terminal variant matching the complete stop-cause set. An already durable wait is simply reconstructed. Startup never creates a cancellation-only or classification-only replacement attempt. A new attempt exists only after resolving evidence or a valid owner decision closes `AwaitingRecoveryDecision`, and fatal mismatch invalidation makes continuation invalid.
 
-Closure of a provider ambiguity wait serializes the owner decision against newly resolving provider evidence. If completion, refusal, known-failure, or confirmed-cancellation evidence for the still-authoritative prior call commits first, the common precedence applies and a now-stale duplicate-risk command cannot create a replacement. If `ContinueAcceptingDuplicateRisk` commits first, its single transaction closes the exact wait, records accepted risk, creates the new `Prepared` turn attempt and fully targeted `Prepared` replacement call, and transfers outcome authority; every later fact about the prior call is audit/reconciliation evidence only. Restart reconstructs whichever transaction won and never restores authority to a replaced call.
+Closure of a provider ambiguity wait serializes the owner decision against newly resolving provider evidence. If completion, refusal, known-failure, or confirmed-cancellation evidence for the still-authoritative prior call commits first, the common precedence applies and a now-stale duplicate-risk command cannot create a replacement. If `ContinueAcceptingDuplicateRisk` commits first, its single transaction closes the exact wait, records accepted risk, consumes pending steering under ADR-0027, creates the new `Prepared` turn attempt and fully targeted `Prepared` replacement call with that frontier, and transfers outcome authority; every later fact about the prior call is audit/reconciliation evidence only. Restart reconstructs whichever transaction won and never restores authority to a replaced call or a consumed input to pending state.
 
 Recovery remains in the same turn only when all of the following hold:
 
@@ -168,9 +231,9 @@ Updating session configuration defaults under ADR-0027 is not itself conversatio
 
 ### Cancellation and ambiguity
 
-Cancellation is a forward-only request to stop future progress. For a running turn, the request is recorded on the `Running` state that retains the exact current attempt; it sends best-effort cancellation to current model calls and tool attempts, makes authorized-but-undispatched requests non-dispatchable, and prevents new effects unless needed to classify already-issued work. The request or a locally closed connection is not evidence that an external operation stopped: `Cancelled` requires effect-specific terminal evidence, and uncertainty is `Ambiguous`. Provider or runner work may still finish after the request; raced evidence is classified honestly, and evidence arriving after terminalization follows the late-result rule above. For an approval wait, cancellation closes the exact wait, terminally cancels its owned tool request, and terminalizes the turn as `Cancelled`. For a recovery-decision wait, cancellation closes the exact wait and terminalizes as `ReconciliationRequired`. Cancellation does not roll back, compensate, or declare an external effect absent.
+Cancellation is a forward-only request to stop future progress. For a running turn, acceptance moves the exact current attempt to `StopRequested(CancellationOnly)`, or populates the accepted-cancellation field if a fatal-mismatch stop is already present; it sends best-effort cancellation to current model calls and tool attempts, makes authorized-but-undispatched requests non-dispatchable, and prevents new effects unless needed to classify already-issued work. The cause or a locally closed connection is not evidence that an external operation stopped: `Cancelled` requires effect-specific terminal evidence, and uncertainty is `Ambiguous`. Provider or runner work may still finish after the request; raced evidence is classified honestly, and evidence arriving after terminalization follows the late-result rule above. For an approval wait, cancellation closes the exact wait, terminally cancels its owned tool request, and terminalizes the turn as `Cancelled`. For a recovery-decision wait, cancellation closes the exact wait and terminalizes as `ReconciliationRequired`. Cancellation does not roll back, compensate, or declare an external effect absent.
 
-The turn cannot become `Cancelled`, `Failed`, `Completed`, or `Refused` while an issued effect has an unacknowledged ambiguous outcome. The physical attempt ends `Ambiguous`. When no cancellation request is active, the turn enters `Active(AwaitingRecoveryDecision)` and retains the session slot. The ambiguity is never resolved merely by scheduler or effect-policy timing. An exact-set `ContinueAcceptingDuplicateRisk` decision may instead mark the ambiguity acknowledged without changing its physical disposition; ordinary terminalization is then permitted only with that accepted-risk marker in semantic history.
+The turn cannot become `Cancelled`, `Failed`, `Completed`, or `Refused` while an issued effect has an unacknowledged ambiguous outcome. The physical attempt ends `Ambiguous`. When no stop cause or fatal invalidation requires terminal reconciliation, the turn enters `Active(AwaitingRecoveryDecision)` and retains the session slot. The ambiguity is never resolved merely by scheduler or effect-policy timing. An exact-set `ContinueAcceptingDuplicateRisk` decision may instead mark the ambiguity acknowledged without changing its physical disposition, but it is invalid after fatal mismatch invalidation; ordinary terminalization is permitted only with that accepted-risk marker in semantic history.
 
 An explicit owner recovery decision is a typed command rather than an unbound boolean:
 
@@ -213,16 +276,16 @@ No option reopens or overwrites the ambiguous physical operation, and no duplica
 
 - INV-004, INV-006, INV-009–INV-011, INV-025, INV-026, INV-029, and INV-034 are preserved and made precise.
 - INV-009 changes from provisional state membership to the exact rule that every `Active` phase retains the slot.
-- A running turn carries exactly one `CurrentTurnAttempt`; its `Prepared`, `Running`, or `CancellationRequested` variant is the single nonterminal attempt state. Cancellation of a `Prepared` attempt ends it and the turn atomically. Each waiting active turn carries its exact wait subject and no attempt.
+- A running turn carries exactly one `CurrentTurnAttempt`; its `Prepared`, `Running`, or `StopRequested` variant is the single nonterminal attempt state. `StopRequested` is either `CancellationOnly` or `FatalMismatch` with a nonempty failure set and optional accepted cancellation; additions are idempotent and event-order independent, and matching terminal variants make fatal-stop completion/refusal/cancellation unrepresentable. Cancellation of a `Prepared` attempt ends it and the turn atomically; fatal mismatch ends it as known failure. Each waiting active turn carries its exact wait subject and no attempt.
 - Ending a current attempt for a nonterminal turn atomically moves the turn to a typed wait; only later resolving evidence or a valid owner decision may close that wait and create a replacement.
 - No terminal turn or attempt returns to a nonterminal state.
 - A turn cannot terminalize or release its slot until every owned logical tool/approval dependency is durably closed or terminally non-dispatchable, every issued physical operation is durably classified, its current attempt is ended, and any durable wait is closed.
-- A live provider refusal uses call, attempt, and turn dispositions `Refused`, `TurnRefused`, and `Refused`. Startup-observed refusal leaves the abandoned attempt `Lost`; evidence after terminal ambiguity leaves call and attempt ambiguous. Both recovery paths may still terminalize the turn as `Refused` without reopening physical records.
+- A live provider refusal without reported target mismatch and without fatal stop uses call, attempt, and turn dispositions `Refused`, `TurnRefused`, and `Refused` in one aggregate transition; serial orchestration makes a refused-call/effect-authorizing-turn state invalid. A continuation that races refusal under `StopRequested(FatalMismatch)` remains physically refused and non-authoritative while the attempt ends `AfterFatalMismatch` and the turn fails or reconciles. Startup applies the same distinction from its complete evidence set: a fatal cause already durable or first established in that scan makes the abandoned attempt `AfterFatalMismatch(Lost)` and keeps refusal non-authoritative; without a stop cause it is `WithoutStop(Lost)` and ordinary refusal may terminalize the turn. Evidence after terminal ambiguity leaves call and attempt ambiguous. Mismatch delivered with or before ordinary refusal commit selects call known failure; mismatch resolving terminal ambiguity preserves that physical state, failing the turn when no other ambiguity remains and requiring reconciliation otherwise; evidence after an atomically refused turn cannot rewrite it.
 - No recovery retry changes origin, effective configuration, committed semantic history, or known effect evidence.
 - Every provider replacement call atomically becomes outcome-authoritative; prior-call evidence remains durable but cannot create a second conversational outcome or change successor context.
 - Ambiguity is never coerced to cancellation or known failure to free the session slot.
-- A non-cancelled unacknowledged ambiguous issued effect always enters `AwaitingRecoveryDecision`; only a typed owner decision or new evidence may continue or terminalize it. Owner-authorized continuation preserves the physical ambiguity and adds an explicit accepted-risk marker that later terminal outcomes must retain.
-- No cancellation transition enters `AwaitingRecoveryDecision`; cancellation plus unresolved ambiguity closes any existing recovery wait and terminalizes as reconciliation required.
+- An unacknowledged ambiguous issued effect enters `AwaitingRecoveryDecision` only when neither accepted cancellation nor fatal mismatch/invalidation requires terminal reconciliation; only a typed owner decision or new evidence may then continue or terminalize it. Owner-authorized continuation preserves the physical ambiguity and adds an explicit accepted-risk marker that later terminal outcomes must retain.
+- No accepted-cancellation or fatal-mismatch stop enters `AwaitingRecoveryDecision`; either cause plus unresolved ambiguity closes any existing recovery wait and terminalizes as reconciliation required, and fatal invalidation prohibits owner continuation.
 
 ## Strongest alternative
 
@@ -248,13 +311,13 @@ Attempt records become more numerous around resumed waits, but each describes an
 
 Terminal reconciliation-required turns release the progressing slot while preserving explicit ambiguity for successor context. Reconciliation is a separate lifecycle and may affect later work only through a new durable fact.
 
-Non-cancelled ambiguity can therefore block later turns until the owner decides. This is intentionally stronger than selecting terminal reconciliation from scheduler timing: the owner must explicitly choose when unresolved evidence is allowed to release the ordered-progress slot.
+Ambiguity without accepted cancellation or fatal mismatch can therefore block later turns until the owner decides. This is intentionally stronger than selecting terminal reconciliation from scheduler timing: the owner must explicitly choose when unresolved evidence is allowed to release the ordered-progress slot.
 
 ## Scenario walkthroughs
 
-- **S03:** Restart reconstructs a queued turn or an active wait. Eligibility is derived from durable lineage and slot ownership. If running orchestration was lost, the startup scan ends its current attempt, classifies every issued operation, and never creates a replacement by itself.
-- **S04:** A lost provider stream ends the physical attempt; it never changes turn identity by itself. A non-cancelled ambiguous result puts the turn in `AwaitingRecoveryDecision` and prevents automatic replacement; a known provider failure without ambiguity fails the turn.
-- **S06:** A non-cancelled ambiguous tool write ends its attempt and retains the turn slot in `AwaitingRecoveryDecision`. Later tool policy may prohibit continuation, but scheduler timing cannot silently choose it or release the slot.
+- **S03:** Restart reconstructs a queued turn with `AcceptedInputQueueOrder` or an active wait with nonoptional `AcceptedInputTurnStart`. Eligibility is derived from durable total queue order and slot ownership; the activation or eligible-failure transition constructs starting lineage and frontier together. If running orchestration was lost, the startup scan ends its current attempt, classifies every issued operation, and never creates a replacement by itself.
+- **S04:** A lost provider stream ends the physical attempt; it never changes turn identity by itself. An ambiguous result puts the turn in `AwaitingRecoveryDecision` and prevents automatic replacement only when neither accepted cancellation nor fatal mismatch prohibits continuation; either stop cause yields reconciliation. A known provider failure without ambiguity fails the turn. Resolving target-mismatch evidence after terminal ambiguity leaves the call and attempt ambiguous, failing the turn when no other unacknowledged ambiguity remains and requiring reconciliation otherwise. Mismatch first discovered after call completion while the turn remains active creates typed invalidation and applies the same stop/failure-or-reconciliation rule as live handling; the abandoned attempt ends `AfterFatalMismatch(Lost)` whether that cause was durable before the crash or first established by the scan. A recovered ordinary non-mismatched refusal terminalizes the turn atomically only when the complete evidence set has no fatal cause; refusal from a continuation under a prior or same-scan fatal cause remains physical evidence while the turn fails or reconciles.
+- **S06:** An ambiguous tool write without accepted cancellation or fatal mismatch ends its attempt and retains the turn slot in `AwaitingRecoveryDecision`. Either stop cause instead preserves the physical ambiguity and makes the turn `ReconciliationRequired`. Later tool policy may prohibit continuation, but scheduler timing cannot silently choose it or release the slot.
 - **S07:** Interrupting an unsent `Prepared` attempt ends it and the turn atomically; interrupting a `Running` attempt records cancellation and retains the slot until honest classification; interrupting an approval or recovery wait closes that exact wait and terminalizes atomically. A restart performs the startup scan without creating cancellation-only work. The interrupt-created successor remains queued.
 - **S08:** Pending safe-point steering belongs to the active turn. The turn retains its slot through waits, and later calls may consume a newer frontier.
 - **S10:** Entering `AwaitingApproval` ends the current attempt with `YieldedToDurableWait`; approval creates a new attempt for the same active turn.
