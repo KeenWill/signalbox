@@ -77,7 +77,7 @@ This glossary recommends working language for design discussion. “Accepted” 
 - **Definition:** The source frontier from which a session's initial semantic conversation context was derived, or an explicit absence of such a source.
 - **Status:** Single-source initial concept is accepted; the immutable `none` or one-source boundary is proposed by [ADR-0003](decisions/0003-session-creation-and-transcript-ancestry.md). Any future multi-source model remains open. “Transcript ancestry” is preferred to “parent session,” because delegation and ancestry are independent.
 - **Do not confuse with:** Creation cause, ongoing related-session links, or ownership.
-- **Example:** A user-created session forks session A through message 18; its cause is user creation and its ancestry is A at frontier 18.
+- **Example:** An owner-created session forks session A through message 18; its cause is `OwnerInitiated` and its ancestry is A at frontier 18.
 
 ## Input delivery policy
 
@@ -174,10 +174,10 @@ This glossary recommends working language for design discussion. “Accepted” 
 
 ## Effective configuration
 
-- **Definition:** The complete immutable semantic configuration governing one turn. Its minimum algebra explicitly represents direct or frozen-alias model selection, parameters, absent or frozen instructions, disabled or configured tools, placement constraints, disabled known-provider-failure retry and fallback, turn resource policy, and interpreting policy versions. Every field is identity-significant and equality is semantic value equality.
+- **Definition:** The complete immutable semantic configuration governing one turn. Its minimum algebra explicitly represents direct or frozen-alias model selection, parameters, absent or frozen instructions, disabled tools or enabled tools with placement constraints, disabled known-provider-failure retry and fallback, turn resource policy, and interpreting policy versions. Placement has no variant when tools are disabled. Every constructible field is identity-significant and equality is semantic value equality.
 - **Status:** Durable provenance is accepted; the closed semantic categories, operational exclusions, immutability, equality, and freeze boundary are proposed by [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md), [ADR-0005](decisions/0005-model-call-retry-semantics.md), and [ADR-0027](decisions/0027-input-delivery-lifecycle.md). Nested subsystem representations remain open without reopening whether they are identity-significant.
 - **Do not confuse with:** The exact provider/model target resolved for a model call, current hub defaults, or a client-side draft selection.
-- **Example:** A queued turn records its request, exact session-defaults version, and effective value. Reclassified safe-point steering instead records the source turn and inherited effective value without inventing a request.
+- **Example:** A queued turn records its request, exact session-defaults version, and effective value. Pending safe-point steering records only its source turn; if reclassified, the new turn derives that source turn's canonical immutable effective value without inventing a request or accepting a conflicting copy.
 
 ## Dispatch generation
 

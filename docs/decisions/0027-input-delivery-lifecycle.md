@@ -72,8 +72,10 @@ EffectiveConfiguration = {
         parameters: ProviderDefaults | FrozenModelParameters
     },
     instructions: None | FrozenInstructionSnapshot,
-    tools: Disabled | Enabled(FrozenToolConfiguration),
-    placement: Unconstrained | FrozenPlacementConstraints,
+    tools: Disabled | Enabled {
+        configuration: FrozenToolConfiguration,
+        placement: Unconstrained | FrozenPlacementConstraints
+    },
     recovery: RecoveryConfiguration {
         known_provider_failure_retry: Disabled,
         model_fallback: Disabled,
@@ -85,7 +87,7 @@ EffectiveConfiguration = {
 
 `FrozenAliasDefinition` is the immutable definition version or value snapshot used to interpret the alias; its current version is selected by the atomic acceptance transition. `ProviderDefaults` means provider-defined parameter defaults selected as part of this frozen semantic value, not a later Signalbox lookup. `FrozenPolicyVersions` may be empty only when no interpreting policy applies. Each snapshot is a purpose-specific immutable domain value rather than JSON or a generic key-value map. Later subsystem ADRs may refine its internals without changing the variants or moving the category across the identity boundary.
 
-`TypedConfigurationOverrides`, `ConfigurationRequest`, and `SessionConfigurationDefaults` use corresponding purpose-specific typed variants rather than generic maps. Overrides express only caller-selected differences from the named defaults version; the normalized request itself contains no optional “fill this later” fields and is complete inside the domain acceptance transition. `EffectiveConfiguration` differs by capturing immutable alias meaning and the policy snapshots required to execute that request.
+`TypedConfigurationOverrides`, `ConfigurationRequest`, and `SessionConfigurationDefaults` use corresponding purpose-specific typed variants rather than generic maps. Overrides express only caller-selected differences from the named defaults version; the normalized request itself contains no optional “fill this later” fields and is complete inside the domain acceptance transition. `EffectiveConfiguration` differs by capturing immutable alias meaning and the policy snapshots required to execute that request. Placement constrains tool execution and therefore exists only inside `Enabled`; `Disabled` cannot carry an inert placement value that would change configuration identity without changing any possible behavior.
 
 An unimplemented capability is represented explicitly as disabled or absent inside this algebra; it is not omitted and later filled from mutable defaults. In particular, version one has no known-provider-failure retry and no model fallback.
 
@@ -114,8 +116,7 @@ AcceptedInputDisposition =
   | ReclassifiedAsTurnOrigin { turn: TurnId, reason: NoSafePointBeforeTerminal }
 
 SteeringBinding = {
-    source_turn: TurnId,
-    source_effective_configuration: EffectiveConfiguration
+    source_turn: TurnId
 }
 
 TurnConfigurationProvenance =
@@ -127,7 +128,7 @@ TurnConfigurationProvenance =
 
 Effective configuration freezes every semantic category defined above. Its typed equality is total: any field difference requires new logical work, while changes to explicitly excluded operational facts do not. The alias definition is already frozen, and exact target resolution occurs during the initial prepared attempt but before model-call creation as defined by ADR-0005. If static pre-activation validation proves a frozen configuration structurally unsupported, the already-created turn waits until its predecessors terminate, fixes its starting frontier, and fails without an attempt. If target resolution then fails after activation, the prepared attempt ends `KnownFailure` and the turn fails. Neither path lets input disappear, adopt newer session defaults, or terminalize ahead of its lineage.
 
-`NextSafePoint` initially creates no turn. Its command variant contains no independent configuration request. It captures one `SteeringBinding` containing the exact source turn and source effective configuration. If terminalization later reclassifies the input, the new origin reuses that binding as `InheritedForReclassifiedSteering`; it does not duplicate a second source-turn field, invent a request, or claim that current session defaults produced the value. Any model or configuration change must instead be submitted as origin input for new logical work. The explicit delivery request determines identity: the hub does not inspect natural-language content to decide whether steering expresses the “same” or a “materially different” objective.
+`NextSafePoint` initially creates no turn. Its command variant contains no independent configuration request. It captures one `SteeringBinding` containing only the exact source turn; that turn already owns the canonical immutable effective configuration. If terminalization later reclassifies the input, the new origin reuses that binding as `InheritedForReclassifiedSteering` and atomically sets its own required effective configuration equal to the referenced source turn's canonical value. It does not store a second source configuration in the binding, duplicate a source-turn field, invent a request, or claim that current session defaults produced the value. A missing source turn or any attempt to supply a different configuration is invalid. Any model or configuration change must instead be submitted as origin input for new logical work. The explicit delivery request determines identity: the hub does not inspect natural-language content to decide whether steering expresses the “same” or a “materially different” objective.
 
 ```text
 AcceptedInputQueueOrder = {
@@ -144,7 +145,7 @@ Accepted origin turns persist `AcceptedInputQueueOrder`, not a direct predecesso
 | --- | --- | --- | --- | --- |
 | Start with no active turn | Persist input, origin turn, configuration, and acceptance position; derived eligibility holds if no predecessor is queued | New turn immediately | None is active | Reconstruct queued or active work and derive eligibility from durable queue order and slot ownership |
 | Interrupt | Persist input and successor configuration plus the exact predecessor transition atomically | New turn, designated as the active turn's immediate successor | End an unsent `Prepared` attempt and turn; request best-effort cancellation of a `Running` attempt; or close the exact durable wait; never roll back issued work | Reconstruct cancellation or terminal disposition, issued-effect evidence, and queued successor; startup scans abandoned attempts without creating recovery work |
-| Next safe point | Persist input as pending steering with source-turn configuration provenance | No new turn unless reclassified | Does not mutate an issued provider call, tool request, approval, or tool attempt | Reconstruct pending steering, target, and inherited fallback provenance; consume or reclassify durably |
+| Next safe point | Persist input as pending steering with a canonical source-turn reference | No new turn unless reclassified | Does not mutate an issued provider call, tool request, approval, or tool attempt | Reconstruct pending steering and derive immutable inherited configuration from its source turn; consume or reclassify durably |
 | After current turn | Persist input, queued turn, immutable acceptance position, and configuration | New queued turn | Does not cancel or alter current work | Reconstruct exact queue order and frozen configuration |
 
 The first accepted interrupt records a typed priority relation designating its origin turn as the immediate successor of the active turn, ahead of every other successor candidate. This includes ordinary after-current turns already queued and any pending safe-point input that may be reclassified when the interrupted turn terminalizes. It does not rewrite a direct predecessor because queued turns do not fix one before eligibility. If the current attempt is `Prepared`, acceptance atomically ends the unsent attempt and predecessor as `Cancelled` with `AcceptedCancellationCause { command: command_id }` in attempt history. If it is `Running`, acceptance atomically changes that sole current-attempt state to `StopRequested(CancellationOnly)` with that cause. If it is already `StopRequested(FatalMismatch)` without cancellation, acceptance populates its cancellation field and creates the successor without reauthorizing any predecessor effect. Cancellation from an approval or recovery wait closes that exact wait and terminalizes atomically under ADR-0004. Another interrupt is rejected once accepted cancellation is present, and a later request must target the new authoritative active state. After the interrupt-created successor, reclassified steering and ordinary queued turns retain their original accepted-input order. This defined priority insertion is part of interrupt semantics, not a general queue-reordering command.
@@ -236,7 +237,7 @@ Version one does not support editing accepted input, reordering queued turns, ch
 - **Safe point:** The version-one provider-call preparation boundary at which pending steering can enter a new immutable context frontier.
 - **Context frontier:** An immutable reference to the exact ordered semantic content consumed by one model call, including applicable user inputs, consumed steering, committed assistant or tool content, and explicit terminal-outcome markers.
 - **Session configuration defaults:** Mutable, explicitly versioned user/session-level defaults used only while accepting future origin input.
-- **Inherited reclassification provenance:** The source turn and frozen effective configuration captured for pending steering in case that input must become new logical work without an explicit configuration request.
+- **Inherited reclassification provenance:** The exact source-turn reference captured for pending steering, from which reclassification derives that turn's canonical immutable effective configuration when the input must become new logical work without an explicit configuration request.
 - **Starting context frontier:** The immutable outcome-aware semantic frontier fixed with starting lineage when an accepted-input-origin turn becomes eligible.
 - **Queue order:** Immutable accepted-input positions plus typed priority relations that form the durable total order of known work before eligibility.
 - **Starting lineage:** The first-in-session or exact immediate-predecessor relation fixed once from durable queue order when an accepted-input-origin turn becomes eligible.
@@ -249,7 +250,7 @@ Version one does not support editing accepted input, reordering queued turns, ch
 - INV-008 fixes turn creation and configuration freeze atomically with accepted origin input.
 - INV-016 fixes version-one safe points at model-call preparation boundaries.
 - Every acknowledged input is either a turn origin, pending steering, consumed steering, or visibly reclassified as a turn origin; no state permits silent disappearance.
-- Every origin turn carries either explicit request/default-version/effective provenance or inherited reclassification provenance; no reclassified steering input invents a configuration request.
+- Every origin turn carries either explicit request/default-version/effective provenance or inherited source-turn provenance. Reclassification constructs the new turn's effective configuration from that canonical source turn in the same transition; no reclassified steering input invents a configuration request or carries a competing copied value.
 - Updating session defaults affects only origin input accepted after the new version becomes current.
 - Every queued or interrupt-created turn fixes one explicit starting lineage and frontier before activation.
 - For accepted-input-origin turns, `FirstInSession` starting lineage is constructible if and only if the session has no prior turn; every such turn made eligible later fixes the exact terminal predecessor immediately before it in durable queue order. Future non-input origins retain their own explicit extension boundary.
@@ -289,7 +290,7 @@ Interrupt is responsive in cancellation signaling but conservative in activation
 - **S01:** The client submits `StartWhenNoActiveTurn`; with no earlier queued work, acceptance creates a queued turn for which eligibility is immediately derivable. Activation atomically fixes a frontier based on no ancestry or one immutable ancestry source and creates its initial attempt.
 - **S03:** Restart finds the accepted input, already-created queued turn, configuration provenance, acceptance/priority order facts, and disposition, then derives eligibility. An unexecutable queued turn waits for every earlier ordered turn and fixes its exact starting lineage and frontier before failing. No session default is re-read to reconstruct intent.
 - **S07:** Interrupt atomically creates the immediate successor with a typed priority relation and ends an unsent prepared predecessor, requests cancellation of an already-running predecessor, or closes the exact wait. No queued successor has fixed a direct predecessor; after terminalization adds any reclassified steering, each turn later fixes lineage and a frontier through the exact terminal turn before it. Startup classification creates no cancellation-only attempt.
-- **S08:** Steering accepted during a provider call remains pending with one source-turn/configuration binding. After every earlier issued physical operation is classified and every earlier tool/approval dependency has a durable outcome, the next provider-call boundary—including duplicate-risk replacement—consumes and commits it by reference to that call; an authorized-but-undispatched tool request cannot be bypassed. Every future authorized call retains the steering, and if no such boundary occurs, terminalization reclassifies it into visible queued work with that provenance and original acceptance position.
+- **S08:** Steering accepted during a provider call remains pending with one binding to its canonical source turn and no copied configuration. After every earlier issued physical operation is classified and every earlier tool/approval dependency has a durable outcome, the next provider-call boundary—including duplicate-risk replacement—consumes and commits it by reference to that call; an authorized-but-undispatched tool request cannot be bypassed. Every future authorized call retains the steering, and if no such boundary occurs, terminalization reclassifies it into visible queued work whose configuration is derived from that source turn and whose order uses the original acceptance position.
 - **S09:** After-current input creates a queued turn immediately with frozen configuration and acceptance position but no direct predecessor. At eligibility it fixes context and starting lineage through the terminal turn immediately before it after all priority insertions.
 - **S10:** Steering can remain pending through an approval wait. It neither alters the approved request nor releases the active turn's slot.
 - **S24:** Reconnecting clients reconstruct accepted-input dispositions and replace any transient draft; pending steering is not inferred from client state.

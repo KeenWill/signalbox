@@ -82,7 +82,7 @@ These scenarios test architectural boundaries; quoted commands and state names a
 ## S08 — Submit safe-point steering
 
 - **User intent:** Refine active work without creating a separate future turn.
-- **Durable commands:** Persist the input with `next_safe_point`, acceptance order, and one binding containing the source active turn and frozen effective configuration; the command carries no independent configuration request. After every earlier issued physical operation is classified, every earlier tool/approval dependency has a durable outcome, and immediately before any later model call—including a duplicate-risk replacement—atomically commit it to turn semantic history, include it in that call's frontier, and record consumption by call identity.
+- **Durable commands:** Persist the input with `next_safe_point`, acceptance order, and one binding referencing the source active turn; the command carries no independent configuration request or copied configuration. The source turn remains the canonical immutable configuration source if reclassification is needed. After every earlier issued physical operation is classified, every earlier tool/approval dependency has a durable outcome, and immediately before any later model call—including a duplicate-risk replacement—atomically commit it to turn semantic history, include it in that call's frontier, and record consumption by call identity.
 - **State transitions:** Accepted input → pending steering → consumed by a later model call, or visibly reclassified as a queued turn origin if the target turn terminates first. Every active wait retains the turn's session slot under proposed ADR-0004.
 - **Transient updates:** Client shows “will apply at next safe point”; no mutation of the current provider stream.
 - **Owning component:** Hub decides safe-point boundaries and builds context; clients only request and display treatment.
@@ -181,7 +181,7 @@ These scenarios test architectural boundaries; quoted commands and state names a
 ## S17 — Fork from previous transcript state
 
 - **User intent:** Explore an alternative from an earlier point without changing the source session.
-- **Durable commands:** Create a session with cause (for example, user-created) independent from ancestry `(source session, immutable frontier)`.
+- **Durable commands:** Create a session with the baseline `OwnerInitiated` cause independent from ancestry `(source session, immutable frontier)`.
 - **State transitions:** New session absent → active with derived initial context; source remains unchanged.
 - **Transient updates:** Client may preview the fork point.
 - **Owning component:** Hub validates frontier and creates the fork atomically; Postgres preserves source reference and derived history representation.

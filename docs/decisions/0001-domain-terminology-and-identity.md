@@ -3,7 +3,7 @@
 - Status: Proposed
 - Date: 2026-07-12
 - Owners: Repository owner
-- Reviewers: Domain reviewer pending; provider and tool-safety reviewers unassigned
+- Reviewers: Domain, provider, and tool-safety reviewers unassigned
 - Supersedes: none
 - Superseded by: none
 - Acceptance dependency: must be accepted atomically with ADR-0003, ADR-0004, ADR-0005, and ADR-0027 in the current foundation set
@@ -67,12 +67,11 @@ AcceptedInputDisposition =
     }
 
 SteeringBinding = {
-    source_turn: TurnId,
-    source_effective_configuration: EffectiveConfiguration
+    source_turn: TurnId
 }
 ```
 
-These are the complete baseline disposition categories defined with ADR-0027. A pending input stores its source turn exactly once in `SteeringBinding`; a consumed input references the immutable model call from which the owning turn and exact frontier are derived. Reclassification is distinct from an input originally accepted as turn-origin work so recovery and presentation can explain that the target turn terminated without consuming the steering. Future origin or disposition variants, including a typed regeneration relation, require explicit domain additions; the pseudocode does not use a catch-all variant that would hide an unknown semantic case or an origin whose context rules are still unresolved.
+These are the complete baseline disposition categories defined with ADR-0027. A pending input stores its source turn exactly once in `SteeringBinding`; it derives immutable source configuration from that canonical turn rather than copying a second value that could disagree. A consumed input references the immutable model call from which the owning turn and exact frontier are derived. Reclassification is distinct from an input originally accepted as turn-origin work so recovery and presentation can explain that the target turn terminated without consuming the steering. Future origin or disposition variants, including a typed regeneration relation, require explicit domain additions; the pseudocode does not use a catch-all variant that would hide an unknown semantic case or an origin whose context rules are still unresolved.
 
 **Accepted input** describes durable user-originated semantic content and its delivery request. It is distinct from a transport command, which may be delivered more than once, and from a transcript entry, which is a semantic projection created when the input is used.
 
