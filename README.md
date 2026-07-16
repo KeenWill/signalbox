@@ -31,7 +31,6 @@ The hub is the source of truth; a client device and an execution machine need no
 - [Invariant catalog](docs/invariants.md)
 - [Decision log](docs/decisions.md)
 - [Open questions](docs/open-questions.md)
-- [Testing strategy](docs/testing-strategy.md)
 - [Architecture decision records](docs/decisions/README.md)
 
 Project participation is described in [CONTRIBUTING.md](CONTRIBUTING.md), security reporting in [SECURITY.md](SECURITY.md), and repository guidance for coding agents in [AGENTS.md](AGENTS.md).
