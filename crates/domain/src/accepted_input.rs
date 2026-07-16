@@ -24,20 +24,20 @@ impl SteeringBinding {
 /// turn's next safe point, is consumed by an exact model call, or becomes new
 /// turn-origin work when the source turn terminates before a safe point.
 ///
-/// The transition methods on this type enforce only these local disposition
-/// transitions:
+/// The transition methods on this type provide these validated local
+/// disposition transitions:
 ///
 /// - `PendingSteering` to `ConsumedAsSteering`;
 /// - `PendingSteering` to `ReclassifiedAsTurnOrigin`.
 ///
-/// They do not validate that a model call belongs to the source turn or
-/// contains the steering input in its context frontier. Reclassification does
-/// not validate inherited configuration provenance or prove that the source
-/// turn terminated without another safe point. Persistence atomicity, queue
-/// ordering, current aggregate ownership, and command authorization also
-/// remain responsibilities of later aggregate transitions and persistence
-/// guards.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+/// These methods do not provide complete lifecycle enforcement. They do not
+/// validate that a model call belongs to the source turn or contains the
+/// steering input in its context frontier. Reclassification does not validate
+/// inherited configuration provenance or prove that the source turn terminated
+/// without another safe point. Persistence atomicity, queue ordering, current
+/// aggregate ownership, and command authorization remain responsibilities of
+/// later aggregate transitions and persistence guards.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum AcceptedInputDisposition {
     /// The accepted input originated the identified turn.
     OriginOf(TurnId),
@@ -94,7 +94,7 @@ impl AcceptedInputDisposition {
 }
 
 /// Reports a rejected local accepted-input disposition transition.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AcceptedInputDispositionTransitionError {
     /// The current disposition cannot be consumed as steering.
     CannotConsumeAsSteering {
@@ -172,7 +172,7 @@ mod tests {
     fn consumption_rejects_every_non_pending_disposition_with_the_current_value() {
         for current in non_pending_dispositions() {
             assert_eq!(
-                current.consume_as_steering(model_call_id(4)),
+                current.clone().consume_as_steering(model_call_id(4)),
                 Err(AcceptedInputDispositionTransitionError::CannotConsumeAsSteering { current })
             );
         }
@@ -182,7 +182,7 @@ mod tests {
     fn reclassification_rejects_every_non_pending_disposition_with_the_current_value() {
         for current in non_pending_dispositions() {
             assert_eq!(
-                current.reclassify_as_turn_origin(
+                current.clone().reclassify_as_turn_origin(
                     turn_id(4),
                     SteeringReclassificationReason::NoSafePointBeforeTerminal,
                 ),
