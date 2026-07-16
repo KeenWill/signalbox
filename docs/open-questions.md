@@ -20,6 +20,10 @@ Some questions carry an ADR number reserved by earlier planning and cited from a
 
 - **Editing, canceling, reordering, or changing delivery policy of queued input.** Excluded from the accepted ADR-0027 baseline; any addition needs explicit dispositions. Later scope. (S09)
 
+## Turn lifecycle
+
+- **Standalone active-turn cancellation.** Not a baseline feature: ADR-0004 defines cancellation authority only through applied interrupts, and adding a standalone command requires a future ADR with its own proof and disposition rules. Later scope. (S07)
+
 ## Archival and retention (reserved ADR-0028, ADR-0029)
 
 - **Archive eligibility, nonterminal work handling, and restore target.** Leaning: preserve identity and history; never silently abandon work. Blocks archive/restore. (S25)
@@ -30,12 +34,18 @@ Some questions carry an ADR number reserved by earlier planning and cited from a
 
 - **Regeneration command acceptance, queue placement, source frontier, and relation representation.** The identity rule is accepted by ADR-0004 (always new logical work; never reopen the original); the rest blocks the regeneration feature. (S26)
 
+## Configuration categories
+
+- **Additional effective-configuration categories.** Custom parameters, instructions, tool enablement/configuration, placement constraints, per-turn resources, and interpreting-policy selections are unavailable baseline capabilities; a future subsystem ADR must extend the request, session-default, override, and effective-value algebras together (ADR-0027). Blocks those capabilities. (S02, S05, S13–S16)
+
 ## Model fallback and provenance (reserved ADR-0006, ADR-0007)
 
 - **Whether version one supports automatic fallback.** Leaning: none until an explicit policy is justified. Deferrable for the first provider slice. (S22, S23)
 - **Which failure classes permit fallback, if it exists.** Leaning: narrow allowlist of classified availability failures; refusal alone never qualifies. Blocks fallback. (S22, S23)
 - **Fallback configuration and visibility.** Requires explicit session/turn policy, per-call provenance, and clear UI; no constructible fallback configuration exists in the baseline. Blocks fallback. (S20, S22)
 - **Model identifier normalization and detailed provenance representation.** The mismatch disposition itself is accepted by ADR-0005. Blocks the provider provenance schema. (S20–S23)
+- **Future known-provider-failure retry.** Version one never automatically retries a known or ambiguous provider failure; any later retry command or policy, including backoff and resource limits, is a separate decision left open by ADR-0005. Blocks retry features. (S02, S04, S22)
+- **Provider ambiguity evidence thresholds.** Which provider evidence classifies an uncertain outcome as known failure versus ambiguous is provider-contract scope left open by ADR-0004 and ADR-0005. Blocks the first provider adapter. (S02, S04)
 
 ## Scheduling and runners (reserved ADR-0008, ADR-0009, ADR-0010)
 
