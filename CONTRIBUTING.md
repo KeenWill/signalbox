@@ -15,7 +15,7 @@ Read the [vision](docs/vision.md), [architecture](docs/architecture.md), [invari
 - Do not introduce speculative product code, deployment configuration, or package trees during the foundation phase.
 - Add a dependency when it provides clearer types or interfaces, replaces code Signalbox would otherwise need to own, or supplies another focused capability with a concrete benefit. Prefer small, narrowly scoped dependencies and explain the benefit and tradeoffs in the pull request.
 - Get the project owner's explicit agreement before adding a large dependency with substantial transitive, build-time, runtime, or architectural cost.
-- Prefer the modern Rust module layout: use `input.rs` for `mod input;` and `input/disposition.rs` for its children rather than `input/mod.rs`. Use `mod.rs` only when consistency with an existing subtree makes it less disruptive.
+- Update directly affected documentation in an implementation pull request when needed to keep it accurate. Avoid unrelated rewording, cleanup, restructuring, or formatting.
 - Use original explanations and examples that make sense without private context.
 - Avoid drive-by rewording of unrelated design decisions.
 
