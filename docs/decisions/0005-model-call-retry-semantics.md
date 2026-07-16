@@ -7,7 +7,7 @@
 - Supersedes: none
 - Superseded by: none
 - Accepted with: ADR-0001, ADR-0003, ADR-0004, and ADR-0027 as one atomic foundation set
-- Decision-ledger questions: target-before-call creation; provider-reported target mismatch; no automatic known-failure retry; ambiguous provider-call disposition; acceptance-time alias meaning; model or configuration change identity; turn disposition after provider refusal
+- Decision questions: target-before-call creation; provider-reported target mismatch; no automatic known-failure retry; ambiguous provider-call disposition; acceptance-time alias meaning; model or configuration change identity; turn disposition after provider refusal
 
 ## Context
 
