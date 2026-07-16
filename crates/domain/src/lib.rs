@@ -18,7 +18,7 @@ pub use configuration::{
     FrozenModelSelection, KnownProviderFailureRetry, ModelAlias, ModelFallback, ModelParameters,
     ModelSelectionOverride, ModelSelectionRequest, OriginConfiguration,
     SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-    SessionDefaultsVersionMismatch, TurnConfigurationProvenance,
+    SessionDefaultsVersionMismatch, TurnConfigurationProvenance, UnknownModelAlias,
     VersionedSessionConfigurationDefaults,
 };
 

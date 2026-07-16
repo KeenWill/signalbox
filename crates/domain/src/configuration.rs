@@ -312,8 +312,10 @@ impl SessionDefaultsVersionMismatch {
 /// The complete configuration provenance frozen for one explicitly
 /// configured origin turn.
 ///
-/// The constructors derive the effective value from the request, so a
-/// requested selection cannot be cross-wired with a different frozen value.
+/// It is constructible only by consuming a derived, version-checked
+/// [`ConfigurationRequest`], so the stored request and effective value can
+/// neither be cross-wired nor bypass the defaults-version check that
+/// produced the request.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct OriginConfiguration {
     requested: ConfigurationRequest,
@@ -322,37 +324,29 @@ pub struct OriginConfiguration {
 }
 
 impl OriginConfiguration {
-    /// Freezes provenance for a direct model-selection request.
-    pub const fn freeze_direct(
-        selection: DirectModelSelection,
+    /// Freezes provenance by consuming the derived, version-checked request.
+    ///
+    /// `select_definition` supplies the current immutable definition when the
+    /// request names an alias; returning `None` reports the alias as unknown
+    /// and freezes nothing. A direct request never invokes it.
+    pub fn freeze(
+        requested: ConfigurationRequest,
         session_defaults_version: SessionConfigurationDefaultsVersion,
-    ) -> Self {
-        Self {
-            requested: ConfigurationRequest {
-                model: ModelSelectionRequest::Direct(selection),
+        select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+    ) -> Result<Self, UnknownModelAlias> {
+        let model = match requested.model() {
+            ModelSelectionRequest::Direct(selection) => FrozenModelSelection::Direct(selection),
+            ModelSelectionRequest::Alias(alias) => match select_definition(alias) {
+                Some(definition) => FrozenModelSelection::FrozenAlias { alias, definition },
+                None => return Err(UnknownModelAlias { alias }),
             },
-            session_defaults_version,
-            effective: EffectiveConfiguration::baseline(FrozenModelSelection::Direct(selection)),
-        }
-    }
+        };
 
-    /// Freezes provenance for an alias request together with the definition
-    /// selected at acceptance.
-    pub const fn freeze_alias(
-        alias: ModelAlias,
-        definition: FrozenAliasDefinition,
-        session_defaults_version: SessionConfigurationDefaultsVersion,
-    ) -> Self {
-        Self {
-            requested: ConfigurationRequest {
-                model: ModelSelectionRequest::Alias(alias),
-            },
+        Ok(Self {
+            requested,
             session_defaults_version,
-            effective: EffectiveConfiguration::baseline(FrozenModelSelection::FrozenAlias {
-                alias,
-                definition,
-            }),
-        }
+            effective: EffectiveConfiguration::baseline(model),
+        })
     }
 
     /// Borrows the derived configuration request.
@@ -368,6 +362,19 @@ impl OriginConfiguration {
     /// Borrows the complete frozen effective value.
     pub const fn effective(&self) -> &EffectiveConfiguration {
         &self.effective
+    }
+}
+
+/// Reports an alias request whose current definition could not be selected.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UnknownModelAlias {
+    alias: ModelAlias,
+}
+
+impl UnknownModelAlias {
+    /// Returns the alias with no selectable definition.
+    pub const fn alias(&self) -> ModelAlias {
+        self.alias
     }
 }
 
@@ -597,16 +604,34 @@ mod tests {
         );
     }
 
-    #[test]
-    fn origin_configuration_freezes_a_direct_request_coherently() {
-        let version = SessionConfigurationDefaultsVersion::first();
-        let origin = OriginConfiguration::freeze_direct(direct(1), version);
+    fn direct_request(value: u128) -> ConfigurationRequest {
+        ConfigurationRequest {
+            model: ModelSelectionRequest::Direct(direct(value)),
+        }
+    }
 
-        assert_eq!(
-            origin.requested().model(),
-            ModelSelectionRequest::Direct(direct(1))
-        );
-        assert_eq!(origin.session_defaults_version(), version);
+    fn freeze_direct_request(
+        value: u128,
+        version: SessionConfigurationDefaultsVersion,
+    ) -> OriginConfiguration {
+        OriginConfiguration::freeze(direct_request(value), version, |_| None)
+            .expect("a direct request freezes without an alias definition")
+    }
+
+    /// INV-008: an explicitly configured origin atomically records its
+    /// version-checked request, exact defaults version, and effective value.
+    #[test]
+    fn origin_configuration_freezes_the_derived_direct_request_coherently() {
+        let current = VersionedSessionConfigurationDefaults::establish(defaults(1));
+        let request = current
+            .derive_request(current.version(), ModelSelectionOverride::UseSessionDefault)
+            .expect("current expected version derives a request");
+
+        let origin = OriginConfiguration::freeze(request, current.version(), |_| None)
+            .expect("a direct request freezes without an alias definition");
+
+        assert_eq!(origin.requested(), &request);
+        assert_eq!(origin.session_defaults_version(), current.version());
         assert_eq!(
             origin.effective(),
             &EffectiveConfiguration::baseline(FrozenModelSelection::Direct(direct(1)))
@@ -614,10 +639,18 @@ mod tests {
     }
 
     #[test]
-    fn origin_configuration_freezes_an_alias_request_with_its_frozen_definition() {
+    fn origin_configuration_freezes_an_alias_request_with_the_selected_definition() {
         let version = SessionConfigurationDefaultsVersion::first();
         let definition = FrozenAliasDefinition::selecting(direct(1));
-        let origin = OriginConfiguration::freeze_alias(alias(2), definition, version);
+        let request = ConfigurationRequest {
+            model: ModelSelectionRequest::Alias(alias(2)),
+        };
+
+        let origin = OriginConfiguration::freeze(request, version, |requested| {
+            assert_eq!(requested, alias(2));
+            Some(definition)
+        })
+        .expect("a selectable alias definition freezes the request");
 
         assert_eq!(
             origin.requested().model(),
@@ -632,18 +665,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_alias_request_without_a_selectable_definition_freezes_nothing() {
+        let request = ConfigurationRequest {
+            model: ModelSelectionRequest::Alias(alias(1)),
+        };
+
+        let error = OriginConfiguration::freeze(
+            request,
+            SessionConfigurationDefaultsVersion::first(),
+            |_| None,
+        )
+        .expect_err("an unknown alias cannot freeze provenance");
+
+        assert_eq!(error.alias(), alias(1));
+    }
+
     /// INV-008: the defaults version belongs to provenance, not
     /// effective-value equality.
     #[test]
     fn defaults_version_is_provenance_rather_than_effective_equality() {
-        let first = OriginConfiguration::freeze_direct(
-            direct(1),
-            SessionConfigurationDefaultsVersion::first(),
-        );
-        let later = OriginConfiguration::freeze_direct(
-            direct(1),
-            SessionConfigurationDefaultsVersion::first().next(),
-        );
+        let first = freeze_direct_request(1, SessionConfigurationDefaultsVersion::first());
+        let later = freeze_direct_request(1, SessionConfigurationDefaultsVersion::first().next());
 
         assert_eq!(first.effective(), later.effective());
         assert_ne!(first, later);
@@ -654,10 +697,7 @@ mod tests {
     /// binding.
     #[test]
     fn provenance_variants_carry_an_origin_record_or_only_the_binding() {
-        let origin = OriginConfiguration::freeze_direct(
-            direct(1),
-            SessionConfigurationDefaultsVersion::first(),
-        );
+        let origin = freeze_direct_request(1, SessionConfigurationDefaultsVersion::first());
         let binding = SteeringBinding::new(TurnId::from_uuid(Uuid::from_u128(2)));
 
         let explicit = TurnConfigurationProvenance::ExplicitOrigin(origin.clone());
@@ -665,10 +705,10 @@ mod tests {
 
         assert_ne!(
             explicit,
-            TurnConfigurationProvenance::ExplicitOrigin(OriginConfiguration::freeze_direct(
-                direct(3),
+            TurnConfigurationProvenance::ExplicitOrigin(freeze_direct_request(
+                3,
                 SessionConfigurationDefaultsVersion::first(),
-            ),)
+            ))
         );
         match inherited {
             TurnConfigurationProvenance::InheritedForReclassifiedSteering(carried) => {
