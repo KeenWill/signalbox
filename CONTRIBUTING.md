@@ -4,13 +4,13 @@ Signalbox is currently establishing its domain language, invariants, and archite
 
 ## Before proposing a change
 
-Read the [vision](docs/vision.md), [architecture](docs/architecture.md), [invariants](docs/invariants.md), [decision log](docs/decisions.md), and [open questions](docs/open-questions.md). Check [accepted ADRs](docs/decisions/README.md) before revisiting a decision. A change that alters accepted direction or closes an open foundational question should normally begin as a proposed ADR.
+Read the [vision](docs/vision.md), [architecture](docs/architecture.md), [invariants](docs/invariants.md), [decision log](docs/decisions.md), and [open questions](docs/open-questions.md). Check [accepted ADRs](docs/decisions/README.md) before revisiting a decision. Ordinary decisions, including closing an ordinary open question, are made in the pull request and recorded in the decision log. A foundation-weight change — altering accepted ADR semantics or direction, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, introducing a technology that constrains several components, or closing a foundation-weight open question — must begin as a proposed ADR.
 
 ## Contribution rules
 
 - Keep each pull request narrowly scoped and independently reviewable.
 - Distinguish accepted direction, working terminology, and open questions.
-- Add or update concrete scenarios when changing lifecycle behavior.
+- Add or update concrete scenarios alongside the decision that changes lifecycle behavior or introduces a new lifecycle edge.
 - Give domain concepts distinct identities; do not reuse wire, storage, or framework types as domain types.
 - Do not introduce speculative product code, deployment configuration, or package trees during the foundation phase.
 - Add a dependency when it provides clearer types or interfaces, replaces code Signalbox would otherwise need to own, or supplies another focused capability with a concrete benefit. Prefer small, narrowly scoped dependencies and explain the benefit and tradeoffs in the pull request.
