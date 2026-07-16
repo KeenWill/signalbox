@@ -2,7 +2,7 @@
 
 These scenarios test architectural boundaries; quoted commands and state names are descriptive pseudocode, not final APIs. “Durable commands” means owner intent the hub must commit before acknowledging, not a prescribed event-sourcing design. Invariant identifiers link to [the catalog](invariants.md).
 
-The scenarios are frozen design fixtures. New or changed normative behavior belongs in the record that owns it (an ADR or the [decision log](decisions.md)); a scenario changes or is added only alongside the decision that motivates it, and a decision introducing a new lifecycle edge adds or amends its scenario fixture in the same change. Each scenario gains a `Covered by:` line naming its integration tests as they are implemented.
+The scenarios are frozen design fixtures. New or changed normative behavior belongs in the record that owns it (an ADR or the [decision log](decisions.md)); a scenario's normative content changes or is added only alongside the decision that motivates it, and a decision introducing a new lifecycle edge adds or amends its scenario fixture in the same change. `Covered by:` lines naming a scenario's integration tests are coverage links rather than normative changes and are added with the tests themselves.
 
 ## S01 — Create a new interactive session
 
