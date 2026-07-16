@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-15 — Ordinal session-defaults versions
+
+**Context.** ADR-0027 versions session model-selection defaults — creation establishes version one and each explicit update installs a complete later immutable version — without fixing a version representation. The caller's expected version participates in equality comparison at acceptance.
+
+**Decision.** `SessionConfigurationDefaultsVersion` is a private ordinal counter starting at one with a successor operation; equality is the acceptance-time comparison. Storage and wire encodings remain open.
+
+**Rejected alternatives.** UUID version identities: they lose the accepted "version one" and succession semantics. Timestamps: wall-clock coupling and collision risk without adding meaning.
+
+**Affects.** `crates/domain/src/configuration.rs`.
+
 ## 2026-07-15 — UUID-backed model-selection keys
 
 **Context.** ADR-0027 defines `DirectModelSelection` as a canonical domain-owned key with immutable semantic meaning and `ModelAlias` as an owner-configured alias name, and represents `FrozenAliasDefinition` as "an immutable definition version or value selecting exactly one `DirectModelSelection`", leaving concrete encodings open. The first configuration slice needs backing values.

@@ -157,13 +157,246 @@ impl EffectiveConfiguration {
     }
 }
 
+/// Identifies one immutable version of a session's model-selection defaults.
+///
+/// Session creation establishes version one; each explicit replacement
+/// installs the next version. The version belongs to
+/// [`OriginConfiguration`] provenance, not effective-value equality.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SessionConfigurationDefaultsVersion(u64);
+
+impl SessionConfigurationDefaultsVersion {
+    /// Returns version one, established by session creation.
+    pub const fn first() -> Self {
+        Self(1)
+    }
+
+    /// Returns the version installed by the next complete replacement.
+    pub fn next(self) -> Self {
+        Self(
+            self.0
+                .checked_add(1)
+                .expect("session defaults version counter overflow"),
+        )
+    }
+}
+
+/// One complete normalized model-selection default value.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct SessionConfigurationDefaults {
+    model: ModelSelectionRequest,
+}
+
+impl SessionConfigurationDefaults {
+    /// Creates a complete defaults value from its model-selection request.
+    pub const fn new(model: ModelSelectionRequest) -> Self {
+        Self { model }
+    }
+
+    /// Returns the default model-selection request.
+    pub const fn model(&self) -> ModelSelectionRequest {
+        self.model
+    }
+}
+
+/// The current immutable version of a session's model-selection defaults.
+///
+/// Replacement installs a complete later version; it never mutates an
+/// existing one. Whether an update affects only subsequently accepted origin
+/// input is an aggregate acceptance rule, not a property of this value.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct VersionedSessionConfigurationDefaults {
+    version: SessionConfigurationDefaultsVersion,
+    defaults: SessionConfigurationDefaults,
+}
+
+impl VersionedSessionConfigurationDefaults {
+    /// Establishes version one at session creation.
+    pub const fn establish(defaults: SessionConfigurationDefaults) -> Self {
+        Self {
+            version: SessionConfigurationDefaultsVersion::first(),
+            defaults,
+        }
+    }
+
+    /// Installs a complete replacement as the next immutable version.
+    pub fn replace(self, defaults: SessionConfigurationDefaults) -> Self {
+        Self {
+            version: self.version.next(),
+            defaults,
+        }
+    }
+
+    /// Returns the current version identity.
+    pub const fn version(&self) -> SessionConfigurationDefaultsVersion {
+        self.version
+    }
+
+    /// Borrows the current defaults value.
+    pub const fn defaults(&self) -> &SessionConfigurationDefaults {
+        &self.defaults
+    }
+
+    /// Derives one complete configuration request from the explicit model
+    /// override or the named default.
+    ///
+    /// The caller's expected defaults version must still be current; a
+    /// mismatch is an authoritative rejection that cannot silently adopt a
+    /// newer version for the same caller payload.
+    pub fn derive_request(
+        &self,
+        expected: SessionConfigurationDefaultsVersion,
+        model: ModelSelectionOverride,
+    ) -> Result<ConfigurationRequest, SessionDefaultsVersionMismatch> {
+        if expected != self.version {
+            return Err(SessionDefaultsVersionMismatch {
+                expected,
+                current: self.version,
+            });
+        }
+
+        let model = match model {
+            ModelSelectionOverride::UseSessionDefault => self.defaults.model(),
+            ModelSelectionOverride::ReplaceWith(request) => request,
+        };
+
+        Ok(ConfigurationRequest { model })
+    }
+}
+
+/// The caller's per-input model-selection choice.
+///
+/// `UseSessionDefault` and `ReplaceWith(X)` remain structurally distinct
+/// even when the current default is `X`, because canonical construction
+/// cannot consult mutable aggregate state before command lookup.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ModelSelectionOverride {
+    /// Resolve against the session default named by the expected version.
+    UseSessionDefault,
+    /// Replace the default with an explicit request.
+    ReplaceWith(ModelSelectionRequest),
+}
+
+/// One complete derived configuration request for an origin input.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ConfigurationRequest {
+    model: ModelSelectionRequest,
+}
+
+impl ConfigurationRequest {
+    /// Returns the requested model selection.
+    pub const fn model(&self) -> ModelSelectionRequest {
+        self.model
+    }
+}
+
+/// Reports a caller-expected defaults version that is no longer current.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SessionDefaultsVersionMismatch {
+    expected: SessionConfigurationDefaultsVersion,
+    current: SessionConfigurationDefaultsVersion,
+}
+
+impl SessionDefaultsVersionMismatch {
+    /// Returns the version the caller expected to be current.
+    pub const fn expected(&self) -> SessionConfigurationDefaultsVersion {
+        self.expected
+    }
+
+    /// Returns the version that was current instead.
+    pub const fn current(&self) -> SessionConfigurationDefaultsVersion {
+        self.current
+    }
+}
+
+/// The complete configuration provenance frozen for one explicitly
+/// configured origin turn.
+///
+/// The constructors derive the effective value from the request, so a
+/// requested selection cannot be cross-wired with a different frozen value.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct OriginConfiguration {
+    requested: ConfigurationRequest,
+    session_defaults_version: SessionConfigurationDefaultsVersion,
+    effective: EffectiveConfiguration,
+}
+
+impl OriginConfiguration {
+    /// Freezes provenance for a direct model-selection request.
+    pub const fn freeze_direct(
+        selection: DirectModelSelection,
+        session_defaults_version: SessionConfigurationDefaultsVersion,
+    ) -> Self {
+        Self {
+            requested: ConfigurationRequest {
+                model: ModelSelectionRequest::Direct(selection),
+            },
+            session_defaults_version,
+            effective: EffectiveConfiguration::baseline(FrozenModelSelection::Direct(selection)),
+        }
+    }
+
+    /// Freezes provenance for an alias request together with the definition
+    /// selected at acceptance.
+    pub const fn freeze_alias(
+        alias: ModelAlias,
+        definition: FrozenAliasDefinition,
+        session_defaults_version: SessionConfigurationDefaultsVersion,
+    ) -> Self {
+        Self {
+            requested: ConfigurationRequest {
+                model: ModelSelectionRequest::Alias(alias),
+            },
+            session_defaults_version,
+            effective: EffectiveConfiguration::baseline(FrozenModelSelection::FrozenAlias {
+                alias,
+                definition,
+            }),
+        }
+    }
+
+    /// Borrows the derived configuration request.
+    pub const fn requested(&self) -> &ConfigurationRequest {
+        &self.requested
+    }
+
+    /// Returns the exact defaults version the request was accepted under.
+    pub const fn session_defaults_version(&self) -> SessionConfigurationDefaultsVersion {
+        self.session_defaults_version
+    }
+
+    /// Borrows the complete frozen effective value.
+    pub const fn effective(&self) -> &EffectiveConfiguration {
+        &self.effective
+    }
+}
+
+/// How one turn's effective configuration is explained.
+///
+/// A reclassified-steering origin carries only its source-turn binding; the
+/// variant has no configuration or request field, so a different inherited
+/// value cannot be supplied. The new origin's effective configuration is set
+/// equal to the referenced source turn's canonical value by the aggregate
+/// reclassification transition.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum TurnConfigurationProvenance {
+    /// The origin recorded its request, defaults version, and effective value.
+    ExplicitOrigin(OriginConfiguration),
+    /// The origin inherits the canonical value of the bound source turn.
+    InheritedForReclassifiedSteering(crate::SteeringBinding),
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        DirectModelSelection, EffectiveConfiguration, FrozenAliasDefinition, FrozenModelSelection,
-        KnownProviderFailureRetry, ModelAlias, ModelFallback, ModelParameters,
-        ModelSelectionRequest,
+        ConfigurationRequest, DirectModelSelection, EffectiveConfiguration, FrozenAliasDefinition,
+        FrozenModelSelection, KnownProviderFailureRetry, ModelAlias, ModelFallback,
+        ModelParameters, ModelSelectionOverride, ModelSelectionRequest, OriginConfiguration,
+        SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
+        SessionDefaultsVersionMismatch, TurnConfigurationProvenance,
+        VersionedSessionConfigurationDefaults,
     };
+    use crate::{SteeringBinding, TurnId};
     use uuid::Uuid;
 
     fn direct(value: u128) -> DirectModelSelection {
@@ -270,5 +503,189 @@ mod tests {
             EffectiveConfiguration::baseline(selection),
             EffectiveConfiguration::baseline(FrozenModelSelection::Direct(direct(2)))
         );
+    }
+
+    fn defaults(value: u128) -> SessionConfigurationDefaults {
+        SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(direct(value)))
+    }
+
+    #[test]
+    fn session_creation_establishes_defaults_version_one() {
+        let established = VersionedSessionConfigurationDefaults::establish(defaults(1));
+
+        assert_eq!(
+            established.version(),
+            SessionConfigurationDefaultsVersion::first()
+        );
+        assert_eq!(established.defaults(), &defaults(1));
+    }
+
+    /// INV-008: session model-selection defaults are versioned; a
+    /// replacement installs a complete later immutable version.
+    #[test]
+    fn replacement_installs_the_next_complete_version() {
+        let established = VersionedSessionConfigurationDefaults::establish(defaults(1));
+        let replaced = established.replace(defaults(2));
+
+        assert_eq!(
+            replaced.version(),
+            SessionConfigurationDefaultsVersion::first().next()
+        );
+        assert_ne!(replaced.version(), established.version());
+        assert_eq!(replaced.defaults(), &defaults(2));
+    }
+
+    #[test]
+    fn use_session_default_derives_the_named_default() {
+        let current = VersionedSessionConfigurationDefaults::establish(defaults(1));
+
+        let request = current
+            .derive_request(current.version(), ModelSelectionOverride::UseSessionDefault)
+            .expect("current expected version derives a request");
+
+        assert_eq!(request.model(), ModelSelectionRequest::Direct(direct(1)));
+    }
+
+    #[test]
+    fn replace_with_derives_the_explicit_request() {
+        let current = VersionedSessionConfigurationDefaults::establish(defaults(1));
+        let explicit = ModelSelectionRequest::Alias(alias(2));
+
+        let request = current
+            .derive_request(
+                current.version(),
+                ModelSelectionOverride::ReplaceWith(explicit),
+            )
+            .expect("current expected version derives a request");
+
+        assert_eq!(request.model(), explicit);
+    }
+
+    /// INV-012: `UseSessionDefault` and `ReplaceWith(X)` remain structurally
+    /// distinct comparison payloads even when the current default is `X`.
+    #[test]
+    fn override_payloads_stay_distinct_even_when_they_derive_equal_requests() {
+        let current = VersionedSessionConfigurationDefaults::establish(defaults(1));
+        let use_default = ModelSelectionOverride::UseSessionDefault;
+        let replace_with_default = ModelSelectionOverride::ReplaceWith(current.defaults().model());
+
+        assert_ne!(use_default, replace_with_default);
+        assert_eq!(
+            current.derive_request(current.version(), use_default),
+            current.derive_request(current.version(), replace_with_default)
+        );
+    }
+
+    #[test]
+    fn stale_expected_version_is_an_authoritative_rejection() {
+        let current =
+            VersionedSessionConfigurationDefaults::establish(defaults(1)).replace(defaults(2));
+        let stale = SessionConfigurationDefaultsVersion::first();
+
+        let error = current
+            .derive_request(stale, ModelSelectionOverride::UseSessionDefault)
+            .expect_err("a stale expected version cannot derive a request");
+
+        assert_eq!(error.expected(), stale);
+        assert_eq!(error.current(), current.version());
+        assert_eq!(
+            error,
+            SessionDefaultsVersionMismatch {
+                expected: stale,
+                current: current.version(),
+            }
+        );
+    }
+
+    #[test]
+    fn origin_configuration_freezes_a_direct_request_coherently() {
+        let version = SessionConfigurationDefaultsVersion::first();
+        let origin = OriginConfiguration::freeze_direct(direct(1), version);
+
+        assert_eq!(
+            origin.requested().model(),
+            ModelSelectionRequest::Direct(direct(1))
+        );
+        assert_eq!(origin.session_defaults_version(), version);
+        assert_eq!(
+            origin.effective(),
+            &EffectiveConfiguration::baseline(FrozenModelSelection::Direct(direct(1)))
+        );
+    }
+
+    #[test]
+    fn origin_configuration_freezes_an_alias_request_with_its_frozen_definition() {
+        let version = SessionConfigurationDefaultsVersion::first();
+        let definition = FrozenAliasDefinition::selecting(direct(1));
+        let origin = OriginConfiguration::freeze_alias(alias(2), definition, version);
+
+        assert_eq!(
+            origin.requested().model(),
+            ModelSelectionRequest::Alias(alias(2))
+        );
+        assert_eq!(
+            origin.effective(),
+            &EffectiveConfiguration::baseline(FrozenModelSelection::FrozenAlias {
+                alias: alias(2),
+                definition,
+            })
+        );
+    }
+
+    /// INV-008: the defaults version belongs to provenance, not
+    /// effective-value equality.
+    #[test]
+    fn defaults_version_is_provenance_rather_than_effective_equality() {
+        let first = OriginConfiguration::freeze_direct(
+            direct(1),
+            SessionConfigurationDefaultsVersion::first(),
+        );
+        let later = OriginConfiguration::freeze_direct(
+            direct(1),
+            SessionConfigurationDefaultsVersion::first().next(),
+        );
+
+        assert_eq!(first.effective(), later.effective());
+        assert_ne!(first, later);
+    }
+
+    /// INV-008: an explicit origin records request, defaults version, and
+    /// effective value; reclassified steering carries only its source-turn
+    /// binding.
+    #[test]
+    fn provenance_variants_carry_an_origin_record_or_only_the_binding() {
+        let origin = OriginConfiguration::freeze_direct(
+            direct(1),
+            SessionConfigurationDefaultsVersion::first(),
+        );
+        let binding = SteeringBinding::new(TurnId::from_uuid(Uuid::from_u128(2)));
+
+        let explicit = TurnConfigurationProvenance::ExplicitOrigin(origin.clone());
+        let inherited = TurnConfigurationProvenance::InheritedForReclassifiedSteering(binding);
+
+        assert_ne!(
+            explicit,
+            TurnConfigurationProvenance::ExplicitOrigin(OriginConfiguration::freeze_direct(
+                direct(3),
+                SessionConfigurationDefaultsVersion::first(),
+            ),)
+        );
+        match inherited {
+            TurnConfigurationProvenance::InheritedForReclassifiedSteering(carried) => {
+                assert_eq!(carried, binding);
+            }
+            TurnConfigurationProvenance::ExplicitOrigin(_) => {
+                panic!("reclassified steering carries only its binding");
+            }
+        }
+    }
+
+    #[test]
+    fn configuration_request_exposes_its_model_selection() {
+        let request = ConfigurationRequest {
+            model: ModelSelectionRequest::Direct(direct(1)),
+        };
+
+        assert_eq!(request.model(), ModelSelectionRequest::Direct(direct(1)));
     }
 }

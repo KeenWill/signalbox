@@ -14,8 +14,12 @@ pub use accepted_input::{
     SteeringBinding, SteeringReclassificationReason,
 };
 pub use configuration::{
-    DirectModelSelection, EffectiveConfiguration, FrozenAliasDefinition, FrozenModelSelection,
-    KnownProviderFailureRetry, ModelAlias, ModelFallback, ModelParameters, ModelSelectionRequest,
+    ConfigurationRequest, DirectModelSelection, EffectiveConfiguration, FrozenAliasDefinition,
+    FrozenModelSelection, KnownProviderFailureRetry, ModelAlias, ModelFallback, ModelParameters,
+    ModelSelectionOverride, ModelSelectionRequest, OriginConfiguration,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
+    SessionDefaultsVersionMismatch, TurnConfigurationProvenance,
+    VersionedSessionConfigurationDefaults,
 };
 
 macro_rules! define_identity {
