@@ -7,16 +7,8 @@
 //! retry and model fallback. Custom parameters, instructions, tool
 //! enablement, placement constraints, per-turn resources, and
 //! interpreting-policy selections are unavailable baseline capabilities, not
-//! latent optional fields.
-//!
-//! # Scope
-//!
-//! This module defines pure configuration values. It omits input acceptance
-//! transactions, command deduplication, selection of the current alias
-//! definition from mutable state, exact provider/model target resolution
-//! (ADR-0005 pins the target as a separate turn fact), and storage, wire,
-//! deployment-key, and display encodings. Aggregate transitions and boundary
-//! code own those ADR-0027 requirements.
+//! latent optional fields. The `Scope` section on [`EffectiveConfiguration`]
+//! lists what these pure values deliberately omit.
 
 crate::define_identity!(
     /// Names exactly one configured provider/model selection as a canonical
@@ -117,6 +109,14 @@ pub enum ModelFallback {
 /// requires new logical work. The exact provider/model target is not a
 /// field: ADR-0005 pins it as a separate turn fact before the first model
 /// call is created.
+///
+/// # Scope
+///
+/// This and the surrounding configuration types are pure values. They omit
+/// input acceptance transactions, command deduplication, selection of the
+/// current alias definition from mutable state, exact provider/model target
+/// resolution, and storage, wire, deployment-key, and display encodings.
+/// Aggregate transitions and boundary code own those ADR-0027 requirements.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct EffectiveConfiguration {
     model: FrozenModelSelection,
