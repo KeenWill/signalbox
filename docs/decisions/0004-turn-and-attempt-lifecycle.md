@@ -7,7 +7,7 @@
 - Supersedes: none
 - Superseded by: none
 - Accepted with: ADR-0001, ADR-0003, ADR-0005, and ADR-0027 as one atomic foundation set
-- Decision-ledger questions: startup scan versus recovery attempt identity; manual-regeneration identity boundary and later scope; actively progressing state set; aggregate running-attempt and terminalization guards; state-specific cancellation; exact-set ambiguity decisions; refusal attempt/turn disposition with ADR-0005
+- Decision questions: startup scan versus recovery attempt identity; manual-regeneration identity boundary and later scope; actively progressing state set; aggregate running-attempt and terminalization guards; state-specific cancellation; exact-set ambiguity decisions; refusal attempt/turn disposition with ADR-0005
 
 ## Context
 

@@ -8,7 +8,7 @@
 - Supersedes: none
 - Superseded by: none
 - Accepted with: ADR-0003, ADR-0004, ADR-0005, and ADR-0027 as one atomic foundation set
-- Decision-ledger questions: owner-global durable-command identity scope; final names and boundaries for session, accepted input, turn, turn attempt, model call, tool request, and tool attempt
+- Decision questions: owner-global durable-command identity scope; final names and boundaries for session, accepted input, turn, turn attempt, model call, tool request, and tool attempt
 
 ## Context
 
