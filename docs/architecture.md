@@ -1,6 +1,6 @@
 # Architecture
 
-This document records current high-level boundaries, not an implemented system or final API. Accepted names are defined in the [glossary](glossary.md); unresolved choices remain in the [decision ledger](decision-ledger.md). The first domain/lifecycle choices are authoritative in the [accepted ADR foundation set](decisions/README.md).
+This document records current high-level boundaries, not an implemented system or final API. Accepted names are defined in the [glossary](glossary.md); unresolved choices remain in [open questions](open-questions.md). The first domain/lifecycle choices are authoritative in the [accepted ADR foundation set](decisions/README.md).
 
 ## Component view
 

@@ -1,12 +1,10 @@
 # Architecture decision records
 
-Architecture decision records (ADRs) explain durable design choices that affect boundaries, identities, invariants, compatibility, or several future features. The [decision ledger](../decision-ledger.md) inventories accepted decisions and unresolved foundational questions.
+ADRs record foundation-weight decisions: choices that alter accepted semantics, move a boundary between domain, storage, wire, or framework representations, weaken an invariant, or introduce a technology that constrains several components. Lighter decisions are made in pull requests and recorded in the [decision log](../decisions.md). Unresolved foundational questions live in [open-questions.md](../open-questions.md).
 
 ## Accepted foundation set
 
-The repository owner accepted these records atomically on 2026-07-13 after independent adversarial architecture review. They are authoritative together:
-
-ADR-0001 was materially amended on 2026-07-15 to accept the initial private UUID-backed representation and deliberately named UUID conversions for its Rust domain identity newtypes. The ADR remains `Accepted`; storage and wire representations remain separate and undecided.
+The repository owner accepted these records atomically on 2026-07-13 after independent adversarial architecture review. ADR-0001 was materially amended on 2026-07-15 to accept the initial private UUID-backed representation and deliberately named UUID conversions for its Rust domain identity newtypes; storage and wire representations remain separate and undecided. The records are authoritative together:
 
 | ADR | Scope |
 | --- | --- |
@@ -16,77 +14,15 @@ ADR-0001 was materially amended on 2026-07-15 to accept the initial private UUID
 | [ADR-0005](0005-model-call-retry-semantics.md) | Target-before-call identity, typed reported-target mismatch failure/invalidation, no automatic known-failure retry, ambiguous-call recovery, continuation, refusal disposition, and configuration identity |
 | [ADR-0027](0027-input-delivery-lifecycle.md) | Input delivery, versioned model-selection session defaults, constructible baseline effective configuration, explicit steering/configuration provenance, command deduplication, durable queue ordering, eligibility-fixed starting lineage, and context frontiers |
 
-The five records form one normatively coupled baseline: their identity algebras, lifecycle transitions, configuration boundary, and context rules reference one another. A future change may correct or supersede an individual record only while preserving or explicitly revising its accepted dependencies.
+The five records form one coupled baseline: their identity algebras, lifecycle transitions, configuration boundary, and context rules reference one another. A change may correct or supersede an individual record only while preserving or explicitly revising its accepted dependencies. As implementation lands, executable tests become the enforcement of record; the [invariant catalog](../invariants.md) links each invariant to its enforcement.
 
-## When to write an ADR
+## Process
 
-Write an ADR before closing a foundational ledger question, changing accepted direction, weakening an invariant, or introducing a technology that constrains several components. Do not use an ADR for local implementation details that are easy to reverse and do not alter a public boundary.
+- A new ADR starts as `Proposed`; the repository owner's approval makes it `Accepted` and authoritative from its decision date. Acceptance may happen in the pull request that introduces it.
+- An accepted ADR is never silently edited into a different decision. Supersession preserves the old record and links both directions. Meaning-preserving corrections are allowed and noted when material.
+- Rejected proposals are kept so the same option is not rediscovered without new evidence.
+- Filenames are sequential (`NNNN-short-title.md`); a number identifies the record, not its precedence. Numbers cited by accepted records for future decisions (for example ADR-0002 or ADR-0028) stay reserved for those topics.
 
-Use sequential filenames such as `0001-domain-terminology.md`. A number identifies the record, not its precedence; status and explicit supersession determine which decision applies.
+## Format
 
-## Status lifecycle
-
-- **Proposed:** Under review and not authoritative. Implementation may explore it but must not present it as settled.
-- **Accepted:** Approved and authoritative from its decision date. Update affected narrative documents, ledger rows, scenarios, and invariants in the same change.
-- **Superseded:** Replaced wholly or partly by one or more accepted ADRs. Preserve the old record and link both directions.
-- **Rejected:** Considered and declined. Preserve the rationale so the same option is not repeatedly rediscovered without new evidence.
-
-A proposed ADR may become accepted or rejected. An accepted ADR may become superseded, never silently edited into a different choice. Corrections that do not change meaning are allowed and should be noted when material.
-
-## Template
-
-```markdown
-# ADR-NNNN: Short decision title
-
-- Status: Proposed
-- Date: YYYY-MM-DD
-- Owners: ...
-- Reviewers: ...
-- Supersedes: none
-- Superseded by: none
-- Decision-ledger questions: ...
-
-## Context
-
-What forces, accepted direction, evidence, and constraints make a decision necessary now?
-
-## Decision
-
-What is chosen, at what boundary, and from when? Use precise normative language.
-
-## Terminology
-
-Which concepts and names are introduced, retained, or changed? What must remain distinct?
-
-## Invariants
-
-Which invariant identifiers are preserved, added, changed, or retired, and how are they enforced?
-
-## Alternatives
-
-Which plausible choices were considered, including the status quo, and why were they not chosen?
-
-## Consequences
-
-What becomes easier, harder, required, or intentionally unsupported?
-
-## Scenario walkthroughs
-
-Walk the decision through affected scenario identifiers, including failure and restart behavior.
-
-## Extension implications
-
-Which future changes remain possible, and which compatibility or migration hooks are intentionally preserved?
-
-## Open questions
-
-What remains unresolved and where is it recorded in the decision ledger?
-
-## Explicit non-decisions
-
-What tempting adjacent choices does this ADR deliberately not settle?
-```
-
-## Review standard
-
-An ADR should be independently understandable, narrow enough to decide, and specific enough to falsify with scenarios. Acceptance requires named owner approval, reviewer status, links to affected ledger rows, and corresponding document/test-plan updates. It must not use typed pseudocode as if it were a final Rust, Swift, wire, or storage API.
+Required: Status, Date, Context, and Decision, using precise normative language. Add further sections only where they earn their length: Terminology, Invariants, Alternatives, Consequences, Scenario walkthroughs, Extension implications, Open questions, and Explicit non-decisions. Keep the decision narrow enough to review in one sitting, make it falsifiable against scenarios, and do not use typed pseudocode as if it were a final Rust, Swift, wire, or storage API.

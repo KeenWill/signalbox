@@ -29,7 +29,8 @@ The hub is the source of truth; a client device and an execution machine need no
 - [Glossary](docs/glossary.md)
 - [Scenarios](docs/scenarios.md)
 - [Invariant catalog](docs/invariants.md)
-- [Decision ledger](docs/decision-ledger.md)
+- [Decision log](docs/decisions.md)
+- [Open questions](docs/open-questions.md)
 - [Testing strategy](docs/testing-strategy.md)
 - [Architecture decision records](docs/decisions/README.md)
 
