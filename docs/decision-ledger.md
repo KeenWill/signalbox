@@ -4,7 +4,7 @@ This is the authoritative inventory of accepted and unresolved foundational ques
 
 Unless a row says otherwise, **owner/reviewer status** is “repository owner decision pending; specialist reviewer unassigned.” This status applies individually to every row below.
 
-Rows marked **Foundation accepted** inherit this status: the repository owner accepted ADR-0001, ADR-0003, ADR-0004, ADR-0005, and ADR-0027 atomically on 2026-07-13 after independent adversarial architecture review; no specialist human reviewer was assigned.
+Rows marked **Foundation accepted** inherit this status: the repository owner accepted ADR-0001, ADR-0003, ADR-0004, ADR-0005, and ADR-0027 atomically on 2026-07-13 after independent adversarial architecture review; no specialist human reviewer was assigned. ADR-0001 was materially amended by the repository owner on 2026-07-15 to accept the initial private UUID-backed Rust identity representation while leaving storage and wire representations open.
 
 ## Accepted foundation set
 
@@ -12,7 +12,7 @@ The records remain independent units for future correction or supersession, but 
 
 | Record | Questions grouped for independent review | Status |
 | --- | --- | --- |
-| [ADR-0001](decisions/0001-domain-terminology-and-identity.md) | Core names, owner-global command identity, purpose-specific applied-command proofs, durable semantic identity boundaries, and accepted input versus transcript/turn identity | Accepted 2026-07-13 |
+| [ADR-0001](decisions/0001-domain-terminology-and-identity.md) | Core names, owner-global command identity, purpose-specific applied-command proofs, durable semantic identity boundaries, accepted input versus transcript/turn identity, and the initial private UUID-backed Rust identity representation | Accepted 2026-07-13; materially amended 2026-07-15 |
 | [ADR-0003](decisions/0003-session-creation-and-transcript-ancestry.md) | Immutable creation cause and ancestry, owner-initiated-only baseline, typed cause extension, and separation from versioned session defaults | Accepted 2026-07-13 |
 | [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md) | Logical/physical lifecycle, aggregate current-attempt ownership, progressing-slot states, interrupt-only cancellation authority, proof-bearing reconciliation, startup recovery scan, terminal guards, regeneration boundary, and exact-set ambiguity decisions | Accepted 2026-07-13; standalone active-turn cancellation, regeneration command/context, and delegated waits remain later ADR scope |
 | [ADR-0005](decisions/0005-model-call-retry-semantics.md) | Target-before-call identity, reported-target mismatch failure, no automatic known-failure retry, ambiguous-call recovery, continuation calls, changed configuration identity, and refusal disposition | Accepted 2026-07-13 |
@@ -28,6 +28,7 @@ The records remain independent units for future correction or supersession, but 
 | Final name for a physical orchestration effort? | It must be distinct from runners and provider/tool calls. | Turn attempt; orchestration attempt; execution | Accepted: turn attempt, bounded physical orchestration tenure | Blocking before domain schema | S03–S08, S10, S18 | [ADR-0001](decisions/0001-domain-terminology-and-identity.md), [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md) | Foundation accepted |
 | Final name for one provider interaction? | Provenance and provider retries require a stable unit, including attempts that fail before send. | Model call; provider call; inference attempt | Accepted: every hub authorization to attempt a provider interaction is a distinct model call, whether or not it reaches the provider | Blocking before provider slice | S02, S04, S20–S23 | [ADR-0001](decisions/0001-domain-terminology-and-identity.md), [ADR-0005](decisions/0005-model-call-retry-semantics.md) | Foundation accepted |
 | Final names for logical and physical tool work? | Approval must bind to logical intent while retries identify effects. | Tool request/tool attempt; invocation/execution | Accepted: tool request and tool attempt remain distinct | Blocking before tool slice | S05–S16 | [ADR-0001](decisions/0001-domain-terminology-and-identity.md) | Foundation accepted |
+| What is the initial Rust representation of ADR-0001 identity types? | The implementation needs a concrete backing value without coupling semantic identity to storage or wire encodings. | UUID newtypes; integer newtypes; opaque bytes; per-type representations | Accepted: each Rust identity newtype named by ADR-0001 has a private `uuid::Uuid` field and deliberately named UUID conversions. UUID generation, caller supply, boundary validation, storage/wire encoding, public formatting, and serialization remain undecided. | Blocking before initial identity implementation | S01, S02, S04, S08, S10, S12 | [ADR-0001](decisions/0001-domain-terminology-and-identity.md) | Foundation accepted by 2026-07-15 amendment |
 
 ## Session semantics
 

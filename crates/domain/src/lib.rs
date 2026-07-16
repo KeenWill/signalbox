@@ -1,4 +1,107 @@
 //! Core domain boundary for Signalbox.
 //!
-//! This crate will own domain concepts and rules independently of storage,
-//! protocol, and framework types. It intentionally defines no product behavior.
+//! Domain identities are distinct from storage, protocol, and framework types.
+//! Lifecycle and product behavior remain intentionally deferred.
+
+macro_rules! define_identity {
+    ($(#[$documentation:meta])* $name:ident) => {
+        $(#[$documentation])*
+        #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+        pub struct $name(uuid::Uuid);
+
+        impl $name {
+            /// Creates this domain identity from its UUID value.
+            pub const fn from_uuid(value: uuid::Uuid) -> Self {
+                Self(value)
+            }
+
+            /// Borrows the UUID value.
+            pub const fn as_uuid(&self) -> &uuid::Uuid {
+                &self.0
+            }
+
+            /// Returns the UUID value.
+            pub const fn into_uuid(self) -> uuid::Uuid {
+                self.0
+            }
+        }
+    };
+}
+
+define_identity!(
+    /// Identifies one owner-global, durably handled command submission.
+    ///
+    /// This identity does not prove that the command was applied.
+    DurableCommandId
+);
+
+define_identity!(
+    /// Identifies one durable, independently browsable conversation.
+    SessionId
+);
+
+define_identity!(
+    /// Identifies one user submission durably accepted with a delivery treatment.
+    AcceptedInputId
+);
+
+define_identity!(
+    /// Identifies one logical request for a conversational outcome.
+    TurnId
+);
+
+define_identity!(
+    /// Identifies one physical orchestration tenure for a turn.
+    TurnAttemptId
+);
+
+define_identity!(
+    /// Identifies one hub authorization to attempt a provider interaction.
+    ModelCallId
+);
+
+define_identity!(
+    /// Identifies one logical request for a normalized tool operation.
+    ToolRequestId
+);
+
+define_identity!(
+    /// Identifies one physical effort to execute a tool request.
+    ToolAttemptId
+);
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        AcceptedInputId, DurableCommandId, ModelCallId, SessionId, ToolAttemptId, ToolRequestId,
+        TurnAttemptId, TurnId,
+    };
+    use uuid::Uuid;
+
+    macro_rules! assert_uuid_contract {
+        ($identity:ty) => {{
+            let first_uuid = Uuid::from_u128(1);
+            let second_uuid = Uuid::from_u128(2);
+            let first_id = <$identity>::from_uuid(first_uuid);
+            let equal_id = <$identity>::from_uuid(first_uuid);
+            let different_id = <$identity>::from_uuid(second_uuid);
+
+            assert_eq!(first_id, equal_id);
+            assert_ne!(first_id, different_id);
+            assert_eq!(first_id.as_uuid(), &first_uuid);
+            assert_eq!(first_id.into_uuid(), first_uuid);
+        }};
+    }
+
+    #[test]
+    fn identity_uuid_representation_contract() {
+        assert_uuid_contract!(DurableCommandId);
+        assert_uuid_contract!(SessionId);
+        assert_uuid_contract!(AcceptedInputId);
+        assert_uuid_contract!(TurnId);
+        assert_uuid_contract!(TurnAttemptId);
+        assert_uuid_contract!(ModelCallId);
+        assert_uuid_contract!(ToolRequestId);
+        assert_uuid_contract!(ToolAttemptId);
+    }
+}

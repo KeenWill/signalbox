@@ -2,7 +2,7 @@
 
 Signalbox is an independently designed, personal LLM session platform for durable, resumable work across machines and interfaces. An always-on central hub will coordinate conversation state, model calls, approvals, tools, and outbound execution runners while preserving enough provenance to explain and recover accepted work.
 
-> **Status:** design and foundation phase. This repository currently contains architectural framing, development policy, and mechanical Rust workspace scaffolding, not a usable product. The first domain terminology and lifecycle foundation is accepted; APIs, protocols, storage models, and implementation details are not yet stable.
+> **Status:** design and foundation phase. This repository currently contains architectural framing, development policy, Rust workspace scaffolding, and the first domain identity types, not a usable product. The first domain terminology and lifecycle foundation is accepted; APIs, protocols, storage models, and implementation details are not yet stable.
 
 Intended product surfaces include a central hub, remote runners, shared protocols and tool infrastructure, a terminal client, a web client, and native macOS and iOS clients.
 

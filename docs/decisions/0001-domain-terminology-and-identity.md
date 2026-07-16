@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-07-13
+- Amended: 2026-07-15 — accept the initial private Rust UUID representation described below
 - Owners: Repository owner
 - Reviewers: Codex (independent adversarial architecture review); no specialist human reviewer assigned
 - Supersedes: none
@@ -19,7 +20,7 @@ The repository already accepts most of these conceptual distinctions, but severa
 
 Signalbox uses the domain terms **session**, **accepted input**, **turn**, **turn attempt**, **model call**, **tool request**, and **tool attempt**. Each has a distinct durable semantic identity type. None may be substituted for another at a domain boundary, even if an initial workflow happens to create them one-to-one. A separate **durable command identity** is an owner-global idempotency identity, not a semantic work identity or proof that the command was applied.
 
-The identity boundary is semantic rather than representational:
+The identity boundary is semantic: using one backing representation does not make different identity kinds interchangeable.
 
 | Concept | Identity denotes | Identity does not denote |
 | --- | --- | --- |
@@ -40,11 +41,26 @@ A model call belongs to exactly one turn attempt and therefore one turn. A turn 
 
 A malformed transport request, a request whose caller fields cannot construct the canonical typed command, a request for which owner authority cannot be established, or an infrastructure/transaction failure before that atomic record commits does not claim the identifier. A corrected request may therefore reuse that still-unclaimed identifier; once typed command handling records an applied result or authoritative domain rejection, correction requires a new one. These exclusions define the domain boundary without selecting an authentication mechanism or transport error model. Whenever lifecycle state needs causal authority, it stores a purpose-specific proof type constructible only from the matching committed `Applied` command result; a raw identifier or recorded rejection cannot serve as that proof. The rule keeps command references in interrupt, ambiguity, and authority-transfer history unambiguous and prevents rejected commands from acquiring different meanings later. It does not choose a wire representation or require one storage table.
 
-Identifiers are opaque domain values. Whether their stored encodings are UUIDs, integers, or another format is not part of the decision.
+### 2026-07-15 amendment: initial Rust representation
+
+This material clarification accepts `uuid::Uuid` as the initial private backing representation for each Rust domain identity newtype named by this ADR. Semantic opacity remains unchanged: `SessionId`, `TurnId`, and every other identity kind are distinct domain types and cannot be substituted for one another merely because their private fields use the same representation. The UUID field remains private, while public, deliberately named `from_uuid`, `as_uuid`, and `into_uuid` conversion methods are permitted.
+
+This is a decision about the initial in-process Rust domain representation, not a shared boundary encoding. Database records, JSON, Protobuf or other wire messages, and public APIs may use representations or encodings selected for their own boundaries and must map explicitly to the domain types.
+
+This amendment does not yet determine:
+
+- which UUID generation version, if any, is used;
+- which component generates each identity;
+- whether callers or clients may supply identities;
+- database text versus binary encoding;
+- JSON or protocol encoding;
+- public textual formatting;
+- ownership, namespace, relationship, or authorization validation; or
+- serialization strategy.
 
 ## Terminology
 
-The following typed pseudocode is conceptual and is not a final Rust, storage, or wire API:
+The following typed pseudocode describes semantic relationships. It is not a storage or wire API, and the Rust representation amendment above does not make this lifecycle algebra a final Rust API:
 
 ```text
 opaque DurableCommandId
@@ -130,11 +146,11 @@ Names used in public protocols may still be versioned before such a protocol is 
 
 ## Open questions
 
-- Global versus owner-scoped uniqueness for non-command identities, cross-owner physical encoding, and concrete identifier formats remain part of persistence and protocol design. `DurableCommandId` is explicitly owner-global within one established owner authority; this open question does not reopen that namespace.
+- Global versus owner-scoped uniqueness for non-command identities, cross-owner storage and wire encoding, and boundary representations remain part of persistence and protocol design. The private Rust UUID backing and named conversions do not settle those questions. `DurableCommandId` is explicitly owner-global within one established owner authority; this open question does not reopen that namespace.
 - Tool-request and tool-attempt state machines remain assigned to later tool ADRs.
 - The exact transcript-entry model and assistant-content commit granularity remain open.
 - Whether non-text user commands share an accepted-input envelope is a later command-model question; they must not erase the distinction decided here.
 
 ## Explicit non-decisions
 
-This ADR does not choose a database schema, event model, protocol field, Rust newtype spelling, crate layout, idempotency-key format, tool-risk taxonomy, provider SDK, or client presentation. It does not define delegation results, delegation cancellation, archive behavior, or transcript merging.
+Beyond the amended private UUID-backed Rust newtypes and their deliberately named UUID conversions, this ADR does not choose a database schema, event model, protocol field, crate layout, idempotency-key format, tool-risk taxonomy, provider SDK, or client presentation. It does not define delegation results, delegation cancellation, archive behavior, or transcript merging.

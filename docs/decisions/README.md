@@ -6,9 +6,11 @@ Architecture decision records (ADRs) explain durable design choices that affect 
 
 The repository owner accepted these records atomically on 2026-07-13 after independent adversarial architecture review. They are authoritative together:
 
+ADR-0001 was materially amended on 2026-07-15 to accept the initial private UUID-backed representation and deliberately named UUID conversions for its Rust domain identity newtypes. The ADR remains `Accepted`; storage and wire representations remain separate and undecided.
+
 | ADR | Scope |
 | --- | --- |
-| [ADR-0001](0001-domain-terminology-and-identity.md) | Core terminology, owner-global applied-or-rejected command identity, purpose-specific applied-command proofs, and durable semantic identity boundaries |
+| [ADR-0001](0001-domain-terminology-and-identity.md) | Core terminology, owner-global applied-or-rejected command identity, purpose-specific applied-command proofs, durable semantic identity boundaries, and the initial private UUID-backed Rust identity representation |
 | [ADR-0003](0003-session-creation-and-transcript-ancestry.md) | Independent session creation cause, owner-initiated baseline, initial transcript ancestry, and separation from versioned session defaults |
 | [ADR-0004](0004-turn-and-attempt-lifecycle.md) | Turn/attempt lifecycle, aggregate attempt ownership, typed stop causes, applied-interrupt cancellation, proof-bearing reconciliation, startup recovery scan, terminal guards, ambiguity decisions, and regeneration identity boundary |
 | [ADR-0005](0005-model-call-retry-semantics.md) | Target-before-call identity, typed reported-target mismatch failure/invalidation, no automatic known-failure retry, ambiguous-call recovery, continuation, refusal disposition, and configuration identity |
