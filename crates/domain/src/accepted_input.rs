@@ -1,19 +1,29 @@
+//! Accepted-input disposition lifecycle.
+//!
+//! ADR-0027 (`docs/decisions/0027-input-delivery-lifecycle.md`) is the
+//! normative specification. An accepted input either originates a turn,
+//! waits as pending steering bound to its source turn, is consumed by an
+//! exact model call, or is reclassified as new turn-origin work when its
+//! source turn terminates before a safe point.
+
 use crate::{AcceptedInputId, ModelCallId, TurnId};
 
-/// The canonical public boundary for validated accepted-input disposition transitions.
+/// The public boundary for validated accepted-input disposition transitions.
 ///
-/// The consuming transition methods preserve the accepted-input identity while
-/// applying the validated disposition transitions defined below. External callers
-/// cannot invoke those transition methods on a bare [`AcceptedInputDisposition`].
-/// Rejected transitions return this lifecycle value unchanged, including its
-/// [`AcceptedInputId`].
+/// Consuming transition methods preserve the [`AcceptedInputId`] while
+/// applying a disposition transition; a rejected transition returns this
+/// lifecycle value unchanged. External callers cannot transition a bare
+/// [`AcceptedInputDisposition`].
 ///
-/// This is a local lifecycle projection, not the complete accepted-input
-/// aggregate or a persistence record. It deliberately omits content, session,
-/// delivery request, order, configuration provenance, command handling, and
-/// transaction boundaries. Future aggregate transitions must validate those
-/// facts together with model-call ownership, turn termination, inherited
-/// configuration, and queue ordering where ADR-0027 requires them.
+/// # Scope
+///
+/// This lifecycle is a local projection, not the complete accepted-input
+/// aggregate or a persistence record. It omits content, session, delivery
+/// request, queue order, configuration provenance, command handling, and
+/// transaction boundaries, and it does not validate model-call ownership,
+/// presence of the steering input in the consuming call's context frontier,
+/// turn termination, or inherited configuration. Aggregate transitions and
+/// persistence guards own those ADR-0027 requirements.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AcceptedInputLifecycle {
     id: AcceptedInputId,
@@ -23,9 +33,7 @@ pub struct AcceptedInputLifecycle {
 impl AcceptedInputLifecycle {
     /// Couples an accepted-input identity to an existing valid disposition.
     ///
-    /// This constructor does not accept or acknowledge user input. Boundary and
-    /// aggregate code must establish the omitted ADR-0027 acceptance facts before
-    /// constructing a lifecycle projection for newly accepted input.
+    /// This constructor does not accept or acknowledge user input.
     pub const fn new(id: AcceptedInputId, disposition: AcceptedInputDisposition) -> Self {
         Self { id, disposition }
     }
@@ -135,15 +143,10 @@ impl SteeringBinding {
 
 /// Records how one durably accepted input is accounted for.
 ///
-/// An accepted input either originates a turn, remains pending for a source
-/// turn's next safe point, is consumed by an exact model call, or becomes new
-/// turn-origin work when the source turn terminates before a safe point.
-///
-/// [`AcceptedInputLifecycle`] is the canonical public boundary for changing a
-/// disposition because it preserves the associated [`AcceptedInputId`]. The
-/// lower-level transition implementation on this enum is crate-private.
-/// External callers therefore cannot invoke the validated transition methods on
-/// a bare disposition:
+/// Transitions are crate-private; [`AcceptedInputLifecycle`] is the public
+/// boundary because it preserves the associated [`AcceptedInputId`], and its
+/// `Scope` section lists the validation these transitions deliberately omit.
+/// External callers cannot transition a bare disposition:
 ///
 /// ```compile_fail
 /// use signalbox_domain::{AcceptedInputDisposition, ModelCallId};
@@ -169,14 +172,6 @@ impl SteeringBinding {
 ///     let _ = disposition.reclassify_as_turn_origin(turn, reason);
 /// }
 /// ```
-///
-/// The lifecycle transitions do not provide complete lifecycle enforcement. They do not
-/// validate that a model call belongs to the source turn or contains the
-/// steering input in its context frontier. Reclassification does not validate
-/// inherited configuration provenance or prove that the source turn terminated
-/// without another safe point. Persistence atomicity, queue ordering, current
-/// aggregate ownership, and command authorization remain responsibilities of
-/// later aggregate transitions and persistence guards.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum AcceptedInputDisposition {
     /// The accepted input originated the identified turn.
@@ -327,6 +322,8 @@ mod tests {
         assert_eq!(lifecycle.disposition(), &disposition);
     }
 
+    /// INV-004: accepted steering remains separately identified; typed
+    /// transitions preserve the accepted-input identity.
     #[test]
     fn lifecycle_consumption_preserves_accepted_input_identity() {
         let id = accepted_input_id(1);
@@ -342,6 +339,8 @@ mod tests {
         );
     }
 
+    /// INV-004: accepted steering remains separately identified; typed
+    /// transitions preserve the accepted-input identity.
     #[test]
     fn lifecycle_reclassification_preserves_accepted_input_identity() {
         let id = accepted_input_id(1);
@@ -358,6 +357,8 @@ mod tests {
         );
     }
 
+    /// INV-006: a transition is valid only from explicitly permitted prior
+    /// states, and a rejection leaves the current state unchanged.
     #[test]
     fn lifecycle_consumption_rejections_return_the_unchanged_identity_and_disposition() {
         for disposition in non_pending_dispositions() {
@@ -375,6 +376,8 @@ mod tests {
         }
     }
 
+    /// INV-006: a transition is valid only from explicitly permitted prior
+    /// states, and a rejection leaves the current state unchanged.
     #[test]
     fn lifecycle_reclassification_rejections_return_the_unchanged_identity_and_disposition() {
         for disposition in non_pending_dispositions() {
@@ -395,6 +398,8 @@ mod tests {
         }
     }
 
+    /// INV-006: a transition is valid only from explicitly permitted prior
+    /// states.
     #[test]
     fn internal_consumption_rejects_every_non_pending_disposition_with_the_current_value() {
         for current in non_pending_dispositions() {
@@ -405,6 +410,8 @@ mod tests {
         }
     }
 
+    /// INV-006: a transition is valid only from explicitly permitted prior
+    /// states.
     #[test]
     fn internal_reclassification_rejects_every_non_pending_disposition_with_the_current_value() {
         for current in non_pending_dispositions() {
