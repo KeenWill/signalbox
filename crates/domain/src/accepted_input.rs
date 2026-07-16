@@ -5,15 +5,6 @@
 //! waits as pending steering bound to its source turn, is consumed by an
 //! exact model call, or is reclassified as new turn-origin work when its
 //! source turn terminates before a safe point.
-//!
-//! # Scope
-//!
-//! This module is a local lifecycle projection, not the complete
-//! accepted-input aggregate or a persistence record. It omits content,
-//! session, delivery request, queue order, configuration provenance, command
-//! handling, and transaction boundaries, and it does not validate model-call
-//! ownership, turn termination, or inherited configuration. Aggregate
-//! transitions and persistence guards own those ADR-0027 requirements.
 
 use crate::{AcceptedInputId, ModelCallId, TurnId};
 
@@ -23,6 +14,16 @@ use crate::{AcceptedInputId, ModelCallId, TurnId};
 /// applying a disposition transition; a rejected transition returns this
 /// lifecycle value unchanged. External callers cannot transition a bare
 /// [`AcceptedInputDisposition`].
+///
+/// # Scope
+///
+/// This lifecycle is a local projection, not the complete accepted-input
+/// aggregate or a persistence record. It omits content, session, delivery
+/// request, queue order, configuration provenance, command handling, and
+/// transaction boundaries, and it does not validate model-call ownership,
+/// presence of the steering input in the consuming call's context frontier,
+/// turn termination, or inherited configuration. Aggregate transitions and
+/// persistence guards own those ADR-0027 requirements.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AcceptedInputLifecycle {
     id: AcceptedInputId,
@@ -143,8 +144,9 @@ impl SteeringBinding {
 /// Records how one durably accepted input is accounted for.
 ///
 /// Transitions are crate-private; [`AcceptedInputLifecycle`] is the public
-/// boundary because it preserves the associated [`AcceptedInputId`]. External
-/// callers therefore cannot transition a bare disposition:
+/// boundary because it preserves the associated [`AcceptedInputId`], and its
+/// `Scope` section lists the validation these transitions deliberately omit.
+/// External callers cannot transition a bare disposition:
 ///
 /// ```compile_fail
 /// use signalbox_domain::{AcceptedInputDisposition, ModelCallId};
