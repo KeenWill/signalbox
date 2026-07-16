@@ -6,7 +6,8 @@
 mod accepted_input;
 
 pub use accepted_input::{
-    AcceptedInputDisposition, SteeringBinding, SteeringReclassificationReason,
+    AcceptedInputDisposition, AcceptedInputDispositionTransitionError, SteeringBinding,
+    SteeringReclassificationReason,
 };
 
 macro_rules! define_identity {
