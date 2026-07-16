@@ -1,13 +1,14 @@
 //! Core domain boundary for Signalbox.
 //!
 //! Domain identities are distinct from storage, protocol, and framework types.
-//! Lifecycle and product behavior remain intentionally deferred.
+//! Lifecycle behavior is introduced only in slices authorized by accepted
+//! decisions; aggregate orchestration and product behavior remain deferred.
 
 mod accepted_input;
 
 pub use accepted_input::{
-    AcceptedInputDisposition, AcceptedInputDispositionTransitionError, SteeringBinding,
-    SteeringReclassificationReason,
+    AcceptedInputDisposition, AcceptedInputDispositionTransitionError, AcceptedInputLifecycle,
+    AcceptedInputLifecycleTransitionError, SteeringBinding, SteeringReclassificationReason,
 };
 
 macro_rules! define_identity {

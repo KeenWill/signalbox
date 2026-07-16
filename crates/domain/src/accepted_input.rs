@@ -1,4 +1,117 @@
-use crate::{ModelCallId, TurnId};
+use crate::{AcceptedInputId, ModelCallId, TurnId};
+
+/// Couples one accepted input's identity to its current local disposition.
+///
+/// The consuming transition methods preserve the accepted-input identity while
+/// applying the validated disposition transitions defined below. Rejected
+/// transitions return this lifecycle value unchanged.
+///
+/// This is a local lifecycle projection, not the complete accepted-input
+/// aggregate or a persistence record. It deliberately omits content, session,
+/// delivery request, order, configuration provenance, command handling, and
+/// transaction boundaries. Future aggregate transitions must validate those
+/// facts together with model-call ownership, turn termination, inherited
+/// configuration, and queue ordering where ADR-0027 requires them.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AcceptedInputLifecycle {
+    id: AcceptedInputId,
+    disposition: AcceptedInputDisposition,
+}
+
+impl AcceptedInputLifecycle {
+    /// Couples an accepted-input identity to an existing valid disposition.
+    ///
+    /// This constructor does not accept or acknowledge user input. Boundary and
+    /// aggregate code must establish the omitted ADR-0027 acceptance facts before
+    /// constructing a lifecycle projection for newly accepted input.
+    pub const fn new(id: AcceptedInputId, disposition: AcceptedInputDisposition) -> Self {
+        Self { id, disposition }
+    }
+
+    /// Returns the accepted-input identity preserved by this lifecycle.
+    pub const fn id(&self) -> AcceptedInputId {
+        self.id
+    }
+
+    /// Borrows the accepted input's current disposition.
+    pub const fn disposition(&self) -> &AcceptedInputDisposition {
+        &self.disposition
+    }
+
+    /// Consumes pending steering into the identified model call.
+    pub fn consume_as_steering(
+        self,
+        call: ModelCallId,
+    ) -> Result<Self, AcceptedInputLifecycleTransitionError> {
+        let Self { id, disposition } = self;
+
+        match disposition.consume_as_steering(call) {
+            Ok(disposition) => Ok(Self { id, disposition }),
+            Err(error) => Err(
+                AcceptedInputLifecycleTransitionError::CannotConsumeAsSteering {
+                    lifecycle: Self {
+                        id,
+                        disposition: error.into_current(),
+                    },
+                },
+            ),
+        }
+    }
+
+    /// Reclassifies pending steering as the origin of a new turn.
+    pub fn reclassify_as_turn_origin(
+        self,
+        turn: TurnId,
+        reason: SteeringReclassificationReason,
+    ) -> Result<Self, AcceptedInputLifecycleTransitionError> {
+        let Self { id, disposition } = self;
+
+        match disposition.reclassify_as_turn_origin(turn, reason) {
+            Ok(disposition) => Ok(Self { id, disposition }),
+            Err(error) => Err(
+                AcceptedInputLifecycleTransitionError::CannotReclassifyAsTurnOrigin {
+                    lifecycle: Self {
+                        id,
+                        disposition: error.into_current(),
+                    },
+                },
+            ),
+        }
+    }
+}
+
+/// Reports a rejected identity-preserving accepted-input lifecycle transition.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AcceptedInputLifecycleTransitionError {
+    /// The current disposition cannot be consumed as steering.
+    CannotConsumeAsSteering {
+        /// The unchanged lifecycle on which consumption was attempted.
+        lifecycle: AcceptedInputLifecycle,
+    },
+    /// The current disposition cannot be reclassified as turn-origin work.
+    CannotReclassifyAsTurnOrigin {
+        /// The unchanged lifecycle on which reclassification was attempted.
+        lifecycle: AcceptedInputLifecycle,
+    },
+}
+
+impl AcceptedInputLifecycleTransitionError {
+    /// Borrows the unchanged lifecycle on which the transition was rejected.
+    pub const fn lifecycle(&self) -> &AcceptedInputLifecycle {
+        match self {
+            Self::CannotConsumeAsSteering { lifecycle }
+            | Self::CannotReclassifyAsTurnOrigin { lifecycle } => lifecycle,
+        }
+    }
+
+    /// Returns the unchanged lifecycle on which the transition was rejected.
+    pub fn into_lifecycle(self) -> AcceptedInputLifecycle {
+        match self {
+            Self::CannotConsumeAsSteering { lifecycle }
+            | Self::CannotReclassifyAsTurnOrigin { lifecycle } => lifecycle,
+        }
+    }
+}
 
 /// Binds pending steering to the exact turn it was accepted to steer.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -108,6 +221,15 @@ pub enum AcceptedInputDispositionTransitionError {
     },
 }
 
+impl AcceptedInputDispositionTransitionError {
+    fn into_current(self) -> AcceptedInputDisposition {
+        match self {
+            Self::CannotConsumeAsSteering { current }
+            | Self::CannotReclassifyAsTurnOrigin { current } => current,
+        }
+    }
+}
+
 /// Explains why accepted steering became new turn-origin work.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum SteeringReclassificationReason {
@@ -118,10 +240,10 @@ pub enum SteeringReclassificationReason {
 #[cfg(test)]
 mod tests {
     use super::{
-        AcceptedInputDisposition, AcceptedInputDispositionTransitionError, SteeringBinding,
-        SteeringReclassificationReason,
+        AcceptedInputDisposition, AcceptedInputDispositionTransitionError, AcceptedInputLifecycle,
+        AcceptedInputLifecycleTransitionError, SteeringBinding, SteeringReclassificationReason,
     };
-    use crate::{ModelCallId, TurnId};
+    use crate::{AcceptedInputId, ModelCallId, TurnId};
     use uuid::Uuid;
 
     #[test]
@@ -169,6 +291,84 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_couples_identity_to_disposition() {
+        let id = accepted_input_id(1);
+        let disposition = pending_steering(2);
+        let lifecycle = AcceptedInputLifecycle::new(id, disposition.clone());
+
+        assert_eq!(lifecycle.id(), id);
+        assert_eq!(lifecycle.disposition(), &disposition);
+    }
+
+    #[test]
+    fn lifecycle_consumption_preserves_accepted_input_identity() {
+        let id = accepted_input_id(1);
+        let call = model_call_id(3);
+        let lifecycle = AcceptedInputLifecycle::new(id, pending_steering(2));
+
+        assert_eq!(
+            lifecycle.consume_as_steering(call),
+            Ok(AcceptedInputLifecycle::new(
+                id,
+                AcceptedInputDisposition::ConsumedAsSteering { call }
+            ))
+        );
+    }
+
+    #[test]
+    fn lifecycle_reclassification_preserves_accepted_input_identity() {
+        let id = accepted_input_id(1);
+        let turn = turn_id(3);
+        let reason = SteeringReclassificationReason::NoSafePointBeforeTerminal;
+        let lifecycle = AcceptedInputLifecycle::new(id, pending_steering(2));
+
+        assert_eq!(
+            lifecycle.reclassify_as_turn_origin(turn, reason),
+            Ok(AcceptedInputLifecycle::new(
+                id,
+                AcceptedInputDisposition::ReclassifiedAsTurnOrigin { turn, reason }
+            ))
+        );
+    }
+
+    #[test]
+    fn lifecycle_consumption_rejections_return_the_unchanged_identity_and_disposition() {
+        for disposition in non_pending_dispositions() {
+            let lifecycle = AcceptedInputLifecycle::new(accepted_input_id(1), disposition);
+            let error = AcceptedInputLifecycleTransitionError::CannotConsumeAsSteering {
+                lifecycle: lifecycle.clone(),
+            };
+
+            assert_eq!(
+                lifecycle.clone().consume_as_steering(model_call_id(4)),
+                Err(error.clone())
+            );
+            assert_eq!(error.lifecycle(), &lifecycle);
+            assert_eq!(error.into_lifecycle(), lifecycle);
+        }
+    }
+
+    #[test]
+    fn lifecycle_reclassification_rejections_return_the_unchanged_identity_and_disposition() {
+        for disposition in non_pending_dispositions() {
+            let lifecycle = AcceptedInputLifecycle::new(accepted_input_id(1), disposition);
+            let error = AcceptedInputLifecycleTransitionError::CannotReclassifyAsTurnOrigin {
+                lifecycle: lifecycle.clone(),
+            };
+
+            assert_eq!(
+                lifecycle.clone().reclassify_as_turn_origin(
+                    turn_id(4),
+                    SteeringReclassificationReason::NoSafePointBeforeTerminal,
+                ),
+                Err(error.clone())
+            );
+            assert_eq!(error.lifecycle(), &lifecycle);
+            assert_eq!(error.into_lifecycle(), lifecycle);
+        }
+    }
+
+    #[test]
     fn consumption_rejects_every_non_pending_disposition_with_the_current_value() {
         for current in non_pending_dispositions() {
             assert_eq!(
@@ -212,6 +412,10 @@ mod tests {
         AcceptedInputDisposition::PendingSteering {
             binding: SteeringBinding::new(turn_id(source_turn)),
         }
+    }
+
+    fn accepted_input_id(value: u128) -> AcceptedInputId {
+        AcceptedInputId::from_uuid(Uuid::from_u128(value))
     }
 
     fn model_call_id(value: u128) -> ModelCallId {
