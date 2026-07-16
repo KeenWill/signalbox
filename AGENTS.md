@@ -1,6 +1,6 @@
 # Agent guidance
 
-Signalbox is in its design and foundation phase. Implementation is limited to mechanical workspace and tooling scaffolding until accepted plans authorize product slices; speculative product behavior is not permitted.
+Signalbox is in its design and foundation phase. Implementation is limited to mechanical workspace and tooling scaffolding plus narrowly scoped domain slices authorized by accepted decisions or explicit owner-approved plans; speculative product behavior is not permitted.
 
 Authoritative starting points are `docs/architecture.md`, `docs/invariants.md`, `docs/decision-ledger.md`, and accepted records under `docs/decisions/`. Accepted ADRs override earlier narrative documents; reconcile stale documents in the same change.
 
