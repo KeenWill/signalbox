@@ -19,6 +19,20 @@ Read the [vision](docs/vision.md), [architecture](docs/architecture.md), [invari
 - Use original explanations and examples that make sense without private context.
 - Avoid drive-by rewording of unrelated design decisions.
 
+## Testing
+
+Tests prove domain transitions and recovery semantics before optimizing transport or deployment; they use the same distinct identities as the production design and assert durable state, not only a returned status or rendered screen. Prefer deterministic inputs: fixed clocks, seeded identifiers, scripted provider and runner fakes, bounded schedulers, and explicitly advanced streams. Tests that depend on real provider availability or timing are never the merge gate. Postgres is the test database for persistence behavior, using ephemeral containers; SQLite is not a substitute for transaction, constraint, locking, or recovery semantics.
+
+Expected layers, each added with the first implementation of the behavior it covers:
+
+- **Pure domain transitions:** table-driven state-machine cases covering every allowed transition and rejecting every invalid predecessor/state combination, plus property tests for identity preservation and terminal-state monotonicity. Model effects as requested decisions rather than performing I/O so ordering (for example "persist before provider send") is assertable.
+- **Postgres integration:** real migrations, constraints, transactions, idempotency keys, and compare-and-set fencing against ephemeral Postgres; duplicate and stale-generation races prove state advances at most once and current state is never overwritten.
+- **Fake external boundaries:** scripted provider adapters that stream deterministically, fail at chosen points, report identity, mismatch, or refusal, block until cancellation, and expose received context so call frontiers can be asserted; fake runners exercise approval binding, disconnect ambiguity, and fencing.
+- **Restart and recovery:** stop the hub at named durability boundaries (before acceptance; after acceptance but before scheduling; after attempt creation but before send; after send but before outcome persistence; during waits; after outcome persistence but before acknowledgement) and assert both the final state and the absence of forbidden effects; re-running the startup scan changes nothing.
+- **Protocol fixtures and end-to-end slices:** language-neutral compatibility fixtures before a second independently versioned process or language client merges, and one narrow deterministic end-to-end slice per major capability covering its defining failure/restart path.
+
+Test names or metadata should reference scenario and invariant identifiers when the connection is meaningful, for example `S12_INV011_rejects_stale_generation`. The concrete required cases for each slice live with the ADR or decision that authorizes it and in the tests themselves.
+
 ## Validation
 
 Run the repository-wide format, lint, test, and documentation commands listed in the root [AGENTS.md](AGENTS.md). For documentation changes, also:
