@@ -1,10 +1,12 @@
 use crate::{AcceptedInputId, ModelCallId, TurnId};
 
-/// Couples one accepted input's identity to its current local disposition.
+/// The canonical public boundary for validated accepted-input disposition transitions.
 ///
 /// The consuming transition methods preserve the accepted-input identity while
-/// applying the validated disposition transitions defined below. Rejected
-/// transitions return this lifecycle value unchanged.
+/// applying the validated disposition transitions defined below. External callers
+/// cannot invoke those transition methods on a bare [`AcceptedInputDisposition`].
+/// Rejected transitions return this lifecycle value unchanged, including its
+/// [`AcceptedInputId`].
 ///
 /// This is a local lifecycle projection, not the complete accepted-input
 /// aggregate or a persistence record. It deliberately omits content, session,
@@ -137,13 +139,38 @@ impl SteeringBinding {
 /// turn's next safe point, is consumed by an exact model call, or becomes new
 /// turn-origin work when the source turn terminates before a safe point.
 ///
-/// The transition methods on this type provide these validated local
-/// disposition transitions:
+/// [`AcceptedInputLifecycle`] is the canonical public boundary for changing a
+/// disposition because it preserves the associated [`AcceptedInputId`]. The
+/// lower-level transition implementation on this enum is crate-private.
+/// External callers therefore cannot invoke the validated transition methods on
+/// a bare disposition:
 ///
-/// - `PendingSteering` to `ConsumedAsSteering`;
-/// - `PendingSteering` to `ReclassifiedAsTurnOrigin`.
+/// ```compile_fail
+/// use signalbox_domain::{AcceptedInputDisposition, ModelCallId};
 ///
-/// These methods do not provide complete lifecycle enforcement. They do not
+/// fn consume_bare_disposition(
+///     disposition: AcceptedInputDisposition,
+///     call: ModelCallId,
+/// ) {
+///     let _ = disposition.consume_as_steering(call);
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use signalbox_domain::{
+///     AcceptedInputDisposition, SteeringReclassificationReason, TurnId,
+/// };
+///
+/// fn reclassify_bare_disposition(
+///     disposition: AcceptedInputDisposition,
+///     turn: TurnId,
+///     reason: SteeringReclassificationReason,
+/// ) {
+///     let _ = disposition.reclassify_as_turn_origin(turn, reason);
+/// }
+/// ```
+///
+/// The lifecycle transitions do not provide complete lifecycle enforcement. They do not
 /// validate that a model call belongs to the source turn or contains the
 /// steering input in its context frontier. Reclassification does not validate
 /// inherited configuration provenance or prove that the source turn terminated
@@ -175,7 +202,7 @@ pub enum AcceptedInputDisposition {
 
 impl AcceptedInputDisposition {
     /// Consumes pending steering into the identified model call.
-    pub fn consume_as_steering(
+    pub(crate) fn consume_as_steering(
         self,
         call: ModelCallId,
     ) -> Result<Self, AcceptedInputDispositionTransitionError> {
@@ -190,7 +217,7 @@ impl AcceptedInputDisposition {
     }
 
     /// Reclassifies pending steering as the origin of a new turn.
-    pub fn reclassify_as_turn_origin(
+    pub(crate) fn reclassify_as_turn_origin(
         self,
         turn: TurnId,
         reason: SteeringReclassificationReason,
@@ -206,9 +233,9 @@ impl AcceptedInputDisposition {
     }
 }
 
-/// Reports a rejected local accepted-input disposition transition.
+/// Reports a rejected crate-private accepted-input disposition transition.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum AcceptedInputDispositionTransitionError {
+pub(crate) enum AcceptedInputDispositionTransitionError {
     /// The current disposition cannot be consumed as steering.
     CannotConsumeAsSteering {
         /// The disposition on which consumption was attempted.
@@ -270,7 +297,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_steering_can_be_consumed_by_an_exact_model_call() {
+    fn internal_disposition_transition_can_consume_pending_steering() {
         let call = model_call_id(2);
 
         assert_eq!(
@@ -280,7 +307,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_steering_can_be_reclassified_with_an_exact_turn_and_reason() {
+    fn internal_disposition_transition_can_reclassify_pending_steering() {
         let turn = turn_id(2);
         let reason = SteeringReclassificationReason::NoSafePointBeforeTerminal;
 
@@ -369,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn consumption_rejects_every_non_pending_disposition_with_the_current_value() {
+    fn internal_consumption_rejects_every_non_pending_disposition_with_the_current_value() {
         for current in non_pending_dispositions() {
             assert_eq!(
                 current.clone().consume_as_steering(model_call_id(4)),
@@ -379,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn reclassification_rejects_every_non_pending_disposition_with_the_current_value() {
+    fn internal_reclassification_rejects_every_non_pending_disposition_with_the_current_value() {
         for current in non_pending_dispositions() {
             assert_eq!(
                 current.clone().reclassify_as_turn_origin(
