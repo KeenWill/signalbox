@@ -7,10 +7,15 @@
 //! disposition transitions that preserve an accepted input's identity.
 
 mod accepted_input;
+mod configuration;
 
 pub use accepted_input::{
     AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputLifecycleTransitionError,
     SteeringBinding, SteeringReclassificationReason,
+};
+pub use configuration::{
+    DirectModelSelection, EffectiveConfiguration, FrozenAliasDefinition, FrozenModelSelection,
+    KnownProviderFailureRetry, ModelAlias, ModelFallback, ModelParameters, ModelSelectionRequest,
 };
 
 macro_rules! define_identity {
@@ -37,6 +42,8 @@ macro_rules! define_identity {
         }
     };
 }
+
+pub(crate) use define_identity;
 
 define_identity!(
     /// Identifies one owner-global, durably handled command submission.

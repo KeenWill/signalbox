@@ -1,6 +1,16 @@
 # Decision log
 
-An append-only, dated record of decisions below foundation weight. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
+An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
+
+## 2026-07-15 — UUID-backed model-selection keys
+
+**Context.** ADR-0027 defines `DirectModelSelection` as a canonical domain-owned key with immutable semantic meaning and `ModelAlias` as an owner-configured alias name, and represents `FrozenAliasDefinition` as "an immutable definition version or value selecting exactly one `DirectModelSelection`", leaving concrete encodings open. The first configuration slice needs backing values.
+
+**Decision.** `DirectModelSelection` and `ModelAlias` are private UUID-backed newtypes with deliberately named UUID conversions, following the representation convention the amended ADR-0001 accepted for identity newtypes. `FrozenAliasDefinition` takes the value form: it stores exactly the selected `DirectModelSelection`. Deployment-key mapping, storage, wire, display, and serialization encodings remain open, as does adding a definition-version identity if a later slice needs one.
+
+**Rejected alternatives.** String-backed keys: they invite provider-native unnormalized identifiers into domain equality, which ADR-0027 forbids. A definition-version identity inside `FrozenAliasDefinition` now: nothing constructible needs it yet.
+
+**Affects.** `crates/domain/src/configuration.rs`; the `define_identity` macro becomes crate-visible for domain keys that follow the identity representation convention.
 
 ## 2026-07-15 — Adopt a lightweight decision process
 
