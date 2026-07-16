@@ -19,7 +19,7 @@ pub use configuration::{
     ModelSelectionOverride, ModelSelectionRequest, OriginConfiguration,
     SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
     SessionDefaultsVersionMismatch, TurnConfigurationProvenance, UnknownModelAlias,
-    VersionedSessionConfigurationDefaults,
+    VersionCheckedConfigurationRequest, VersionedSessionConfigurationDefaults,
 };
 
 macro_rules! define_identity {

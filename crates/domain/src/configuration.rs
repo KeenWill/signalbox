@@ -242,12 +242,13 @@ impl VersionedSessionConfigurationDefaults {
     ///
     /// The caller's expected defaults version must still be current; a
     /// mismatch is an authoritative rejection that cannot silently adopt a
-    /// newer version for the same caller payload.
+    /// newer version for the same caller payload. The result carries the
+    /// exact version it was checked against.
     pub fn derive_request(
         &self,
         expected: SessionConfigurationDefaultsVersion,
         model: ModelSelectionOverride,
-    ) -> Result<ConfigurationRequest, SessionDefaultsVersionMismatch> {
+    ) -> Result<VersionCheckedConfigurationRequest, SessionDefaultsVersionMismatch> {
         if expected != self.version {
             return Err(SessionDefaultsVersionMismatch {
                 expected,
@@ -260,7 +261,10 @@ impl VersionedSessionConfigurationDefaults {
             ModelSelectionOverride::ReplaceWith(request) => request,
         };
 
-        Ok(ConfigurationRequest { model })
+        Ok(VersionCheckedConfigurationRequest {
+            request: ConfigurationRequest { model },
+            session_defaults_version: self.version,
+        })
     }
 }
 
@@ -290,6 +294,31 @@ impl ConfigurationRequest {
     }
 }
 
+/// A derived configuration request bound to the exact defaults version it
+/// was checked against.
+///
+/// It is constructible only by
+/// [`VersionedSessionConfigurationDefaults::derive_request`], so frozen
+/// origin provenance can never claim a defaults version that did not
+/// validate its request.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct VersionCheckedConfigurationRequest {
+    request: ConfigurationRequest,
+    session_defaults_version: SessionConfigurationDefaultsVersion,
+}
+
+impl VersionCheckedConfigurationRequest {
+    /// Borrows the derived configuration request.
+    pub const fn request(&self) -> &ConfigurationRequest {
+        &self.request
+    }
+
+    /// Returns the exact defaults version the request was checked against.
+    pub const fn session_defaults_version(&self) -> SessionConfigurationDefaultsVersion {
+        self.session_defaults_version
+    }
+}
+
 /// Reports a caller-expected defaults version that is no longer current.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SessionDefaultsVersionMismatch {
@@ -312,10 +341,10 @@ impl SessionDefaultsVersionMismatch {
 /// The complete configuration provenance frozen for one explicitly
 /// configured origin turn.
 ///
-/// It is constructible only by consuming a derived, version-checked
-/// [`ConfigurationRequest`], so the stored request and effective value can
-/// neither be cross-wired nor bypass the defaults-version check that
-/// produced the request.
+/// It is constructible only by consuming a
+/// [`VersionCheckedConfigurationRequest`], so the stored request, defaults
+/// version, and effective value can neither be cross-wired nor bypass the
+/// defaults-version check that produced the request.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct OriginConfiguration {
     requested: ConfigurationRequest,
@@ -330,10 +359,14 @@ impl OriginConfiguration {
     /// request names an alias; returning `None` reports the alias as unknown
     /// and freezes nothing. A direct request never invokes it.
     pub fn freeze(
-        requested: ConfigurationRequest,
-        session_defaults_version: SessionConfigurationDefaultsVersion,
+        checked: VersionCheckedConfigurationRequest,
         select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
     ) -> Result<Self, UnknownModelAlias> {
+        let VersionCheckedConfigurationRequest {
+            request: requested,
+            session_defaults_version,
+        } = checked;
+
         let model = match requested.model() {
             ModelSelectionRequest::Direct(selection) => FrozenModelSelection::Direct(selection),
             ModelSelectionRequest::Alias(alias) => match select_definition(alias) {
@@ -401,7 +434,7 @@ mod tests {
         ModelParameters, ModelSelectionOverride, ModelSelectionRequest, OriginConfiguration,
         SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
         SessionDefaultsVersionMismatch, TurnConfigurationProvenance,
-        VersionedSessionConfigurationDefaults,
+        VersionCheckedConfigurationRequest, VersionedSessionConfigurationDefaults,
     };
     use crate::{SteeringBinding, TurnId};
     use uuid::Uuid;
@@ -546,11 +579,15 @@ mod tests {
     fn use_session_default_derives_the_named_default() {
         let current = VersionedSessionConfigurationDefaults::establish(defaults(1));
 
-        let request = current
+        let checked = current
             .derive_request(current.version(), ModelSelectionOverride::UseSessionDefault)
             .expect("current expected version derives a request");
 
-        assert_eq!(request.model(), ModelSelectionRequest::Direct(direct(1)));
+        assert_eq!(
+            checked.request().model(),
+            ModelSelectionRequest::Direct(direct(1))
+        );
+        assert_eq!(checked.session_defaults_version(), current.version());
     }
 
     #[test]
@@ -558,14 +595,15 @@ mod tests {
         let current = VersionedSessionConfigurationDefaults::establish(defaults(1));
         let explicit = ModelSelectionRequest::Alias(alias(2));
 
-        let request = current
+        let checked = current
             .derive_request(
                 current.version(),
                 ModelSelectionOverride::ReplaceWith(explicit),
             )
             .expect("current expected version derives a request");
 
-        assert_eq!(request.model(), explicit);
+        assert_eq!(checked.request().model(), explicit);
+        assert_eq!(checked.session_defaults_version(), current.version());
     }
 
     /// INV-012: `UseSessionDefault` and `ReplaceWith(X)` remain structurally
@@ -604,17 +642,23 @@ mod tests {
         );
     }
 
-    fn direct_request(value: u128) -> ConfigurationRequest {
-        ConfigurationRequest {
-            model: ModelSelectionRequest::Direct(direct(value)),
-        }
+    fn checked_direct_request(
+        value: u128,
+        current: &VersionedSessionConfigurationDefaults,
+    ) -> VersionCheckedConfigurationRequest {
+        current
+            .derive_request(
+                current.version(),
+                ModelSelectionOverride::ReplaceWith(ModelSelectionRequest::Direct(direct(value))),
+            )
+            .expect("current expected version derives a request")
     }
 
     fn freeze_direct_request(
         value: u128,
-        version: SessionConfigurationDefaultsVersion,
+        current: &VersionedSessionConfigurationDefaults,
     ) -> OriginConfiguration {
-        OriginConfiguration::freeze(direct_request(value), version, |_| None)
+        OriginConfiguration::freeze(checked_direct_request(value, current), |_| None)
             .expect("a direct request freezes without an alias definition")
     }
 
@@ -623,14 +667,14 @@ mod tests {
     #[test]
     fn origin_configuration_freezes_the_derived_direct_request_coherently() {
         let current = VersionedSessionConfigurationDefaults::establish(defaults(1));
-        let request = current
+        let checked = current
             .derive_request(current.version(), ModelSelectionOverride::UseSessionDefault)
             .expect("current expected version derives a request");
 
-        let origin = OriginConfiguration::freeze(request, current.version(), |_| None)
+        let origin = OriginConfiguration::freeze(checked, |_| None)
             .expect("a direct request freezes without an alias definition");
 
-        assert_eq!(origin.requested(), &request);
+        assert_eq!(origin.requested(), checked.request());
         assert_eq!(origin.session_defaults_version(), current.version());
         assert_eq!(
             origin.effective(),
@@ -640,13 +684,16 @@ mod tests {
 
     #[test]
     fn origin_configuration_freezes_an_alias_request_with_the_selected_definition() {
-        let version = SessionConfigurationDefaultsVersion::first();
+        let current = VersionedSessionConfigurationDefaults::establish(defaults(1));
         let definition = FrozenAliasDefinition::selecting(direct(1));
-        let request = ConfigurationRequest {
-            model: ModelSelectionRequest::Alias(alias(2)),
-        };
+        let checked = current
+            .derive_request(
+                current.version(),
+                ModelSelectionOverride::ReplaceWith(ModelSelectionRequest::Alias(alias(2))),
+            )
+            .expect("current expected version derives a request");
 
-        let origin = OriginConfiguration::freeze(request, version, |requested| {
+        let origin = OriginConfiguration::freeze(checked, |requested| {
             assert_eq!(requested, alias(2));
             Some(definition)
         })
@@ -656,6 +703,7 @@ mod tests {
             origin.requested().model(),
             ModelSelectionRequest::Alias(alias(2))
         );
+        assert_eq!(origin.session_defaults_version(), current.version());
         assert_eq!(
             origin.effective(),
             &EffectiveConfiguration::baseline(FrozenModelSelection::FrozenAlias {
@@ -667,16 +715,16 @@ mod tests {
 
     #[test]
     fn an_alias_request_without_a_selectable_definition_freezes_nothing() {
-        let request = ConfigurationRequest {
-            model: ModelSelectionRequest::Alias(alias(1)),
-        };
+        let current = VersionedSessionConfigurationDefaults::establish(defaults(1));
+        let checked = current
+            .derive_request(
+                current.version(),
+                ModelSelectionOverride::ReplaceWith(ModelSelectionRequest::Alias(alias(1))),
+            )
+            .expect("current expected version derives a request");
 
-        let error = OriginConfiguration::freeze(
-            request,
-            SessionConfigurationDefaultsVersion::first(),
-            |_| None,
-        )
-        .expect_err("an unknown alias cannot freeze provenance");
+        let error = OriginConfiguration::freeze(checked, |_| None)
+            .expect_err("an unknown alias cannot freeze provenance");
 
         assert_eq!(error.alias(), alias(1));
     }
@@ -685,10 +733,17 @@ mod tests {
     /// effective-value equality.
     #[test]
     fn defaults_version_is_provenance_rather_than_effective_equality() {
-        let first = freeze_direct_request(1, SessionConfigurationDefaultsVersion::first());
-        let later = freeze_direct_request(1, SessionConfigurationDefaultsVersion::first().next());
+        let established = VersionedSessionConfigurationDefaults::establish(defaults(1));
+        let replaced = established.replace(defaults(1));
+
+        let first = freeze_direct_request(1, &established);
+        let later = freeze_direct_request(1, &replaced);
 
         assert_eq!(first.effective(), later.effective());
+        assert_ne!(
+            first.session_defaults_version(),
+            later.session_defaults_version()
+        );
         assert_ne!(first, later);
     }
 
@@ -697,7 +752,8 @@ mod tests {
     /// binding.
     #[test]
     fn provenance_variants_carry_an_origin_record_or_only_the_binding() {
-        let origin = freeze_direct_request(1, SessionConfigurationDefaultsVersion::first());
+        let current = VersionedSessionConfigurationDefaults::establish(defaults(1));
+        let origin = freeze_direct_request(1, &current);
         let binding = SteeringBinding::new(TurnId::from_uuid(Uuid::from_u128(2)));
 
         let explicit = TurnConfigurationProvenance::ExplicitOrigin(origin.clone());
@@ -705,10 +761,7 @@ mod tests {
 
         assert_ne!(
             explicit,
-            TurnConfigurationProvenance::ExplicitOrigin(freeze_direct_request(
-                3,
-                SessionConfigurationDefaultsVersion::first(),
-            ))
+            TurnConfigurationProvenance::ExplicitOrigin(freeze_direct_request(3, &current))
         );
         match inherited {
             TurnConfigurationProvenance::InheritedForReclassifiedSteering(carried) => {
