@@ -3,6 +3,12 @@
 //! Domain identities are distinct from storage, protocol, and framework types.
 //! Lifecycle and product behavior remain intentionally deferred.
 
+mod accepted_input;
+
+pub use accepted_input::{
+    AcceptedInputDisposition, SteeringBinding, SteeringReclassificationReason,
+};
+
 macro_rules! define_identity {
     ($(#[$documentation:meta])* $name:ident) => {
         $(#[$documentation])*
