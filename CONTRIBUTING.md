@@ -4,7 +4,7 @@ Signalbox is currently establishing its domain language, invariants, and archite
 
 ## Before proposing a change
 
-Read the [vision](docs/vision.md), [architecture](docs/architecture.md), [invariants](docs/invariants.md), [decision log](docs/decisions.md), and [open questions](docs/open-questions.md). Check [accepted ADRs](docs/decisions/README.md) before revisiting a decision. A change that alters accepted direction or closes an open foundational question should normally begin as a proposed ADR.
+Read the [vision](docs/vision.md), [architecture](docs/architecture.md), [invariants](docs/invariants.md), [decision log](docs/decisions.md), and [open questions](docs/open-questions.md). Check [accepted ADRs](docs/decisions/README.md) before revisiting a decision. Ordinary decisions are made in the pull request and recorded in the decision log; a change that alters accepted direction or closes an open foundational question should begin as a proposed ADR.
 
 ## Contribution rules
 

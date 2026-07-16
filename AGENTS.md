@@ -2,9 +2,13 @@
 
 Signalbox is in its design and foundation phase. Implementation is limited to mechanical workspace and tooling scaffolding plus narrowly scoped domain slices authorized by accepted decisions or explicit owner-approved plans; speculative product behavior is not permitted.
 
-Authoritative starting points are `docs/architecture.md`, `docs/invariants.md`, `docs/decisions.md`, `docs/open-questions.md`, and accepted records under `docs/decisions/`. Accepted ADRs override earlier narrative documents; reconcile stale documents in the same change.
+Authoritative starting points are `docs/architecture.md`, `docs/invariants.md`, `docs/decisions.md`, `docs/open-questions.md`, and accepted records under `docs/decisions/`. Accepted ADRs are the normative specification for decided semantics; executable tests become the enforcement of record as slices implement them.
 
-Do not silently change a foundational decision or close a recorded open question. Propose an ADR and exercise the change against scenarios. Keep domain types distinct from storage records, protocol messages, and framework types. Keep pull requests narrow and reviewable.
+Every normative statement lives in exactly one place — an accepted ADR, a decision-log entry, or an implemented test — and other documents link to it rather than restating it. Do not add or expand normative prose in derived documents (architecture, invariants, scenarios); update the owning record and keep summaries short.
+
+Decisions have two weights. Ordinary decisions are made in the pull request and recorded as a dated entry in `docs/decisions.md` stating context, decision, rejected alternatives, and what it affects. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require an ADR under `docs/decisions/`, exercised against scenarios. Do not silently change a foundational decision or close a recorded open question. Keep domain types distinct from storage records, protocol messages, and framework types. Keep pull requests narrow and reviewable.
+
+Tests reference the scenario and invariant identifiers they enforce when the connection is meaningful (for example `S12_INV011_rejects_stale_generation`, or a doc comment naming the invariant). When a test becomes the enforcement of an accepted invariant, link it from the invariant catalog's enforcement column in the same change.
 
 Dependencies are allowed when they provide clearer types or interfaces, replace code Signalbox would otherwise need to own, or supply another focused capability with a concrete benefit. Prefer small, narrowly scoped dependencies and explain their tradeoffs in the pull request. Before adding a large dependency with substantial transitive, build-time, runtime, or architectural cost, ask the user and wait for explicit approval.
 
