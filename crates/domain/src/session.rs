@@ -261,11 +261,7 @@ impl CreateSession {
     ///     ancestry: TranscriptAncestry,
     ///     defaults: SessionConfigurationDefaults,
     /// ) {
-    ///     let _ = SessionCreationProvenance {
-    ///         cause,
-    ///         ancestry,
-    ///         defaults,
-    ///     };
+    ///     let _ = SessionCreationProvenance::new(cause, ancestry, defaults);
     /// }
     /// ```
     ///
