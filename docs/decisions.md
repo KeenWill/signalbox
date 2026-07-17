@@ -12,6 +12,16 @@ An append-only, dated record of decisions below foundation weight, newest first.
 
 **Affects.** `crates/domain/src/configuration.rs` and its tests, and a `crates/domain/src/delivery_request.rs` test that constructs a later version. Refines the 2026-07-15 "Ordinal session-defaults versions" decision's "successor operation" to a checked successor; storage and wire encodings remain open.
 
+## 2026-07-17 — Shared test constructors for domain identities
+
+**Context.** Every unit-test module built domain identities with the same `Type::from_uuid(Uuid::from_u128(value))` pattern behind small named helpers, so `turn_id` was defined identically in three modules, `direct` in two, and `session_id`, `model_call_id`, and `accepted_input_id` each carried their own copy. The repetition added no test meaning and drifted independently as modules were added.
+
+**Decision.** Add a `#[cfg(test)] pub(crate) mod test_support` in `crates/domain/src/lib.rs` that generates the identity constructors (`turn_id`, `session_id`, `accepted_input_id`, `model_call_id`, `direct`, `alias`) from one macro, and import them where each test module previously defined its own. This is a mechanical test-only refactor: no production types, public API, or asserted behavior change, and the full validation sequence still passes.
+
+**Rejected alternatives.** Emitting a `from_u128` constructor from `define_identity!` onto every identity type: it would touch call sites throughout and add a constructor to production types solely for tests. A generic `id::<T>(u128)` helper behind a new trait: it adds a trait and turbofish call sites for no readability gain over the terse named constructors the tests already used. Leaving the duplication: it keeps five helpers drifting across modules.
+
+**Affects.** The `#[cfg(test)]` test modules of `crates/domain/src/{accepted_input,configuration,delivery_request,queue_order}.rs` and the new `test_support` module in `crates/domain/src/lib.rs`. No non-test code, re-exports, or invariants change.
+
 ## 2026-07-16 — Canonical turn-attempt stop and terminal values
 
 **Context.** ADR-0004 requires cancellation-only stop to retain one applied-interrupt proof, fatal stop to retain a nonempty set of ADR-0005 mismatch references plus any applied interrupt, and terminal history to exclude several dishonest stop/disposition combinations. The representation of the nonempty set and `ProviderTargetEvidenceId` backing remain below foundation weight.

@@ -431,22 +431,15 @@ pub enum TurnConfigurationProvenance {
 mod tests {
     use super::{
         ConfigurationRequest, DirectModelSelection, EffectiveConfiguration, FrozenAliasDefinition,
-        FrozenModelSelection, KnownProviderFailureRetry, ModelAlias, ModelFallback,
-        ModelParameters, ModelSelectionOverride, ModelSelectionRequest, OriginConfiguration,
+        FrozenModelSelection, KnownProviderFailureRetry, ModelFallback, ModelParameters,
+        ModelSelectionOverride, ModelSelectionRequest, OriginConfiguration,
         SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
         SessionDefaultsVersionMismatch, TurnConfigurationProvenance,
         VersionCheckedConfigurationRequest, VersionedSessionConfigurationDefaults,
     };
-    use crate::{SteeringBinding, TurnId};
+    use crate::SteeringBinding;
+    use crate::test_support::{alias, direct, turn_id};
     use uuid::Uuid;
-
-    fn direct(value: u128) -> DirectModelSelection {
-        DirectModelSelection::from_uuid(Uuid::from_u128(value))
-    }
-
-    fn alias(value: u128) -> ModelAlias {
-        ModelAlias::from_uuid(Uuid::from_u128(value))
-    }
 
     #[test]
     fn selection_keys_expose_their_uuid_values() {
@@ -786,7 +779,7 @@ mod tests {
     fn provenance_variants_carry_an_origin_record_or_only_the_binding() {
         let current = VersionedSessionConfigurationDefaults::establish(defaults(1));
         let origin = freeze_direct_request(1, &current);
-        let binding = SteeringBinding::new(TurnId::from_uuid(Uuid::from_u128(2)));
+        let binding = SteeringBinding::new(turn_id(2));
 
         let explicit = TurnConfigurationProvenance::ExplicitOrigin(origin.clone());
         let inherited = TurnConfigurationProvenance::InheritedForReclassifiedSteering(binding);

@@ -265,8 +265,7 @@ mod tests {
         AcceptedInputDisposition, AcceptedInputDispositionTransitionError, AcceptedInputLifecycle,
         AcceptedInputLifecycleTransitionError, SteeringBinding, SteeringReclassificationReason,
     };
-    use crate::{AcceptedInputId, ModelCallId, TurnId};
-    use uuid::Uuid;
+    use crate::test_support::{accepted_input_id, model_call_id, turn_id};
 
     #[test]
     fn steering_binding_exposes_the_exact_source_turn() {
@@ -446,17 +445,5 @@ mod tests {
         AcceptedInputDisposition::PendingSteering {
             binding: SteeringBinding::new(turn_id(source_turn)),
         }
-    }
-
-    fn accepted_input_id(value: u128) -> AcceptedInputId {
-        AcceptedInputId::from_uuid(Uuid::from_u128(value))
-    }
-
-    fn model_call_id(value: u128) -> ModelCallId {
-        ModelCallId::from_uuid(Uuid::from_u128(value))
-    }
-
-    fn turn_id(value: u128) -> TurnId {
-        TurnId::from_uuid(Uuid::from_u128(value))
     }
 }
