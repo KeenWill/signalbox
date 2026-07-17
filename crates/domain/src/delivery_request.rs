@@ -214,7 +214,9 @@ mod tests {
     fn s01_s07_s08_s09_inv012_delivery_payload_equality_is_structural() {
         let configuration = choices();
         let later_configuration = PerInputConfigurationChoices::new(
-            first_version().next(),
+            first_version()
+                .checked_next()
+                .expect("the second version is representable"),
             ModelSelectionOverride::UseSessionDefault,
         );
         let explicit_configuration = PerInputConfigurationChoices::new(

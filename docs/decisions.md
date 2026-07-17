@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-17 — Checked session-defaults version succession
+
+**Context.** `SessionConfigurationDefaultsVersion` is a private ordinal counter and `VersionedSessionConfigurationDefaults::replace` installs the next version on each explicit replacement. The successor was computed by an `expect` on `u64::checked_add`, so an exhausted counter aborted the process by panic instead of being reported to the caller. The sibling ordinal `SessionInputPosition` already exposes a checked successor returning `Option`, and the ordinal-input-positions decision explicitly rejected panicking as a way to signal an unrepresentable ordinal.
+
+**Decision.** Replace `SessionConfigurationDefaultsVersion::next` with `checked_next(self) -> Option<Self>`, mirroring `SessionInputPosition::checked_next`, and have `VersionedSessionConfigurationDefaults::replace` return `Option<Self>` (`None` when the counter is exhausted) so the exhaustion is propagated rather than swallowed by a panic. No other version semantics change.
+
+**Rejected alternatives.** Keeping the panicking `next`: it terminates the process on a representable domain condition and contradicts the checked-successor convention already established for session input positions. Introducing a dedicated typed error struct for exhaustion: `Option` matches the existing sibling successor and carries the only possible reason without adding a one-variant error type.
+
+**Affects.** `crates/domain/src/configuration.rs` and its tests, and a `crates/domain/src/delivery_request.rs` test that constructs a later version. Refines the 2026-07-15 "Ordinal session-defaults versions" decision's "successor operation" to a checked successor; storage and wire encodings remain open.
+
 ## 2026-07-17 — Shared test constructors for domain identities
 
 **Context.** Every unit-test module built domain identities with the same `Type::from_uuid(Uuid::from_u128(value))` pattern behind small named helpers, so `turn_id` was defined identically in three modules, `direct` in two, and `session_id`, `model_call_id`, and `accepted_input_id` each carried their own copy. The repetition added no test meaning and drifted independently as modules were added.
