@@ -1,14 +1,14 @@
 # ADR-0017: Provider and integration credential lifecycle
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-17
 - Owners: Repository owner
-- Reviewers: none yet; this record is authoritative only if the owner accepts it
+- Reviewers: Codex (independent automated architecture review); accepted by the repository owner
 - Supersedes: none
 - Superseded by: none
 - Depends on: the accepted foundation set ([ADR-0001](0001-domain-terminology-and-identity.md), [ADR-0003](0003-session-creation-and-transcript-ancestry.md), [ADR-0004](0004-turn-and-attempt-lifecycle.md), [ADR-0005](0005-model-call-retry-semantics.md), [ADR-0027](0027-input-delivery-lifecycle.md)); consistent with the Proposed [ADR-0022](0022-persistence-representation.md), whose schema map contains no credential table and which explicitly did not decide credential storage
-- Refines if accepted: the enforcement boundary of INV-035; nothing is amended while this record remains Proposed
-- Resolves if accepted: the ["Provider and integration credential storage and rotation"](../open-questions.md#identity-credentials-and-resource-governance-reserved-adr-0015-through-adr-0018) question (reserved ADR-0017)
+- Refines: the enforcement boundary of INV-035 (see the INV-035 enforcement index)
+- Resolves: the ["Provider and integration credential storage and rotation"](../open-questions.md#identity-credentials-and-resource-governance-reserved-adr-0015-through-adr-0018) question (reserved ADR-0017)
 - Decision questions: channel ownership between 1Password and sops-age-in-git so no secret has two sources of truth; the delivery path into the hub process with rotation behavior; the in-process access boundary that enforces INV-035; failure behavior when a credential or its manager is unavailable at startup versus during operation
 
 ## Context
@@ -77,7 +77,7 @@ Clause phrasing intended for INV-035's enforcement column when the provider adap
 
 ## Invariants
 
-- INV-035: this record defines the enforcement boundary (access port, reference-only records, sanitized errors); the catalog row remains unchanged while this record is Proposed, and acceptance adds the enforcement link without restating these rules.
+- INV-035: this record defines the enforcement boundary (access port, reference-only records, sanitized errors); the catalog's enforcement index links here without restating these rules, and the test-backed enforcement wording lands with the provider adapter slice.
 - INV-002 / INV-005: the credential boundary value is a purpose-specific adapter representation; it appears in no domain, storage, wire, or presentation type.
 - INV-008 and ADR-0027's configuration boundary: credential state never enters `EffectiveConfiguration`, provenance, or acceptance-time derivation; rotation changes no frozen configuration and no turn identity.
 - INV-014 / ADR-0005: credential failures map onto existing call, attempt, and turn edges; no new call state, disposition, or retry is introduced.

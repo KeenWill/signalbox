@@ -68,7 +68,6 @@ Some questions carry an ADR number reserved by earlier planning and cited from a
 
 - **Owner client authentication and revocation.** Keep the hub's authorization model single-owner while choosing a remotely safe authentication boundary. Blocks any remote client. (S01, S10, S24, S25)
 - **Runner enrollment, authentication, and revocation.** Strong runner identity distinct from capability claims, with rotation. Blocks remote runners. (S05, S06, S12–S16)
-- **Provider and integration credential storage and rotation.** Secret values stay outside ordinary session records, exposed only to the responsible hub adapter. Blocks real credentials. (S02, S15, S20–S23)
 - **First-release resource limits.** Leaning: explicit bounded concurrency and configurable usage limits at effect boundaries. Blocks public release. (S02–S06, S13–S18)
 
 ## Protocols and persistence (reserved ADR-0019 through ADR-0023)
