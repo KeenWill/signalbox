@@ -7,6 +7,7 @@
 - Supersedes: none
 - Superseded by: none
 - Accepted with: ADR-0001, ADR-0004, ADR-0005, and ADR-0027 as one atomic foundation set
+- Refined by: [ADR-0030](0030-context-frontier-snapshots.md)
 - Decision questions: owner-initiated baseline and typed extension of session creation cause; independent transcript ancestry; separation from versioned session configuration defaults; future multiple ancestry sources or merge
 
 ## Context
@@ -115,7 +116,6 @@ Related-session links may be added for navigation, results, or lifecycle policy 
 ## Open questions
 
 - Application, schedule, and delegation ADRs must decide whether they add creation causes and, if so, the exact durable initiating identity carried by each new variant.
-- Copy, reference, or hybrid transcript storage remains open under the persistence ADR.
 - Retention behavior when an ancestry source is later subject to destructive deletion remains open.
 - Multiple-source ancestry and merge remain future decision scope.
 

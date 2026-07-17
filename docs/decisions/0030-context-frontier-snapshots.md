@@ -1,13 +1,13 @@
 # ADR-0030: Immutable context-frontier snapshots
 
-- Status: Proposed
-- Date: 2026-07-16
+- Status: Accepted
+- Date: 2026-07-17
 - Owners: Repository owner
-- Reviewers: none yet; this record is authoritative only if the owner accepts it
+- Reviewers: Codex (architecture and acceptance consistency review); no specialist human reviewer assigned
 - Supersedes: none
 - Superseded by: none
 - Depends on: the accepted foundation set ([ADR-0001](0001-domain-terminology-and-identity.md), [ADR-0003](0003-session-creation-and-transcript-ancestry.md), [ADR-0004](0004-turn-and-attempt-lifecycle.md), [ADR-0005](0005-model-call-retry-semantics.md), and [ADR-0027](0027-input-delivery-lifecycle.md))
-- Refines if accepted: ADR-0001's identity boundary, ADR-0003's transcript-frontier boundary, and ADR-0027's context-frontier and eligibility rules; none is amended while this record remains Proposed
+- Refines: ADR-0001's identity boundary, ADR-0003's transcript-frontier boundary, and ADR-0027's context-frontier and eligibility rules
 - Decision questions: context-frontier identity and resolved contents; identity versus semantic-content equality; immutability and prefix preservation; trusted construction and eligibility proof; domain, application, and persistence responsibilities; transcript-ancestry resolution
 
 ## Context
@@ -121,14 +121,14 @@ This preserves ADR-0003's independent source provenance while allowing transcrip
 
 ## Invariants
 
-If accepted, this record refines the enforcement boundary of:
+This record refines the enforcement boundary of:
 
 - INV-001: `ContextFrontierId` becomes another distinct semantic identity and cannot substitute for an entry, session, turn, call, or transcript-frontier identity.
 - INV-009: eligibility derives and atomically fixes one opaque `AcceptedInputTurnStart`; neither an identifier nor a list supplied by a caller establishes that authority.
 - INV-015: every call frontier resolves to one immutable exact ordered semantic-entry sequence and is bound during the call-creation transition.
 - INV-030: ancestry resolution preserves the selected source frontier and semantic-entry identities even if persistence copies or shares their physical representation.
 
-These catalog rows remain unchanged while this ADR is Proposed. Acceptance must add their links without duplicating this record's normative rules.
+The invariant catalog links these rows to this record without duplicating its normative rules.
 
 ## Strongest alternative
 
@@ -151,7 +151,7 @@ Domain transitions operate on resolved snapshots rather than arbitrary IDs, so a
 
 Identity equality stays cheap and unambiguous. Exact-content comparison is available when genuinely needed, but duplicate-content snapshots are legal and retain their independent creation and session provenance.
 
-Snapshot records add durable identities and may increase record count. Prefix sharing can reduce physical duplication without changing domain semantics. A separate persistence proposal that maps context frontiers must conform to this domain boundary rather than deciding it through table shape.
+Snapshot records add durable identities and may increase record count. Prefix sharing can reduce physical duplication without changing domain semantics. Accepted [ADR-0022](0022-persistence-representation.md) maps context frontiers into normalized persistence records while preserving this domain boundary and its freedom to materialize complete membership, store parent plus append, or share immutable prefixes.
 
 ## Scenario walkthroughs
 
@@ -169,9 +169,9 @@ Any future semantic compaction, selective omission, rebasing, or context-window 
 ## Open questions
 
 - Semantic transcript-entry payload variants, commit granularity, and rendering remain open; this ADR uses their already-distinct identities without defining their contents.
-- Identity generation, UUID version or other backing, database and wire encoding, and public formatting for `ContextFrontierId` remain with the broader identity and boundary-representation decisions. Its semantic ownership is session-scoped regardless of eventual encoding.
+- Identity generation, UUID version or other backing, database and wire encoding, and public formatting for `ContextFrontierId` remain open. ADR-0022 selects native Postgres columns only for the UUID-backed identities it names; it does not silently choose this identity's backing or boundary encodings. Its semantic ownership remains session-scoped regardless of eventual representation.
 - Which terminal semantic boundaries a client may select as a `TranscriptFrontier` remains separate from how a validated selection resolves.
-- Physical snapshot layout, lookup interfaces, caching, integrity checks, and migration strategy remain persistence concerns.
+- Physical snapshot layout, lookup interfaces, caching, integrity checks, and layout-specific migration details/tooling remain persistence concerns within ADR-0022's accepted migration discipline.
 - Non-input origin frontiers, multi-source ancestry, and semantic compaction remain future foundation decisions.
 
 ## Explicit non-decisions

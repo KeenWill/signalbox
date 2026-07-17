@@ -184,12 +184,12 @@ The scenarios are frozen design fixtures. New or changed normative behavior belo
 
 - **User intent:** Explore an alternative from an earlier point without changing the source session.
 - **Durable commands:** Create a session with the baseline `OwnerInitiated` cause independent from ancestry `(source session, immutable frontier)`.
-- **State transitions:** New session absent → active with derived initial context; source remains unchanged.
+- **State transitions:** New session absent → session durably created with its immutable source-session and `TranscriptFrontier` reference. After the fork's first input is accepted and its turn becomes eligible, the eligibility transition resolves that source boundary, preserves its source-qualified semantic-entry identities, appends the new origin entry, and atomically binds the new session-owned context snapshot while activating or recording eligible failure. The source remains unchanged.
 - **Transient updates:** Client may preview the fork point.
-- **Owning component:** Hub validates frontier and creates the fork atomically; Postgres preserves source reference and derived history representation.
+- **Owning component:** The hub validates and atomically creates the session with its source reference; the later eligibility transition derives and binds the first context snapshot. Postgres preserves both durable boundaries.
 - **Failure behavior:** Invalid or inaccessible frontier fails before creation. Retrying creation is idempotent. Later source archival does not erase fork identity.
-- **Required invariants:** INV-003, INV-012, INV-030.
-- **Remaining questions:** Copy versus reference storage, deletion/retention, multiple ancestry sources, and merge semantics (not initially required).
+- **Required invariants:** INV-001, INV-003, INV-009, INV-012, INV-030.
+- **Remaining questions:** Deletion/retention, selectable transcript-frontier boundaries, multiple ancestry sources, and merge semantics (not initially required). Copy, reference, and shared-prefix storage are permitted implementation choices when they preserve ADR-0030's resolved semantic identities.
 
 ## S18 — Delegate to a child session
 
@@ -289,6 +289,17 @@ The scenarios are frozen design fixtures. New or changed normative behavior belo
 - **Failure behavior:** When introduced, duplicate command delivery must create at most one regeneration turn. A changed model or any changed effective-configuration field belongs to that new turn and is never disguised as recovery of the original.
 - **Required invariants:** INV-001, INV-004, INV-006, INV-008, INV-012, INV-014, INV-015.
 - **Remaining questions:** A future regeneration ADR must decide command acceptance, FIFO interaction, exact historical source frontier, configuration freeze, and alternative-answer presentation before implementation.
+
+## S27 — Fatal mismatch with a separately classified ambiguity
+
+- **User intent:** Preserve an independently ambiguous effect exactly while allowing a fully closed fatal mismatch to release the session slot without a ceremonial stopping phase.
+- **Durable commands:** A running attempt owns provider call X and tool attempt Y. Y is already physically `Ambiguous`, while X is the last unclassified issued operation. One serialized transition records trusted target-mismatch evidence for X, classifies X `KnownFailed`, adds its exact failure to the complete fatal causes F, records any required best-effort cancellation intent, closes or makes non-dispatchable every logical dependency, and reclassifies pending steering.
+- **State transitions:** With every terminal guard now satisfied and the exact unacknowledged ambiguity set U equal to `{Y}`, the same transaction ends the attempt `AfterFatalMismatch(Ambiguous)` and terminalizes the turn `ReconciliationRequired` with `{Y}` and `FatalMismatchRequiresReconciliation(F)`. It does not persist `StopRequested` or fabricate a recovery wait. Countercase: if another issued operation Z remains unclassified when X mismatches, the attempt must enter `StopRequested(FatalMismatch(F))` and retain the slot. After Z is honestly classified, the turn fails if U is empty or receives exact fatal reconciliation if U remains nonempty.
+- **Transient updates:** Delivery and acknowledgement of best-effort cancellation may continue after direct terminalization; progress text and late provider or runner observations are not outcome authority.
+- **Owning component:** The hub derives F, U, and every terminal guard from authoritative aggregate state and atomically commits the result; adapters only deliver cancellation intent and report evidence.
+- **Failure behavior:** A crash exposes either the prior running aggregate or the complete terminal attempt, exact marker, steering dispositions, and released slot, never a partial direct transition. Replay cannot insert a synthetic stop phase or a second terminal result. Late cleanup or operation evidence remains audit/reconciliation evidence and cannot authorize new effects or rewrite the terminal turn.
+- **Required invariants:** INV-006, INV-009, INV-014, INV-025, INV-026, INV-034.
+- **Remaining questions:** Provider-specific evidence thresholds, exact cancellation delivery and acknowledgement mechanics, and whether direct interrupt-only reconciliation is ever added.
 
 ## Coverage note
 
