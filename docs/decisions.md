@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-17 — Private-field current and ended model-call transitions
+
+**Context.** ADR-0005 owns the complete model-call transition table and assigns serialized classification and correlation to the turn aggregate. The preceding value slice makes pinned targets and prepared call records constructible, but it does not choose how a call advances or terminalizes without letting other callers forge in-flight or terminal records.
+
+**Decision.** Add crate-private consuming transitions on the private-field `CurrentModelCall`: send authorization from `Prepared`, a payload-free best-effort cancellation request whose replay on an already-requested call is idempotent, classified terminal dispositions (`Prepared` admits only known failure), and proof-correlated unsent cancellation that validates the applied interrupt proof's predecessor against the call's turn. Successful terminal history is a separate private-field `EndedModelCall` preserving identity, pinned fact, and disposition with no transition back. Rejections return the unchanged current call plus the exact rejected input in one boxed payload. Cancellation-cause retention stays with the attempt's stop causes rather than being duplicated at the call level.
+
+**Rejected alternatives.** Public local transitions bypass the aggregate's serialization and guards. One state enum containing terminal variants readmits terminal-to-nonterminal edges. Rejecting cancellation-request replay makes the aggregate branch on current state to record the same single durable fact. A cause-carrying call-level cancellation state duplicates the attempt stop-cause algebra. Permitting `Prepared` to classify completion, refusal, ambiguity, or proof-free cancellation admits outcomes an unsent request cannot have.
+
+**Affects.** `crates/domain/src/model_call.rs`, the `EndedModelCall` re-export in `crates/domain/src/lib.rs`, and enforcement links in `docs/invariants.md`; trusted evidence correlation, outcome-authority transfer, aggregate guards, persistence, and startup scanning remain later work.
+
 ## 2026-07-17 — Pinned provider-target fact and model-call record values
 
 **Context.** ADR-0005 pins one exact hub-resolved provider/model target as a durable turn fact before the first `ModelCallId` exists, requires every model call to carry that exact target at creation, and fixes the `Prepared`/`InFlight`/`CancellationRequested`/`Terminal(disposition)` call algebra. The deployment facts needed to resolve a frozen selection, and the aggregate that serializes call creation, do not exist yet, so this slice needs representations that cannot overstate resolution or aggregate authority. Provider-identity normalization and detailed provenance remain the open ADR-0007 questions.
