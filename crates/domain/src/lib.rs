@@ -11,6 +11,7 @@ mod applied_interrupt;
 mod configuration;
 mod delivery_request;
 mod model_call;
+mod provider_evidence;
 mod queue_order;
 mod session;
 mod turn_attempt;
@@ -33,6 +34,10 @@ pub use delivery_request::{DeliveryRequest, PerInputConfigurationChoices};
 pub use model_call::{
     CurrentModelCall, CurrentModelCallState, EndedModelCall, ModelCallDisposition,
     PinnedProviderTarget, ProviderModelIdentity, ResolvedProviderTarget,
+};
+pub use provider_evidence::{
+    ProviderTargetEvidence, ProviderTargetEvidenceLog, ProviderTargetMismatchInvalidation,
+    ProviderTargetMismatchInvalidationLog, ProviderTargetObservation,
 };
 pub use queue_order::{
     AcceptedInputQueueOrder, AcceptedInputQueueOrderError, AcceptedInputQueuePriority,

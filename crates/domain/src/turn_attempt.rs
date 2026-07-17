@@ -30,8 +30,9 @@ use crate::{AppliedInterruptProof, ModelCallId, ProviderTargetEvidenceId};
 /// }
 /// ```
 ///
-/// A later provider-evidence slice supplies the trusted producer after it can
-/// validate the canonical call and observation.
+/// The trusted producers are the validating provider-evidence correlations in
+/// `provider_evidence`, which check the canonical call and observation before
+/// constructing a reference; these raw constructors stay crate-private.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ProviderTargetMismatchFailureRef {
     kind: ProviderTargetMismatchFailureKind,
@@ -43,22 +44,22 @@ impl ProviderTargetMismatchFailureRef {
         self.kind
     }
 
-    #[cfg(test)]
-    const fn nonterminal_call_observation(evidence: ProviderTargetEvidenceId) -> Self {
+    /// Wraps one validated mismatch observation on a nonterminal call.
+    pub(crate) const fn nonterminal_call_observation(evidence: ProviderTargetEvidenceId) -> Self {
         Self {
             kind: ProviderTargetMismatchFailureKind::NonterminalCallObservation { evidence },
         }
     }
 
-    #[cfg(test)]
-    const fn terminal_ambiguity_resolution(evidence: ProviderTargetEvidenceId) -> Self {
+    /// Wraps one validated mismatch resolution of a terminal ambiguous call.
+    pub(crate) const fn terminal_ambiguity_resolution(evidence: ProviderTargetEvidenceId) -> Self {
         Self {
             kind: ProviderTargetMismatchFailureKind::TerminalAmbiguityResolution { evidence },
         }
     }
 
-    #[cfg(test)]
-    const fn terminal_call_invalidation(invalidated_call: ModelCallId) -> Self {
+    /// Wraps one validated invalidation of a completed current-authority call.
+    pub(crate) const fn terminal_call_invalidation(invalidated_call: ModelCallId) -> Self {
         Self {
             kind: ProviderTargetMismatchFailureKind::TerminalCallInvalidation { invalidated_call },
         }
