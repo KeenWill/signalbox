@@ -12,6 +12,16 @@ An append-only, dated record of decisions below foundation weight, newest first.
 
 **Affects.** `crates/domain/src/configuration.rs` and its tests. Refines the 2026-07-15 "Ordinal session-defaults versions" decision's "successor operation" to a checked successor; storage and wire encodings remain open.
 
+## 2026-07-16 — Canonical turn-attempt stop and terminal values
+
+**Context.** ADR-0004 requires cancellation-only stop to retain one applied-interrupt proof, fatal stop to retain a nonempty set of ADR-0005 mismatch references plus any applied interrupt, and terminal history to exclude several dishonest stop/disposition combinations. The representation of the nonempty set and `ProviderTargetEvidenceId` backing remain below foundation weight.
+
+**Decision.** Store fatal failures in a private `BTreeSet` initialized from one opaque trusted reference, making equality canonical and empty construction unavailable without adding a dependency. Model the three ADR-0005 reference kinds behind an opaque value so raw evidence or call identities cannot mint fatal authority; trusted construction remains with a later provider-evidence transition. Represent `ProviderTargetEvidenceId` as a private UUID-backed identity under the existing identity convention. Use distinct unstopped, cancellation-stop, and fatal-stop disposition enums, and return a typed error with unchanged causes when a distinct second interrupt proof would otherwise be lost.
+
+**Rejected alternatives.** A vector permits duplicates and event-order-dependent equality. A caller-supplied set needs an empty-case boundary and exposes the collection representation. Public mismatch-reference constructors over raw IDs overstate evidence authority. An optional cancellation flag or one catch-all terminal-disposition enum admits invalid combinations that ADR-0004 excludes.
+
+**Affects.** `crates/domain/src/turn_attempt.rs`, the `ProviderTargetEvidenceId` export in `crates/domain/src/lib.rs`, and enforcement links in `docs/invariants.md`; current-attempt transitions, trusted mismatch correlation, turn aggregate guards, waits, persistence, and startup scanning remain later work.
+
 ## 2026-07-16 — Opaque applied-interrupt result as proof boundary
 
 **Context.** ADR-0001, ADR-0004, and ADR-0027 require cancellation authority to come only from the matching applied interrupt result, correlated with its exact predecessor, accepted input, and immediate successor. The current pure-domain foundation has no complete `SubmitInput`, authoritative turn aggregate, or persistence commit boundary, so a public raw-fact constructor would overstate its authority.
