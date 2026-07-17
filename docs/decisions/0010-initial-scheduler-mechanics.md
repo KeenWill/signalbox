@@ -7,7 +7,7 @@
 - Supersedes: none
 - Superseded by: none
 - Depends on: the accepted foundation set ([ADR-0001](0001-domain-terminology-and-identity.md), [ADR-0003](0003-session-creation-and-transcript-ancestry.md), [ADR-0004](0004-turn-and-attempt-lifecycle.md), [ADR-0005](0005-model-call-retry-semantics.md), [ADR-0027](0027-input-delivery-lifecycle.md))
-- Coordinated with: Proposed [ADR-0009](0009-dispatch-fencing.md) (the fence carried by dispatch and result transactions), Proposed [ADR-0022](0022-persistence-representation.md) (guarded rows, partial unique indexes, and the deferred process-incarnation question), and Proposed [ADR-0030](0030-context-frontier-snapshots.md) (the start construction the activation transaction commits); if any changes, the references here follow it
+- Coordinated with: Proposed [ADR-0009](0009-dispatch-fencing.md) (the fence carried by dispatch and result transactions), Proposed [ADR-0022](0022-persistence-representation.md) (guarded rows, partial unique indexes, and the deferred process-incarnation question), and Proposed [ADR-0030](0030-context-frontier-snapshots.md) (the start construction that the activation transaction commits); if any of them changes, the references here follow that record
 - Decision questions: how eligibility is detected and serialized per session against INV-009's database-level enforcement; wake-up strategy and its failure behavior; startup-scan coordination with ADR-0004's recovery semantics; whether Postgres alone coordinates the initial scheduler; the adapter boundary that keeps a future broker possible
 
 ## Context

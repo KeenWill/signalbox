@@ -32,16 +32,16 @@ The transaction that authorizes a dispatch validates, with current-state predica
 
 Every result envelope names its tool attempt and echoed dispatch generation (INV-021). Result acceptance is one compare-and-set transaction whose predicate validates all of the following against current durable state, matching INV-011's wording exactly:
 
-1. the named attempt exists and belongs to the envelope's owning tool request;
-2. that attempt's issuing turn attempt is the recorded issuer — the correlation is read from durable ownership rows, never trusted from the envelope;
+1. the named attempt exists and its owning tool request is the recorded owner — the correlation is read from durable ownership rows, never trusted from the envelope;
+2. that attempt's issuing turn attempt is the recorded issuer — likewise read from durable ownership rows, never trusted from the envelope;
 3. the attempt is nonterminal; and
 4. the echoed generation equals the attempt's current generation.
 
-The first envelope satisfying the predicate advances the attempt exactly once to its terminal classification under the turn aggregate's rules. Anything failing the predicate cannot advance or overwrite current logical state.
+The first envelope satisfying the predicate advances the attempt exactly once to its terminal classification under the turn aggregate's rules. The compare-and-set gates *state advancement* only: an envelope that fails it never advances or overwrites current logical state, but failing the predicate is not by itself an error. Whether such an envelope is acknowledged so the runner stops retrying, rejected, or retained as evidence is decided by the duplicate-and-stale classification below — which is evaluated even when predicate 3 now fails because a prior result already terminalized the attempt.
 
 ### Duplicate and stale delivery
 
-Runners retry delivery until acknowledged (S12), so redelivery is normal, and INV-012 leaves result-delivery deduplication operation-specific. For tool results: a redelivered envelope structurally equal to the one already applied for the same attempt and generation is acknowledged without applying anything again. An envelope for the same attempt and generation whose content differs from the applied result is conflicting delivery: it is rejected and retained as typed audit evidence when policy requires. An envelope with an older generation, a terminal attempt, or a turn that has released its slot is stale: it is rejected from state advancement and, per S12, recorded as duplicate/stale evidence if audit policy requires or discarded, without being applied.
+Runners retry delivery until acknowledged (S12), so redelivery is normal, and INV-012 leaves result-delivery deduplication operation-specific. This classification runs for every envelope that does not advance state under the compare-and-set above, including the ordinary case where the attempt it names is already terminal from the first applied result. For tool results: a redelivered envelope structurally equal to the one already applied for the same attempt and generation is acknowledged idempotently without applying anything again, even though the now-terminal attempt makes it fail the acceptance predicate. An envelope for the same attempt and generation whose content differs from the applied result is conflicting delivery: it is rejected and retained as typed audit evidence when policy requires. An envelope with an older generation, a terminal attempt, or a turn that has released its slot is stale: it is rejected from state advancement and, per S12, recorded as duplicate/stale evidence if audit policy requires or discarded, without being applied.
 
 One late arrival is deliberately not discarded silently. When the named attempt is terminal `Ambiguous`, an authenticated late result is a candidate for ADR-0004's separate resolving-evidence path: it may clear the blocking uncertainty or refine an `AwaitingRecoveryDecision` wait to the exact remaining set, without ever reopening the terminal physical disposition or being applied as a second first-class result. Who may record such evidence, and its exact representation, remain the open questions S06 already records.
 
@@ -53,9 +53,12 @@ A valid attempt-and-generation pair fences transport staleness only. It is not p
 
 If accepted, this record proposes the enforcement mechanics of INV-011 (the exact result-acceptance predicate above), INV-021 (the envelope's required attempt and generation fields), and the tool-result case of INV-012's operation-specific result deduplication, and it relies on INV-006 (terminal dispositions never reopen) and INV-010. The catalog rows remain unchanged while this record is Proposed; acceptance adds enforcement links without duplicating these rules.
 
-## Alternatives
+## Strongest alternative
 
-- **Equality-only random token per dispatch.** Rejected as the primary representation: a random token still needs a durable "current" pointer for the compare-and-set, so it saves nothing, while losing the ability to classify a late envelope as superseded and losing dispatch-order audit. The glossary's "or equivalent fence" language stays satisfiable by protocol design later; the durable value proposed here is ordered.
+**Equality-only random token per dispatch.** Rejected as the primary representation: a random token still needs a durable "current" pointer for the compare-and-set, so it saves nothing, while losing the ability to classify a late envelope as superseded and losing dispatch-order audit. The glossary's "or equivalent fence" language stays satisfiable by protocol design later; the durable value proposed here is ordered.
+
+## Rejected alternatives
+
 - **Lease- or heartbeat-based fencing.** Rejected: expiry-based ownership reintroduces the live-process dependence INV-010 excludes and invents a wall-clock split-brain window that compare-and-set does not have.
 - **Fence keyed on runner identity or connection.** Rejected: runner identity, enrollment, and authentication are reserved (ADR-0015 through ADR-0018), and connection state is transient by the architecture's sources-of-truth table.
 - **One global generation sequence.** Rejected: a hub-wide counter cannot express "the current dispatch of this attempt" without a per-attempt pointer anyway, and it manufactures cross-attempt ordering that means nothing.
