@@ -9,6 +9,7 @@
 mod accepted_input;
 mod applied_interrupt;
 mod configuration;
+mod context_frontier;
 mod delivery_request;
 mod model_call;
 mod provider_evidence;
@@ -29,6 +30,10 @@ pub use configuration::{
     SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
     SessionDefaultsVersionMismatch, TurnConfigurationProvenance, UnknownModelAlias,
     VersionCheckedConfigurationRequest, VersionedSessionConfigurationDefaults,
+};
+pub use context_frontier::{
+    ContextFrontier, ContextFrontierId, ResolvedContextFrontierSnapshot, SemanticTranscriptEntryId,
+    SemanticTranscriptEntryRef,
 };
 pub use delivery_request::{DeliveryRequest, PerInputConfigurationChoices};
 pub use model_call::{
@@ -55,9 +60,9 @@ pub use turn_attempt::{
     UnstoppedAttemptDisposition,
 };
 pub use turn_lifecycle::{
-    AcceptedInputStartingLineage, ActiveTurnPhase, AppliedStopForReconciliationProof,
-    IssuedOperationRef, NonEmptyIssuedOperationRefs, NonEmptyIssuedOperationRefsError,
-    ReconciliationMarker, ReconciliationReason, TurnDisposition,
+    AcceptedInputStartingLineage, AcceptedInputTurnStart, ActiveTurnPhase,
+    AppliedStopForReconciliationProof, IssuedOperationRef, NonEmptyIssuedOperationRefs,
+    NonEmptyIssuedOperationRefsError, ReconciliationMarker, ReconciliationReason, TurnDisposition,
 };
 
 macro_rules! define_identity {
@@ -162,6 +167,8 @@ pub(crate) mod test_support {
         model_call_id -> crate::ModelCallId,
         provider_target_evidence_id -> crate::ProviderTargetEvidenceId,
         provider_model_identity -> crate::ProviderModelIdentity,
+        context_frontier_id -> crate::ContextFrontierId,
+        semantic_transcript_entry_id -> crate::SemanticTranscriptEntryId,
         tool_request_id -> crate::ToolRequestId,
         tool_attempt_id -> crate::ToolAttemptId,
         direct -> crate::DirectModelSelection,
@@ -172,8 +179,9 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::{
-        AcceptedInputId, DurableCommandId, ModelCallId, ProviderTargetEvidenceId, SessionId,
-        ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId,
+        AcceptedInputId, ContextFrontierId, DurableCommandId, ModelCallId,
+        ProviderTargetEvidenceId, SemanticTranscriptEntryId, SessionId, ToolAttemptId,
+        ToolRequestId, TurnAttemptId, TurnId,
     };
     use uuid::Uuid;
 
@@ -201,6 +209,8 @@ mod tests {
         assert_uuid_contract!(TurnAttemptId);
         assert_uuid_contract!(ModelCallId);
         assert_uuid_contract!(ProviderTargetEvidenceId);
+        assert_uuid_contract!(ContextFrontierId);
+        assert_uuid_contract!(SemanticTranscriptEntryId);
         assert_uuid_contract!(ToolRequestId);
         assert_uuid_contract!(ToolAttemptId);
     }
