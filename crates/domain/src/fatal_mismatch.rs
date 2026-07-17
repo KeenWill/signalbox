@@ -1,13 +1,9 @@
 //! Sealed post-evidence facts for fatal-mismatch closure.
 //!
-//! ADR-0031 is normative. This module consumes one trusted mismatch fact and a
-//! complete projection of the current attempt's owned logical dependencies and
-//! issued operations. It derives the complete fatal causes, exact unfinished
-//! owned work, and the exact blocking-ambiguity remainder without accepting a
-//! caller-selected cause set, ambiguity set, or disposition.
-//! The result is not commit authority. Binding it to attempt and turn
-//! transitions, proving the remaining ADR-0004 terminal guards, reclassifying
-//! steering, and committing atomically remain the next aggregate slice.
+//! ADR-0031 is normative. This module consumes one trusted mismatch and a
+//! complete owned-work projection, then derives exact causes, unfinished work,
+//! and blocking ambiguity without caller-selected authority. Lifecycle
+//! binding, remaining guards, steering, and atomic commit remain later work.
 
 #![cfg_attr(
     not(test),
@@ -78,21 +74,8 @@ pub(crate) enum FatalMismatchOwnedWorkBlocker {
     UnclassifiedOperation(IssuedOperationRef),
 }
 
-/// The derived state of the attempt's complete owned-work projection.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum FatalMismatchOwnedWorkStatus {
-    /// At least one exact dependency or operation remains unfinished.
-    Unfinished,
-    /// Owned work is closed and no blocking ambiguity remains.
-    ClosedWithoutBlockingAmbiguity,
-    /// Owned work is closed with an exact nonempty blocking remainder.
-    ClosedWithBlockingAmbiguity,
-}
-
-/// Complete fatal causes and owned-work facts after one trusted mismatch.
-///
-/// This is deliberately not re-exported from the crate. The application layer
-/// cannot construct or use it as proof that a transition committed.
+/// Sealed fatal causes and owned-work facts after one trusted mismatch; this
+/// value is not application-visible commit proof.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PostEvidenceFatalMismatchFacts {
     projection: CompleteFatalMismatchProjection,
@@ -106,22 +89,8 @@ impl PostEvidenceFatalMismatchFacts {
         &self.projection.current_attempt
     }
 
-    pub(crate) const fn projection(&self) -> &CompleteFatalMismatchProjection {
-        &self.projection
-    }
-
     pub(crate) const fn causes(&self) -> &FatalMismatchStopCauses {
         &self.causes
-    }
-
-    pub(crate) fn owned_work_status(&self) -> FatalMismatchOwnedWorkStatus {
-        if !self.unfinished_blockers.is_empty() {
-            FatalMismatchOwnedWorkStatus::Unfinished
-        } else if self.blocking_ambiguities.is_some() {
-            FatalMismatchOwnedWorkStatus::ClosedWithBlockingAmbiguity
-        } else {
-            FatalMismatchOwnedWorkStatus::ClosedWithoutBlockingAmbiguity
-        }
     }
 
     pub(crate) fn unfinished_blockers(
@@ -141,11 +110,8 @@ impl PostEvidenceFatalMismatchFacts {
     }
 }
 
-/// A sealed complete projection before the new mismatch fact takes effect.
-///
-/// Production construction arrives with the turn aggregate. The test-only
-/// constructor keeps this slice from exposing a free-standing way to assert
-/// that these maps contain every owned fact.
+/// A sealed complete pre-mismatch projection. Production construction remains
+/// with the aggregate; only tests may freely claim map completeness here.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CompleteFatalMismatchProjection {
     current_attempt: CurrentTurnAttempt,
@@ -172,19 +138,23 @@ impl CompleteFatalMismatchProjection {
         mut self,
         fact: AppliedProviderTargetMismatch,
     ) -> Result<PostEvidenceFatalMismatchFacts, FatalMismatchProjectionError> {
-        let causes = match self.current_attempt.state() {
-            CurrentTurnAttemptState::Prepared => {
-                return Err(FatalMismatchProjectionError::new(
-                    self,
-                    fact,
-                    FatalMismatchProjectionRejection::AttemptIsPrepared,
-                ));
-            }
-            CurrentTurnAttemptState::Running => FatalMismatchStopCauses::new(
+        let causes = match (self.current_attempt.state(), fact.effect()) {
+            (
+                CurrentTurnAttemptState::Prepared,
+                ProviderTargetMismatchEffectView::PreserveCompletedInvalidation,
+            )
+            | (CurrentTurnAttemptState::Running, _) => FatalMismatchStopCauses::new(
                 fact.failure(),
                 AppliedInterruptState::NoAppliedInterrupt,
             ),
-            CurrentTurnAttemptState::StopRequested { causes } => match causes {
+            (CurrentTurnAttemptState::Prepared, _) => {
+                return Err(FatalMismatchProjectionError::new(
+                    self,
+                    fact,
+                    FatalMismatchProjectionRejection::PreparedRequiresCompletedInvalidation,
+                ));
+            }
+            (CurrentTurnAttemptState::StopRequested { causes }, _) => match causes {
                 TurnAttemptStopCauses::CancellationOnly { interrupt } => {
                     FatalMismatchStopCauses::new(
                         fact.failure(),
@@ -286,8 +256,8 @@ impl CompleteFatalMismatchProjection {
 /// Why a sealed projection rejected one trusted mismatch fact.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FatalMismatchProjectionRejection {
-    /// ADR-0031's live closure rule does not apply to an unsent attempt.
-    AttemptIsPrepared,
+    /// Prepared can receive only late completed-call invalidation.
+    PreparedRequiresCompletedInvalidation,
     /// The affected call is absent from the complete owned-operation map.
     AffectedCallIsNotOwned {
         /// The cross-wired or incomplete call identity.
@@ -323,18 +293,6 @@ impl FatalMismatchProjectionError {
         Self {
             rejected: Box::new((projection, fact, rejection)),
         }
-    }
-
-    pub(crate) const fn projection(&self) -> &CompleteFatalMismatchProjection {
-        &self.rejected.0
-    }
-
-    pub(crate) const fn fact(&self) -> AppliedProviderTargetMismatch {
-        self.rejected.1
-    }
-
-    pub(crate) const fn rejection(&self) -> FatalMismatchProjectionRejection {
-        self.rejected.2
     }
 
     pub(crate) fn into_parts(
@@ -431,10 +389,6 @@ mod tests {
         .expect("owned call and compatible state accept mismatch");
 
         assert_eq!(
-            facts.owned_work_status(),
-            FatalMismatchOwnedWorkStatus::Unfinished
-        );
-        assert_eq!(
             facts
                 .unfinished_blockers()
                 .expect("unfinished facts expose exact blockers")
@@ -488,12 +442,8 @@ mod tests {
         .expect("closed projection accepts mismatch");
 
         assert_eq!(
-            facts.owned_work_status(),
-            FatalMismatchOwnedWorkStatus::ClosedWithoutBlockingAmbiguity
-        );
-        assert_eq!(
             facts
-                .projection()
+                .projection
                 .operations
                 .get(&IssuedOperationRef::ModelCall(model_call_id(1))),
             Some(&IssuedOperationClosure::ClassifiedNonAmbiguous)
@@ -527,10 +477,6 @@ mod tests {
         assert_eq!(
             facts.causes().interrupt(),
             AppliedInterruptState::NoAppliedInterrupt
-        );
-        assert_eq!(
-            facts.owned_work_status(),
-            FatalMismatchOwnedWorkStatus::ClosedWithBlockingAmbiguity
         );
         let remainder = facts
             .blocking_ambiguities()
@@ -656,7 +602,7 @@ mod tests {
         assert!(!remainder.contains(x));
         assert!(remainder.contains(y));
         assert_eq!(
-            facts.projection().operations.get(&x),
+            facts.projection.operations.get(&x),
             Some(&IssuedOperationClosure::PhysicallyAmbiguous {
                 turn_treatment: AmbiguousOperationTurnTreatment::ResolvedByEvidence,
             })
@@ -688,6 +634,7 @@ mod tests {
             (
                 nonterminal_fact(1, 1),
                 [Some(classified), None, None, None, None],
+                [None, None, None, None, None],
             ),
             (
                 AppliedProviderTargetMismatch::test_terminal_ambiguity_resolution(
@@ -695,78 +642,73 @@ mod tests {
                     call,
                 ),
                 [None, None, Some(resolved), Some(resolved), None],
+                [None, None, None, None, None],
             ),
             (
                 AppliedProviderTargetMismatch::test_completed_invalidation(call),
                 [None, Some(classified), None, None, None],
+                [None, Some(classified), None, None, None],
             ),
         ];
 
-        for (fact, expected_states) in cases {
-            for (current, expected) in states.iter().copied().zip(expected_states) {
-                let input = projection(running_attempt(), [], [(operation, current)]);
-                let unchanged = input.clone();
-                match expected {
-                    Some(expected) => {
-                        let facts = input.apply(fact).expect("compatible pair must apply");
-                        assert_eq!(
-                            facts.projection().operations.get(&operation),
-                            Some(&expected)
-                        );
-                        assert!(facts.causes().contains(fact.failure()));
-                        assert!(facts.blocking_ambiguities().is_none());
-                    }
-                    None => {
-                        let rejection =
-                            FatalMismatchProjectionRejection::AffectedCallStateMismatch {
-                                call,
-                                effect: fact.effect(),
-                                current,
+        for (fact, running_expected, prepared_expected) in cases {
+            for (attempt, expected_states) in [
+                (running_attempt(), running_expected),
+                (
+                    CurrentTurnAttempt::prepared(turn_attempt_id(1)),
+                    prepared_expected,
+                ),
+            ] {
+                let prepared = attempt.state() == &CurrentTurnAttemptState::Prepared;
+                for (current, expected) in states.iter().copied().zip(expected_states) {
+                    let input = projection(attempt.clone(), [], [(operation, current)]);
+                    let unchanged = input.clone();
+                    match expected {
+                        Some(expected) => {
+                            let facts = input.apply(fact).expect("compatible pair must apply");
+                            assert_eq!(
+                                facts.projection.operations.get(&operation),
+                                Some(&expected)
+                            );
+                            assert!(facts.causes().contains(fact.failure()));
+                            assert!(facts.blocking_ambiguities().is_none());
+                        }
+                        None => {
+                            let rejection = if prepared
+                                && fact.effect()
+                                    != ProviderTargetMismatchEffectView::PreserveCompletedInvalidation
+                            {
+                                FatalMismatchProjectionRejection::PreparedRequiresCompletedInvalidation
+                            } else {
+                                FatalMismatchProjectionRejection::AffectedCallStateMismatch {
+                                    call,
+                                    effect: fact.effect(),
+                                    current,
+                                }
                             };
-                        let error = input
-                            .apply(fact)
-                            .expect_err("incompatible pair must reject");
-                        assert_eq!(error.projection(), &unchanged);
-                        assert_eq!(error.fact(), fact);
-                        assert_eq!(error.rejection(), rejection);
-                        assert_eq!(error.into_parts(), (unchanged, fact, rejection));
+                            let error = input
+                                .apply(fact)
+                                .expect_err("incompatible pair must reject");
+                            assert_eq!(error.into_parts(), (unchanged, fact, rejection));
+                        }
                     }
                 }
             }
         }
     }
 
-    /// INV-006 / INV-014: the two non-matrix predecessor failures reject with
-    /// the exact projection and fact unchanged.
+    /// INV-006 / INV-014: a missing affected call preserves both inputs.
     #[test]
-    fn inv006_inv014_prepared_or_missing_call_rejects_unchanged() {
+    fn inv006_inv014_missing_call_rejects_unchanged() {
         let fact = nonterminal_fact(1, 1);
-        let cases = [
-            (
-                projection(
-                    CurrentTurnAttempt::prepared(turn_attempt_id(1)),
-                    [],
-                    [(
-                        IssuedOperationRef::ModelCall(model_call_id(1)),
-                        IssuedOperationClosure::Unclassified,
-                    )],
-                ),
-                FatalMismatchProjectionRejection::AttemptIsPrepared,
-            ),
-            (
-                projection(running_attempt(), [], []),
-                FatalMismatchProjectionRejection::AffectedCallIsNotOwned {
-                    call: model_call_id(1),
-                },
-            ),
-        ];
-
-        for (input, rejection) in cases {
-            let unchanged = input.clone();
-            let error = input
-                .apply(fact)
-                .expect_err("invalid predecessor must reject");
-            assert_eq!(error.into_parts(), (unchanged, fact, rejection));
-        }
+        let input = projection(running_attempt(), [], []);
+        let unchanged = input.clone();
+        let rejection = FatalMismatchProjectionRejection::AffectedCallIsNotOwned {
+            call: model_call_id(1),
+        };
+        let error = input
+            .apply(fact)
+            .expect_err("missing ownership must reject");
+        assert_eq!(error.into_parts(), (unchanged, fact, rejection));
     }
 }
