@@ -39,7 +39,8 @@ pub use queue_order::{
     AcceptedInputQueueWork, SessionInputPosition, derive_accepted_input_total_order,
 };
 pub use session::{
-    SessionCreationCause, SessionCreationProvenance, TranscriptAncestry, TranscriptFrontier,
+    CreateSession, SessionCreationCause, SessionCreationProvenance, TranscriptAncestry,
+    TranscriptFrontier,
 };
 pub use turn_attempt::{
     AppliedInterruptState, AttemptEnd, CancellationStopDisposition, CurrentTurnAttempt,
