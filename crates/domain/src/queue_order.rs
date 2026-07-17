@@ -198,6 +198,13 @@ pub enum AcceptedInputQueueOrderError {
         turn: TurnId,
     },
     /// An interrupt claimed an acceptance position no later than its target.
+    ///
+    /// This check is an interpretation, not a quoted rule: ADR-0027 accepts
+    /// the active-work modes "only when `expected_active_turn` is the
+    /// session's current active turn", and a turn that is already active has
+    /// an origin input accepted at an earlier position, so interrupt facts
+    /// violating this chronology cannot have been produced by valid
+    /// acceptance.
     InterruptPositionNotAfterPredecessor {
         /// The interrupt-origin turn.
         turn: TurnId,
@@ -210,6 +217,11 @@ pub enum AcceptedInputQueueOrderError {
     },
     /// Later-accepted interrupt work targeted an earlier active predecessor
     /// than a previously accepted interrupt had already reached.
+    ///
+    /// This check is an interpretation, not a quoted rule: it formalizes
+    /// ADR-0027's "a later request must target the new authoritative active
+    /// state" as monotonic advancement of interrupt targets through the
+    /// derived total order.
     InterruptPredecessorChronologyReversed {
         /// The earlier-accepted interrupt-origin turn.
         earlier_interrupt: TurnId,
@@ -231,8 +243,11 @@ pub enum AcceptedInputQueueOrderError {
 /// ordinary root. Interrupt targets must advance monotonically through that
 /// derived order as later inputs are accepted, so a later interrupt cannot
 /// target a turn that an earlier target's activation already required to be
-/// terminal. The returned turn identities are derived order only: no direct-
-/// predecessor pointer is written back into queued work.
+/// terminal; this monotonicity and the position-chronology guard are
+/// interpretations documented on their
+/// [`AcceptedInputQueueOrderError`] variants. The returned turn identities
+/// are derived order only: no direct-predecessor pointer is written back
+/// into queued work.
 pub fn derive_accepted_input_total_order(
     currently_known_work: impl IntoIterator<Item = AcceptedInputQueueWork>,
 ) -> Result<Vec<TurnId>, AcceptedInputQueueOrderError> {
