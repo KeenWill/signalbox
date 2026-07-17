@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-16 — Opaque applied-interrupt result as proof boundary
+
+**Context.** ADR-0001, ADR-0004, and ADR-0027 require cancellation authority to come only from the matching applied interrupt result, correlated with its exact predecessor, accepted input, and immediate successor. The current pure-domain foundation has no complete `SubmitInput`, authoritative turn aggregate, or persistence commit boundary, so a public raw-fact constructor would overstate its authority.
+
+**Decision.** Keep `AppliedInterruptProof` at the accepted private two-field shape and expose it only from an opaque `AppliedInterruptCommandResult`. A module-private handled-result projection and correlation function reject recorded rejection, non-interrupt or cross-wired delivery, target/session/origin/position mismatches, and invalid immediate-successor queue facts. No sibling module can supply those synthetic facts. This staged seam validates pure correlations only; the later transaction-owning aggregate adapter is the first production producer and remains responsible for authoritative state, fact-set completeness, and commit atomicity.
+
+**Rejected alternatives.** Public construction from IDs or an untrusted applied flag: either lets callers mint cancellation authority. Adding session or successor to the proof: that changes the accepted algebra instead of retaining correlation in the applied result. Defining an incomplete public `SubmitInput`, a synthetic transaction token, or a persistence-shaped record: each crosses a deferred boundary and claims semantics this slice cannot enforce.
+
+**Affects.** `crates/domain/src/applied_interrupt.rs` and its re-exports from `crates/domain/src/lib.rs`; canonical command handling, persistence, cancellation transitions, effect evidence, ambiguity, and terminal guards remain later work.
+
 ## 2026-07-16 — Ordinal input positions and collection-wide queue derivation
 
 **Context.** ADR-0027 requires immutable per-session input positions plus ordinary or immediate-after-interrupt priority facts to form one total order over currently known work. It leaves the position representation and pure derivation API open. A single record cannot implement the relational interrupt rule or carry a starting predecessor before eligibility.
