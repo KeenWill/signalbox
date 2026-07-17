@@ -1,6 +1,5 @@
 # ADR-0022: Persistence representation
 
-- Status: Accepted
 - Date: 2026-07-17
 - Owners: Repository owner
 - Reviewers: Codex (architecture and acceptance consistency review); no specialist human reviewer assigned

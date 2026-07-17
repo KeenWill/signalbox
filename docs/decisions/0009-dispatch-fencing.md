@@ -1,6 +1,5 @@
 # ADR-0009: Dispatch fencing
 
-- Status: Accepted
 - Date: 2026-07-17
 - Owners: Repository owner
 - Reviewers: Codex, Copilot, and Cursor Bugbot (automated PR review); no specialist human reviewer assigned

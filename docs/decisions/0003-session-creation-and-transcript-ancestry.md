@@ -1,6 +1,5 @@
 # ADR-0003: Session creation cause and transcript ancestry
 
-- Status: Accepted
 - Date: 2026-07-13
 - Owners: Repository owner
 - Reviewers: Codex (independent adversarial architecture review); no specialist human reviewer assigned
