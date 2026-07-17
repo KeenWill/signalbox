@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-16 — Delivery-request caller payload representation
+
+**Context.** ADR-0027 defines four discriminated delivery requests. Three create origin work and carry a model-selection override bound to the caller's expected session-defaults version; safe-point steering must carry no independent configuration. The first caller-payload slice needs a Rust representation without implementing command handling or authoritative-state validation.
+
+**Decision.** Represent `DeliveryRequest` as a domain enum with named fields for its exact caller-supplied payload. Group the expected defaults version and `ModelSelectionOverride` in a `PerInputConfigurationChoices` value with private fields and read-only accessors. Give `NextSafePoint` only its expected active-turn field, making an independent configuration choice unconstructible.
+
+**Rejected alternatives.** Optional configuration on every variant: it would admit both missing origin configuration and forbidden steering configuration. Separate version and override fields on each origin-producing variant: it would repeat one semantic unit and make partial refactors easier to cross-wire. A wire-oriented request struct with nullable fields: domain construction would no longer establish the discriminated payload.
+
+**Affects.** `crates/domain/src/delivery_request.rs` and its re-exports from `crates/domain/src/lib.rs`; acceptance validation, command identity, content, storage, and wire mappings remain later slices.
+
 ## 2026-07-15 — Ordinal session-defaults versions
 
 **Context.** ADR-0027 versions session model-selection defaults — creation establishes version one and each explicit update installs a complete later immutable version — without fixing a version representation. The caller's expected version participates in equality comparison at acceptance.
