@@ -171,13 +171,13 @@ impl SessionConfigurationDefaultsVersion {
         Self(1)
     }
 
-    /// Returns the version installed by the next complete replacement.
-    pub fn next(self) -> Self {
-        Self(
-            self.0
-                .checked_add(1)
-                .expect("session defaults version counter overflow"),
-        )
+    /// Returns the version installed by the next complete replacement, or
+    /// `None` when the ordinal counter is exhausted.
+    pub const fn checked_next(self) -> Option<Self> {
+        match self.0.checked_add(1) {
+            Some(next) => Some(Self(next)),
+            None => None,
+        }
     }
 }
 
@@ -219,12 +219,13 @@ impl VersionedSessionConfigurationDefaults {
         }
     }
 
-    /// Installs a complete replacement as the next immutable version.
-    pub fn replace(self, defaults: SessionConfigurationDefaults) -> Self {
-        Self {
-            version: self.version.next(),
+    /// Installs a complete replacement as the next immutable version, or
+    /// `None` when the version counter is exhausted.
+    pub fn replace(self, defaults: SessionConfigurationDefaults) -> Option<Self> {
+        Some(Self {
+            version: self.version.checked_next()?,
             defaults,
-        }
+        })
     }
 
     /// Returns the current version identity.
@@ -550,6 +551,30 @@ mod tests {
     }
 
     #[test]
+    fn defaults_version_successor_is_checked_instead_of_panicking_at_exhaustion() {
+        let first = SessionConfigurationDefaultsVersion::first();
+        let second = first
+            .checked_next()
+            .expect("the second version is representable");
+
+        assert!(first < second);
+        assert_eq!(
+            SessionConfigurationDefaultsVersion(u64::MAX).checked_next(),
+            None
+        );
+    }
+
+    #[test]
+    fn replacement_at_an_exhausted_version_is_reported_rather_than_panicking() {
+        let exhausted = VersionedSessionConfigurationDefaults {
+            version: SessionConfigurationDefaultsVersion(u64::MAX),
+            defaults: defaults(1),
+        };
+
+        assert_eq!(exhausted.replace(defaults(2)), None);
+    }
+
+    #[test]
     fn session_creation_establishes_defaults_version_one() {
         let established = VersionedSessionConfigurationDefaults::establish(defaults(1));
 
@@ -565,11 +590,15 @@ mod tests {
     #[test]
     fn replacement_installs_the_next_complete_version() {
         let established = VersionedSessionConfigurationDefaults::establish(defaults(1));
-        let replaced = established.replace(defaults(2));
+        let replaced = established
+            .replace(defaults(2))
+            .expect("an unexhausted version counter installs the next version");
 
         assert_eq!(
             replaced.version(),
-            SessionConfigurationDefaultsVersion::first().next()
+            SessionConfigurationDefaultsVersion::first()
+                .checked_next()
+                .expect("the second version is representable")
         );
         assert_ne!(replaced.version(), established.version());
         assert_eq!(replaced.defaults(), &defaults(2));
@@ -623,8 +652,9 @@ mod tests {
 
     #[test]
     fn stale_expected_version_is_an_authoritative_rejection() {
-        let current =
-            VersionedSessionConfigurationDefaults::establish(defaults(1)).replace(defaults(2));
+        let current = VersionedSessionConfigurationDefaults::establish(defaults(1))
+            .replace(defaults(2))
+            .expect("an unexhausted version counter installs the next version");
         let stale = SessionConfigurationDefaultsVersion::first();
 
         let error = current
@@ -734,7 +764,9 @@ mod tests {
     #[test]
     fn defaults_version_is_provenance_rather_than_effective_equality() {
         let established = VersionedSessionConfigurationDefaults::establish(defaults(1));
-        let replaced = established.replace(defaults(1));
+        let replaced = established
+            .replace(defaults(1))
+            .expect("an unexhausted version counter installs the next version");
 
         let first = freeze_direct_request(1, &established);
         let later = freeze_direct_request(1, &replaced);
