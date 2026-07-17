@@ -50,7 +50,7 @@ Every state-changing request is one durable command:
 
 ```text
 CommandEnvelope = {
-    command_id: DurableCommandId,        // the accepted payload's own durable identifier, surfaced for lookup — not a second id
+    command_id: DurableCommandId,        // the accepted payload's own durable identifier, carried on the envelope — not a second id
     command: DiscriminatedCommandPayload // one typed variant per command kind
 }
 
@@ -65,7 +65,7 @@ This is semantic pseudocode, not a wire schema. The envelope adds nothing to the
 
 Three consequences are fixed here as protocol rules:
 
-- **The caller supplies the durable command identifier, and it has a single authoritative source.** The identifier ADR-0027's `SubmitInput` and the `CreateSession` payload already carry *is* the envelope's `command_id`, surfaced to the envelope so owner-global identifier lookup precedes canonical construction — never a second, independently supplied identifier. A transport that encodes the identifier in both the envelope and the payload body carries the same value in both positions by construction, and any divergence is a boundary rejection claiming no identifier. An envelope without an identifier is unconstructible. The protocol requires caller supply of no other identity: commands reference existing identities (an expected active turn, a session), and identities created by an applied command are returned in its recorded result. Whether any future command may supply a new semantic identity stays with the open identity question.
+- **The caller supplies the durable command identifier, and it has a single authoritative source.** The identifier ADR-0027's `SubmitInput` and the `CreateSession` payload already carry *is* the envelope's `command_id` — never a second, independently supplied identifier. Surfacing it on the envelope does not change the established handling order: the boundary constructs the canonical typed command first, and owner-global identifier lookup then precedes current-state validation (ADR-0001, ADR-0027). A transport that encodes the identifier in both the envelope and the payload body carries the same value in both positions by construction, and any divergence is a boundary rejection claiming no identifier. An envelope without an identifier is unconstructible. The protocol requires caller supply of no other identity: commands reference existing identities (an expected active turn, a session), and identities created by an applied command are returned in its recorded result. Whether any future command may supply a new semantic identity stays with the open identity question.
 - **The protocol adds no second concurrency layer.** Expected-state fields (`expected_active_turn`, the expected session-defaults version) live inside the typed payloads where the accepted algebra put them. The transport imposes and promises no cross-command ordering; clients sequence intent through those explicit fields.
 - **Acknowledgement is the committed result.** The command response is produced only after the transaction that makes the result durable (INV-007). A connection lost between commit and response is indistinguishable from one lost before commit, and the client resolves it the same way: resubmit the same identifier and payload, and receive either the recorded result (committed) or first handling (not committed). This is the duplicate-submission-across-reconnect path walked under S24 below.
 
