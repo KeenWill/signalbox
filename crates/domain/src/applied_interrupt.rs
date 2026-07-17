@@ -333,11 +333,13 @@ pub(crate) fn correlate_applied_interrupt(
         return Err(AppliedInterruptConstructionError::SuccessorAlreadyKnown { successor });
     }
 
-    let mut complete_work = Vec::with_capacity(known_work_before_application.len() + 1);
-    complete_work.extend_from_slice(known_work_before_application);
-    complete_work.push(facts.successor);
-    derive_accepted_input_total_order(complete_work)
-        .map_err(|error| AppliedInterruptConstructionError::InvalidQueueOrder { error })?;
+    derive_accepted_input_total_order(
+        known_work_before_application
+            .iter()
+            .copied()
+            .chain([facts.successor]),
+    )
+    .map_err(|error| AppliedInterruptConstructionError::InvalidQueueOrder { error })?;
 
     Ok(AppliedInterruptCommandResult {
         proof: AppliedInterruptProof {
