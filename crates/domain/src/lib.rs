@@ -12,6 +12,7 @@ mod configuration;
 mod delivery_request;
 mod queue_order;
 mod turn_attempt;
+mod turn_lifecycle;
 
 pub use accepted_input::{
     AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputLifecycleTransitionError,
@@ -37,6 +38,11 @@ pub use turn_attempt::{
     FatalMismatchStopDisposition, ProviderTargetMismatchFailureKind,
     ProviderTargetMismatchFailureRef, TurnAttemptStopCauseUnionError, TurnAttemptStopCauses,
     UnstoppedAttemptDisposition,
+};
+pub use turn_lifecycle::{
+    AcceptedInputStartingLineage, ActiveTurnPhase, AppliedStopForReconciliationProof,
+    IssuedOperationRef, NonEmptyIssuedOperationRefs, NonEmptyIssuedOperationRefsError,
+    ReconciliationMarker, ReconciliationReason, TurnDisposition,
 };
 
 macro_rules! define_identity {
@@ -140,6 +146,8 @@ pub(crate) mod test_support {
         accepted_input_id -> crate::AcceptedInputId,
         model_call_id -> crate::ModelCallId,
         provider_target_evidence_id -> crate::ProviderTargetEvidenceId,
+        tool_request_id -> crate::ToolRequestId,
+        tool_attempt_id -> crate::ToolAttemptId,
         direct -> crate::DirectModelSelection,
         alias -> crate::ModelAlias,
     }

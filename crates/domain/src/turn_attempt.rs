@@ -160,6 +160,17 @@ impl FatalMismatchStopCauses {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn test_fatal_mismatch_stop_causes(
+    evidence: ProviderTargetEvidenceId,
+    interrupt: AppliedInterruptState,
+) -> FatalMismatchStopCauses {
+    FatalMismatchStopCauses::new(
+        ProviderTargetMismatchFailureRef::nonterminal_call_observation(evidence),
+        interrupt,
+    )
+}
+
 /// The complete nonempty reason a live attempt prohibits new semantic effects.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TurnAttemptStopCauses {

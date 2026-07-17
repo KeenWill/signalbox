@@ -12,6 +12,16 @@ An append-only, dated record of decisions below foundation weight, newest first.
 
 **Affects.** The `#[cfg(test)]` test modules of `crates/domain/src/{accepted_input,configuration,delivery_request,queue_order}.rs` and the new `test_support` module in `crates/domain/src/lib.rs`. No non-test code, re-exports, or invariants change.
 
+## 2026-07-16 — Canonical reconciliation and active-phase values
+
+**Context.** ADR-0004 fixes the tagged nonempty ambiguity set, proof-bearing reconciliation and terminal values, and exact active-phase variants. ADR-0027 fixes the starting-lineage algebra. The exact context-frontier and aggregate evidence boundaries needed to construct a complete start or claim a lifecycle transition do not yet exist, so this slice needs representations that cannot overstate that authority.
+
+**Decision.** Represent starting lineage and issued-operation kinds as closed enums. Store ambiguity references in a private `BTreeSet`, rejecting empty and duplicate caller collections so valid reorderings compare equal. Keep the applied stop proof opaque and the reconciliation marker's fields private; expose only observation of their exact payloads. Represent each active phase and terminal disposition as the ADR's exact structural variant, without optional attempt or wait-subject fields. These standalone values claim neither aggregate guard satisfaction nor a valid state transition.
+
+**Rejected alternatives.** A vector permits duplicates and event-order-dependent equality. Stringly operation identifiers collapse distinct physical-operation kinds. Public proof or marker construction from raw identifiers lets callers mint lifecycle authority. Optional fields or a catch-all wait admit invalid phase shapes. Inventing a frontier token or incomplete aggregate would choose an undecided semantic boundary.
+
+**Affects.** `crates/domain/src/turn_lifecycle.rs`, its re-exports from `crates/domain/src/lib.rs`, and enforcement links in `docs/invariants.md`; exact frontier construction, `AcceptedInputTurnStart`, the authoritative turn aggregate, eligibility, production proof construction, terminal guards, persistence, and startup recovery remain later work.
+
 ## 2026-07-16 — Private-field current and ended attempt transitions
 
 **Context.** ADR-0004 owns the complete attempt-state transition table and assigns its transitions to the turn aggregate. The preceding turn-attempt value slice makes stop and terminal values constructible, but it does not choose how the aggregate enters or leaves a current Rust attempt without letting other callers forge `Running`, `StopRequested`, or terminal history.
