@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-16 — Ordinal input positions and collection-wide queue derivation
+
+**Context.** ADR-0027 requires immutable per-session input positions plus ordinary or immediate-after-interrupt priority facts to form one total order over currently known work. It leaves the position representation and pure derivation API open. A single record cannot implement the relational interrupt rule or carry a starting predecessor before eligibility.
+
+**Decision.** Represent `SessionInputPosition` as a private ordinal beginning at one with a checked successor. Supply each derivation item as an explicit session/turn/order projection and reject mixed-session collections without adding session identity to the normative order value. Sort ordinary roots by position, emit each root's unique recursive interrupt-successor chain, and require later-accepted interrupt targets to advance through that derived order. Return typed errors for malformed facts and leave storage and wire encodings open. Two validity checks are interpretations rather than quoted ADR rules and are documented as such on their error variants: interrupt acceptance positions must follow their predecessor's (from ADR-0027's requirement that active-work modes target the current active turn) and interrupt targets must advance monotonically (formalizing "a later request must target the new authoritative active state").
+
+**Rejected alternatives.** UUID or timestamp positions: neither expresses deterministic session acceptance order. Implementing `Ord` on one `AcceptedInputQueueOrder`: interrupt priority is relational and needs the complete set. Storing an optional direct predecessor: priority insertion would make it premature and rewritable. Treating same-session scope as an unchecked public precondition, silently tie-breaking malformed facts by `TurnId`, or panicking: each would weaken the domain boundary or invent queue semantics not accepted by the ADR.
+
+**Affects.** `crates/domain/src/queue_order.rs` and its re-exports from `crates/domain/src/lib.rs`; eligibility, starting lineage/frontier, persistence, session locking, and scheduling remain later slices.
+
 ## 2026-07-16 — Delivery-request caller payload representation
 
 **Context.** ADR-0027 defines four discriminated delivery requests. Three create origin work and carry a model-selection override bound to the caller's expected session-defaults version; safe-point steering must carry no independent configuration. The first caller-payload slice needs a Rust representation without implementing command handling or authoritative-state validation.
