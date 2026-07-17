@@ -1,12 +1,12 @@
-//! Turn-attempt stop causes and terminal value algebra.
+//! Turn-attempt stop causes, terminal values, and local state transitions.
 //!
-//! ADR-0004 and ADR-0005 are normative. This module models only canonical stop
-//! values and cause-specific terminal history. Current-state transitions and
-//! the turn aggregate's operation, wait, terminal-guard, and persistence rules
-//! are separate later slices.
-//! Standalone values here are candidates, not proof of owning-turn correlation
-//! or complete aggregate evidence; authoritative ended-attempt construction
-//! remains opaque until those guards arrive.
+//! ADR-0004 and ADR-0005 are normative. This module models canonical stop
+//! values, cause-specific terminal history, and the attempt-local predecessor
+//! matrix. The turn aggregate's operation, wait, terminal-guard, correlation,
+//! and persistence rules are a separate later slice. A locally ended attempt
+//! therefore does not by itself prove complete aggregate evidence. Creation
+//! and mutation stay crate-private so only that aggregate can expose guarded
+//! lifecycle operations.
 
 use std::collections::BTreeSet;
 
@@ -350,12 +350,366 @@ pub enum FatalMismatchStopDisposition {
     Ambiguous,
 }
 
+/// The sole nonterminal state carried by an active running turn.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CurrentTurnAttemptState {
+    /// Orchestration is durably prepared but not externally authorized.
+    Prepared,
+    /// External orchestration is authorized for this attempt.
+    Running,
+    /// Stop was requested and new semantic effects are prohibited.
+    StopRequested {
+        /// The complete nonempty typed stop causes.
+        causes: TurnAttemptStopCauses,
+    },
+}
+
+/// One current, nonterminal physical orchestration tenure.
+///
+/// The identity is factored outside the state and preserved by every consuming
+/// transition. Only the crate-private prepared entry creates a current attempt,
+/// so callers cannot couple an identity directly to `Running` or
+/// `StopRequested` or invoke attempt-local transitions around the turn
+/// aggregate.
+///
+/// ```compile_fail
+/// use signalbox_domain::{CurrentTurnAttempt, CurrentTurnAttemptState, TurnAttemptId};
+///
+/// fn running_cannot_be_forged(id: TurnAttemptId) {
+///     let _ = CurrentTurnAttempt {
+///         id,
+///         state: CurrentTurnAttemptState::Running,
+///     };
+/// }
+/// ```
+///
+/// Attempt-local transitions are sealed behind the turn aggregate:
+///
+/// ```compile_fail
+/// use signalbox_domain::{CurrentTurnAttempt, TurnAttemptId};
+///
+/// fn local_transition_cannot_bypass_aggregate(id: TurnAttemptId) {
+///     let _ = CurrentTurnAttempt::prepared(id);
+/// }
+/// ```
+///
+/// # Scope
+///
+/// This is an attempt component, not an independently persisted aggregate.
+/// The turn aggregate owns current-attempt uniqueness, proof-to-turn and
+/// mismatch correlation, operation classification, durable-wait changes,
+/// complete terminal guards, and atomic persistence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CurrentTurnAttempt {
+    id: crate::TurnAttemptId,
+    state: CurrentTurnAttemptState,
+}
+
+#[allow(
+    dead_code,
+    reason = "sealed transition seam is consumed by the next stacked aggregate slice"
+)]
+impl CurrentTurnAttempt {
+    /// Creates a newly durably prepared attempt.
+    pub(crate) const fn prepared(id: crate::TurnAttemptId) -> Self {
+        Self {
+            id,
+            state: CurrentTurnAttemptState::Prepared,
+        }
+    }
+
+    /// Returns the physical attempt identity preserved by transitions.
+    pub const fn id(&self) -> crate::TurnAttemptId {
+        self.id
+    }
+
+    /// Borrows the current nonterminal state.
+    pub const fn state(&self) -> &CurrentTurnAttemptState {
+        &self.state
+    }
+
+    /// Authorizes external orchestration from `Prepared`.
+    pub(crate) fn begin_running(self) -> Result<Self, CurrentTurnAttemptTransitionError> {
+        let Self { id, state } = self;
+        match state {
+            CurrentTurnAttemptState::Prepared => Ok(Self {
+                id,
+                state: CurrentTurnAttemptState::Running,
+            }),
+            state => Err(CurrentTurnAttemptTransitionError::new(
+                Self { id, state },
+                AttemptedTurnAttemptTransition::BeginRunning,
+            )),
+        }
+    }
+
+    /// Adds an applied interrupt to `Running` or a compatible stop request.
+    ///
+    /// Equal replay is idempotent. A distinct second proof is rejected without
+    /// changing the current attempt.
+    pub(crate) fn request_cancellation(
+        self,
+        proof: AppliedInterruptProof,
+    ) -> Result<Self, CurrentTurnAttemptTransitionError> {
+        let attempted = AttemptedTurnAttemptTransition::RequestCancellation { proof };
+        let Self { id, state } = self;
+        let state = match state {
+            CurrentTurnAttemptState::Running => CurrentTurnAttemptState::StopRequested {
+                causes: TurnAttemptStopCauses::cancellation_only(proof),
+            },
+            CurrentTurnAttemptState::StopRequested { causes } => {
+                match causes.add_interrupt(proof) {
+                    Ok(causes) => CurrentTurnAttemptState::StopRequested { causes },
+                    Err(error) => {
+                        let (causes, _) = error.into_parts();
+                        return Err(CurrentTurnAttemptTransitionError::new(
+                            Self {
+                                id,
+                                state: CurrentTurnAttemptState::StopRequested { causes },
+                            },
+                            attempted,
+                        ));
+                    }
+                }
+            }
+            state => {
+                return Err(CurrentTurnAttemptTransitionError::new(
+                    Self { id, state },
+                    attempted,
+                ));
+            }
+        };
+
+        Ok(Self { id, state })
+    }
+
+    /// Adds a trusted fatal mismatch to `Running` or an existing stop request.
+    ///
+    /// Cancellation-only stop upgrades to fatal without losing its proof;
+    /// existing fatal stop uses canonical idempotent set union.
+    pub(crate) fn request_fatal_mismatch(
+        self,
+        failure: ProviderTargetMismatchFailureRef,
+    ) -> Result<Self, CurrentTurnAttemptTransitionError> {
+        let attempted = AttemptedTurnAttemptTransition::RequestFatalMismatch { failure };
+        let Self { id, state } = self;
+        let state = match state {
+            CurrentTurnAttemptState::Running => CurrentTurnAttemptState::StopRequested {
+                causes: TurnAttemptStopCauses::fatal_mismatch(failure),
+            },
+            CurrentTurnAttemptState::StopRequested { causes } => {
+                CurrentTurnAttemptState::StopRequested {
+                    causes: causes.add_fatal_mismatch(failure),
+                }
+            }
+            state => {
+                return Err(CurrentTurnAttemptTransitionError::new(
+                    Self { id, state },
+                    attempted,
+                ));
+            }
+        };
+
+        Ok(Self { id, state })
+    }
+
+    /// Ends without a stop cause when the predecessor permits the disposition.
+    pub(crate) fn end_without_stop(
+        self,
+        disposition: UnstoppedAttemptDisposition,
+    ) -> Result<EndedTurnAttempt, CurrentTurnAttemptTransitionError> {
+        self.end(AttemptEnd::WithoutStop { disposition })
+    }
+
+    /// Ends with an applied interrupt and an honest classified disposition.
+    pub(crate) fn end_after_cancellation(
+        self,
+        cause: AppliedInterruptProof,
+        disposition: CancellationStopDisposition,
+    ) -> Result<EndedTurnAttempt, CurrentTurnAttemptTransitionError> {
+        self.end(AttemptEnd::AfterCancellation { cause, disposition })
+    }
+
+    /// Ends with the exact complete fatal causes and fatal disposition.
+    pub(crate) fn end_after_fatal_mismatch(
+        self,
+        causes: FatalMismatchStopCauses,
+        disposition: FatalMismatchStopDisposition,
+    ) -> Result<EndedTurnAttempt, CurrentTurnAttemptTransitionError> {
+        self.end(AttemptEnd::AfterFatalMismatch {
+            causes,
+            disposition,
+        })
+    }
+
+    fn end(
+        self,
+        attempted_end: AttemptEnd,
+    ) -> Result<EndedTurnAttempt, CurrentTurnAttemptTransitionError> {
+        let allowed = match (&self.state, &attempted_end) {
+            (
+                CurrentTurnAttemptState::Prepared,
+                AttemptEnd::WithoutStop {
+                    disposition:
+                        UnstoppedAttemptDisposition::KnownFailure | UnstoppedAttemptDisposition::Lost,
+                },
+            )
+            | (
+                CurrentTurnAttemptState::Prepared,
+                AttemptEnd::AfterCancellation {
+                    disposition: CancellationStopDisposition::Cancelled,
+                    ..
+                },
+            ) => true,
+            (
+                CurrentTurnAttemptState::Prepared,
+                AttemptEnd::AfterFatalMismatch {
+                    causes,
+                    disposition:
+                        FatalMismatchStopDisposition::KnownFailure | FatalMismatchStopDisposition::Lost,
+                },
+                // ADR-0004 and ADR-0027 route an applied interrupt from Prepared
+                // through the atomic AfterCancellation edge instead.
+            ) => causes.interrupt() == AppliedInterruptState::NoAppliedInterrupt,
+            (CurrentTurnAttemptState::Running, _) => true,
+            (
+                CurrentTurnAttemptState::StopRequested {
+                    causes: TurnAttemptStopCauses::CancellationOnly { interrupt },
+                },
+                AttemptEnd::AfterCancellation { cause, .. },
+            ) => interrupt == cause,
+            (
+                CurrentTurnAttemptState::StopRequested {
+                    causes: TurnAttemptStopCauses::FatalMismatch(current),
+                },
+                AttemptEnd::AfterFatalMismatch { causes, .. },
+            ) => current == causes,
+            _ => false,
+        };
+
+        if allowed {
+            Ok(EndedTurnAttempt {
+                id: self.id,
+                end: attempted_end,
+            })
+        } else {
+            Err(CurrentTurnAttemptTransitionError::new(
+                self,
+                AttemptedTurnAttemptTransition::End { end: attempted_end },
+            ))
+        }
+    }
+}
+
+/// Immutable terminal history for one physical attempt.
+///
+/// This type exposes no transition back to a current attempt:
+///
+/// ```compile_fail
+/// use signalbox_domain::EndedTurnAttempt;
+///
+/// fn terminal_attempt_cannot_run_again(ended: EndedTurnAttempt) {
+///     let _ = ended.begin_running();
+/// }
+/// ```
+///
+/// Terminal history can only be produced by a valid consuming transition:
+///
+/// ```compile_fail
+/// use signalbox_domain::{AttemptEnd, EndedTurnAttempt, TurnAttemptId};
+///
+/// fn terminal_history_cannot_be_forged(id: TurnAttemptId, end: AttemptEnd) {
+///     let _ = EndedTurnAttempt { id, end };
+/// }
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EndedTurnAttempt {
+    id: crate::TurnAttemptId,
+    end: AttemptEnd,
+}
+
+impl EndedTurnAttempt {
+    /// Returns the identity preserved from the current attempt.
+    pub const fn id(&self) -> crate::TurnAttemptId {
+        self.id
+    }
+
+    /// Borrows the exact cause-specific terminal history.
+    pub const fn end(&self) -> &AttemptEnd {
+        &self.end
+    }
+}
+
+/// The transition input returned when a current attempt rejects it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(
+    dead_code,
+    reason = "sealed transition seam is consumed by the next stacked aggregate slice"
+)]
+pub(crate) enum AttemptedTurnAttemptTransition {
+    /// Authorization was requested outside `Prepared`.
+    BeginRunning,
+    /// An interrupt was requested from an incompatible state or proof.
+    RequestCancellation {
+        /// The exact proof that could not be added.
+        proof: AppliedInterruptProof,
+    },
+    /// A fatal mismatch was requested from an incompatible state.
+    RequestFatalMismatch {
+        /// The exact failure that could not be added.
+        failure: ProviderTargetMismatchFailureRef,
+    },
+    /// The requested terminal history does not match the current state.
+    End {
+        /// The complete requested terminal history.
+        end: AttemptEnd,
+    },
+}
+
+/// A rejected transition with the unchanged current attempt and exact input.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(
+    dead_code,
+    reason = "sealed transition seam is consumed by the next stacked aggregate slice"
+)]
+pub(crate) struct CurrentTurnAttemptTransitionError {
+    rejected: Box<(CurrentTurnAttempt, AttemptedTurnAttemptTransition)>,
+}
+
+#[allow(
+    dead_code,
+    reason = "sealed transition seam is consumed by the next stacked aggregate slice"
+)]
+impl CurrentTurnAttemptTransitionError {
+    fn new(current: CurrentTurnAttempt, attempted: AttemptedTurnAttemptTransition) -> Self {
+        Self {
+            rejected: Box::new((current, attempted)),
+        }
+    }
+
+    /// Borrows the unchanged current attempt.
+    pub(crate) fn current(&self) -> &CurrentTurnAttempt {
+        &self.rejected.0
+    }
+
+    /// Borrows the rejected transition input.
+    pub(crate) fn attempted(&self) -> &AttemptedTurnAttemptTransition {
+        &self.rejected.1
+    }
+
+    /// Returns the unchanged attempt and rejected transition input.
+    pub(crate) fn into_parts(self) -> (CurrentTurnAttempt, AttemptedTurnAttemptTransition) {
+        *self.rejected
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::applied_interrupt::test_applied_interrupt_proof;
     use crate::test_support::{
-        command_id, model_call_id, provider_target_evidence_id as evidence, turn_id,
+        command_id, model_call_id, provider_target_evidence_id as evidence,
+        turn_attempt_id as attempt_id, turn_id,
     };
 
     fn proof(value: u128) -> AppliedInterruptProof {
@@ -364,6 +718,341 @@ mod tests {
 
     fn failure(value: u128) -> ProviderTargetMismatchFailureRef {
         ProviderTargetMismatchFailureRef::nonterminal_call_observation(evidence(value))
+    }
+
+    fn prepared() -> CurrentTurnAttempt {
+        CurrentTurnAttempt::prepared(attempt_id(1))
+    }
+
+    fn running() -> CurrentTurnAttempt {
+        prepared().begin_running().expect("Prepared may run")
+    }
+
+    fn cancellation_stopped() -> CurrentTurnAttempt {
+        running()
+            .request_cancellation(proof(1))
+            .expect("Running may request cancellation")
+    }
+
+    fn fatal_stopped() -> CurrentTurnAttempt {
+        running()
+            .request_fatal_mismatch(failure(1))
+            .expect("Running may request fatal stop")
+    }
+
+    fn fatal_causes(attempt: &CurrentTurnAttempt) -> FatalMismatchStopCauses {
+        let CurrentTurnAttemptState::StopRequested {
+            causes: TurnAttemptStopCauses::FatalMismatch(causes),
+        } = attempt.state()
+        else {
+            panic!("test fixture must be fatal-stopped");
+        };
+        causes.clone()
+    }
+
+    /// INV-004 / INV-006: Prepared is the sole entry and authorization
+    /// preserves the physical-attempt identity.
+    #[test]
+    fn prepared_begins_running_with_the_same_identity() {
+        let current = prepared().begin_running().expect("Prepared may run");
+
+        assert_eq!(current.id(), attempt_id(1));
+        assert_eq!(current.state(), &CurrentTurnAttemptState::Running);
+    }
+
+    /// INV-006: authorization rejects every non-Prepared current state and
+    /// returns that state unchanged.
+    #[test]
+    fn begin_running_rejects_every_other_current_state_unchanged() {
+        for current in [running(), cancellation_stopped(), fatal_stopped()] {
+            let error = current.clone().begin_running().unwrap_err();
+            assert_eq!(
+                error.into_parts(),
+                (current, AttemptedTurnAttemptTransition::BeginRunning)
+            );
+        }
+    }
+
+    /// S07 / INV-006 / INV-029: Running accepts either singleton stop; stopped
+    /// values replay/union compatible causes; Prepared accepts neither.
+    #[test]
+    fn stop_request_transition_matrix_preserves_complete_causes() {
+        let cancellation = cancellation_stopped();
+        assert!(matches!(
+            cancellation.state(),
+            CurrentTurnAttemptState::StopRequested {
+                causes: TurnAttemptStopCauses::CancellationOnly { interrupt },
+            } if *interrupt == proof(1)
+        ));
+        assert_eq!(
+            cancellation.clone().request_cancellation(proof(1)).unwrap(),
+            cancellation
+        );
+
+        let fatal = fatal_stopped();
+        assert!(fatal_causes(&fatal).contains(failure(1)));
+        assert_eq!(
+            fatal.clone().request_fatal_mismatch(failure(1)).unwrap(),
+            fatal
+        );
+        let upgraded = cancellation
+            .request_fatal_mismatch(failure(1))
+            .expect("fatal mismatch upgrades cancellation stop");
+        let added_interrupt = fatal
+            .request_cancellation(proof(1))
+            .expect("fatal stop retains a first interrupt");
+        assert_eq!(upgraded, added_interrupt);
+        let unioned = upgraded
+            .request_fatal_mismatch(failure(2))
+            .expect("fatal failure set unions");
+        assert!(fatal_causes(&unioned).contains(failure(2)));
+
+        assert_eq!(
+            prepared()
+                .request_cancellation(proof(1))
+                .unwrap_err()
+                .into_parts(),
+            (
+                prepared(),
+                AttemptedTurnAttemptTransition::RequestCancellation { proof: proof(1) }
+            )
+        );
+        assert_eq!(
+            prepared()
+                .request_fatal_mismatch(failure(1))
+                .unwrap_err()
+                .into_parts(),
+            (
+                prepared(),
+                AttemptedTurnAttemptTransition::RequestFatalMismatch {
+                    failure: failure(1)
+                }
+            )
+        );
+    }
+
+    /// INV-006 / INV-029: a distinct second interrupt is rejected for either
+    /// stopped family without changing the exact current attempt.
+    #[test]
+    fn conflicting_interrupt_returns_the_unchanged_stopped_attempt() {
+        let fatal_with_interrupt = fatal_stopped().request_cancellation(proof(1)).unwrap();
+        for current in [cancellation_stopped(), fatal_with_interrupt] {
+            let error = current.clone().request_cancellation(proof(2)).unwrap_err();
+            assert_eq!(error.current(), &current);
+            assert_eq!(
+                error.attempted(),
+                &AttemptedTurnAttemptTransition::RequestCancellation { proof: proof(2) }
+            );
+        }
+    }
+
+    /// S03 / S04 / S07 / INV-006 / INV-029 / INV-034: Prepared accepts exactly
+    /// the restricted unsent and startup terminal branches from ADR-0004.
+    #[test]
+    fn prepared_terminal_matrix_is_complete() {
+        for disposition in all_unstopped_dispositions() {
+            let allowed = matches!(
+                disposition,
+                UnstoppedAttemptDisposition::KnownFailure | UnstoppedAttemptDisposition::Lost
+            );
+            assert_eq!(
+                prepared().end_without_stop(disposition).is_ok(),
+                allowed,
+                "unexpected Prepared/WithoutStop result for {disposition:?}"
+            );
+        }
+        for disposition in all_cancellation_dispositions() {
+            assert_eq!(
+                prepared()
+                    .end_after_cancellation(proof(1), disposition)
+                    .is_ok(),
+                disposition == CancellationStopDisposition::Cancelled,
+                "unexpected Prepared/AfterCancellation result for {disposition:?}"
+            );
+        }
+        for disposition in all_fatal_dispositions() {
+            let allowed = disposition != FatalMismatchStopDisposition::Ambiguous;
+            assert_eq!(
+                prepared()
+                    .end_after_fatal_mismatch(
+                        FatalMismatchStopCauses::new(
+                            failure(1),
+                            AppliedInterruptState::NoAppliedInterrupt,
+                        ),
+                        disposition,
+                    )
+                    .is_ok(),
+                allowed,
+                "unexpected Prepared/AfterFatalMismatch result for {disposition:?}"
+            );
+            assert!(
+                prepared()
+                    .end_after_fatal_mismatch(
+                        FatalMismatchStopCauses::new(
+                            failure(1),
+                            AppliedInterruptState::Applied { proof: proof(1) },
+                        ),
+                        disposition,
+                    )
+                    .is_err()
+            );
+        }
+    }
+
+    /// S02 / S04 / S06 / S07 / S10 / S23 / INV-004 / INV-006: Running may
+    /// enter every type-valid terminal branch once slice 5 establishes guards.
+    #[test]
+    fn running_accepts_every_type_valid_terminal_value() {
+        for disposition in all_unstopped_dispositions() {
+            assert_eq!(
+                running()
+                    .end_without_stop(disposition)
+                    .expect("Running accepts every unstopped disposition")
+                    .id(),
+                attempt_id(1)
+            );
+        }
+        for disposition in all_cancellation_dispositions() {
+            assert!(
+                running()
+                    .end_after_cancellation(proof(1), disposition)
+                    .is_ok()
+            );
+        }
+        for interrupt in [
+            AppliedInterruptState::NoAppliedInterrupt,
+            AppliedInterruptState::Applied { proof: proof(1) },
+        ] {
+            for disposition in all_fatal_dispositions() {
+                assert!(
+                    running()
+                        .end_after_fatal_mismatch(
+                            FatalMismatchStopCauses::new(failure(1), interrupt),
+                            disposition,
+                        )
+                        .is_ok()
+                );
+            }
+        }
+    }
+
+    /// S04 / S07 / S23 / INV-006 / INV-029 / INV-034: CancellationOnly ends
+    /// only as AfterCancellation with its exact proof and any honest result.
+    #[test]
+    fn cancellation_stopped_terminal_matrix_is_complete() {
+        for disposition in all_cancellation_dispositions() {
+            assert!(
+                cancellation_stopped()
+                    .end_after_cancellation(proof(1), disposition)
+                    .is_ok()
+            );
+            assert!(
+                cancellation_stopped()
+                    .end_after_cancellation(proof(2), disposition)
+                    .is_err()
+            );
+        }
+        for disposition in all_unstopped_dispositions() {
+            assert!(
+                cancellation_stopped()
+                    .end_without_stop(disposition)
+                    .is_err()
+            );
+        }
+        for disposition in all_fatal_dispositions() {
+            assert!(
+                cancellation_stopped()
+                    .end_after_fatal_mismatch(
+                        FatalMismatchStopCauses::new(
+                            failure(1),
+                            AppliedInterruptState::Applied { proof: proof(1) },
+                        ),
+                        disposition,
+                    )
+                    .is_err()
+            );
+        }
+    }
+
+    /// S04 / S06 / S21 / S23 / INV-006 / INV-034: FatalMismatch ends only as
+    /// AfterFatalMismatch with the exact complete cause value.
+    #[test]
+    fn fatal_stopped_terminal_matrix_is_complete() {
+        let without_interrupt = fatal_stopped();
+        let exact_without_interrupt = fatal_causes(&without_interrupt);
+        for disposition in all_fatal_dispositions() {
+            assert!(
+                without_interrupt
+                    .clone()
+                    .end_after_fatal_mismatch(exact_without_interrupt.clone(), disposition)
+                    .is_ok()
+            );
+        }
+
+        let current = fatal_stopped()
+            .request_fatal_mismatch(failure(2))
+            .and_then(|attempt| attempt.request_cancellation(proof(1)))
+            .expect("compatible fatal causes union");
+        let exact = fatal_causes(&current);
+        for disposition in all_fatal_dispositions() {
+            assert!(
+                current
+                    .clone()
+                    .end_after_fatal_mismatch(exact.clone(), disposition)
+                    .is_ok()
+            );
+            assert!(
+                current
+                    .clone()
+                    .end_after_fatal_mismatch(
+                        FatalMismatchStopCauses::new(
+                            failure(1),
+                            AppliedInterruptState::Applied { proof: proof(1) },
+                        ),
+                        disposition,
+                    )
+                    .is_err()
+            );
+        }
+        for disposition in all_unstopped_dispositions() {
+            assert!(current.clone().end_without_stop(disposition).is_err());
+        }
+        for disposition in all_cancellation_dispositions() {
+            assert!(
+                current
+                    .clone()
+                    .end_after_cancellation(proof(1), disposition)
+                    .is_err()
+            );
+        }
+
+        let TurnAttemptStopCauses::FatalMismatch(superset) =
+            TurnAttemptStopCauses::FatalMismatch(exact.clone()).add_fatal_mismatch(failure(3))
+        else {
+            panic!("adding a fatal failure must stay fatal");
+        };
+        assert!(
+            current
+                .clone()
+                .end_after_fatal_mismatch(superset, FatalMismatchStopDisposition::KnownFailure,)
+                .is_err()
+        );
+        let TurnAttemptStopCauses::FatalMismatch(different_interrupt) =
+            TurnAttemptStopCauses::fatal_mismatch(failure(1))
+                .add_fatal_mismatch(failure(2))
+                .add_interrupt(proof(2))
+                .expect("first interrupt is compatible")
+        else {
+            panic!("adding an interrupt must stay fatal");
+        };
+        assert!(
+            current
+                .end_after_fatal_mismatch(
+                    different_interrupt,
+                    FatalMismatchStopDisposition::KnownFailure,
+                )
+                .is_err()
+        );
     }
 
     /// INV-006: fatal stop is nonempty and repeated additions are canonical set
@@ -586,5 +1275,66 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// INV-004 / INV-006: a successful terminal transition preserves identity
+    /// and exact history; rejection returns the unchanged state and input.
+    #[test]
+    fn terminal_transition_preserves_success_and_rejection_inputs_exactly() {
+        let expected = AttemptEnd::AfterCancellation {
+            cause: proof(1),
+            disposition: CancellationStopDisposition::Ambiguous,
+        };
+        let ended = cancellation_stopped()
+            .end_after_cancellation(proof(1), CancellationStopDisposition::Ambiguous)
+            .expect("matching cancellation history may end");
+        assert_eq!(ended.id(), attempt_id(1));
+        assert_eq!(ended.end(), &expected);
+
+        let current = cancellation_stopped();
+        let rejected = AttemptEnd::WithoutStop {
+            disposition: UnstoppedAttemptDisposition::KnownFailure,
+        };
+        let error = current
+            .clone()
+            .end_without_stop(UnstoppedAttemptDisposition::KnownFailure)
+            .unwrap_err();
+        assert_eq!(
+            error.into_parts(),
+            (
+                current,
+                AttemptedTurnAttemptTransition::End { end: rejected }
+            )
+        );
+    }
+
+    fn all_unstopped_dispositions() -> [UnstoppedAttemptDisposition; 6] {
+        [
+            UnstoppedAttemptDisposition::TurnCompleted,
+            UnstoppedAttemptDisposition::TurnRefused,
+            UnstoppedAttemptDisposition::YieldedToDurableWait,
+            UnstoppedAttemptDisposition::KnownFailure,
+            UnstoppedAttemptDisposition::Lost,
+            UnstoppedAttemptDisposition::Ambiguous,
+        ]
+    }
+
+    fn all_cancellation_dispositions() -> [CancellationStopDisposition; 6] {
+        [
+            CancellationStopDisposition::TurnCompleted,
+            CancellationStopDisposition::TurnRefused,
+            CancellationStopDisposition::KnownFailure,
+            CancellationStopDisposition::Lost,
+            CancellationStopDisposition::Cancelled,
+            CancellationStopDisposition::Ambiguous,
+        ]
+    }
+
+    fn all_fatal_dispositions() -> [FatalMismatchStopDisposition; 3] {
+        [
+            FatalMismatchStopDisposition::KnownFailure,
+            FatalMismatchStopDisposition::Lost,
+            FatalMismatchStopDisposition::Ambiguous,
+        ]
     }
 }

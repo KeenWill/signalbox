@@ -32,7 +32,8 @@ pub use queue_order::{
     AcceptedInputQueueWork, SessionInputPosition, derive_accepted_input_total_order,
 };
 pub use turn_attempt::{
-    AppliedInterruptState, AttemptEnd, CancellationStopDisposition, FatalMismatchStopCauses,
+    AppliedInterruptState, AttemptEnd, CancellationStopDisposition, CurrentTurnAttempt,
+    CurrentTurnAttemptState, EndedTurnAttempt, FatalMismatchStopCauses,
     FatalMismatchStopDisposition, ProviderTargetMismatchFailureKind,
     ProviderTargetMismatchFailureRef, TurnAttemptStopCauseUnionError, TurnAttemptStopCauses,
     UnstoppedAttemptDisposition,
@@ -134,6 +135,7 @@ pub(crate) mod test_support {
     identity_constructors! {
         command_id -> crate::DurableCommandId,
         turn_id -> crate::TurnId,
+        turn_attempt_id -> crate::TurnAttemptId,
         session_id -> crate::SessionId,
         accepted_input_id -> crate::AcceptedInputId,
         model_call_id -> crate::ModelCallId,
