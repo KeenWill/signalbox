@@ -1,4 +1,4 @@
-# ADR-0033: Postgres implementation dependencies
+# ADR-0032: Postgres implementation dependencies
 
 - Date: 2026-07-17
 - Owners: Repository owner
