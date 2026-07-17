@@ -1,20 +1,21 @@
 # ADR-0009: Dispatch fencing
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-17
 - Owners: Repository owner
-- Reviewers: none yet; this record is authoritative only if the owner accepts it
+- Reviewers: Codex, Copilot, and Cursor Bugbot (automated PR review); no specialist human reviewer assigned
 - Supersedes: none
 - Superseded by: none
+- Accepted with: [ADR-0010](0010-initial-scheduler-mechanics.md) as one coupled pair — the scheduler transactions that carry this fence
 - Depends on: the accepted foundation set ([ADR-0001](0001-domain-terminology-and-identity.md), [ADR-0003](0003-session-creation-and-transcript-ancestry.md), [ADR-0004](0004-turn-and-attempt-lifecycle.md), [ADR-0005](0005-model-call-retry-semantics.md), [ADR-0027](0027-input-delivery-lifecycle.md))
-- Coordinated with: Proposed [ADR-0010](0010-initial-scheduler-mechanics.md) (the transactions that carry this fence) and Proposed [ADR-0022](0022-persistence-representation.md) (the guarded-row discipline and reserved dispatch-generation placement); if either changes, the references here follow it
+- Coordinated with: Proposed [ADR-0022](0022-persistence-representation.md) (the guarded-row discipline and reserved dispatch-generation placement); if it changes, the references here follow it
 - Decision questions: what fence a stale dispatch or result presents; the generation value's scope and ordering; the exact result-acceptance compare-and-set (INV-011); duplicate-delivery disposition; late-result routing after terminal classification
 
 ## Context
 
-The open question ["Fencing that rejects stale dispatches and results"](../open-questions.md#scheduling-and-runners-reserved-adr-0008-adr-0009-adr-0010) blocks runner dispatch (S05, S06, S12), with a recorded leaning toward durable attempt identity plus generation or equivalent compare-and-set. The behavior is already accepted in outline: INV-011 requires that a stale physical attempt or dispatch generation cannot advance or overwrite current logical state, INV-021 requires every runner result to identify its tool attempt and authorized dispatch generation or equivalent fence, and the [glossary](../glossary.md#dispatch-generation) defines a dispatch generation as the token identifying which scheduler dispatch is currently authorized to report for a physical attempt while marking its representation and monotonicity provisional. This record proposes the fence mechanics those rows leave open. The catalog rows remain the statements of record; nothing here is normative unless the owner accepts it.
+This record closes the foundational question of fencing that rejects stale dispatches and results — previously listed under [scheduling and runners](../open-questions.md#scheduling-and-runners-reserved-adr-0008) — which blocked runner dispatch (S05, S06, S12), and whose recorded leaning was toward durable attempt identity plus generation or equivalent compare-and-set. The behavior is already accepted in outline: INV-011 requires that a stale physical attempt or dispatch generation cannot advance or overwrite current logical state, INV-021 requires every runner result to identify its tool attempt and authorized dispatch generation or equivalent fence, and the [glossary](../glossary.md#dispatch-generation) defines a dispatch generation as the token identifying which scheduler dispatch is currently authorized to report for a physical attempt while marking its representation and monotonicity provisional. This record decides the fence mechanics those rows leave open. The catalog rows remain the statements of record; this record is the normative source for the mechanics it fixes.
 
-The accepted lifecycle fixes what the fence must protect. ADR-0001 fixes the ownership cardinalities: each tool attempt belongs to exactly one tool request and exactly one issuing turn attempt, and a tool attempt is not "a scheduler delivery retry." ADR-0004's terminalization guard closes every owned logical tool request "so a scheduler cannot dispatch it after the turn releases its slot," and its ambiguity rules make a terminal `Ambiguous` operation immutable: separate resolving evidence may clear the blocking uncertainty, but nothing reopens the physical disposition. The domain crate already implements `ToolRequestId` and `ToolAttemptId` as distinct identities and carries exact `ToolAttempt(ToolAttemptId)` references in `NonEmptyIssuedOperationRefs` ([`crates/domain/src/turn_lifecycle.rs`](../../crates/domain/src/turn_lifecycle.rs)); tool state machines do not exist yet, so this proposal constrains a future slice rather than existing code.
+The accepted lifecycle fixes what the fence must protect. ADR-0001 fixes the ownership cardinalities: each tool attempt belongs to exactly one tool request and exactly one issuing turn attempt, and a tool attempt is not "a scheduler delivery retry." ADR-0004's terminalization guard closes every owned logical tool request "so a scheduler cannot dispatch it after the turn releases its slot," and its ambiguity rules make a terminal `Ambiguous` operation immutable: separate resolving evidence may clear the blocking uncertainty, but nothing reopens the physical disposition. The domain crate already implements `ToolRequestId` and `ToolAttemptId` as distinct identities and carries exact `ToolAttempt(ToolAttemptId)` references in `NonEmptyIssuedOperationRefs` ([`crates/domain/src/turn_lifecycle.rs`](../../crates/domain/src/turn_lifecycle.rs)); tool state machines do not exist yet, so this record constrains a future slice rather than existing code.
 
 ## Decision
 
@@ -51,7 +52,7 @@ A valid attempt-and-generation pair fences transport staleness only. It is not p
 
 ## Invariants
 
-If accepted, this record proposes the enforcement mechanics of INV-011 (the exact result-acceptance predicate above), INV-021 (the envelope's required attempt and generation fields), and the tool-result case of INV-012's operation-specific result deduplication, and it relies on INV-006 (terminal dispositions never reopen) and INV-010. The catalog rows remain unchanged while this record is Proposed; acceptance adds enforcement links without duplicating these rules.
+This record fixes the enforcement mechanics of INV-011 (the exact result-acceptance predicate above), INV-021 (the envelope's required attempt and generation fields), and the tool-result case of INV-012's operation-specific result deduplication, and it relies on INV-006 (terminal dispositions never reopen) and INV-010. The catalog rows remain the statements of record; this acceptance adds the enforcement links there without duplicating these rules.
 
 ## Strongest alternative
 

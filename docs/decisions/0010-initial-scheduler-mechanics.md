@@ -1,20 +1,21 @@
 # ADR-0010: Initial scheduler mechanics
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-17
 - Owners: Repository owner
-- Reviewers: none yet; this record is authoritative only if the owner accepts it
+- Reviewers: Codex, Copilot, and Cursor Bugbot (automated PR review); no specialist human reviewer assigned
 - Supersedes: none
 - Superseded by: none
+- Accepted with: [ADR-0009](0009-dispatch-fencing.md) as one coupled pair — the fence carried by the dispatch and result transactions this scheduler executes
 - Depends on: the accepted foundation set ([ADR-0001](0001-domain-terminology-and-identity.md), [ADR-0003](0003-session-creation-and-transcript-ancestry.md), [ADR-0004](0004-turn-and-attempt-lifecycle.md), [ADR-0005](0005-model-call-retry-semantics.md), [ADR-0027](0027-input-delivery-lifecycle.md))
-- Coordinated with: Proposed [ADR-0009](0009-dispatch-fencing.md) (the fence carried by dispatch and result transactions), Proposed [ADR-0022](0022-persistence-representation.md) (guarded rows, partial unique indexes, and the deferred process-incarnation question), and Proposed [ADR-0030](0030-context-frontier-snapshots.md) (the start construction that the activation transaction commits); if any of them changes, the references here follow that record
+- Coordinated with: Proposed [ADR-0022](0022-persistence-representation.md) (guarded rows, partial unique indexes, and the deferred process-incarnation question) and Proposed [ADR-0030](0030-context-frontier-snapshots.md) (the start construction that the activation transaction commits); if either changes, the references here follow that record
 - Decision questions: how eligibility is detected and serialized per session against INV-009's database-level enforcement; wake-up strategy and its failure behavior; startup-scan coordination with ADR-0004's recovery semantics; whether Postgres alone coordinates the initial scheduler; the adapter boundary that keeps a future broker possible
 
 ## Context
 
-The open question ["Whether Postgres alone is sufficient for the initial scheduler"](../open-questions.md#scheduling-and-runners-reserved-adr-0008-adr-0009-adr-0010) records a leaning to start with Postgres if correctness and wake-up tests pass while preserving an adapter boundary (S03, S05, S12). ADR-0004 leaves "scheduler locking, wake-up, leases, and Postgres coordination" to this record, and ADR-0022 defers here whether attempts need a process-incarnation column or the single-hub fact suffices to identify abandoned tenures. The [architecture](../architecture.md) makes the central scheduler a hub-owned module responsible for durable dispatch coordination, fencing, and the at-most-one-progressing-turn policy, allows the hub to be one deployable modular monolith, and deliberately selects no broker or workflow engine.
+This record closes the foundational question of whether Postgres alone is sufficient for the initial scheduler — previously listed under [scheduling and runners](../open-questions.md#scheduling-and-runners-reserved-adr-0008) (S03, S05, S12) — whose recorded leaning was to start with Postgres if correctness and wake-up tests pass while preserving an adapter boundary. ADR-0004 leaves "scheduler locking, wake-up, leases, and Postgres coordination" to this record, and ADR-0022 defers here whether attempts need a process-incarnation column or the single-hub fact suffices to identify abandoned tenures. The [architecture](../architecture.md) makes the central scheduler a hub-owned module responsible for durable dispatch coordination, fencing, and the at-most-one-progressing-turn policy, allows the hub to be one deployable modular monolith, and deliberately selects no broker or workflow engine.
 
-The accepted semantics the scheduler must execute already exist. ADR-0004 defines eligibility as a derived predicate — every turn earlier in ADR-0027's durable total queue order is terminal and the session has no active turn — and requires that enforcement of the single progressing slot not rest on process memory (INV-009). ADR-0027 fixes starting lineage and the outcome-aware frontier atomically at eligibility, never at acceptance, and ADR-0030 proposes the snapshot construction that transaction commits. The domain crate implements the pure order derivation as `derive_accepted_input_total_order` over immutable queue facts ([`crates/domain/src/queue_order.rs`](../../crates/domain/src/queue_order.rs)), and models the closed active-phase and current-attempt shapes the activation transaction creates ([`crates/domain/src/turn_lifecycle.rs`](../../crates/domain/src/turn_lifecycle.rs), [`crates/domain/src/turn_attempt.rs`](../../crates/domain/src/turn_attempt.rs)). This record proposes the mechanics that run those transitions; it closes no open question, and nothing below is normative unless the owner accepts it.
+The accepted semantics the scheduler must execute already exist. ADR-0004 defines eligibility as a derived predicate — every turn earlier in ADR-0027's durable total queue order is terminal and the session has no active turn — and requires that enforcement of the single progressing slot not rest on process memory (INV-009). ADR-0027 fixes starting lineage and the outcome-aware frontier atomically at eligibility, never at acceptance, and ADR-0030 proposes the snapshot construction that transaction commits. The domain crate implements the pure order derivation as `derive_accepted_input_total_order` over immutable queue facts ([`crates/domain/src/queue_order.rs`](../../crates/domain/src/queue_order.rs)), and models the closed active-phase and current-attempt shapes the activation transaction creates ([`crates/domain/src/turn_lifecycle.rs`](../../crates/domain/src/turn_lifecycle.rs), [`crates/domain/src/turn_attempt.rs`](../../crates/domain/src/turn_attempt.rs)). This record fixes the mechanics that run those transitions and, on acceptance, closes that question; it is the normative source for the mechanics it decides.
 
 ## Decision
 
@@ -66,7 +67,7 @@ The adapter boundary that keeps a future broker possible separates three seams, 
 
 ## Invariants
 
-If accepted, this record proposes mechanics for INV-009 (the serialization discipline layered on ADR-0022's database enforcement), INV-034 (scan-before-scheduling ordering and the single-hub abandonment rule), and INV-010 (no durable lease or process reference), and relies on INV-007 and INV-011/INV-021 via ADR-0009. The catalog rows remain unchanged while this record is Proposed; acceptance adds enforcement links without duplicating these rules.
+This record fixes mechanics for INV-009 (the serialization discipline layered on ADR-0022's database enforcement), INV-034 (scan-before-scheduling ordering and the single-hub abandonment rule), and INV-010 (no durable lease or process reference), and relies on INV-007 and INV-011/INV-021 via ADR-0009. The catalog rows remain the statements of record; this acceptance adds the enforcement links there without duplicating these rules.
 
 ## Strongest alternative
 
