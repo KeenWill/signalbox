@@ -1,13 +1,13 @@
 # ADR-0031: Direct fatal-mismatch terminalization at a closed aggregate boundary
 
-- Status: Proposed
-- Date: 2026-07-16
+- Status: Accepted
+- Date: 2026-07-17
 - Owners: Repository owner
-- Reviewers: none yet; this record is authoritative only if the owner accepts it
+- Reviewers: Codex (architecture and acceptance consistency review); no specialist human reviewer assigned
 - Supersedes: none
 - Superseded by: none
 - Depends on: [ADR-0004](0004-turn-and-attempt-lifecycle.md), [ADR-0005](0005-model-call-retry-semantics.md), and [ADR-0027](0027-input-delivery-lifecycle.md)
-- Refines if accepted: ADR-0004's exhaustive live turn-transition matrix and ADR-0005's fatal-mismatch handling; neither is amended while this record remains Proposed
+- Refines: ADR-0004's exhaustive live turn-transition matrix and ADR-0005's fatal-mismatch handling
 - Decision questions: when fatal mismatch requires `StopRequested`; direct `Failed` versus `ReconciliationRequired`; complete cause and ambiguity derivation; audit without an intermediate stop state; best-effort cancellation and restart behavior
 
 ## Context
@@ -24,7 +24,7 @@ This ADR makes the closed-boundary rule exhaustive. It decides when the fatal mi
 
 ### One missing live edge
 
-If accepted, the live turn algebra gains the explicit edge:
+The live turn algebra includes the explicit edge:
 
 ```text
 Active(Running {
@@ -52,7 +52,7 @@ U = exact canonical set of issued operations that remain physically
 
 `U` is computed after the new evidence takes effect. If mismatch evidence resolves an already-ambiguous call, that call keeps its physical `Ambiguous` disposition but is removed from `U`; its `TerminalAmbiguityResolution` remains in `F`. An operation classified `Ambiguous` counts as physically classified. While it remains in `U`, its uncertainty prevents an ordinary terminal disposition, but it can appear honestly in an exact reconciliation marker.
 
-The transition derives `F`, `U`, and guard satisfaction itself. A public or application caller cannot supply an `all_done`, `all_guards_hold`, ambiguity set, or desired disposition flag as authority. If the complete aggregate projection is unavailable or stale, no fatal transition commits; persistence reloads or rejects it rather than recording an incomplete cause or marker.
+The transition derives `F`, `U`, and guard satisfaction itself. A public or application caller cannot supply an `all_done`, `all_guards_hold`, ambiguity set, or desired disposition flag as authority. If the complete aggregate projection is unavailable or stale, no fatal transition commits from that projection; application and persistence code reload and serialize against authoritative state rather than recording an incomplete cause or marker or rejecting otherwise trusted evidence merely because an earlier read became stale.
 
 ### Direct closure versus stop coordination
 
@@ -60,19 +60,19 @@ Given the complete post-evidence aggregate, the outcome is:
 
 | Aggregate state at commit | Attempt transition | Turn transition |
 | --- | --- | --- |
-| Any owned logical dependency remains open or cannot become terminally non-dispatchable in this transaction; any issued physical operation remains unclassified; or another ADR-0004 terminal guard cannot be satisfied atomically | `Running -> StopRequested(FatalMismatch(F))` | Remain `Active(Running)`, retain the session slot, and authorize no new semantic effects while still allowing already-issued work to be classified or resolved and the input delivery ADR-0027 keeps valid under a pending stop (queued `AfterCurrentTurn`, and the first `Interrupt` against a fatal-mismatch-only stop) |
+| Any owned logical dependency remains open or cannot become terminally non-dispatchable in this transaction; any issued physical operation remains unclassified; or another ADR-0004 terminal guard cannot be satisfied atomically | `Running -> StopRequested(FatalMismatch(F))` | Remain `Active(Running)`, retain the session slot, and authorize no new semantic effect for the stopped predecessor. Further classification, resolving evidence, stop-cause accumulation, and input-submission handling remain governed by ADR-0004 and ADR-0027. |
 | Every ADR-0004 terminal guard can be satisfied atomically and `U` is empty | `Running -> Ended(AfterFatalMismatch { causes: F, disposition: KnownFailure })` | `Terminal(Failed)` |
 | Every ADR-0004 terminal guard can be satisfied atomically and `U` is nonempty | `Running -> Ended(AfterFatalMismatch { causes: F, disposition: Ambiguous })` | `Terminal(ReconciliationRequired { marker: { ambiguous_operations: U, reason: FatalMismatchRequiresReconciliation(F) } })` |
 
-The two direct branches commit no intermediate `StopRequested`. Their single aggregate transaction records the mismatch evidence and physical classification or invalidation, closes every logical dependency, makes authorized-but-undispatched work terminally non-dispatchable, ends the current attempt, commits the failure outcome or exact reconciliation marker, reclassifies pending steering under ADR-0027, and releases the session slot.
+The two direct branches commit no intermediate `StopRequested`. Their single aggregate transaction records the mismatch evidence and physical classification or invalidation, closes every logical dependency, makes authorized-but-undispatched work terminally non-dispatchable, records any required best-effort cancellation intent, ends the current attempt, commits the failure outcome or exact reconciliation marker, reclassifies pending steering under ADR-0027, and releases the session slot.
 
 `StopRequested(FatalMismatch)` remains mandatory whenever any of that work cannot finish in the mismatch transaction. It is not optional merely because direct terminalization would be operationally convenient. While it exists, the accepted no-new-effects guard, cause-union rules, slot retention, later classification, and terminal precedence remain unchanged.
 
 ### Best-effort cancellation is not a terminal guard
 
-ADR-0005 requires the first trusted nonterminal mismatch to durably request best-effort cancellation of remaining provider work, and active-turn invalidation of a completed current-authority call to durably request best-effort cancellation of already-issued continuation/tool work. The direct transaction preserves each case's exact cancellation target rather than narrowing it to provider work, so an issued tool attempt (the algebra's representation of runner-local execution) is not left without durable cancellation intent. Whenever the mismatch timing requires that request, the direct transaction still records it. Delivery, provider acknowledgement, or local connection closure is operational cleanup; none proves that the provider stopped, and none is an ADR-0004 terminal guard.
+ADR-0005 requires cancellation of remaining provider work for a nonterminal mismatch and of already-issued continuation/tool work for completed-call invalidation. The transition preserves the cancellation targets required by the applicable timing branch. Whenever the mismatch timing requires that request, the direct transaction still records it. Delivery, provider acknowledgement, runner acknowledgement, or local connection closure is operational cleanup; none proves that the external work stopped, and none is an ADR-0004 terminal guard.
 
-Once the mismatched call is durably classified and non-authoritative, pending delivery or acknowledgement of that cancellation request does not by itself require `StopRequested`. A successor may become eligible while cleanup continues. Late chunks or provider outcomes remain audit/reconciliation evidence and cannot authorize new effects, restore provider-outcome authority, or rewrite the terminal turn.
+Once the mismatch evidence, any authority invalidation, and every classification required for terminalization are durable, pending delivery or acknowledgement of a cancellation request does not by itself require `StopRequested`. A successor may become eligible while cleanup continues. Late chunks or external outcomes remain audit/reconciliation evidence and cannot authorize new effects, restore provider-outcome authority, or rewrite the terminal turn.
 
 An actually unclassified issued operation is different: it requires `StopRequested` until honest evidence classifies it. The distinction is between unfinished aggregate work and unfinished delivery of an already-durable best-effort containment request.
 
@@ -82,7 +82,7 @@ The absence of a `StopRequested` record on a direct path is intentional. Durable
 
 The direct transaction is atomic:
 
-- a crash before commit leaves the prior running state and none of the proposed transition's facts;
+- a crash before commit leaves the prior running state and none of the transition's durable facts;
 - a crash after commit reconstructs the complete terminal attempt, turn outcome or marker, steering dispositions, and released slot; and
 - replay of the mismatch evidence cannot insert a synthetic stop state or a second terminal result.
 
@@ -90,7 +90,7 @@ Startup classification remains governed by ADR-0004 and ADR-0005. A prior-proces
 
 ## Invariants
 
-If accepted, this record refines the enforcement boundary of:
+This record refines the enforcement boundary of:
 
 - INV-006: the exhaustive live matrix includes direct fatal `ReconciliationRequired` only when every terminal guard is satisfied and the exact marker is committed atomically.
 - INV-009: direct closure releases the session slot only in the complete terminal transaction; otherwise `StopRequested` retains it.
@@ -98,7 +98,7 @@ If accepted, this record refines the enforcement boundary of:
 - INV-025 and INV-026: physical ambiguity remains immutable and is neither coerced to failure nor made retryable; direct reconciliation carries the exact unacknowledged remainder.
 - INV-034: startup recovery and live handling share fatal precedence while retaining their distinct `Lost` versus live attempt dispositions.
 
-These catalog rows remain unchanged while this ADR is Proposed. Acceptance must add their links without copying this record's complete decision rule into the catalog.
+The invariant catalog links these rows to this record without copying its complete decision rule.
 
 ## Strongest alternative
 
@@ -117,7 +117,7 @@ That creates one uniform observable path and may simplify monitoring that treats
 
 ## Consequences
 
-The aggregate API must receive enough authoritative state to derive every fatal cause, every issued-operation classification, the exact unacknowledged ambiguity set, and all terminal guards. The persistence boundary must compare-and-set that complete transition so stale derivations do not commit.
+The aggregate API must receive enough authoritative state to derive every fatal cause, every issued-operation classification, the exact unacknowledged ambiguity set, and all terminal guards. The persistence boundary must serialize and atomically commit that complete transition so stale derivations do not commit.
 
 The common fully classified path has one fewer durable state and cannot be stranded in a ceremonial stop phase after a crash. The cost is that operators cannot use the presence of a `StopRequested` row as the universal record of fatal mismatch; terminal attempt history and reconciliation markers are the source of truth.
 
@@ -125,30 +125,12 @@ The common fully classified path has one fewer durable state and cannot be stran
 
 ## Scenario walkthrough
 
-**Proposed S27 — fatal mismatch with a separately classified ambiguity.** A running attempt already owns provider call X and tool attempt Y. Y has become physically `Ambiguous`, but X is still unclassified, so the attempt remains live under the classification-only dispatch guard. Trusted target-mismatch evidence is then the last outstanding classification: X becomes `KnownFailed`, `F` gains its exact mismatch reference, every dependency is closed, and `U` is exactly `{Y}`.
-
-The same transaction ends the attempt `AfterFatalMismatch(Ambiguous)`, terminalizes the turn as `ReconciliationRequired` with `{Y}` and `FatalMismatchRequiresReconciliation(F)`, reclassifies pending steering, and releases the slot. It does not persist `StopRequested`.
-
-Countercase: if another issued operation Z remains unclassified when X mismatches, the transition persists `StopRequested(FatalMismatch(F))` and retains the slot. After Z is classified, the existing stop-requested path ends in `Failed` when the final `U` is empty or exact fatal reconciliation when it is nonempty.
-
-This fixture combines S21's provider-target mismatch with S06's independently ambiguous operation without changing either operation's physical truth.
-
-## Acceptance follow-up
-
-If the owner accepts this record, the same acceptance change must:
-
-- add the missing distinct `Running -> Terminal(ReconciliationRequired)` row to ADR-0004's turn table and link it to this decision;
-- make ADR-0004's immediate fatal attempt row explicitly name `KnownFailure or Ambiguous`;
-- replace ADR-0005's ambiguous phrase “immediate atomic failure” with “immediate atomic fatal terminalization” while preserving its timing matrix;
-- add the focused S27 fixture above to [scenarios.md](../scenarios.md);
-- link the affected invariant rows and add this record under an accepted-refinements section without rewriting the original five-record atomic foundation statement.
-
-No accepted record or derived catalog is changed while this ADR remains Proposed.
+[S27 — fatal mismatch with a separately classified ambiguity](../scenarios.md#s27--fatal-mismatch-with-a-separately-classified-ambiguity) exercises both the closed direct-reconciliation branch and the countercase that must retain `StopRequested`.
 
 ## Open questions
 
 - Provider-specific evidence thresholds for mismatch, known failure, and ambiguity remain with provider contracts.
-- Persistence layout and the delivery mechanism for best-effort cancellation remain separate implementation decisions.
+- ADR-0022 fixes the normalized relational persistence baseline and durable cancellation-intent boundary; the exact physical table layout, deduplication, outbox or delivery mechanism, and operational acknowledgement handling remain implementation decisions within it.
 - Direct interrupt-only reconciliation from a running attempt is not decided here.
 - The exact aggregate API and transaction representation remain implementation work constrained by this rule.
 

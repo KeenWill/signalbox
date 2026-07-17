@@ -167,15 +167,15 @@ This glossary recommends working language for design discussion. “Accepted” 
 
 ## Context frontier
 
-- **Definition:** An immutable reference to the exact ordered semantic content consumed by one model call, including applicable user inputs, consumed steering, committed assistant or tool content, and explicit completion, refusal, failure, cancellation, accepted-risk, typed provider-target-invalidation, or complete reconciliation markers.
-- **Status:** Per-call provenance and accepted-input-origin starting-frontier and safe-point selection rules are accepted by [ADR-0027](decisions/0027-input-delivery-lifecycle.md). Future non-input origins must define their own starting-frontier rules. Representation remains provisional.
-- **Do not confuse with:** The latest session transcript, an entire turn, or client rendering state.
-- **Example:** Model call 1 consumes frontier 42; steering and a tool result become committed, so model call 2 consumes frontier 47 within the same turn. If call 2 fails, any future explicitly authorized call still retains that committed content.
+- **Definition:** A session-owned immutable identified snapshot that resolves to the exact ordered-distinct source-qualified semantic-entry references consumed by one model call or fixed for an accepted-input turn start.
+- **Status:** Selection and safe-point rules are accepted by [ADR-0027](decisions/0027-input-delivery-lifecycle.md); identity, resolution, equality, and construction authority by [ADR-0030](decisions/0030-context-frontier-snapshots.md); and the normalized persistence boundary by [ADR-0022](decisions/0022-persistence-representation.md). Semantic-entry payloads, future non-input origins, identifier backing and wire encoding, and exact physical snapshot layout remain open.
+- **Do not confuse with:** The latest session transcript, an entire turn, a `TranscriptFrontier`, an ordered list supplied as authority, or client rendering state.
+- **Example:** Model call 1 consumes frontier F1; steering and a tool result become committed, so model call 2 consumes a distinct prefix-extending frontier F2 within the same turn. If call 2 fails, any future explicitly authorized call still retains that committed content.
 
 ## Queue order
 
 - **Definition:** The durable total ordering of known accepted-input-origin work derived from immutable acceptance positions and typed priority relations such as an interrupt's immediate-successor relation.
-- **Status:** Accepted by [ADR-0027](decisions/0027-input-delivery-lifecycle.md); persistence representation remains open.
+- **Status:** Accepted by [ADR-0027](decisions/0027-input-delivery-lifecycle.md); its normalized persistence approach is accepted by [ADR-0022](decisions/0022-persistence-representation.md).
 - **Do not confuse with:** A direct predecessor pointer fixed when input is accepted, a mutable user-reorderable queue, or wall-clock scheduler order.
 - **Example:** While A is active, after-current B is accepted and then interrupt I is accepted; the priority relation orders I before B without rewriting a fixed predecessor on B.
 

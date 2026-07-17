@@ -1,12 +1,14 @@
 # Open questions
 
-This is the inventory of unresolved foundational questions. A "leaning" guides exploration but is not a decision. Closing a question requires an entry in the [decision log](decisions.md) or, at foundation weight, an [ADR](decisions/README.md). Accepted decisions live in the ADR foundation set and the decision log; scenario identifiers refer to [scenarios.md](scenarios.md).
+This is the inventory of unresolved foundational questions. A "leaning" guides exploration but is not a decision. Closing a question requires an entry in the [decision log](decisions.md) or, at foundation weight, an [ADR](decisions/README.md). Accepted decisions live in the accepted ADR index and the decision log; scenario identifiers refer to [scenarios.md](scenarios.md).
 
 Some questions carry an ADR number reserved by earlier planning and cited from accepted records; those numbers remain reserved for their topics.
 
 ## Identity representation
 
-- **Identity mechanics left open by the ADR-0001 amendment.** UUID generation and version, caller supply versus hub minting, boundary validation, storage and wire encodings, public formatting, and serialization for the identity newtypes. Blocks persistence and protocol slices. (S01, S02, S04, S08, S10, S12)
+- **Identity mechanics left open after ADR-0022.** [ADR-0022](decisions/0022-persistence-representation.md) selects native Postgres identity/reference columns only for the UUID-backed identities it names. UUID generation and version, caller supply versus hub minting, boundary validation, public formatting, serialization, wire encoding, and identity encodings embedded in canonical payloads remain open. [ADR-0030](decisions/0030-context-frontier-snapshots.md) separately leaves `ContextFrontierId` backing, database encoding, wire encoding, and formatting open. Blocks protocol and identity-minting slices. (S01, S02, S04, S08, S10, S12)
+- **Semantic transcript-entry boundary.** Payload variants, commit granularity, and rendering remain open even though entry identity and source-qualified frontier ordering are accepted by ADR-0030. Blocks the first semantic-history slice. (S01–S04, S08, S09, S17)
+- **Selectable transcript-frontier boundaries.** Which terminal semantic boundaries a client may select as a `TranscriptFrontier` remains open; ADR-0030 decides only how a validated selection resolves into a new session's context. Blocks fork selection. (S17)
 
 ## Delegation (reserved ADR-0002)
 
@@ -23,6 +25,7 @@ Some questions carry an ADR number reserved by earlier planning and cited from a
 ## Turn lifecycle
 
 - **Standalone active-turn cancellation.** Not a baseline feature: ADR-0004 defines cancellation authority only through applied interrupts, and adding a standalone command requires a future ADR with its own proof and disposition rules. Later scope. (S07)
+- **Direct interrupt-only reconciliation from a running attempt.** [ADR-0031](decisions/0031-direct-fatal-terminalization.md) adds direct reconciliation only for fatal mismatch at a closed aggregate boundary; whether an interrupt-only path may bypass `StopRequested` remains undecided. Later scope. (S07)
 
 ## Archival and retention (reserved ADR-0028, ADR-0029)
 
@@ -76,7 +79,7 @@ Dispatch fencing and initial scheduler mechanics are decided by accepted [ADR-00
 - **Process protocol (Protobuf/gRPC, Connect, JSON/HTTP, other).** Leaning: define semantics and fixtures before selecting transport. Blocks cross-process implementation. (S01, S02, S12, S24)
 - **Browser transport.** Preserve authoritative-snapshot-plus-transient-stream semantics; technology open. Blocks the web client. (S02, S24)
 - **Protocol version and capability negotiation.** Leaning: version plus capability handshake with explicit incompatibility. Blocks remote clients and runners. (S12, S24)
-- **Stable storage representation.** Leaning: Postgres-native schema with explicit migrations; event/log use only where justified. Blocks persistence implementation. (S03, S04, S25)
+- **Persistence implementation within the accepted relational baseline.** [ADR-0022](decisions/0022-persistence-representation.md) closes the broad stable-storage question. Migration and database-adapter tooling, canonical command-payload encoding, proof rehydration, process-incarnation representation, streaming checkpoints, dispatch-generation placement, archival form, and exact cancellation-delivery records remain open. Physical frontier layout may use any normalized representation that satisfies [ADR-0030](decisions/0030-context-frontier-snapshots.md). Blocks the first Postgres adapter slice. (S03, S04, S17, S25, S27)
 - **Swift client type generation.** Leaning: generated boundary types mapped to hand-written client domain types. Deferrable until the Swift client. (S01, S24)
 - **Cross-release compatibility policy.** Leaning: small documented compatibility window with fixtures; exact window open. Blocks the first public release. (S12, S24)
 

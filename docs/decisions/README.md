@@ -4,7 +4,7 @@ ADRs record foundation-weight decisions: choices that alter accepted semantics, 
 
 ## Accepted foundation set
 
-The repository owner accepted these records atomically on 2026-07-13 after independent adversarial architecture review. ADR-0001 was materially amended on 2026-07-15 to accept the initial private UUID-backed representation and deliberately named UUID conversions for its Rust domain identity newtypes; storage and wire representations remain separate and undecided. The records are authoritative together:
+The repository owner accepted these records atomically on 2026-07-13 after independent adversarial architecture review. ADR-0001 was materially amended on 2026-07-15 to accept the initial private UUID-backed representation and deliberately named UUID conversions for its Rust domain identity newtypes; storage and wire representations remain separate boundaries. ADR-0022 later selects native Postgres columns for the UUID-backed relational identities and references it names, while wire representation remains undecided. The original records are authoritative together:
 
 | ADR | Scope |
 | --- | --- |
@@ -15,6 +15,16 @@ The repository owner accepted these records atomically on 2026-07-13 after indep
 | [ADR-0027](0027-input-delivery-lifecycle.md) | Input delivery, versioned model-selection session defaults, constructible baseline effective configuration, explicit steering/configuration provenance, command deduplication, durable queue ordering, eligibility-fixed starting lineage, and context frontiers |
 
 The five records form one coupled baseline: their identity algebras, lifecycle transitions, configuration boundary, and context rules reference one another. A change may correct or supersede an individual record only while preserving or explicitly revising its accepted dependencies. As implementation lands, executable tests become the enforcement of record; the [invariant catalog](../invariants.md) links each invariant to its enforcement.
+
+## Accepted refinements and extensions
+
+The repository owner accepted the following records on 2026-07-17. They depend on and refine the original foundation set; they do not retroactively become part of its five-record atomic acceptance.
+
+| ADR | Scope |
+| --- | --- |
+| [ADR-0022](0022-persistence-representation.md) | Normalized Postgres persistence records, explicit migrations, storage/domain mapping, database enforcement of the progressing slot and owner-global command identity, and native Postgres encoding for the UUID-backed identity columns it names |
+| [ADR-0030](0030-context-frontier-snapshots.md) | Session-owned immutable context-frontier snapshot identity, exact ordered source-qualified resolution, identity versus content equality, trusted construction, and ancestry resolution |
+| [ADR-0031](0031-direct-fatal-terminalization.md) | Direct fatal-mismatch failure or exact reconciliation at a closed aggregate boundary, with `StopRequested` retained only while aggregate work remains unfinished |
 
 ## Process
 
