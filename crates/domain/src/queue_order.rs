@@ -432,8 +432,8 @@ fn canonical_pair(first: TurnId, second: TurnId) -> (TurnId, TurnId) {
 #[cfg(test)]
 mod tests {
     use super::{
-        AcceptedInputQueueOrder, AcceptedInputQueueOrderError, AcceptedInputQueueWork,
-        SessionInputPosition, derive_accepted_input_total_order,
+        AcceptedInputQueueOrder, AcceptedInputQueueOrderError, AcceptedInputQueuePriority,
+        AcceptedInputQueueWork, SessionInputPosition, derive_accepted_input_total_order,
     };
     use crate::TurnId;
     use crate::test_support::{session_id, turn_id};
@@ -487,6 +487,36 @@ mod tests {
 
         assert!(first < second);
         assert_eq!(SessionInputPosition(u64::MAX).checked_next(), None);
+    }
+
+    /// INV-009: queue-order facts expose exactly the immutable acceptance
+    /// position and typed priority they were constructed with, and the
+    /// derivation projection round-trips its session, turn, and order without
+    /// substituting or dropping any identity.
+    #[test]
+    fn inv009_queue_order_facts_expose_their_construction_inputs() {
+        let position = positions(2);
+
+        let ordinary_order = AcceptedInputQueueOrder::ordinary(position[0]);
+        assert_eq!(ordinary_order.acceptance_position(), position[0]);
+        assert_eq!(
+            ordinary_order.priority(),
+            AcceptedInputQueuePriority::Ordinary
+        );
+
+        let predecessor = turn_id(7);
+        let interrupt_order =
+            AcceptedInputQueueOrder::interrupt_immediately_after(position[1], predecessor);
+        assert_eq!(interrupt_order.acceptance_position(), position[1]);
+        assert_eq!(
+            interrupt_order.priority(),
+            AcceptedInputQueuePriority::InterruptImmediatelyAfter { predecessor }
+        );
+
+        let work = AcceptedInputQueueWork::new(session_id(100), turn_id(3), interrupt_order);
+        assert_eq!(work.session(), session_id(100));
+        assert_eq!(work.turn(), turn_id(3));
+        assert_eq!(work.order(), interrupt_order);
     }
 
     /// S09 / INV-009: ordinary work is ordered by immutable acceptance
