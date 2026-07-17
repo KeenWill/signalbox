@@ -186,13 +186,24 @@ impl SessionCreationProvenance {
 /// }
 /// ```
 ///
+/// # Comparison payload
+///
+/// Structural equality is the ADR-0001 durable-command comparison payload:
+/// every caller-supplied semantic field except the command identifier itself.
+/// Two creation payloads that differ only in `command_id` therefore compare
+/// equal, matching the sibling [`crate::DeliveryRequest`] payload, which omits
+/// command identity entirely. The replay/deduplication boundary looks up the
+/// claimed identifier separately and compares canonical payloads: equal replay
+/// returns the recorded result, while the same identifier arriving with a
+/// different provenance or defaults payload is conflicting reuse.
+///
 /// # Scope
 ///
 /// This is neither a wire message nor a committed command handling. It omits
 /// session identity minting, owner authority, command deduplication and
 /// replay, atomic validation of the provenance pair before acknowledgement,
 /// persistence, and acknowledgement.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug)]
 pub struct CreateSession {
     command_id: DurableCommandId,
     provenance: SessionCreationProvenance,
@@ -263,6 +274,25 @@ impl CreateSession {
     /// work.
     pub const fn establish_initial_defaults(&self) -> VersionedSessionConfigurationDefaults {
         VersionedSessionConfigurationDefaults::establish(self.initial_configuration_defaults)
+    }
+}
+
+/// ADR-0001: the durable-command comparison payload is every caller-supplied
+/// semantic field except the identifier itself, so equality and hashing cover
+/// the provenance facts and the defaults payload but not the command identity.
+impl PartialEq for CreateSession {
+    fn eq(&self, other: &Self) -> bool {
+        self.provenance == other.provenance
+            && self.initial_configuration_defaults == other.initial_configuration_defaults
+    }
+}
+
+impl Eq for CreateSession {}
+
+impl std::hash::Hash for CreateSession {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.provenance.hash(state);
+        self.initial_configuration_defaults.hash(state);
     }
 }
 
@@ -439,10 +469,13 @@ mod tests {
         assert_eq!(first.provenance(), provenance);
     }
 
-    /// S01 / S17 / INV-012: canonical payload comparison includes the command
-    /// identity, both provenance facts, and the defaults payload.
+    /// S01 / S17 / INV-012: the canonical comparison payload is every
+    /// caller-supplied semantic field except the command identifier itself, so
+    /// payloads that differ only in `command_id` compare equal (equal replay),
+    /// while any provenance or defaults difference is a distinct payload
+    /// (conflicting reuse of one identifier is then detectable).
     #[test]
-    fn s01_s17_inv012_create_session_payload_equality_is_structural() {
+    fn s01_s17_inv012_create_session_comparison_payload_excludes_command_id() {
         let fork = SessionCreationProvenance::new(
             SessionCreationCause::OwnerInitiated,
             TranscriptAncestry::SingleSource {
@@ -456,7 +489,7 @@ mod tests {
             create,
             CreateSession::new(command_id(3), owner_initiated_empty(), defaults(4))
         );
-        assert_ne!(
+        assert_eq!(
             create,
             CreateSession::new(command_id(5), owner_initiated_empty(), defaults(4))
         );
