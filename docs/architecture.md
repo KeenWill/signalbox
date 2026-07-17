@@ -1,6 +1,6 @@
 # Architecture
 
-This document records current high-level boundaries, not an implemented system or final API. Accepted names are defined in the [glossary](glossary.md); unresolved choices remain in [open questions](open-questions.md). The first domain/lifecycle choices are authoritative in the [accepted ADR foundation set](decisions/README.md).
+This document records current high-level boundaries, not an implemented system or final API. Accepted names are defined in the [glossary](glossary.md); unresolved choices remain in [open questions](open-questions.md). Authoritative foundation records and later accepted refinements are indexed in the [accepted ADRs](decisions/README.md).
 
 ## Component view
 
@@ -69,7 +69,7 @@ The hub may initially be one deployable modular monolith. Rows in this table are
 | Streaming drafts and progress | Live hub process unless selectively checkpointed | Client transient view; never authoritative final content |
 | Provider credentials | Hub-controlled secret storage; mechanism decided by [ADR-0017](decisions/0017-credential-lifecycle.md) | Never client or runner session state |
 
-Postgres is the canonical durable store in development, testing, and production. This does not mean every transient token delta is stored or that database records themselves are domain types.
+Postgres is the canonical durable store in development, testing, and production. [ADR-0022](decisions/0022-persistence-representation.md) fixes the normalized record/domain mapping boundary, while [ADR-0030](decisions/0030-context-frontier-snapshots.md) fixes the semantic and atomic constraints for context-frontier snapshots independently of their physical layout. This does not mean every transient token delta is stored or that database records themselves are domain types.
 
 A declaration is an operationally required claim, not proof of the claimed capability or isolation. Configured properties describe trusted deployment intent, while verified properties are limited to what an accepted mechanism can establish. The scheduler and clients may rely only on the effective properties derived for a particular dispatch, and those properties must never express a stronger execution guarantee than the available evidence supports. Runner enrollment, authentication, verification, and attestation remain unresolved.
 
@@ -77,7 +77,7 @@ A declaration is an operationally required claim, not proof of the claimed capab
 
 ### Accepted input and model execution
 
-[ADR-0027](decisions/0027-input-delivery-lifecycle.md) is the normative definition of this flow, with model-call semantics in [ADR-0005](decisions/0005-model-call-retry-semantics.md). In outline:
+[ADR-0027](decisions/0027-input-delivery-lifecycle.md) is the normative definition of input selection and eligibility, [ADR-0030](decisions/0030-context-frontier-snapshots.md) defines frontier identity, resolution, and construction authority, and [ADR-0005](decisions/0005-model-call-retry-semantics.md) defines model-call semantics. In outline:
 
 1. Session creation establishes version one of the session's model-selection defaults; explicit updates create later immutable versions that affect only origin input accepted afterward.
 2. A client submits content with an explicit delivery treatment: start when no turn is active or, against an expected active turn, interrupt, next safe point, or after current turn.
@@ -127,7 +127,7 @@ These are architectural dependency rules, not a commitment to a specific Rust mo
 
 Acknowledged work must not vanish. On restart, an idempotent startup scan reconstructs durable state from Postgres, ends each nonterminal turn attempt owned by the prior process with disposition `Lost`, and classifies every interrupted physical operation; the scan is not itself an attempt and issues no semantic effects. Live and startup classification share the single outcome precedence that [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md) and [ADR-0005](decisions/0005-model-call-retry-semantics.md) define normatively. Ambiguous external effects are preserved as ambiguous rather than coerced to failure. Separate resolving evidence may clear a blocking ambiguity without rewriting the physical record, after which unfinished work continues without repeating it; continuing past a still-unresolved ambiguity requires an explicit owner decision that records accepted duplicate risk.
 
-At most one logical turn actively progresses per session initially; every implemented active phase, including approval and recovery waits, retains the session slot. A running turn owns exactly one current attempt, while a waiting turn carries its exact wait subject and no attempt. The complete state, stop-cause, and terminal-guard algebra is normative in ADR-0004. Future child waits require the delegation decision (reserved ADR-0002) and will retain the slot unless it defines explicit branching semantics. Scheduler mechanics remain open.
+At most one logical turn actively progresses per session initially; every implemented active phase, including approval and recovery waits, retains the session slot. A running turn owns exactly one current attempt, while a waiting turn carries its exact wait subject and no attempt. The complete state, stop-cause, and terminal-guard algebra is normative in ADR-0004, with live closed-boundary fatal handling refined by [ADR-0031](decisions/0031-direct-fatal-terminalization.md). Future child waits require the delegation decision (reserved ADR-0002) and will retain the slot unless it defines explicit branching semantics. Scheduler mechanics remain open.
 
 ## Explicitly open boundaries
 
@@ -139,7 +139,7 @@ At most one logical turn actively progresses per session initially; every implem
 - Tool safety: risk taxonomy, confirmation thresholds, judge role, sandbox minimums, and retry rules.
 - Identity and access: owner/client authentication, runner enrollment and authentication, and session revocation (provider/integration credential lifecycle is decided by [ADR-0017](decisions/0017-credential-lifecycle.md)).
 - Resource governance: initial limits for turns, provider use, tool execution, runner concurrency, and retained artifacts.
-- Storage representation: table/event design, streaming checkpoint policy, and stable archival form.
+- Persistence implementation within [ADR-0022's](decisions/0022-persistence-representation.md) normalized relational baseline: migration and adapter tooling, canonical payload encoding, proof rehydration, exact [ADR-0030](decisions/0030-context-frontier-snapshots.md)-conforming snapshot layout, cancellation delivery, streaming checkpoint policy, and archival form.
 - Client implementation order and web technology.
 - Deployment decomposition: modular monolith is acceptable; microservices are not presumed.
 
