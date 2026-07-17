@@ -2,8 +2,9 @@
 //!
 //! ADR-0031 is normative. This module consumes one trusted mismatch and a
 //! complete owned-work projection, then derives exact causes, unfinished work,
-//! and blocking ambiguity without caller-selected authority. Lifecycle
-//! binding, remaining guards, steering, and atomic commit remain later work.
+//! and blocking ambiguity without caller-selected authority. It binds sealed
+//! attempt/turn candidates, but remaining aggregate guards, steering, and
+//! atomic commit remain later work.
 
 #![cfg_attr(
     not(test),
@@ -12,6 +13,8 @@
         reason = "the next stacked aggregate slice supplies the trusted projection producer"
     )
 )]
+
+pub(crate) mod lifecycle;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -79,6 +82,7 @@ pub(crate) enum FatalMismatchOwnedWorkBlocker {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PostEvidenceFatalMismatchFacts {
     projection: CompleteFatalMismatchProjection,
+    applied_mismatch: AppliedProviderTargetMismatch,
     causes: FatalMismatchStopCauses,
     unfinished_blockers: BTreeSet<FatalMismatchOwnedWorkBlocker>,
     blocking_ambiguities: Option<NonEmptyIssuedOperationRefs>,
@@ -87,6 +91,10 @@ pub(crate) struct PostEvidenceFatalMismatchFacts {
 impl PostEvidenceFatalMismatchFacts {
     pub(crate) const fn current_attempt(&self) -> &CurrentTurnAttempt {
         &self.projection.current_attempt
+    }
+
+    pub(crate) const fn applied_mismatch(&self) -> AppliedProviderTargetMismatch {
+        self.applied_mismatch
     }
 
     pub(crate) const fn causes(&self) -> &FatalMismatchStopCauses {
@@ -246,6 +254,7 @@ impl CompleteFatalMismatchProjection {
 
         Ok(PostEvidenceFatalMismatchFacts {
             projection: self,
+            applied_mismatch: fact,
             causes,
             unfinished_blockers: blockers,
             blocking_ambiguities,
