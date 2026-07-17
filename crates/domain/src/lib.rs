@@ -8,6 +8,7 @@
 
 mod accepted_input;
 mod configuration;
+mod delivery_request;
 
 pub use accepted_input::{
     AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputLifecycleTransitionError,
@@ -21,6 +22,7 @@ pub use configuration::{
     SessionDefaultsVersionMismatch, TurnConfigurationProvenance, UnknownModelAlias,
     VersionCheckedConfigurationRequest, VersionedSessionConfigurationDefaults,
 };
+pub use delivery_request::{DeliveryRequest, PerInputConfigurationChoices};
 
 macro_rules! define_identity {
     ($(#[$documentation:meta])* $name:ident) => {
