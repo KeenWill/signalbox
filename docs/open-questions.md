@@ -50,13 +50,13 @@ Some questions carry an ADR number reserved by earlier planning and cited from a
 - **Future known-provider-failure retry.** Version one never automatically retries a known or ambiguous provider failure; any later retry command or policy, including backoff and resource limits, is a separate decision left open by ADR-0005. Blocks retry features. (S02, S04, S22)
 - **Provider ambiguity evidence thresholds.** Which provider evidence classifies an uncertain outcome as known failure versus ambiguous is provider-contract scope left open by ADR-0004 and ADR-0005. Blocks the first provider adapter. (S02, S04)
 
-## Scheduling and runners (reserved ADR-0008, ADR-0009, ADR-0010)
+## Scheduling and runners (reserved ADR-0008)
+
+Dispatch fencing and initial scheduler mechanics are decided by accepted [ADR-0009](decisions/0009-dispatch-fencing.md) and [ADR-0010](decisions/0010-initial-scheduler-mechanics.md); the questions below remain open.
 
 - **Runner capability, evidence, and placement model.** Leaning: typed core properties with explicit evidence levels; effective guarantees never stronger than supporting evidence. Blocks the runner protocol. (S05–S16)
 - **Runner pinning and workspace affinity.** Leaning: explicit session/turn pinning where locality matters, with observable failure. Blocks workspace tools. (S05–S16)
 - **Multiple runners in one turn.** Leaning: at most one selected runner initially, counting hub-local tools separately. Constrains version one. (S13–S16)
-- **Fencing that rejects stale dispatches and results.** Leaning: durable attempt identity plus generation or equivalent compare-and-set. Blocks runner dispatch. (S05, S06, S12)
-- **Whether Postgres alone is sufficient for the initial scheduler.** Leaning: start with Postgres if correctness and wake-up tests pass; preserve the adapter boundary. Deferrable until a scheduler prototype. (S03, S05, S12)
 
 ## Tool safety (reserved ADR-0011, ADR-0012, ADR-0013, ADR-0014)
 
