@@ -7,6 +7,7 @@
 //! disposition transitions that preserve an accepted input's identity.
 
 mod accepted_input;
+mod applied_interrupt;
 mod configuration;
 mod delivery_request;
 mod queue_order;
@@ -15,6 +16,7 @@ pub use accepted_input::{
     AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputLifecycleTransitionError,
     SteeringBinding, SteeringReclassificationReason,
 };
+pub use applied_interrupt::{AppliedInterruptCommandResult, AppliedInterruptProof};
 pub use configuration::{
     ConfigurationRequest, DirectModelSelection, EffectiveConfiguration, FrozenAliasDefinition,
     FrozenModelSelection, KnownProviderFailureRetry, ModelAlias, ModelFallback, ModelParameters,
@@ -118,6 +120,7 @@ pub(crate) mod test_support {
     }
 
     identity_constructors! {
+        command_id -> crate::DurableCommandId,
         turn_id -> crate::TurnId,
         session_id -> crate::SessionId,
         accepted_input_id -> crate::AcceptedInputId,
