@@ -9,6 +9,7 @@
 mod accepted_input;
 mod configuration;
 mod delivery_request;
+mod queue_order;
 
 pub use accepted_input::{
     AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputLifecycleTransitionError,
@@ -23,6 +24,10 @@ pub use configuration::{
     VersionCheckedConfigurationRequest, VersionedSessionConfigurationDefaults,
 };
 pub use delivery_request::{DeliveryRequest, PerInputConfigurationChoices};
+pub use queue_order::{
+    AcceptedInputQueueOrder, AcceptedInputQueueOrderError, AcceptedInputQueuePriority,
+    AcceptedInputQueueWork, SessionInputPosition, derive_accepted_input_total_order,
+};
 
 macro_rules! define_identity {
     ($(#[$documentation:meta])* $name:ident) => {
