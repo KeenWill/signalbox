@@ -10,6 +10,7 @@ mod accepted_input;
 mod applied_interrupt;
 mod configuration;
 mod delivery_request;
+mod model_call;
 mod queue_order;
 mod turn_attempt;
 
@@ -27,6 +28,10 @@ pub use configuration::{
     VersionCheckedConfigurationRequest, VersionedSessionConfigurationDefaults,
 };
 pub use delivery_request::{DeliveryRequest, PerInputConfigurationChoices};
+pub use model_call::{
+    CurrentModelCall, CurrentModelCallState, ModelCallDisposition, PinnedProviderTarget,
+    ProviderModelIdentity, ResolvedProviderTarget,
+};
 pub use queue_order::{
     AcceptedInputQueueOrder, AcceptedInputQueueOrderError, AcceptedInputQueuePriority,
     AcceptedInputQueueWork, SessionInputPosition, derive_accepted_input_total_order,
@@ -140,6 +145,7 @@ pub(crate) mod test_support {
         accepted_input_id -> crate::AcceptedInputId,
         model_call_id -> crate::ModelCallId,
         provider_target_evidence_id -> crate::ProviderTargetEvidenceId,
+        provider_model_identity -> crate::ProviderModelIdentity,
         direct -> crate::DirectModelSelection,
         alias -> crate::ModelAlias,
     }
