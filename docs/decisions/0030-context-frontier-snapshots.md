@@ -49,7 +49,7 @@ A context-frontier snapshot belongs to exactly one consuming session. A complete
 
 An accepted baseline derivation is prefix-preserving. A later snapshot derived from an earlier context frontier retains every earlier entry reference in the same order and appends only semantic entries that the accepted lifecycle makes eligible. The accepted successor-start formula, safe-point guards, included outcome markers, and exclusions remain owned by ADR-0027; this ADR defines the value and authority boundary used to enforce that formula rather than restating it.
 
-Once a complete `ContextFrontier` is committed, its owning session and ordered entries never change. Correcting or extending semantic history creates new semantic entries as required and a new snapshot identity. It never edits an existing snapshot.
+Once a complete `ContextFrontier` is committed, its owning session and the ordered entries of its resolved snapshot never change. Correcting or extending semantic history creates new semantic entries as required and a new snapshot identity. It never edits an existing snapshot.
 
 Physical storage may materialize the complete ordered sequence, retain a parent plus appended entries, share immutable prefixes, or use another representation. Every representation must resolve to the same complete domain value and reject a stored session-and-identifier reference that maps to different contents.
 
