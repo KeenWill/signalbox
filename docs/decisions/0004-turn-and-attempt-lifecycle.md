@@ -1,6 +1,5 @@
 # ADR-0004: Logical turn and physical attempt lifecycle
 
-- Status: Accepted
 - Date: 2026-07-13
 - Amended: 2026-07-17 — [ADR-0031](0031-direct-fatal-terminalization.md) adds the closed-boundary direct fatal-reconciliation edge
 - Owners: Repository owner

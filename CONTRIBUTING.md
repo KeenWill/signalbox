@@ -4,7 +4,7 @@ Signalbox is currently establishing its domain language, invariants, and archite
 
 ## Before proposing a change
 
-Read the [vision](docs/vision.md), [architecture](docs/architecture.md), [invariants](docs/invariants.md), [decision log](docs/decisions.md), and [open questions](docs/open-questions.md). Check [accepted ADRs](docs/decisions/README.md) before revisiting a decision. Ordinary decisions, including closing an ordinary open question, are made in the pull request and recorded in the decision log. A foundation-weight change — altering accepted ADR semantics or direction, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, introducing a technology that constrains several components, or closing a foundation-weight open question — must begin as a proposed ADR.
+Read the [vision](docs/vision.md), [architecture](docs/architecture.md), [invariants](docs/invariants.md), [decision log](docs/decisions.md), and [open questions](docs/open-questions.md). Check [accepted ADRs](docs/decisions/README.md) before revisiting a decision. Ordinary decisions, including closing an ordinary open question, are made in the pull request and recorded in the decision log. A foundation-weight change — altering accepted ADR semantics or direction, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, introducing a technology that constrains several components, or closing a foundation-weight open question — must begin as an ADR pull request; the record is under review while the pull request is open, and the owner's merge is its acceptance.
 
 ## Contribution rules
 

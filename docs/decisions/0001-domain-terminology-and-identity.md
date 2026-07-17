@@ -1,6 +1,5 @@
 # ADR-0001: Core domain terminology and identity boundaries
 
-- Status: Accepted
 - Date: 2026-07-13
 - Amended: 2026-07-15 — accept the initial private Rust UUID representation described below
 - Owners: Repository owner
