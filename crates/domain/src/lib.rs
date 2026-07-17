@@ -99,6 +99,35 @@ define_identity!(
 );
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    //! Shared constructors that build domain identities from small integers.
+    //!
+    //! Every unit test needs deterministic identity values, and each identity
+    //! is a distinct UUID-backed newtype built by [`define_identity`]. These
+    //! constructors keep the `from_uuid(Uuid::from_u128(..))` pattern in one
+    //! place instead of repeating it in each module's test helpers.
+
+    macro_rules! identity_constructors {
+        ($($constructor:ident -> $identity:ty),+ $(,)?) => {
+            $(
+                pub(crate) fn $constructor(value: u128) -> $identity {
+                    <$identity>::from_uuid(uuid::Uuid::from_u128(value))
+                }
+            )+
+        };
+    }
+
+    identity_constructors! {
+        turn_id -> crate::TurnId,
+        session_id -> crate::SessionId,
+        accepted_input_id -> crate::AcceptedInputId,
+        model_call_id -> crate::ModelCallId,
+        direct -> crate::DirectModelSelection,
+        alias -> crate::ModelAlias,
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{
         AcceptedInputId, DurableCommandId, ModelCallId, SessionId, ToolAttemptId, ToolRequestId,

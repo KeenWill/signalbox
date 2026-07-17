@@ -105,19 +105,10 @@ pub enum DeliveryRequest {
 #[cfg(test)]
 mod tests {
     use super::{DeliveryRequest, PerInputConfigurationChoices};
+    use crate::test_support::{direct, turn_id};
     use crate::{
-        DirectModelSelection, ModelSelectionOverride, ModelSelectionRequest,
-        SessionConfigurationDefaultsVersion, TurnId,
+        ModelSelectionOverride, ModelSelectionRequest, SessionConfigurationDefaultsVersion,
     };
-    use uuid::Uuid;
-
-    fn turn_id(value: u128) -> TurnId {
-        TurnId::from_uuid(Uuid::from_u128(value))
-    }
-
-    fn direct(value: u128) -> DirectModelSelection {
-        DirectModelSelection::from_uuid(Uuid::from_u128(value))
-    }
 
     fn first_version() -> SessionConfigurationDefaultsVersion {
         SessionConfigurationDefaultsVersion::first()

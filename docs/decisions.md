@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-17 — Shared test constructors for domain identities
+
+**Context.** Every unit-test module built domain identities with the same `Type::from_uuid(Uuid::from_u128(value))` pattern behind small named helpers, so `turn_id` was defined identically in three modules, `direct` in two, and `session_id`, `model_call_id`, and `accepted_input_id` each carried their own copy. The repetition added no test meaning and drifted independently as modules were added.
+
+**Decision.** Add a `#[cfg(test)] pub(crate) mod test_support` in `crates/domain/src/lib.rs` that generates the identity constructors (`turn_id`, `session_id`, `accepted_input_id`, `model_call_id`, `direct`, `alias`) from one macro, and import them where each test module previously defined its own. This is a mechanical test-only refactor: no production types, public API, or asserted behavior change, and the full validation sequence still passes.
+
+**Rejected alternatives.** Emitting a `from_u128` constructor from `define_identity!` onto every identity type: it would touch call sites throughout and add a constructor to production types solely for tests. A generic `id::<T>(u128)` helper behind a new trait: it adds a trait and turbofish call sites for no readability gain over the terse named constructors the tests already used. Leaving the duplication: it keeps five helpers drifting across modules.
+
+**Affects.** The `#[cfg(test)]` test modules of `crates/domain/src/{accepted_input,configuration,delivery_request,queue_order}.rs` and the new `test_support` module in `crates/domain/src/lib.rs`. No non-test code, re-exports, or invariants change.
+
 ## 2026-07-16 — Ordinal input positions and collection-wide queue derivation
 
 **Context.** ADR-0027 requires immutable per-session input positions plus ordinary or immediate-after-interrupt priority facts to form one total order over currently known work. It leaves the position representation and pure derivation API open. A single record cannot implement the relational interrupt rule or carry a starting predecessor before eligibility.
