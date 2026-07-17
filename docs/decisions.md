@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-17 — Atomic-only prepared fatal-mismatch candidate
+
+**Context.** [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md) permits live completed-call invalidation during `Prepared` to end directly as fatal known failure, while that attempt state has no `StopRequested` or fatal-reconciliation edge. The preceding lifecycle binding deliberately requires a fatal-stop fallback and therefore covers only `Running` and `StopRequested`.
+
+**Decision.** Represent the prepared path with a separate crate-private consuming binding and `PreparedFatalMismatchAtomicCandidate`. It couples exact sealed facts to `AfterFatalMismatch(KnownFailure)` and `Failed`, carries a canonical set of logical dependencies that the later aggregate must close in the same transaction, and has no stop fallback. Any unclassified operation or blocking ambiguity rejects with the original facts and source phase.
+
+**Rejected alternatives.** Reusing the stoppable-attempt binding would require an invalid optional fallback. Synthesizing `StopRequested` or `AfterFatalMismatch(Ambiguous)` invents transitions. Dropping open logical dependencies loses required same-transaction work. Treating the candidate as commit proof would bypass canonical aggregate, steering, and slot guards.
+
+**Affects.** New internal `crates/domain/src/fatal_mismatch/prepared.rs`, its parent-module registration, and enforcement links for INV-006 and INV-014. Canonical logical closure, remaining terminal guards, steering reclassification, slot release, cancellation intent, startup handling, and atomic persistence remain later work.
+
 ## 2026-07-17 — Sealed live fatal-mismatch lifecycle candidate binding
 
 **Context.** [ADR-0031](decisions/0031-direct-fatal-terminalization.md) owns the stop-versus-direct-closure rule, while the preceding slice derives its sealed post-evidence inputs but commits no lifecycle transition. The Rust implementation needs a candidate representation that couples those inputs to existing attempt and turn values without implying aggregate or commit authority.
