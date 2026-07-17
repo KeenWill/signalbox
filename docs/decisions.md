@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-17 — Merging an ADR pull request is its acceptance
+
+**Context.** ADRs carried a `Status:` line with a Proposed-to-Accepted lifecycle, so records could sit on `main` while still undecided and acceptance required a second status-flip pull request (PR #33) or a draft claiming `Accepted` before the owner had decided (PR #31). Both paths caused reviewer churn and slowed the decision pipeline without adding safety.
+
+**Decision.** An ADR file under `docs/decisions/` on `main` is accepted and authoritative. The pull request that introduces it is the proposal: while it is open the record is under review, the repository owner's merge is the act of acceptance, and only the owner merges ADR pull requests. Records carry no `Status:` line, and a draft may not claim acceptance. A rejected proposal is closed unmerged and recorded as a dated entry in this log naming the pull request and reason. Supersession is unchanged: the old record is preserved and both directions are linked. The header format shrinks accordingly (Date, Depends on, Supersedes, Superseded by, Decision questions).
+
+**Rejected alternatives.** Keeping statuses with a same-pull-request flip: still requires an agent round-trip after the owner decides and still allows undecided records on `main`. Mechanical enforcement through CODEOWNERS and required review: declined as unnecessary ceremony for a single-owner repository where only the owner merges. Deleting rejected proposals without a log entry: loses the record that prevents relitigating the same option.
+
+**Affects.** `docs/decisions/README.md` (process and format sections), removal of every `Status:` line from the ten in-tree records as a meaning-preserving mechanical correction (all were `Accepted` after PR #33 merged), and `CONTRIBUTING.md` wording. Open ADR pull requests should drop their `Status:` lines before merge.
+
 ## 2026-07-17 — Keyed provider-target evidence and validated mismatch producers
 
 **Context.** ADR-0005 fixes the typed observation payload, the evidence record keyed by `ProviderTargetEvidenceId` whose identifier lookup precedes current-state validation, the completed-call invalidation that is unique by invalidated call, and the three mismatch-failure reference kinds whose opaque value `crates/domain/src/turn_attempt.rs` reserved for a provider-evidence slice. Trust classification of raw provider data remains ADR-0007 scope, and outcome authority, aggregate precedence, and persistence do not exist yet.

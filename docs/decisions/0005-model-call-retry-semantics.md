@@ -1,6 +1,5 @@
 # ADR-0005: Model-call retry and configuration identity
 
-- Status: Accepted
 - Date: 2026-07-13
 - Amended: 2026-07-17 — [ADR-0031](0031-direct-fatal-terminalization.md) clarifies closed-boundary fatal terminalization
 - Owners: Repository owner
