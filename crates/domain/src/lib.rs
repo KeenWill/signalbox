@@ -32,7 +32,8 @@ pub use queue_order::{
     AcceptedInputQueueWork, SessionInputPosition, derive_accepted_input_total_order,
 };
 pub use turn_attempt::{
-    AppliedInterruptState, AttemptEnd, CancellationStopDisposition, FatalMismatchStopCauses,
+    AppliedInterruptState, AttemptEnd, CancellationStopDisposition, CurrentTurnAttempt,
+    CurrentTurnAttemptState, EndedTurnAttempt, FatalMismatchStopCauses,
     FatalMismatchStopDisposition, ProviderTargetMismatchFailureKind,
     ProviderTargetMismatchFailureRef, TurnAttemptStopCauseUnionError, TurnAttemptStopCauses,
     UnstoppedAttemptDisposition,

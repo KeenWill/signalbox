@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-16 — Private-field current and ended attempt transitions
+
+**Context.** ADR-0004 owns the complete attempt-state transition table and assigns its transitions to the turn aggregate. The preceding turn-attempt value slice makes stop and terminal values constructible, but it does not choose how the aggregate enters or leaves a current Rust attempt without letting other callers forge `Running`, `StopRequested`, or terminal history.
+
+**Decision.** Represent the live component as a private-field `CurrentTurnAttempt` that factors one `TurnAttemptId` from its nonterminal state. Keep its prepared entry and all consuming transitions crate-private so the later aggregate remains the only public lifecycle authority. Preserve identity on success and return the unchanged current value plus the exact rejected input on failure. Represent successful terminal history as a separate private-field `EndedTurnAttempt` with no transition back to current state; keep aggregate-owned correlation, operation classification, wait changes, full terminal guards, and atomic persistence outside this component.
+
+**Rejected alternatives.** Public local transitions remain an aggregate-guard bypass even when fields are private. A publicly constructible state value with identity in each variant also allows callers to forge later states and repeats identity handling. Mutating transitions can leave rejected inputs or partial state changes implicit. Returning a bare error discards the authoritative current value and the input that failed. Letting callers pair `TurnAttemptId` with `AttemptEnd` bypasses predecessor validation.
+
+**Affects.** `crates/domain/src/turn_attempt.rs`, re-exports from `crates/domain/src/lib.rs`, and enforcement links in `docs/invariants.md`; the authoritative turn aggregate, applied-proof and mismatch correlation, effect classification, waits, persistence, and startup scan remain later work.
+
 ## 2026-07-16 — Canonical turn-attempt stop and terminal values
 
 **Context.** ADR-0004 requires cancellation-only stop to retain one applied-interrupt proof, fatal stop to retain a nonempty set of ADR-0005 mismatch references plus any applied interrupt, and terminal history to exclude several dishonest stop/disposition combinations. The representation of the nonempty set and `ProviderTargetEvidenceId` backing remain below foundation weight.
