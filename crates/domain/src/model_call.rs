@@ -232,21 +232,22 @@ impl CurrentModelCall {
 
     /// Durably requests best-effort cancellation of remaining provider work.
     ///
-    /// The request records one payload-free durable fact, so replay on an
-    /// already-requested call is idempotent. An unsent `Prepared` call is
-    /// rejected: it ends through the proof-correlated unsent path instead.
+    /// ADR-0005's only cancellation-request edge starts at `InFlight`. An
+    /// already-requested call and an unsent `Prepared` call are both
+    /// rejected unchanged: the durable request exists at most once, and the
+    /// unsent call ends through the proof-correlated unsent path instead.
     pub(crate) fn request_cancellation(self) -> Result<Self, CurrentModelCallTransitionError> {
         match self.state {
-            CurrentModelCallState::InFlight | CurrentModelCallState::CancellationRequested => {
-                Ok(Self {
-                    state: CurrentModelCallState::CancellationRequested,
-                    ..self
-                })
+            CurrentModelCallState::InFlight => Ok(Self {
+                state: CurrentModelCallState::CancellationRequested,
+                ..self
+            }),
+            CurrentModelCallState::Prepared | CurrentModelCallState::CancellationRequested => {
+                Err(CurrentModelCallTransitionError::new(
+                    self,
+                    AttemptedModelCallTransition::RequestCancellation,
+                ))
             }
-            CurrentModelCallState::Prepared => Err(CurrentModelCallTransitionError::new(
-                self,
-                AttemptedModelCallTransition::RequestCancellation,
-            )),
         }
     }
 
@@ -377,7 +378,7 @@ impl EndedModelCall {
 pub(crate) enum AttemptedModelCallTransition {
     /// Send authorization was requested outside `Prepared`.
     BeginInFlight,
-    /// Best-effort cancellation was requested for an unsent call.
+    /// Best-effort cancellation was requested outside `InFlight`.
     RequestCancellation,
     /// The classified disposition does not match the current state.
     EndClassified {
@@ -533,23 +534,25 @@ mod tests {
         }
     }
 
-    /// S07 / S21 / INV-006: best-effort cancellation request is valid from
-    /// `InFlight`, replays idempotently, and rejects an unsent call.
+    /// S07 / S21 / INV-006: best-effort cancellation request is valid only
+    /// from `InFlight`; unsent and already-requested calls are rejected
+    /// unchanged.
     #[test]
-    fn cancellation_request_matrix_is_idempotent_and_rejects_unsent_calls() {
+    fn cancellation_request_accepts_only_in_flight_calls() {
         let requested = cancellation_requested();
         assert_eq!(
             requested.state(),
             CurrentModelCallState::CancellationRequested
         );
-        assert_eq!(requested.clone().request_cancellation().unwrap(), requested);
 
-        let error = prepared().request_cancellation().unwrap_err();
-        assert_eq!(error.current(), &prepared());
-        assert_eq!(
-            error.attempted(),
-            &AttemptedModelCallTransition::RequestCancellation
-        );
+        for current in [prepared(), cancellation_requested()] {
+            let error = current.clone().request_cancellation().unwrap_err();
+            assert_eq!(error.current(), &current);
+            assert_eq!(
+                error.attempted(),
+                &AttemptedModelCallTransition::RequestCancellation
+            );
+        }
     }
 
     /// S04 / S21 / INV-006 / INV-014 / INV-029: `Prepared` classifies only
