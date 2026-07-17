@@ -140,7 +140,7 @@ If the owner accepts this record, the same acceptance change must:
 - add the missing distinct `Running -> Terminal(ReconciliationRequired)` row to ADR-0004's turn table and link it to this decision;
 - make ADR-0004's immediate fatal attempt row explicitly name `KnownFailure or Ambiguous`;
 - replace ADR-0005's ambiguous phrase “immediate atomic failure” with “immediate atomic fatal terminalization” while preserving its timing matrix;
-- add the focused S27 fixture above to `scenarios.md`;
+- add the focused S27 fixture above to [scenarios.md](../scenarios.md);
 - link the affected invariant rows and add this record under an accepted-refinements section without rewriting the original five-record atomic foundation statement.
 
 No accepted record or derived catalog is changed while this ADR remains Proposed.
