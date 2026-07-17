@@ -26,6 +26,7 @@ The repository owner accepted the following records on 2026-07-17. They depend o
 | [ADR-0022](0022-persistence-representation.md) | Normalized Postgres persistence records, explicit migrations, storage/domain mapping, database enforcement of the progressing slot and owner-global command identity, and native Postgres encoding for the UUID-backed identity columns it names |
 | [ADR-0030](0030-context-frontier-snapshots.md) | Session-owned immutable context-frontier snapshot identity, exact ordered source-qualified resolution, identity versus content equality, trusted construction, and ancestry resolution |
 | [ADR-0031](0031-direct-fatal-terminalization.md) | Direct fatal-mismatch failure or exact reconciliation at a closed aggregate boundary, with `StopRequested` retained only while aggregate work remains unfinished |
+| [ADR-0033](0033-postgres-implementation-dependencies.md) | SQLx Postgres driver, pool, and embedded migrations; Tokio runtime; and explicit Testcontainers-based ephemeral-Postgres integration testing |
 
 ## Process
 

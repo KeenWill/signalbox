@@ -139,7 +139,7 @@ At most one logical turn actively progresses per session initially; every implem
 - Tool safety: risk taxonomy, confirmation thresholds, judge role, sandbox minimums, and retry rules.
 - Identity and access: owner/client authentication, runner enrollment and authentication, and session revocation (provider/integration credential lifecycle is decided by [ADR-0017](decisions/0017-credential-lifecycle.md)).
 - Resource governance: initial limits for turns, provider use, tool execution, runner concurrency, and retained artifacts.
-- Persistence implementation within [ADR-0022's](decisions/0022-persistence-representation.md) normalized relational baseline: migration and adapter tooling, canonical payload encoding, proof rehydration, exact [ADR-0030](decisions/0030-context-frontier-snapshots.md)-conforming snapshot layout, cancellation delivery, streaming checkpoint policy, and archival form.
+- Persistence implementation within [ADR-0022's](decisions/0022-persistence-representation.md) normalized relational baseline, using the driver, pool, migration, runtime, and ephemeral-test stack selected by [ADR-0033](decisions/0033-postgres-implementation-dependencies.md): canonical payload encoding, proof rehydration, exact [ADR-0030](decisions/0030-context-frontier-snapshots.md)-conforming snapshot layout, cancellation delivery, streaming checkpoint policy, and archival form remain open.
 - Client implementation order and web technology.
 - Deployment decomposition: modular monolith is acceptable; microservices are not presumed.
 
