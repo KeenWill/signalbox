@@ -76,11 +76,12 @@ Dispatch fencing and initial scheduler mechanics are decided by accepted [ADR-00
 
 ## Protocols and persistence (reserved ADR-0019 through ADR-0023)
 
-Process protocol semantics and the compatibility and negotiation baseline are decided by accepted [ADR-0019](decisions/0019-process-protocol.md) and [ADR-0021](decisions/0021-compatibility-and-negotiation.md); the questions below remain open.
-
+- **Process protocol (Protobuf/gRPC, Connect, JSON/HTTP, other).** Leaning: define semantics and fixtures before selecting transport. Blocks cross-process implementation. (S01, S02, S12, S24)
 - **Browser transport.** Preserve authoritative-snapshot-plus-transient-stream semantics; technology open. Blocks the web client. (S02, S24)
+- **Protocol version and capability negotiation.** Leaning: version plus capability handshake with explicit incompatibility. Blocks remote clients and runners. (S12, S24)
 - **Persistence implementation within the accepted relational baseline.** [ADR-0022](decisions/0022-persistence-representation.md) closes the broad stable-storage question. Migration and database-adapter tooling, canonical command-payload encoding, proof rehydration, process-incarnation representation, streaming checkpoints, dispatch-generation placement, archival form, and exact cancellation-delivery records remain open. Physical frontier layout may use any normalized representation that satisfies [ADR-0030](decisions/0030-context-frontier-snapshots.md). Blocks the first Postgres adapter slice. (S03, S04, S17, S25, S27)
 - **Swift client type generation.** Leaning: generated boundary types mapped to hand-written client domain types. Deferrable until the Swift client. (S01, S24)
+- **Cross-release compatibility policy.** Leaning: small documented compatibility window with fixtures; exact window open. Blocks the first public release. (S12, S24)
 
 ## Client scope (reserved ADR-0024, ADR-0025, ADR-0026)
 
