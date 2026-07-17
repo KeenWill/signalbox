@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-17 — Prepared model calls borrow resolved frontier projections
+
+**Context.** [ADR-0005](decisions/0005-model-call-retry-semantics.md) and [ADR-0030](decisions/0030-context-frontier-snapshots.md) require the exact call frontier to exist on the prepared record before send authorization. The preceding value slice makes a resolved projection available through a sealed construction seam, while the existing `CurrentModelCall::prepared` accepts only the call identity and turn-wide pinned target.
+
+**Decision.** Add a nonoptional private `ContextFrontier` field to both `CurrentModelCall` and `EndedModelCall`. Make the crate-private prepared entry borrow a `ResolvedContextFrontierSnapshot` and copy its exact identified frontier into the call, so the record cannot be created through that seam from a bare frontier reference. Preserve the field through every successful nonterminal and terminal transition and every rejected transition's unchanged current value, and expose only a read accessor. Keep the frontier off `PinnedProviderTarget`: the target is one turn-wide fact, while each call records its own frontier. The later aggregate still owns selection of the lifecycle-correct resolved projection and atomic persistence.
+
+**Rejected alternatives.** Taking a bare `ContextFrontier` at prepared entry would discard the resolved-projection boundary before aggregate validation exists. Storing an optional frontier or attaching one after creation would admit the frontierless prepared state the records exclude. Moving the frontier onto `PinnedProviderTarget` would incorrectly make one frontier apply to the whole turn. Owning the complete resolved projection inside every call would duplicate semantic contents instead of retaining the accepted identified reference.
+
+**Affects.** `crates/domain/src/model_call.rs`, provider-evidence test fixtures that construct canonical calls, and INV-014/INV-015 enforcement links in `docs/invariants.md`. Requested-selection recording, call-to-turn/attempt/session correlation, semantic-entry eligibility, safe-point consumption, authoritative snapshot-identity freshness, and atomic persistence remain later aggregate work.
+
 ## 2026-07-17 — UUID-backed context-frontier values and sealed prefix derivation
 
 **Context.** [ADR-0030](decisions/0030-context-frontier-snapshots.md) fixes context-frontier identity, resolution, equality, immutability, and construction authority while deliberately leaving its semantic pseudocode, initial Rust identity backing, and trusted transition spelling open. The first domain slice needs to compare and derive resolved frontier candidates without making a raw identifier, structurally plausible entry list, or generally callable service into lifecycle authority.

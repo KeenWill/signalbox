@@ -1,14 +1,17 @@
 //! Pinned provider-target turn fact, model-call records, and transitions.
 //!
-//! ADR-0005 is normative. This module models the exact hub-resolved
-//! provider/model target pinned as a durable turn fact before any model call
-//! exists, the current call record created from that fact, and the
-//! call-local predecessor matrix. Resolving a frozen selection against
-//! deployment state, provider-target evidence, outcome-authority transfer,
-//! and the turn aggregate's guards are separate later slices. A standalone
-//! value is not proof that resolution or aggregate guards held.
+//! ADR-0005 and ADR-0030 are normative. This module models the exact
+//! hub-resolved provider/model target pinned as a durable turn fact before any
+//! model call exists, the current call record created from that fact and one
+//! resolved context-frontier snapshot, and the call-local predecessor matrix.
+//! Resolving a frozen selection against deployment state, selecting the
+//! lifecycle-correct frontier, provider-target evidence, outcome-authority
+//! transfer, and the turn aggregate's guards are separate later slices. A
+//! standalone value is not proof that resolution or aggregate guards held.
 
-use crate::{AppliedInterruptProof, ModelCallId, TurnId};
+use crate::{
+    AppliedInterruptProof, ContextFrontier, ModelCallId, ResolvedContextFrontierSnapshot, TurnId,
+};
 
 crate::define_identity!(
     /// Names one provider/model identity in the hub's normalized value space.
@@ -120,8 +123,8 @@ pub enum ModelCallDisposition {
 /// variants.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum CurrentModelCallState {
-    /// The call exists durably with its exact target; sending is not
-    /// authorized.
+    /// The call exists durably with its exact target and context frontier;
+    /// sending is not authorized.
     Prepared,
     /// Send authorization is durably persisted for the provider boundary.
     InFlight,
@@ -133,20 +136,26 @@ pub enum CurrentModelCallState {
 /// One current, nonterminal model call.
 ///
 /// The sole entry is the crate-private prepared constructor consuming the
-/// turn's [`PinnedProviderTarget`], so target-resolution failure — which
-/// pins no fact — can never produce a call, and no field admits a targetless
-/// or optional-target call. S20 / S21 / INV-014: a call record cannot be
-/// forged around the pinned fact:
+/// turn's [`PinnedProviderTarget`] and borrowing a resolved frontier snapshot,
+/// so target-resolution failure — which pins no fact — can never produce a
+/// call, and no field admits a targetless or frontierless call. S02 / S20 /
+/// S21 / INV-014 / INV-015: a call record cannot be forged around those facts:
 ///
 /// ```compile_fail
 /// use signalbox_domain::{
-///     CurrentModelCall, CurrentModelCallState, ModelCallId, PinnedProviderTarget,
+///     ContextFrontier, CurrentModelCall, CurrentModelCallState, ModelCallId,
+///     PinnedProviderTarget,
 /// };
 ///
-/// fn a_call_cannot_be_forged(id: ModelCallId, pinned: PinnedProviderTarget) {
+/// fn a_call_cannot_be_forged(
+///     id: ModelCallId,
+///     pinned: PinnedProviderTarget,
+///     frontier: ContextFrontier,
+/// ) {
 ///     let _ = CurrentModelCall {
 ///         id,
 ///         pinned,
+///         frontier,
 ///         state: CurrentModelCallState::Prepared,
 ///     };
 /// }
@@ -155,10 +164,17 @@ pub enum CurrentModelCallState {
 /// Call creation is sealed behind the turn aggregate:
 ///
 /// ```compile_fail
-/// use signalbox_domain::{CurrentModelCall, ModelCallId, PinnedProviderTarget};
+/// use signalbox_domain::{
+///     CurrentModelCall, ModelCallId, PinnedProviderTarget,
+///     ResolvedContextFrontierSnapshot,
+/// };
 ///
-/// fn creation_cannot_bypass_the_aggregate(id: ModelCallId, pinned: PinnedProviderTarget) {
-///     let _ = CurrentModelCall::prepared(id, pinned);
+/// fn creation_cannot_bypass_the_aggregate(
+///     id: ModelCallId,
+///     pinned: PinnedProviderTarget,
+///     snapshot: &ResolvedContextFrontierSnapshot,
+/// ) {
+///     let _ = CurrentModelCall::prepared(id, pinned, snapshot);
 /// }
 /// ```
 ///
@@ -167,13 +183,13 @@ pub enum CurrentModelCallState {
 /// This is a call-record component, not an independently persisted
 /// aggregate. The turn aggregate owns distinct-call-per-authorization
 /// creation, outcome eligibility and authority transfer, correlation with
-/// attempt stop causes, and atomic persistence. Requested-selection and
-/// context-frontier recording on the durable call record remain with those
-/// later slices.
+/// attempt stop causes, selection of the lifecycle-correct resolved frontier,
+/// requested-selection recording, and atomic persistence.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct CurrentModelCall {
     id: ModelCallId,
     pinned: PinnedProviderTarget,
+    frontier: ContextFrontier,
     state: CurrentModelCallState,
 }
 
@@ -182,11 +198,22 @@ pub struct CurrentModelCall {
     reason = "sealed transition seam is consumed by the later aggregate slice"
 )]
 impl CurrentModelCall {
-    /// Creates one durably prepared call from its turn's pinned target.
-    pub(crate) const fn prepared(id: ModelCallId, pinned: PinnedProviderTarget) -> Self {
+    /// Creates one prepared call from its turn's pinned target and a resolved
+    /// frontier candidate.
+    ///
+    /// Borrowing the resolved projection prevents a bare frontier reference
+    /// from entering a call record. The later aggregate must still establish
+    /// that the projection is the exact lifecycle-eligible frontier for this
+    /// call and commit both records atomically.
+    pub(crate) const fn prepared(
+        id: ModelCallId,
+        pinned: PinnedProviderTarget,
+        snapshot: &ResolvedContextFrontierSnapshot,
+    ) -> Self {
         Self {
             id,
             pinned,
+            frontier: snapshot.frontier(),
             state: CurrentModelCallState::Prepared,
         }
     }
@@ -209,6 +236,11 @@ impl CurrentModelCall {
     /// Returns the exact resolved target recorded on this call.
     pub const fn target(&self) -> ResolvedProviderTarget {
         self.pinned.target()
+    }
+
+    /// Returns the exact identified context frontier recorded on this call.
+    pub const fn frontier(&self) -> ContextFrontier {
+        self.frontier
     }
 
     /// Returns the current nonterminal state.
@@ -271,6 +303,7 @@ impl CurrentModelCall {
             Ok(EndedModelCall {
                 id: self.id,
                 pinned: self.pinned,
+                frontier: self.frontier,
                 disposition,
             })
         } else {
@@ -295,6 +328,7 @@ impl CurrentModelCall {
             Ok(EndedModelCall {
                 id: self.id,
                 pinned: self.pinned,
+                frontier: self.frontier,
                 disposition: ModelCallDisposition::Cancelled,
             })
         } else {
@@ -324,13 +358,19 @@ impl CurrentModelCall {
 ///
 /// ```compile_fail
 /// use signalbox_domain::{
-///     EndedModelCall, ModelCallDisposition, ModelCallId, PinnedProviderTarget,
+///     ContextFrontier, EndedModelCall, ModelCallDisposition, ModelCallId,
+///     PinnedProviderTarget,
 /// };
 ///
-/// fn terminal_history_cannot_be_forged(id: ModelCallId, pinned: PinnedProviderTarget) {
+/// fn terminal_history_cannot_be_forged(
+///     id: ModelCallId,
+///     pinned: PinnedProviderTarget,
+///     frontier: ContextFrontier,
+/// ) {
 ///     let _ = EndedModelCall {
 ///         id,
 ///         pinned,
+///         frontier,
 ///         disposition: ModelCallDisposition::Completed,
 ///     };
 /// }
@@ -339,6 +379,7 @@ impl CurrentModelCall {
 pub struct EndedModelCall {
     id: ModelCallId,
     pinned: PinnedProviderTarget,
+    frontier: ContextFrontier,
     disposition: ModelCallDisposition,
 }
 
@@ -361,6 +402,11 @@ impl EndedModelCall {
     /// Returns the exact resolved target recorded on this call.
     pub const fn target(&self) -> ResolvedProviderTarget {
         self.pinned.target()
+    }
+
+    /// Returns the exact context frontier preserved from the current call.
+    pub const fn frontier(&self) -> ContextFrontier {
+        self.frontier
     }
 
     /// Returns the terminal physical disposition.
@@ -435,9 +481,14 @@ mod tests {
         AttemptedModelCallTransition, CurrentModelCall, CurrentModelCallState, EndedModelCall,
         ModelCallDisposition, PinnedProviderTarget, ProviderModelIdentity, ResolvedProviderTarget,
     };
-    use crate::AppliedInterruptProof;
     use crate::applied_interrupt::test_applied_interrupt_proof;
-    use crate::test_support::{command_id, model_call_id, provider_model_identity, turn_id};
+    use crate::test_support::{
+        command_id, context_frontier_id, model_call_id, provider_model_identity,
+        semantic_transcript_entry_id, session_id, turn_id,
+    };
+    use crate::{
+        AppliedInterruptProof, ResolvedContextFrontierSnapshot, SemanticTranscriptEntryRef,
+    };
     use uuid::Uuid;
 
     fn target(value: u128) -> ResolvedProviderTarget {
@@ -452,8 +503,32 @@ mod tests {
         test_applied_interrupt_proof(command_id(9), turn_id(predecessor))
     }
 
+    fn semantic_entry(value: u128) -> SemanticTranscriptEntryRef {
+        SemanticTranscriptEntryRef::from_source(session_id(1), semantic_transcript_entry_id(value))
+    }
+
+    fn frontier_snapshot(value: u128) -> ResolvedContextFrontierSnapshot {
+        ResolvedContextFrontierSnapshot::try_from_candidate(
+            session_id(1),
+            context_frontier_id(value),
+            vec![semantic_entry(value)],
+        )
+        .expect("test frontier contains one exact semantic entry")
+    }
+
+    fn prepared_from_snapshot(
+        call: u128,
+        snapshot: &ResolvedContextFrontierSnapshot,
+    ) -> CurrentModelCall {
+        CurrentModelCall::prepared(model_call_id(call), pinned_target(), snapshot)
+    }
+
+    fn prepared_call(call: u128, frontier: u128) -> CurrentModelCall {
+        prepared_from_snapshot(call, &frontier_snapshot(frontier))
+    }
+
     fn prepared() -> CurrentModelCall {
-        CurrentModelCall::prepared(model_call_id(3), pinned_target())
+        prepared_call(3, 1)
     }
 
     fn in_flight() -> CurrentModelCall {
@@ -503,26 +578,39 @@ mod tests {
         assert_ne!(pinned, PinnedProviderTarget::pinned(turn_id(2), target(7)));
     }
 
-    /// S20 / INV-014: a prepared call records its distinct identity and its
-    /// turn's exact pinned target at creation.
+    /// S02 / S20 / INV-014 / INV-015: every prepared call records its exact
+    /// resolved target and frontier at creation, while two calls in one turn
+    /// can retain distinct prefix-related frontier identities.
     #[test]
-    fn prepared_call_records_the_pinned_target_at_creation() {
-        let call = prepared();
+    fn prepared_call_records_the_target_and_exact_frontier_at_creation() {
+        let first_snapshot = frontier_snapshot(1);
+        let later_snapshot = first_snapshot
+            .derive_appending_candidate(context_frontier_id(2), vec![semantic_entry(2)])
+            .expect("later test frontier retains and extends the exact prefix");
+        let call = prepared_from_snapshot(3, &first_snapshot);
+        let later = prepared_from_snapshot(4, &later_snapshot);
 
         assert_eq!(call.id(), model_call_id(3));
         assert_eq!(call.pinned(), &pinned_target());
         assert_eq!(call.turn(), turn_id(1));
         assert_eq!(call.target(), target(7));
+        assert_eq!(call.frontier(), first_snapshot.frontier());
         assert_eq!(call.state(), CurrentModelCallState::Prepared);
+        assert_eq!(later.turn(), call.turn());
+        assert_eq!(later.target(), call.target());
+        assert_ne!(later.frontier(), call.frontier());
+        assert_eq!(later.frontier(), later_snapshot.frontier());
+        assert!(first_snapshot.is_semantic_prefix_of(&later_snapshot));
     }
 
-    /// S02 / INV-004 / INV-006 / INV-014: send authorization is valid only
-    /// from `Prepared` and preserves the call identity and pinned target.
+    /// S02 / INV-004 / INV-006 / INV-014 / INV-015: send authorization is
+    /// valid only from `Prepared` and preserves the complete call record.
     #[test]
     fn begin_in_flight_accepts_only_prepared_and_preserves_the_record() {
         let call = in_flight();
         assert_eq!(call.id(), model_call_id(3));
         assert_eq!(call.pinned(), &pinned_target());
+        assert_eq!(call.frontier(), frontier_snapshot(1).frontier());
         assert_eq!(call.state(), CurrentModelCallState::InFlight);
 
         for current in [in_flight(), cancellation_requested()] {
@@ -534,9 +622,9 @@ mod tests {
         }
     }
 
-    /// S07 / S21 / INV-006: best-effort cancellation request is valid only
-    /// from `InFlight`; unsent and already-requested calls are rejected
-    /// unchanged.
+    /// S07 / S21 / INV-006 / INV-015: best-effort cancellation request is
+    /// valid only from `InFlight`; it preserves the exact frontier, and
+    /// unsent and already-requested calls are rejected unchanged.
     #[test]
     fn cancellation_request_accepts_only_in_flight_calls() {
         let requested = cancellation_requested();
@@ -544,6 +632,7 @@ mod tests {
             requested.state(),
             CurrentModelCallState::CancellationRequested
         );
+        assert_eq!(requested.frontier(), frontier_snapshot(1).frontier());
 
         for current in [prepared(), cancellation_requested()] {
             let error = current.clone().request_cancellation().unwrap_err();
@@ -568,10 +657,33 @@ mod tests {
             );
         }
 
+        let known_failed_source = prepared();
+        let known_failed_frontier = known_failed_source.frontier();
+        let known_failed = known_failed_source
+            .end_classified(ModelCallDisposition::KnownFailed)
+            .expect("Prepared may end with known failure");
+        assert_eq!(known_failed.frontier(), known_failed_frontier);
+
+        let rejected_source = prepared();
+        let rejected = rejected_source
+            .clone()
+            .end_classified(ModelCallDisposition::Completed)
+            .expect_err("an unsent call cannot complete");
+        assert_eq!(
+            rejected.into_parts(),
+            (
+                rejected_source,
+                AttemptedModelCallTransition::EndClassified {
+                    disposition: ModelCallDisposition::Completed,
+                },
+            )
+        );
+
         let ended = prepared()
             .end_cancelled_unsent(proof_for(1))
             .expect("the exact proof cancels the unsent call");
         assert_eq!(ended.disposition(), ModelCallDisposition::Cancelled);
+        assert_eq!(ended.frontier(), frontier_snapshot(1).frontier());
 
         let error = prepared().end_cancelled_unsent(proof_for(2)).unwrap_err();
         assert_eq!(
@@ -588,9 +700,9 @@ mod tests {
         }
     }
 
-    /// S02 / S04 / S21 / S23 / INV-006 / INV-025: issued calls accept every
-    /// classified disposition, and ambiguity stays its own disposition
-    /// instead of being coerced to failure.
+    /// S02 / S04 / S21 / S23 / INV-006 / INV-015 / INV-025: issued calls
+    /// accept every classified disposition and preserve their frontier;
+    /// ambiguity stays distinct instead of being coerced to failure.
     #[test]
     fn issued_calls_accept_every_classified_disposition() {
         for current in [in_flight(), cancellation_requested()] {
@@ -600,14 +712,16 @@ mod tests {
                     .end_classified(disposition)
                     .expect("issued calls classify every disposition");
                 assert_eq!(ended.disposition(), disposition);
+                assert_eq!(ended.frontier(), current.frontier());
             }
         }
     }
 
-    /// INV-004 / INV-014: terminal history preserves the identity, turn, and
-    /// exact pinned target of the current call it consumed.
+    /// INV-004 / INV-014 / INV-015: terminal history preserves the identity,
+    /// turn, exact pinned target, and exact frontier of the current call it
+    /// consumed.
     #[test]
-    fn terminal_history_preserves_identity_and_exact_target() {
+    fn terminal_history_preserves_identity_target_and_exact_frontier() {
         let ended: EndedModelCall = in_flight()
             .end_classified(ModelCallDisposition::Completed)
             .expect("InFlight may complete");
@@ -616,6 +730,7 @@ mod tests {
         assert_eq!(ended.pinned(), &pinned_target());
         assert_eq!(ended.turn(), turn_id(1));
         assert_eq!(ended.target(), target(7));
+        assert_eq!(ended.frontier(), frontier_snapshot(1).frontier());
         assert_eq!(ended.disposition(), ModelCallDisposition::Completed);
     }
 }
