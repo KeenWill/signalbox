@@ -26,6 +26,13 @@ The repository owner accepted the following records on 2026-07-17. They depend o
 | [ADR-0030](0030-context-frontier-snapshots.md) | Session-owned immutable context-frontier snapshot identity, exact ordered source-qualified resolution, identity versus content equality, trusted construction, and ancestry resolution |
 | [ADR-0031](0031-direct-fatal-terminalization.md) | Direct fatal-mismatch failure or exact reconciliation at a closed aggregate boundary, with `StopRequested` retained only while aggregate work remains unfinished |
 
+The repository owner accepted the following coupled pair on 2026-07-17. They depend on the original foundation set, the accepted refinements, and [ADR-0009](0009-dispatch-fencing.md); they do not retroactively become part of either prior acceptance group.
+
+| ADR | Scope |
+| --- | --- |
+| [ADR-0019](0019-process-protocol.md) | Process protocol semantics, three domain-bearing request families, authoritative snapshots with per-session observation cursors and transient streams, durable command envelope, four typed rejection classes, Protobuf and Connect schema and transport selection with tonic+tonic-web as the documented fallback, and the golden fixture corpus baseline |
+| [ADR-0021](0021-compatibility-and-negotiation.md) | Version-plus-capability negotiation baseline, explicit typed incompatibility, version-independent stable handshake frame, two-version support window, fixture-backed compatibility enforcement, and one baseline governing every hub process boundary |
+
 ## Process
 
 - An ADR in this directory is accepted and authoritative. The pull request that introduces it is the proposal; while that pull request is open the record is under review, and the repository owner's merge is the act of acceptance. Records carry no status line, and nothing in a draft may claim acceptance — only a merge confers it. Only the repository owner merges ADR pull requests.
