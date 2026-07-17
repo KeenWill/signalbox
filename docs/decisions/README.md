@@ -22,6 +22,7 @@ The repository owner accepted the following records on 2026-07-17. They depend o
 
 | ADR | Scope |
 | --- | --- |
+| [ADR-0017](0017-credential-lifecycle.md) | Provider and integration credential lifecycle: 1Password/sops-age channel ownership, operator-synced Secret mounted-volume delivery read per send, the in-process credential access port keyed by non-secret references that enforces INV-035, frozen credential reference at target pin, and credential failure semantics mapped onto existing ADR-0005 edges |
 | [ADR-0022](0022-persistence-representation.md) | Normalized Postgres persistence records, explicit migrations, storage/domain mapping, database enforcement of the progressing slot and owner-global command identity, and native Postgres encoding for the UUID-backed identity columns it names |
 | [ADR-0030](0030-context-frontier-snapshots.md) | Session-owned immutable context-frontier snapshot identity, exact ordered source-qualified resolution, identity versus content equality, trusted construction, and ancestry resolution |
 | [ADR-0031](0031-direct-fatal-terminalization.md) | Direct fatal-mismatch failure or exact reconciliation at a closed aggregate boundary, with `StopRequested` retained only while aggregate work remains unfinished |
