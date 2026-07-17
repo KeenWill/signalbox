@@ -1,4 +1,4 @@
-# ADR-0030: Direct fatal-mismatch terminalization at a closed aggregate boundary
+# ADR-0031: Direct fatal-mismatch terminalization at a closed aggregate boundary
 
 - Status: Proposed
 - Date: 2026-07-16
