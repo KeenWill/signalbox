@@ -43,12 +43,13 @@ pub enum ProviderTargetObservation {
 /// The call-state effect already validated with one fatal mismatch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ProviderTargetMismatchEffectView {
-    /// A nonterminal call is now physically known failed.
+    /// A nonterminal call is to be classified physically known failed.
     ClassifyNonterminalKnownFailed,
     /// A terminally ambiguous call keeps its physical disposition while its
     /// turn-level ambiguity is resolved.
     ResolveTerminalAmbiguity,
-    /// A completed current-authority call is invalidated without rewriting it.
+    /// A completed current-authority call is to be invalidated without
+    /// rewriting it.
     PreserveCompletedInvalidation,
 }
 
