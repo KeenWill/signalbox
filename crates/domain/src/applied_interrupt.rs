@@ -41,7 +41,7 @@ use crate::{
 /// ```
 ///
 /// The sole public producer is [`AppliedInterruptCommandResult::proof`]. The
-/// applied result itself is opaque; its module-private correlation seam is
+/// applied result itself is opaque; its crate-private correlation seam is
 /// reserved for the later transaction-owning aggregate adapter.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct AppliedInterruptProof {
@@ -66,7 +66,7 @@ impl AppliedInterruptProof {
 ///
 /// This value groups the purpose-specific proof with the accepted input and
 /// immediate-successor facts created by the same aggregate transition. Its
-/// private fields have no public constructor. The module-private correlation
+/// private fields have no public constructor. The crate-private correlation
 /// boundary validates pure domain facts; it does not itself claim that a
 /// database commit occurred or define a persistence record.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -116,7 +116,7 @@ impl AppliedInterruptCommandResult {
     expect(dead_code, reason = "slice 5 adds the trusted adapter")
 )]
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum HandledSubmitInputProjection {
+pub(crate) enum HandledSubmitInputProjection {
     /// Authoritative handling recorded a domain rejection and no semantic
     /// work identities.
     Rejected {
@@ -134,17 +134,17 @@ enum HandledSubmitInputProjection {
     expect(dead_code, reason = "slice 5 adds the trusted adapter")
 )]
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct AppliedSubmitInputFacts {
-    command: DurableCommandId,
-    command_session: SessionId,
-    command_delivery: DeliveryRequest,
-    predecessor_session: SessionId,
-    predecessor: TurnId,
-    accepted_input_session: SessionId,
-    accepted_input: AcceptedInputLifecycle,
-    accepted_delivery: DeliveryRequest,
-    accepted_position: SessionInputPosition,
-    successor: AcceptedInputQueueWork,
+pub(crate) struct AppliedSubmitInputFacts {
+    pub(crate) command: DurableCommandId,
+    pub(crate) command_session: SessionId,
+    pub(crate) command_delivery: DeliveryRequest,
+    pub(crate) predecessor_session: SessionId,
+    pub(crate) predecessor: TurnId,
+    pub(crate) accepted_input_session: SessionId,
+    pub(crate) accepted_input: AcceptedInputLifecycle,
+    pub(crate) accepted_delivery: DeliveryRequest,
+    pub(crate) accepted_position: SessionInputPosition,
+    pub(crate) successor: AcceptedInputQueueWork,
 }
 
 /// Identifies which applied-result association crossed a session boundary.
@@ -153,7 +153,7 @@ struct AppliedSubmitInputFacts {
     expect(dead_code, reason = "slice 5 adds the trusted adapter")
 )]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum InterruptSessionAssociation {
+pub(crate) enum InterruptSessionAssociation {
     Predecessor,
     AcceptedInput,
     Successor,
@@ -166,7 +166,7 @@ enum InterruptSessionAssociation {
     expect(dead_code, reason = "slice 5 adds the trusted adapter")
 )]
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum AppliedInterruptConstructionError {
+pub(crate) enum AppliedInterruptConstructionError {
     RejectedCommand {
         command: DurableCommandId,
     },
@@ -221,7 +221,7 @@ enum AppliedInterruptConstructionError {
     not(test),
     expect(dead_code, reason = "slice 5 adds the trusted adapter")
 )]
-fn correlate_applied_interrupt(
+pub(crate) fn correlate_applied_interrupt(
     handled: &HandledSubmitInputProjection,
     known_work_before_application: &[AcceptedInputQueueWork],
 ) -> Result<AppliedInterruptCommandResult, AppliedInterruptConstructionError> {
