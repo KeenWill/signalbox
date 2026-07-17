@@ -31,8 +31,8 @@ pub use configuration::{
 };
 pub use delivery_request::{DeliveryRequest, PerInputConfigurationChoices};
 pub use model_call::{
-    CurrentModelCall, CurrentModelCallState, ModelCallDisposition, PinnedProviderTarget,
-    ProviderModelIdentity, ResolvedProviderTarget,
+    CurrentModelCall, CurrentModelCallState, EndedModelCall, ModelCallDisposition,
+    PinnedProviderTarget, ProviderModelIdentity, ResolvedProviderTarget,
 };
 pub use queue_order::{
     AcceptedInputQueueOrder, AcceptedInputQueueOrderError, AcceptedInputQueuePriority,
