@@ -67,7 +67,7 @@ The hub may initially be one deployable modular monolith. Rows in this table are
 | Effective runner properties for a dispatch | Hub policy applied to available declarations, trusted configuration, and verified evidence; durable snapshot with the attempt | Scheduler memory and client display |
 | Final tool result and outcome classification | Hub-accepted durable record | Runner delivery buffer and client presentation |
 | Streaming drafts and progress | Live hub process unless selectively checkpointed | Client transient view; never authoritative final content |
-| Provider credentials | Hub-controlled secret storage; exact mechanism open | Never client or runner session state |
+| Provider credentials | Hub-controlled secret storage; mechanism decided by [ADR-0017](decisions/0017-credential-lifecycle.md) | Never client or runner session state |
 
 Postgres is the canonical durable store in development, testing, and production. [ADR-0022](decisions/0022-persistence-representation.md) fixes the normalized record/domain mapping boundary, while [ADR-0030](decisions/0030-context-frontier-snapshots.md) fixes the semantic and atomic constraints for context-frontier snapshots independently of their physical layout. This does not mean every transient token delta is stored or that database records themselves are domain types.
 
@@ -137,7 +137,7 @@ At most one logical turn actively progresses per session initially; every implem
 - Provider evolution: provider calls begin in the hub; a later dedicated service requires an ADR and must preserve provenance and ownership.
 - Model fallback: availability fallback is a scenario to design, not accepted automatic behavior.
 - Tool safety: risk taxonomy, confirmation thresholds, judge role, sandbox minimums, and retry rules.
-- Identity and access: owner/client authentication, runner enrollment and authentication, credential lifecycle, and session revocation.
+- Identity and access: owner/client authentication, runner enrollment and authentication, and session revocation (provider/integration credential lifecycle is decided by [ADR-0017](decisions/0017-credential-lifecycle.md)).
 - Resource governance: initial limits for turns, provider use, tool execution, runner concurrency, and retained artifacts.
 - Persistence implementation within [ADR-0022's](decisions/0022-persistence-representation.md) normalized relational baseline: migration and adapter tooling, canonical payload encoding, proof rehydration, exact [ADR-0030](decisions/0030-context-frontier-snapshots.md)-conforming snapshot layout, cancellation delivery, streaming checkpoint policy, and archival form.
 - Client implementation order and web technology.
