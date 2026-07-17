@@ -38,6 +38,56 @@ pub enum ProviderTargetObservation {
     },
 }
 
+/// The model call identity and its exact resolved target, read together
+/// from one canonical call record.
+///
+/// ADR-0005 derives the target from the canonical call record inside the
+/// serialized transition. This value is the only way to hand a
+/// `(call, target)` pair to the recording boundary, and it can be built
+/// outside this module solely from a real [`CurrentModelCall`] or
+/// [`EndedModelCall`]. That prevents recording call A's observation against
+/// call B's target, which would durably accept a mislabeled match as
+/// trusted evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct CanonicalCallTarget {
+    call: ModelCallId,
+    target: ResolvedProviderTarget,
+}
+
+impl From<&CurrentModelCall> for CanonicalCallTarget {
+    fn from(call: &CurrentModelCall) -> Self {
+        Self {
+            call: call.id(),
+            target: call.target(),
+        }
+    }
+}
+
+impl From<&EndedModelCall> for CanonicalCallTarget {
+    fn from(call: &EndedModelCall) -> Self {
+        Self {
+            call: call.id(),
+            target: call.target(),
+        }
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "recording seam is consumed by the later aggregate slice"
+)]
+impl CanonicalCallTarget {
+    /// Returns the canonical call identity.
+    pub const fn call(&self) -> ModelCallId {
+        self.call
+    }
+
+    /// Returns the exact resolved target read from the canonical record.
+    pub const fn target(&self) -> ResolvedProviderTarget {
+        self.target
+    }
+}
+
 /// One recorded provider-target observation for one model call.
 ///
 /// The record deliberately carries no copy of the exact target: ADR-0005
@@ -225,22 +275,24 @@ impl ProviderTargetEvidenceLog {
 
     /// Records one observation, replaying an equal record idempotently.
     ///
-    /// `call` and `target` must be read together from one canonical call
-    /// record inside the serialized transition; the target is a validation
-    /// input, never copied into the record. Identifier lookup happens
-    /// first: an identical identifier/call/payload replay returns the
-    /// already-recorded result, and identifier reuse with a different call
-    /// or payload is rejected with the unchanged existing record and the
-    /// exact rejected input. A fresh identifier is durably recorded only
-    /// when the claimed variant is consistent with the exact target — a
-    /// match must report it and a mismatch must not.
+    /// The call identity and its exact target arrive paired in a
+    /// [`CanonicalCallTarget`] read from one canonical call record, so a
+    /// caller cannot cross-wire call A with call B's target; the target is
+    /// a validation input, never copied into the record. Identifier lookup
+    /// happens first: an identical identifier/call/payload replay returns
+    /// the already-recorded result, and identifier reuse with a different
+    /// call or payload is rejected with the unchanged existing record and
+    /// the exact rejected input. A fresh identifier is durably recorded
+    /// only when the claimed variant is consistent with the exact target —
+    /// a match must report it and a mismatch must not.
     pub(crate) fn record(
         &mut self,
         id: ProviderTargetEvidenceId,
-        call: ModelCallId,
-        target: ResolvedProviderTarget,
+        canonical: CanonicalCallTarget,
         observation: ProviderTargetObservation,
     ) -> Result<ProviderTargetEvidenceRecording, ProviderTargetEvidenceRecordingError> {
+        let call = canonical.call;
+        let target = canonical.target;
         if let Some(existing) = self.records.get(&id) {
             return if existing.call == call && existing.observation == observation {
                 Ok(ProviderTargetEvidenceRecording::Replayed(*existing))
@@ -382,11 +434,13 @@ impl ProviderTargetEvidenceReuseError {
 /// }
 /// ```
 ///
-/// The sole producer is the crate-private admission boundary, which
-/// validates the canonical completed call and correlated mismatch evidence
-/// against the at most one existing invalidation for that call. Whether
-/// the call is still outcome-authoritative when the transition commits, and
-/// that it belongs to the active turn, are the aggregate's checks.
+/// The sole producer is the crate-private [`ProviderTargetMismatchInvalidationLog`],
+/// which owns the per-call uniqueness: it looks up the at most one existing
+/// invalidation for the call itself and validates the canonical completed
+/// call and correlated mismatch evidence against it, so admission cannot
+/// depend on a caller remembering to pass that lookup. Whether the call is
+/// still outcome-authoritative when the transition commits, and that it
+/// belongs to the active turn, are the aggregate's checks.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ProviderTargetMismatchInvalidation {
     invalidated_call: ModelCallId,
@@ -415,7 +469,12 @@ impl ProviderTargetMismatchInvalidation {
     /// structurally equal evidence replay returns the existing value; any
     /// later observation, cross-wired record, non-mismatch payload, or
     /// non-completed call is rejected without relabeling.
-    pub(crate) fn admit(
+    ///
+    /// This is module-private: the crate-visible admission boundary is
+    /// [`ProviderTargetMismatchInvalidationLog`], which supplies `existing`
+    /// from its own per-call lookup so uniqueness cannot depend on a caller
+    /// remembering to perform it.
+    fn admit(
         existing: Option<&Self>,
         call: &EndedModelCall,
         evidence: &ProviderTargetEvidence,
@@ -457,6 +516,58 @@ impl ProviderTargetMismatchInvalidation {
     /// invalidation requires.
     pub(crate) fn failure(&self) -> ProviderTargetMismatchFailureRef {
         ProviderTargetMismatchFailureRef::terminal_call_invalidation(self.invalidated_call)
+    }
+}
+
+/// The durable completed-call mismatch invalidations keyed by invalidated
+/// call.
+///
+/// ADR-0005 makes the invalidation unique by `invalidated_call`. This value
+/// owns that per-call uniqueness so admission cannot depend on a caller
+/// remembering to look up the existing invalidation: the log itself finds
+/// the at most one existing value for the call, the first valid correlated
+/// mismatch fixes the entry, a structurally equal evidence replay returns
+/// it, and any later observation for the same call is rejected without
+/// duplicating or replacing the fixed value.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ProviderTargetMismatchInvalidationLog {
+    invalidations: BTreeMap<ModelCallId, ProviderTargetMismatchInvalidation>,
+}
+
+#[allow(
+    dead_code,
+    reason = "admission seam is consumed by the later aggregate slice"
+)]
+impl ProviderTargetMismatchInvalidationLog {
+    /// Creates an empty invalidation log.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns the recorded invalidation for this call, if any.
+    pub fn lookup(&self, call: ModelCallId) -> Option<&ProviderTargetMismatchInvalidation> {
+        self.invalidations.get(&call)
+    }
+
+    /// Admits mismatch evidence against one completed call, enforcing the
+    /// per-call uniqueness from its own keyed lookup.
+    ///
+    /// The first valid correlated mismatch durably fixes the invalidation
+    /// for the call; a structurally equal evidence replay returns it; any
+    /// later observation for the same call, cross-wired record, non-mismatch
+    /// payload, or non-completed call is rejected without changing the log.
+    pub(crate) fn admit(
+        &mut self,
+        call: &EndedModelCall,
+        evidence: &ProviderTargetEvidence,
+    ) -> Result<AdmittedProviderTargetMismatchInvalidation, ProviderTargetMismatchInvalidationError>
+    {
+        let existing = self.invalidations.get(&call.id());
+        let admitted = ProviderTargetMismatchInvalidation::admit(existing, call, evidence)?;
+        if let AdmittedProviderTargetMismatchInvalidation::First(invalidation) = admitted {
+            self.invalidations.insert(call.id(), invalidation);
+        }
+        Ok(admitted)
     }
 }
 
@@ -519,11 +630,11 @@ pub(crate) enum ProviderTargetMismatchInvalidationError {
 #[cfg(test)]
 mod tests {
     use super::{
-        AdmittedProviderTargetMismatchInvalidation, ProviderTargetEvidence,
+        AdmittedProviderTargetMismatchInvalidation, CanonicalCallTarget, ProviderTargetEvidence,
         ProviderTargetEvidenceLog, ProviderTargetEvidenceRecording,
         ProviderTargetEvidenceRecordingError, ProviderTargetMismatchCorrelationError,
         ProviderTargetMismatchInvalidation, ProviderTargetMismatchInvalidationError,
-        ProviderTargetObservation,
+        ProviderTargetMismatchInvalidationLog, ProviderTargetObservation,
     };
     use crate::test_support::{
         model_call_id, provider_model_identity, provider_target_evidence_id as evidence_id, turn_id,
@@ -564,6 +675,16 @@ mod tests {
         }
     }
 
+    /// Pairs a call identity with a target the way the canonical call
+    /// record does, so tests can still exercise cross-wired combinations the
+    /// public `From` conversions never produce.
+    fn canonical(call: u128, target: ResolvedProviderTarget) -> CanonicalCallTarget {
+        CanonicalCallTarget {
+            call: model_call_id(call),
+            target,
+        }
+    }
+
     fn record_against(
         target: ResolvedProviderTarget,
         id: u128,
@@ -571,7 +692,7 @@ mod tests {
         observation: ProviderTargetObservation,
     ) -> ProviderTargetEvidence {
         ProviderTargetEvidenceLog::new()
-            .record(evidence_id(id), model_call_id(call), target, observation)
+            .record(evidence_id(id), canonical(call, target), observation)
             .expect("a consistent fresh identifier records")
             .evidence()
     }
@@ -588,7 +709,7 @@ mod tests {
     fn evidence_identifier_replay_and_reuse_boundaries_are_exact() {
         let mut log = ProviderTargetEvidenceLog::new();
         let first = log
-            .record(evidence_id(1), model_call_id(2), target(), mismatch(8))
+            .record(evidence_id(1), canonical(2, target()), mismatch(8))
             .unwrap();
         let ProviderTargetEvidenceRecording::First(evidence) = first else {
             panic!("a fresh identifier must record first");
@@ -599,27 +720,27 @@ mod tests {
         assert_eq!(log.lookup(evidence_id(1)), Some(&evidence));
 
         assert_eq!(
-            log.record(evidence_id(1), model_call_id(2), target(), mismatch(8)),
+            log.record(evidence_id(1), canonical(2, target()), mismatch(8)),
             Ok(ProviderTargetEvidenceRecording::Replayed(evidence))
         );
 
         for (call, observation) in [
-            (model_call_id(3), mismatch(8)),
+            (3, mismatch(8)),
             (
-                model_call_id(2),
+                2,
                 ProviderTargetObservation::MatchesResolvedTarget {
                     reported: provider_model_identity(TARGET_IDENTITY),
                 },
             ),
         ] {
             let error = log
-                .record(evidence_id(1), call, target(), observation)
+                .record(evidence_id(1), canonical(call, target()), observation)
                 .unwrap_err();
             let ProviderTargetEvidenceRecordingError::IdentifierReuse(reuse) = error else {
                 panic!("identifier reuse must be rejected as reuse");
             };
             assert_eq!(reuse.existing(), evidence);
-            assert_eq!(reuse.requested_call(), call);
+            assert_eq!(reuse.requested_call(), model_call_id(call));
             assert_eq!(reuse.requested_observation(), observation);
         }
         assert_eq!(log.lookup(evidence_id(1)), Some(&evidence));
@@ -638,7 +759,7 @@ mod tests {
             },
         ] {
             assert_eq!(
-                log.record(evidence_id(1), model_call_id(2), target(), observation),
+                log.record(evidence_id(1), canonical(2, target()), observation),
                 Err(
                     ProviderTargetEvidenceRecordingError::ObservationContradictsTarget {
                         target: target(),
@@ -856,5 +977,101 @@ mod tests {
                 }
             ))
         );
+    }
+
+    /// S21 / INV-014: recording reads the call identity and its exact target
+    /// together from one canonical call record, so a match observation is
+    /// validated against the call's own target and cannot be cross-wired to
+    /// another call's target through the public conversions.
+    #[test]
+    fn recording_binds_the_call_and_target_from_one_canonical_record() {
+        let current = current_call(2);
+        let from_current = CanonicalCallTarget::from(&current);
+        assert_eq!(from_current.call(), model_call_id(2));
+        assert_eq!(from_current.target(), current.target());
+
+        let ended = ended_call(3, ModelCallDisposition::Completed);
+        let from_ended = CanonicalCallTarget::from(&ended);
+        assert_eq!(from_ended.call(), model_call_id(3));
+        assert_eq!(from_ended.target(), ended.target());
+
+        let mut log = ProviderTargetEvidenceLog::new();
+        let matches = ProviderTargetObservation::MatchesResolvedTarget {
+            reported: provider_model_identity(TARGET_IDENTITY),
+        };
+        let recorded = log
+            .record(evidence_id(1), from_current, matches)
+            .expect("a match reported against the call's own target records");
+        assert_eq!(recorded.evidence().call(), model_call_id(2));
+
+        // The only pair reachable from a real record carries that record's
+        // target, so a match claiming a different identity is a contradiction
+        // rather than durable trusted evidence for this call.
+        let mislabeled = ProviderTargetObservation::MatchesResolvedTarget {
+            reported: provider_model_identity(9),
+        };
+        assert_eq!(
+            log.record(
+                evidence_id(2),
+                CanonicalCallTarget::from(&current),
+                mislabeled
+            ),
+            Err(
+                ProviderTargetEvidenceRecordingError::ObservationContradictsTarget {
+                    target: current.target(),
+                    observation: mislabeled,
+                }
+            )
+        );
+    }
+
+    /// S21 / INV-014: the invalidation log owns the per-call uniqueness, so
+    /// the first valid mismatch fixes the entry and a later observation for
+    /// the same call is rejected without the caller tracking the existing
+    /// value.
+    #[test]
+    fn invalidation_log_enforces_uniqueness_without_caller_tracking() {
+        let completed = ended_call(2, ModelCallDisposition::Completed);
+        let evidence = recorded_mismatch(1, 2, 8);
+
+        let mut log = ProviderTargetMismatchInvalidationLog::new();
+        assert_eq!(log.lookup(model_call_id(2)), None);
+
+        let admitted = log.admit(&completed, &evidence).unwrap();
+        let AdmittedProviderTargetMismatchInvalidation::First(invalidation) = admitted else {
+            panic!("the first valid mismatch must fix the value");
+        };
+        assert_eq!(invalidation.invalidated_call(), model_call_id(2));
+        assert_eq!(invalidation.first_mismatch_evidence(), evidence_id(1));
+        assert_eq!(log.lookup(model_call_id(2)), Some(&invalidation));
+
+        assert_eq!(
+            log.admit(&completed, &evidence),
+            Ok(AdmittedProviderTargetMismatchInvalidation::Replayed(
+                invalidation
+            ))
+        );
+
+        let later = recorded_mismatch(4, 2, 9);
+        assert_eq!(
+            log.admit(&completed, &later),
+            Err(
+                ProviderTargetMismatchInvalidationError::LaterObservationCannotReplace {
+                    existing: invalidation,
+                    later_evidence: evidence_id(4),
+                }
+            )
+        );
+        assert_eq!(log.lookup(model_call_id(2)), Some(&invalidation));
+
+        let other_completed = ended_call(5, ModelCallDisposition::Completed);
+        let other = log
+            .admit(&other_completed, &recorded_mismatch(6, 5, 8))
+            .unwrap();
+        assert_eq!(
+            other,
+            AdmittedProviderTargetMismatchInvalidation::First(other.invalidation())
+        );
+        assert_eq!(other.invalidation().invalidated_call(), model_call_id(5));
     }
 }

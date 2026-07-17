@@ -35,7 +35,7 @@ pub use model_call::{
 };
 pub use provider_evidence::{
     ProviderTargetEvidence, ProviderTargetEvidenceLog, ProviderTargetMismatchInvalidation,
-    ProviderTargetObservation,
+    ProviderTargetMismatchInvalidationLog, ProviderTargetObservation,
 };
 pub use queue_order::{
     AcceptedInputQueueOrder, AcceptedInputQueueOrderError, AcceptedInputQueuePriority,
