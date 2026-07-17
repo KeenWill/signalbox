@@ -65,8 +65,6 @@ pub(crate) struct AppliedProviderTargetMismatch {
     effect: ProviderTargetMismatchEffectView,
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "used by the stacked child"))]
-#[cfg_attr(test, expect(dead_code, reason = "test seams await the child"))]
 impl AppliedProviderTargetMismatch {
     const fn nonterminal(evidence: ProviderTargetEvidenceId, call: ModelCallId) -> Self {
         Self {
