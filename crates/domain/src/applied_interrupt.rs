@@ -370,34 +370,15 @@ mod tests {
         AppliedInterruptConstructionError, AppliedSubmitInputFacts, HandledSubmitInputProjection,
         InterruptSessionAssociation, correlate_applied_interrupt,
     };
-    use crate::{
-        AcceptedInputDisposition, AcceptedInputId, AcceptedInputLifecycle, AcceptedInputQueueOrder,
-        AcceptedInputQueueOrderError, AcceptedInputQueueWork, DeliveryRequest, DurableCommandId,
-        ModelCallId, ModelSelectionOverride, PerInputConfigurationChoices,
-        SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition, SteeringBinding,
-        SteeringReclassificationReason, TurnId,
+    use crate::test_support::{
+        accepted_input_id, command_id, model_call_id as call_id, session_id, turn_id,
     };
-    use uuid::Uuid;
-
-    fn command_id(value: u128) -> DurableCommandId {
-        DurableCommandId::from_uuid(Uuid::from_u128(value))
-    }
-
-    fn session_id(value: u128) -> SessionId {
-        SessionId::from_uuid(Uuid::from_u128(value))
-    }
-
-    fn accepted_input_id(value: u128) -> AcceptedInputId {
-        AcceptedInputId::from_uuid(Uuid::from_u128(value))
-    }
-
-    fn turn_id(value: u128) -> TurnId {
-        TurnId::from_uuid(Uuid::from_u128(value))
-    }
-
-    fn call_id(value: u128) -> ModelCallId {
-        ModelCallId::from_uuid(Uuid::from_u128(value))
-    }
+    use crate::{
+        AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputQueueOrder,
+        AcceptedInputQueueOrderError, AcceptedInputQueueWork, DeliveryRequest,
+        ModelSelectionOverride, PerInputConfigurationChoices, SessionConfigurationDefaultsVersion,
+        SessionInputPosition, SteeringBinding, SteeringReclassificationReason,
+    };
 
     fn positions(count: usize) -> Vec<SessionInputPosition> {
         let mut positions = Vec::with_capacity(count);
@@ -516,10 +497,11 @@ mod tests {
         )
         .expect("the nested interrupt is correlated");
 
-        assert_eq!(first.proof(), first.proof());
+        assert_eq!(first.proof().command(), command_id(10));
+        assert_eq!(first.proof().predecessor(), turn_id(1));
+        assert_eq!(nested.proof().command(), command_id(11));
+        assert_eq!(nested.proof().predecessor(), turn_id(2));
         assert_ne!(first.proof(), nested.proof());
-        assert_ne!(first.proof().command(), nested.proof().command());
-        assert_ne!(first.proof().predecessor(), nested.proof().predecessor());
     }
 
     /// S07 / INV-001 / INV-029: an authoritative rejection contains no

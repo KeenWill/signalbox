@@ -198,6 +198,13 @@ pub enum AcceptedInputQueueOrderError {
         turn: TurnId,
     },
     /// An interrupt claimed an acceptance position no later than its target.
+    ///
+    /// This check is an interpretation, not a quoted rule: ADR-0027 accepts
+    /// the active-work modes "only when `expected_active_turn` is the
+    /// session's current active turn", and a turn that is already active has
+    /// an origin input accepted at an earlier position, so interrupt facts
+    /// violating this chronology cannot have been produced by valid
+    /// acceptance.
     InterruptPositionNotAfterPredecessor {
         /// The interrupt-origin turn.
         turn: TurnId,
@@ -210,6 +217,11 @@ pub enum AcceptedInputQueueOrderError {
     },
     /// Later-accepted interrupt work targeted an earlier active predecessor
     /// than a previously accepted interrupt had already reached.
+    ///
+    /// This check is an interpretation, not a quoted rule: it formalizes
+    /// ADR-0027's "a later request must target the new authoritative active
+    /// state" as monotonic advancement of interrupt targets through the
+    /// derived total order.
     InterruptPredecessorChronologyReversed {
         /// The earlier-accepted interrupt-origin turn.
         earlier_interrupt: TurnId,
@@ -231,8 +243,11 @@ pub enum AcceptedInputQueueOrderError {
 /// ordinary root. Interrupt targets must advance monotonically through that
 /// derived order as later inputs are accepted, so a later interrupt cannot
 /// target a turn that an earlier target's activation already required to be
-/// terminal. The returned turn identities are derived order only: no direct-
-/// predecessor pointer is written back into queued work.
+/// terminal; this monotonicity and the position-chronology guard are
+/// interpretations documented on their
+/// [`AcceptedInputQueueOrderError`] variants. The returned turn identities
+/// are derived order only: no direct-predecessor pointer is written back
+/// into queued work.
 pub fn derive_accepted_input_total_order(
     currently_known_work: impl IntoIterator<Item = AcceptedInputQueueWork>,
 ) -> Result<Vec<TurnId>, AcceptedInputQueueOrderError> {
@@ -417,19 +432,11 @@ fn canonical_pair(first: TurnId, second: TurnId) -> (TurnId, TurnId) {
 #[cfg(test)]
 mod tests {
     use super::{
-        AcceptedInputQueueOrder, AcceptedInputQueueOrderError, AcceptedInputQueueWork,
-        SessionInputPosition, derive_accepted_input_total_order,
+        AcceptedInputQueueOrder, AcceptedInputQueueOrderError, AcceptedInputQueuePriority,
+        AcceptedInputQueueWork, SessionInputPosition, derive_accepted_input_total_order,
     };
-    use crate::{SessionId, TurnId};
-    use uuid::Uuid;
-
-    fn turn_id(value: u128) -> TurnId {
-        TurnId::from_uuid(Uuid::from_u128(value))
-    }
-
-    fn session_id(value: u128) -> SessionId {
-        SessionId::from_uuid(Uuid::from_u128(value))
-    }
+    use crate::TurnId;
+    use crate::test_support::{session_id, turn_id};
 
     fn positions(count: usize) -> Vec<SessionInputPosition> {
         let mut positions = Vec::with_capacity(count);
@@ -480,6 +487,36 @@ mod tests {
 
         assert!(first < second);
         assert_eq!(SessionInputPosition(u64::MAX).checked_next(), None);
+    }
+
+    /// INV-009: queue-order facts expose exactly the immutable acceptance
+    /// position and typed priority they were constructed with, and the
+    /// derivation projection round-trips its session, turn, and order without
+    /// substituting or dropping any identity.
+    #[test]
+    fn inv009_queue_order_facts_expose_their_construction_inputs() {
+        let position = positions(2);
+
+        let ordinary_order = AcceptedInputQueueOrder::ordinary(position[0]);
+        assert_eq!(ordinary_order.acceptance_position(), position[0]);
+        assert_eq!(
+            ordinary_order.priority(),
+            AcceptedInputQueuePriority::Ordinary
+        );
+
+        let predecessor = turn_id(7);
+        let interrupt_order =
+            AcceptedInputQueueOrder::interrupt_immediately_after(position[1], predecessor);
+        assert_eq!(interrupt_order.acceptance_position(), position[1]);
+        assert_eq!(
+            interrupt_order.priority(),
+            AcceptedInputQueuePriority::InterruptImmediatelyAfter { predecessor }
+        );
+
+        let work = AcceptedInputQueueWork::new(session_id(100), turn_id(3), interrupt_order);
+        assert_eq!(work.session(), session_id(100));
+        assert_eq!(work.turn(), turn_id(3));
+        assert_eq!(work.order(), interrupt_order);
     }
 
     /// S09 / INV-009: ordinary work is ordered by immutable acceptance

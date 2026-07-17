@@ -706,26 +706,18 @@ impl CurrentTurnAttemptTransitionError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DurableCommandId, TurnId, applied_interrupt::test_applied_interrupt_proof};
-    use uuid::Uuid;
-
-    fn evidence(value: u128) -> ProviderTargetEvidenceId {
-        ProviderTargetEvidenceId::from_uuid(Uuid::from_u128(value))
-    }
+    use crate::applied_interrupt::test_applied_interrupt_proof;
+    use crate::test_support::{
+        command_id, model_call_id, provider_target_evidence_id as evidence,
+        turn_attempt_id as attempt_id, turn_id,
+    };
 
     fn proof(value: u128) -> AppliedInterruptProof {
-        test_applied_interrupt_proof(
-            DurableCommandId::from_uuid(Uuid::from_u128(value)),
-            TurnId::from_uuid(Uuid::from_u128(100)),
-        )
+        test_applied_interrupt_proof(command_id(value), turn_id(100))
     }
 
     fn failure(value: u128) -> ProviderTargetMismatchFailureRef {
         ProviderTargetMismatchFailureRef::nonterminal_call_observation(evidence(value))
-    }
-
-    fn attempt_id(value: u128) -> crate::TurnAttemptId {
-        crate::TurnAttemptId::from_uuid(Uuid::from_u128(value))
     }
 
     fn prepared() -> CurrentTurnAttempt {
@@ -1133,9 +1125,8 @@ mod tests {
             ProviderTargetMismatchFailureRef::nonterminal_call_observation(evidence(1));
         let resolution =
             ProviderTargetMismatchFailureRef::terminal_ambiguity_resolution(evidence(1));
-        let invalidation = ProviderTargetMismatchFailureRef::terminal_call_invalidation(
-            ModelCallId::from_uuid(Uuid::from_u128(1)),
-        );
+        let invalidation =
+            ProviderTargetMismatchFailureRef::terminal_call_invalidation(model_call_id(1));
 
         assert_ne!(nonterminal, resolution);
         assert_ne!(nonterminal, invalidation);
@@ -1155,7 +1146,7 @@ mod tests {
         assert_eq!(
             invalidation.kind(),
             ProviderTargetMismatchFailureKind::TerminalCallInvalidation {
-                invalidated_call: ModelCallId::from_uuid(Uuid::from_u128(1)),
+                invalidated_call: model_call_id(1),
             }
         );
     }

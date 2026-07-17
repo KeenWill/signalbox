@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-17 — Shared test constructors for domain identities
+
+**Context.** Every unit-test module built domain identities with the same `Type::from_uuid(Uuid::from_u128(value))` pattern behind small named helpers, so `turn_id` was defined identically in three modules, `direct` in two, and `session_id`, `model_call_id`, and `accepted_input_id` each carried their own copy. The repetition added no test meaning and drifted independently as modules were added.
+
+**Decision.** Add a `#[cfg(test)] pub(crate) mod test_support` in `crates/domain/src/lib.rs` that generates the identity constructors (`turn_id`, `session_id`, `accepted_input_id`, `model_call_id`, `direct`, `alias`) from one macro, and import them where each test module previously defined its own. This is a mechanical test-only refactor: no production types, public API, or asserted behavior change, and the full validation sequence still passes.
+
+**Rejected alternatives.** Emitting a `from_u128` constructor from `define_identity!` onto every identity type: it would touch call sites throughout and add a constructor to production types solely for tests. A generic `id::<T>(u128)` helper behind a new trait: it adds a trait and turbofish call sites for no readability gain over the terse named constructors the tests already used. Leaving the duplication: it keeps five helpers drifting across modules.
+
+**Affects.** The `#[cfg(test)]` test modules of `crates/domain/src/{accepted_input,configuration,delivery_request,queue_order}.rs` and the new `test_support` module in `crates/domain/src/lib.rs`. No non-test code, re-exports, or invariants change.
+
 ## 2026-07-16 — Private-field current and ended attempt transitions
 
 **Context.** ADR-0004 owns the complete attempt-state transition table and assigns its transitions to the turn aggregate. The preceding turn-attempt value slice makes stop and terminal values constructible, but it does not choose how the aggregate enters or leaves a current Rust attempt without letting other callers forge `Running`, `StopRequested`, or terminal history.
@@ -36,7 +46,7 @@ An append-only, dated record of decisions below foundation weight, newest first.
 
 **Context.** ADR-0027 requires immutable per-session input positions plus ordinary or immediate-after-interrupt priority facts to form one total order over currently known work. It leaves the position representation and pure derivation API open. A single record cannot implement the relational interrupt rule or carry a starting predecessor before eligibility.
 
-**Decision.** Represent `SessionInputPosition` as a private ordinal beginning at one with a checked successor. Supply each derivation item as an explicit session/turn/order projection and reject mixed-session collections without adding session identity to the normative order value. Sort ordinary roots by position, emit each root's unique recursive interrupt-successor chain, and require later-accepted interrupt targets to advance through that derived order. Return typed errors for malformed facts and leave storage and wire encodings open.
+**Decision.** Represent `SessionInputPosition` as a private ordinal beginning at one with a checked successor. Supply each derivation item as an explicit session/turn/order projection and reject mixed-session collections without adding session identity to the normative order value. Sort ordinary roots by position, emit each root's unique recursive interrupt-successor chain, and require later-accepted interrupt targets to advance through that derived order. Return typed errors for malformed facts and leave storage and wire encodings open. Two validity checks are interpretations rather than quoted ADR rules and are documented as such on their error variants: interrupt acceptance positions must follow their predecessor's (from ADR-0027's requirement that active-work modes target the current active turn) and interrupt targets must advance monotonically (formalizing "a later request must target the new authoritative active state").
 
 **Rejected alternatives.** UUID or timestamp positions: neither expresses deterministic session acceptance order. Implementing `Ord` on one `AcceptedInputQueueOrder`: interrupt priority is relational and needs the complete set. Storing an optional direct predecessor: priority insertion would make it premature and rewritable. Treating same-session scope as an unchecked public precondition, silently tie-breaking malformed facts by `TurnId`, or panicking: each would weaken the domain boundary or invent queue semantics not accepted by the ADR.
 
