@@ -6,10 +6,10 @@
 //! session exists, and a transcript ancestry answering where its initial
 //! semantic conversation context came from. This module represents those
 //! facts as pure values, together with the typed [`CreateSession`] caller
-//! payload that pairs them with the initial model-selection defaults ADR-0027
-//! versions: atomic creation-time validation, durable storage, and selection
-//! of a real frontier from source-session history are aggregate and
-//! later-slice work.
+//! payload that pairs them with the initial model-selection defaults that
+//! ADR-0027 versions: atomic creation-time validation, durable storage, and
+//! selection of a real frontier from source-session history are aggregate
+//! and later-slice work.
 
 use crate::{
     DurableCommandId, SessionConfigurationDefaults, SessionId,
