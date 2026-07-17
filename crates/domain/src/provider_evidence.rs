@@ -72,9 +72,12 @@ impl From<&EndedModelCall> for CanonicalCallTarget {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "recording seam is consumed by the later aggregate slice"
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "recording seam is consumed by the later aggregate slice"
+    )
 )]
 impl CanonicalCallTarget {
     /// Returns the canonical call identity.
@@ -123,9 +126,12 @@ pub struct ProviderTargetEvidence {
     observation: ProviderTargetObservation,
 }
 
-#[allow(
-    dead_code,
-    reason = "trusted producer seam is consumed by the later aggregate slice"
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "trusted producer seam is consumed by the later aggregate slice"
+    )
 )]
 impl ProviderTargetEvidence {
     /// Returns the evidence identifier this record is keyed by.
@@ -212,9 +218,12 @@ impl ProviderTargetEvidence {
 
 /// Reports why evidence cannot correlate into mismatch-failure authority.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "trusted producer seam is consumed by the later aggregate slice"
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "trusted producer seam is consumed by the later aggregate slice"
+    )
 )]
 pub(crate) enum ProviderTargetMismatchCorrelationError {
     /// The evidence was recorded for a different model call.
@@ -258,9 +267,12 @@ pub struct ProviderTargetEvidenceLog {
     records: BTreeMap<ProviderTargetEvidenceId, ProviderTargetEvidence>,
 }
 
-#[allow(
-    dead_code,
-    reason = "recording seam is consumed by the later aggregate slice"
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "recording seam is consumed by the later aggregate slice"
+    )
 )]
 impl ProviderTargetEvidenceLog {
     /// Creates an empty evidence log.
@@ -334,9 +346,12 @@ impl ProviderTargetEvidenceLog {
 
 /// Reports why an observation could not be durably recorded.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "recording seam is consumed by the later aggregate slice"
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "recording seam is consumed by the later aggregate slice"
+    )
 )]
 pub(crate) enum ProviderTargetEvidenceRecordingError {
     /// The identifier is already recorded with a different call or payload.
@@ -352,9 +367,12 @@ pub(crate) enum ProviderTargetEvidenceRecordingError {
 
 /// One accepted evidence-recording outcome.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "recording seam is consumed by the later aggregate slice"
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "recording seam is consumed by the later aggregate slice"
+    )
 )]
 pub(crate) enum ProviderTargetEvidenceRecording {
     /// A fresh identifier durably recorded this evidence.
@@ -363,9 +381,12 @@ pub(crate) enum ProviderTargetEvidenceRecording {
     Replayed(ProviderTargetEvidence),
 }
 
-#[allow(
-    dead_code,
-    reason = "recording seam is consumed by the later aggregate slice"
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "recording seam is consumed by the later aggregate slice"
+    )
 )]
 impl ProviderTargetEvidenceRecording {
     /// Returns the recorded evidence for either outcome.
@@ -378,9 +399,12 @@ impl ProviderTargetEvidenceRecording {
 
 /// A rejected identifier reuse with a different call or payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "recording seam is consumed by the later aggregate slice"
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "recording seam is consumed by the later aggregate slice"
+    )
 )]
 pub(crate) struct ProviderTargetEvidenceReuseError {
     existing: ProviderTargetEvidence,
@@ -388,9 +412,12 @@ pub(crate) struct ProviderTargetEvidenceReuseError {
     requested_observation: ProviderTargetObservation,
 }
 
-#[allow(
-    dead_code,
-    reason = "recording seam is consumed by the later aggregate slice"
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "recording seam is consumed by the later aggregate slice"
+    )
 )]
 impl ProviderTargetEvidenceReuseError {
     /// Returns the unchanged existing record for the identifier.
@@ -447,9 +474,12 @@ pub struct ProviderTargetMismatchInvalidation {
     first_mismatch_evidence: ProviderTargetEvidenceId,
 }
 
-#[allow(
-    dead_code,
-    reason = "trusted producer seam is consumed by the later aggregate slice"
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "trusted producer seam is consumed by the later aggregate slice"
+    )
 )]
 impl ProviderTargetMismatchInvalidation {
     /// Returns the completed call whose material became unusable.
@@ -534,9 +564,12 @@ pub struct ProviderTargetMismatchInvalidationLog {
     invalidations: BTreeMap<ModelCallId, ProviderTargetMismatchInvalidation>,
 }
 
-#[allow(
-    dead_code,
-    reason = "admission seam is consumed by the later aggregate slice"
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "admission seam is consumed by the later aggregate slice"
+    )
 )]
 impl ProviderTargetMismatchInvalidationLog {
     /// Creates an empty invalidation log.
@@ -573,9 +606,12 @@ impl ProviderTargetMismatchInvalidationLog {
 
 /// One accepted invalidation-admission outcome.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "trusted producer seam is consumed by the later aggregate slice"
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "trusted producer seam is consumed by the later aggregate slice"
+    )
 )]
 pub(crate) enum AdmittedProviderTargetMismatchInvalidation {
     /// The first valid mismatch fixed the unique value.
@@ -584,9 +620,12 @@ pub(crate) enum AdmittedProviderTargetMismatchInvalidation {
     Replayed(ProviderTargetMismatchInvalidation),
 }
 
-#[allow(
-    dead_code,
-    reason = "trusted producer seam is consumed by the later aggregate slice"
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "trusted producer seam is consumed by the later aggregate slice"
+    )
 )]
 impl AdmittedProviderTargetMismatchInvalidation {
     /// Returns the unique invalidation for either outcome.
@@ -599,9 +638,12 @@ impl AdmittedProviderTargetMismatchInvalidation {
 
 /// Reports why mismatch evidence cannot invalidate a completed call.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "trusted producer seam is consumed by the later aggregate slice"
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "trusted producer seam is consumed by the later aggregate slice"
+    )
 )]
 pub(crate) enum ProviderTargetMismatchInvalidationError {
     /// The offered terminal call did not end `Completed`.
