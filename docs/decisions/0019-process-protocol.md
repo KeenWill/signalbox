@@ -94,6 +94,8 @@ The semantics above are captured as a language-neutral golden fixture corpus —
 
 Message schemas are defined in **Protobuf** (proto3), the single schema source for all consumers; JSON encodings follow the proto3 JSON mapping. The wire protocol is the **Connect RPC protocol**, serving unary requests as plain HTTP POST exchanges (JSON or binary Protobuf) and subscriptions as Connect server-streaming responses.
 
+Proto3's default handling of unknown fields — accept and preserve them unread — would let an older hub silently decode a newer client's ungranted-capability field or command variant as an older request, defeating INV-033 on the binary path. This selection therefore requires the opposite: every runtime and transport mapping must reject content outside the negotiated version and capability set rather than ignore it, and capability-gated additions are carried behind negotiated discriminators an older speaker classifies as the typed incompatibility (ADR-0021), never as optional fields it drops. Enforcing that on each mapping is a slice concern; the fixture corpus below includes the unknown-content exchanges that pin it.
+
 The candidates were evaluated against the owner's criteria — Swift toolchain reality first, browser viability as an explicit transport criterion, and Rust server and TUI-client cost:
 
 | Criterion | gRPC (tonic + grpc-swift-2, tonic-web for browsers) | Connect (connect-swift, connect-es, Rust runtime) | JSON/HTTP + SSE (hand- or generated types) |
@@ -140,7 +142,7 @@ The repository gains a Protobuf schema source and a fixture corpus that every co
 
 ## Extension implications
 
-Reserved ADR-0020 decides the exact browser transport within this selection — the Connect protocol over fetch is the default expectation, and that record chooses the concrete client configuration, cross-origin deployment posture, and any fallback mode — without reopening the snapshot/stream semantics. Reserved ADR-0023 decides Swift type-generation mechanics against the stated input. The reserved runner protocol records (ADR-0008, ADR-0016) define the runner-facing boundary, including the wire encoding of ADR-0009's fence fields, and adopt ADR-0021's baseline; nothing here presumes the runner boundary shares this protocol's schema or transport. New command kinds, snapshot projections, and event types arrive as schema additions under ADR-0021's negotiation rules, each with fixtures in the same change.
+Reserved ADR-0020 decides the exact browser transport within this selection — the Connect protocol over fetch is the default expectation, and that record chooses the concrete client configuration, cross-origin deployment posture, and any fallback mode — without reopening the snapshot/stream semantics. Reserved ADR-0023 decides Swift type-generation mechanics against the stated input. The reserved runner protocol record (ADR-0008) defines the runner-facing boundary, including the wire encoding of ADR-0009's fence fields, and adopts ADR-0021's baseline; nothing here presumes the runner boundary shares this protocol's schema or transport. New command kinds, snapshot projections, and event types arrive as schema additions under ADR-0021's negotiation rules, each with fixtures in the same change.
 
 ## Open questions
 
@@ -153,4 +155,4 @@ Reserved ADR-0020 decides the exact browser transport within this selection — 
 
 ## Explicit non-decisions
 
-This record does not decide the runner protocol (reserved ADR-0008, ADR-0016), ADR-0023's code-generation mechanics beyond the stated input, or the exact browser transport beyond the viability evaluation (reserved ADR-0020). It selects no Rust crate, Swift package, npm package, or other dependency, adds no code, and defines no final message schema, field name, or endpoint path — pseudocode and tables above are semantic shapes for review, not a wire API. It does not choose authentication, credential storage, resource limits, client presentation, or client implementation order, and it does not alter the accepted deduplication, lifecycle, or frontier semantics it carries.
+This record does not decide the runner protocol (reserved ADR-0008), ADR-0023's code-generation mechanics beyond the stated input, or the exact browser transport beyond the viability evaluation (reserved ADR-0020). It selects no Rust crate, Swift package, npm package, or other dependency, adds no code, and defines no final message schema, field name, or endpoint path — pseudocode and tables above are semantic shapes for review, not a wire API. It does not choose authentication, credential storage, resource limits, client presentation, or client implementation order, and it does not alter the accepted deduplication, lifecycle, or frontier semantics it carries.
