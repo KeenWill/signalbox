@@ -70,7 +70,7 @@ The two direct branches commit no intermediate `StopRequested`. Their single agg
 
 ### Best-effort cancellation is not a terminal guard
 
-ADR-0005 requires the first trusted nonterminal mismatch or active-turn invalidation to durably request best-effort cancellation of remaining provider work. Whenever the mismatch timing requires that request, the direct transaction still records it. Delivery, provider acknowledgement, or local connection closure is operational cleanup; none proves that the provider stopped, and none is an ADR-0004 terminal guard.
+ADR-0005 requires the first trusted nonterminal mismatch to durably request best-effort cancellation of remaining provider work, and active-turn invalidation of a completed current-authority call to durably request best-effort cancellation of already-issued continuation/tool work. The direct transaction preserves each case's exact cancellation target rather than narrowing it to provider work, so an issued tool or runner attempt is not left without durable cancellation intent. Whenever the mismatch timing requires that request, the direct transaction still records it. Delivery, provider acknowledgement, or local connection closure is operational cleanup; none proves that the provider stopped, and none is an ADR-0004 terminal guard.
 
 Once the mismatched call is durably classified and non-authoritative, pending delivery or acknowledgement of that cancellation request does not by itself require `StopRequested`. A successor may become eligible while cleanup continues. Late chunks or provider outcomes remain audit/reconciliation evidence and cannot authorize new effects, restore provider-outcome authority, or rewrite the terminal turn.
 
