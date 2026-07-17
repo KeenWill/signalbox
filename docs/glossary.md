@@ -202,7 +202,7 @@ This glossary recommends working language for design discussion. “Accepted” 
 
 ## Dispatch generation
 
-- **Definition:** A monotonic fencing value or equivalent token that identifies which scheduler dispatch is currently authorized to report for a physical attempt.
-- **Status:** Behavior accepted; representation and whether it is monotonic are provisional.
+- **Definition:** A per-attempt monotonic ordinal that identifies which scheduler dispatch is currently authorized to report for a physical attempt.
+- **Status:** Behavior and the monotonic per-attempt ordinal semantics accepted by [ADR-0009](decisions/0009-dispatch-fencing.md); wire encoding and storage placement remain reserved to the protocol and persistence slices.
 - **Do not confuse with:** A runner identifier, attempt identifier, or transport message sequence.
 - **Example:** A result for generation 3 arrives after generation 4 was assigned; the hub records or discards it as stale without advancing current state.
