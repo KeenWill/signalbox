@@ -66,6 +66,8 @@ Dispatch fencing and initial scheduler mechanics are decided by accepted [ADR-00
 
 ## Identity, credentials, and resource governance (reserved ADR-0015 through ADR-0018)
 
+Provider and integration credential lifecycle (storage, delivery, and rotation) is decided by accepted [ADR-0017](decisions/0017-credential-lifecycle.md); the questions below remain open.
+
 - **Owner client authentication and revocation.** Keep the hub's authorization model single-owner while choosing a remotely safe authentication boundary. Blocks any remote client. (S01, S10, S24, S25)
 - **Runner enrollment, authentication, and revocation.** Strong runner identity distinct from capability claims, with rotation. Blocks remote runners. (S05, S06, S12–S16)
 - **First-release resource limits.** Leaning: explicit bounded concurrency and configurable usage limits at effect boundaries. Blocks public release. (S02–S06, S13–S18)
