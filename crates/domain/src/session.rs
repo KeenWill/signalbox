@@ -5,11 +5,16 @@
 //! independent, immutable creation facts: a creation cause answering why the
 //! session exists, and a transcript ancestry answering where its initial
 //! semantic conversation context came from. This module represents those
-//! facts as pure values: atomic creation-time validation, durable storage,
-//! and selection of a real frontier from source-session history are aggregate
-//! and later-slice work.
+//! facts as pure values, together with the typed [`CreateSession`] caller
+//! payload that pairs them with the initial model-selection defaults ADR-0027
+//! versions: atomic creation-time validation, durable storage, and selection
+//! of a real frontier from source-session history are aggregate and
+//! later-slice work.
 
-use crate::SessionId;
+use crate::{
+    DurableCommandId, SessionConfigurationDefaults, SessionId,
+    VersionedSessionConfigurationDefaults,
+};
 
 /// Why one session exists.
 ///
@@ -157,6 +162,110 @@ impl SessionCreationProvenance {
     }
 }
 
+/// The complete typed caller payload that creates one session.
+///
+/// The payload carries the owner-global durable command identity, both
+/// required independent creation-provenance facts, and one complete
+/// unversioned model-selection defaults value. Session creation establishes
+/// the first immutable defaults version through
+/// [`Self::establish_initial_defaults`], so the caller cannot supply a
+/// version of its own:
+///
+/// ```compile_fail
+/// use signalbox_domain::{
+///     CreateSession, DurableCommandId, SessionCreationProvenance,
+///     VersionedSessionConfigurationDefaults,
+/// };
+///
+/// fn a_versioned_value_is_not_a_creation_payload(
+///     command_id: DurableCommandId,
+///     provenance: SessionCreationProvenance,
+///     defaults: VersionedSessionConfigurationDefaults,
+/// ) {
+///     let _ = CreateSession::new(command_id, provenance, defaults);
+/// }
+/// ```
+///
+/// # Scope
+///
+/// This is neither a wire message nor a committed command handling. It omits
+/// session identity minting, owner authority, command deduplication and
+/// replay, atomic validation of the provenance pair before acknowledgement,
+/// persistence, and acknowledgement.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct CreateSession {
+    command_id: DurableCommandId,
+    provenance: SessionCreationProvenance,
+    initial_configuration_defaults: SessionConfigurationDefaults,
+}
+
+impl CreateSession {
+    /// Creates the complete payload from its command identity, provenance
+    /// facts, and unversioned initial defaults value.
+    pub const fn new(
+        command_id: DurableCommandId,
+        provenance: SessionCreationProvenance,
+        initial_configuration_defaults: SessionConfigurationDefaults,
+    ) -> Self {
+        Self {
+            command_id,
+            provenance,
+            initial_configuration_defaults,
+        }
+    }
+
+    /// Returns the owner-global durable command identity claimed by this
+    /// payload.
+    pub const fn command_id(&self) -> DurableCommandId {
+        self.command_id
+    }
+
+    /// Returns the two required independent creation facts.
+    pub const fn provenance(&self) -> SessionCreationProvenance {
+        self.provenance
+    }
+
+    /// Returns the complete unversioned initial defaults payload.
+    pub const fn initial_configuration_defaults(&self) -> SessionConfigurationDefaults {
+        self.initial_configuration_defaults
+    }
+
+    /// Establishes the first immutable defaults version this creation
+    /// installs.
+    ///
+    /// The result is always [`VersionedSessionConfigurationDefaults::establish`]
+    /// applied to the carried payload, so session creation establishes
+    /// version one. S01 / INV-003: the established defaults are operationally
+    /// associated with the session but are not a third creation-provenance
+    /// fact:
+    ///
+    /// ```compile_fail
+    /// use signalbox_domain::{
+    ///     SessionConfigurationDefaults, SessionCreationCause,
+    ///     SessionCreationProvenance, TranscriptAncestry,
+    /// };
+    ///
+    /// fn defaults_are_not_a_provenance_fact(
+    ///     cause: SessionCreationCause,
+    ///     ancestry: TranscriptAncestry,
+    ///     defaults: SessionConfigurationDefaults,
+    /// ) {
+    ///     let _ = SessionCreationProvenance {
+    ///         cause,
+    ///         ancestry,
+    ///         defaults,
+    ///     };
+    /// }
+    /// ```
+    ///
+    /// A later explicit replacement installs the next version without
+    /// rewriting creation cause, transcript ancestry, or already accepted
+    /// work.
+    pub const fn establish_initial_defaults(&self) -> VersionedSessionConfigurationDefaults {
+        VersionedSessionConfigurationDefaults::establish(self.initial_configuration_defaults)
+    }
+}
+
 #[cfg(test)]
 const fn test_frontier(value: u128) -> TranscriptFrontier {
     TranscriptFrontier {
@@ -167,9 +276,25 @@ const fn test_frontier(value: u128) -> TranscriptFrontier {
 #[cfg(test)]
 mod tests {
     use super::{
-        SessionCreationCause, SessionCreationProvenance, TranscriptAncestry, test_frontier,
+        CreateSession, SessionCreationCause, SessionCreationProvenance, TranscriptAncestry,
+        test_frontier,
     };
-    use crate::test_support::session_id;
+    use crate::test_support::{command_id, direct, session_id};
+    use crate::{
+        ModelSelectionRequest, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
+        VersionedSessionConfigurationDefaults,
+    };
+
+    fn defaults(value: u128) -> SessionConfigurationDefaults {
+        SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(direct(value)))
+    }
+
+    fn owner_initiated_empty() -> SessionCreationProvenance {
+        SessionCreationProvenance::new(
+            SessionCreationCause::OwnerInitiated,
+            TranscriptAncestry::None,
+        )
+    }
 
     /// S01 / INV-003: an owner-initiated session with explicitly empty
     /// ancestry is complete creation provenance for an empty conversation.
@@ -257,5 +382,88 @@ mod tests {
         assert_ne!(ancestry, different_session);
         assert_ne!(ancestry, different_frontier);
         assert_ne!(ancestry, TranscriptAncestry::None);
+    }
+
+    /// S01 / INV-003: the creation payload couples the durable command
+    /// identity, both independent provenance facts, and one complete
+    /// unversioned defaults payload.
+    #[test]
+    fn s01_inv003_create_session_couples_command_provenance_and_defaults() {
+        let provenance = owner_initiated_empty();
+        let create = CreateSession::new(command_id(1), provenance, defaults(2));
+
+        assert_eq!(create.command_id(), command_id(1));
+        assert_eq!(create.provenance(), provenance);
+        assert_eq!(create.initial_configuration_defaults(), defaults(2));
+    }
+
+    /// S01: session creation establishes exactly version one of the carried
+    /// model-selection defaults payload.
+    #[test]
+    fn s01_creation_establishes_version_one_of_the_carried_defaults() {
+        let create = CreateSession::new(command_id(1), owner_initiated_empty(), defaults(2));
+
+        let established = create.establish_initial_defaults();
+
+        assert_eq!(
+            established,
+            VersionedSessionConfigurationDefaults::establish(defaults(2))
+        );
+        assert_eq!(
+            established.version(),
+            SessionConfigurationDefaultsVersion::first()
+        );
+        assert_eq!(*established.defaults(), defaults(2));
+    }
+
+    /// S01 / S17 / INV-003: initial defaults never join the provenance facts,
+    /// and replacing established defaults installs a later version while both
+    /// provenance facts compare unchanged.
+    #[test]
+    fn s01_s17_inv003_defaults_are_not_a_third_provenance_fact() {
+        let provenance = owner_initiated_empty();
+        let first = CreateSession::new(command_id(1), provenance, defaults(2));
+        let second = CreateSession::new(command_id(1), provenance, defaults(3));
+
+        assert_ne!(first, second);
+        assert_eq!(first.provenance(), second.provenance());
+
+        let replaced = first
+            .establish_initial_defaults()
+            .replace(defaults(4))
+            .expect("version one must have a next version");
+        assert_eq!(
+            Some(replaced.version()),
+            SessionConfigurationDefaultsVersion::first().checked_next()
+        );
+        assert_eq!(first.provenance(), provenance);
+    }
+
+    /// S01 / S17 / INV-012: canonical payload comparison includes the command
+    /// identity, both provenance facts, and the defaults payload.
+    #[test]
+    fn s01_s17_inv012_create_session_payload_equality_is_structural() {
+        let fork = SessionCreationProvenance::new(
+            SessionCreationCause::OwnerInitiated,
+            TranscriptAncestry::SingleSource {
+                source_session: session_id(1),
+                source_frontier: test_frontier(2),
+            },
+        );
+        let create = CreateSession::new(command_id(3), owner_initiated_empty(), defaults(4));
+
+        assert_eq!(
+            create,
+            CreateSession::new(command_id(3), owner_initiated_empty(), defaults(4))
+        );
+        assert_ne!(
+            create,
+            CreateSession::new(command_id(5), owner_initiated_empty(), defaults(4))
+        );
+        assert_ne!(create, CreateSession::new(command_id(3), fork, defaults(4)));
+        assert_ne!(
+            create,
+            CreateSession::new(command_id(3), owner_initiated_empty(), defaults(6))
+        );
     }
 }
