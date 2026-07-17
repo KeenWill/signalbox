@@ -11,6 +11,7 @@ mod applied_interrupt;
 mod configuration;
 mod delivery_request;
 mod queue_order;
+mod turn_attempt;
 
 pub use accepted_input::{
     AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputLifecycleTransitionError,
@@ -29,6 +30,12 @@ pub use delivery_request::{DeliveryRequest, PerInputConfigurationChoices};
 pub use queue_order::{
     AcceptedInputQueueOrder, AcceptedInputQueueOrderError, AcceptedInputQueuePriority,
     AcceptedInputQueueWork, SessionInputPosition, derive_accepted_input_total_order,
+};
+pub use turn_attempt::{
+    AppliedInterruptState, AttemptEnd, CancellationStopDisposition, FatalMismatchStopCauses,
+    FatalMismatchStopDisposition, ProviderTargetMismatchFailureKind,
+    ProviderTargetMismatchFailureRef, TurnAttemptStopCauseUnionError, TurnAttemptStopCauses,
+    UnstoppedAttemptDisposition,
 };
 
 macro_rules! define_identity {
@@ -91,6 +98,11 @@ define_identity!(
 );
 
 define_identity!(
+    /// Identifies one trusted observation of a provider's reported model.
+    ProviderTargetEvidenceId
+);
+
+define_identity!(
     /// Identifies one logical request for a normalized tool operation.
     ToolRequestId
 );
@@ -103,8 +115,8 @@ define_identity!(
 #[cfg(test)]
 mod tests {
     use super::{
-        AcceptedInputId, DurableCommandId, ModelCallId, SessionId, ToolAttemptId, ToolRequestId,
-        TurnAttemptId, TurnId,
+        AcceptedInputId, DurableCommandId, ModelCallId, ProviderTargetEvidenceId, SessionId,
+        ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId,
     };
     use uuid::Uuid;
 
@@ -131,6 +143,7 @@ mod tests {
         assert_uuid_contract!(TurnId);
         assert_uuid_contract!(TurnAttemptId);
         assert_uuid_contract!(ModelCallId);
+        assert_uuid_contract!(ProviderTargetEvidenceId);
         assert_uuid_contract!(ToolRequestId);
         assert_uuid_contract!(ToolAttemptId);
     }

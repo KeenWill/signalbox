@@ -62,6 +62,17 @@ impl AppliedInterruptProof {
     }
 }
 
+#[cfg(test)]
+pub(crate) const fn test_applied_interrupt_proof(
+    command: DurableCommandId,
+    predecessor: TurnId,
+) -> AppliedInterruptProof {
+    AppliedInterruptProof {
+        command,
+        predecessor,
+    }
+}
+
 /// The correlated domain result of one applied interrupt command.
 ///
 /// This value groups the purpose-specific proof with the accepted input and
