@@ -505,10 +505,11 @@ mod tests {
         )
         .expect("the nested interrupt is correlated");
 
-        assert_eq!(first.proof(), first.proof());
+        assert_eq!(first.proof().command(), command_id(10));
+        assert_eq!(first.proof().predecessor(), turn_id(1));
+        assert_eq!(nested.proof().command(), command_id(11));
+        assert_eq!(nested.proof().predecessor(), turn_id(2));
         assert_ne!(first.proof(), nested.proof());
-        assert_ne!(first.proof().command(), nested.proof().command());
-        assert_ne!(first.proof().predecessor(), nested.proof().predecessor());
     }
 
     /// S07 / INV-001 / INV-029: an authoritative rejection contains no
