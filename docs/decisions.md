@@ -12,6 +12,16 @@ An append-only, dated record of decisions below foundation weight, newest first.
 
 **Affects.** `crates/domain/src/configuration.rs` and its tests, and a `crates/domain/src/delivery_request.rs` test that constructs a later version. Refines the 2026-07-15 "Ordinal session-defaults versions" decision's "successor operation" to a checked successor; storage and wire encodings remain open.
 
+## 2026-07-17 — Opaque transcript frontier and session-provenance value spelling
+
+**Context.** ADR-0003 requires every session to record an immutable creation cause and an independent transcript ancestry of none or exactly one exact source frontier, and states its pseudocode is not final Rust spelling. The representation of a boundary in semantic history is undecided (semantic-transcript-entry identity remains an open question), and the turn-lifecycle slice deliberately declined to invent a frontier token.
+
+**Decision.** Represent the cause as the closed one-variant enum `SessionCreationCause::OwnerInitiated` (spelled with the `Session` prefix for the flat crate namespace), ancestry as a two-variant enum whose single-source variant carries the source session and an opaque `TranscriptFrontier`, and provenance as a private-field pair requiring both facts. Back the frontier with a private UUID token that has no public constructor, accessor, or raw-part conversion, so equality compares exact boundaries while the trusted producer arrives with the slice that fixes semantic-history boundaries.
+
+**Rejected alternatives.** A `#[non_exhaustive]` cause enum: reserved extension examples are added as typed variants by the ADR that defines their initiating identity, and a wildcard arm today would silently absorb causes that cannot exist yet. A public UUID-backed frontier identity via `define_identity!`: it exports a durable identity kind the ADR-0001 identity set does not list and lets callers mint unvalidated fork points. An `Option`-wrapped source struct instead of an ancestry enum: the ADR gives explicit `None` its own meaning, which the named variant documents and extension preserves.
+
+**Affects.** New `crates/domain/src/session.rs`, its re-exports from `crates/domain/src/lib.rs`, and enforcement links for INV-003 and INV-030 in `docs/invariants.md`; atomic creation-time validation, frontier selection from real source history, persistence, and the `CreateSession` payload coupling remain later slices.
+
 ## 2026-07-17 — Shared test constructors for domain identities
 
 **Context.** Every unit-test module built domain identities with the same `Type::from_uuid(Uuid::from_u128(value))` pattern behind small named helpers, so `turn_id` was defined identically in three modules, `direct` in two, and `session_id`, `model_call_id`, and `accepted_input_id` each carried their own copy. The repetition added no test meaning and drifted independently as modules were added.

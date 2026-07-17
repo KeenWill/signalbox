@@ -11,6 +11,7 @@ mod applied_interrupt;
 mod configuration;
 mod delivery_request;
 mod queue_order;
+mod session;
 mod turn_attempt;
 mod turn_lifecycle;
 
@@ -31,6 +32,9 @@ pub use delivery_request::{DeliveryRequest, PerInputConfigurationChoices};
 pub use queue_order::{
     AcceptedInputQueueOrder, AcceptedInputQueueOrderError, AcceptedInputQueuePriority,
     AcceptedInputQueueWork, SessionInputPosition, derive_accepted_input_total_order,
+};
+pub use session::{
+    SessionCreationCause, SessionCreationProvenance, TranscriptAncestry, TranscriptFrontier,
 };
 pub use turn_attempt::{
     AppliedInterruptState, AttemptEnd, CancellationStopDisposition, CurrentTurnAttempt,
