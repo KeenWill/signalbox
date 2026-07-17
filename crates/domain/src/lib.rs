@@ -12,7 +12,9 @@ mod configuration;
 mod delivery_request;
 mod model_call;
 mod queue_order;
+mod session;
 mod turn_attempt;
+mod turn_lifecycle;
 
 pub use accepted_input::{
     AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputLifecycleTransitionError,
@@ -36,12 +38,20 @@ pub use queue_order::{
     AcceptedInputQueueOrder, AcceptedInputQueueOrderError, AcceptedInputQueuePriority,
     AcceptedInputQueueWork, SessionInputPosition, derive_accepted_input_total_order,
 };
+pub use session::{
+    SessionCreationCause, SessionCreationProvenance, TranscriptAncestry, TranscriptFrontier,
+};
 pub use turn_attempt::{
     AppliedInterruptState, AttemptEnd, CancellationStopDisposition, CurrentTurnAttempt,
     CurrentTurnAttemptState, EndedTurnAttempt, FatalMismatchStopCauses,
     FatalMismatchStopDisposition, ProviderTargetMismatchFailureKind,
     ProviderTargetMismatchFailureRef, TurnAttemptStopCauseUnionError, TurnAttemptStopCauses,
     UnstoppedAttemptDisposition,
+};
+pub use turn_lifecycle::{
+    AcceptedInputStartingLineage, ActiveTurnPhase, AppliedStopForReconciliationProof,
+    IssuedOperationRef, NonEmptyIssuedOperationRefs, NonEmptyIssuedOperationRefsError,
+    ReconciliationMarker, ReconciliationReason, TurnDisposition,
 };
 
 macro_rules! define_identity {
@@ -146,6 +156,8 @@ pub(crate) mod test_support {
         model_call_id -> crate::ModelCallId,
         provider_target_evidence_id -> crate::ProviderTargetEvidenceId,
         provider_model_identity -> crate::ProviderModelIdentity,
+        tool_request_id -> crate::ToolRequestId,
+        tool_attempt_id -> crate::ToolAttemptId,
         direct -> crate::DirectModelSelection,
         alias -> crate::ModelAlias,
     }

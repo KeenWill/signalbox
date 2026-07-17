@@ -32,6 +32,16 @@ An append-only, dated record of decisions below foundation weight, newest first.
 
 **Affects.** `crates/domain/src/configuration.rs` and its tests, and a `crates/domain/src/delivery_request.rs` test that constructs a later version. Refines the 2026-07-15 "Ordinal session-defaults versions" decision's "successor operation" to a checked successor; storage and wire encodings remain open.
 
+## 2026-07-17 — Opaque transcript frontier and session-provenance value spelling
+
+**Context.** ADR-0003 requires every session to record an immutable creation cause and an independent transcript ancestry of none or exactly one exact source frontier, and states its pseudocode is not final Rust spelling. The representation of a boundary in semantic history is undecided (semantic-transcript-entry identity remains an open question), and the turn-lifecycle slice deliberately declined to invent a frontier token.
+
+**Decision.** Represent the cause as the closed one-variant enum `SessionCreationCause::OwnerInitiated` (spelled with the `Session` prefix for the flat crate namespace), ancestry as a two-variant enum whose single-source variant carries the source session and an opaque `TranscriptFrontier`, and provenance as a private-field pair requiring both facts. Back the frontier with a private UUID token that has no public constructor, accessor, or raw-part conversion, so equality compares exact boundaries while the trusted producer arrives with the slice that fixes semantic-history boundaries.
+
+**Rejected alternatives.** A `#[non_exhaustive]` cause enum: reserved extension examples are added as typed variants by the ADR that defines their initiating identity, and a wildcard arm today would silently absorb causes that cannot exist yet. A public UUID-backed frontier identity via `define_identity!`: it exports a durable identity kind the ADR-0001 identity set does not list and lets callers mint unvalidated fork points. An `Option`-wrapped source struct instead of an ancestry enum: the ADR gives explicit `None` its own meaning, which the named variant documents and extension preserves.
+
+**Affects.** New `crates/domain/src/session.rs`, its re-exports from `crates/domain/src/lib.rs`, and enforcement links for INV-003 and INV-030 in `docs/invariants.md`; atomic creation-time validation, frontier selection from real source history, persistence, and the `CreateSession` payload coupling remain later slices.
+
 ## 2026-07-17 — Shared test constructors for domain identities
 
 **Context.** Every unit-test module built domain identities with the same `Type::from_uuid(Uuid::from_u128(value))` pattern behind small named helpers, so `turn_id` was defined identically in three modules, `direct` in two, and `session_id`, `model_call_id`, and `accepted_input_id` each carried their own copy. The repetition added no test meaning and drifted independently as modules were added.
@@ -41,6 +51,16 @@ An append-only, dated record of decisions below foundation weight, newest first.
 **Rejected alternatives.** Emitting a `from_u128` constructor from `define_identity!` onto every identity type: it would touch call sites throughout and add a constructor to production types solely for tests. A generic `id::<T>(u128)` helper behind a new trait: it adds a trait and turbofish call sites for no readability gain over the terse named constructors the tests already used. Leaving the duplication: it keeps five helpers drifting across modules.
 
 **Affects.** The `#[cfg(test)]` test modules of `crates/domain/src/{accepted_input,configuration,delivery_request,queue_order}.rs` and the new `test_support` module in `crates/domain/src/lib.rs`. No non-test code, re-exports, or invariants change.
+
+## 2026-07-16 — Canonical reconciliation and active-phase values
+
+**Context.** ADR-0004 fixes the tagged nonempty ambiguity set, proof-bearing reconciliation and terminal values, and exact active-phase variants. ADR-0027 fixes the starting-lineage algebra. The exact context-frontier and aggregate evidence boundaries needed to construct a complete start or claim a lifecycle transition do not yet exist, so this slice needs representations that cannot overstate that authority.
+
+**Decision.** Represent starting lineage and issued-operation kinds as closed enums. Store ambiguity references in a private `BTreeSet`, rejecting empty and duplicate caller collections so valid reorderings compare equal. Keep the applied stop proof opaque and the reconciliation marker's fields private; expose only observation of their exact payloads. Represent each active phase and terminal disposition as the ADR's exact structural variant, without optional attempt or wait-subject fields. These standalone values claim neither aggregate guard satisfaction nor a valid state transition.
+
+**Rejected alternatives.** A vector permits duplicates and event-order-dependent equality. Stringly operation identifiers collapse distinct physical-operation kinds. Public proof or marker construction from raw identifiers lets callers mint lifecycle authority. Optional fields or a catch-all wait admit invalid phase shapes. Inventing a frontier token or incomplete aggregate would choose an undecided semantic boundary.
+
+**Affects.** `crates/domain/src/turn_lifecycle.rs`, its re-exports from `crates/domain/src/lib.rs`, and enforcement links in `docs/invariants.md`; exact frontier construction, `AcceptedInputTurnStart`, the authoritative turn aggregate, eligibility, production proof construction, terminal guards, persistence, and startup recovery remain later work.
 
 ## 2026-07-16 — Private-field current and ended attempt transitions
 
