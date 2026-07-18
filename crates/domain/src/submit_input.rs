@@ -1,21 +1,23 @@
-//! Canonical durable input submission and no-active-turn preparation.
+//! Canonical durable input submission and authoritative-state preparation.
 //!
 //! ADR-0027 owns accepted-input delivery, configuration, ordering, and
 //! disposition semantics. ADR-0034 owns structural replay equality, ADR-0035
 //! owns checked reconstitution, ADR-0037 owns content, and ADR-0039 owns
-//! actor attribution. This slice prepares only the authoritative state that
-//! exists before turn machinery: a session with no active turn. It creates
-//! durable queued logical-work facts but no turn lifecycle, eligibility,
-//! frontier, slot, attempt, steering consumption, or interrupt transition.
+//! actor attribution. This slice prepares accepted origin work with no active
+//! turn or after the exact active turn, and pending steering for the exact
+//! active turn. It does not consume steering, apply interruption, construct an
+//! interrupt proof, transition turn lifecycle, or perform persistence.
 
 use std::hash::{Hash, Hasher};
 
 use crate::{
     AcceptedInputDisposition, AcceptedInputId, AcceptedInputQueueOrder, AcceptedInputQueuePriority,
-    Actor, DeliveryRequest, DurableCommandId, FrozenAliasDefinition, FrozenModelSelection,
-    ModelAlias, ModelSelectionRequest, OriginConfiguration, PerInputConfigurationChoices, Session,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
-    SessionInputPosition, TurnId, UserContent, VersionedSessionConfigurationDefaults,
+    AcceptedInputTurnSchedulingProjection, AcceptedInputTurnSchedulingStatus, ActiveTurnPhase,
+    Actor, CurrentTurnAttemptState, DeliveryRequest, DurableCommandId, FrozenAliasDefinition,
+    FrozenModelSelection, ModelAlias, ModelSelectionRequest, OriginConfiguration,
+    PerInputConfigurationChoices, Session, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition, SteeringBinding, TurnId,
+    UserContent, VersionedSessionConfigurationDefaults,
 };
 
 /// One canonical owner-global durable input command.
@@ -194,14 +196,250 @@ impl SubmitInput {
         let target_session = self.session;
         Ok(PreparedSubmitInput {
             command: self,
-            result: SubmitInputResult::Applied(SubmitInputAppliedResult {
-                accepted_input,
-                session: target_session,
-                turn,
-                queue_order: AcceptedInputQueueOrder::ordinary(acceptance_position),
-                origin_configuration,
-            }),
+            result: SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(
+                SubmitInputTurnOriginAppliedResult {
+                    accepted_input,
+                    session: target_session,
+                    acceptance_position,
+                    turn,
+                    queue_order: AcceptedInputQueueOrder::ordinary(acceptance_position),
+                    origin_configuration,
+                },
+            )),
         })
+    }
+
+    /// Prepares handling against the exact authoritative active turn.
+    ///
+    /// `StartWhenNoActiveTurn` records the active slot owner, stale
+    /// active-work requests record both expected and actual turns, matching
+    /// after-current input creates ordinary queued origin work, and matching
+    /// next-safe-point input creates pending steering unless the current
+    /// attempt is already `StopRequested`. Interrupt application remains a
+    /// nonclaiming preparation failure in this slice.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_with_active_turn(
+        self,
+        session: &Session,
+        active_turn: &AcceptedInputTurnSchedulingProjection,
+        accepted_input: AcceptedInputId,
+        turn: Option<TurnId>,
+        previous_position: Option<SessionInputPosition>,
+        select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+    ) -> Result<PreparedSubmitInput, SubmitInputPreparationError> {
+        if session.id() != self.session {
+            return Err(SubmitInputPreparationError {
+                command: Box::new(self),
+                failure: SubmitInputPreparationFailure::SessionMismatch {
+                    provided_session: session.id(),
+                },
+            });
+        }
+        if active_turn.session() != self.session {
+            return Err(SubmitInputPreparationError {
+                command: Box::new(self),
+                failure: SubmitInputPreparationFailure::ActiveTurnSessionMismatch {
+                    provided_session: active_turn.session(),
+                },
+            });
+        }
+        if active_turn.status() != AcceptedInputTurnSchedulingStatus::Active {
+            return Err(SubmitInputPreparationError {
+                command: Box::new(self),
+                failure: SubmitInputPreparationFailure::ActiveTurnProjectionIsNotActive {
+                    provided_turn: active_turn.turn(),
+                },
+            });
+        }
+        if delivery_creates_turn(self.delivery) != turn.is_some() {
+            return Err(SubmitInputPreparationError {
+                command: Box::new(self),
+                failure: SubmitInputPreparationFailure::TurnCandidateMismatch,
+            });
+        }
+
+        let actual_active_turn = active_turn.turn();
+        let target_session = self.session;
+        let delivery = self.delivery;
+        let expected_active_turn = match delivery {
+            DeliveryRequest::StartWhenNoActiveTurn { .. } => {
+                return Ok(PreparedSubmitInput {
+                    command: self,
+                    result: SubmitInputResult::Rejected(
+                        SubmitInputRejectedResult::ActiveTurnPresent {
+                            session: target_session,
+                            active_turn: actual_active_turn,
+                        },
+                    ),
+                });
+            }
+            DeliveryRequest::Interrupt {
+                expected_active_turn,
+                ..
+            }
+            | DeliveryRequest::NextSafePoint {
+                expected_active_turn,
+            }
+            | DeliveryRequest::AfterCurrentTurn {
+                expected_active_turn,
+                ..
+            } => expected_active_turn,
+        };
+        if expected_active_turn != actual_active_turn {
+            return Ok(PreparedSubmitInput {
+                command: self,
+                result: SubmitInputResult::Rejected(
+                    SubmitInputRejectedResult::ActiveTurnMismatch {
+                        session: target_session,
+                        expected_active_turn,
+                        actual_active_turn,
+                    },
+                ),
+            });
+        }
+
+        match delivery {
+            DeliveryRequest::Interrupt { .. } => Err(SubmitInputPreparationError {
+                command: Box::new(self),
+                failure: SubmitInputPreparationFailure::InterruptApplicationUnavailable,
+            }),
+            DeliveryRequest::NextSafePoint { .. } => {
+                let phase = active_turn
+                    .active_phase()
+                    .expect("validated active scheduling projection has an exact phase");
+                if matches!(
+                    phase,
+                    ActiveTurnPhase::Running { current_attempt }
+                        if matches!(
+                            current_attempt.state(),
+                            CurrentTurnAttemptState::StopRequested { .. }
+                        )
+                ) {
+                    return Ok(PreparedSubmitInput {
+                        command: self,
+                        result: SubmitInputResult::Rejected(
+                            SubmitInputRejectedResult::SafePointUnavailableWhileStopping {
+                                session: target_session,
+                                active_turn: actual_active_turn,
+                            },
+                        ),
+                    });
+                }
+
+                let acceptance_position = match next_acceptance_position(previous_position) {
+                    Ok(position) => position,
+                    Err(last) => {
+                        return Ok(PreparedSubmitInput {
+                            command: self,
+                            result: SubmitInputResult::Rejected(
+                                SubmitInputRejectedResult::AcceptancePositionExhausted {
+                                    session: target_session,
+                                    last,
+                                },
+                            ),
+                        });
+                    }
+                };
+                let binding = SteeringBinding::new(actual_active_turn);
+                Ok(PreparedSubmitInput {
+                    command: self,
+                    result: SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(
+                        SubmitInputPendingSteeringAppliedResult {
+                            accepted_input,
+                            session: target_session,
+                            acceptance_position,
+                            binding,
+                        },
+                    )),
+                })
+            }
+            DeliveryRequest::AfterCurrentTurn { configuration, .. } => {
+                let Some(turn) = turn else {
+                    unreachable!("turn-candidate correlation was validated above");
+                };
+                let checked = match session.current_configuration_defaults().derive_request(
+                    configuration.expected_session_defaults_version(),
+                    configuration.model(),
+                ) {
+                    Ok(checked) => checked,
+                    Err(mismatch) => {
+                        return Ok(PreparedSubmitInput {
+                            command: self,
+                            result: SubmitInputResult::Rejected(
+                                SubmitInputRejectedResult::SessionDefaultsVersionMismatch {
+                                    session: target_session,
+                                    expected: mismatch.expected(),
+                                    current: mismatch.current(),
+                                },
+                            ),
+                        });
+                    }
+                };
+                let origin_configuration =
+                    match OriginConfiguration::freeze(checked, select_definition) {
+                        Ok(configuration) => configuration,
+                        Err(unknown) => {
+                            return Ok(PreparedSubmitInput {
+                                command: self,
+                                result: SubmitInputResult::Rejected(
+                                    SubmitInputRejectedResult::UnknownModelAlias {
+                                        session: target_session,
+                                        alias: unknown.alias(),
+                                    },
+                                ),
+                            });
+                        }
+                    };
+                let acceptance_position = match next_acceptance_position(previous_position) {
+                    Ok(position) => position,
+                    Err(last) => {
+                        return Ok(PreparedSubmitInput {
+                            command: self,
+                            result: SubmitInputResult::Rejected(
+                                SubmitInputRejectedResult::AcceptancePositionExhausted {
+                                    session: target_session,
+                                    last,
+                                },
+                            ),
+                        });
+                    }
+                };
+                Ok(PreparedSubmitInput {
+                    command: self,
+                    result: SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(
+                        SubmitInputTurnOriginAppliedResult {
+                            accepted_input,
+                            session: target_session,
+                            acceptance_position,
+                            turn,
+                            queue_order: AcceptedInputQueueOrder::ordinary(acceptance_position),
+                            origin_configuration,
+                        },
+                    )),
+                })
+            }
+            DeliveryRequest::StartWhenNoActiveTurn { .. } => {
+                unreachable!("start returned the active-turn rejection above")
+            }
+        }
+    }
+}
+
+fn delivery_creates_turn(delivery: DeliveryRequest) -> bool {
+    matches!(
+        delivery,
+        DeliveryRequest::StartWhenNoActiveTurn { .. }
+            | DeliveryRequest::Interrupt { .. }
+            | DeliveryRequest::AfterCurrentTurn { .. }
+    )
+}
+
+fn next_acceptance_position(
+    previous_position: Option<SessionInputPosition>,
+) -> Result<SessionInputPosition, SessionInputPosition> {
+    match previous_position {
+        None => Ok(SessionInputPosition::first()),
+        Some(last) => last.checked_next().ok_or(last),
     }
 }
 
@@ -235,19 +473,92 @@ pub enum SubmitInputResult {
     Rejected(SubmitInputRejectedResult),
 }
 
-/// The complete applied receipt for durable queued input.
+/// The exact applied acceptance shape.
 ///
-/// Construction is sealed behind preparation and checked reconstitution.
+/// Both variants contain private-field values sealed behind authoritative
+/// preparation and checked reconstitution. Pending steering cannot carry a
+/// turn candidate, queue order, or configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SubmitInputAppliedResult {
+pub enum SubmitInputAppliedResult {
+    /// Acceptance created ordinary accepted-input-origin work.
+    TurnOrigin(SubmitInputTurnOriginAppliedResult),
+    /// Acceptance created pending steering bound to the exact active turn.
+    PendingSteering(SubmitInputPendingSteeringAppliedResult),
+}
+
+impl SubmitInputAppliedResult {
+    /// Returns the durable accepted-input identity.
+    pub const fn accepted_input(&self) -> AcceptedInputId {
+        match self {
+            Self::TurnOrigin(result) => result.accepted_input,
+            Self::PendingSteering(result) => result.accepted_input,
+        }
+    }
+
+    /// Returns the owning session.
+    pub const fn session(&self) -> SessionId {
+        match self {
+            Self::TurnOrigin(result) => result.session,
+            Self::PendingSteering(result) => result.session,
+        }
+    }
+
+    /// Returns the immutable session acceptance position.
+    pub const fn acceptance_position(&self) -> SessionInputPosition {
+        match self {
+            Self::TurnOrigin(result) => result.acceptance_position,
+            Self::PendingSteering(result) => result.acceptance_position,
+        }
+    }
+
+    /// Returns the exact initial durable disposition.
+    pub const fn disposition(&self) -> AcceptedInputDisposition {
+        match self {
+            Self::TurnOrigin(result) => AcceptedInputDisposition::OriginOf(result.turn),
+            Self::PendingSteering(result) => AcceptedInputDisposition::PendingSteering {
+                binding: result.binding,
+            },
+        }
+    }
+
+    /// Borrows turn-origin fields when this acceptance created logical work.
+    pub const fn turn_origin(&self) -> Option<&SubmitInputTurnOriginAppliedResult> {
+        match self {
+            Self::TurnOrigin(result) => Some(result),
+            Self::PendingSteering(_) => None,
+        }
+    }
+
+    /// Borrows pending-steering fields when acceptance created no turn.
+    pub const fn pending_steering(&self) -> Option<&SubmitInputPendingSteeringAppliedResult> {
+        match self {
+            Self::PendingSteering(result) => Some(result),
+            Self::TurnOrigin(_) => None,
+        }
+    }
+}
+
+/// The complete applied receipt for accepted-input-origin work.
+///
+/// Raw facts cannot construct this private-field value.
+///
+/// ```compile_fail
+/// # use signalbox_domain::SubmitInputTurnOriginAppliedResult;
+/// fn bypass_checked_construction(result: &SubmitInputTurnOriginAppliedResult) {
+///     let _ = result.turn;
+/// }
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SubmitInputTurnOriginAppliedResult {
     accepted_input: AcceptedInputId,
     session: SessionId,
+    acceptance_position: SessionInputPosition,
     turn: TurnId,
     queue_order: AcceptedInputQueueOrder,
     origin_configuration: OriginConfiguration,
 }
 
-impl SubmitInputAppliedResult {
+impl SubmitInputTurnOriginAppliedResult {
     /// Returns the durable accepted-input identity.
     pub const fn accepted_input(&self) -> AcceptedInputId {
         self.accepted_input
@@ -275,12 +586,52 @@ impl SubmitInputAppliedResult {
 
     /// Returns the immutable session acceptance position.
     pub const fn acceptance_position(&self) -> SessionInputPosition {
-        self.queue_order.acceptance_position()
+        self.acceptance_position
     }
 
     /// Borrows the complete frozen origin configuration.
     pub const fn origin_configuration(&self) -> &OriginConfiguration {
         &self.origin_configuration
+    }
+}
+
+/// The complete applied receipt for pending steering.
+///
+/// This shape has no turn-origin, queue-order, or configuration field.
+///
+/// ```compile_fail
+/// # use signalbox_domain::SubmitInputPendingSteeringAppliedResult;
+/// fn bypass_checked_construction(result: &SubmitInputPendingSteeringAppliedResult) {
+///     let _ = result.binding;
+/// }
+/// ```
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SubmitInputPendingSteeringAppliedResult {
+    accepted_input: AcceptedInputId,
+    session: SessionId,
+    acceptance_position: SessionInputPosition,
+    binding: SteeringBinding,
+}
+
+impl SubmitInputPendingSteeringAppliedResult {
+    /// Returns the durable accepted-input identity.
+    pub const fn accepted_input(&self) -> AcceptedInputId {
+        self.accepted_input
+    }
+
+    /// Returns the owning session.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    /// Returns the immutable session acceptance position.
+    pub const fn acceptance_position(&self) -> SessionInputPosition {
+        self.acceptance_position
+    }
+
+    /// Returns the exact active-turn steering binding.
+    pub const fn binding(&self) -> SteeringBinding {
+        self.binding
     }
 }
 
@@ -298,6 +649,29 @@ pub enum SubmitInputRejectedResult {
         session: SessionId,
         /// The turn the caller expected to be active.
         expected_active_turn: TurnId,
+    },
+    /// A no-active-turn start was submitted while a turn owned the slot.
+    ActiveTurnPresent {
+        /// The target session.
+        session: SessionId,
+        /// The authoritative active turn.
+        active_turn: TurnId,
+    },
+    /// An active-work request named a stale turn.
+    ActiveTurnMismatch {
+        /// The target session.
+        session: SessionId,
+        /// The turn named by the command.
+        expected_active_turn: TurnId,
+        /// The authoritative active turn.
+        actual_active_turn: TurnId,
+    },
+    /// Safe-point steering cannot be accepted after stop was requested.
+    SafePointUnavailableWhileStopping {
+        /// The target session.
+        session: SessionId,
+        /// The exact stopped active turn.
+        active_turn: TurnId,
     },
     /// The caller's expected defaults version was no longer current.
     SessionDefaultsVersionMismatch {
@@ -348,7 +722,7 @@ impl PreparedSubmitInput {
     }
 }
 
-/// Why no-active-turn preparation could not produce a terminal result.
+/// Why authoritative-state preparation could not produce a terminal result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SubmitInputPreparationFailure {
     /// The supplied session belonged to another command target.
@@ -361,6 +735,18 @@ pub enum SubmitInputPreparationFailure {
     /// `NextSafePoint` initially creates no turn; every other delivery mode
     /// needs a turn candidate for the state in which it can apply.
     TurnCandidateMismatch,
+    /// The supplied active turn belongs to another session.
+    ActiveTurnSessionMismatch {
+        /// The cross-wired session carried by the projection.
+        provided_session: SessionId,
+    },
+    /// The supplied scheduling turn does not own the active slot.
+    ActiveTurnProjectionIsNotActive {
+        /// The non-active turn supplied.
+        provided_turn: TurnId,
+    },
+    /// This slice cannot yet apply interruption or claim its command result.
+    InterruptApplicationUnavailable,
 }
 
 /// A nonterminal correlation failure during preparation.
@@ -391,7 +777,7 @@ impl SubmitInputPreparationError {
 }
 
 #[derive(Clone, Debug)]
-struct SubmitInputAppliedReconstitutionFacts {
+struct SubmitInputTurnOriginAppliedReconstitutionFacts {
     result_session: SessionId,
     result_accepted_input: AcceptedInputId,
     result_turn: TurnId,
@@ -413,14 +799,42 @@ struct SubmitInputAppliedReconstitutionFacts {
 }
 
 #[derive(Clone, Debug)]
+struct SubmitInputPendingSteeringAppliedReconstitutionFacts {
+    result_session: SessionId,
+    result_accepted_input: AcceptedInputId,
+    result_source_turn: TurnId,
+    accepted_command: DurableCommandId,
+    accepted_input: AcceptedInputId,
+    accepted_session: SessionId,
+    accepted_content: UserContent,
+    accepted_delivery: DeliveryRequest,
+    accepted_position: SessionInputPosition,
+    accepted_disposition: AcceptedInputDisposition,
+}
+
+#[derive(Clone, Debug)]
 enum SubmitInputReconstitutionFacts {
-    Applied(Box<SubmitInputAppliedReconstitutionFacts>),
+    AppliedTurnOrigin(Box<SubmitInputTurnOriginAppliedReconstitutionFacts>),
+    AppliedPendingSteering(Box<SubmitInputPendingSteeringAppliedReconstitutionFacts>),
     RejectedSessionNotFound {
         result_session: SessionId,
     },
     RejectedNoActiveTurn {
         result_session: SessionId,
         result_expected_active_turn: TurnId,
+    },
+    RejectedActiveTurnPresent {
+        result_session: SessionId,
+        result_active_turn: TurnId,
+    },
+    RejectedActiveTurnMismatch {
+        result_session: SessionId,
+        result_expected_active_turn: TurnId,
+        result_actual_active_turn: TurnId,
+    },
+    RejectedSafePointUnavailableWhileStopping {
+        result_session: SessionId,
+        result_active_turn: TurnId,
     },
     RejectedDefaultsVersionMismatch {
         result_session: SessionId,
@@ -454,9 +868,10 @@ pub struct SubmitInputReconstitutionInput {
 }
 
 impl SubmitInputReconstitutionInput {
-    /// Supplies every recorded applied-result and durable effect correlation.
+    /// Supplies every recorded turn-origin result and durable effect
+    /// correlation.
     #[allow(clippy::too_many_arguments)]
-    pub fn applied(
+    pub fn applied_turn_origin(
         command: SubmitInput,
         stored_actor: Actor,
         result_session: SessionId,
@@ -481,8 +896,8 @@ impl SubmitInputReconstitutionInput {
         Self {
             command,
             stored_actor,
-            facts: SubmitInputReconstitutionFacts::Applied(Box::new(
-                SubmitInputAppliedReconstitutionFacts {
+            facts: SubmitInputReconstitutionFacts::AppliedTurnOrigin(Box::new(
+                SubmitInputTurnOriginAppliedReconstitutionFacts {
                     result_session,
                     result_accepted_input,
                     result_turn,
@@ -501,6 +916,43 @@ impl SubmitInputReconstitutionInput {
                     defaults,
                     stored_requested_model,
                     stored_frozen_model,
+                },
+            )),
+        }
+    }
+
+    /// Supplies every recorded pending-steering result and accepted-input
+    /// effect correlation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn applied_pending_steering(
+        command: SubmitInput,
+        stored_actor: Actor,
+        result_session: SessionId,
+        result_accepted_input: AcceptedInputId,
+        result_source_turn: TurnId,
+        accepted_command: DurableCommandId,
+        accepted_input: AcceptedInputId,
+        accepted_session: SessionId,
+        accepted_content: UserContent,
+        accepted_delivery: DeliveryRequest,
+        accepted_position: SessionInputPosition,
+        accepted_disposition: AcceptedInputDisposition,
+    ) -> Self {
+        Self {
+            command,
+            stored_actor,
+            facts: SubmitInputReconstitutionFacts::AppliedPendingSteering(Box::new(
+                SubmitInputPendingSteeringAppliedReconstitutionFacts {
+                    result_session,
+                    result_accepted_input,
+                    result_source_turn,
+                    accepted_command,
+                    accepted_input,
+                    accepted_session,
+                    accepted_content,
+                    accepted_delivery,
+                    accepted_position,
+                    accepted_disposition,
                 },
             )),
         }
@@ -532,6 +984,59 @@ impl SubmitInputReconstitutionInput {
             facts: SubmitInputReconstitutionFacts::RejectedNoActiveTurn {
                 result_session,
                 result_expected_active_turn,
+            },
+        }
+    }
+
+    /// Supplies a recorded active-turn-present result for a start request.
+    pub const fn rejected_active_turn_present(
+        command: SubmitInput,
+        stored_actor: Actor,
+        result_session: SessionId,
+        result_active_turn: TurnId,
+    ) -> Self {
+        Self {
+            command,
+            stored_actor,
+            facts: SubmitInputReconstitutionFacts::RejectedActiveTurnPresent {
+                result_session,
+                result_active_turn,
+            },
+        }
+    }
+
+    /// Supplies a recorded stale-active-turn result.
+    pub const fn rejected_active_turn_mismatch(
+        command: SubmitInput,
+        stored_actor: Actor,
+        result_session: SessionId,
+        result_expected_active_turn: TurnId,
+        result_actual_active_turn: TurnId,
+    ) -> Self {
+        Self {
+            command,
+            stored_actor,
+            facts: SubmitInputReconstitutionFacts::RejectedActiveTurnMismatch {
+                result_session,
+                result_expected_active_turn,
+                result_actual_active_turn,
+            },
+        }
+    }
+
+    /// Supplies a recorded safe-point-unavailable-while-stopping result.
+    pub const fn rejected_safe_point_unavailable_while_stopping(
+        command: SubmitInput,
+        stored_actor: Actor,
+        result_session: SessionId,
+        result_active_turn: TurnId,
+    ) -> Self {
+        Self {
+            command,
+            stored_actor,
+            facts: SubmitInputReconstitutionFacts::RejectedSafePointUnavailableWhileStopping {
+                result_session,
+                result_active_turn,
             },
         }
     }
@@ -614,8 +1119,8 @@ impl SubmitInputReconstitutionInput {
         }
 
         let result = match self.facts.clone() {
-            SubmitInputReconstitutionFacts::Applied(facts) => {
-                let SubmitInputAppliedReconstitutionFacts {
+            SubmitInputReconstitutionFacts::AppliedTurnOrigin(facts) => {
+                let SubmitInputTurnOriginAppliedReconstitutionFacts {
                     result_session,
                     result_accepted_input,
                     result_turn,
@@ -638,9 +1143,10 @@ impl SubmitInputReconstitutionInput {
                 if !matches!(
                     self.command.delivery,
                     DeliveryRequest::StartWhenNoActiveTurn { .. }
+                        | DeliveryRequest::AfterCurrentTurn { .. }
                 ) {
                     return Err(fail(
-                        SubmitInputReconstitutionFailure::AppliedDeliveryIsNotStart,
+                        SubmitInputReconstitutionFailure::AppliedDeliveryIsNotTurnOrigin,
                     ));
                 }
                 if result_session != self.command.session {
@@ -705,13 +1211,88 @@ impl SubmitInputReconstitutionInput {
                 )
                 .map_err(&fail)?;
 
-                SubmitInputResult::Applied(SubmitInputAppliedResult {
-                    accepted_input: result_accepted_input,
-                    session: result_session,
-                    turn: result_turn,
-                    queue_order,
-                    origin_configuration,
-                })
+                SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(
+                    SubmitInputTurnOriginAppliedResult {
+                        accepted_input: result_accepted_input,
+                        session: result_session,
+                        acceptance_position: accepted_position,
+                        turn: result_turn,
+                        queue_order,
+                        origin_configuration,
+                    },
+                ))
+            }
+            SubmitInputReconstitutionFacts::AppliedPendingSteering(facts) => {
+                let SubmitInputPendingSteeringAppliedReconstitutionFacts {
+                    result_session,
+                    result_accepted_input,
+                    result_source_turn,
+                    accepted_command,
+                    accepted_input,
+                    accepted_session,
+                    accepted_content,
+                    accepted_delivery,
+                    accepted_position,
+                    accepted_disposition,
+                } = *facts;
+                let DeliveryRequest::NextSafePoint {
+                    expected_active_turn,
+                } = self.command.delivery
+                else {
+                    return Err(fail(
+                        SubmitInputReconstitutionFailure::AppliedDeliveryIsNotNextSafePoint,
+                    ));
+                };
+                if result_session != self.command.session {
+                    return Err(fail(
+                        SubmitInputReconstitutionFailure::ResultSessionMismatch,
+                    ));
+                }
+                if result_source_turn != expected_active_turn {
+                    return Err(fail(
+                        SubmitInputReconstitutionFailure::SteeringSourceTurnMismatch,
+                    ));
+                }
+                if accepted_command != self.command.command_id {
+                    return Err(fail(
+                        SubmitInputReconstitutionFailure::AcceptedCommandMismatch,
+                    ));
+                }
+                if accepted_input != result_accepted_input {
+                    return Err(fail(
+                        SubmitInputReconstitutionFailure::AcceptedInputMismatch,
+                    ));
+                }
+                if accepted_session != self.command.session {
+                    return Err(fail(
+                        SubmitInputReconstitutionFailure::AcceptedSessionMismatch,
+                    ));
+                }
+                if accepted_content != self.command.content {
+                    return Err(fail(
+                        SubmitInputReconstitutionFailure::AcceptedContentMismatch,
+                    ));
+                }
+                if accepted_delivery != self.command.delivery {
+                    return Err(fail(
+                        SubmitInputReconstitutionFailure::AcceptedDeliveryMismatch,
+                    ));
+                }
+                let binding = SteeringBinding::new(result_source_turn);
+                if accepted_disposition != (AcceptedInputDisposition::PendingSteering { binding }) {
+                    return Err(fail(
+                        SubmitInputReconstitutionFailure::AcceptedDispositionMismatch,
+                    ));
+                }
+
+                SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(
+                    SubmitInputPendingSteeringAppliedResult {
+                        accepted_input: result_accepted_input,
+                        session: result_session,
+                        acceptance_position: accepted_position,
+                        binding,
+                    },
+                ))
             }
             SubmitInputReconstitutionFacts::RejectedSessionNotFound { result_session } => {
                 if result_session != self.command.session {
@@ -743,6 +1324,81 @@ impl SubmitInputReconstitutionInput {
                     expected_active_turn: result_expected_active_turn,
                 })
             }
+            SubmitInputReconstitutionFacts::RejectedActiveTurnPresent {
+                result_session,
+                result_active_turn,
+            } => {
+                if result_session != self.command.session {
+                    return Err(fail(
+                        SubmitInputReconstitutionFailure::ResultSessionMismatch,
+                    ));
+                }
+                if !matches!(
+                    self.command.delivery,
+                    DeliveryRequest::StartWhenNoActiveTurn { .. }
+                ) {
+                    return Err(fail(
+                        SubmitInputReconstitutionFailure::RejectionDeliveryIsNotStart,
+                    ));
+                }
+                SubmitInputResult::Rejected(SubmitInputRejectedResult::ActiveTurnPresent {
+                    session: result_session,
+                    active_turn: result_active_turn,
+                })
+            }
+            SubmitInputReconstitutionFacts::RejectedActiveTurnMismatch {
+                result_session,
+                result_expected_active_turn,
+                result_actual_active_turn,
+            } => {
+                if result_session != self.command.session {
+                    return Err(fail(
+                        SubmitInputReconstitutionFailure::ResultSessionMismatch,
+                    ));
+                }
+                if expected_active_turn(self.command.delivery) != Some(result_expected_active_turn)
+                {
+                    return Err(fail(
+                        SubmitInputReconstitutionFailure::ExpectedActiveTurnMismatch,
+                    ));
+                }
+                if result_actual_active_turn == result_expected_active_turn {
+                    return Err(fail(
+                        SubmitInputReconstitutionFailure::RejectedActiveTurnsAreEqual,
+                    ));
+                }
+                SubmitInputResult::Rejected(SubmitInputRejectedResult::ActiveTurnMismatch {
+                    session: result_session,
+                    expected_active_turn: result_expected_active_turn,
+                    actual_active_turn: result_actual_active_turn,
+                })
+            }
+            SubmitInputReconstitutionFacts::RejectedSafePointUnavailableWhileStopping {
+                result_session,
+                result_active_turn,
+            } => {
+                if result_session != self.command.session {
+                    return Err(fail(
+                        SubmitInputReconstitutionFailure::ResultSessionMismatch,
+                    ));
+                }
+                if !matches!(
+                    self.command.delivery,
+                    DeliveryRequest::NextSafePoint {
+                        expected_active_turn,
+                    } if expected_active_turn == result_active_turn
+                ) {
+                    return Err(fail(
+                        SubmitInputReconstitutionFailure::SafePointRejectionMismatch,
+                    ));
+                }
+                SubmitInputResult::Rejected(
+                    SubmitInputRejectedResult::SafePointUnavailableWhileStopping {
+                        session: result_session,
+                        active_turn: result_active_turn,
+                    },
+                )
+            }
             SubmitInputReconstitutionFacts::RejectedDefaultsVersionMismatch {
                 result_session,
                 result_expected,
@@ -753,9 +1409,10 @@ impl SubmitInputReconstitutionInput {
                         SubmitInputReconstitutionFailure::ResultSessionMismatch,
                     ));
                 }
-                let Some(configuration) = start_configuration(self.command.delivery) else {
+                let Some(configuration) = explicit_origin_configuration(self.command.delivery)
+                else {
                     return Err(fail(
-                        SubmitInputReconstitutionFailure::RejectionDeliveryIsNotStart,
+                        SubmitInputReconstitutionFailure::RejectionHasNoExplicitOriginConfiguration,
                     ));
                 };
                 if result_expected != configuration.expected_session_defaults_version() {
@@ -788,9 +1445,10 @@ impl SubmitInputReconstitutionInput {
                         SubmitInputReconstitutionFailure::ResultSessionMismatch,
                     ));
                 }
-                let Some(configuration) = start_configuration(self.command.delivery) else {
+                let Some(configuration) = explicit_origin_configuration(self.command.delivery)
+                else {
                     return Err(fail(
-                        SubmitInputReconstitutionFailure::RejectionDeliveryIsNotStart,
+                        SubmitInputReconstitutionFailure::RejectionHasNoExplicitOriginConfiguration,
                     ));
                 };
                 if defaults_session != self.command.session {
@@ -834,9 +1492,14 @@ impl SubmitInputReconstitutionInput {
                         SubmitInputReconstitutionFailure::ResultSessionMismatch,
                     ));
                 }
-                if start_configuration(self.command.delivery).is_none() {
+                if !matches!(
+                    self.command.delivery,
+                    DeliveryRequest::StartWhenNoActiveTurn { .. }
+                        | DeliveryRequest::NextSafePoint { .. }
+                        | DeliveryRequest::AfterCurrentTurn { .. }
+                ) {
                     return Err(fail(
-                        SubmitInputReconstitutionFailure::RejectionDeliveryIsNotStart,
+                        SubmitInputReconstitutionFailure::PositionExhaustionDeliveryUnavailable,
                     ));
                 }
                 if result_last_position.checked_next().is_some() {
@@ -868,8 +1531,8 @@ fn reconstruct_origin_configuration(
     stored_requested_model: ModelSelectionRequest,
     stored_frozen_model: FrozenModelSelection,
 ) -> Result<OriginConfiguration, SubmitInputReconstitutionFailure> {
-    let Some(configuration) = start_configuration(command.delivery) else {
-        return Err(SubmitInputReconstitutionFailure::AppliedDeliveryIsNotStart);
+    let Some(configuration) = explicit_origin_configuration(command.delivery) else {
+        return Err(SubmitInputReconstitutionFailure::AppliedDeliveryIsNotTurnOrigin);
     };
     if defaults_session != command.session {
         return Err(SubmitInputReconstitutionFailure::DefaultsSessionMismatch);
@@ -900,12 +1563,13 @@ fn reconstruct_origin_configuration(
     Ok(frozen)
 }
 
-fn start_configuration(delivery: DeliveryRequest) -> Option<PerInputConfigurationChoices> {
+fn explicit_origin_configuration(
+    delivery: DeliveryRequest,
+) -> Option<PerInputConfigurationChoices> {
     match delivery {
-        DeliveryRequest::StartWhenNoActiveTurn { configuration } => Some(configuration),
-        DeliveryRequest::Interrupt { .. }
-        | DeliveryRequest::NextSafePoint { .. }
-        | DeliveryRequest::AfterCurrentTurn { .. } => None,
+        DeliveryRequest::StartWhenNoActiveTurn { configuration }
+        | DeliveryRequest::AfterCurrentTurn { configuration, .. } => Some(configuration),
+        DeliveryRequest::Interrupt { .. } | DeliveryRequest::NextSafePoint { .. } => None,
     }
 }
 
@@ -931,8 +1595,11 @@ fn expected_active_turn(delivery: DeliveryRequest) -> Option<TurnId> {
 pub enum SubmitInputReconstitutionFailure {
     /// The stored actor attribution differs from the command.
     StoredActorMismatch,
-    /// An applied record carries a non-start delivery request.
-    AppliedDeliveryIsNotStart,
+    /// Turn-origin applied facts carry a delivery that does not create the
+    /// admitted start or after-current origin.
+    AppliedDeliveryIsNotTurnOrigin,
+    /// Pending-steering applied facts carry a non-safe-point delivery.
+    AppliedDeliveryIsNotNextSafePoint,
     /// A terminal result names another session.
     ResultSessionMismatch,
     /// The accepted-input effect names another command.
@@ -947,6 +1614,8 @@ pub enum SubmitInputReconstitutionFailure {
     AcceptedDeliveryMismatch,
     /// The stored disposition is not the result turn's origin relation.
     AcceptedDispositionMismatch,
+    /// The applied steering result names another source turn.
+    SteeringSourceTurnMismatch,
     /// The queue fact belongs to another session.
     QueueSessionMismatch,
     /// The queue fact names another future turn.
@@ -957,9 +1626,15 @@ pub enum SubmitInputReconstitutionFailure {
     QueuePriorityMismatch,
     /// A required rejection was recorded for a non-start request.
     RejectionDeliveryIsNotStart,
+    /// A configuration rejection carries no explicit origin configuration.
+    RejectionHasNoExplicitOriginConfiguration,
     /// A no-active-turn result names a different expected turn or a start
     /// request.
     ExpectedActiveTurnMismatch,
+    /// A stale-active rejection claims equal expected and actual turns.
+    RejectedActiveTurnsAreEqual,
+    /// A stopped-safe-point rejection does not match the command target.
+    SafePointRejectionMismatch,
     /// A mismatch result repeats a different expected defaults version.
     ExpectedDefaultsVersionMismatch,
     /// A mismatch result claims equal expected and current versions.
@@ -978,6 +1653,8 @@ pub enum SubmitInputReconstitutionFailure {
     RejectionDidNotSelectAlias,
     /// The recorded last position still has a successor.
     PositionIsNotExhausted,
+    /// This slice cannot record position exhaustion for interrupt application.
+    PositionExhaustionDeliveryUnavailable,
 }
 
 /// Failed reconstitution retaining every typed input unchanged.
@@ -1046,12 +1723,20 @@ mod tests {
         SubmitInputRejectedResult, SubmitInputResult,
     };
     use crate::test_support::{accepted_input_id, alias, command_id, direct, session_id, turn_id};
+    use crate::test_support::{context_frontier_id, semantic_transcript_entry_id, turn_attempt_id};
     use crate::{
-        AcceptedInputDisposition, Actor, DeliveryRequest, FrozenAliasDefinition,
-        FrozenModelSelection, ModelSelectionOverride, ModelSelectionRequest,
-        PerInputConfigurationChoices, Session, SessionConfigurationDefaults,
+        AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputQueueOrder,
+        AcceptedInputSchedulingReconstitutionInput, AcceptedInputStartingLineage,
+        AcceptedInputTurnSchedulingProjection, AcceptedInputTurnSchedulingRecord,
+        AcceptedInputTurnSchedulingRecordState, ActiveTurnPhase, Actor, CurrentTurnAttempt,
+        CurrentTurnAttemptState, DeliveryRequest, FrozenAliasDefinition, FrozenModelSelection,
+        InitialSemanticTranscriptEntryPayload, ModelSelectionOverride, ModelSelectionRequest,
+        OriginConfiguration, PerInputConfigurationChoices, PreparedTurnAttemptReconstitutionInput,
+        ResolvedContextFrontierReconstitutionInput, SemanticTranscriptEntryReconstitutionInput,
+        SemanticTranscriptEntryRef, Session, SessionConfigurationDefaults,
         SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-        SessionInputPosition, SessionReconstitutionInput, TranscriptAncestry, UserContent,
+        SessionInputPosition, SessionReconstitutionInput, SteeringBinding, TranscriptAncestry,
+        UserContent, applied_interrupt::test_applied_interrupt_proof,
     };
 
     fn version(value: u64) -> SessionConfigurationDefaultsVersion {
@@ -1099,6 +1784,127 @@ mod tests {
         )
     }
 
+    fn after_command(command: u128, expected_active_turn: u128) -> SubmitInput {
+        SubmitInput::new(
+            command_id(command),
+            session_id(1),
+            content("hello"),
+            DeliveryRequest::AfterCurrentTurn {
+                expected_active_turn: turn_id(expected_active_turn),
+                configuration: choices(1, ModelSelectionOverride::UseSessionDefault),
+            },
+        )
+    }
+
+    fn safe_point_command(command: u128, expected_active_turn: u128) -> SubmitInput {
+        SubmitInput::new(
+            command_id(command),
+            session_id(1),
+            content("hello"),
+            DeliveryRequest::NextSafePoint {
+                expected_active_turn: turn_id(expected_active_turn),
+            },
+        )
+    }
+
+    fn interrupt_command(command: u128, expected_active_turn: u128) -> SubmitInput {
+        SubmitInput::new(
+            command_id(command),
+            session_id(1),
+            content("hello"),
+            DeliveryRequest::Interrupt {
+                expected_active_turn: turn_id(expected_active_turn),
+                configuration: choices(1, ModelSelectionOverride::UseSessionDefault),
+            },
+        )
+    }
+
+    fn origin_configuration(current: &Session) -> OriginConfiguration {
+        let current_version = current.current_configuration_defaults().version();
+        let checked = current
+            .current_configuration_defaults()
+            .derive_request(current_version, ModelSelectionOverride::UseSessionDefault)
+            .expect("the test defaults version is current");
+        OriginConfiguration::freeze(checked, |_| None)
+            .expect("direct test selection does not require an alias")
+    }
+
+    fn active_turn(current: &Session) -> AcceptedInputTurnSchedulingProjection {
+        let origin_entry = semantic_transcript_entry_id(0x31);
+        AcceptedInputSchedulingReconstitutionInput::new(
+            current.clone(),
+            vec![AcceptedInputTurnSchedulingRecord::new(
+                current.id(),
+                turn_id(7),
+                current.id(),
+                AcceptedInputLifecycle::new(
+                    accepted_input_id(0x21),
+                    AcceptedInputDisposition::OriginOf(turn_id(7)),
+                ),
+                current.id(),
+                turn_id(7),
+                AcceptedInputQueueOrder::ordinary(SessionInputPosition::first()),
+                origin_configuration(current),
+                AcceptedInputTurnSchedulingRecordState::Active {
+                    starting_lineage: AcceptedInputStartingLineage::FirstInSession,
+                    starting_frontier: context_frontier_id(0x41),
+                    current_attempt: PreparedTurnAttemptReconstitutionInput::new(
+                        turn_id(7),
+                        turn_attempt_id(0x51),
+                        CurrentTurnAttemptState::Prepared,
+                    ),
+                },
+            )],
+            vec![SemanticTranscriptEntryReconstitutionInput::new(
+                origin_entry,
+                current.id(),
+                InitialSemanticTranscriptEntryPayload::OriginAcceptedInput {
+                    accepted_input: accepted_input_id(0x21),
+                },
+            )],
+            vec![ResolvedContextFrontierReconstitutionInput::new(
+                current.id(),
+                context_frontier_id(0x41),
+                vec![SemanticTranscriptEntryRef::from_source(
+                    current.id(),
+                    origin_entry,
+                )],
+            )],
+        )
+        .reconstitute()
+        .expect("test active scheduling facts are complete")
+        .active_turn()
+        .expect("the test turn owns the active slot")
+        .clone()
+    }
+
+    fn queued_turn(current: &Session) -> AcceptedInputTurnSchedulingProjection {
+        AcceptedInputSchedulingReconstitutionInput::new(
+            current.clone(),
+            vec![AcceptedInputTurnSchedulingRecord::new(
+                current.id(),
+                turn_id(7),
+                current.id(),
+                AcceptedInputLifecycle::new(
+                    accepted_input_id(0x21),
+                    AcceptedInputDisposition::OriginOf(turn_id(7)),
+                ),
+                current.id(),
+                turn_id(7),
+                AcceptedInputQueueOrder::ordinary(SessionInputPosition::first()),
+                origin_configuration(current),
+                AcceptedInputTurnSchedulingRecordState::Queued,
+            )],
+            vec![],
+            vec![],
+        )
+        .reconstitute()
+        .expect("test queued scheduling facts are complete")
+        .turn(turn_id(7))
+        .expect("the test turn is present")
+        .clone()
+    }
+
     fn hash(value: &SubmitInput) -> u64 {
         let mut hasher = DefaultHasher::new();
         value.hash(&mut hasher);
@@ -1108,7 +1914,7 @@ mod tests {
     /// One complete applied projection whose every fact matches the command.
     fn applied_input() -> SubmitInputReconstitutionInput {
         let command = start_command(1, "hello", 1);
-        SubmitInputReconstitutionInput::applied(
+        SubmitInputReconstitutionInput::applied_turn_origin(
             command.clone(),
             Actor::Owner,
             session_id(1),
@@ -1134,9 +1940,66 @@ mod tests {
 
     fn applied_facts(
         input: &mut SubmitInputReconstitutionInput,
-    ) -> &mut super::SubmitInputAppliedReconstitutionFacts {
-        let super::SubmitInputReconstitutionFacts::Applied(facts) = &mut input.facts else {
+    ) -> &mut super::SubmitInputTurnOriginAppliedReconstitutionFacts {
+        let super::SubmitInputReconstitutionFacts::AppliedTurnOrigin(facts) = &mut input.facts
+        else {
             panic!("the base reconstitution input is applied");
+        };
+        facts
+    }
+
+    fn after_applied_input() -> SubmitInputReconstitutionInput {
+        let command = after_command(1, 7);
+        SubmitInputReconstitutionInput::applied_turn_origin(
+            command.clone(),
+            Actor::Owner,
+            session_id(1),
+            accepted_input_id(3),
+            turn_id(8),
+            command_id(1),
+            accepted_input_id(3),
+            session_id(1),
+            content("hello"),
+            command.delivery(),
+            SessionInputPosition::first(),
+            AcceptedInputDisposition::OriginOf(turn_id(8)),
+            session_id(1),
+            turn_id(8),
+            AcceptedInputQueueOrder::ordinary(SessionInputPosition::first()),
+            session_id(1),
+            version(1),
+            defaults(ModelSelectionRequest::Direct(direct(2))),
+            ModelSelectionRequest::Direct(direct(2)),
+            FrozenModelSelection::Direct(direct(2)),
+        )
+    }
+
+    fn pending_steering_input() -> SubmitInputReconstitutionInput {
+        let command = safe_point_command(1, 7);
+        SubmitInputReconstitutionInput::applied_pending_steering(
+            command.clone(),
+            Actor::Owner,
+            session_id(1),
+            accepted_input_id(3),
+            turn_id(7),
+            command_id(1),
+            accepted_input_id(3),
+            session_id(1),
+            content("hello"),
+            command.delivery(),
+            SessionInputPosition::first(),
+            AcceptedInputDisposition::PendingSteering {
+                binding: SteeringBinding::new(turn_id(7)),
+            },
+        )
+    }
+
+    fn pending_facts(
+        input: &mut SubmitInputReconstitutionInput,
+    ) -> &mut super::SubmitInputPendingSteeringAppliedReconstitutionFacts {
+        let super::SubmitInputReconstitutionFacts::AppliedPendingSteering(facts) = &mut input.facts
+        else {
+            panic!("the base reconstitution input is pending steering");
         };
         facts
     }
@@ -1194,6 +2057,9 @@ mod tests {
         let SubmitInputResult::Applied(applied) = prepared.result() else {
             panic!("matching start request applies");
         };
+        let applied = applied
+            .turn_origin()
+            .expect("start acceptance creates turn-origin work");
         assert_eq!(applied.accepted_input(), accepted_input_id(3));
         assert_eq!(applied.session(), session_id(1));
         assert_eq!(applied.turn(), turn_id(4));
@@ -1248,6 +2114,9 @@ mod tests {
         let SubmitInputResult::Applied(applied) = frozen.result() else {
             panic!("selectable alias applies");
         };
+        let applied = applied
+            .turn_origin()
+            .expect("start acceptance creates turn-origin work");
         assert_eq!(
             applied.origin_configuration().effective().model(),
             &FrozenModelSelection::FrozenAlias {
@@ -1343,6 +2212,342 @@ mod tests {
         );
     }
 
+    /// S09 / INV-007 / INV-008 / INV-028: matching after-current input
+    /// creates ordinary queued origin work with the next acceptance position
+    /// and exact frozen configuration.
+    #[test]
+    fn s09_matching_after_current_prepares_ordinary_turn_origin() {
+        let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
+        let command = after_command(1, 7);
+        let prepared = command
+            .clone()
+            .prepare_with_active_turn(
+                &current,
+                &active_turn(&current),
+                accepted_input_id(3),
+                Some(turn_id(8)),
+                Some(SessionInputPosition::first()),
+                |_| None,
+            )
+            .expect("matching after-current input is available");
+
+        let SubmitInputResult::Applied(applied) = prepared.result() else {
+            panic!("matching after-current input applies");
+        };
+        let origin = applied
+            .turn_origin()
+            .expect("after-current input creates origin work");
+        assert_eq!(origin.accepted_input(), accepted_input_id(3));
+        assert_eq!(origin.turn(), turn_id(8));
+        assert_eq!(
+            origin.disposition(),
+            AcceptedInputDisposition::OriginOf(turn_id(8))
+        );
+        assert_eq!(origin.acceptance_position().as_u64(), 2);
+        assert_eq!(
+            origin.queue_order(),
+            AcceptedInputQueueOrder::ordinary(origin.acceptance_position())
+        );
+        assert_eq!(
+            origin.origin_configuration().effective().model(),
+            &FrozenModelSelection::Direct(direct(2))
+        );
+    }
+
+    /// S08 / INV-007 / INV-016 / INV-028: matching safe-point input creates
+    /// pending steering bound to the exact active turn and carries no
+    /// turn-origin fields.
+    #[test]
+    fn s08_matching_next_safe_point_prepares_pending_steering() {
+        let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
+        let prepared = safe_point_command(1, 7)
+            .prepare_with_active_turn(
+                &current,
+                &active_turn(&current),
+                accepted_input_id(3),
+                None,
+                Some(SessionInputPosition::first()),
+                |_| panic!("safe-point acceptance has no configuration"),
+            )
+            .expect("matching safe-point input is available");
+
+        let SubmitInputResult::Applied(applied) = prepared.result() else {
+            panic!("matching safe-point input applies");
+        };
+        assert_eq!(applied.accepted_input(), accepted_input_id(3));
+        assert_eq!(applied.acceptance_position().as_u64(), 2);
+        assert_eq!(
+            applied.disposition(),
+            AcceptedInputDisposition::PendingSteering {
+                binding: SteeringBinding::new(turn_id(7)),
+            }
+        );
+        assert!(applied.turn_origin().is_none());
+        let steering = applied
+            .pending_steering()
+            .expect("safe-point acceptance creates pending steering");
+        assert_eq!(steering.binding().source_turn(), turn_id(7));
+    }
+
+    /// S01 / S08 / S09 / INV-012 / INV-016 / INV-028: occupied-slot
+    /// validation records exact active/stale/stopping rejections, while a
+    /// matching interrupt remains nonclaiming until interrupt application is
+    /// implemented.
+    #[test]
+    fn occupied_slot_rejections_and_interrupt_unavailability_are_exact() {
+        let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
+        let active = active_turn(&current);
+
+        let start = start_command(1, "hello", 1)
+            .prepare_with_active_turn(
+                &current,
+                &active,
+                accepted_input_id(3),
+                Some(turn_id(8)),
+                None,
+                |_| None,
+            )
+            .expect("active presence is an authoritative rejection");
+        assert!(matches!(
+            start.result(),
+            SubmitInputResult::Rejected(SubmitInputRejectedResult::ActiveTurnPresent {
+                session,
+                active_turn,
+            }) if *session == session_id(1) && *active_turn == turn_id(7)
+        ));
+
+        for (command, candidate) in [
+            (after_command(2, 9), Some(turn_id(8))),
+            (safe_point_command(3, 9), None),
+            (interrupt_command(4, 9), Some(turn_id(8))),
+        ] {
+            let stale = command
+                .prepare_with_active_turn(
+                    &current,
+                    &active,
+                    accepted_input_id(3),
+                    candidate,
+                    None,
+                    |_| None,
+                )
+                .expect("a stale active target is an authoritative rejection");
+            assert!(matches!(
+                stale.result(),
+                SubmitInputResult::Rejected(SubmitInputRejectedResult::ActiveTurnMismatch {
+                    expected_active_turn,
+                    actual_active_turn,
+                    ..
+                }) if *expected_active_turn == turn_id(9) && *actual_active_turn == turn_id(7)
+            ));
+        }
+
+        let stopping_attempt = CurrentTurnAttempt::prepared(turn_attempt_id(0x52))
+            .begin_running()
+            .expect("prepared test attempt begins running")
+            .request_cancellation(test_applied_interrupt_proof(command_id(9), turn_id(7)))
+            .expect("running test attempt accepts its first cancellation");
+        let stopping = active
+            .clone()
+            .test_with_active_phase(ActiveTurnPhase::Running {
+                current_attempt: stopping_attempt,
+            });
+        let stopped_safe_point = safe_point_command(5, 7)
+            .prepare_with_active_turn(
+                &current,
+                &stopping,
+                accepted_input_id(3),
+                None,
+                None,
+                |_| None,
+            )
+            .expect("stopping is an authoritative safe-point rejection");
+        assert!(matches!(
+            stopped_safe_point.result(),
+            SubmitInputResult::Rejected(
+                SubmitInputRejectedResult::SafePointUnavailableWhileStopping {
+                    active_turn,
+                    ..
+                }
+            ) if *active_turn == turn_id(7)
+        ));
+
+        let interrupt = interrupt_command(6, 7);
+        let unavailable = interrupt
+            .clone()
+            .prepare_with_active_turn(
+                &current,
+                &active,
+                accepted_input_id(3),
+                Some(turn_id(8)),
+                None,
+                |_| None,
+            )
+            .expect_err("interrupt application cannot claim a command in this slice");
+        assert_eq!(
+            unavailable.failure(),
+            SubmitInputPreparationFailure::InterruptApplicationUnavailable
+        );
+        assert_eq!(unavailable.command(), &interrupt);
+    }
+
+    /// S08 / S09 / INV-008 / INV-012 / INV-028: the occupied-slot
+    /// configuration and position checks record the same exact terminal
+    /// failures for the delivery modes that reach them.
+    #[test]
+    fn occupied_slot_configuration_and_position_rejections_are_typed() {
+        let stale_session = session(1, 2, ModelSelectionRequest::Direct(direct(2)));
+        let stale = after_command(1, 7)
+            .prepare_with_active_turn(
+                &stale_session,
+                &active_turn(&stale_session),
+                accepted_input_id(3),
+                Some(turn_id(8)),
+                None,
+                |_| panic!("stale defaults cannot reach alias resolution"),
+            )
+            .expect("a stale defaults version is an authoritative rejection");
+        assert!(matches!(
+            stale.result(),
+            SubmitInputResult::Rejected(
+                SubmitInputRejectedResult::SessionDefaultsVersionMismatch {
+                    expected,
+                    current,
+                    ..
+                }
+            ) if *expected == version(1) && *current == version(2)
+        ));
+
+        let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
+        let alias_command = SubmitInput::new(
+            command_id(2),
+            session_id(1),
+            content("hello"),
+            DeliveryRequest::AfterCurrentTurn {
+                expected_active_turn: turn_id(7),
+                configuration: choices(
+                    1,
+                    ModelSelectionOverride::ReplaceWith(ModelSelectionRequest::Alias(alias(9))),
+                ),
+            },
+        );
+        let unknown_alias = alias_command
+            .prepare_with_active_turn(
+                &current,
+                &active_turn(&current),
+                accepted_input_id(3),
+                Some(turn_id(8)),
+                None,
+                |_| None,
+            )
+            .expect("an unresolved alias is an authoritative rejection");
+        assert!(matches!(
+            unknown_alias.result(),
+            SubmitInputResult::Rejected(SubmitInputRejectedResult::UnknownModelAlias {
+                alias: unknown,
+                ..
+            }) if *unknown == alias(9)
+        ));
+
+        let maximum = SessionInputPosition::try_from_u64(u64::MAX).expect("positive maximum");
+        for (command, candidate) in [
+            (after_command(3, 7), Some(turn_id(8))),
+            (safe_point_command(4, 7), None),
+        ] {
+            let exhausted = command
+                .prepare_with_active_turn(
+                    &current,
+                    &active_turn(&current),
+                    accepted_input_id(3),
+                    candidate,
+                    Some(maximum),
+                    |_| None,
+                )
+                .expect("position exhaustion is an authoritative rejection");
+            assert!(matches!(
+                exhausted.result(),
+                SubmitInputResult::Rejected(
+                    SubmitInputRejectedResult::AcceptancePositionExhausted { last, .. }
+                ) if *last == maximum
+            ));
+        }
+    }
+
+    /// INV-002 / INV-012: every occupied-slot correlation failure retains the
+    /// unchanged command and constructs no terminal result.
+    #[test]
+    fn occupied_slot_preparation_rejects_cross_wired_projection_and_candidates() {
+        let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
+        let command = after_command(1, 7);
+        let wrong_session = session(2, 1, ModelSelectionRequest::Direct(direct(2)));
+
+        let wrong_active_session = command
+            .clone()
+            .prepare_with_active_turn(
+                &current,
+                &active_turn(&wrong_session),
+                accepted_input_id(3),
+                Some(turn_id(8)),
+                None,
+                |_| None,
+            )
+            .expect_err("a cross-session active projection is nonterminal");
+        assert_eq!(
+            wrong_active_session.failure(),
+            SubmitInputPreparationFailure::ActiveTurnSessionMismatch {
+                provided_session: session_id(2),
+            }
+        );
+
+        let not_active = command
+            .clone()
+            .prepare_with_active_turn(
+                &current,
+                &queued_turn(&current),
+                accepted_input_id(3),
+                Some(turn_id(8)),
+                None,
+                |_| None,
+            )
+            .expect_err("a queued projection cannot stand in for the active turn");
+        assert_eq!(
+            not_active.failure(),
+            SubmitInputPreparationFailure::ActiveTurnProjectionIsNotActive {
+                provided_turn: turn_id(7),
+            }
+        );
+
+        let missing_turn = command
+            .clone()
+            .prepare_with_active_turn(
+                &current,
+                &active_turn(&current),
+                accepted_input_id(3),
+                None,
+                None,
+                |_| None,
+            )
+            .expect_err("after-current input requires a minted turn candidate");
+        assert_eq!(
+            missing_turn.failure(),
+            SubmitInputPreparationFailure::TurnCandidateMismatch
+        );
+
+        let extra_turn = safe_point_command(2, 7)
+            .prepare_with_active_turn(
+                &current,
+                &active_turn(&current),
+                accepted_input_id(3),
+                Some(turn_id(8)),
+                None,
+                |_| None,
+            )
+            .expect_err("safe-point input cannot receive a turn candidate");
+        assert_eq!(
+            extra_turn.failure(),
+            SubmitInputPreparationFailure::TurnCandidateMismatch
+        );
+    }
+
     /// S01 / INV-008 / INV-012: missing sessions, stale defaults, unknown
     /// aliases, and exhausted positions remain distinct terminal results.
     #[test]
@@ -1396,6 +2601,9 @@ mod tests {
         let SubmitInputResult::Applied(applied) = reconstructed.result() else {
             panic!("applied facts reconstruct an applied result");
         };
+        let applied = applied
+            .turn_origin()
+            .expect("turn-origin facts reconstruct turn-origin acceptance");
         assert_eq!(applied.turn(), turn_id(4));
 
         let mut wrong = applied_input();
@@ -1406,6 +2614,74 @@ mod tests {
                 .expect_err("cross-wired content fails closed")
                 .failure(),
             SubmitInputReconstitutionFailure::AcceptedContentMismatch
+        );
+    }
+
+    /// S08 / S09 / INV-002 / INV-012 / INV-016: both new applied shapes
+    /// reconstruct only from their exact delivery, position, disposition,
+    /// configuration, and source-turn correlations.
+    #[test]
+    fn occupied_applied_shapes_reconstitute_exactly() {
+        let after = after_applied_input()
+            .reconstitute()
+            .expect("complete after-current origin facts reconstruct");
+        let SubmitInputResult::Applied(after) = after.result() else {
+            panic!("after-current facts remain applied");
+        };
+        let after = after
+            .turn_origin()
+            .expect("after-current facts create turn-origin work");
+        assert_eq!(after.turn(), turn_id(8));
+        assert_eq!(
+            after.origin_configuration().effective().model(),
+            &FrozenModelSelection::Direct(direct(2))
+        );
+
+        let pending = pending_steering_input()
+            .reconstitute()
+            .expect("complete pending-steering facts reconstruct");
+        let SubmitInputResult::Applied(pending) = pending.result() else {
+            panic!("safe-point facts remain applied");
+        };
+        assert_eq!(
+            pending.disposition(),
+            AcceptedInputDisposition::PendingSteering {
+                binding: SteeringBinding::new(turn_id(7)),
+            }
+        );
+        assert!(pending.turn_origin().is_none());
+
+        let mut wrong_delivery = pending_steering_input();
+        wrong_delivery.command = start_command(1, "hello", 1);
+        assert_eq!(
+            wrong_delivery
+                .reconstitute()
+                .expect_err("pending facts require a safe-point command")
+                .failure(),
+            SubmitInputReconstitutionFailure::AppliedDeliveryIsNotNextSafePoint
+        );
+
+        let mut wrong_source = pending_steering_input();
+        pending_facts(&mut wrong_source).result_source_turn = turn_id(9);
+        assert_eq!(
+            wrong_source
+                .reconstitute()
+                .expect_err("the result source must match the command target")
+                .failure(),
+            SubmitInputReconstitutionFailure::SteeringSourceTurnMismatch
+        );
+
+        let mut wrong_disposition = pending_steering_input();
+        pending_facts(&mut wrong_disposition).accepted_disposition =
+            AcceptedInputDisposition::PendingSteering {
+                binding: SteeringBinding::new(turn_id(9)),
+            };
+        assert_eq!(
+            wrong_disposition
+                .reconstitute()
+                .expect_err("the accepted disposition must retain the exact binding")
+                .failure(),
+            SubmitInputReconstitutionFailure::AcceptedDispositionMismatch
         );
     }
 
@@ -1436,7 +2712,7 @@ mod tests {
                         },
                     );
                 },
-                SubmitInputReconstitutionFailure::AppliedDeliveryIsNotStart,
+                SubmitInputReconstitutionFailure::AppliedDeliveryIsNotTurnOrigin,
             ),
             (
                 |input| applied_facts(input).result_session = session_id(2),
@@ -1484,9 +2760,11 @@ mod tests {
             ),
             (
                 |input| {
-                    applied_facts(input).accepted_position = SessionInputPosition::first()
-                        .checked_next()
-                        .expect("the second position exists");
+                    applied_facts(input).queue_order = AcceptedInputQueueOrder::ordinary(
+                        SessionInputPosition::first()
+                            .checked_next()
+                            .expect("the second position exists"),
+                    );
                 },
                 SubmitInputReconstitutionFailure::QueuePositionMismatch,
             ),
@@ -1661,6 +2939,72 @@ mod tests {
             SubmitInputReconstitutionFailure::ExpectedActiveTurnMismatch
         );
 
+        SubmitInputReconstitutionInput::rejected_active_turn_present(
+            start.clone(),
+            Actor::Owner,
+            session_id(1),
+            turn_id(7),
+        )
+        .reconstitute()
+        .expect("a start request can record the exact active slot owner");
+        assert_eq!(
+            SubmitInputReconstitutionInput::rejected_active_turn_present(
+                safe_point.clone(),
+                Actor::Owner,
+                session_id(1),
+                turn_id(7),
+            )
+            .reconstitute()
+            .expect_err("only start can record active-turn-present")
+            .failure(),
+            SubmitInputReconstitutionFailure::RejectionDeliveryIsNotStart
+        );
+
+        let after = after_command(2, 7);
+        SubmitInputReconstitutionInput::rejected_active_turn_mismatch(
+            after.clone(),
+            Actor::Owner,
+            session_id(1),
+            turn_id(7),
+            turn_id(9),
+        )
+        .reconstitute()
+        .expect("different expected and actual active turns reconstruct");
+        assert_eq!(
+            SubmitInputReconstitutionInput::rejected_active_turn_mismatch(
+                after,
+                Actor::Owner,
+                session_id(1),
+                turn_id(7),
+                turn_id(7),
+            )
+            .reconstitute()
+            .expect_err("equal turns are not a stale-active rejection")
+            .failure(),
+            SubmitInputReconstitutionFailure::RejectedActiveTurnsAreEqual
+        );
+
+        SubmitInputReconstitutionInput::rejected_safe_point_unavailable_while_stopping(
+            safe_point.clone(),
+            Actor::Owner,
+            session_id(1),
+            turn_id(7),
+        )
+        .reconstitute()
+        .expect("the exact stopped safe-point target reconstructs");
+        assert_eq!(
+            SubmitInputReconstitutionInput::rejected_safe_point_unavailable_while_stopping(
+                safe_point.clone(),
+                Actor::Owner,
+                session_id(1),
+                turn_id(9),
+            )
+            .reconstitute()
+            .expect_err("another stopped turn does not match the command")
+            .failure(),
+            SubmitInputReconstitutionFailure::SafePointRejectionMismatch
+        );
+
         assert_eq!(
             SubmitInputReconstitutionInput::rejected_defaults_version_mismatch(
                 safe_point,
@@ -1672,7 +3016,7 @@ mod tests {
             .reconstitute()
             .expect_err("a non-start delivery fails closed")
             .failure(),
-            SubmitInputReconstitutionFailure::RejectionDeliveryIsNotStart
+            SubmitInputReconstitutionFailure::RejectionHasNoExplicitOriginConfiguration
         );
         assert_eq!(
             SubmitInputReconstitutionInput::rejected_defaults_version_mismatch(
@@ -1781,6 +3125,18 @@ mod tests {
             .expect_err("a position with a successor is not exhausted")
             .failure(),
             SubmitInputReconstitutionFailure::PositionIsNotExhausted
+        );
+        assert_eq!(
+            SubmitInputReconstitutionInput::rejected_acceptance_position_exhausted(
+                interrupt_command(3, 7),
+                Actor::Owner,
+                session_id(1),
+                maximum,
+            )
+            .reconstitute()
+            .expect_err("interrupt application is nonclaiming in this slice")
+            .failure(),
+            SubmitInputReconstitutionFailure::PositionExhaustionDeliveryUnavailable
         );
     }
 

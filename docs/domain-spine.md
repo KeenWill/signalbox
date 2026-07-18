@@ -473,6 +473,15 @@ impl SubmitInput {
         previous_position: Option<SessionInputPosition>,
         select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
     ) -> Result<PreparedSubmitInput, SubmitInputPreparationError>;
+    pub fn prepare_with_active_turn(
+        self,
+        session: &Session,
+        active_turn: &AcceptedInputTurnSchedulingProjection,
+        accepted_input: AcceptedInputId,
+        turn: Option<TurnId>,
+        previous_position: Option<SessionInputPosition>,
+        select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+    ) -> Result<PreparedSubmitInput, SubmitInputPreparationError>;
     // accessors: command_id(), session(), actor(), content(), delivery()
 }
 // Eq/Hash exclude command_id; all other fields participate
@@ -482,11 +491,27 @@ pub enum SubmitInputResult {
     Rejected(SubmitInputRejectedResult),
 }
 
-pub struct SubmitInputAppliedResult { /* private */ }
+pub enum SubmitInputAppliedResult {
+    TurnOrigin(SubmitInputTurnOriginAppliedResult),
+    PendingSteering(SubmitInputPendingSteeringAppliedResult),
+}
 // sealed: SubmitInput preparation or SubmitInputReconstitutionInput::reconstitute
 impl SubmitInputAppliedResult {
+    // accessors: accepted_input(), session(), acceptance_position(),
+    // disposition(), turn_origin(), pending_steering()
+}
+
+pub struct SubmitInputTurnOriginAppliedResult { /* private */ }
+// sealed: SubmitInput preparation or SubmitInputReconstitutionInput::reconstitute
+impl SubmitInputTurnOriginAppliedResult {
     // accessors: accepted_input(), session(), turn(), disposition(),
     // queue_order(), acceptance_position(), origin_configuration()
+}
+
+pub struct SubmitInputPendingSteeringAppliedResult { /* private */ }
+// sealed: SubmitInput preparation or SubmitInputReconstitutionInput::reconstitute
+impl SubmitInputPendingSteeringAppliedResult {
+    // accessors: accepted_input(), session(), acceptance_position(), binding()
 }
 
 pub enum SubmitInputRejectedResult {
@@ -496,6 +521,19 @@ pub enum SubmitInputRejectedResult {
     NoActiveTurn {
         session: SessionId,
         expected_active_turn: TurnId,
+    },
+    ActiveTurnPresent {
+        session: SessionId,
+        active_turn: TurnId,
+    },
+    ActiveTurnMismatch {
+        session: SessionId,
+        expected_active_turn: TurnId,
+        actual_active_turn: TurnId,
+    },
+    SafePointUnavailableWhileStopping {
+        session: SessionId,
+        active_turn: TurnId,
     },
     SessionDefaultsVersionMismatch {
         session: SessionId,
@@ -520,7 +558,7 @@ impl PreparedSubmitInput {
 }
 
 pub struct SubmitInputPreparationError { /* private */ }
-// sealed: Err of SubmitInput::prepare_when_no_active_turn; not terminal
+// sealed: Err of SubmitInput authoritative-state preparation; not terminal
 impl SubmitInputPreparationError {
     pub fn into_parts(self) -> (SubmitInput, SubmitInputPreparationFailure);
     // accessors: command(), failure()
@@ -529,11 +567,14 @@ impl SubmitInputPreparationError {
 pub enum SubmitInputPreparationFailure {
     SessionMismatch { provided_session: SessionId },
     TurnCandidateMismatch,
+    ActiveTurnSessionMismatch { provided_session: SessionId },
+    ActiveTurnProjectionIsNotActive { provided_turn: TurnId },
+    InterruptApplicationUnavailable,
 }
 
 pub struct SubmitInputReconstitutionInput { /* private */ }
 impl SubmitInputReconstitutionInput {
-    pub fn applied(
+    pub fn applied_turn_origin(
         command: SubmitInput,
         stored_actor: Actor,
         result_session: SessionId,
@@ -555,6 +596,20 @@ impl SubmitInputReconstitutionInput {
         stored_requested_model: ModelSelectionRequest,
         stored_frozen_model: FrozenModelSelection,
     ) -> Self;
+    pub fn applied_pending_steering(
+        command: SubmitInput,
+        stored_actor: Actor,
+        result_session: SessionId,
+        result_accepted_input: AcceptedInputId,
+        result_source_turn: TurnId,
+        accepted_command: DurableCommandId,
+        accepted_input: AcceptedInputId,
+        accepted_session: SessionId,
+        accepted_content: UserContent,
+        accepted_delivery: DeliveryRequest,
+        accepted_position: SessionInputPosition,
+        accepted_disposition: AcceptedInputDisposition,
+    ) -> Self;
     pub const fn rejected_session_not_found(
         command: SubmitInput,
         stored_actor: Actor,
@@ -565,6 +620,25 @@ impl SubmitInputReconstitutionInput {
         stored_actor: Actor,
         result_session: SessionId,
         result_expected_active_turn: TurnId,
+    ) -> Self;
+    pub const fn rejected_active_turn_present(
+        command: SubmitInput,
+        stored_actor: Actor,
+        result_session: SessionId,
+        result_active_turn: TurnId,
+    ) -> Self;
+    pub const fn rejected_active_turn_mismatch(
+        command: SubmitInput,
+        stored_actor: Actor,
+        result_session: SessionId,
+        result_expected_active_turn: TurnId,
+        result_actual_active_turn: TurnId,
+    ) -> Self;
+    pub const fn rejected_safe_point_unavailable_while_stopping(
+        command: SubmitInput,
+        stored_actor: Actor,
+        result_session: SessionId,
+        result_active_turn: TurnId,
     ) -> Self;
     pub const fn rejected_defaults_version_mismatch(
         command: SubmitInput,
@@ -595,7 +669,8 @@ impl SubmitInputReconstitutionInput {
 
 pub enum SubmitInputReconstitutionFailure {
     StoredActorMismatch,
-    AppliedDeliveryIsNotStart,
+    AppliedDeliveryIsNotTurnOrigin,
+    AppliedDeliveryIsNotNextSafePoint,
     ResultSessionMismatch,
     AcceptedCommandMismatch,
     AcceptedInputMismatch,
@@ -603,12 +678,16 @@ pub enum SubmitInputReconstitutionFailure {
     AcceptedContentMismatch,
     AcceptedDeliveryMismatch,
     AcceptedDispositionMismatch,
+    SteeringSourceTurnMismatch,
     QueueSessionMismatch,
     QueueTurnMismatch,
     QueuePositionMismatch,
     QueuePriorityMismatch,
     RejectionDeliveryIsNotStart,
+    RejectionHasNoExplicitOriginConfiguration,
     ExpectedActiveTurnMismatch,
+    RejectedActiveTurnsAreEqual,
+    SafePointRejectionMismatch,
     ExpectedDefaultsVersionMismatch,
     RejectedDefaultsVersionsAreEqual,
     DefaultsSessionMismatch,
@@ -618,6 +697,7 @@ pub enum SubmitInputReconstitutionFailure {
     UnknownAliasMismatch,
     RejectionDidNotSelectAlias,
     PositionIsNotExhausted,
+    PositionExhaustionDeliveryUnavailable,
 }
 
 pub struct SubmitInputReconstitutionError { /* private */ }
@@ -1648,7 +1728,7 @@ impl<Generator: SubmitInputIdGenerator, Transaction: SubmitInputTransaction>
 | domain: accepted_input | 5 |
 | domain: delivery_request | 2 |
 | domain: user_content | 4 |
-| domain: submit_input | 11 |
+| domain: submit_input | 13 |
 | domain: queue_order | 5 (+1 free fn) |
 | domain: turn_lifecycle | 10 |
 | domain: turn_eligibility | 14 |
@@ -1660,7 +1740,7 @@ impl<Generator: SubmitInputIdGenerator, Transaction: SubmitInputTransaction>
 | domain: applied_interrupt | 2 |
 | domain: fatal_mismatch | 0 |
 | domain: replace_session_defaults | 13 |
-| **signalbox-domain total** | **147 (+1 free fn)** |
+| **signalbox-domain total** | **149 (+1 free fn)** |
 | application: create_session | 8 (incl. 2 traits) |
 | application: load_session | 2 (incl. 1 trait) |
 | application: replace_session_defaults | 4 (incl. 1 trait) |

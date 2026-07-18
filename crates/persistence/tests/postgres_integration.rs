@@ -2558,7 +2558,10 @@ async fn s01_inv005_inv008_inv010_inv012_inv028_submit_apply_replay_conflict_and
     );
 
     let first = service.execute(request.clone()).await?;
-    let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(applied)) = first.clone() else {
+    let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
+        signalbox_domain::SubmitInputAppliedResult::TurnOrigin(applied),
+    )) = first.clone()
+    else {
         panic!("no-active-turn start must apply");
     };
     assert_eq!(applied.accepted_input(), accepted);
@@ -4329,8 +4332,9 @@ async fn inv007_inv008_inv012_submit_serializes_positions_and_rolls_back_failure
     }
     let mut positions = Vec::new();
     for task in tasks {
-        let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(applied)) =
-            task.await??
+        let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            signalbox_domain::SubmitInputAppliedResult::TurnOrigin(applied),
+        )) = task.await??
         else {
             panic!("each distinct concurrent command must apply");
         };

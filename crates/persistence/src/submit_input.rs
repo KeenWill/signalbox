@@ -10,7 +10,7 @@ use signalbox_domain::{
     ModelAlias, ModelSelectionOverride, ModelSelectionRequest, NonEmptyUnicodeTextFailure,
     PerInputConfigurationChoices, PreparedSubmitInput, ReconstitutedSubmitInput,
     SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
-    SessionInputPosition, SubmitInput, SubmitInputPreparationFailure,
+    SessionInputPosition, SubmitInput, SubmitInputAppliedResult, SubmitInputPreparationFailure,
     SubmitInputReconstitutionFailure, SubmitInputReconstitutionInput, SubmitInputRejectedResult,
     SubmitInputResult, ToolRequestId, TurnId, UserContent,
 };
@@ -443,6 +443,11 @@ async fn prepare_against_locked_state(
                     "current session ownership"
                 }
                 SubmitInputPreparationFailure::TurnCandidateMismatch => "delivery turn candidate",
+                SubmitInputPreparationFailure::ActiveTurnSessionMismatch { .. }
+                | SubmitInputPreparationFailure::ActiveTurnProjectionIsNotActive { .. }
+                | SubmitInputPreparationFailure::InterruptApplicationUnavailable => {
+                    unreachable!("occupied-slot SubmitInput preparation is not implemented")
+                }
             };
             SubmitInputCorruption::Inconsistent(relationship).into()
         })
@@ -505,7 +510,9 @@ async fn insert_prepared(
     .execute(&mut *connection)
     .await?;
 
-    if let SubmitInputResult::Applied(applied) = prepared.result() {
+    if let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(applied)) =
+        prepared.result()
+    {
         let origin = applied.origin_configuration();
         let requested = encode_selection(origin.requested().model());
         let frozen = encode_frozen_model(origin.effective().model());
@@ -761,7 +768,7 @@ struct EncodedResult {
 
 fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> EncodedResult {
     match result {
-        SubmitInputResult::Applied(result) => EncodedResult {
+        SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(result)) => EncodedResult {
             kind: APPLIED,
             rejection_kind: None,
             session: result.session(),
@@ -774,6 +781,16 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
             selected_defaults_version: None,
             last_position: None,
         },
+        SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(_)) => {
+            unreachable!("occupied-slot SubmitInput persistence is not implemented")
+        }
+        SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::ActiveTurnPresent { .. }
+            | SubmitInputRejectedResult::ActiveTurnMismatch { .. }
+            | SubmitInputRejectedResult::SafePointUnavailableWhileStopping { .. },
+        ) => {
+            unreachable!("occupied-slot SubmitInput persistence is not implemented")
+        }
         SubmitInputResult::Rejected(SubmitInputRejectedResult::SessionNotFound { session }) => {
             EncodedResult {
                 kind: REJECTED,
@@ -1177,7 +1194,7 @@ fn decode_applied(
         row.try_get("frozen_alias_selected_direct_id")?,
     )?;
 
-    Ok(SubmitInputReconstitutionInput::applied(
+    Ok(SubmitInputReconstitutionInput::applied_turn_origin(
         command,
         stored_actor,
         result_session,

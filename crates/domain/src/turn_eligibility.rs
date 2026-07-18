@@ -540,6 +540,24 @@ impl AcceptedInputTurnSchedulingProjection {
     }
 }
 
+#[cfg(test)]
+impl AcceptedInputTurnSchedulingProjection {
+    /// Replaces the phase only for sibling unit tests that exercise consumers
+    /// of already-validated active projections. This cannot enter production
+    /// or persistence reconstitution.
+    pub(crate) fn test_with_active_phase(mut self, phase: ActiveTurnPhase) -> Self {
+        let ReconstitutedSchedulingState::Active {
+            phase: current_phase,
+            ..
+        } = &mut self.state
+        else {
+            panic!("test phase replacement requires an active projection");
+        };
+        *current_phase = phase;
+        self
+    }
+}
+
 /// Canonical complete scheduling state for one session.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AcceptedInputSchedulingProjection {
