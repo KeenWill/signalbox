@@ -6,10 +6,9 @@
 //! session exists, and a transcript ancestry answering where its initial
 //! semantic conversation context came from. This module represents those
 //! facts as pure values, together with the typed [`CreateSession`] caller
-//! payload that pairs them with the initial model-selection defaults that
-//! ADR-0027 versions: atomic creation-time validation, durable storage, and
-//! selection of a real frontier from source-session history are aggregate
-//! and later-slice work.
+//! payload, its baseline pre-commit candidate, and its purpose-specific
+//! reconstitution boundary. Durable storage and selection of a real frontier
+//! from source-session history remain later-slice work.
 
 use crate::{
     DurableCommandId, SessionConfigurationDefaults, SessionId,
@@ -292,6 +291,360 @@ impl std::hash::Hash for CreateSession {
     }
 }
 
+/// The canonical initial state of one session and its defaults.
+///
+/// This pure value does not claim that a transaction committed. It is carried
+/// by [`PreparedCreateSession`] before persistence and by
+/// [`ReconstitutedSessionCreation`] only after complete durable facts validate.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct InitialSession {
+    id: SessionId,
+    provenance: SessionCreationProvenance,
+    configuration_defaults: VersionedSessionConfigurationDefaults,
+}
+
+impl InitialSession {
+    /// Returns the hub-minted session identity.
+    pub const fn id(&self) -> SessionId {
+        self.id
+    }
+
+    /// Returns the immutable creation provenance.
+    pub const fn provenance(&self) -> SessionCreationProvenance {
+        self.provenance
+    }
+
+    /// Returns defaults version one established by creation.
+    pub const fn configuration_defaults(&self) -> &VersionedSessionConfigurationDefaults {
+        &self.configuration_defaults
+    }
+}
+
+/// The terminal typed result recorded when `CreateSession` is applied.
+///
+/// The field is private and there is no constructor from a raw session
+/// identity. Live preparation and complete reconstitution are its only
+/// producers. The value records a result suitable for replay; possessing a
+/// pre-commit value does not claim that persistence occurred.
+///
+/// ```compile_fail
+/// use signalbox_domain::{CreateSessionAppliedResult, SessionId};
+///
+/// fn a_raw_session_id_is_not_an_applied_result(session: SessionId) {
+///     let _ = CreateSessionAppliedResult { session };
+/// }
+/// ```
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct CreateSessionAppliedResult {
+    session: SessionId,
+}
+
+impl CreateSessionAppliedResult {
+    /// Returns the exact session identity created by the applied command.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+}
+
+/// A sealed baseline creation candidate for one future atomic transaction.
+///
+/// Construction consumes the canonical command and accepts a session identity
+/// minted by application orchestration. Private fields prevent independently
+/// cross-wiring the command, initial state, and applied result. This value is
+/// not evidence of a database commit or command claim.
+#[derive(Clone, Copy, Debug)]
+pub struct PreparedCreateSession {
+    command: CreateSession,
+    session: InitialSession,
+    applied_result: CreateSessionAppliedResult,
+}
+
+impl PreparedCreateSession {
+    /// Borrows the exact canonical command to claim in the future transaction.
+    pub const fn command(&self) -> &CreateSession {
+        &self.command
+    }
+
+    /// Borrows the exact initial session state to persist.
+    pub const fn session(&self) -> &InitialSession {
+        &self.session
+    }
+
+    /// Returns the exact terminal applied result to record atomically.
+    pub const fn applied_result(&self) -> CreateSessionAppliedResult {
+        self.applied_result
+    }
+
+    /// Consumes the sealed candidate into its correlated transaction inputs.
+    pub const fn into_parts(self) -> (CreateSession, InitialSession, CreateSessionAppliedResult) {
+        (self.command, self.session, self.applied_result)
+    }
+}
+
+/// Why a canonical command cannot yet form the baseline creation candidate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CreateSessionPreparationFailure {
+    /// Trusted production and validation of a source transcript frontier is
+    /// not available in this slice.
+    TranscriptAncestryUnavailable,
+}
+
+/// A failed pre-commit preparation retaining every supplied input unchanged.
+///
+/// This is not an authoritative command rejection and does not claim the
+/// durable command identity.
+#[derive(Clone, Debug)]
+pub struct CreateSessionPreparationError {
+    session: SessionId,
+    command: CreateSession,
+    failure: CreateSessionPreparationFailure,
+}
+
+impl CreateSessionPreparationError {
+    /// Returns why no baseline candidate was formed.
+    pub const fn failure(&self) -> CreateSessionPreparationFailure {
+        self.failure
+    }
+
+    /// Borrows the unchanged canonical command.
+    pub const fn command(&self) -> &CreateSession {
+        &self.command
+    }
+
+    /// Returns the unchanged supplied session identity.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    /// Returns all unchanged preparation inputs and the failure.
+    pub fn into_parts(self) -> (SessionId, CreateSession, CreateSessionPreparationFailure) {
+        (self.session, self.command, self.failure)
+    }
+}
+
+impl CreateSession {
+    /// Prepares the owner-initiated, no-ancestry baseline for one transaction.
+    ///
+    /// A single-source command remains a canonical command value but cannot
+    /// be handled until a trusted transcript-frontier producer validates its
+    /// source boundary. That case returns every input unchanged and is not a
+    /// terminal rejected command result.
+    pub fn prepare(
+        self,
+        session: SessionId,
+    ) -> Result<PreparedCreateSession, CreateSessionPreparationError> {
+        match (self.provenance.cause(), self.provenance.ancestry()) {
+            (SessionCreationCause::OwnerInitiated, TranscriptAncestry::None) => {}
+            (SessionCreationCause::OwnerInitiated, TranscriptAncestry::SingleSource { .. }) => {
+                return Err(CreateSessionPreparationError {
+                    session,
+                    command: self,
+                    failure: CreateSessionPreparationFailure::TranscriptAncestryUnavailable,
+                });
+            }
+        }
+
+        let initial_session = InitialSession {
+            id: session,
+            provenance: self.provenance,
+            configuration_defaults: self.establish_initial_defaults(),
+        };
+        Ok(PreparedCreateSession {
+            command: self,
+            session: initial_session,
+            applied_result: CreateSessionAppliedResult { session },
+        })
+    }
+}
+
+/// Complete checked inputs for reconstituting one applied session creation.
+///
+/// These are domain values rather than rows or nullable storage shapes. The
+/// result session is supplied separately from the session record identity so
+/// the domain can reject a cross-wired applied result.
+#[derive(Clone, Copy, Debug)]
+pub struct CreateSessionReconstitutionInput {
+    command: CreateSession,
+    result_session: SessionId,
+    session: SessionId,
+    provenance: SessionCreationProvenance,
+    defaults_version: crate::SessionConfigurationDefaultsVersion,
+    defaults: SessionConfigurationDefaults,
+}
+
+impl CreateSessionReconstitutionInput {
+    /// Supplies the complete typed facts required by this purpose-specific
+    /// reconstitution seam.
+    pub const fn new(
+        command: CreateSession,
+        result_session: SessionId,
+        session: SessionId,
+        provenance: SessionCreationProvenance,
+        defaults_version: crate::SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+    ) -> Self {
+        Self {
+            command,
+            result_session,
+            session,
+            provenance,
+            defaults_version,
+            defaults,
+        }
+    }
+
+    /// Borrows the reconstructed canonical command record.
+    pub const fn command(&self) -> &CreateSession {
+        &self.command
+    }
+
+    /// Returns the session identity recorded in the applied result.
+    pub const fn result_session(&self) -> SessionId {
+        self.result_session
+    }
+
+    /// Returns the identity recorded by the session aggregate.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    /// Returns the immutable provenance recorded by the session aggregate.
+    pub const fn provenance(&self) -> SessionCreationProvenance {
+        self.provenance
+    }
+
+    /// Returns the stored initial defaults version.
+    pub const fn defaults_version(&self) -> crate::SessionConfigurationDefaultsVersion {
+        self.defaults_version
+    }
+
+    /// Returns the stored initial defaults value.
+    pub const fn defaults(&self) -> SessionConfigurationDefaults {
+        self.defaults
+    }
+
+    /// Reconstructs the complete canonical creation without replaying effects.
+    pub fn reconstitute(
+        self,
+    ) -> Result<ReconstitutedSessionCreation, CreateSessionReconstitutionError> {
+        let fail = |failure| CreateSessionReconstitutionError {
+            input: Box::new(self),
+            failure,
+        };
+
+        if self.session != self.result_session {
+            return Err(fail(
+                CreateSessionReconstitutionFailure::SessionResultMismatch,
+            ));
+        }
+        if self.command.provenance() != self.provenance {
+            return Err(fail(CreateSessionReconstitutionFailure::ProvenanceMismatch));
+        }
+        match (self.provenance.cause(), self.provenance.ancestry()) {
+            (SessionCreationCause::OwnerInitiated, TranscriptAncestry::None) => {}
+            (SessionCreationCause::OwnerInitiated, TranscriptAncestry::SingleSource { .. }) => {
+                return Err(fail(
+                    CreateSessionReconstitutionFailure::TranscriptAncestryUnavailable,
+                ));
+            }
+        }
+        if self.defaults_version != crate::SessionConfigurationDefaultsVersion::first() {
+            return Err(fail(
+                CreateSessionReconstitutionFailure::DefaultsVersionIsNotFirst,
+            ));
+        }
+        if self.command.initial_configuration_defaults() != self.defaults {
+            return Err(fail(CreateSessionReconstitutionFailure::DefaultsMismatch));
+        }
+
+        Ok(ReconstitutedSessionCreation {
+            command: self.command,
+            session: InitialSession {
+                id: self.session,
+                provenance: self.provenance,
+                configuration_defaults: VersionedSessionConfigurationDefaults::establish(
+                    self.defaults,
+                ),
+            },
+            applied_result: CreateSessionAppliedResult {
+                session: self.result_session,
+            },
+        })
+    }
+}
+
+/// Why complete typed durable facts cannot reconstruct session creation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CreateSessionReconstitutionFailure {
+    /// The applied result names a different session from the session record.
+    SessionResultMismatch,
+    /// The stored creation provenance differs from the canonical command.
+    ProvenanceMismatch,
+    /// Trusted source-frontier production is unavailable for this slice.
+    TranscriptAncestryUnavailable,
+    /// Session creation did not establish defaults version one.
+    DefaultsVersionIsNotFirst,
+    /// The stored initial defaults differ from the canonical command payload.
+    DefaultsMismatch,
+}
+
+/// A failed reconstitution retaining the complete unchanged typed input.
+#[derive(Clone, Debug)]
+pub struct CreateSessionReconstitutionError {
+    input: Box<CreateSessionReconstitutionInput>,
+    failure: CreateSessionReconstitutionFailure,
+}
+
+impl CreateSessionReconstitutionError {
+    /// Returns why the complete projection could not be reconstructed.
+    pub const fn failure(&self) -> CreateSessionReconstitutionFailure {
+        self.failure
+    }
+
+    /// Borrows the complete unchanged input.
+    pub const fn input(&self) -> &CreateSessionReconstitutionInput {
+        &self.input
+    }
+
+    /// Returns the complete unchanged input and failure.
+    pub fn into_parts(
+        self,
+    ) -> (
+        CreateSessionReconstitutionInput,
+        CreateSessionReconstitutionFailure,
+    ) {
+        (*self.input, self.failure)
+    }
+}
+
+/// One complete session creation reconstructed from matching durable facts.
+///
+/// This is distinct from [`PreparedCreateSession`]: it authorizes no insert,
+/// effect, identity generation, or command claim.
+#[derive(Clone, Copy, Debug)]
+pub struct ReconstitutedSessionCreation {
+    command: CreateSession,
+    session: InitialSession,
+    applied_result: CreateSessionAppliedResult,
+}
+
+impl ReconstitutedSessionCreation {
+    /// Borrows the reconstructed canonical command.
+    pub const fn command(&self) -> &CreateSession {
+        &self.command
+    }
+
+    /// Borrows the reconstructed initial session state.
+    pub const fn session(&self) -> &InitialSession {
+        &self.session
+    }
+
+    /// Returns the reconstructed recorded applied result.
+    pub const fn applied_result(&self) -> CreateSessionAppliedResult {
+        self.applied_result
+    }
+}
+
 #[cfg(test)]
 const fn test_frontier(value: u128) -> TranscriptFrontier {
     TranscriptFrontier {
@@ -302,8 +655,9 @@ const fn test_frontier(value: u128) -> TranscriptFrontier {
 #[cfg(test)]
 mod tests {
     use super::{
-        CreateSession, SessionCreationCause, SessionCreationProvenance, TranscriptAncestry,
-        test_frontier,
+        CreateSession, CreateSessionPreparationFailure, CreateSessionReconstitutionFailure,
+        CreateSessionReconstitutionInput, SessionCreationCause, SessionCreationProvenance,
+        TranscriptAncestry, test_frontier,
     };
     use crate::test_support::{command_id, direct, session_id};
     use crate::{
@@ -494,5 +848,212 @@ mod tests {
             create,
             CreateSession::new(command_id(3), owner_initiated_empty(), defaults(6))
         );
+    }
+
+    /// S01 / INV-003 / INV-008 / INV-012: preparation seals the exact
+    /// command, hub-supplied session, independent provenance, defaults version
+    /// one, and matching replay result without claiming a commit.
+    #[test]
+    fn s01_inv003_inv008_inv012_preparation_couples_complete_creation() {
+        let create = CreateSession::new(command_id(1), owner_initiated_empty(), defaults(2));
+
+        let prepared = create
+            .prepare(session_id(3))
+            .expect("the empty owner-initiated baseline is preparable");
+
+        assert_eq!(prepared.command().command_id(), command_id(1));
+        assert_eq!(prepared.command(), &create);
+        assert_eq!(prepared.session().id(), session_id(3));
+        assert_eq!(prepared.session().provenance(), owner_initiated_empty());
+        assert_eq!(
+            prepared.session().configuration_defaults().version(),
+            SessionConfigurationDefaultsVersion::first()
+        );
+        assert_eq!(
+            prepared.session().configuration_defaults().defaults(),
+            &defaults(2)
+        );
+        assert_eq!(prepared.applied_result().session(), session_id(3));
+
+        let (carried_command, carried_session, carried_result) = prepared.into_parts();
+        assert_eq!(carried_command.command_id(), command_id(1));
+        assert_eq!(carried_session.id(), carried_result.session());
+    }
+
+    /// S17: until trusted transcript-frontier production exists, a
+    /// single-source command yields no candidate or terminal command result
+    /// and returns the command and minted identity unchanged.
+    #[test]
+    fn s17_unavailable_ancestry_is_a_nonclaiming_preparation_failure() {
+        let provenance = SessionCreationProvenance::new(
+            SessionCreationCause::OwnerInitiated,
+            TranscriptAncestry::SingleSource {
+                source_session: session_id(1),
+                source_frontier: test_frontier(2),
+            },
+        );
+        let create = CreateSession::new(command_id(3), provenance, defaults(4));
+
+        let error = create
+            .prepare(session_id(5))
+            .expect_err("unvalidated source ancestry cannot form a candidate");
+
+        assert_eq!(
+            error.failure(),
+            CreateSessionPreparationFailure::TranscriptAncestryUnavailable
+        );
+        assert_eq!(error.session(), session_id(5));
+        assert_eq!(error.command().command_id(), command_id(3));
+        assert_eq!(error.command().provenance(), provenance);
+        let (session, command, failure) = error.into_parts();
+        assert_eq!(session, session_id(5));
+        assert_eq!(command.command_id(), command_id(3));
+        assert_eq!(command.provenance(), provenance);
+        assert_eq!(
+            failure,
+            CreateSessionPreparationFailure::TranscriptAncestryUnavailable
+        );
+    }
+
+    /// S01 / INV-003 / INV-008 / INV-012: complete matching durable facts
+    /// reconstruct the same canonical initial session and typed replay result
+    /// without producing a pre-commit candidate.
+    #[test]
+    fn s01_inv003_inv008_inv012_matching_creation_reconstitutes_whole() {
+        let create = CreateSession::new(command_id(1), owner_initiated_empty(), defaults(2));
+        let input = CreateSessionReconstitutionInput::new(
+            create,
+            session_id(3),
+            session_id(3),
+            owner_initiated_empty(),
+            SessionConfigurationDefaultsVersion::first(),
+            defaults(2),
+        );
+
+        let reconstituted = input
+            .reconstitute()
+            .expect("complete matching creation facts must reconstruct");
+
+        assert_eq!(reconstituted.command().command_id(), command_id(1));
+        assert_eq!(reconstituted.command(), &create);
+        assert_eq!(reconstituted.session().id(), session_id(3));
+        assert_eq!(
+            reconstituted.session().provenance(),
+            owner_initiated_empty()
+        );
+        assert_eq!(
+            reconstituted.session().configuration_defaults().version(),
+            SessionConfigurationDefaultsVersion::first()
+        );
+        assert_eq!(
+            reconstituted.session().configuration_defaults().defaults(),
+            &defaults(2)
+        );
+        assert_eq!(reconstituted.applied_result().session(), session_id(3));
+    }
+
+    /// S01 / INV-003 / INV-008 / INV-012: every cross-wired session, result,
+    /// provenance, or defaults shape fails closed and retains the complete
+    /// unchanged typed projection.
+    #[test]
+    fn s01_inv003_inv008_inv012_reconstitution_rejects_cross_wired_facts() {
+        let create = CreateSession::new(command_id(1), owner_initiated_empty(), defaults(2));
+        let second_version = SessionConfigurationDefaultsVersion::first()
+            .checked_next()
+            .expect("version two exists");
+        let fork = SessionCreationProvenance::new(
+            SessionCreationCause::OwnerInitiated,
+            TranscriptAncestry::SingleSource {
+                source_session: session_id(10),
+                source_frontier: test_frontier(11),
+            },
+        );
+
+        let cases = [
+            (
+                CreateSessionReconstitutionInput::new(
+                    create,
+                    session_id(4),
+                    session_id(3),
+                    owner_initiated_empty(),
+                    SessionConfigurationDefaultsVersion::first(),
+                    defaults(2),
+                ),
+                CreateSessionReconstitutionFailure::SessionResultMismatch,
+            ),
+            (
+                CreateSessionReconstitutionInput::new(
+                    CreateSession::new(command_id(1), fork, defaults(2)),
+                    session_id(3),
+                    session_id(3),
+                    owner_initiated_empty(),
+                    SessionConfigurationDefaultsVersion::first(),
+                    defaults(2),
+                ),
+                CreateSessionReconstitutionFailure::ProvenanceMismatch,
+            ),
+            (
+                CreateSessionReconstitutionInput::new(
+                    CreateSession::new(command_id(1), fork, defaults(2)),
+                    session_id(3),
+                    session_id(3),
+                    fork,
+                    SessionConfigurationDefaultsVersion::first(),
+                    defaults(2),
+                ),
+                CreateSessionReconstitutionFailure::TranscriptAncestryUnavailable,
+            ),
+            (
+                CreateSessionReconstitutionInput::new(
+                    create,
+                    session_id(3),
+                    session_id(3),
+                    owner_initiated_empty(),
+                    second_version,
+                    defaults(2),
+                ),
+                CreateSessionReconstitutionFailure::DefaultsVersionIsNotFirst,
+            ),
+            (
+                CreateSessionReconstitutionInput::new(
+                    create,
+                    session_id(3),
+                    session_id(3),
+                    owner_initiated_empty(),
+                    SessionConfigurationDefaultsVersion::first(),
+                    defaults(5),
+                ),
+                CreateSessionReconstitutionFailure::DefaultsMismatch,
+            ),
+        ];
+
+        for (input, expected_failure) in cases {
+            let expected_command_id = input.command().command_id();
+            let expected_result_session = input.result_session();
+            let expected_session = input.session();
+            let expected_provenance = input.provenance();
+            let expected_version = input.defaults_version();
+            let expected_defaults = input.defaults();
+
+            let error = input
+                .reconstitute()
+                .expect_err("cross-wired durable facts must fail closed");
+
+            assert_eq!(error.failure(), expected_failure);
+            assert_eq!(error.input().command().command_id(), expected_command_id);
+            assert_eq!(error.input().result_session(), expected_result_session);
+            assert_eq!(error.input().session(), expected_session);
+            assert_eq!(error.input().provenance(), expected_provenance);
+            assert_eq!(error.input().defaults_version(), expected_version);
+            assert_eq!(error.input().defaults(), expected_defaults);
+            let (returned, failure) = error.into_parts();
+            assert_eq!(returned.command().command_id(), expected_command_id);
+            assert_eq!(returned.result_session(), expected_result_session);
+            assert_eq!(returned.session(), expected_session);
+            assert_eq!(returned.provenance(), expected_provenance);
+            assert_eq!(returned.defaults_version(), expected_version);
+            assert_eq!(returned.defaults(), expected_defaults);
+            assert_eq!(failure, expected_failure);
+        }
     }
 }

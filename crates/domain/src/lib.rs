@@ -50,8 +50,11 @@ pub use queue_order::{
     AcceptedInputQueueWork, SessionInputPosition, derive_accepted_input_total_order,
 };
 pub use session::{
-    CreateSession, SessionCreationCause, SessionCreationProvenance, TranscriptAncestry,
-    TranscriptFrontier,
+    CreateSession, CreateSessionAppliedResult, CreateSessionPreparationError,
+    CreateSessionPreparationFailure, CreateSessionReconstitutionError,
+    CreateSessionReconstitutionFailure, CreateSessionReconstitutionInput, InitialSession,
+    PreparedCreateSession, ReconstitutedSessionCreation, SessionCreationCause,
+    SessionCreationProvenance, TranscriptAncestry, TranscriptFrontier,
 };
 pub use turn_attempt::{
     AppliedInterruptState, AttemptEnd, CancellationStopDisposition, CurrentTurnAttempt,
