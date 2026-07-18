@@ -69,10 +69,11 @@ reviewed SQL migration set. Persistence queries use SQLx's runtime query API,
 static SQL, `Row::try_get`, hand-written record structs, and explicit fallible
 record/domain conversions. The persistence boundary does not use `query!`,
 `query_as!`, `FromRow` derives, SQLx type derives, or an ORM-generated domain or
-record model. SQLx's `macros` feature also makes its derive and query macros
-available, but availability is not authority to use them. The stack does not
-enable `any`, another database driver, or JSON support before ADR-0022's
-canonical durable-command payload encoding is decided.
+record model. SQLx 0.9 exposes query macros through `macros`; derive macros are a
+separate `derive` feature, which Signalbox does not enable. Availability of the
+query macros is not authority to use them. The stack does not enable `any`,
+another database driver, or JSON support before ADR-0022's canonical
+durable-command payload encoding is decided.
 
 SQLx's built-in
 [`PgPool`](https://docs.rs/sqlx/0.9.0/sqlx/postgres/type.PgPool.html) is the only
@@ -146,11 +147,12 @@ Container-backed integration tests use the
 features are disabled; only `postgres` and the `ring` crypto backend are
 enabled. The synchronous `blocking` runner and unrelated service modules remain
 disabled. Each test binary starts an explicitly tagged supported Postgres
-image, uses that container's isolated database, applies the embedded
-migrations, and closes its SQLx pool before the container is dropped. The
-implementation pins an explicit image tag rather than inheriting a module
-default or using `latest`; the supported production major and test major must
-match.
+image, enables the module's `with_fsync_enabled()` setting rather than
+inheriting its performance-oriented `fsync=off` default, uses that container's
+isolated database, applies the embedded migrations, and closes its SQLx pool
+before the container is dropped. The implementation pins an explicit image tag
+rather than inheriting a module default or using `latest`; the supported
+production major and test major must match.
 
 The container dependency is isolated behind a `postgres-integration` Cargo
 feature and a dedicated integration-test target. Every container-backed test
@@ -250,8 +252,8 @@ Testcontainers increase download, compile, audit, and upgrade surface. In
 return, Signalbox does not own a pool, migration ledger, migration lock, TLS
 stack integration, or container lifecycle wrapper. Default-feature suppression
 keeps unused database drivers and JSON mapping out of the initial graph. The
-`macros` feature necessarily makes SQLx query and derive macros available, but
-repository code uses only `migrate!`.
+`macros` feature necessarily makes SQLx query macros available, but repository
+code uses only `migrate!`; the separate `derive` feature remains disabled.
 
 The persistence crate stays hand-written and Postgres-specific. Tests exercise
 the same database semantics as production and make Docker use explicit.
