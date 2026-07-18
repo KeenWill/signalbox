@@ -6,6 +6,7 @@
 mod create_session;
 mod load_session;
 mod replace_session_defaults;
+mod submit_input;
 
 pub use create_session::{
     CreateSessionError, CreateSessionOutcome, CreateSessionRequest, CreateSessionService,
@@ -16,4 +17,8 @@ pub use load_session::{LoadSessionService, SessionReader};
 pub use replace_session_defaults::{
     ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest, ReplaceSessionDefaultsService,
     ReplaceSessionDefaultsTransaction,
+};
+pub use submit_input::{
+    SubmitInputIdGenerator, SubmitInputOutcome, SubmitInputRequest, SubmitInputService,
+    SubmitInputTransaction, UuidV7SubmitInputIdGenerator,
 };

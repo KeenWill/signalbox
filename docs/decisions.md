@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-18 — Application-owned durable input orchestration
+
+**Context.** The domain `SubmitInput` slice defines the canonical actor-bearing command and closed recorded result, while ADR-0033 assigns accepted-input and future-turn identity generation to application orchestration. ADR-0027 and ADR-0034 require owner-global lookup before mutable session validation, so the application cannot prepare against a preloaded session.
+
+**Decision.** Represent the admitted application input as a private-field `SubmitInputRequest` carrying command identity, session, checked content, and explicit delivery treatment. Reuse `InvalidDurableCommandId` before canonical construction, and fix `Actor::Owner` in the service because ADR-0039 admits no other baseline command actor. Compose one generator port that supplies fresh UUIDv7 accepted-input and future-turn candidates with one async transaction port accepting the unprepared command and both candidates. The service constructs once, generates once per identity kind, calls the transaction once, and returns its recorded domain result, typed conflicting reuse, or adapter failure unchanged. Authoritative lookup, session loading, position allocation, preparation, and commit remain inside the transaction implementation.
+
+**Rejected alternatives.** Accepting an actor would expose command agency not admitted by ADR-0039. Application preparation would move mutable validation ahead of owner-global lookup. Generating identities in domain, persistence, or database code would cross ADR-0033's boundary. Flattening recorded rejections into application errors would erase terminal replay meaning. Retrying would obscure whether the transaction committed.
+
+**Affects.** `crates/application/src/submit_input.rs`, its exports, the application domain spine, and the INV-001/INV-002/INV-007/INV-008/INV-012/INV-028 enforcement links. It adds no persistence adapter, schema, alias source, turn lifecycle, scheduler, protocol, outbox event, retry policy, or dependency.
+
 ## 2026-07-18 — Canonical SubmitInput domain boundary
 
 **Context.** ADR-0027 fixes the caller payload, accepted disposition, queue facts, and configuration provenance for durable input; ADR-0037 and ADR-0039 now fix its content and actor fields. The first priority milestone stops before the turn aggregate, so its domain API must prepare the authoritative no-active-turn state without implying lifecycle, eligibility, frontier, slot, attempt, steering, or interrupt authority.
