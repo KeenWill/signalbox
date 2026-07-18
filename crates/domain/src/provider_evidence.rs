@@ -771,11 +771,14 @@ mod tests {
         ProviderTargetObservation,
     };
     use crate::test_support::{
-        model_call_id, provider_model_identity, provider_target_evidence_id as evidence_id, turn_id,
+        context_frontier_id, model_call_id, provider_model_identity,
+        provider_target_evidence_id as evidence_id, semantic_transcript_entry_id, session_id,
+        turn_id,
     };
     use crate::{
         CurrentModelCall, CurrentModelCallState, EndedModelCall, ModelCallDisposition,
-        PinnedProviderTarget, ProviderTargetMismatchFailureKind, ResolvedProviderTarget,
+        PinnedProviderTarget, ProviderTargetMismatchFailureKind, ResolvedContextFrontierSnapshot,
+        ResolvedProviderTarget, SemanticTranscriptEntryRef,
     };
 
     const TARGET_IDENTITY: u128 = 7;
@@ -787,8 +790,20 @@ mod tests {
         )
     }
 
+    fn frontier_snapshot() -> ResolvedContextFrontierSnapshot {
+        ResolvedContextFrontierSnapshot::try_from_candidate(
+            session_id(1),
+            context_frontier_id(1),
+            vec![SemanticTranscriptEntryRef::from_source(
+                session_id(1),
+                semantic_transcript_entry_id(1),
+            )],
+        )
+        .expect("test frontier contains one exact semantic entry")
+    }
+
     fn current_call(call: u128) -> CurrentModelCall {
-        CurrentModelCall::prepared(model_call_id(call), pinned_target())
+        CurrentModelCall::prepared(model_call_id(call), pinned_target(), &frontier_snapshot())
             .begin_in_flight()
             .expect("Prepared may send")
     }
@@ -927,7 +942,8 @@ mod tests {
             ProviderTargetMismatchEffectView::ClassifyNonterminalKnownFailed
         );
 
-        let unsent = CurrentModelCall::prepared(model_call_id(2), pinned_target());
+        let unsent =
+            CurrentModelCall::prepared(model_call_id(2), pinned_target(), &frontier_snapshot());
         assert_eq!(unsent.state(), CurrentModelCallState::Prepared);
         assert_eq!(
             recorded_mismatch(1, 2, 8).nonterminal_call_mismatch_fact(&unsent),
