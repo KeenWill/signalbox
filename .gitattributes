@@ -1,0 +1,1 @@
+crates/persistence/migrations/*.sql text eol=lf

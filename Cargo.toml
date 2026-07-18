@@ -1,5 +1,10 @@
 [workspace]
-members = ["apps/hubd", "crates/application", "crates/domain"]
+members = [
+    "apps/hubd",
+    "crates/application",
+    "crates/domain",
+    "crates/persistence",
+]
 resolver = "3"
 
 [workspace.package]
