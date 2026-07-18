@@ -10,7 +10,7 @@ An append-only, dated record of decisions below foundation weight, newest first.
 
 **Rejected alternatives.** Depending on the persistence crate would reverse the intended adapter direction. Generating identities in Postgres or domain code would violate ADR-0033. Returning the invocation's fresh candidate on replay would replace the recorded receipt. Returning `Session` would conflate the receipt with ADR-0038's separate current snapshot. Retrying inside the use case would obscure whether the transaction committed; the caller may resubmit the same command ID and let the atomic port resolve replay.
 
-**Affects.** `crates/application/src/create_session.rs`, the application crate's focused UUIDv7 dependency and public exports, and INV-002/INV-003/INV-012 enforcement links. It adds no persistence adapter, current-session load, protocol, authentication, client or hub wiring, fork, input-submission, or defaults-replacement behavior.
+**Affects.** `crates/application/src/create_session.rs`, the application crate's focused UUIDv7 dependency and public exports, and INV-001/INV-002/INV-003/INV-008/INV-012 enforcement links. It adds no persistence adapter, current-session load, protocol, authentication, client or hub wiring, fork, input-submission, or defaults-replacement behavior.
 
 ## 2026-07-18 — Atomic CreateSession handling and complete replay load
 
