@@ -1002,12 +1002,12 @@ async fn inv002_inv003_inv008_current_session_corruption_fails_closed() -> Resul
         })
     ));
 
-    let missing = session_repository
+    let missing_selected_row = session_repository
         .load_session(missing_selected.session().id())
         .await
         .expect_err("a missing selected defaults row is corruption");
     assert!(matches!(
-        missing,
+        missing_selected_row,
         SessionRepositoryError::Corruption(SessionCorruption::Missing(
             "selected_defaults_session_id"
         ))
