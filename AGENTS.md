@@ -4,6 +4,23 @@ Signalbox is in its design and foundation phase. Implementation is limited to me
 
 Authoritative starting points are `docs/architecture.md`, `docs/invariants.md`, `docs/decisions.md`, `docs/open-questions.md`, and accepted records under `docs/decisions/`. Accepted ADRs are the normative specification for decided semantics; executable tests become the enforcement of record as slices implement them. When selecting milestones, also consult `docs/target-model.md`, the owner's directional product target — it guides destination and ordering but is not authoritative and never overrides the sources above.
 
+**Working autonomously.** Within an assigned task, proceed without asking: branch, implement, run the validation sequence (it defines done for any code change), and open and revise pull requests. Stop only at owner gates — merges, foundation-weight decisions, large dependencies — and when two rules conflict in practice, stop and report the conflict rather than reconciling it silently. Autonomous milestone-delivering runs additionally follow `docs/goal-mode.md`.
+
+**Finished pull requests.** The owner merges every pull request; deliver each one finished and awaiting owner merge:
+
+- CI is green on the final commit.
+- Every reviewer-bot comment is triaged in-thread: fixed with the fixing commit named, or declined with a reason.
+- External reviews are re-requested on the final commit after any rebase, and outdated review threads are resolved.
+- The description is at most 350 words, states the count of meaningfully changed lines (excluding lockfiles), and claims only what the code enforces — a contract binding future implementors is described as a contract, not an enforcement.
+- At most two review-fix waves, where one wave is one round of fix commits responding to a review pass; then stop work on that pull request and escalate to the owner.
+
+**Stacked pull requests.** Stacks may grow as deep as the work requires; the owner merges in batches, so never wait on a merge to continue. Keep every stack linear and healthy:
+
+- Each pull request targets the immediately preceding branch, and its diff is reviewed against that immediate base, not `main`.
+- Verify a base branch still exists before stacking on it; when a base merges, fetch and retarget or rebase the remainder without discarding work.
+- Open draft pull requests early so the stack is visible; mark each ready only after its own validation passes.
+- Never force-push or rewrite a shared branch without first proving it necessary and safe; preserve owner-authored and externally added changes.
+
 Every normative statement lives in exactly one place — an accepted ADR, a decision-log entry, a catalog row or scenario that is its own statement of record, or an implemented test — and other documents link to it rather than restating it. Do not restate content owned elsewhere in the overview documents (architecture, the invariant catalog's ADR-backed summaries, scenarios); a row or fixture that is itself the statement of record changes only together with the decision that authorizes the change.
 
 Decisions have two weights. Ordinary decisions are made in the pull request and recorded as a dated entry in `docs/decisions.md` stating context, decision, rejected alternatives, and what it affects. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, introducing a technology that constrains several components, or closing an open question whose resolution has any of these effects — require an ADR under `docs/decisions/`, exercised against scenarios. Do not silently change a foundational decision or close a recorded open question. Keep domain types distinct from storage records, protocol messages, and framework types. Keep pull requests narrow and reviewable.

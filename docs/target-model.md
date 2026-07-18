@@ -6,7 +6,7 @@ This document records the owner's directional product and domain target: the des
 
 This document is **directional, not normative**. Accepted records under [docs/decisions/](decisions/README.md), the [invariant catalog](invariants.md), and the [decision log](decisions.md) always override it; where this document and an accepted record disagree, the record wins and this document is out of date. Concepts described here that lack an accepted ADR are **targets awaiting decisions, not decisions**: naming a concept here authorizes neither its implementation nor a silent closure of an open question. The [one-place rule](../AGENTS.md) applies throughout — decided semantics are linked, never restated, and only target-only concepts are owned by this document.
 
-Agents selecting milestones should use it as follows: pick the earliest unfinished step of the [priority order](#priority-order) whose blocking decisions are accepted, or propose the blocking decision itself as the milestone. A row marked *Target* in the [concept status map](#concept-status-map) identifies work that needs a decision before code; a row marked *Reserved* names the ADR number that decision must use. Cross-check the [open questions inventory](open-questions.md) before treating anything here as settled.
+Milestone selection rules for autonomous runs live in [goal-mode.md](goal-mode.md); this document owns only the [priority order](#priority-order) and [concept status map](#concept-status-map) those rules reference. A row marked *Target* identifies work that needs a decision before code; a row marked *Reserved* names the ADR number that decision must use. Cross-check the [open questions inventory](open-questions.md) before treating anything here as settled.
 
 ## Product vision
 

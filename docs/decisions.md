@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-18 — Goal-mode rules split and unbounded stacks
+
+**Context.** Autonomous milestone runs need durable operating rules, but the root `AGENTS.md` is injected into every agent for every task, and the published prompting guidance for the models running these agents ranks contradictory or duplicated instructions as the leading failure mode. An earlier draft capped open pull requests at three and told runs to "finish and merge" at the cap, contradicting owner-only merging; the owner had already hit that cap while steering real runs.
+
+**Decision.** Keep in `AGENTS.md` only the rules that bind every agent and pull request: an explicit autonomy grant, the finished-pull-request checklist delivered awaiting owner merge, and stack hygiene without any depth cap — stacks may grow as deep as the work requires and the owner merges in batches. Move milestone selection, frozen surfaces, blocker handling, orchestration, progress checkpoints, the milestone check-in gate, and goal-writing guidance to `docs/goal-mode.md`, loaded only by autonomous milestone runs. The milestone-selection algorithm lives there alone; `docs/target-model.md` links to it and owns only the priority order and status map.
+
+**Rejected alternatives.** Keeping everything in `AGENTS.md` burdens single-task agents with rules that do not bind them. Any fixed stack cap re-creates the merge contradiction and stalls autonomous runs on the owner's availability. Restating the selection algorithm in two documents invites the divergence the one-place rule exists to prevent.
+
+**Affects.** `AGENTS.md`, `docs/goal-mode.md` (new), the milestone-selection paragraph of `docs/target-model.md`, and future goal prompts, which can now stay lean.
+
 ## 2026-07-18 — Postgres implements the application defaults-replacement port
 
 **Context.** The application crate owns the one-call `ReplaceSessionDefaultsTransaction` port and its closed recorded-or-conflict outcome, while the persistence crate already owns the atomic PostgreSQL handler required by ADR-0027 and ADR-0034. The final adapter must connect those seams without duplicating replay, current-pointer, or reconstruction policy.
