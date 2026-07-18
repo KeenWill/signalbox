@@ -15,6 +15,7 @@
 )]
 
 pub(crate) mod lifecycle;
+pub(crate) mod prepared;
 
 use std::collections::{BTreeMap, BTreeSet};
 
