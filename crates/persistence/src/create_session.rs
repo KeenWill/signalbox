@@ -391,12 +391,11 @@ fn decode_complete(
         );
     }
     let stored_version = decode_ordinal(&row, "stored_defaults_version")?;
-    let current_version = decode_ordinal(&row, "current_version")?;
-    if current_version != stored_version {
-        return Err(
-            CreateSessionCorruption::Inconsistent("current defaults pointer version").into(),
-        );
-    }
+    // ADR-0022/ADR-0034: `current_version` is a mutable pointer advanced by later
+    // defaults replacements and must not gate CreateSession reconstitution, which
+    // reconstructs the immutable initial creation from `initial_defaults_version`.
+    // It is decoded only to reject a non-ordinal pointer row.
+    let _current_version = decode_ordinal(&row, "current_version")?;
     let stored_defaults = decode_selection(
         required(&row, "stored_model_kind")?,
         row.try_get("stored_direct_id")?,
