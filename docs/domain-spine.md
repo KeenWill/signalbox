@@ -21,7 +21,9 @@ Conventions used below:
   accessor return types in source.
 - Enums are shown with their full variant lists — the variants are the
   semantic content.
-- Every struct in both crates has private fields. Structs a caller can build
+- Structs have private fields unless declared as unit structs (a unit
+  struct such as `UuidV7SessionIdGenerator;` is directly constructible).
+  Structs a caller can build
   show their public constructors as full signatures; structs with no public
   constructor appear with a `// sealed:` comment naming the only public
   producer(s), or noting that the trusted producer is deferred to a later
@@ -1035,7 +1037,6 @@ impl<Reader> LoadSessionService<Reader> {
 impl<Reader: SessionReader> LoadSessionService<Reader> {
     pub async fn execute(&self, session_id: SessionId)
         -> Result<Option<Session>, Reader::Error>;
-    // single query; no retry, no translation of absence or failure
 }
 ```
 
@@ -1077,7 +1078,6 @@ impl<Transaction: ReplaceSessionDefaultsTransaction> ReplaceSessionDefaultsServi
         &mut self,
         request: ReplaceSessionDefaultsRequest,
     ) -> Result<ReplaceSessionDefaultsOutcome, Transaction::Error>;
-    // constructs the canonical command once, calls the atomic port exactly once
 }
 ```
 

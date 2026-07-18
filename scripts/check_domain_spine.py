@@ -47,7 +47,7 @@ DECLARATION = re.compile(
     rf"^pub {MODIFIERS}(?:struct|enum|trait|fn) ([A-Za-z_][A-Za-z0-9_]*)"
 )
 ROOT_DECLARATION = re.compile(
-    rf"^pub {MODIFIERS}(?:struct|enum|trait|fn|static|type|const) ([A-Za-z_][A-Za-z0-9_]*)",
+    rf"^pub {MODIFIERS}(?:struct|enum|union|trait|fn|static|type|const) ([A-Za-z_][A-Za-z0-9_]*)",
     re.MULTILINE,
 )
 
@@ -248,15 +248,22 @@ def main() -> int:
                     f"{crate}: {module} has exports but no Inventory table row"
                 )
 
-    totals = {
-        crate: int(count) + int(extra or 0)
-        for crate, count, extra in re.findall(
-            r"^\| \*\*signalbox-(domain|application) total\*\* \|"
-            r" \*\*(\d+)(?: \(\+(\d+) free fn\))?\*\* \|",
-            spine_text,
-            re.MULTILINE,
+    totals: dict[str, int] = {}
+    for crate, count, extra in re.findall(
+        r"^\| \*\*signalbox-(domain|application) total\*\* \|"
+        r" \*\*(\d+)(?: \(\+(\d+) free fn\))?\*\* \|",
+        spine_text,
+        re.MULTILINE,
+    ):
+        if crate in totals:
+            failures.append(
+                f"Inventory table has more than one signalbox-{crate} total row"
+            )
+        totals[crate] = int(count) + int(extra or 0)
+    if ("domain", "lib.rs identities") not in expected:
+        failures.append(
+            "Inventory table is missing the 'domain: lib.rs identities' row"
         )
-    }
     for crate in CRATES:
         claimed = totals.get(crate)
         actual = sum(count for (c, _), count in expected.items() if c == crate)
