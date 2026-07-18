@@ -231,8 +231,10 @@ the durable record.
   one consumer of that seam.
 - Concrete record families land only with admitted command slices; this record
   does not choose names or fields before their domain payload and result exist.
-- Wire command envelopes and compatibility remain with reserved ADR-0019
-  through ADR-0021.
+- Wire command envelopes and compatibility are governed by
+  [ADR-0019](0019-process-protocol.md) and
+  [ADR-0021](0021-compatibility-and-negotiation.md); concrete schemas arrive
+  with their implementation slices.
 
 ## Explicit non-decisions
 

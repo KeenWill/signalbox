@@ -5,17 +5,16 @@ use std::{error::Error, fmt};
 use rust_decimal::Decimal;
 use signalbox_domain::{
     CreateSessionAppliedResult, CreateSessionReconstitutionFailure,
-    CreateSessionReconstitutionInput, DurableCommandId, ModelSelectionRequest,
-    PreparedCreateSession, ReconstitutedSessionCreation, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-    TranscriptAncestry,
+    CreateSessionReconstitutionInput, DirectModelSelection, DurableCommandId, ModelAlias,
+    ModelSelectionRequest, PreparedCreateSession, ReconstitutedSessionCreation,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
+    SessionCreationProvenance, TranscriptAncestry,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
 use crate::mapping::{
     PositiveOrdinalMappingError, defaults_version_from_numeric, defaults_version_to_numeric,
-    direct_model_selection_from_uuid, direct_model_selection_to_uuid, durable_command_id_to_uuid,
-    model_alias_from_uuid, model_alias_to_uuid, session_id_from_uuid, session_id_to_uuid,
+    durable_command_id_to_uuid, session_id_from_uuid, session_id_to_uuid,
 };
 
 const COMMAND_KIND: &str = "create_session";
@@ -291,13 +290,13 @@ fn encode_selection(selection: ModelSelectionRequest) -> EncodedSelection {
     match selection {
         ModelSelectionRequest::Direct(value) => EncodedSelection {
             kind: "direct",
-            direct: Some(direct_model_selection_to_uuid(value)),
+            direct: Some(value.into_uuid()),
             alias: None,
         },
         ModelSelectionRequest::Alias(value) => EncodedSelection {
             kind: "alias",
             direct: None,
-            alias: Some(model_alias_to_uuid(value)),
+            alias: Some(value.into_uuid()),
         },
     }
 }
@@ -386,8 +385,10 @@ fn decode_complete(
     )?;
     let defaults_session: Uuid = required(&row, "defaults_session_id")?;
     let pointer_session: Uuid = required(&row, "pointer_session_id")?;
-    if defaults_session != stored_session_uuid || pointer_session != stored_session_uuid {
-        return Err(CreateSessionCorruption::Inconsistent("session/defaults ownership").into());
+    if pointer_session != stored_session_uuid {
+        return Err(
+            CreateSessionCorruption::Inconsistent("current defaults pointer ownership").into(),
+        );
     }
     let stored_version = decode_ordinal(&row, "stored_defaults_version")?;
     let current_version = decode_ordinal(&row, "current_version")?;
@@ -408,6 +409,7 @@ fn decode_complete(
         result_session,
         stored_session,
         stored_provenance,
+        session_id_from_uuid(defaults_session),
         stored_version,
         stored_defaults,
     )
@@ -498,9 +500,9 @@ fn decode_selection(
 ) -> Result<SessionConfigurationDefaults, CreateSessionRepositoryError> {
     let model = match (kind.as_str(), direct, alias) {
         ("direct", Some(value), None) => {
-            ModelSelectionRequest::Direct(direct_model_selection_from_uuid(value))
+            ModelSelectionRequest::Direct(DirectModelSelection::from_uuid(value))
         }
-        ("alias", None, Some(value)) => ModelSelectionRequest::Alias(model_alias_from_uuid(value)),
+        ("alias", None, Some(value)) => ModelSelectionRequest::Alias(ModelAlias::from_uuid(value)),
         ("direct" | "alias", _, _) => {
             return Err(CreateSessionCorruption::Inconsistent(field).into());
         }

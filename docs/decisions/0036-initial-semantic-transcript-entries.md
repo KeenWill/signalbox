@@ -7,6 +7,7 @@
 - Superseded by: none
 - Depends on: the accepted foundation set ([ADR-0001](0001-domain-terminology-and-identity.md), [ADR-0003](0003-session-creation-and-transcript-ancestry.md), [ADR-0004](0004-turn-and-attempt-lifecycle.md), [ADR-0005](0005-model-call-retry-semantics.md), and [ADR-0027](0027-input-delivery-lifecycle.md)) and the accepted persistence and frontier refinements ([ADR-0022](0022-persistence-representation.md) and [ADR-0030](0030-context-frontier-snapshots.md))
 - Refines: ADR-0027's origin-input and explicit-failure semantic-history requirements and ADR-0030's semantic-entry boundary
+- Refined by: [ADR-0037](0037-baseline-user-content.md) for the immutable content value referenced by `OriginAcceptedInput`
 - Resolves: semantic-entry payload and commit granularity for accepted-input-origin eligibility and eligible failure; later semantic variants remain open
 - Decision questions: first semantic-entry payload variants; accepted-input content correlation; entry identity and source; eligibility and failure commit boundaries; deferred variants and rendering
 
@@ -115,7 +116,7 @@ S01 activation and both S03 eligibility outcomes can commit a complete origin pr
 ## Open questions
 
 - Assistant content and completion, refusal, cancellation, reconciliation, mismatch, accepted-risk, steering, tool, approval, and delegation entry variants and their exact commit granularity remain open.
-- The concrete accepted-input content algebra remains owned by the accepted-input slice; this record references that immutable value rather than selecting text, rich content, attachments, or rendering.
+- The concrete accepted-input content algebra is defined by [ADR-0037](0037-baseline-user-content.md); this record continues to reference that immutable value rather than copying it.
 - Provider-prompt rendering, client transcript rendering and grouping, selectable `TranscriptFrontier` boundaries, and any public or wire representation remain open.
 - Semantic compaction, selective omission, merging, and non-input origins remain future foundation decisions under ADR-0030.
 

@@ -460,14 +460,16 @@ impl CreateSession {
 /// Complete checked inputs for reconstituting one applied session creation.
 ///
 /// These are domain values rather than rows or nullable storage shapes. The
-/// result session is supplied separately from the session record identity so
-/// the domain can reject a cross-wired applied result.
+/// result session and the defaults row's owning session are each supplied
+/// separately from the session record identity so the domain can reject a
+/// cross-wired applied result or a defaults row belonging to another session.
 #[derive(Clone, Copy, Debug)]
 pub struct CreateSessionReconstitutionInput {
     command: CreateSession,
     result_session: SessionId,
     session: SessionId,
     provenance: SessionCreationProvenance,
+    defaults_session: SessionId,
     defaults_version: crate::SessionConfigurationDefaultsVersion,
     defaults: SessionConfigurationDefaults,
 }
@@ -480,6 +482,7 @@ impl CreateSessionReconstitutionInput {
         result_session: SessionId,
         session: SessionId,
         provenance: SessionCreationProvenance,
+        defaults_session: SessionId,
         defaults_version: crate::SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
     ) -> Self {
@@ -488,6 +491,7 @@ impl CreateSessionReconstitutionInput {
             result_session,
             session,
             provenance,
+            defaults_session,
             defaults_version,
             defaults,
         }
@@ -511,6 +515,11 @@ impl CreateSessionReconstitutionInput {
     /// Returns the immutable provenance recorded by the session aggregate.
     pub const fn provenance(&self) -> SessionCreationProvenance {
         self.provenance
+    }
+
+    /// Returns the session that owns the stored initial defaults row.
+    pub const fn defaults_session(&self) -> SessionId {
+        self.defaults_session
     }
 
     /// Returns the stored initial defaults version.
@@ -539,6 +548,11 @@ impl CreateSessionReconstitutionInput {
         }
         if self.command.provenance() != self.provenance {
             return Err(fail(CreateSessionReconstitutionFailure::ProvenanceMismatch));
+        }
+        if self.defaults_session != self.session {
+            return Err(fail(
+                CreateSessionReconstitutionFailure::DefaultsSessionMismatch,
+            ));
         }
         match (self.provenance.cause(), self.provenance.ancestry()) {
             (SessionCreationCause::OwnerInitiated, TranscriptAncestry::None) => {}
@@ -580,6 +594,8 @@ pub enum CreateSessionReconstitutionFailure {
     SessionResultMismatch,
     /// The stored creation provenance differs from the canonical command.
     ProvenanceMismatch,
+    /// The stored initial defaults row belongs to a different session.
+    DefaultsSessionMismatch,
     /// Trusted source-frontier production is unavailable for this slice.
     TranscriptAncestryUnavailable,
     /// Session creation did not establish defaults version one.
@@ -926,6 +942,7 @@ mod tests {
             session_id(3),
             session_id(3),
             owner_initiated_empty(),
+            session_id(3),
             SessionConfigurationDefaultsVersion::first(),
             defaults(2),
         );
@@ -976,6 +993,7 @@ mod tests {
                     session_id(4),
                     session_id(3),
                     owner_initiated_empty(),
+                    session_id(3),
                     SessionConfigurationDefaultsVersion::first(),
                     defaults(2),
                 ),
@@ -987,6 +1005,7 @@ mod tests {
                     session_id(3),
                     session_id(3),
                     owner_initiated_empty(),
+                    session_id(3),
                     SessionConfigurationDefaultsVersion::first(),
                     defaults(2),
                 ),
@@ -998,6 +1017,7 @@ mod tests {
                     session_id(3),
                     session_id(3),
                     fork,
+                    session_id(3),
                     SessionConfigurationDefaultsVersion::first(),
                     defaults(2),
                 ),
@@ -1009,6 +1029,19 @@ mod tests {
                     session_id(3),
                     session_id(3),
                     owner_initiated_empty(),
+                    session_id(9),
+                    SessionConfigurationDefaultsVersion::first(),
+                    defaults(2),
+                ),
+                CreateSessionReconstitutionFailure::DefaultsSessionMismatch,
+            ),
+            (
+                CreateSessionReconstitutionInput::new(
+                    create,
+                    session_id(3),
+                    session_id(3),
+                    owner_initiated_empty(),
+                    session_id(3),
                     second_version,
                     defaults(2),
                 ),
@@ -1020,6 +1053,7 @@ mod tests {
                     session_id(3),
                     session_id(3),
                     owner_initiated_empty(),
+                    session_id(3),
                     SessionConfigurationDefaultsVersion::first(),
                     defaults(5),
                 ),
@@ -1032,6 +1066,7 @@ mod tests {
             let expected_result_session = input.result_session();
             let expected_session = input.session();
             let expected_provenance = input.provenance();
+            let expected_defaults_session = input.defaults_session();
             let expected_version = input.defaults_version();
             let expected_defaults = input.defaults();
 
@@ -1044,6 +1079,7 @@ mod tests {
             assert_eq!(error.input().result_session(), expected_result_session);
             assert_eq!(error.input().session(), expected_session);
             assert_eq!(error.input().provenance(), expected_provenance);
+            assert_eq!(error.input().defaults_session(), expected_defaults_session);
             assert_eq!(error.input().defaults_version(), expected_version);
             assert_eq!(error.input().defaults(), expected_defaults);
             let (returned, failure) = error.into_parts();
@@ -1051,6 +1087,7 @@ mod tests {
             assert_eq!(returned.result_session(), expected_result_session);
             assert_eq!(returned.session(), expected_session);
             assert_eq!(returned.provenance(), expected_provenance);
+            assert_eq!(returned.defaults_session(), expected_defaults_session);
             assert_eq!(returned.defaults_version(), expected_version);
             assert_eq!(returned.defaults(), expected_defaults);
             assert_eq!(failure, expected_failure);

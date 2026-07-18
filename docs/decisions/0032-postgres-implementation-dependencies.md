@@ -287,9 +287,12 @@ grant the steady-state hub schema-owner privileges.
 
 ## Open questions
 
-- ADR-0022's canonical durable-command payload encoding, opaque-proof
-  rehydration seam, exact ADR-0030 snapshot layout, cancellation-intent
-  delivery, and archival form remain open.
+- [ADR-0034](0034-durable-command-storage-and-equality.md) closes canonical
+  durable-command storage, [ADR-0035](0035-domain-owned-persistence-reconstitution.md)
+  closes the reconstitution boundary, and the [first frontier-layout
+  decision](../decisions.md#2026-07-17--materialize-complete-membership-for-first-context-frontier-storage)
+  selects complete membership. Cancellation-intent delivery and archival form
+  remain open.
 - Production migration invocation, migration-role separation, pool sizing,
   timeouts, and connection observability are implementation and deployment
   questions within this selected stack. The exact supported Postgres image tag

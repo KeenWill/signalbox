@@ -5,13 +5,13 @@
 - Reviewers: pull-request review; no specialist human reviewer assigned
 - Supersedes: none
 - Superseded by: none
-- Coupled with: [ADR-0021](0021-compatibility-and-negotiation.md), proposed together as one pair to be decided together — the negotiation and compatibility baseline every exchange of this protocol performs
+- Accepted with: [ADR-0021](0021-compatibility-and-negotiation.md) as one coupled pair — the negotiation and compatibility baseline every exchange of this protocol performs
 - Depends on: the accepted foundation set ([ADR-0001](0001-domain-terminology-and-identity.md), [ADR-0003](0003-session-creation-and-transcript-ancestry.md), [ADR-0004](0004-turn-and-attempt-lifecycle.md), [ADR-0005](0005-model-call-retry-semantics.md), [ADR-0027](0027-input-delivery-lifecycle.md)), the accepted refinements ([ADR-0022](0022-persistence-representation.md), [ADR-0030](0030-context-frontier-snapshots.md), [ADR-0031](0031-direct-fatal-terminalization.md)), and the accepted scheduler pair ([ADR-0009](0009-dispatch-fencing.md), [ADR-0010](0010-initial-scheduler-mechanics.md)) for the fence and result-acceptance semantics its walkthroughs reference
 - Decision questions: the authoritative-snapshot versus transient-stream read semantics (INV-032); the durable command envelope and typed rejection surfaces over INV-012's owner-global deduplication; the schema language and wire protocol across Swift, browser, and Rust terminal clients; what remains reserved for ADR-0020 and ADR-0023
 
 ## Context
 
-This record addresses the foundational question of the process protocol — listed under [protocols and persistence](../open-questions.md#protocols-and-persistence-reserved-adr-0019-through-adr-0023) — which blocks cross-process implementation (S01, S02, S12, S24), and whose recorded leaning is to define semantics and fixtures before selecting transport. The record follows that leaning in its structure: the protocol semantics below are normative independently of transport, and the technology selection is stated afterward against those semantics.
+This record addresses the foundational question of the process protocol — listed under [protocols and persistence](../open-questions.md#protocols-and-persistence-adr-0019-through-adr-0023) — which blocks cross-process implementation (S01, S02, S12, S24), and whose recorded leaning is to define semantics and fixtures before selecting transport. The record follows that leaning in its structure: the protocol semantics below are normative independently of transport, and the technology selection is stated afterward against those semantics.
 
 The accepted records already fix most of what the protocol must carry. ADR-0001 and ADR-0027 fix owner-global durable-command identity, canonical construction before command lookup, first-committed-handling recording, replay, conflicting reuse, and the non-claiming boundary. INV-032 requires a reconnecting client to reconstruct authoritative durable state and replace transient drafts; S24 fixes that gaps cause another snapshot, never guessed tokens, and that reconnecting creates no logical work. INV-002 and INV-005 keep protocol messages distinct from domain types, storage records, and any universal event type, and the [architecture's dependency direction](../architecture.md#dependency-direction) states that shared protocols describe compatibility at a process boundary, not the canonical persistence schema or the domain model.
 
@@ -147,8 +147,8 @@ Reserved ADR-0020 decides the exact browser transport within this selection — 
 ## Open questions
 
 - Wire encoding of identities inside the Protobuf schemas (string versus bytes UUID forms, public formatting) remains the open identity question; the envelope treats every identity as an opaque required field until that decision lands.
-- The canonical versioned payload encoding used for durable-command structural comparison remains ADR-0022's open question; this record fixes only that wire encoding is not that comparison payload.
-- Concrete snapshot projection schemas arrive with their slices; the semantic transcript-entry payload question (open under ADR-0001 and ADR-0030) bounds what a transcript projection can contain until it is decided.
+- The canonical versioned record-family encoding used for durable-command structural comparison is decided by [ADR-0034](0034-durable-command-storage-and-equality.md); this record fixes only that wire encoding is not that comparison representation.
+- Concrete snapshot projection schemas arrive with their slices; [ADR-0036](0036-initial-semantic-transcript-entries.md) fixes the first payload variants, while later semantic variants remain open.
 - Cursor derivation from committed state, retention of resumable history, and any draft checkpointing remain open under ADR-0022's streaming-checkpoint question.
 - Owner client authentication, authorization carriage, and revocation are reserved (ADR-0015); this protocol assumes established owner authority at the boundary ADR-0001 defines and selects no mechanism.
 - Subscription backpressure, event batching, and resource limits on concurrent subscriptions remain open with first-release resource governance.

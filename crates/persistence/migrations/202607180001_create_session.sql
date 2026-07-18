@@ -103,6 +103,7 @@ CREATE TABLE session_current_defaults (
         REFERENCES session_defaults_version (session_id, version)
         ON UPDATE RESTRICT
         ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED
 );
 
 CREATE TABLE create_session_command (
@@ -182,8 +183,9 @@ CREATE TABLE create_session_command (
 );
 
 -- These deferred reverse references require one complete typed command record
--- per claimed registry ID and one current-defaults pointer per session at every
--- transaction boundary, while still allowing the rows to be inserted together.
+-- per claimed registry ID, one current-defaults pointer per session, and one
+-- backing CreateSession record per session at every transaction boundary, while
+-- still allowing the rows to be inserted together.
 ALTER TABLE durable_command
     ADD CONSTRAINT durable_command_typed_record_fk
     FOREIGN KEY (command_id)
@@ -196,6 +198,14 @@ ALTER TABLE session
     ADD CONSTRAINT session_current_defaults_fk
     FOREIGN KEY (session_id)
     REFERENCES session_current_defaults (session_id)
+    ON UPDATE RESTRICT
+    ON DELETE RESTRICT
+    DEFERRABLE INITIALLY DEFERRED;
+
+ALTER TABLE session
+    ADD CONSTRAINT session_create_command_fk
+    FOREIGN KEY (session_id)
+    REFERENCES create_session_command (created_session_id)
     ON UPDATE RESTRICT
     ON DELETE RESTRICT
     DEFERRABLE INITIALLY DEFERRED;

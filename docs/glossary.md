@@ -12,7 +12,7 @@ This glossary recommends working language for design discussion. “Accepted” 
 ## Accepted input
 
 - **Definition:** One user submission made durable with its explicit delivery request and recoverable disposition before acknowledgement.
-- **Status:** Accepted by [ADR-0001](decisions/0001-domain-terminology-and-identity.md) and [ADR-0027](decisions/0027-input-delivery-lifecycle.md).
+- **Status:** Accepted by [ADR-0001](decisions/0001-domain-terminology-and-identity.md) and [ADR-0027](decisions/0027-input-delivery-lifecycle.md); the baseline content value is defined by [ADR-0037](decisions/0037-baseline-user-content.md).
 - **Do not confuse with:** A transport command, transcript entry, turn, or model call. One accepted input may originate a turn or steer an existing turn.
 - **Example:** “Use the new log” remains the same accepted input whether it is consumed at a safe point or visibly reclassified as queued work because the active turn ends first.
 
@@ -168,7 +168,7 @@ This glossary recommends working language for design discussion. “Accepted” 
 ## Context frontier
 
 - **Definition:** A session-owned immutable identified snapshot that resolves to the exact ordered-distinct source-qualified semantic-entry references consumed by one model call or fixed for an accepted-input turn start.
-- **Status:** Selection and safe-point rules are accepted by [ADR-0027](decisions/0027-input-delivery-lifecycle.md); identity, resolution, equality, and construction authority by [ADR-0030](decisions/0030-context-frontier-snapshots.md); the initial private UUID-backed Rust values by the [2026-07-17 representation decision](decisions.md#2026-07-17--uuid-backed-context-frontier-values-and-sealed-prefix-derivation); the normalized persistence boundary by [ADR-0022](decisions/0022-persistence-representation.md); and generation, supply, and Postgres UUID encoding by [ADR-0033](decisions/0033-identity-generation-supply-and-encoding.md). Semantic-entry payloads, future non-input origins, wire encoding, and exact physical snapshot layout remain open.
+- **Status:** Selection and safe-point rules are accepted by [ADR-0027](decisions/0027-input-delivery-lifecycle.md); identity, resolution, equality, and construction authority by [ADR-0030](decisions/0030-context-frontier-snapshots.md); the initial private UUID-backed Rust values by the [2026-07-17 representation decision](decisions.md#2026-07-17--uuid-backed-context-frontier-values-and-sealed-prefix-derivation); the normalized persistence boundary by [ADR-0022](decisions/0022-persistence-representation.md); generation, supply, and Postgres UUID encoding by [ADR-0033](decisions/0033-identity-generation-supply-and-encoding.md); initial semantic-entry payloads by [ADR-0036](decisions/0036-initial-semantic-transcript-entries.md); and the first physical snapshot layout by the [materialized-membership decision](decisions.md#2026-07-17--materialize-complete-membership-for-first-context-frontier-storage). Future semantic variants, wire encoding, and later physical-layout migrations remain open.
 - **Do not confuse with:** The latest session transcript, an entire turn, a `TranscriptFrontier`, an ordered list supplied as authority, or client rendering state.
 - **Example:** Model call 1 consumes frontier F1; steering and a tool result become committed, so model call 2 consumes a distinct prefix-extending frontier F2 within the same turn. If call 2 fails, any future explicitly authorized call still retains that committed content.
 
