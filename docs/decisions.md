@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-18 — Domain spine as the owner's API-review surface
+
+**Context.** Source files surround every public item with rustdoc, tests, and `compile_fail` proofs, so reviewing domain shape means reading past enforcement scaffolding. The owner reviews type shapes rather than implementations and needs one diffable surface showing the public API of the domain and application crates, kept current by something stronger than instruction-following.
+
+**Decision.** Add `docs/domain-spine.md`: a hand-maintained mirror of the public type and function surface of both crates — full enum variants, sealed-constructor markers, transition signatures, collapsed accessors, load-bearing derive notes. Source stays authoritative; the mirror is updated from it, never the reverse. Every pull request changing a public item updates the spine in the same change (`AGENTS.md` rule), and the `validate` CI job runs `scripts/check_domain_spine.py`, which fails when an exported name is absent from the spine or a per-module inventory count disagrees with the lib.rs export surface.
+
+**Rejected alternatives.** Reviewing rustdoc output yields no diffable pull-request artifact. `cargo public-api` needs a nightly toolchain and a new tool dependency for what a small repository-local script checks. Instruction-only maintenance drifts silently the first time a run does not load the spine. Splitting tests into sibling files shrinks sources but still leaves no single review surface.
+
+**Affects.** `docs/domain-spine.md`, `scripts/check_domain_spine.py`, the `validate` job in `.github/workflows/rust.yml`, the spine paragraph in `AGENTS.md`, and the README design-documents index.
+
 ## 2026-07-18 — Goal-mode rules split and unbounded stacks
 
 **Context.** Autonomous milestone runs need durable operating rules, but the root `AGENTS.md` is injected into every agent for every task, and the published prompting guidance for the models running these agents ranks contradictory or duplicated instructions as the leading failure mode. An earlier draft capped open pull requests at three and told runs to "finish and merge" at the cap, contradicting owner-only merging; the owner had already hit that cap while steering real runs.
