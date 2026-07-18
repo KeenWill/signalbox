@@ -109,6 +109,14 @@ def validate_lib_forms(crate: str, lib_rs: Path) -> list[str]:
                 f"{crate} lib.rs has an unsupported re-export form: `{flat}`"
                 " — restate or extend the check"
             )
+    for line in text.splitlines():
+        macro = re.match(r"([A-Za-z_][A-Za-z0-9_:]*)!\s*[\(\[{]", line)
+        if macro and macro.group(1) not in ("define_identity", "macro_rules"):
+            failures.append(
+                f"{crate} lib.rs invokes item macro `{macro.group(1)}!` at the"
+                " crate root; its expansion is invisible to this check —"
+                " restate or extend the check"
+            )
     if crate == "domain":
         invocations = text.count("define_identity!(")
         parsed = len(
@@ -134,10 +142,13 @@ def parse_spine_sections(
     duplicates: list[str] = []
     current: tuple[str, str] | None = None
     for line in spine_text.splitlines():
-        header = re.match(r"^## (domain|application): (.+)$", line)
-        if header:
-            current = (header.group(1), header.group(2).strip())
-            sections.setdefault(current, set())
+        if line.startswith("## "):
+            header = re.match(r"^## (domain|application): (.+)$", line)
+            if header:
+                current = (header.group(1), header.group(2).strip())
+                sections.setdefault(current, set())
+            else:
+                current = None
             continue
         if current:
             declared = DECLARATION.match(line)
