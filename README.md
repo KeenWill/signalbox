@@ -43,6 +43,7 @@ Install [rustup](https://rustup.rs/). The repository's `rust-toolchain.toml` mak
 The workspace contains the dependency chain `apps/hubd` → `crates/application` → `crates/domain`. Run the full local validation sequence from the repository root:
 
 ```bash
+python3 scripts/check_domain_spine.py
 cargo fmt --all -- --check
 cargo check --workspace --all-targets --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings

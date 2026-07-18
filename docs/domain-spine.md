@@ -350,7 +350,6 @@ impl AcceptedInputLifecycle {
         -> Result<Self, AcceptedInputLifecycleTransitionError>;
     // accessors: id(), disposition()
 }
-// consuming transitions preserve AcceptedInputId; Err returns the lifecycle unchanged
 
 pub enum AcceptedInputLifecycleTransitionError {
     CannotConsumeAsSteering { lifecycle: AcceptedInputLifecycle },
@@ -489,8 +488,6 @@ pub enum AcceptedInputQueueOrderError {
 pub fn derive_accepted_input_total_order(
     currently_known_work: impl IntoIterator<Item = AcceptedInputQueueWork>,
 ) -> Result<Vec<TurnId>, AcceptedInputQueueOrderError>;
-// input must be the complete currently known single-session fact set;
-// result is derived order only, never a written-back predecessor pointer
 ```
 
 ## domain: turn_lifecycle
@@ -605,10 +602,8 @@ impl TurnAttemptStopCauses {
     pub const fn cancellation_only(interrupt: AppliedInterruptProof) -> Self;
     pub fn fatal_mismatch(failure: ProviderTargetMismatchFailureRef) -> Self;
     pub fn add_fatal_mismatch(self, failure: ProviderTargetMismatchFailureRef) -> Self;
-    // cancellation-only upgrades to fatal, retaining its proof
     pub fn add_interrupt(self, proof: AppliedInterruptProof)
         -> Result<Self, TurnAttemptStopCauseUnionError>;
-    // equal replay idempotent; a distinct second proof is rejected unchanged
 }
 
 pub struct TurnAttemptStopCauseUnionError { /* private */ }
@@ -805,7 +800,7 @@ impl ProviderTargetMismatchInvalidationLog {
 
 ## domain: applied_interrupt
 
-Another deliberately tiny public surface (768-line module): the
+Another deliberately tiny public surface: the
 submit-input correlation seam that produces `AppliedInterruptCommandResult`
 is module-private, reserved for a later transaction-owning adapter.
 
@@ -956,7 +951,6 @@ impl ReplaceSessionDefaultsReconstitutionError {
 
 pub struct ReconstitutedReplaceSessionDefaults { /* private */ }
 // sealed: ReplaceSessionDefaultsReconstitutionInput::reconstitute;
-// authorizes no insert, pointer update, repair, or command claim
 impl ReconstitutedReplaceSessionDefaults {
     // accessors: command(), result()
 }
@@ -990,8 +984,6 @@ pub enum CreateSessionOutcome {
     Applied(CreateSessionAppliedResult),
     ConflictingReuse { command_id: DurableCommandId },
 }
-// Applied carries the recorded receipt; on equal replay it may name a
-// different session from this invocation's fresh candidate
 
 pub trait CreateSessionTransaction {
     type Error;
@@ -1020,7 +1012,6 @@ impl<Generator: SessionIdGenerator, Transaction: CreateSessionTransaction>
         &mut self,
         request: CreateSessionRequest,
     ) -> Result<CreateSessionOutcome, CreateSessionError<Transaction::Error>>;
-    // calls the atomic port exactly once; no retry, no receipt fabrication
 }
 ```
 
@@ -1035,7 +1026,6 @@ pub trait SessionReader {
         session_id: SessionId,
     ) -> impl Future<Output = Result<Option<Session>, Self::Error>> + Send;
 }
-// Ok(None) means true absence; integrity failure for an existing session is Err
 
 pub struct LoadSessionService<Reader> { /* private */ }
 impl<Reader> LoadSessionService<Reader> {
@@ -1067,7 +1057,6 @@ pub enum ReplaceSessionDefaultsOutcome {
     Recorded(ReplaceSessionDefaultsResult),
     ConflictingReuse { command_id: DurableCommandId },
 }
-// Recorded nests the domain's applied-or-rejected receipt unchanged
 
 pub trait ReplaceSessionDefaultsTransaction {
     type Error;

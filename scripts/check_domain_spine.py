@@ -12,7 +12,14 @@ item. The spine is parsed per `## crate: module` section, taking column-0
 3. a lib.rs declares a public item outside `pub use`/`define_identity!`
    that this mapping does not cover, or
 4. a per-module count in the Inventory table disagrees with the export
-   surface, or an exporting module has no Inventory row.
+   surface, an aggregate total row disagrees with the per-module sum, an
+   exporting module has no Inventory row, or a section declares the same
+   name twice.
+
+Known limitation, accepted in the decision log: signatures, associated
+items, and enum variant lists inside a declaration are not validated —
+keeping those faithful is a review responsibility (cargo public-api is the
+upgrade path if name/count tripwires prove insufficient).
 
 The spine may say more than declarations (sealed markers, accessor notes); it
 may not disagree with the export surface. Run from the repository root; exits
@@ -32,9 +39,12 @@ CRATES = {
 }
 IDENTITY_SECTION = "lib.rs — identities"
 
-DECLARATION = re.compile(r"^pub (?:struct|enum|trait|fn) ([A-Za-z_][A-Za-z0-9_]*)")
+MODIFIERS = r"(?:(?:async|unsafe|const)\s+|extern\s+\"[^\"]*\"\s+)*"
+DECLARATION = re.compile(
+    rf"^pub {MODIFIERS}(?:struct|enum|trait|fn) ([A-Za-z_][A-Za-z0-9_]*)"
+)
 ROOT_DECLARATION = re.compile(
-    r"^pub (?:struct|enum|trait|fn|const|static|type) ([A-Za-z_][A-Za-z0-9_]*)",
+    rf"^pub {MODIFIERS}(?:struct|enum|trait|fn|static|type|const) ([A-Za-z_][A-Za-z0-9_]*)",
     re.MULTILINE,
 )
 
@@ -68,9 +78,12 @@ def parse_root_declarations(lib_rs: Path) -> set[str]:
     return set(ROOT_DECLARATION.findall(lib_rs.read_text()))
 
 
-def parse_spine_sections(spine_text: str) -> dict[tuple[str, str], set[str]]:
-    """Map (crate, section label) -> declared names in that section."""
+def parse_spine_sections(
+    spine_text: str,
+) -> tuple[dict[tuple[str, str], set[str]], list[str]]:
+    """Map (crate, section label) -> declared names; also report duplicates."""
     sections: dict[tuple[str, str], set[str]] = {}
+    duplicates: list[str] = []
     current: tuple[str, str] | None = None
     for line in spine_text.splitlines():
         header = re.match(r"^## (domain|application): (.+)$", line)
@@ -81,8 +94,13 @@ def parse_spine_sections(spine_text: str) -> dict[tuple[str, str], set[str]]:
         if current:
             declared = DECLARATION.match(line)
             if declared:
-                sections[current].add(declared.group(1))
-    return sections
+                name = declared.group(1)
+                if name in sections[current] and name != "<Identity>":
+                    duplicates.append(
+                        f"'{current[0]}: {current[1]}' declares {name} more than once"
+                    )
+                sections[current].add(name)
+    return sections, duplicates
 
 
 def parse_inventory(spine_text: str) -> dict[tuple[str, str], int]:
@@ -107,7 +125,8 @@ def main() -> int:
 
     identities = parse_identities(CRATES["domain"])
     all_exports = {crate: parse_exports(path) for crate, path in CRATES.items()}
-    sections = parse_spine_sections(spine_text)
+    sections, duplicates = parse_spine_sections(spine_text)
+    failures.extend(duplicates)
 
     # Root-declared items must be the identity macros; anything else needs
     # this mapping extended before it can pass.
@@ -170,6 +189,25 @@ def main() -> int:
                 failures.append(
                     f"{crate}: {module} has exports but no Inventory table row"
                 )
+
+    totals = {
+        crate: int(count) + int(extra or 0)
+        for crate, count, extra in re.findall(
+            r"^\| \*\*signalbox-(domain|application) total\*\* \|"
+            r" \*\*(\d+)(?: \(\+(\d+) free fn\))?\*\* \|",
+            spine_text,
+            re.MULTILINE,
+        )
+    }
+    for crate in CRATES:
+        claimed = totals.get(crate)
+        actual = sum(count for (c, _), count in expected.items() if c == crate)
+        if claimed is None:
+            failures.append(f"no aggregate total row found for signalbox-{crate}")
+        elif claimed != actual:
+            failures.append(
+                f"signalbox-{crate} total row says {claimed} but per-module rows sum to {actual}"
+            )
 
     if failures:
         print("domain-spine check FAILED — docs/domain-spine.md is out of sync:")

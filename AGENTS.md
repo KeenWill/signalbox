@@ -36,6 +36,7 @@ Directly affected documentation may be updated in an implementation pull request
 Run the repository-wide validation sequence:
 
 ```bash
+python3 scripts/check_domain_spine.py
 cargo fmt --all -- --check
 cargo check --workspace --all-targets --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
