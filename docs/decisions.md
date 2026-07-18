@@ -2,6 +2,26 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-17 — Sealed live fatal-mismatch lifecycle candidate binding
+
+**Context.** [ADR-0031](decisions/0031-direct-fatal-terminalization.md) owns the stop-versus-direct-closure rule, while the preceding slice derives its sealed post-evidence inputs but commits no lifecycle transition. The Rust implementation needs a candidate representation that couples those inputs to existing attempt and turn values without implying aggregate or commit authority.
+
+**Decision.** For `Running` and `StopRequested` attempt projections, represent local binding as a crate-private consuming `FatalMismatchLifecycleBinding` that retains the source facts, exact supplied `ActiveTurnPhase`, and a closed outcome enum. Represent the closed branch with one private-field value coupling `EndedTurnAttempt`, `TurnDisposition`, and the exact fatal-stopped fallback. A separate private marker candidate couples nonempty ambiguity and fatal-cause values for the narrow `turn_lifecycle` construction seam. Local rejection retains the unchanged facts and phase.
+
+**Rejected alternatives.** Raw tuples or independent optional fields permit invalid combinations. A public marker constructor lets sibling code pair unrelated values. Omitting the fallback loses a value the later aggregate needs on rejected terminalization. Exposing the binding publicly or naming it as a committed transition would overstate its authority.
+
+**Affects.** New internal `crates/domain/src/fatal_mismatch/lifecycle.rs`, one sealed marker-construction seam in `crates/domain/src/turn_lifecycle.rs`, and enforcement links for INV-006, INV-025, INV-026, and INV-029. Prepared atomic invalidation binding, aggregate guards, canonical mutation, steering, slot ownership, cancellation intent, startup handling, and atomic persistence remain later work.
+
+## 2026-07-17 — Sealed post-evidence fatal-closure derivation
+
+**Context.** The sealed provider-target mismatch fact prevents cross-wired evidence, while [ADR-0031](decisions/0031-direct-fatal-terminalization.md) also forbids callers from supplying completion, guard, cause-set, ambiguity-set, or disposition authority. The domain needs one representation from which those facts are derived together.
+
+**Decision.** A crate-private `CompleteFatalMismatchProjection` owns the current attempt plus `BTreeMap`-canonicalized entries for every owned logical dependency and issued operation. Consuming one sealed mismatch fact derives complete fatal causes, applies the effect only to its exact compatible call state, and retains exact unfinished blockers in a `BTreeSet` independently from optional canonical nonempty `U`. A `Prepared` projection accepts only completed-call invalidation against classified call history; the other two timing effects reject unchanged. Construction remains test-only until the authoritative aggregate is its sole production source. The result proves derivation from that projection, not a committed lifecycle transition.
+
+**Rejected alternatives.** Public fields or constructors would let sibling code forge completeness or derived results. Raw tuples permit cross-wiring. Sequences permit duplicate keys or order-sensitive equality. Application-, storage-, wire-, or framework-owned projection types would move the accepted domain boundary.
+
+**Affects.** New internal `crates/domain/src/fatal_mismatch.rs`, one canonical-union helper in `turn_attempt.rs`, and enforcement links for INV-006, INV-014, INV-025, INV-026, and INV-029. Lifecycle binding, remaining aggregate guards, steering, slot ownership, cancellation intent, startup recovery, and atomic persistence remain later work.
+
 ## 2026-07-17 — Sealed provider-target mismatch correlation facts
 
 **Context.** [ADR-0031](decisions/0031-direct-fatal-terminalization.md) requires the aggregate to apply one trusted fatal-mismatch fact through one of three timing-specific call effects. The existing ADR-0005 evidence slice validated each correlation but returned only a failure reference, so later closure code could pair a valid failure for call A with call B or a different timing effect.

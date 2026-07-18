@@ -150,6 +150,11 @@ impl FatalMismatchStopCauses {
         self.failures.insert(failure);
     }
 
+    pub(crate) fn with_failure(mut self, failure: ProviderTargetMismatchFailureRef) -> Self {
+        self.add_failure(failure);
+        self
+    }
+
     fn add_interrupt(&mut self, proof: AppliedInterruptProof) -> bool {
         match self.interrupt {
             AppliedInterruptState::NoAppliedInterrupt => {

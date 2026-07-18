@@ -10,6 +10,7 @@ mod accepted_input;
 mod applied_interrupt;
 mod configuration;
 mod delivery_request;
+mod fatal_mismatch;
 mod model_call;
 mod provider_evidence;
 mod queue_order;
