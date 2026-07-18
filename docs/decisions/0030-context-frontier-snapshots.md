@@ -168,10 +168,10 @@ Any future semantic compaction, selective omission, rebasing, or context-window 
 
 ## Open questions
 
-- Semantic transcript-entry payload variants, commit granularity, and rendering remain open; this ADR uses their already-distinct identities without defining their contents.
-- The [initial Rust representation](../decisions.md#2026-07-17--uuid-backed-context-frontier-values-and-sealed-prefix-derivation) selects private UUID-backed `ContextFrontierId` and `SemanticTranscriptEntryId` values. Identity generation, UUID version, caller supply versus hub minting, database and wire encoding, serialization, and public formatting remain open. ADR-0022 selects native Postgres columns only for the UUID-backed identities it names; the in-process choice does not silently extend that database mapping. Context-frontier semantic ownership remains session-scoped regardless of eventual representation.
+- [ADR-0036](0036-initial-semantic-transcript-entries.md) fixes the first semantic transcript-entry payload variants and commit boundaries; later variants and rendering remain open.
+- The [initial Rust representation](../decisions.md#2026-07-17--uuid-backed-context-frontier-values-and-sealed-prefix-derivation) selects private UUID-backed `ContextFrontierId` and `SemanticTranscriptEntryId` values. [ADR-0033](0033-identity-generation-supply-and-encoding.md) fixes their generation, supply, boundary validation, and Postgres encoding; wire serialization and public formatting remain open. Context-frontier semantic ownership remains session-scoped regardless of representation.
 - Which terminal semantic boundaries a client may select as a `TranscriptFrontier` remains separate from how a validated selection resolves.
-- Physical snapshot layout, lookup interfaces, caching, integrity checks, and layout-specific migration details/tooling remain persistence concerns within ADR-0022's accepted migration discipline.
+- The [first physical snapshot layout](../decisions.md#2026-07-17--materialize-complete-membership-for-first-context-frontier-storage) materializes complete membership; lookup interfaces, caching, integrity checks, and later layout-specific migration details remain persistence concerns within ADR-0022's accepted migration discipline.
 - Non-input origin frontiers, multi-source ancestry, and semantic compaction remain future foundation decisions.
 
 ## Explicit non-decisions
