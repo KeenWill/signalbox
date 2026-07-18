@@ -461,7 +461,6 @@ impl SubmitInput {
     pub const fn new(
         command_id: DurableCommandId,
         session: SessionId,
-        actor: Actor,
         content: UserContent,
         delivery: DeliveryRequest,
     ) -> Self;
@@ -470,7 +469,7 @@ impl SubmitInput {
         self,
         session: &Session,
         accepted_input: AcceptedInputId,
-        turn: TurnId,
+        turn: Option<TurnId>,
         previous_position: Option<SessionInputPosition>,
         select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
     ) -> Result<PreparedSubmitInput, SubmitInputPreparationError>;
@@ -523,8 +522,13 @@ impl PreparedSubmitInput {
 pub struct SubmitInputPreparationError { /* private */ }
 // sealed: Err of SubmitInput::prepare_when_no_active_turn; not terminal
 impl SubmitInputPreparationError {
-    pub fn into_parts(self) -> (SubmitInput, SessionId);
-    // accessors: command(), provided_session()
+    pub fn into_parts(self) -> (SubmitInput, SubmitInputPreparationFailure);
+    // accessors: command(), failure()
+}
+
+pub enum SubmitInputPreparationFailure {
+    SessionMismatch { provided_session: SessionId },
+    TurnCandidateMismatch,
 }
 
 pub struct SubmitInputReconstitutionInput { /* private */ }
@@ -1306,7 +1310,7 @@ impl<Transaction: ReplaceSessionDefaultsTransaction> ReplaceSessionDefaultsServi
 | domain: accepted_input | 5 |
 | domain: delivery_request | 2 |
 | domain: user_content | 4 |
-| domain: submit_input | 10 |
+| domain: submit_input | 11 |
 | domain: queue_order | 5 (+1 free fn) |
 | domain: turn_lifecycle | 10 |
 | domain: turn_attempt | 13 |
@@ -1316,7 +1320,7 @@ impl<Transaction: ReplaceSessionDefaultsTransaction> ReplaceSessionDefaultsServi
 | domain: applied_interrupt | 2 |
 | domain: fatal_mismatch | 0 |
 | domain: replace_session_defaults | 13 |
-| **signalbox-domain total** | **128 (+1 free fn)** |
+| **signalbox-domain total** | **129 (+1 free fn)** |
 | application: create_session | 8 (incl. 2 traits) |
 | application: load_session | 2 (incl. 1 trait) |
 | application: replace_session_defaults | 4 (incl. 1 trait) |

@@ -33,18 +33,19 @@ pub struct SubmitInput {
 }
 
 impl SubmitInput {
-    /// Constructs the complete canonical typed payload.
+    /// Constructs the complete canonical typed payload for the baseline owner.
+    ///
+    /// ADR-0039 admits no non-owner actor at this durable-command boundary.
     pub const fn new(
         command_id: DurableCommandId,
         session: SessionId,
-        actor: Actor,
         content: UserContent,
         delivery: DeliveryRequest,
     ) -> Self {
         Self {
             command_id,
             session,
-            actor,
+            actor: Actor::Owner,
             content,
             delivery,
         }
@@ -97,18 +98,26 @@ impl SubmitInput {
         self,
         session: &Session,
         accepted_input: AcceptedInputId,
-        turn: TurnId,
+        turn: Option<TurnId>,
         previous_position: Option<SessionInputPosition>,
         select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
     ) -> Result<PreparedSubmitInput, SubmitInputPreparationError> {
         if session.id() != self.session {
             return Err(SubmitInputPreparationError {
                 command: Box::new(self),
-                provided_session: session.id(),
+                failure: SubmitInputPreparationFailure::SessionMismatch {
+                    provided_session: session.id(),
+                },
             });
         }
 
         let DeliveryRequest::StartWhenNoActiveTurn { configuration } = self.delivery else {
+            if matches!(self.delivery, DeliveryRequest::NextSafePoint { .. }) != turn.is_none() {
+                return Err(SubmitInputPreparationError {
+                    command: Box::new(self),
+                    failure: SubmitInputPreparationFailure::TurnCandidateMismatch,
+                });
+            }
             let expected_active_turn =
                 expected_active_turn(self.delivery).expect("non-start delivery names a turn");
             let target_session = self.session;
@@ -118,6 +127,12 @@ impl SubmitInput {
                     session: target_session,
                     expected_active_turn,
                 }),
+            });
+        };
+        let Some(turn) = turn else {
+            return Err(SubmitInputPreparationError {
+                command: Box::new(self),
+                failure: SubmitInputPreparationFailure::TurnCandidateMismatch,
             });
         };
 
@@ -333,14 +348,29 @@ impl PreparedSubmitInput {
     }
 }
 
-/// A supplied session belonged to another command target.
+/// Why no-active-turn preparation could not produce a terminal result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SubmitInputPreparationFailure {
+    /// The supplied session belonged to another command target.
+    SessionMismatch {
+        /// The different session supplied for preparation.
+        provided_session: SessionId,
+    },
+    /// Turn identity supply did not match the delivery variant.
+    ///
+    /// `NextSafePoint` initially creates no turn; every other delivery mode
+    /// needs a turn candidate for the state in which it can apply.
+    TurnCandidateMismatch,
+}
+
+/// A nonterminal correlation failure during preparation.
 ///
 /// This is a preparation correlation failure, not a terminal recorded
 /// rejection, and claims no command identity.
 #[derive(Clone, Debug)]
 pub struct SubmitInputPreparationError {
     command: Box<SubmitInput>,
-    provided_session: SessionId,
+    failure: SubmitInputPreparationFailure,
 }
 
 impl SubmitInputPreparationError {
@@ -349,14 +379,14 @@ impl SubmitInputPreparationError {
         &self.command
     }
 
-    /// Returns the different session supplied for preparation.
-    pub const fn provided_session(&self) -> SessionId {
-        self.provided_session
+    /// Returns the exact nonterminal failure.
+    pub const fn failure(&self) -> SubmitInputPreparationFailure {
+        self.failure
     }
 
-    /// Returns both unchanged correlation inputs.
-    pub fn into_parts(self) -> (SubmitInput, SessionId) {
-        (*self.command, self.provided_session)
+    /// Returns the unchanged command and exact failure.
+    pub fn into_parts(self) -> (SubmitInput, SubmitInputPreparationFailure) {
+        (*self.command, self.failure)
     }
 }
 
@@ -987,8 +1017,9 @@ mod tests {
     use std::hash::{Hash, Hasher};
 
     use super::{
-        ReconstitutedSubmitInput, SubmitInput, SubmitInputReconstitutionFailure,
-        SubmitInputReconstitutionInput, SubmitInputRejectedResult, SubmitInputResult,
+        ReconstitutedSubmitInput, SubmitInput, SubmitInputPreparationFailure,
+        SubmitInputReconstitutionFailure, SubmitInputReconstitutionInput,
+        SubmitInputRejectedResult, SubmitInputResult,
     };
     use crate::test_support::{accepted_input_id, alias, command_id, direct, session_id, turn_id};
     use crate::{
@@ -1037,7 +1068,6 @@ mod tests {
         SubmitInput::new(
             command_id(command),
             session_id(1),
-            Actor::Owner,
             content(text),
             DeliveryRequest::StartWhenNoActiveTurn {
                 configuration: choices(expected, ModelSelectionOverride::UseSessionDefault),
@@ -1051,9 +1081,9 @@ mod tests {
         hasher.finish()
     }
 
-    /// S01 / INV-012: comparison excludes only command identity and includes
-    /// session, actor, exact content, delivery discriminator, and every
-    /// delivery field.
+    /// S01 / INV-012 / ADR-0039: comparison excludes only command identity and
+    /// includes the fixed owner actor, session, exact content, delivery
+    /// discriminator, and every delivery field.
     #[test]
     fn s01_inv012_comparison_payload_is_structural() {
         let baseline = start_command(1, "hello", 1);
@@ -1066,27 +1096,16 @@ mod tests {
             SubmitInput::new(
                 command_id(1),
                 session_id(2),
-                Actor::Owner,
                 content("hello"),
                 baseline.delivery(),
             )
         );
+        assert_eq!(baseline.actor(), Actor::Owner);
         assert_ne!(
             baseline,
             SubmitInput::new(
                 command_id(1),
                 session_id(1),
-                Actor::Recovery,
-                content("hello"),
-                baseline.delivery(),
-            )
-        );
-        assert_ne!(
-            baseline,
-            SubmitInput::new(
-                command_id(1),
-                session_id(1),
-                Actor::Owner,
                 content("hello"),
                 DeliveryRequest::NextSafePoint {
                     expected_active_turn: turn_id(9),
@@ -1105,7 +1124,7 @@ mod tests {
             .prepare_when_no_active_turn(
                 &session(1, 1, ModelSelectionRequest::Direct(direct(2))),
                 accepted_input_id(3),
-                turn_id(4),
+                Some(turn_id(4)),
                 None,
                 |_| None,
             )
@@ -1144,7 +1163,6 @@ mod tests {
         let command = SubmitInput::new(
             command_id(1),
             session_id(1),
-            Actor::Owner,
             content("hello"),
             DeliveryRequest::StartWhenNoActiveTurn {
                 configuration: choices(
@@ -1159,7 +1177,7 @@ mod tests {
             .prepare_when_no_active_turn(
                 &current,
                 accepted_input_id(4),
-                turn_id(5),
+                Some(turn_id(5)),
                 None,
                 |requested| {
                     assert_eq!(requested, alias(2));
@@ -1183,7 +1201,7 @@ mod tests {
                 .prepare_when_no_active_turn(
                     &current,
                     accepted_input_id(4),
-                    turn_id(5),
+                    Some(turn_id(5)),
                     None,
                     |_| None,
                 )
@@ -1202,30 +1220,38 @@ mod tests {
     fn s01_inv012_inv028_active_modes_reject_when_no_turn_is_active() {
         let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
         let configuration = choices(1, ModelSelectionOverride::UseSessionDefault);
-        for delivery in [
-            DeliveryRequest::Interrupt {
-                expected_active_turn: turn_id(7),
-                configuration,
-            },
-            DeliveryRequest::NextSafePoint {
-                expected_active_turn: turn_id(7),
-            },
-            DeliveryRequest::AfterCurrentTurn {
-                expected_active_turn: turn_id(7),
-                configuration,
-            },
+        for (delivery, turn_candidate) in [
+            (
+                DeliveryRequest::Interrupt {
+                    expected_active_turn: turn_id(7),
+                    configuration,
+                },
+                Some(turn_id(4)),
+            ),
+            (
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: turn_id(7),
+                },
+                None,
+            ),
+            (
+                DeliveryRequest::AfterCurrentTurn {
+                    expected_active_turn: turn_id(7),
+                    configuration,
+                },
+                Some(turn_id(4)),
+            ),
         ] {
-            let prepared = SubmitInput::new(
-                command_id(1),
-                session_id(1),
-                Actor::Owner,
-                content("hello"),
-                delivery,
-            )
-            .prepare_when_no_active_turn(&current, accepted_input_id(3), turn_id(4), None, |_| {
-                panic!("active-work rejection does not resolve configuration")
-            })
-            .expect("session matches");
+            let prepared =
+                SubmitInput::new(command_id(1), session_id(1), content("hello"), delivery)
+                    .prepare_when_no_active_turn(
+                        &current,
+                        accepted_input_id(3),
+                        turn_candidate,
+                        None,
+                        |_| panic!("active-work rejection does not resolve configuration"),
+                    )
+                    .expect("session matches");
             assert!(matches!(
                 prepared.result(),
                 SubmitInputResult::Rejected(SubmitInputRejectedResult::NoActiveTurn {
@@ -1234,6 +1260,27 @@ mod tests {
                 }) if *session == session_id(1) && *expected_active_turn == turn_id(7)
             ));
         }
+
+        let mismatch = SubmitInput::new(
+            command_id(1),
+            session_id(1),
+            content("hello"),
+            DeliveryRequest::NextSafePoint {
+                expected_active_turn: turn_id(7),
+            },
+        )
+        .prepare_when_no_active_turn(
+            &current,
+            accepted_input_id(3),
+            Some(turn_id(4)),
+            None,
+            |_| None,
+        )
+        .expect_err("safe-point steering initially creates no turn");
+        assert_eq!(
+            mismatch.failure(),
+            SubmitInputPreparationFailure::TurnCandidateMismatch
+        );
     }
 
     /// S01 / INV-008 / INV-012: missing sessions, stale defaults, unknown
@@ -1251,7 +1298,7 @@ mod tests {
                 .prepare_when_no_active_turn(
                     &session(1, 2, ModelSelectionRequest::Direct(direct(2))),
                     accepted_input_id(3),
-                    turn_id(4),
+                    Some(turn_id(4)),
                     None,
                     |_| None,
                 )
@@ -1267,7 +1314,7 @@ mod tests {
                 .prepare_when_no_active_turn(
                     &session(1, 1, ModelSelectionRequest::Direct(direct(2))),
                     accepted_input_id(3),
-                    turn_id(4),
+                    Some(turn_id(4)),
                     Some(maximum),
                     |_| None,
                 )
