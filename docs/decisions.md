@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-18 — Application-owned current-session query port
+
+**Context.** ADR-0038 defines `load_session(SessionId)` as a separate current-snapshot query that returns the complete domain `Session`, distinguishes true session absence from malformed durable state, and leaves exact repository trait spelling and async types as implementation choices. The application crate needs that query without depending on persistence or reconstructing storage facts.
+
+**Decision.** Define an async `SessionReader` application port whose only query input is `SessionId` and whose successful value is `Option<Session>`. Compose it in a generic `LoadSessionService` that delegates exactly once and returns the adapter's complete session, true absence, or error unchanged. Use an immutable receiver because this is a read capability; adapters retain ownership of database consistency and fail-closed integrity classification.
+
+**Rejected alternatives.** Returning persistence records would reverse the domain boundary. Loading by durable-command identity or through the creation receipt would conflate replay history with current conversational state. Returning a partial or application-reconstructed session would weaken complete checked reconstitution. Retrying, caching, or translating adapter errors here would invent policy and could hide whether a later load observes a different current-defaults pointer.
+
+**Affects.** `crates/application/src/load_session.rs`, its public exports, and INV-002/INV-008/INV-012 enforcement links. It adds no persistence adapter, SQLx dependency, command handling, defaults replacement, protocol, authentication, client, cache, or hub wiring.
+
 ## 2026-07-18 — Application-owned CreateSession orchestration ports
 
 **Context.** ADR-0033 places hub-minted session UUIDv7 generation in application orchestration, while ADR-0034 makes the atomic persistence boundary authoritative for first handling, equal replay, and conflicting reuse. The admitted domain candidate fixes owner initiation with no ancestry, and ADR-0038 forbids replacing the recorded command receipt with a loaded current session.
