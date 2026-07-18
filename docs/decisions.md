@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-18 — Application-owned CreateSession orchestration ports
+
+**Context.** ADR-0033 places hub-minted session UUIDv7 generation in application orchestration, while ADR-0034 makes the atomic persistence boundary authoritative for first handling, equal replay, and conflicting reuse. The admitted domain candidate fixes owner initiation with no ancestry, and ADR-0038 forbids replacing the recorded command receipt with a loaded current session.
+
+**Decision.** Represent the application input as a private-field `CreateSessionRequest` whose fallible `try_new` constructor rejects ADR-0033's nil and max command UUID sentinels before canonical command construction. Compose a `SessionIdGenerator` port, with a UUIDv7 production implementation, and an async `CreateSessionTransaction` port in a generic `CreateSessionService`. Each execution mints one fresh candidate, fixes `OwnerInitiated` plus `None`, prepares through the domain seam, and invokes the atomic port exactly once. Return the port's recorded `CreateSessionAppliedResult` unchanged for first handling or equal replay, a typed conflicting-reuse outcome for a different payload, and a nonterminal error for preparation or transaction failure. Do not retry, pre-load command state, or load/return the current `Session`.
+
+**Rejected alternatives.** Depending on the persistence crate would reverse the intended adapter direction. Generating identities in Postgres or domain code would violate ADR-0033. Returning the invocation's fresh candidate on replay would replace the recorded receipt. Returning `Session` would conflate the receipt with ADR-0038's separate current snapshot. Retrying inside the use case would obscure whether the transaction committed; the caller may resubmit the same command ID and let the atomic port resolve replay.
+
+**Affects.** `crates/application/src/create_session.rs`, the application crate's focused UUIDv7 dependency and public exports, and INV-002/INV-003/INV-012 enforcement links. It adds no persistence adapter, current-session load, protocol, authentication, client or hub wiring, fork, input-submission, or defaults-replacement behavior.
+
 ## 2026-07-18 — Atomic CreateSession handling and complete replay load
 
 **Context.** The accepted CreateSession domain candidate and relational record family provide the sealed input and complete durable shape required by ADR-0034 and ADR-0035, but neither supplies the database operation that claims an owner-global command identity, commits its effects, handles concurrent duplicates, and reconstructs the recorded result after restart.
