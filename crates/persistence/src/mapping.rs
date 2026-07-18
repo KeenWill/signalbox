@@ -4,7 +4,8 @@ use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
-    DurableCommandId, SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition,
+    AcceptedInputId, DurableCommandId, SessionConfigurationDefaultsVersion, SessionId,
+    SessionInputPosition, TurnId,
 };
 use sqlx::types::Uuid;
 
@@ -79,6 +80,26 @@ pub fn session_id_from_uuid(value: Uuid) -> SessionId {
     SessionId::from_uuid(value)
 }
 
+/// Encodes an accepted-input identity for a PostgreSQL `uuid` column.
+pub fn accepted_input_id_to_uuid(value: AcceptedInputId) -> Uuid {
+    value.into_uuid()
+}
+
+/// Decodes an accepted-input identity from a PostgreSQL `uuid` column.
+pub fn accepted_input_id_from_uuid(value: Uuid) -> AcceptedInputId {
+    AcceptedInputId::from_uuid(value)
+}
+
+/// Encodes a turn identity for a PostgreSQL `uuid` column.
+pub fn turn_id_to_uuid(value: TurnId) -> Uuid {
+    value.into_uuid()
+}
+
+/// Decodes a turn identity from a PostgreSQL `uuid` column.
+pub fn turn_id_from_uuid(value: Uuid) -> TurnId {
+    TurnId::from_uuid(value)
+}
+
 /// Why a PostgreSQL `uuid` value is not a valid durable-command identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DurableCommandIdMappingError {
@@ -122,15 +143,17 @@ mod tests {
 
     use rust_decimal::Decimal;
     use signalbox_domain::{
-        DurableCommandId, SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition,
+        AcceptedInputId, DurableCommandId, SessionConfigurationDefaultsVersion, SessionId,
+        SessionInputPosition, TurnId,
     };
     use sqlx::types::Uuid;
 
     use super::{
-        DurableCommandIdMappingError, PositiveOrdinalMappingError, defaults_version_from_numeric,
-        defaults_version_to_numeric, durable_command_id_from_uuid, durable_command_id_to_uuid,
-        input_position_from_numeric, input_position_to_numeric, session_id_from_uuid,
-        session_id_to_uuid,
+        DurableCommandIdMappingError, PositiveOrdinalMappingError, accepted_input_id_from_uuid,
+        accepted_input_id_to_uuid, defaults_version_from_numeric, defaults_version_to_numeric,
+        durable_command_id_from_uuid, durable_command_id_to_uuid, input_position_from_numeric,
+        input_position_to_numeric, session_id_from_uuid, session_id_to_uuid, turn_id_from_uuid,
+        turn_id_to_uuid,
     };
 
     const OUT_OF_U64_RANGE: &str = "18446744073709551616";
@@ -215,6 +238,22 @@ mod tests {
         assert_eq!(command, DurableCommandId::from_uuid(command_uuid));
         assert_eq!(session_id_to_uuid(session), session_uuid);
         assert_eq!(durable_command_id_to_uuid(command), command_uuid);
+    }
+
+    /// INV-002: accepted-input and future-turn identities cross the SQL
+    /// boundary through distinct mappings even though both use native UUIDs.
+    #[test]
+    fn inv002_submit_input_identity_mappings_remain_kind_specific() {
+        let accepted_uuid = Uuid::from_u128(3);
+        let turn_uuid = Uuid::from_u128(4);
+
+        let accepted = accepted_input_id_from_uuid(accepted_uuid);
+        let turn = turn_id_from_uuid(turn_uuid);
+
+        assert_eq!(accepted, AcceptedInputId::from_uuid(accepted_uuid));
+        assert_eq!(turn, TurnId::from_uuid(turn_uuid));
+        assert_eq!(accepted_input_id_to_uuid(accepted), accepted_uuid);
+        assert_eq!(turn_id_to_uuid(turn), turn_uuid);
     }
 
     /// INV-002 / ADR-0033: the durable-command boundary rejects the nil and max
