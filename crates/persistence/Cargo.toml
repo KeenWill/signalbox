@@ -1,0 +1,42 @@
+[package]
+name = "signalbox-persistence"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+postgres-integration = ["dep:testcontainers-modules"]
+
+[dependencies]
+sqlx = { version = "0.9.0", default-features = false, features = [
+    "postgres",
+    "runtime-tokio",
+    "tls-rustls-ring-native-roots",
+    "migrate",
+    "macros",
+    "uuid",
+    "rust_decimal",
+    "time",
+] }
+tokio = { version = "1.53.0", default-features = false, features = [
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "time",
+] }
+testcontainers-modules = { version = "0.15.0", optional = true, default-features = false, features = [
+    "postgres",
+    "ring",
+] }
+
+[[test]]
+name = "postgres_integration"
+path = "tests/postgres_integration.rs"
+required-features = ["postgres-integration"]
+
+[lints]
+workspace = true

@@ -27,3 +27,16 @@ jobs:
         run: cargo test --workspace --all-targets --all-features
       - name: Build documentation
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
+
+  postgres-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Run ephemeral Postgres integration tests
+        run: >-
+          cargo test -p signalbox-persistence
+          --features postgres-integration
+          --test postgres_integration
+          -- --ignored --test-threads=1
