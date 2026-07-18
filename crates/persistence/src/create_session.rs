@@ -390,7 +390,12 @@ fn decode_complete(
         return Err(CreateSessionCorruption::Inconsistent("session/defaults ownership").into());
     }
     let stored_version = decode_ordinal(&row, "stored_defaults_version")?;
-    let _current_version = decode_ordinal(&row, "current_version")?;
+    let current_version = decode_ordinal(&row, "current_version")?;
+    if current_version != stored_version {
+        return Err(
+            CreateSessionCorruption::Inconsistent("current defaults pointer version").into(),
+        );
+    }
     let stored_defaults = decode_selection(
         required(&row, "stored_model_kind")?,
         row.try_get("stored_direct_id")?,

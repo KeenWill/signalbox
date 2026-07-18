@@ -705,3 +705,53 @@ async fn inv012_incomplete_or_unknown_claims_fail_closed_as_corruption()
     drop(container);
     Ok(())
 }
+
+/// INV-012: a current-defaults pointer that references a version other than the
+/// reconstituted immutable defaults row is inconsistent durable shape, so `load`
+/// must fail closed rather than reconstruct against a cross-wired pointer.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_cross_wired_current_pointer_fails_closed() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = CreateSessionRepository::new(pool.clone());
+    let creation = prepared(0x501, 0x901, direct(0x801));
+    assert_eq!(
+        repository.handle(creation).await?,
+        CreateSessionHandlingOutcome::Applied(creation.applied_result())
+    );
+
+    let session_id = Uuid::from_u128(0x901);
+    sqlx::query(
+        "INSERT INTO session_defaults_version
+            (session_id, version, model_selection_kind,
+             direct_model_selection_id, model_alias_id)
+         VALUES ($1, 2, 'direct', $2, NULL)",
+    )
+    .bind(session_id)
+    .bind(Uuid::from_u128(0x802))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE session_current_defaults
+         SET current_version = 2
+         WHERE session_id = $1",
+    )
+    .bind(session_id)
+    .execute(&pool)
+    .await?;
+
+    let cross_wired = repository
+        .load(creation.command().command_id())
+        .await
+        .expect_err("a pointer targeting another version is corruption");
+    assert!(matches!(
+        cross_wired,
+        CreateSessionRepositoryError::Corruption(CreateSessionCorruption::Inconsistent(
+            "current defaults pointer version"
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
