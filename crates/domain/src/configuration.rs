@@ -166,6 +166,20 @@ impl EffectiveConfiguration {
 pub struct SessionConfigurationDefaultsVersion(u64);
 
 impl SessionConfigurationDefaultsVersion {
+    /// Reconstitutes a version from its positive ordinal value.
+    ///
+    /// Returns `None` for zero, which is not a version. Storage and protocol
+    /// boundaries remain responsible for decoding their own representations
+    /// into a `u64` before calling this domain-owned check.
+    pub const fn try_from_u64(value: u64) -> Option<Self> {
+        if value == 0 { None } else { Some(Self(value)) }
+    }
+
+    /// Returns this version's positive ordinal value.
+    pub const fn as_u64(self) -> u64 {
+        self.0
+    }
+
     /// Returns version one, established by session creation.
     pub const fn first() -> Self {
         Self(1)
@@ -555,6 +569,21 @@ mod tests {
             SessionConfigurationDefaultsVersion(u64::MAX).checked_next(),
             None
         );
+    }
+
+    /// INV-002: reconstitution accepts the complete positive `u64` domain and
+    /// rejects the zero sentinel without admitting a storage representation.
+    #[test]
+    fn inv002_defaults_version_checked_u64_boundary() {
+        assert_eq!(SessionConfigurationDefaultsVersion::try_from_u64(0), None);
+        assert_eq!(
+            SessionConfigurationDefaultsVersion::try_from_u64(1),
+            Some(SessionConfigurationDefaultsVersion::first())
+        );
+
+        let maximum =
+            SessionConfigurationDefaultsVersion::try_from_u64(u64::MAX).expect("positive maximum");
+        assert_eq!(maximum.as_u64(), u64::MAX);
     }
 
     #[test]
