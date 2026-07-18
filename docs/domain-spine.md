@@ -1,26 +1,41 @@
 # Domain spine
 
-This file is the owner's primary API-review surface. The source files in
+This file is the owner's primary API-review surface. The crates are
+authoritative: this is a hand-maintained mirror of their public API, updated
+from source and never edited in source's place. The source files in
 `crates/domain/src/` and `crates/application/src/` are intentionally dense
 with rustdoc, unit tests, and `compile_fail` proofs; domain shape is reviewed
-here instead. This document mirrors the complete public API of
+here instead. The mirror covers the public type and function surface of
 `signalbox-domain` and `signalbox-application` as bare declarations — no doc
-comments, no tests, no bodies. Any pull request that adds, removes, or changes
-a public item in either crate must update this file in the same change;
-AGENTS.md carries that rule.
+comments, no tests, no bodies. Any pull request that adds, removes, or
+changes a public item in either crate must update this file in the same
+change; `AGENTS.md` carries that rule, and CI (`scripts/check_domain_spine.py`)
+fails when an exported name is missing here or an inventory count disagrees
+with source.
 
 Conventions used below:
 
+- The declarations are illustrative, not compilable Rust. In particular,
+  `pub struct Name { /* private */ }` marks a struct whose real fields are
+  private — it is not a fieldless struct. Resolve exact field shapes and
+  accessor return types in source.
 - Enums are shown with their full variant lists — the variants are the
   semantic content.
 - Every struct in both crates has private fields. Structs a caller can build
   show their public constructors as full signatures; structs with no public
-  constructor appear as `pub struct Name { /* private */ }` with a
-  `// sealed:` comment naming the only public producer(s), or noting that the
-  trusted producer is deferred to a later slice.
+  constructor appear with a `// sealed:` comment naming the only public
+  producer(s), or noting that the trusted producer is deferred to a later
+  slice.
 - Pure getters are collapsed to one `// accessors:` line per type.
 - Public constructors, transitions, and `into_parts`-style decompositions are
   spelled out as bodiless `pub fn` signatures.
+- Derives and trait implementations appear only where load-bearing (`Copy`
+  versus non-`Copy`, equality composition, error traits); adding or removing
+  one on a public type is a public-API change — update the relevant note when
+  it matters, and treat source as the complete record.
+- Comments state API shape only — sealed producers, crate-private seams,
+  equality composition. Decided semantics live in the accepted ADRs and are
+  not restated here.
 
 ## domain: lib.rs — identities
 
@@ -232,7 +247,6 @@ pub enum FrozenModelSelection {
         definition: FrozenAliasDefinition,
     },
 }
-// direct and frozen-alias selections stay unequal even for one exact target
 
 pub enum ModelParameters {
     ProviderDefaults,
@@ -284,7 +298,6 @@ pub enum ModelSelectionOverride {
     UseSessionDefault,
     ReplaceWith(ModelSelectionRequest),
 }
-// UseSessionDefault and ReplaceWith(current default) stay structurally distinct
 
 pub struct ConfigurationRequest { /* private */ }
 // sealed: carried inside VersionCheckedConfigurationRequest (derive_request)
@@ -323,7 +336,6 @@ pub enum TurnConfigurationProvenance {
     ExplicitOrigin(OriginConfiguration),
     InheritedForReclassifiedSteering(SteeringBinding),
 }
-// the inherited variant deliberately carries no configuration value
 ```
 
 ## domain: accepted_input
@@ -397,7 +409,6 @@ pub enum DeliveryRequest {
         configuration: PerInputConfigurationChoices,
     },
 }
-// NextSafePoint carries no configuration by construction
 ```
 
 ## domain: queue_order
@@ -638,14 +649,12 @@ pub enum CancellationStopDisposition {
     Cancelled,
     Ambiguous,
 }
-// no YieldedToDurableWait after an applied cancellation
 
 pub enum FatalMismatchStopDisposition {
     KnownFailure,
     Lost,
     Ambiguous,
 }
-// fatal stop permits no completion, refusal, cancellation, or wait
 
 pub enum CurrentTurnAttemptState {
     Prepared,
@@ -754,7 +763,7 @@ impl ResolvedContextFrontierSnapshot {
 
 ## domain: provider_evidence
 
-The module is large (1,245 lines) but its public surface is deliberately
+The module is large but its public surface is deliberately
 small: the recording (`record`) and admission (`admit`) mutations, mismatch
 correlation producers, and all rejection/outcome types are crate-private
 seams reserved for the later aggregate slice.
@@ -819,8 +828,8 @@ impl AppliedInterruptCommandResult {
 ## domain: fatal_mismatch
 
 Zero public items. The entire subtree (`fatal_mismatch.rs`,
-`fatal_mismatch/lifecycle.rs`, `fatal_mismatch/prepared.rs` — about 1,900
-lines) is `pub(crate)`: post-evidence fact derivation, the reconciliation
+`fatal_mismatch/lifecycle.rs`, `fatal_mismatch/prepared.rs` — large) is
+`pub(crate)`: post-evidence fact derivation, the reconciliation
 marker candidate, and the sealed attempt/turn lifecycle binding are consumed
 by `turn_lifecycle` and reserved for the next aggregate slice. Its only
 externally visible effect today is that `ReconciliationMarker` (turn_lifecycle)

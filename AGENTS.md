@@ -6,6 +6,8 @@ Authoritative starting points are `docs/architecture.md`, `docs/invariants.md`, 
 
 **Working autonomously.** Within an assigned task, proceed without asking: branch, implement, run the validation sequence (it defines done for any code change), and open and revise pull requests. Stop only at owner gates — merges, foundation-weight decisions, large dependencies — and when two rules conflict in practice, stop and report the conflict rather than reconciling it silently. Autonomous milestone-delivering runs additionally follow `docs/goal-mode.md`.
 
+**Domain spine.** `docs/domain-spine.md` mirrors the public API of the domain and application crates as bare declarations and is the owner's primary review surface. Any change to a public item in those crates updates the spine in the same pull request; CI checks its exported names and inventory counts against source.
+
 **Finished pull requests.** The owner merges every pull request; deliver each one finished and awaiting owner merge:
 
 - CI is green on the final commit.
