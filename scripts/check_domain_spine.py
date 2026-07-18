@@ -109,6 +109,11 @@ def validate_lib_forms(crate: str, lib_rs: Path) -> list[str]:
                 f"{crate} lib.rs has an unsupported re-export form: `{flat}`"
                 " — restate or extend the check"
             )
+    for name in re.findall(r"^pub extern crate (\w+)", text, re.MULTILINE):
+        failures.append(
+            f"{crate} lib.rs re-exports crate `{name}` via pub extern crate;"
+            " this form is unsupported — restate or extend the check"
+        )
     for line in text.splitlines():
         macro = re.match(r"([A-Za-z_][A-Za-z0-9_:]*)!\s*[\(\[{]", line)
         if macro and macro.group(1) not in ("define_identity", "macro_rules"):
