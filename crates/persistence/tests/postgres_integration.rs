@@ -209,6 +209,43 @@ async fn inv012_registry_and_create_session_constraints_reject_torn_or_conflicti
         Some("23514")
     );
 
+    let mut session_without_command = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO session (session_id, creation_cause, ancestry_kind)
+         VALUES
+            ('70000000-0000-7000-8000-000000000021',
+             'owner_initiated', 'none')",
+    )
+    .execute(&mut *session_without_command)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_defaults_version
+            (session_id, version, model_selection_kind,
+             direct_model_selection_id, model_alias_id)
+         VALUES
+            ('70000000-0000-7000-8000-000000000021', 1, 'direct',
+             '70000000-0000-7000-8000-000000000022', NULL)",
+    )
+    .execute(&mut *session_without_command)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_current_defaults (session_id, current_version)
+         VALUES ('70000000-0000-7000-8000-000000000021', 1)",
+    )
+    .execute(&mut *session_without_command)
+    .await?;
+    let missing_create_command = session_without_command
+        .commit()
+        .await
+        .expect_err("a session without its CreateSession record must not commit");
+    assert_eq!(
+        missing_create_command
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23503")
+    );
+
     pool.close().await;
     drop(container);
 
