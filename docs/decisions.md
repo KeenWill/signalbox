@@ -12,6 +12,16 @@ An append-only, dated record of decisions below foundation weight, newest first.
 
 **Affects.** New `crates/domain/src/context_frontier.rs`; the lifecycle-owned start value in `crates/domain/src/turn_lifecycle.rs`; identity test support and public re-exports in `crates/domain/src/lib.rs`; INV-001, INV-015, and INV-030 enforcement links in `docs/invariants.md`; and representation wording in ADR-0022, ADR-0030, `docs/open-questions.md`, and `docs/glossary.md`. Eligibility, model-call binding, steering consumption, aggregate authority, persistence, and ancestry-boundary resolution remain later slices.
 
+## 2026-07-17 — Sealed provider-target mismatch correlation facts
+
+**Context.** [ADR-0031](decisions/0031-direct-fatal-terminalization.md) requires the aggregate to apply one trusted fatal-mismatch fact through one of three timing-specific call effects. The existing ADR-0005 evidence slice validated each correlation but returned only a failure reference, so later closure code could pair a valid failure for call A with call B or a different timing effect.
+
+**Decision.** Replace those crate-private producer results with a private-field `AppliedProviderTargetMismatch` coupling the exact `ProviderTargetMismatchFailureRef`, affected `ModelCallId`, and closed `ProviderTargetMismatchEffectView`. Only the existing evidence-correlation and invalidation boundaries construct it. The value proves correlation and timing branch only; it does not prove that call, attempt, or turn state changed or that a transaction committed.
+
+**Rejected alternatives.** Returning a bare failure and supplying call or effect separately permits cross-wiring. A public constructor or raw tuple lets callers mint timing authority. Applying aggregate state changes inside provider evidence crosses the evidence/aggregate boundary.
+
+**Affects.** `crates/domain/src/provider_evidence.rs` and INV-014 enforcement. Complete fatal-cause and closure derivation, lifecycle binding, aggregate guards, persistence, and startup recovery remain later work.
+
 ## 2026-07-17 — Merging an ADR pull request is its acceptance
 
 **Context.** ADRs carried a `Status:` line with a Proposed-to-Accepted lifecycle, so records could sit on `main` while still undecided and acceptance required a second status-flip pull request (PR #33) or a draft claiming `Accepted` before the owner had decided (PR #31). Both paths caused reviewer churn and slowed the decision pipeline without adding safety.

@@ -4,10 +4,12 @@
 //! the evidence record keyed by [`ProviderTargetEvidenceId`] with
 //! identifier-replay and reuse boundaries, the completed-call mismatch
 //! invalidation that is unique by invalidated call, and the validating
-//! producers for [`ProviderTargetMismatchFailureRef`]. Trust classification
-//! of raw provider-reported data, outcome eligibility and authority
-//! transfer, the aggregate's classification precedence, and persistence are
-//! separate later slices; a value here does not prove those guards held.
+//! producers for sealed mismatch facts that bind each
+//! [`ProviderTargetMismatchFailureRef`] to its exact validated call effect.
+//! Trust classification of raw provider-reported data, outcome eligibility
+//! and authority transfer, the aggregate's classification precedence, and
+//! persistence are separate later slices; a value here does not prove those
+//! guards held.
 
 use std::collections::BTreeMap;
 
@@ -36,6 +38,95 @@ pub enum ProviderTargetObservation {
         /// The provider-reported identity.
         reported: ProviderModelIdentity,
     },
+}
+
+/// The call-state effect already validated with one fatal mismatch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProviderTargetMismatchEffectView {
+    /// A nonterminal call is to be classified physically known failed.
+    ClassifyNonterminalKnownFailed,
+    /// A terminally ambiguous call keeps its physical disposition while its
+    /// turn-level ambiguity is resolved.
+    ResolveTerminalAmbiguity,
+    /// A completed current-authority call is to be invalidated without
+    /// rewriting it.
+    PreserveCompletedInvalidation,
+}
+
+/// One trusted fatal mismatch paired with its exact validated call effect.
+///
+/// Only this module's evidence-correlation boundaries construct the value.
+/// The sealed pairing prevents later closure logic from applying a failure
+/// for call A to call B or inventing a different timing-branch effect.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct AppliedProviderTargetMismatch {
+    failure: ProviderTargetMismatchFailureRef,
+    affected_call: ModelCallId,
+    effect: ProviderTargetMismatchEffectView,
+}
+
+#[cfg_attr(not(test), expect(dead_code, reason = "used by the stacked child"))]
+#[cfg_attr(test, expect(dead_code, reason = "test seams await the child"))]
+impl AppliedProviderTargetMismatch {
+    const fn nonterminal(evidence: ProviderTargetEvidenceId, call: ModelCallId) -> Self {
+        Self {
+            failure: ProviderTargetMismatchFailureRef::nonterminal_call_observation(evidence),
+            affected_call: call,
+            effect: ProviderTargetMismatchEffectView::ClassifyNonterminalKnownFailed,
+        }
+    }
+
+    const fn terminal_ambiguity_resolution(
+        evidence: ProviderTargetEvidenceId,
+        call: ModelCallId,
+    ) -> Self {
+        Self {
+            failure: ProviderTargetMismatchFailureRef::terminal_ambiguity_resolution(evidence),
+            affected_call: call,
+            effect: ProviderTargetMismatchEffectView::ResolveTerminalAmbiguity,
+        }
+    }
+
+    const fn completed_invalidation(call: ModelCallId) -> Self {
+        Self {
+            failure: ProviderTargetMismatchFailureRef::terminal_call_invalidation(call),
+            affected_call: call,
+            effect: ProviderTargetMismatchEffectView::PreserveCompletedInvalidation,
+        }
+    }
+
+    pub(crate) const fn failure(self) -> ProviderTargetMismatchFailureRef {
+        self.failure
+    }
+
+    pub(crate) const fn affected_call(self) -> ModelCallId {
+        self.affected_call
+    }
+
+    pub(crate) const fn effect(self) -> ProviderTargetMismatchEffectView {
+        self.effect
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn test_nonterminal(
+        evidence: ProviderTargetEvidenceId,
+        call: ModelCallId,
+    ) -> Self {
+        Self::nonterminal(evidence, call)
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn test_terminal_ambiguity_resolution(
+        evidence: ProviderTargetEvidenceId,
+        call: ModelCallId,
+    ) -> Self {
+        Self::terminal_ambiguity_resolution(evidence, call)
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn test_completed_invalidation(call: ModelCallId) -> Self {
+        Self::completed_invalidation(call)
+    }
 }
 
 /// The model call identity and its exact resolved target, read together
@@ -150,7 +241,7 @@ impl ProviderTargetEvidence {
     }
 
     /// Correlates this record as the first trusted mismatch observation on a
-    /// nonterminal call and produces the typed fatal failure.
+    /// nonterminal call and produces the sealed fatal-mismatch fact.
     ///
     /// Nonterminality is established by the current-call type, and the call
     /// must have crossed send authorization: ADR-0005's mismatch edge starts
@@ -158,33 +249,36 @@ impl ProviderTargetEvidence {
     /// `Prepared` call has no provider interaction that could report a
     /// target. Outcome eligibility and the atomic `Terminal(KnownFailed)`
     /// classification are the aggregate's transition.
-    pub(crate) fn nonterminal_call_mismatch_failure(
+    pub(crate) fn nonterminal_call_mismatch_fact(
         &self,
         call: &CurrentModelCall,
-    ) -> Result<ProviderTargetMismatchFailureRef, ProviderTargetMismatchCorrelationError> {
+    ) -> Result<AppliedProviderTargetMismatch, ProviderTargetMismatchCorrelationError> {
         if call.state() == CurrentModelCallState::Prepared {
             return Err(ProviderTargetMismatchCorrelationError::CallIsUnsent);
         }
         self.correlated_mismatch(call.id(), call.target())?;
-        Ok(ProviderTargetMismatchFailureRef::nonterminal_call_observation(self.id))
+        Ok(AppliedProviderTargetMismatch::nonterminal(
+            self.id,
+            call.id(),
+        ))
     }
 
     /// Correlates this record as mismatch evidence resolving a call that
-    /// already ended `Ambiguous` and produces the typed fatal failure.
+    /// already ended `Ambiguous` and produces the sealed fatal-mismatch fact.
     ///
     /// The terminal physical disposition stays unchanged by construction:
-    /// this takes the ended record immutably and returns only the failure.
-    pub(crate) fn terminal_ambiguity_resolution_failure(
+    /// this takes the ended record immutably and returns only the sealed fact.
+    pub(crate) fn terminal_ambiguity_resolution_fact(
         &self,
         call: &EndedModelCall,
-    ) -> Result<ProviderTargetMismatchFailureRef, ProviderTargetMismatchCorrelationError> {
+    ) -> Result<AppliedProviderTargetMismatch, ProviderTargetMismatchCorrelationError> {
         if call.disposition() != ModelCallDisposition::Ambiguous {
             return Err(ProviderTargetMismatchCorrelationError::CallIsNotAmbiguous {
                 disposition: call.disposition(),
             });
         }
         self.correlated_mismatch(call.id(), call.target())?;
-        Ok(ProviderTargetMismatchFailureRef::terminal_ambiguity_resolution(self.id))
+        Ok(AppliedProviderTargetMismatch::terminal_ambiguity_resolution(self.id, call.id()))
     }
 
     fn correlated_mismatch(
@@ -542,10 +636,9 @@ impl ProviderTargetMismatchInvalidation {
         }
     }
 
-    /// Produces the typed fatal failure carried by the stop this
-    /// invalidation requires.
-    pub(crate) fn failure(&self) -> ProviderTargetMismatchFailureRef {
-        ProviderTargetMismatchFailureRef::terminal_call_invalidation(self.invalidated_call)
+    /// Produces the sealed fatal-mismatch fact this invalidation requires.
+    pub(crate) const fn fatal_mismatch_fact(&self) -> AppliedProviderTargetMismatch {
+        AppliedProviderTargetMismatch::completed_invalidation(self.invalidated_call)
     }
 }
 
@@ -675,8 +768,9 @@ mod tests {
         AdmittedProviderTargetMismatchInvalidation, CanonicalCallTarget, ProviderTargetEvidence,
         ProviderTargetEvidenceLog, ProviderTargetEvidenceRecording,
         ProviderTargetEvidenceRecordingError, ProviderTargetMismatchCorrelationError,
-        ProviderTargetMismatchInvalidation, ProviderTargetMismatchInvalidationError,
-        ProviderTargetMismatchInvalidationLog, ProviderTargetObservation,
+        ProviderTargetMismatchEffectView, ProviderTargetMismatchInvalidation,
+        ProviderTargetMismatchInvalidationError, ProviderTargetMismatchInvalidationLog,
+        ProviderTargetObservation,
     };
     use crate::test_support::{
         model_call_id, provider_model_identity, provider_target_evidence_id as evidence_id, turn_id,
@@ -814,31 +908,36 @@ mod tests {
     }
 
     /// S21 / INV-014: a correlated mismatch on an issued nonterminal call
-    /// produces exactly the nonterminal-observation failure; unsent calls,
+    /// produces exactly the sealed nonterminal-observation fact; unsent calls,
     /// cross-wired calls, non-mismatch payloads, and target-equal reports
     /// are rejected.
     #[test]
     fn nonterminal_mismatch_producer_validates_the_canonical_call() {
         let call = current_call(2);
-        let failure = recorded_mismatch(1, 2, 8)
-            .nonterminal_call_mismatch_failure(&call)
-            .expect("correlated mismatch produces the fatal failure");
+        let fact = recorded_mismatch(1, 2, 8)
+            .nonterminal_call_mismatch_fact(&call)
+            .expect("correlated mismatch produces the fatal fact");
         assert_eq!(
-            failure.kind(),
+            fact.failure().kind(),
             ProviderTargetMismatchFailureKind::NonterminalCallObservation {
                 evidence: evidence_id(1)
             }
+        );
+        assert_eq!(fact.affected_call(), model_call_id(2));
+        assert_eq!(
+            fact.effect(),
+            ProviderTargetMismatchEffectView::ClassifyNonterminalKnownFailed
         );
 
         let unsent = CurrentModelCall::prepared(model_call_id(2), pinned_target());
         assert_eq!(unsent.state(), CurrentModelCallState::Prepared);
         assert_eq!(
-            recorded_mismatch(1, 2, 8).nonterminal_call_mismatch_failure(&unsent),
+            recorded_mismatch(1, 2, 8).nonterminal_call_mismatch_fact(&unsent),
             Err(ProviderTargetMismatchCorrelationError::CallIsUnsent)
         );
 
         assert_eq!(
-            recorded_mismatch(1, 3, 8).nonterminal_call_mismatch_failure(&call),
+            recorded_mismatch(1, 3, 8).nonterminal_call_mismatch_fact(&call),
             Err(
                 ProviderTargetMismatchCorrelationError::EvidenceForDifferentCall {
                     evidence_call: model_call_id(3),
@@ -855,7 +954,7 @@ mod tests {
             },
         );
         assert_eq!(
-            matches.nonterminal_call_mismatch_failure(&call),
+            matches.nonterminal_call_mismatch_fact(&call),
             Err(
                 ProviderTargetMismatchCorrelationError::ObservationIsNotMismatch {
                     observation: matches.observation(),
@@ -871,7 +970,7 @@ mod tests {
             mismatch(TARGET_IDENTITY),
         );
         assert_eq!(
-            cross_wired.nonterminal_call_mismatch_failure(&call),
+            cross_wired.nonterminal_call_mismatch_fact(&call),
             Err(
                 ProviderTargetMismatchCorrelationError::ReportedIdentityMatchesTarget {
                     reported: provider_model_identity(TARGET_IDENTITY),
@@ -882,18 +981,23 @@ mod tests {
 
     /// S21 / INV-014: mismatch evidence resolving terminal ambiguity leaves
     /// the physical disposition unchanged and produces the resolution
-    /// failure only for an `Ambiguous` call.
+    /// fact only for an `Ambiguous` call.
     #[test]
     fn ambiguity_resolution_producer_requires_a_terminal_ambiguous_call() {
         let ambiguous = ended_call(2, ModelCallDisposition::Ambiguous);
-        let failure = recorded_mismatch(1, 2, 8)
-            .terminal_ambiguity_resolution_failure(&ambiguous)
+        let fact = recorded_mismatch(1, 2, 8)
+            .terminal_ambiguity_resolution_fact(&ambiguous)
             .expect("correlated mismatch resolves terminal ambiguity");
         assert_eq!(
-            failure.kind(),
+            fact.failure().kind(),
             ProviderTargetMismatchFailureKind::TerminalAmbiguityResolution {
                 evidence: evidence_id(1)
             }
+        );
+        assert_eq!(fact.affected_call(), model_call_id(2));
+        assert_eq!(
+            fact.effect(),
+            ProviderTargetMismatchEffectView::ResolveTerminalAmbiguity
         );
         assert_eq!(ambiguous.disposition(), ModelCallDisposition::Ambiguous);
 
@@ -905,7 +1009,7 @@ mod tests {
         ] {
             assert_eq!(
                 recorded_mismatch(1, 2, 8)
-                    .terminal_ambiguity_resolution_failure(&ended_call(2, disposition)),
+                    .terminal_ambiguity_resolution_fact(&ended_call(2, disposition)),
                 Err(ProviderTargetMismatchCorrelationError::CallIsNotAmbiguous { disposition })
             );
         }
@@ -928,10 +1032,18 @@ mod tests {
         assert_eq!(invalidation.invalidated_call(), model_call_id(2));
         assert_eq!(invalidation.first_mismatch_evidence(), evidence_id(1));
         assert_eq!(
-            invalidation.failure().kind(),
+            invalidation.fatal_mismatch_fact().failure().kind(),
             ProviderTargetMismatchFailureKind::TerminalCallInvalidation {
                 invalidated_call: model_call_id(2)
             }
+        );
+        assert_eq!(
+            invalidation.fatal_mismatch_fact().affected_call(),
+            model_call_id(2)
+        );
+        assert_eq!(
+            invalidation.fatal_mismatch_fact().effect(),
+            ProviderTargetMismatchEffectView::PreserveCompletedInvalidation
         );
 
         assert_eq!(
