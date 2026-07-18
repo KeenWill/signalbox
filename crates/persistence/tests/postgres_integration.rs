@@ -1,5 +1,9 @@
-use std::{error::Error, sync::Arc};
+use std::{collections::VecDeque, error::Error, sync::Arc};
 
+use signalbox_application::{
+    CreateSessionError, CreateSessionOutcome, CreateSessionRequest, CreateSessionService,
+    SessionIdGenerator,
+};
 use signalbox_domain::{
     CreateSession, DurableCommandId, ModelAlias, ModelSelectionRequest, PreparedCreateSession,
     SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
@@ -74,6 +78,27 @@ fn alias(value: u128) -> ModelSelectionRequest {
     ModelSelectionRequest::Alias(ModelAlias::from_uuid(Uuid::from_u128(value)))
 }
 
+#[derive(Debug)]
+struct FixedSessionIds {
+    remaining: VecDeque<SessionId>,
+}
+
+impl FixedSessionIds {
+    fn new(values: impl IntoIterator<Item = SessionId>) -> Self {
+        Self {
+            remaining: values.into_iter().collect(),
+        }
+    }
+}
+
+impl SessionIdGenerator for FixedSessionIds {
+    fn next_session_id(&mut self) -> SessionId {
+        self.remaining
+            .pop_front()
+            .expect("the integration test supplies one identity per invocation")
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn embedded_migrator_connects_and_is_idempotent() -> Result<(), Box<dyn Error>> {
@@ -85,6 +110,75 @@ async fn embedded_migrator_connects_and_is_idempotent() -> Result<(), Box<dyn Er
     pool.close().await;
     drop(container);
 
+    Ok(())
+}
+
+/// S01 / INV-002 / INV-012: the Postgres adapter preserves the application's
+/// terminal outcomes and returns infrastructure failure through the nonterminal
+/// transaction-error path.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s01_inv002_inv012_application_create_service_uses_postgres_adapter()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let command_id = DurableCommandId::from_uuid(Uuid::from_u128(0x601));
+    let request = CreateSessionRequest::try_new(
+        command_id,
+        SessionConfigurationDefaults::new(direct(0x801)),
+    )?;
+    let conflicting_request =
+        CreateSessionRequest::try_new(command_id, SessionConfigurationDefaults::new(alias(0x802)))?;
+    let winner = SessionId::from_uuid(Uuid::from_u128(0x701));
+    let replay_candidate = SessionId::from_uuid(Uuid::from_u128(0x702));
+    let conflicting_candidate = SessionId::from_uuid(Uuid::from_u128(0x703));
+    let repository = CreateSessionRepository::new(pool.clone());
+    let mut service = CreateSessionService::new(
+        FixedSessionIds::new([winner, replay_candidate, conflicting_candidate]),
+        repository,
+    );
+
+    let first = service.execute(request).await?;
+    let replay = service.execute(request).await?;
+    assert_eq!(first, replay);
+    let CreateSessionOutcome::Applied(recorded_receipt) = first else {
+        panic!("first application must return the recorded applied receipt");
+    };
+    assert_eq!(recorded_receipt.session(), winner);
+    assert_ne!(recorded_receipt.session(), replay_candidate);
+
+    assert_eq!(
+        service.execute(conflicting_request).await?,
+        CreateSessionOutcome::ConflictingReuse { command_id }
+    );
+    let committed_counts: (i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM durable_command),
+            (SELECT count(*) FROM session)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(committed_counts, (1, 1));
+
+    let (_session_ids, repository) = service.into_parts();
+    pool.close().await;
+    let unavailable_request = CreateSessionRequest::try_new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0x602)),
+        SessionConfigurationDefaults::new(direct(0x803)),
+    )?;
+    let mut unavailable_service = CreateSessionService::new(
+        FixedSessionIds::new([SessionId::from_uuid(Uuid::from_u128(0x704))]),
+        repository,
+    );
+    let error = unavailable_service
+        .execute(unavailable_request)
+        .await
+        .expect_err("a closed pool cannot become a terminal command outcome");
+    assert!(matches!(
+        error,
+        CreateSessionError::Transaction(CreateSessionRepositoryError::Database(_))
+    ));
+
+    drop(container);
     Ok(())
 }
 

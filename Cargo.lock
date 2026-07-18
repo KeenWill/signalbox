@@ -2192,6 +2192,7 @@ name = "signalbox-persistence"
 version = "0.0.0"
 dependencies = [
  "rust_decimal",
+ "signalbox-application",
  "signalbox-domain",
  "sqlx",
  "testcontainers-modules",
