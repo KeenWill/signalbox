@@ -16,8 +16,8 @@ use signalbox_domain::{
 /// Why a caller-supplied command identity cannot enter canonical construction.
 ///
 /// ADR-0033 reserves nil and max UUIDs as invalid sentinel-like command
-/// identities. Rejection occurs while constructing [`CreateSessionRequest`],
-/// before session identity generation, domain command construction, or
+/// identities. Rejection occurs while constructing a validated application
+/// request, before domain command construction, identity generation, or
 /// durable-command lookup.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InvalidDurableCommandId {
