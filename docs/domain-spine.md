@@ -1542,6 +1542,49 @@ impl<Transaction: ReplaceSessionDefaultsTransaction> ReplaceSessionDefaultsServi
 }
 ```
 
+## application: start_eligible_turn
+
+```rust
+pub trait StartEligibleTurnIdGenerator {
+    fn next_origin_entry_id(&mut self) -> SemanticTranscriptEntryId;
+    fn next_starting_frontier_id(&mut self) -> ContextFrontierId;
+    fn next_initial_attempt_id(&mut self) -> TurnAttemptId;
+}
+
+pub struct UuidV7StartEligibleTurnIdGenerator;
+// Default; impl StartEligibleTurnIdGenerator
+
+pub enum StartEligibleTurnOutcome {
+    NoEligibleTurn,
+    Activated(Box<ActivatedAcceptedInputTurn>),
+}
+
+pub trait StartEligibleTurnTransaction {
+    type Error;
+
+    fn handle(
+        &mut self,
+        session: SessionId,
+        identities: AcceptedInputTurnActivationIdentities,
+    ) -> impl Future<Output = Result<StartEligibleTurnOutcome, Self::Error>> + Send;
+}
+
+pub struct StartEligibleTurnService<Generator, Transaction> { /* private */ }
+impl<Generator, Transaction> StartEligibleTurnService<Generator, Transaction> {
+    pub const fn new(ids: Generator, transaction: Transaction) -> Self;
+    pub fn into_parts(self) -> (Generator, Transaction);
+}
+impl<
+    Generator: StartEligibleTurnIdGenerator,
+    Transaction: StartEligibleTurnTransaction,
+> StartEligibleTurnService<Generator, Transaction> {
+    pub async fn execute(
+        &mut self,
+        session: SessionId,
+    ) -> Result<StartEligibleTurnOutcome, Transaction::Error>;
+}
+```
+
 ## application: submit_input
 
 ```rust
@@ -1621,5 +1664,6 @@ impl<Generator: SubmitInputIdGenerator, Transaction: SubmitInputTransaction>
 | application: create_session | 8 (incl. 2 traits) |
 | application: load_session | 2 (incl. 1 trait) |
 | application: replace_session_defaults | 4 (incl. 1 trait) |
+| application: start_eligible_turn | 5 (incl. 2 traits) |
 | application: submit_input | 6 (incl. 2 traits) |
-| **signalbox-application total** | **20** |
+| **signalbox-application total** | **25** |
