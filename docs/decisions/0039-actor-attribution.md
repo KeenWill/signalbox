@@ -1,12 +1,10 @@
 # ADR-0039: Actor attribution for durable commands and recorded transitions
 
 - Date: 2026-07-18
-- Owners: Repository owner
-- Reviewers: Repository-owner review in the proposing pull request; no specialist human reviewer assigned
 - Supersedes: none
 - Superseded by: none
 - Depends on: [ADR-0001](0001-domain-terminology-and-identity.md), [ADR-0003](0003-session-creation-and-transcript-ancestry.md), [ADR-0004](0004-turn-and-attempt-lifecycle.md), [ADR-0010](0010-initial-scheduler-mechanics.md), [ADR-0022](0022-persistence-representation.md), [ADR-0027](0027-input-delivery-lifecycle.md), [ADR-0033](0033-identity-generation-supply-and-encoding.md), [ADR-0034](0034-durable-command-storage-and-equality.md), and [ADR-0035](0035-domain-owned-persistence-reconstitution.md)
-- Refines: ADR-0034's canonical comparison-payload composition for command kinds accepted after this record
+- Refines: ADR-0034's canonical comparison-payload composition for command kinds whose typed record families are first accepted after this record
 - Resolves: which kind of agency initiated a durable command or recorded transition, as a first-class typed provenance fact
 - Decision questions: closed initial actor set; replay-equality participation; relation to session creation cause; storage convention; adoption path for pending and already-accepted commands; deferred policy actor
 
@@ -42,7 +40,7 @@ In the baseline, the command boundary constructs only `Owner`: no accepted decis
 
 ### Attribution is payload and participates in replay equality
 
-The canonical typed payload of every durable command kind accepted after this record contains one required `actor` field. It is a caller-supplied semantic fact fixed at purpose-specific construction before owner-global lookup, and it participates in ADR-0034's structural replay equality: replaying a claimed command identifier with a different actor is conflicting reuse, exactly as for any other payload field.
+The canonical typed payload of every durable command kind whose typed record family is first accepted after this record contains one required `actor` field. It is a caller-supplied semantic fact fixed at purpose-specific construction before owner-global lookup, and it participates in ADR-0034's structural replay equality: replaying a claimed command identifier with a different actor is conflicting reuse, exactly as for any other payload field.
 
 The alternative — recording attribution beside the payload as registry metadata outside comparison — is rejected. ADR-0034 already routes non-semantic operational metadata such as claim time outside the comparison and every caller-supplied semantic fact inside it, and attribution is semantic: it is precisely the fact later permission decisions will consume. Left outside equality, one claimed identifier could be replayed under a different claimed agency, and the stored attribution would be an unverifiable annotation rather than part of what the identifier names.
 
