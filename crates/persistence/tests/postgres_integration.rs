@@ -1573,8 +1573,9 @@ async fn s01_inv003_inv008_inv012_current_session_load_and_receipt_replay_remain
 }
 
 /// INV-002 / INV-003 / INV-008: once the session row exists, absent,
-/// malformed, unknown, or undecodable current projection facts fail closed as
-/// typed corruption rather than becoming `None` or nearby valid defaults.
+/// malformed, unknown, undecodable, or non-unique current projection facts fail
+/// closed as typed corruption rather than becoming `None` or nearby valid
+/// defaults.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv002_inv003_inv008_current_session_corruption_fails_closed() -> Result<(), Box<dyn Error>>
@@ -1587,12 +1588,14 @@ async fn inv002_inv003_inv008_current_session_corruption_fails_closed() -> Resul
     let missing_selected = prepared(0x513, 0x913, direct(0x813));
     let malformed_selected = prepared(0x514, 0x914, direct(0x814));
     let unknown_provenance = prepared(0x515, 0x915, direct(0x815));
+    let duplicate_projection = prepared(0x516, 0x916, direct(0x816));
     for creation in [
         missing_pointer,
         invalid_pointer,
         missing_selected,
         malformed_selected,
         unknown_provenance,
+        duplicate_projection,
     ] {
         create_repository.handle(creation).await?;
     }
@@ -1681,6 +1684,20 @@ async fn inv002_inv003_inv008_current_session_corruption_fails_closed() -> Resul
     .execute(&pool)
     .await?;
 
+    sqlx::query(
+        "ALTER TABLE session_current_defaults
+         DROP CONSTRAINT session_current_defaults_pkey",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_current_defaults (session_id, current_version)
+         VALUES ($1, 1)",
+    )
+    .bind(Uuid::from_u128(0x916))
+    .execute(&pool)
+    .await?;
+
     let missing = session_repository
         .load_session(missing_pointer.session().id())
         .await
@@ -1734,6 +1751,17 @@ async fn inv002_inv003_inv008_current_session_corruption_fails_closed() -> Resul
             field: "creation cause",
             ..
         })
+    ));
+
+    let duplicate = session_repository
+        .load_session(duplicate_projection.session().id())
+        .await
+        .expect_err("more than one current projection row is corruption");
+    assert!(matches!(
+        duplicate,
+        SessionRepositoryError::Corruption(SessionCorruption::Inconsistent(
+            "current session projection cardinality"
+        ))
     ));
 
     pool.close().await;
