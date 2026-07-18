@@ -1,8 +1,6 @@
 # ADR-0027: Accepted-input delivery and context frontiers
 
 - Date: 2026-07-13
-- Owners: Repository owner
-- Reviewers: Codex (independent adversarial architecture review); no specialist human reviewer assigned
 - Supersedes: none
 - Superseded by: none
 - Accepted with: ADR-0001, ADR-0003, ADR-0004, and ADR-0005 as one atomic foundation set

@@ -1,8 +1,6 @@
 # ADR-0040: Transactional outbox for client-visible update events
 
 - Date: 2026-07-18
-- Owners: Repository owner
-- Reviewers: pull-request review; no specialist human reviewer assigned
 - Supersedes: none
 - Superseded by: none
 - Depends on: [ADR-0010](0010-initial-scheduler-mechanics.md), [ADR-0019](0019-process-protocol.md), [ADR-0021](0021-compatibility-and-negotiation.md), [ADR-0022](0022-persistence-representation.md), and [ADR-0034](0034-durable-command-storage-and-equality.md)

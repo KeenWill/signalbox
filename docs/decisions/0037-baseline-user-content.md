@@ -1,8 +1,6 @@
 # ADR-0037: Baseline accepted-input user content
 
 - Date: 2026-07-18
-- Owners: Repository owner
-- Reviewers: Codex (domain, persistence, and protocol-boundary review); no specialist human reviewer assigned
 - Supersedes: none
 - Superseded by: none
 - Depends on: [ADR-0001](0001-domain-terminology-and-identity.md), [ADR-0019](0019-process-protocol.md), [ADR-0021](0021-compatibility-and-negotiation.md), [ADR-0022](0022-persistence-representation.md), [ADR-0027](0027-input-delivery-lifecycle.md), [ADR-0034](0034-durable-command-storage-and-equality.md), and [ADR-0036](0036-initial-semantic-transcript-entries.md)

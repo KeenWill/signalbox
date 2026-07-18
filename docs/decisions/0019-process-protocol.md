@@ -1,8 +1,6 @@
 # ADR-0019: Process protocol
 
 - Date: 2026-07-17
-- Owners: Repository owner
-- Reviewers: pull-request review; no specialist human reviewer assigned
 - Supersedes: none
 - Superseded by: none
 - Accepted with: [ADR-0021](0021-compatibility-and-negotiation.md) as one coupled pair — the negotiation and compatibility baseline every exchange of this protocol performs

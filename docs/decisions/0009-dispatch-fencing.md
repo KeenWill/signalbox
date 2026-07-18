@@ -1,8 +1,6 @@
 # ADR-0009: Dispatch fencing
 
 - Date: 2026-07-17
-- Owners: Repository owner
-- Reviewers: Codex, Copilot, and Cursor Bugbot (automated PR review); no specialist human reviewer assigned
 - Supersedes: none
 - Superseded by: none
 - Accepted with: [ADR-0010](0010-initial-scheduler-mechanics.md) as one coupled pair — the scheduler transactions that carry this fence

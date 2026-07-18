@@ -1,8 +1,6 @@
 # ADR-0010: Initial scheduler mechanics
 
 - Date: 2026-07-17
-- Owners: Repository owner
-- Reviewers: Codex, Copilot, and Cursor Bugbot (automated PR review); no specialist human reviewer assigned
 - Supersedes: none
 - Superseded by: none
 - Accepted with: [ADR-0009](0009-dispatch-fencing.md) as one coupled pair — the fence carried by the dispatch and result transactions this scheduler executes

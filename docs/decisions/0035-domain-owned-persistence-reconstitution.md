@@ -1,8 +1,6 @@
 # ADR-0035: Domain-owned persistence reconstitution
 
 - Date: 2026-07-17
-- Owners: Repository owner
-- Reviewers: Codex (architecture and acceptance consistency review); no specialist human reviewer assigned
 - Supersedes: none
 - Superseded by: none
 - Refined by: [ADR-0038](0038-session-aggregate-boundary.md) for the complete long-lived session projection

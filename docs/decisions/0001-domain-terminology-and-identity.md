@@ -2,8 +2,6 @@
 
 - Date: 2026-07-13
 - Amended: 2026-07-15 — accept the initial private Rust UUID representation described below
-- Owners: Repository owner
-- Reviewers: Codex (independent adversarial architecture review); no specialist human reviewer assigned
 - Supersedes: none
 - Superseded by: none
 - Accepted with: ADR-0003, ADR-0004, ADR-0005, and ADR-0027 as one atomic foundation set

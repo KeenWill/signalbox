@@ -1,8 +1,6 @@
 # ADR-0017: Provider and integration credential lifecycle
 
 - Date: 2026-07-17
-- Owners: Repository owner
-- Reviewers: Codex (independent automated architecture review); no specialist human reviewer assigned
 - Supersedes: none
 - Superseded by: none
 - Depends on: the accepted foundation set ([ADR-0001](0001-domain-terminology-and-identity.md), [ADR-0003](0003-session-creation-and-transcript-ancestry.md), [ADR-0004](0004-turn-and-attempt-lifecycle.md), [ADR-0005](0005-model-call-retry-semantics.md), [ADR-0027](0027-input-delivery-lifecycle.md)); consistent with accepted [ADR-0022](0022-persistence-representation.md), whose schema map contains no credential table and which explicitly did not decide credential storage

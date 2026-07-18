@@ -1,8 +1,6 @@
 # ADR-0032: Postgres implementation dependencies
 
 - Date: 2026-07-17
-- Owners: Repository owner
-- Reviewers: Codex (dependency selection and boundary review); no specialist human reviewer assigned
 - Supersedes: none
 - Superseded by: none
 - Depends on: [ADR-0022](0022-persistence-representation.md)

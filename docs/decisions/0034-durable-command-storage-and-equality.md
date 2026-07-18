@@ -1,8 +1,6 @@
 # ADR-0034: Durable-command storage and equality
 
 - Date: 2026-07-17
-- Owners: Repository owner
-- Reviewers: Codex (idempotency and persistence-boundary review); no specialist
   human reviewer assigned
 - Supersedes: none
 - Superseded by: none

@@ -1,8 +1,6 @@
 # ADR-0038: Long-lived session aggregate boundary
 
 - Date: 2026-07-18
-- Owners: Repository owner
-- Reviewers: Codex (architecture and aggregate-boundary review); no specialist human reviewer assigned
 - Supersedes: none
 - Superseded by: none
 - Depends on: [ADR-0001](0001-domain-terminology-and-identity.md), [ADR-0003](0003-session-creation-and-transcript-ancestry.md), [ADR-0022](0022-persistence-representation.md), [ADR-0027](0027-input-delivery-lifecycle.md), and [ADR-0035](0035-domain-owned-persistence-reconstitution.md)
