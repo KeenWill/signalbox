@@ -148,7 +148,12 @@ where
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Preparation(failure) => {
-                write!(formatter, "CreateSession preparation failed: {failure:?}")
+                let reason = match failure {
+                    CreateSessionPreparationFailure::TranscriptAncestryUnavailable => {
+                        "trusted transcript-ancestry validation is unavailable in this slice"
+                    }
+                };
+                write!(formatter, "CreateSession preparation failed: {reason}")
             }
             Self::Transaction(error) => {
                 write!(formatter, "CreateSession transaction failed: {error}")
