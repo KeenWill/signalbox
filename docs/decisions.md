@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-17 — PostgreSQL 18 production and integration-test baseline
+
+**Context.** [ADR-0032](decisions/0032-postgres-implementation-dependencies.md) requires an explicitly tagged supported PostgreSQL image and requires production and integration tests to use the same major, while leaving the exact tag as an implementation decision. Signalbox is greenfield: it has no deployed database, compatibility obligation, or accepted schema feature requiring an older major. PostgreSQL 18 has a longer remaining upstream support window than PostgreSQL 17.
+
+**Decision.** Establish PostgreSQL 18 as the production and integration-test major baseline and pin the initial Testcontainers image to `postgres:18.4-alpine3.23`. Production deployment must select PostgreSQL 18 while this baseline is current. Compatible patch-image updates remain ordinary dependency maintenance under ADR-0032 and stay explicit rather than following a floating tag.
+
+**Rejected alternatives.** PostgreSQL 17.10 is supported and has more elapsed production history, but Signalbox has no existing deployment or schema compatibility need that benefits from starting one major behind, and doing so would shorten the baseline's remaining support window. A floating `18`, `18-alpine`, or `latest` tag would make test inputs change without repository review and is already rejected by ADR-0032.
+
+**Affects.** `crates/persistence/tests/postgres_integration.rs`, the Docker-backed CI test baseline, and future production database-version selection. It changes no domain, transaction, migration, or schema semantics.
+
 ## 2026-07-17 — Prepared model calls borrow resolved frontier projections
 
 **Context.** [ADR-0005](decisions/0005-model-call-retry-semantics.md) and [ADR-0030](decisions/0030-context-frontier-snapshots.md) require the exact call frontier to exist on the prepared record before send authorization. The preceding value slice makes a resolved projection available through a sealed construction seam, while the existing `CurrentModelCall::prepared` accepts only the call identity and turn-wide pinned target.
