@@ -2,7 +2,7 @@ use std::{collections::VecDeque, error::Error, sync::Arc};
 
 use signalbox_application::{
     CreateSessionError, CreateSessionOutcome, CreateSessionRequest, CreateSessionService,
-    SessionIdGenerator,
+    LoadSessionService, SessionIdGenerator,
 };
 use signalbox_domain::{
     CreateSession, DurableCommandId, ModelAlias, ModelSelectionRequest, PreparedCreateSession,
@@ -113,12 +113,12 @@ async fn embedded_migrator_connects_and_is_idempotent() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// S01 / INV-002 / INV-012: the Postgres adapter preserves the application's
-/// terminal outcomes and returns infrastructure failure through the nonterminal
-/// transaction-error path.
+/// S01 / INV-002 / INV-008 / INV-012: the Postgres adapters preserve
+/// application command outcomes, return the complete current session
+/// projection, and keep infrastructure failure nonterminal.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_inv002_inv012_application_create_service_uses_postgres_adapter()
+async fn s01_inv002_inv008_inv012_application_session_services_use_postgres_adapters()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let command_id = DurableCommandId::from_uuid(Uuid::from_u128(0x601));
@@ -158,6 +158,23 @@ async fn s01_inv002_inv012_application_create_service_uses_postgres_adapter()
     .fetch_one(&pool)
     .await?;
     assert_eq!(committed_counts, (1, 1));
+
+    let load_service = LoadSessionService::new(SessionRepository::new(pool.clone()));
+    let loaded = load_service
+        .execute(winner)
+        .await?
+        .expect("the created session is visible through the application query");
+    assert_eq!(loaded.id(), winner);
+    assert_eq!(
+        loaded.current_configuration_defaults().version(),
+        SessionConfigurationDefaultsVersion::first()
+    );
+    assert_eq!(
+        load_service
+            .execute(SessionId::from_uuid(Uuid::from_u128(0x7ff)))
+            .await?,
+        None
+    );
 
     let (_session_ids, repository) = service.into_parts();
     pool.close().await;
