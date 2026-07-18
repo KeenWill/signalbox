@@ -72,7 +72,7 @@ The domain owns a purpose-specific session reconstitution input containing check
 
 - the requested and stored `SessionId`;
 - the complete stored `SessionCreationProvenance`;
-- the current-defaults pointer version;
+- the owning session and version of the current-defaults pointer;
 - the owning session and version of the selected defaults record; and
 - the complete `SessionConfigurationDefaults` value stored at that version.
 
