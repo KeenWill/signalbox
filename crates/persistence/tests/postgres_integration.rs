@@ -6,8 +6,9 @@ use signalbox_application::{
 };
 use signalbox_domain::{
     CreateSession, DurableCommandId, ModelAlias, ModelSelectionRequest, PreparedCreateSession,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
-    SessionCreationProvenance, SessionId, TranscriptAncestry,
+    ReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
+    SessionId, TranscriptAncestry,
 };
 use signalbox_persistence::{
     create_session::{
@@ -15,6 +16,10 @@ use signalbox_persistence::{
         CreateSessionRepositoryError,
     },
     local_test_connection_options, migrate,
+    replace_session_defaults::{
+        ReplaceSessionDefaultsCorruption, ReplaceSessionDefaultsHandlingOutcome,
+        ReplaceSessionDefaultsRepository, ReplaceSessionDefaultsRepositoryError,
+    },
     session::{SessionCorruption, SessionRepository, SessionRepositoryError},
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
@@ -76,6 +81,21 @@ fn direct(value: u128) -> ModelSelectionRequest {
 
 fn alias(value: u128) -> ModelSelectionRequest {
     ModelSelectionRequest::Alias(ModelAlias::from_uuid(Uuid::from_u128(value)))
+}
+
+fn replacement(
+    command: u128,
+    session: u128,
+    expected: u64,
+    selection: ModelSelectionRequest,
+) -> ReplaceSessionDefaults {
+    ReplaceSessionDefaults::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(command)),
+        SessionId::from_uuid(Uuid::from_u128(session)),
+        SessionConfigurationDefaultsVersion::try_from_u64(expected)
+            .expect("test versions are positive"),
+        SessionConfigurationDefaults::new(selection),
+    )
 }
 
 #[derive(Debug)]
@@ -798,9 +818,13 @@ async fn inv012_infrastructure_failure_leaves_the_command_unclaimed() -> Result<
 async fn inv012_incomplete_or_unknown_claims_fail_closed_as_corruption()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
+    let defaults_repository = ReplaceSessionDefaultsRepository::new(pool.clone());
+    let cross_wired = replacement(0x135, 0x735, 1, direct(0x835));
+    defaults_repository.handle(cross_wired).await?;
+
     sqlx::query(
-        "ALTER TABLE durable_command
-         DROP CONSTRAINT durable_command_typed_record_fk",
+        "DROP TRIGGER durable_command_requires_typed_record
+         ON durable_command",
     )
     .execute(&pool)
     .await?;
@@ -817,7 +841,11 @@ async fn inv012_incomplete_or_unknown_claims_fail_closed_as_corruption()
             ('10000000-0000-4000-8000-000000000131',
              'create_session', 1, transaction_timestamp()),
             ('10000000-0000-4000-8000-000000000132',
-             'create_session', 99, transaction_timestamp())",
+             'create_session', 99, transaction_timestamp()),
+            ('10000000-0000-4000-8000-000000000133',
+             'replace_session_defaults', 1, transaction_timestamp()),
+            ('10000000-0000-4000-8000-000000000134',
+             'replace_session_defaults', 99, transaction_timestamp())",
     )
     .execute(&pool)
     .await?;
@@ -849,6 +877,569 @@ async fn inv012_incomplete_or_unknown_claims_fail_closed_as_corruption()
             ..
         })
     ));
+
+    let missing_defaults_id =
+        DurableCommandId::from_uuid(Uuid::parse_str("10000000-0000-4000-8000-000000000133")?);
+    let missing_defaults = defaults_repository
+        .load(missing_defaults_id)
+        .await
+        .expect_err("an incomplete defaults claim is corruption");
+    assert!(matches!(
+        missing_defaults,
+        ReplaceSessionDefaultsRepositoryError::Corruption(
+            ReplaceSessionDefaultsCorruption::Missing("typed_command_id")
+        )
+    ));
+
+    let unknown_defaults_id =
+        DurableCommandId::from_uuid(Uuid::parse_str("10000000-0000-4000-8000-000000000134")?);
+    let unknown_defaults = defaults_repository
+        .load(unknown_defaults_id)
+        .await
+        .expect_err("an unknown defaults representation is corruption");
+    assert!(matches!(
+        unknown_defaults,
+        ReplaceSessionDefaultsRepositoryError::Corruption(
+            ReplaceSessionDefaultsCorruption::Unsupported {
+                field: "registry_version",
+                ..
+            }
+        )
+    ));
+
+    sqlx::query(
+        "ALTER TABLE replace_session_defaults_command
+         DROP CONSTRAINT replace_session_defaults_command_result_session_matches,
+         DISABLE TRIGGER replace_session_defaults_command_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE replace_session_defaults_command
+         SET result_session_id = $2
+         WHERE command_id = $1",
+    )
+    .bind(Uuid::from_u128(0x135))
+    .bind(Uuid::from_u128(0x736))
+    .execute(&pool)
+    .await?;
+    let inconsistent = defaults_repository
+        .load(cross_wired.command_id())
+        .await
+        .expect_err("cross-wired typed result facts are corruption");
+    assert!(matches!(
+        inconsistent,
+        ReplaceSessionDefaultsRepositoryError::Corruption(
+            ReplaceSessionDefaultsCorruption::Domain(_)
+        )
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-002 / INV-008 / INV-012: the second admitted command kind retains a
+/// complete typed record, while the owner-global registry and append-only
+/// constraints reject torn, malformed, or mutable receipts.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv002_inv008_inv012_defaults_schema_enforces_typed_receipts() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+
+    let mut registry_only = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES
+            ('10000000-0000-4000-8000-000000000201',
+             'replace_session_defaults', 1, transaction_timestamp())",
+    )
+    .execute(&mut *registry_only)
+    .await?;
+    let torn = registry_only
+        .commit()
+        .await
+        .expect_err("a defaults registry claim must have its exact typed record");
+    assert_eq!(
+        torn.as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23503")
+    );
+
+    let mut typed_only = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO replace_session_defaults_command
+            (command_id, command_kind, storage_version, session_id,
+             expected_current_version, model_selection_kind,
+             direct_model_selection_id, model_alias_id,
+             result_kind, rejection_kind, result_session_id,
+             result_installed_version, result_expected_version,
+             result_current_version)
+         VALUES
+            ('10000000-0000-4000-8000-000000000204',
+             'replace_session_defaults', 1,
+             '70000000-0000-7000-8000-000000000204',
+             1, 'direct',
+             '70000000-0000-7000-8000-000000000205', NULL,
+             'rejected', 'session_not_found',
+             '70000000-0000-7000-8000-000000000204',
+             NULL, NULL, NULL)",
+    )
+    .execute(&mut *typed_only)
+    .await?;
+    let missing_registry = typed_only
+        .commit()
+        .await
+        .expect_err("a typed defaults record cannot commit without its registry claim");
+    assert_eq!(
+        missing_registry
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23503")
+    );
+
+    let mut missing_installed = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES
+            ('10000000-0000-4000-8000-000000000205',
+             'replace_session_defaults', 1, transaction_timestamp())",
+    )
+    .execute(&mut *missing_installed)
+    .await?;
+    sqlx::query(
+        "INSERT INTO replace_session_defaults_command
+            (command_id, command_kind, storage_version, session_id,
+             expected_current_version, model_selection_kind,
+             direct_model_selection_id, model_alias_id,
+             result_kind, rejection_kind, result_session_id,
+             result_installed_version, result_expected_version,
+             result_current_version)
+         VALUES
+            ('10000000-0000-4000-8000-000000000205',
+             'replace_session_defaults', 1,
+             '70000000-0000-7000-8000-000000000205',
+             1, 'direct',
+             '70000000-0000-7000-8000-000000000206', NULL,
+             'applied', NULL,
+             '70000000-0000-7000-8000-000000000205',
+             2, NULL, NULL)",
+    )
+    .execute(&mut *missing_installed)
+    .await?;
+    let missing_exact_defaults = missing_installed
+        .commit()
+        .await
+        .expect_err("an applied receipt requires its exact immutable installed defaults");
+    assert_eq!(
+        missing_exact_defaults
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23503")
+    );
+
+    let malformed = sqlx::query(
+        "INSERT INTO replace_session_defaults_command
+            (command_id, command_kind, storage_version, session_id,
+             expected_current_version, model_selection_kind,
+             direct_model_selection_id, model_alias_id,
+             result_kind, rejection_kind, result_session_id,
+             result_installed_version, result_expected_version,
+             result_current_version)
+         VALUES
+            ('10000000-0000-4000-8000-000000000202',
+             'replace_session_defaults', 1,
+             '70000000-0000-7000-8000-000000000202',
+             1, 'direct',
+             '70000000-0000-7000-8000-000000000203', NULL,
+             'applied', NULL,
+             '70000000-0000-7000-8000-000000000202',
+             NULL, NULL, NULL)",
+    )
+    .execute(&pool)
+    .await
+    .expect_err("an applied result requires its typed installed version");
+    assert_eq!(
+        malformed
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+
+    let repository = ReplaceSessionDefaultsRepository::new(pool.clone());
+    let absent = replacement(0x203, 0x703, 1, direct(0x803));
+    assert!(matches!(
+        repository.handle(absent).await?,
+        ReplaceSessionDefaultsHandlingOutcome::Rejected(
+            ReplaceSessionDefaultsRejectedResult::SessionNotFound(_)
+        )
+    ));
+    let stored: (String, String, Option<String>) = sqlx::query_as(
+        "SELECT result_kind, rejection_kind, result_installed_version::text
+         FROM replace_session_defaults_command
+         WHERE command_id = $1",
+    )
+    .bind(Uuid::from_u128(0x203))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        stored,
+        ("rejected".to_owned(), "session_not_found".to_owned(), None)
+    );
+
+    let immutable = sqlx::query(
+        "UPDATE replace_session_defaults_command
+         SET result_kind = result_kind
+         WHERE command_id = $1",
+    )
+    .bind(Uuid::from_u128(0x203))
+    .execute(&pool)
+    .await
+    .expect_err("typed defaults receipts are append-only");
+    assert_eq!(
+        immutable
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+    let immutable_delete = sqlx::query(
+        "DELETE FROM replace_session_defaults_command
+         WHERE command_id = $1",
+    )
+    .bind(Uuid::from_u128(0x203))
+    .execute(&pool)
+    .await
+    .expect_err("typed defaults receipts cannot be deleted");
+    assert_eq!(
+        immutable_delete
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S01 / INV-002 / INV-008 / INV-012: defaults replacement records applied
+/// and stale outcomes, replays historical receipts without rereading the
+/// pointer, and leaves creation-time history distinct from current Session.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s01_inv002_inv008_inv012_defaults_apply_replay_stale_and_history()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let create_repository = CreateSessionRepository::new(pool.clone());
+    let defaults_repository = ReplaceSessionDefaultsRepository::new(pool.clone());
+    let session_repository = SessionRepository::new(pool.clone());
+    let creation = prepared(0x211, 0x711, direct(0x811));
+    create_repository.handle(creation).await?;
+
+    let first = replacement(0x212, 0x711, 1, alias(0x812));
+    let first_outcome = defaults_repository.handle(first).await?;
+    let ReplaceSessionDefaultsHandlingOutcome::Applied(first_applied) = first_outcome else {
+        panic!("the first replacement must apply");
+    };
+    assert_eq!(
+        first_applied.installed().version(),
+        SessionConfigurationDefaultsVersion::try_from_u64(2).expect("positive version")
+    );
+    assert_eq!(defaults_repository.handle(first).await?, first_outcome);
+
+    let conflict = replacement(0x212, 0x711, 1, direct(0x813));
+    assert_eq!(
+        defaults_repository.handle(conflict).await?,
+        ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse {
+            command_id: first.command_id()
+        }
+    );
+
+    let stale = replacement(0x213, 0x711, 1, direct(0x814));
+    let stale_outcome = defaults_repository.handle(stale).await?;
+    let ReplaceSessionDefaultsHandlingOutcome::Rejected(
+        ReplaceSessionDefaultsRejectedResult::CurrentVersionMismatch(stale_result),
+    ) = stale_outcome
+    else {
+        panic!("the unseen stale command must record a mismatch");
+    };
+    assert_eq!(
+        stale_result.current(),
+        SessionConfigurationDefaultsVersion::try_from_u64(2).expect("positive version")
+    );
+
+    let later = replacement(0x214, 0x711, 2, direct(0x815));
+    assert!(matches!(
+        defaults_repository.handle(later).await?,
+        ReplaceSessionDefaultsHandlingOutcome::Applied(_)
+    ));
+
+    assert_eq!(
+        defaults_repository.handle(first).await?,
+        first_outcome,
+        "historical applied replay must not require the mutable pointer"
+    );
+    assert_eq!(
+        defaults_repository.handle(stale).await?,
+        stale_outcome,
+        "recorded stale rejection must survive later state"
+    );
+
+    let current = session_repository
+        .load_session(creation.session().id())
+        .await?
+        .expect("the session remains current");
+    assert_eq!(
+        current.current_configuration_defaults().version(),
+        SessionConfigurationDefaultsVersion::try_from_u64(3).expect("positive version")
+    );
+    assert_eq!(
+        current.current_configuration_defaults().defaults().model(),
+        direct(0x815)
+    );
+
+    let receipt = create_repository
+        .load(creation.command().command_id())
+        .await?
+        .expect("creation history remains loadable");
+    assert_eq!(
+        receipt.session().configuration_defaults().version(),
+        SessionConfigurationDefaultsVersion::first()
+    );
+    assert_eq!(
+        receipt
+            .session()
+            .configuration_defaults()
+            .defaults()
+            .model(),
+        direct(0x811)
+    );
+
+    let counts: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM replace_session_defaults_command),
+            (SELECT count(*) FROM session_defaults_version
+              WHERE session_id = $1),
+            (SELECT current_version::bigint FROM session_current_defaults
+              WHERE session_id = $1)",
+    )
+    .bind(Uuid::from_u128(0x711))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(counts, (3, 3, 3));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-012: registry dispatch remains owner-global across command kinds while
+/// purpose-specific loads distinguish a valid other-kind claim from absence.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_cross_kind_reuse_is_conflict_not_corruption_or_absence()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let create_repository = CreateSessionRepository::new(pool.clone());
+    let defaults_repository = ReplaceSessionDefaultsRepository::new(pool.clone());
+    let creation = prepared(0x221, 0x721, direct(0x821));
+    create_repository.handle(creation).await?;
+
+    let defaults_reuse = replacement(0x221, 0x721, 1, alias(0x822));
+    assert_eq!(
+        defaults_repository.handle(defaults_reuse).await?,
+        ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse {
+            command_id: defaults_reuse.command_id()
+        }
+    );
+    assert!(matches!(
+        defaults_repository
+            .load(defaults_reuse.command_id())
+            .await
+            .expect_err("a CreateSession ID is not an unseen defaults receipt"),
+        ReplaceSessionDefaultsRepositoryError::DifferentCommandKind { .. }
+    ));
+
+    let defaults = replacement(0x222, 0x721, 1, alias(0x823));
+    defaults_repository.handle(defaults).await?;
+    let create_reuse = prepared(0x222, 0x722, direct(0x824));
+    assert_eq!(
+        create_repository.handle(create_reuse).await?,
+        CreateSessionHandlingOutcome::ConflictingReuse {
+            command_id: create_reuse.command().command_id()
+        }
+    );
+    assert!(matches!(
+        create_repository
+            .load(defaults.command_id())
+            .await
+            .expect_err("a defaults ID is not an unseen creation receipt"),
+        CreateSessionRepositoryError::DifferentCommandKind { .. }
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-008 / INV-012: two distinct unseen commands expecting one version use
+/// the pointer CAS as their linearization boundary. Exactly one installs the
+/// successor and the loser records the winner's version as a stale rejection.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv008_inv012_concurrent_defaults_replacements_have_one_winner()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let create_repository = CreateSessionRepository::new(pool.clone());
+    let defaults_repository = ReplaceSessionDefaultsRepository::new(pool.clone());
+    create_repository
+        .handle(prepared(0x231, 0x731, direct(0x831)))
+        .await?;
+    let left_command = replacement(0x232, 0x731, 1, direct(0x832));
+    let right_command = replacement(0x233, 0x731, 1, alias(0x833));
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+
+    let (left, right) = tokio::join!(
+        async {
+            barrier.wait().await;
+            defaults_repository.handle(left_command).await
+        },
+        async {
+            barrier.wait().await;
+            defaults_repository.handle(right_command).await
+        }
+    );
+    let outcomes = [left?, right?];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, ReplaceSessionDefaultsHandlingOutcome::Applied(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(
+                outcome,
+                ReplaceSessionDefaultsHandlingOutcome::Rejected(
+                    ReplaceSessionDefaultsRejectedResult::CurrentVersionMismatch(_)
+                )
+            ))
+            .count(),
+        1
+    );
+
+    let counts: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM replace_session_defaults_command
+              WHERE session_id = $1),
+            (SELECT count(*) FROM session_defaults_version
+              WHERE session_id = $1 AND version = 2),
+            (SELECT current_version::bigint FROM session_current_defaults
+              WHERE session_id = $1)",
+    )
+    .bind(Uuid::from_u128(0x731))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(counts, (2, 1, 2));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-008 / INV-012: exhausted versions are recorded rejections, while an
+/// infrastructure failure after provisional claim rolls back both the claim
+/// and the attempted pointer change.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv008_inv012_exhaustion_and_precommit_failure_are_distinct() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let create_repository = CreateSessionRepository::new(pool.clone());
+    let defaults_repository = ReplaceSessionDefaultsRepository::new(pool.clone());
+    create_repository
+        .handle(prepared(0x241, 0x741, direct(0x841)))
+        .await?;
+    create_repository
+        .handle(prepared(0x242, 0x742, direct(0x842)))
+        .await?;
+
+    sqlx::query(
+        "INSERT INTO session_defaults_version
+            (session_id, version, model_selection_kind,
+             direct_model_selection_id, model_alias_id)
+         VALUES ($1, 18446744073709551615, 'direct', $2, NULL)",
+    )
+    .bind(Uuid::from_u128(0x741))
+    .bind(Uuid::from_u128(0x843))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE session_current_defaults
+         SET current_version = 18446744073709551615
+         WHERE session_id = $1",
+    )
+    .bind(Uuid::from_u128(0x741))
+    .execute(&pool)
+    .await?;
+    let exhausted = replacement(0x243, 0x741, u64::MAX, alias(0x844));
+    let exhausted_outcome = defaults_repository.handle(exhausted).await?;
+    assert!(matches!(
+        exhausted_outcome,
+        ReplaceSessionDefaultsHandlingOutcome::Rejected(
+            ReplaceSessionDefaultsRejectedResult::VersionExhausted(_)
+        )
+    ));
+    assert_eq!(
+        defaults_repository.handle(exhausted).await?,
+        exhausted_outcome
+    );
+
+    sqlx::query(
+        "INSERT INTO session_defaults_version
+            (session_id, version, model_selection_kind,
+             direct_model_selection_id, model_alias_id)
+         VALUES ($1, 2, 'direct', $2, NULL)",
+    )
+    .bind(Uuid::from_u128(0x742))
+    .bind(Uuid::from_u128(0x845))
+    .execute(&pool)
+    .await?;
+    let fails_after_claim = replacement(0x244, 0x742, 1, alias(0x846));
+    assert!(matches!(
+        defaults_repository
+            .handle(fails_after_claim)
+            .await
+            .expect_err("the colliding immutable successor aborts the transaction"),
+        ReplaceSessionDefaultsRepositoryError::Database(_)
+    ));
+    assert!(
+        defaults_repository
+            .load(fails_after_claim.command_id())
+            .await?
+            .is_none(),
+        "the failed transaction must not claim the command ID"
+    );
+    let pointer: i64 = sqlx::query_scalar(
+        "SELECT current_version::bigint
+         FROM session_current_defaults
+         WHERE session_id = $1",
+    )
+    .bind(Uuid::from_u128(0x742))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(pointer, 1);
 
     pool.close().await;
     drop(container);

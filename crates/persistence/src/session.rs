@@ -9,7 +9,7 @@ use signalbox_domain::{
     SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
     SessionId, SessionReconstitutionFailure, SessionReconstitutionInput, TranscriptAncestry,
 };
-use sqlx::{PgPool, Row, postgres::PgRow, types::Uuid};
+use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
 use crate::mapping::{
     PositiveOrdinalMappingError, defaults_version_from_numeric, session_id_from_uuid,
@@ -131,40 +131,8 @@ impl SessionRepository {
         &self,
         requested_session: SessionId,
     ) -> Result<Option<Session>, SessionRepositoryError> {
-        let rows = sqlx::query(
-            "SELECT
-                s.session_id AS stored_session_id,
-                s.creation_cause,
-                s.ancestry_kind,
-                p.session_id AS current_defaults_session_id,
-                p.current_version,
-                v.session_id AS selected_defaults_session_id,
-                v.version AS selected_defaults_version,
-                v.model_selection_kind,
-                v.direct_model_selection_id,
-                v.model_alias_id
-             FROM session AS s
-             LEFT JOIN session_current_defaults AS p
-               ON p.session_id = s.session_id
-             LEFT JOIN session_defaults_version AS v
-               ON v.session_id = p.session_id
-              AND v.version = p.current_version
-             WHERE s.session_id = $1",
-        )
-        .bind(session_id_to_uuid(requested_session))
-        .fetch_all(&self.pool)
-        .await?;
-
-        let mut rows = rows.into_iter();
-        let Some(row) = rows.next() else {
-            return Ok(None);
-        };
-        if rows.next().is_some() {
-            return Err(
-                SessionCorruption::Inconsistent("current session projection cardinality").into(),
-            );
-        }
-        decode_complete(row, requested_session).map(Some)
+        let mut connection = self.pool.acquire().await?;
+        load_session_from_connection(&mut connection, requested_session).await
     }
 }
 
@@ -177,6 +145,47 @@ impl SessionReader for SessionRepository {
     ) -> Result<Option<Session>, Self::Error> {
         SessionRepository::load_session(self, requested_session).await
     }
+}
+
+pub(crate) async fn load_session_from_connection(
+    connection: &mut PgConnection,
+    requested_session: SessionId,
+) -> Result<Option<Session>, SessionRepositoryError> {
+    let rows = sqlx::query(
+        "SELECT
+            s.session_id AS stored_session_id,
+            s.creation_cause,
+            s.ancestry_kind,
+            p.session_id AS current_defaults_session_id,
+            p.current_version,
+            v.session_id AS selected_defaults_session_id,
+            v.version AS selected_defaults_version,
+            v.model_selection_kind,
+            v.direct_model_selection_id,
+            v.model_alias_id
+         FROM session AS s
+         LEFT JOIN session_current_defaults AS p
+           ON p.session_id = s.session_id
+         LEFT JOIN session_defaults_version AS v
+           ON v.session_id = p.session_id
+          AND v.version = p.current_version
+         WHERE s.session_id = $1",
+    )
+    .bind(session_id_to_uuid(requested_session))
+    .fetch_all(&mut *connection)
+    .await?;
+
+    let mut rows = rows.into_iter();
+    let Some(row) = rows.next() else {
+        return Ok(None);
+    };
+    if rows.next().is_some() {
+        return Err(
+            SessionCorruption::Inconsistent("current session projection cardinality").into(),
+        );
+    }
+
+    decode_complete(row, requested_session).map(Some)
 }
 
 fn decode_complete(
