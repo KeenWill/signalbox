@@ -8,9 +8,12 @@ item. The spine is parsed per `## crate: module` section, taking column-0
 
 1. an exported name has no declaration in its owning module's section
    (a mention elsewhere in the document does not count),
-2. a section declares a name its module no longer exports (stale declaration),
-3. a lib.rs declares a public item outside `pub use`/`define_identity!`
-   that this mapping does not cover, or
+2. a section declares a name its module no longer exports (stale declaration)
+   or declares it twice, and duplicate Inventory rows are rejected,
+3. a lib.rs exposes public API in any form this script does not parse —
+   direct declarations, `pub mod`, glob/rename/path re-exports, or an
+   identity invocation outside the supported doc-comment shape all fail
+   loudly rather than silently thinning the ground truth, or
 4. a per-module count in the Inventory table disagrees with the export
    surface, an aggregate total row disagrees with the per-module sum, an
    exporting module has no Inventory row, or a section declares the same
@@ -78,6 +81,51 @@ def parse_root_declarations(lib_rs: Path) -> set[str]:
     return set(ROOT_DECLARATION.findall(lib_rs.read_text()))
 
 
+def validate_lib_forms(crate: str, lib_rs: Path) -> list[str]:
+    """Closed-world guard: any public form this script cannot parse fails.
+
+    The check's ground truth is only trustworthy if every way of exposing
+    public API through lib.rs is either parsed or rejected here.
+    """
+    text = lib_rs.read_text()
+    failures = [
+        f"{crate} lib.rs declares `pub mod {name};`; the check supports only"
+        " private modules with pub use re-exports — restate or extend the check"
+        for name in re.findall(r"^pub mod (\w+)", text, re.MULTILINE)
+    ]
+    for statement in re.findall(r"^pub use [^;]+;", text, re.MULTILINE):
+        flat = " ".join(statement.split())
+        group = re.fullmatch(r"pub use (\w+)::\{(.*)\};", flat)
+        if group:
+            for name in group.group(2).split(","):
+                if name.strip() and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name.strip()):
+                    failures.append(
+                        f"{crate} lib.rs re-export `{name.strip()}` is not a bare"
+                        " name (glob/rename/path forms are unsupported) —"
+                        " restate or extend the check"
+                    )
+        elif not re.fullmatch(r"pub use \w+::\w+;", flat):
+            failures.append(
+                f"{crate} lib.rs has an unsupported re-export form: `{flat}`"
+                " — restate or extend the check"
+            )
+    if crate == "domain":
+        invocations = text.count("define_identity!(")
+        parsed = len(
+            re.findall(
+                r"define_identity!\(\s*(?:///[^\n]*\n\s*)*[A-Za-z_][A-Za-z0-9_]*\s*\)",
+                text,
+            )
+        )
+        if invocations != parsed:
+            failures.append(
+                f"domain lib.rs has {invocations} define_identity! invocations"
+                f" but only {parsed} parse (only /// doc lines before the name"
+                " are supported) — restate or extend the check"
+            )
+    return failures
+
+
 def parse_spine_sections(
     spine_text: str,
 ) -> tuple[dict[tuple[str, str], set[str]], list[str]]:
@@ -110,18 +158,27 @@ def parse_inventory(spine_text: str) -> dict[tuple[str, str], int]:
     `8 (incl. 2 traits)` expects 8 (traits are already types).
     """
     expected: dict[tuple[str, str], int] = {}
+    duplicate_rows: list[str] = []
     for crate, label, count, extra in re.findall(
         r"^\| (domain|application): ([^|]+?) \| (\d+)(?: \(\+(\d+) free fn\))?[^|]*\|",
         spine_text,
         re.MULTILINE,
     ):
-        expected[(crate, label.strip())] = int(count) + int(extra or 0)
-    return expected
+        key = (crate, label.strip())
+        if key in expected:
+            duplicate_rows.append(
+                f"Inventory table has more than one row for '{key[0]}: {key[1]}'"
+            )
+        expected[key] = int(count) + int(extra or 0)
+    return expected, duplicate_rows
 
 
 def main() -> int:
     spine_text = SPINE.read_text()
     failures: list[str] = []
+
+    for crate, path in CRATES.items():
+        failures.extend(validate_lib_forms(crate, path))
 
     identities = parse_identities(CRATES["domain"])
     all_exports = {crate: parse_exports(path) for crate, path in CRATES.items()}
@@ -171,7 +228,8 @@ def main() -> int:
                 f"spine section '{crate}: {label}' matches no exporting module"
             )
 
-    expected = parse_inventory(spine_text)
+    expected, duplicate_rows = parse_inventory(spine_text)
+    failures.extend(duplicate_rows)
     if not expected:
         failures.append("could not parse any Inventory table rows")
     for (crate, label), count in expected.items():
