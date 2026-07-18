@@ -331,10 +331,11 @@ mod tests {
         }
     }
 
-    /// INV-002: each production activation identity is a fresh UUIDv7 value
-    /// of its distinct domain kind without using UUID order as authority.
+    /// INV-001 / INV-002: each production activation identity is a fresh
+    /// UUIDv7 value of its distinct domain kind without using UUID order as
+    /// authority.
     #[test]
-    fn inv002_production_generator_supplies_fresh_uuid_v7_candidates() {
+    fn inv001_inv002_production_generator_supplies_fresh_uuid_v7_candidates() {
         let mut generator = UuidV7StartEligibleTurnIdGenerator;
         let values = [
             generator.next_origin_entry_id().into_uuid(),
