@@ -11,7 +11,7 @@
 //! from source-session history remain later-slice work.
 
 use crate::{
-    DurableCommandId, SessionConfigurationDefaults, SessionId,
+    DurableCommandId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
     VersionedSessionConfigurationDefaults,
 };
 
@@ -317,6 +317,232 @@ impl InitialSession {
     /// Returns defaults version one established by creation.
     pub const fn configuration_defaults(&self) -> &VersionedSessionConfigurationDefaults {
         &self.configuration_defaults
+    }
+}
+
+/// The complete current session-level domain snapshot.
+///
+/// ADR-0038 is the normative aggregate boundary. A session owns its semantic
+/// identity, immutable creation provenance, and the complete current
+/// configuration-defaults version selected by the durable pointer. Creation
+/// receipts, transcript history, turns, commands, and scheduler facts remain
+/// separate purpose-specific values.
+///
+/// The fields are private and complete checked reconstitution is the only
+/// public producer:
+///
+/// ```compile_fail
+/// use signalbox_domain::{
+///     Session, SessionCreationProvenance, SessionId,
+///     VersionedSessionConfigurationDefaults,
+/// };
+///
+/// fn raw_parts_are_not_a_session(
+///     id: SessionId,
+///     provenance: SessionCreationProvenance,
+///     defaults: VersionedSessionConfigurationDefaults,
+/// ) {
+///     let _ = Session {
+///         id,
+///         creation_provenance: provenance,
+///         current_configuration_defaults: defaults,
+///     };
+/// }
+/// ```
+///
+/// A `Session` is an owned snapshot rather than an implicitly duplicated live
+/// handle. Callers must clone it deliberately:
+///
+/// ```compile_fail
+/// use signalbox_domain::Session;
+///
+/// fn consume(_: Session) {}
+///
+/// fn a_session_snapshot_is_not_copy(session: Session) {
+///     consume(session);
+///     consume(session);
+/// }
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Session {
+    id: SessionId,
+    creation_provenance: SessionCreationProvenance,
+    current_configuration_defaults: VersionedSessionConfigurationDefaults,
+}
+
+impl Session {
+    /// Returns the durable conversation identity.
+    pub const fn id(&self) -> SessionId {
+        self.id
+    }
+
+    /// Returns the complete immutable creation provenance.
+    pub const fn creation_provenance(&self) -> SessionCreationProvenance {
+        self.creation_provenance
+    }
+
+    /// Borrows the complete defaults version selected as current when this
+    /// snapshot was reconstructed.
+    pub const fn current_configuration_defaults(&self) -> &VersionedSessionConfigurationDefaults {
+        &self.current_configuration_defaults
+    }
+}
+
+/// Complete checked inputs for reconstituting one current [`Session`].
+///
+/// Each independently stored identity and version is retained so the domain
+/// can reject a cross-wired requested session, pointer, or defaults record.
+/// These are checked domain values rather than SQL rows, nullable
+/// discriminators, or framework types.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SessionReconstitutionInput {
+    requested_session: SessionId,
+    stored_session: SessionId,
+    provenance: SessionCreationProvenance,
+    current_defaults_session: SessionId,
+    current_defaults_version: SessionConfigurationDefaultsVersion,
+    defaults_session: SessionId,
+    defaults_version: SessionConfigurationDefaultsVersion,
+    defaults: SessionConfigurationDefaults,
+}
+
+impl SessionReconstitutionInput {
+    /// Supplies the complete typed facts required by the current-session
+    /// reconstitution seam.
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new(
+        requested_session: SessionId,
+        stored_session: SessionId,
+        provenance: SessionCreationProvenance,
+        current_defaults_session: SessionId,
+        current_defaults_version: SessionConfigurationDefaultsVersion,
+        defaults_session: SessionId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+    ) -> Self {
+        Self {
+            requested_session,
+            stored_session,
+            provenance,
+            current_defaults_session,
+            current_defaults_version,
+            defaults_session,
+            defaults_version,
+            defaults,
+        }
+    }
+
+    /// Returns the semantic identity requested by the caller.
+    pub const fn requested_session(&self) -> SessionId {
+        self.requested_session
+    }
+
+    /// Returns the identity stored on the session record.
+    pub const fn stored_session(&self) -> SessionId {
+        self.stored_session
+    }
+
+    /// Returns the complete stored immutable creation provenance.
+    pub const fn provenance(&self) -> SessionCreationProvenance {
+        self.provenance
+    }
+
+    /// Returns the session identity owning the current-defaults pointer.
+    pub const fn current_defaults_session(&self) -> SessionId {
+        self.current_defaults_session
+    }
+
+    /// Returns the version selected by the current-defaults pointer.
+    pub const fn current_defaults_version(&self) -> SessionConfigurationDefaultsVersion {
+        self.current_defaults_version
+    }
+
+    /// Returns the session identity owning the selected defaults record.
+    pub const fn defaults_session(&self) -> SessionId {
+        self.defaults_session
+    }
+
+    /// Returns the version identity on the selected defaults record.
+    pub const fn defaults_version(&self) -> SessionConfigurationDefaultsVersion {
+        self.defaults_version
+    }
+
+    /// Returns the complete value on the selected defaults record.
+    pub const fn defaults(&self) -> SessionConfigurationDefaults {
+        self.defaults
+    }
+
+    /// Reconstructs one complete current session without performing I/O,
+    /// replay, identity generation, or lifecycle effects.
+    pub fn reconstitute(self) -> Result<Session, SessionReconstitutionError> {
+        let fail = |failure| SessionReconstitutionError {
+            input: Box::new(self),
+            failure,
+        };
+
+        if self.requested_session != self.stored_session {
+            return Err(fail(SessionReconstitutionFailure::RequestedSessionMismatch));
+        }
+        if self.current_defaults_session != self.stored_session {
+            return Err(fail(
+                SessionReconstitutionFailure::CurrentDefaultsSessionMismatch,
+            ));
+        }
+        if self.defaults_session != self.stored_session {
+            return Err(fail(SessionReconstitutionFailure::DefaultsSessionMismatch));
+        }
+        if self.current_defaults_version != self.defaults_version {
+            return Err(fail(
+                SessionReconstitutionFailure::CurrentDefaultsVersionMismatch,
+            ));
+        }
+
+        Ok(Session {
+            id: self.stored_session,
+            creation_provenance: self.provenance,
+            current_configuration_defaults: VersionedSessionConfigurationDefaults::reconstitute(
+                self.defaults_version,
+                self.defaults,
+            ),
+        })
+    }
+}
+
+/// Why complete typed durable facts cannot reconstruct a current session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionReconstitutionFailure {
+    /// The requested semantic identity differs from the stored session.
+    RequestedSessionMismatch,
+    /// The current-defaults pointer belongs to another session.
+    CurrentDefaultsSessionMismatch,
+    /// The selected defaults record belongs to another session.
+    DefaultsSessionMismatch,
+    /// The pointer and selected defaults record name different versions.
+    CurrentDefaultsVersionMismatch,
+}
+
+/// A failed current-session reconstitution retaining every typed input
+/// unchanged.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionReconstitutionError {
+    input: Box<SessionReconstitutionInput>,
+    failure: SessionReconstitutionFailure,
+}
+
+impl SessionReconstitutionError {
+    /// Returns why the complete projection could not be reconstructed.
+    pub const fn failure(&self) -> SessionReconstitutionFailure {
+        self.failure
+    }
+
+    /// Borrows the complete unchanged input.
+    pub const fn input(&self) -> &SessionReconstitutionInput {
+        &self.input
+    }
+
+    /// Returns the complete unchanged input and failure.
+    pub fn into_parts(self) -> (SessionReconstitutionInput, SessionReconstitutionFailure) {
+        (*self.input, self.failure)
     }
 }
 
@@ -673,7 +899,8 @@ mod tests {
     use super::{
         CreateSession, CreateSessionPreparationFailure, CreateSessionReconstitutionFailure,
         CreateSessionReconstitutionInput, SessionCreationCause, SessionCreationProvenance,
-        TranscriptAncestry, test_frontier,
+        SessionReconstitutionFailure, SessionReconstitutionInput, TranscriptAncestry,
+        test_frontier,
     };
     use crate::test_support::{command_id, direct, session_id};
     use crate::{
@@ -689,6 +916,17 @@ mod tests {
         SessionCreationProvenance::new(
             SessionCreationCause::OwnerInitiated,
             TranscriptAncestry::None,
+        )
+    }
+
+    fn matching_session_input(
+        session: crate::SessionId,
+        provenance: SessionCreationProvenance,
+        version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+    ) -> SessionReconstitutionInput {
+        SessionReconstitutionInput::new(
+            session, session, provenance, session, version, session, version, defaults,
         )
     }
 
@@ -778,6 +1016,139 @@ mod tests {
         assert_ne!(ancestry, different_session);
         assert_ne!(ancestry, different_frontier);
         assert_ne!(ancestry, TranscriptAncestry::None);
+    }
+
+    /// S01 / INV-002 / INV-003 / INV-008: a complete matching projection
+    /// reconstructs one owned current session with exact immutable provenance
+    /// and the complete later defaults version selected by the pointer.
+    #[test]
+    fn s01_inv002_inv003_inv008_matching_current_session_reconstitutes_whole() {
+        let version = SessionConfigurationDefaultsVersion::first()
+            .checked_next()
+            .expect("version two exists");
+        let input =
+            matching_session_input(session_id(1), owner_initiated_empty(), version, defaults(2));
+
+        let session = input
+            .reconstitute()
+            .expect("complete matching current-session facts must reconstruct");
+
+        assert_eq!(session.id(), session_id(1));
+        assert_eq!(session.creation_provenance(), owner_initiated_empty());
+        assert_eq!(session.current_configuration_defaults().version(), version);
+        assert_eq!(
+            session.current_configuration_defaults().defaults(),
+            &defaults(2)
+        );
+        assert_eq!(session.clone(), session);
+
+        let changed_defaults =
+            matching_session_input(session_id(1), owner_initiated_empty(), version, defaults(3))
+                .reconstitute()
+                .expect("a different complete defaults value must also reconstruct");
+        assert_ne!(session, changed_defaults);
+    }
+
+    /// INV-003: the general current-session seam retains a complete typed
+    /// single-source provenance value. It does not repeat the narrower live
+    /// CreateSession preparation slice's frontier-availability check.
+    #[test]
+    fn inv003_current_session_reconstitution_retains_typed_provenance() {
+        let provenance = SessionCreationProvenance::new(
+            SessionCreationCause::OwnerInitiated,
+            TranscriptAncestry::SingleSource {
+                source_session: session_id(1),
+                source_frontier: test_frontier(2),
+            },
+        );
+        let input = matching_session_input(
+            session_id(3),
+            provenance,
+            SessionConfigurationDefaultsVersion::first(),
+            defaults(4),
+        );
+
+        let session = input
+            .reconstitute()
+            .expect("already-typed provenance remains valid at this seam");
+
+        assert_eq!(session.creation_provenance(), provenance);
+    }
+
+    /// S01 / INV-002 / INV-008: every requested/stored identity, pointer
+    /// owner, defaults owner, or selected-version mismatch fails closed and
+    /// returns the complete unchanged typed projection.
+    #[test]
+    fn s01_inv002_inv008_current_session_rejects_cross_wired_facts() {
+        let first = SessionConfigurationDefaultsVersion::first();
+        let second = first.checked_next().expect("version two exists");
+        let provenance = owner_initiated_empty();
+        let cases = [
+            (
+                SessionReconstitutionInput::new(
+                    session_id(2),
+                    session_id(1),
+                    provenance,
+                    session_id(1),
+                    first,
+                    session_id(1),
+                    first,
+                    defaults(3),
+                ),
+                SessionReconstitutionFailure::RequestedSessionMismatch,
+            ),
+            (
+                SessionReconstitutionInput::new(
+                    session_id(1),
+                    session_id(1),
+                    provenance,
+                    session_id(2),
+                    first,
+                    session_id(1),
+                    first,
+                    defaults(3),
+                ),
+                SessionReconstitutionFailure::CurrentDefaultsSessionMismatch,
+            ),
+            (
+                SessionReconstitutionInput::new(
+                    session_id(1),
+                    session_id(1),
+                    provenance,
+                    session_id(1),
+                    first,
+                    session_id(2),
+                    first,
+                    defaults(3),
+                ),
+                SessionReconstitutionFailure::DefaultsSessionMismatch,
+            ),
+            (
+                SessionReconstitutionInput::new(
+                    session_id(1),
+                    session_id(1),
+                    provenance,
+                    session_id(1),
+                    second,
+                    session_id(1),
+                    first,
+                    defaults(3),
+                ),
+                SessionReconstitutionFailure::CurrentDefaultsVersionMismatch,
+            ),
+        ];
+
+        for (input, expected_failure) in cases {
+            let error = input
+                .reconstitute()
+                .expect_err("cross-wired current-session facts must fail closed");
+
+            assert_eq!(error.failure(), expected_failure);
+            assert_eq!(error.input(), &input);
+            let (returned, failure) = error.into_parts();
+            assert_eq!(returned, input);
+            assert_eq!(failure, expected_failure);
+        }
     }
 
     /// S01 / INV-003: the creation payload couples the durable command

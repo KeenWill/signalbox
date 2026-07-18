@@ -233,6 +233,19 @@ impl VersionedSessionConfigurationDefaults {
         }
     }
 
+    /// Assembles a checked stored version for an owning domain
+    /// reconstitution seam.
+    ///
+    /// This remains crate-private so external boundaries cannot independently
+    /// pair a version with a defaults value without the complete aggregate
+    /// correlation required by ADR-0035.
+    pub(crate) const fn reconstitute(
+        version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+    ) -> Self {
+        Self { version, defaults }
+    }
+
     /// Installs a complete replacement as the next immutable version, or
     /// `None` when the version counter is exhausted.
     pub fn replace(self, defaults: SessionConfigurationDefaults) -> Option<Self> {
