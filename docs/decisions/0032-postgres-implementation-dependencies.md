@@ -107,9 +107,10 @@ ADR-0022 remains the normative owner of the forward-only, versioned,
 in-repository SQL-file discipline. One static SQLx `Migrator` embeds that
 governed file set and uses SQLx's database migration ledger, checksums, and
 default migration locking. The repository adds a build script that emits
-`cargo:rerun-if-changed=<migration-directory>` so stable Rust rebuilds when a
-migration is added, and `.gitattributes` fixes migration files to LF line
-endings so checksums do not vary by checkout platform.
+`cargo:rerun-if-changed` for the migration directory and for each migration
+file so stable Rust rebuilds when a migration is added, removed, or edited, and
+`.gitattributes` fixes migration files to LF line endings so checksums do not
+vary by checkout platform.
 
 The migration library exposes one explicit operation that both production
 startup wiring and integration tests can invoke. This record does not decide
@@ -290,8 +291,10 @@ grant the steady-state hub schema-owner privileges.
   rehydration seam, exact ADR-0030 snapshot layout, cancellation-intent
   delivery, and archival form remain open.
 - Production migration invocation, migration-role separation, pool sizing,
-  timeouts, connection observability, and the exact supported Postgres image
-  tag are implementation and deployment questions within this selected stack.
+  timeouts, and connection observability are implementation and deployment
+  questions within this selected stack. The exact supported Postgres image tag
+  is resolved by the [2026-07-17 PostgreSQL 18 production and integration-test
+  baseline decision](../decisions.md).
 - Provider and integration credential delivery is governed by ADR-0017; the
   future owner-authentication and database-credential decisions remain
   separate.

@@ -1,4 +1,4 @@
-//! PostgreSQL storage records, mappings, and migration support.
+//! PostgreSQL migration support and connection-option helpers.
 //!
 //! This crate owns persistence-specific types. SQLx types do not cross into the
 //! domain crate.
