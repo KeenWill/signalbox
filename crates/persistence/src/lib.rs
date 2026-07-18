@@ -3,8 +3,11 @@
 //! This crate owns persistence-specific types. SQLx types do not cross into the
 //! domain crate.
 
+mod command_registry;
+
 pub mod create_session;
 pub mod mapping;
+pub mod replace_session_defaults;
 pub mod session;
 
 use std::str::FromStr;

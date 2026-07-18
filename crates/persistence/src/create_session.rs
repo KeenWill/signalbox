@@ -13,6 +13,7 @@ use signalbox_domain::{
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
+use crate::command_registry::{self, CommandKind, RegistryCorruption, RegistryInspectionError};
 use crate::mapping::{
     PositiveOrdinalMappingError, defaults_version_from_numeric, defaults_version_to_numeric,
     durable_command_id_to_uuid, session_id_from_uuid, session_id_to_uuid,
@@ -91,6 +92,11 @@ impl Error for CreateSessionCorruption {}
 pub enum CreateSessionRepositoryError {
     /// PostgreSQL could not complete the requested operation.
     Database(sqlx::Error),
+    /// A purpose-specific load named a valid command of another admitted kind.
+    DifferentCommandKind {
+        /// The owner-global identifier that names another kind.
+        command_id: DurableCommandId,
+    },
     /// Committed or transaction-visible records cannot reconstruct the domain.
     Corruption(CreateSessionCorruption),
 }
@@ -99,6 +105,12 @@ impl fmt::Display for CreateSessionRepositoryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Database(error) => write!(formatter, "CreateSession database failure: {error}"),
+            Self::DifferentCommandKind { command_id } => {
+                write!(
+                    formatter,
+                    "durable command {command_id:?} does not name CreateSession"
+                )
+            }
             Self::Corruption(error) => error.fmt(formatter),
         }
     }
@@ -108,6 +120,7 @@ impl Error for CreateSessionRepositoryError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Database(error) => Some(error),
+            Self::DifferentCommandKind { .. } => None,
             Self::Corruption(error) => Some(error),
         }
     }
@@ -149,10 +162,22 @@ impl CreateSessionRepository {
         let command_id = prepared.command().command_id();
         let mut transaction = self.pool.begin().await?;
 
-        if let Some(recorded) = load_from_connection(&mut transaction, command_id).await? {
-            let outcome = existing_outcome(&prepared, &recorded);
-            transaction.rollback().await?;
-            return Ok(outcome);
+        match inspect_registry(&mut transaction, command_id).await? {
+            Some(CommandKind::CreateSession) => {
+                let recorded = load_from_connection(&mut transaction, command_id)
+                    .await?
+                    .ok_or(CreateSessionCorruption::Inconsistent(
+                        "registry entry disappeared",
+                    ))?;
+                let outcome = existing_outcome(&prepared, &recorded);
+                transaction.rollback().await?;
+                return Ok(outcome);
+            }
+            Some(CommandKind::ReplaceSessionDefaults) => {
+                transaction.rollback().await?;
+                return Ok(CreateSessionHandlingOutcome::ConflictingReuse { command_id });
+            }
+            None => {}
         }
 
         let claimed = sqlx::query(
@@ -170,12 +195,24 @@ impl CreateSessionRepository {
             == 1;
 
         if !claimed {
-            let recorded = load_from_connection(&mut transaction, command_id)
-                .await?
-                .ok_or(CreateSessionCorruption::Inconsistent(
-                    "winner claim disappeared",
-                ))?;
-            let outcome = existing_outcome(&prepared, &recorded);
+            let outcome = match inspect_registry(&mut transaction, command_id).await? {
+                Some(CommandKind::CreateSession) => {
+                    let recorded = load_from_connection(&mut transaction, command_id)
+                        .await?
+                        .ok_or(CreateSessionCorruption::Inconsistent(
+                            "winner claim disappeared",
+                        ))?;
+                    existing_outcome(&prepared, &recorded)
+                }
+                Some(CommandKind::ReplaceSessionDefaults) => {
+                    CreateSessionHandlingOutcome::ConflictingReuse { command_id }
+                }
+                None => {
+                    return Err(
+                        CreateSessionCorruption::Inconsistent("winner claim disappeared").into(),
+                    );
+                }
+            };
             transaction.rollback().await?;
             return Ok(outcome);
         }
@@ -196,7 +233,15 @@ impl CreateSessionRepository {
         command_id: DurableCommandId,
     ) -> Result<Option<ReconstitutedSessionCreation>, CreateSessionRepositoryError> {
         let mut connection = self.pool.acquire().await?;
-        load_from_connection(&mut connection, command_id).await
+        match inspect_registry(&mut connection, command_id).await? {
+            None => Ok(None),
+            Some(CommandKind::CreateSession) => {
+                load_from_connection(&mut connection, command_id).await
+            }
+            Some(CommandKind::ReplaceSessionDefaults) => {
+                Err(CreateSessionRepositoryError::DifferentCommandKind { command_id })
+            }
+        }
     }
 }
 
@@ -517,4 +562,39 @@ fn decode_selection(
         }
     };
     Ok(SessionConfigurationDefaults::new(model))
+}
+
+async fn inspect_registry(
+    connection: &mut PgConnection,
+    command_id: DurableCommandId,
+) -> Result<Option<CommandKind>, CreateSessionRepositoryError> {
+    command_registry::inspect(connection, command_id)
+        .await
+        .map_err(map_registry_error)
+}
+
+fn map_registry_error(error: RegistryInspectionError) -> CreateSessionRepositoryError {
+    match error {
+        RegistryInspectionError::Database(error) => error.into(),
+        RegistryInspectionError::Corruption(RegistryCorruption::UnsupportedKind(value)) => {
+            CreateSessionCorruption::Unsupported {
+                field: "registry_kind",
+                value,
+            }
+            .into()
+        }
+        RegistryInspectionError::Corruption(RegistryCorruption::UnsupportedVersion(value)) => {
+            CreateSessionCorruption::Unsupported {
+                field: "registry_version",
+                value: value.to_string(),
+            }
+            .into()
+        }
+        RegistryInspectionError::Corruption(RegistryCorruption::MissingTypedRecord(_)) => {
+            CreateSessionCorruption::Missing("typed_command_id").into()
+        }
+        RegistryInspectionError::Corruption(RegistryCorruption::ConflictingTypedRecords) => {
+            CreateSessionCorruption::Inconsistent("typed command family").into()
+        }
+    }
 }
