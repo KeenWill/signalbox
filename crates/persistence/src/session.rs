@@ -130,7 +130,7 @@ impl SessionRepository {
         &self,
         requested_session: SessionId,
     ) -> Result<Option<Session>, SessionRepositoryError> {
-        let row = sqlx::query(
+        let rows = sqlx::query(
             "SELECT
                 s.session_id AS stored_session_id,
                 s.creation_cause,
@@ -151,11 +151,19 @@ impl SessionRepository {
              WHERE s.session_id = $1",
         )
         .bind(session_id_to_uuid(requested_session))
-        .fetch_optional(&self.pool)
+        .fetch_all(&self.pool)
         .await?;
 
-        row.map(|row| decode_complete(row, requested_session))
-            .transpose()
+        let mut rows = rows.into_iter();
+        let Some(row) = rows.next() else {
+            return Ok(None);
+        };
+        if rows.next().is_some() {
+            return Err(
+                SessionCorruption::Inconsistent("current session projection cardinality").into(),
+            );
+        }
+        decode_complete(row, requested_session).map(Some)
     }
 }
 
