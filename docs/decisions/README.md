@@ -30,6 +30,7 @@ The repository owner accepted the following records on 2026-07-17. They depend o
 | [ADR-0033](0033-identity-generation-supply-and-encoding.md) | Caller-supplied durable-command UUIDs, hub-minted UUIDv7 durable-fact identities, opaque UUID semantics, and native Postgres encoding for every UUID-backed baseline identity |
 | [ADR-0034](0034-durable-command-storage-and-equality.md) | Owner-global durable-command registry with versioned typed payload/result records and structural domain replay equality |
 | [ADR-0035](0035-domain-owned-persistence-reconstitution.md) | Purpose-specific complete domain projections for validated persistence reconstitution, including opaque proof-bearing values and fail-closed corruption handling |
+| [ADR-0036](0036-initial-semantic-transcript-entries.md) | Initial origin-accepted-input and failed-turn semantic entries, with eligibility and terminal-failure commit granularity |
 
 ## Process
 
