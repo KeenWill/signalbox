@@ -11,6 +11,7 @@ mod applied_interrupt;
 mod configuration;
 mod context_frontier;
 mod delivery_request;
+mod fatal_mismatch;
 mod model_call;
 mod provider_evidence;
 mod queue_order;
