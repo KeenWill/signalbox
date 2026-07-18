@@ -743,12 +743,15 @@ async fn inv012_incomplete_or_unknown_claims_fail_closed_as_corruption()
     Ok(())
 }
 
-/// INV-012: a current-defaults pointer that references a version other than the
-/// reconstituted immutable defaults row is inconsistent durable shape, so `load`
-/// must fail closed rather than reconstruct against a cross-wired pointer.
+/// S01 / INV-012 (ADR-0022, ADR-0034): the mutable `session_current_defaults`
+/// pointer is advanced independently by later defaults replacements and must not
+/// gate CreateSession reconstitution. Advancing the pointer past the initial
+/// version leaves the immutable version-one record intact, so `load` must still
+/// reconstitute the original creation instead of failing closed.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_cross_wired_current_pointer_fails_closed() -> Result<(), Box<dyn Error>> {
+async fn inv012_advanced_current_pointer_does_not_gate_reconstitution() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, _database_url) = migrated_postgres().await?;
     let repository = CreateSessionRepository::new(pool.clone());
     let creation = prepared(0x501, 0x901, direct(0x801));
@@ -777,16 +780,13 @@ async fn inv012_cross_wired_current_pointer_fails_closed() -> Result<(), Box<dyn
     .execute(&pool)
     .await?;
 
-    let cross_wired = repository
+    let reconstituted = repository
         .load(creation.command().command_id())
-        .await
-        .expect_err("a pointer targeting another version is corruption");
-    assert!(matches!(
-        cross_wired,
-        CreateSessionRepositoryError::Corruption(CreateSessionCorruption::Inconsistent(
-            "current defaults pointer version"
-        ))
-    ));
+        .await?
+        .expect("an advanced current pointer must not hide the committed creation");
+    assert_eq!(reconstituted.command(), creation.command());
+    assert_eq!(reconstituted.session().id(), creation.session().id());
+    assert_eq!(reconstituted.applied_result(), creation.applied_result());
 
     pool.close().await;
     drop(container);
