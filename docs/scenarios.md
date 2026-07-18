@@ -8,12 +8,12 @@ The scenarios are frozen design fixtures. New or changed normative behavior belo
 
 - **User intent:** Start an empty conversation from a terminal and make it available on every client.
 - **Durable commands:** `CreateSession(cause: owner_initiated, ancestry: none, initial_model_selection_defaults)` establishes defaults version one. `SubmitInput(delivery: start_when_no_active_turn, ...)` resolves its model request against that exact version and atomically persists the accepted input, origin turn, and complete baseline configuration provenance. A later defaults update affects only subsequently accepted origins.
-- **State transitions:** No session → active session; no turn → queued origin turn with derived eligibility → atomically fixed starting frontier plus `Active(Running)` and initial prepared attempt.
+- **State transitions:** No session → durable session with immutable owner/no-ancestry provenance and complete current defaults version one; no turn → queued origin turn with derived eligibility → atomically fixed starting frontier plus `Active(Running)` and initial prepared attempt.
 - **Transient updates:** Optimistic client placeholder and scheduling progress.
 - **Owning component:** Hub owns creation and acceptance; Postgres stores the result; the client owns presentation.
 - **Failure behavior:** A malformed transport, pre-authority, unconstructible typed-command, or pre-commit infrastructure failure that does not reach committed domain handling returns visibly and claims no command identifier; corrected boundary input may reuse it. Canonically equivalent caller forms compare as the same command. The first committed handling of a well-formed typed command under established owner authority records either its applied result or a typed domain rejection. Replay returns that same result before current-state validation; a command rejected after construction cannot later become valid under the same identifier. Corrected domain intent then needs a new identifier, and reuse of a claimed identifier for another command kind, session, or payload is rejected rather than creating a duplicate.
 - **Required invariants:** INV-001, INV-003, INV-007, INV-008, INV-012.
-- **Remaining questions:** First client and protocol. The owner-global idempotency scope and typed relational command representation are decided by ADR-0001 and ADR-0034.
+- **Remaining questions:** First client and protocol. The owner-global idempotency scope and typed relational command representation are decided by ADR-0001 and ADR-0034; the long-lived session aggregate and current-pointer load boundary are decided by ADR-0038.
 
 ## S02 — Stream a centrally called provider response
 

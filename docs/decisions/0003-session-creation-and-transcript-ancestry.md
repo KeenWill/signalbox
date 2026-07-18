@@ -6,7 +6,7 @@
 - Supersedes: none
 - Superseded by: none
 - Accepted with: ADR-0001, ADR-0004, ADR-0005, and ADR-0027 as one atomic foundation set
-- Refined by: [ADR-0030](0030-context-frontier-snapshots.md)
+- Refined by: [ADR-0030](0030-context-frontier-snapshots.md) and [ADR-0038](0038-session-aggregate-boundary.md)
 - Decision questions: owner-initiated baseline and typed extension of session creation cause; independent transcript ancestry; separation from versioned session configuration defaults; future multiple ancestry sources or merge
 
 ## Context

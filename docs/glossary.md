@@ -4,9 +4,9 @@ This glossary recommends working language for design discussion. “Accepted” 
 
 ## Session
 
-- **Definition:** A durable, independently browsable conversation with versioned model-selection defaults in the first baseline, ordered semantic history, operational work, and archival state.
-- **Status:** Accepted by [ADR-0001](decisions/0001-domain-terminology-and-identity.md). “Session” is preferred over “thread” because it emphasizes durable continuity across clients, though it can be confused with a login session.
-- **Do not confuse with:** A client connection, one model context window, one turn, or a runner process.
+- **Definition:** A durable, independently browsable conversation with versioned model-selection defaults in the first baseline, ordered semantic history, operational work, and future archival state. Its minimal long-lived domain aggregate contains identity, immutable creation provenance, and the complete current versioned defaults; transcript, work, command, scheduler, and presentation facts remain separate referenced facts or projections.
+- **Status:** Accepted by [ADR-0001](decisions/0001-domain-terminology-and-identity.md); the long-lived aggregate boundary and load semantics are refined by [ADR-0038](decisions/0038-session-aggregate-boundary.md). “Session” is preferred over “thread” because it emphasizes durable continuity across clients, though it can be confused with a login session.
+- **Do not confuse with:** A client connection, one model context window, one turn, a runner process, the `CreateSession` receipt, or one universal object graph containing all session-associated facts.
 - **Example:** A user starts “repair garden sensor” on a phone, continues it from a terminal, and archives it next week without losing its history.
 
 ## Accepted input
