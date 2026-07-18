@@ -10,6 +10,10 @@ Some questions carry an ADR number reserved by earlier planning and cited from a
 - **Semantic transcript-entry extensions and rendering.** [ADR-0036](decisions/0036-initial-semantic-transcript-entries.md) fixes origin-accepted-input and failed-turn payloads plus their eligibility and terminal-failure commit boundaries. Assistant content and completion, refusal, cancellation, reconciliation, mismatch, accepted-risk, steering, tool, approval, and delegation variants remain open together with provider/client rendering. Blocks those later semantic-history slices, not the first origin activation slice. (S02–S04, S08, S09, S17)
 - **Selectable transcript-frontier boundaries.** Which terminal semantic boundaries a client may select as a `TranscriptFrontier` remains open; ADR-0030 decides only how a validated selection resolves into a new session's context. Blocks fork selection. (S17)
 
+## Accepted-input content
+
+- **Content extensions and rendering.** [ADR-0037](decisions/0037-baseline-user-content.md) fixes the initial text-only `UserContent` value, exact equality, and PostgreSQL mapping. Rich content, attachments, other non-text variants, resource governance, and provider/client rendering remain open. Blocks those extensions, not the first `SubmitInput` slice. (S01, S03, S08)
+
 ## Delegation (reserved ADR-0002)
 
 - **Parent cancellation propagation to active delegated children.** Leaning: explicit relationship policy with visible child outcomes. Blocks delegation. (S18, S19)

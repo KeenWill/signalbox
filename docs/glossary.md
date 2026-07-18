@@ -12,7 +12,7 @@ This glossary recommends working language for design discussion. “Accepted” 
 ## Accepted input
 
 - **Definition:** One user submission made durable with its explicit delivery request and recoverable disposition before acknowledgement.
-- **Status:** Accepted by [ADR-0001](decisions/0001-domain-terminology-and-identity.md) and [ADR-0027](decisions/0027-input-delivery-lifecycle.md).
+- **Status:** Accepted by [ADR-0001](decisions/0001-domain-terminology-and-identity.md) and [ADR-0027](decisions/0027-input-delivery-lifecycle.md); the baseline content value is defined by [ADR-0037](decisions/0037-baseline-user-content.md).
 - **Do not confuse with:** A transport command, transcript entry, turn, or model call. One accepted input may originate a turn or steer an existing turn.
 - **Example:** “Use the new log” remains the same accepted input whether it is consumed at a safe point or visibly reclassified as queued work because the active turn ends first.
 

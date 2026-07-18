@@ -18,7 +18,7 @@ The five records form one coupled baseline: their identity algebras, lifecycle t
 
 ## Accepted refinements and extensions
 
-The repository owner accepted the following records on 2026-07-17. They depend on and refine the original foundation set; they do not retroactively become part of its five-record atomic acceptance.
+The repository owner accepted the following records beginning on 2026-07-17. They depend on and refine the original foundation set; they do not retroactively become part of its five-record atomic acceptance.
 
 | ADR | Scope |
 | --- | --- |
@@ -31,6 +31,7 @@ The repository owner accepted the following records on 2026-07-17. They depend o
 | [ADR-0034](0034-durable-command-storage-and-equality.md) | Owner-global durable-command registry with versioned typed payload/result records and structural domain replay equality |
 | [ADR-0035](0035-domain-owned-persistence-reconstitution.md) | Purpose-specific complete domain projections for validated persistence reconstitution, including opaque proof-bearing values and fail-closed corruption handling |
 | [ADR-0036](0036-initial-semantic-transcript-entries.md) | Initial origin-accepted-input and failed-turn semantic entries, with eligibility and terminal-failure commit granularity |
+| [ADR-0037](0037-baseline-user-content.md) | Text-only baseline accepted-input content, exact decoded-text equality, PostgreSQL text mapping, and additive typed extension boundary |
 
 ## Process
 
