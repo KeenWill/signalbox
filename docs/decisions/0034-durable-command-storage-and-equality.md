@@ -117,7 +117,8 @@ and typed fields rather than an error string. Operational diagnostics may be
 stored separately, but they do not determine replay equality, result meaning,
 or proof authority.
 
-Purpose-specific proof reconstitution remains domain-owned. These records must
+Purpose-specific proof reconstitution remains domain-owned, as decided by
+[ADR-0035](0035-domain-owned-persistence-reconstitution.md). These records must
 retain the command kind, applied result, target aggregate, and any exact-set
 correlation that the accepted proof semantics require, but this ADR does not
 expose raw proof constructors to persistence code.
@@ -225,7 +226,9 @@ the durable record.
 ## Open questions
 
 - The domain-owned seam for reconstituting proof-bearing values from correlated
-  applied command records remains separate.
+  applied command records is decided by
+  [ADR-0035](0035-domain-owned-persistence-reconstitution.md); command replay is
+  one consumer of that seam.
 - Concrete record families land only with admitted command slices; this record
   does not choose names or fields before their domain payload and result exist.
 - Wire command envelopes and compatibility remain with reserved ADR-0019
