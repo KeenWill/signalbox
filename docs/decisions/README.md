@@ -32,6 +32,7 @@ The repository owner accepted the following records beginning on 2026-07-17. The
 | [ADR-0035](0035-domain-owned-persistence-reconstitution.md) | Purpose-specific complete domain projections for validated persistence reconstitution, including opaque proof-bearing values and fail-closed corruption handling |
 | [ADR-0036](0036-initial-semantic-transcript-entries.md) | Initial origin-accepted-input and failed-turn semantic entries, with eligibility and terminal-failure commit granularity |
 | [ADR-0037](0037-baseline-user-content.md) | Text-only baseline accepted-input content, exact decoded-text equality, PostgreSQL text mapping, and additive typed extension boundary |
+| [ADR-0038](0038-session-aggregate-boundary.md) | Minimal long-lived `Session` aggregate, separation from creation receipts and associated history, complete checked reconstitution, and current-pointer load-by-identity semantics |
 
 ## Process
 
