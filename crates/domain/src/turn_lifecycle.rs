@@ -3,14 +3,17 @@
 //! ADR-0004, ADR-0027, ADR-0030, and ADR-0031 are normative. This module
 //! deliberately stops at value constructibility: authoritative eligibility
 //! and terminal aggregate transitions require complete evidence boundaries
-//! that are not yet implemented. Standalone values are not proof that
-//! aggregate guards hold.
+//! that are not yet implemented. The sealed fatal-mismatch binding can
+//! construct a marker only from its exact derived ambiguity remainder and
+//! causes, but that marker remains part of an uncommitted candidate.
+//! Standalone values are not proof that aggregate guards hold.
 
 use std::collections::BTreeSet;
 
 use crate::{
     AppliedInterruptProof, ContextFrontier, CurrentTurnAttempt, DurableCommandId,
     FatalMismatchStopCauses, ModelCallId, ToolAttemptId, ToolRequestId, TurnId,
+    fatal_mismatch::lifecycle::FatalMismatchReconciliationMarkerCandidate,
 };
 
 /// The immutable lineage category selected when accepted-input work starts.
@@ -222,6 +225,17 @@ pub struct ReconciliationMarker {
 }
 
 impl ReconciliationMarker {
+    /// Constructs the fatal marker from the sealed post-evidence binding.
+    pub(crate) fn from_fatal_mismatch_candidate(
+        candidate: FatalMismatchReconciliationMarkerCandidate,
+    ) -> Self {
+        let (ambiguous_operations, causes) = candidate.into_parts();
+        Self {
+            ambiguous_operations,
+            reason: ReconciliationReason::FatalMismatchRequiresReconciliation { causes },
+        }
+    }
+
     /// Borrows the exact canonical nonempty ambiguity set.
     pub const fn ambiguous_operations(&self) -> &NonEmptyIssuedOperationRefs {
         &self.ambiguous_operations
