@@ -4,8 +4,7 @@ use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
-    DirectModelSelection, DurableCommandId, ModelAlias, SessionConfigurationDefaultsVersion,
-    SessionId, SessionInputPosition,
+    DurableCommandId, SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition,
 };
 use sqlx::types::Uuid;
 
@@ -80,34 +79,41 @@ pub fn session_id_from_uuid(value: Uuid) -> SessionId {
     SessionId::from_uuid(value)
 }
 
+/// Why a PostgreSQL `uuid` value is not a valid durable-command identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DurableCommandIdMappingError {
+    /// The value is the nil or max sentinel UUID, which ADR-0033 rejects as an
+    /// invalid command identity before canonical command construction.
+    SentinelUuid,
+}
+
+impl fmt::Display for DurableCommandIdMappingError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::SentinelUuid => "durable-command identity must not be the nil or max UUID",
+        };
+        formatter.write_str(message)
+    }
+}
+
+impl Error for DurableCommandIdMappingError {}
+
 /// Encodes a durable-command identity for a PostgreSQL `uuid` column.
 pub fn durable_command_id_to_uuid(value: DurableCommandId) -> Uuid {
     value.into_uuid()
 }
 
-/// Decodes a durable-command identity from a PostgreSQL `uuid` column.
-pub fn durable_command_id_from_uuid(value: Uuid) -> DurableCommandId {
-    DurableCommandId::from_uuid(value)
-}
-
-/// Encodes a direct-model-selection identity for a PostgreSQL `uuid` column.
-pub fn direct_model_selection_to_uuid(value: DirectModelSelection) -> Uuid {
-    value.into_uuid()
-}
-
-/// Decodes a direct-model-selection identity from a PostgreSQL `uuid` column.
-pub fn direct_model_selection_from_uuid(value: Uuid) -> DirectModelSelection {
-    DirectModelSelection::from_uuid(value)
-}
-
-/// Encodes a model-alias identity for a PostgreSQL `uuid` column.
-pub fn model_alias_to_uuid(value: ModelAlias) -> Uuid {
-    value.into_uuid()
-}
-
-/// Decodes a model-alias identity from a PostgreSQL `uuid` column.
-pub fn model_alias_from_uuid(value: Uuid) -> ModelAlias {
-    ModelAlias::from_uuid(value)
+/// Decodes a checked durable-command identity from a PostgreSQL `uuid` column.
+///
+/// Per ADR-0033 the nil and max UUIDs are invalid sentinel-like command
+/// identities and are rejected before a `DurableCommandId` is constructed.
+pub fn durable_command_id_from_uuid(
+    value: Uuid,
+) -> Result<DurableCommandId, DurableCommandIdMappingError> {
+    if value == Uuid::nil() || value == Uuid::max() {
+        return Err(DurableCommandIdMappingError::SentinelUuid);
+    }
+    Ok(DurableCommandId::from_uuid(value))
 }
 
 #[cfg(test)]
@@ -116,17 +122,15 @@ mod tests {
 
     use rust_decimal::Decimal;
     use signalbox_domain::{
-        DirectModelSelection, DurableCommandId, ModelAlias, SessionConfigurationDefaultsVersion,
-        SessionId, SessionInputPosition,
+        DurableCommandId, SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition,
     };
     use sqlx::types::Uuid;
 
     use super::{
-        PositiveOrdinalMappingError, defaults_version_from_numeric, defaults_version_to_numeric,
-        direct_model_selection_from_uuid, direct_model_selection_to_uuid,
-        durable_command_id_from_uuid, durable_command_id_to_uuid, input_position_from_numeric,
-        input_position_to_numeric, model_alias_from_uuid, model_alias_to_uuid,
-        session_id_from_uuid, session_id_to_uuid,
+        DurableCommandIdMappingError, PositiveOrdinalMappingError, defaults_version_from_numeric,
+        defaults_version_to_numeric, durable_command_id_from_uuid, durable_command_id_to_uuid,
+        input_position_from_numeric, input_position_to_numeric, session_id_from_uuid,
+        session_id_to_uuid,
     };
 
     const OUT_OF_U64_RANGE: &str = "18446744073709551616";
@@ -203,21 +207,33 @@ mod tests {
     fn inv002_create_session_identity_mappings_remain_kind_specific() {
         let session_uuid = Uuid::from_u128(1);
         let command_uuid = Uuid::from_u128(2);
-        let direct_uuid = Uuid::from_u128(3);
-        let alias_uuid = Uuid::from_u128(4);
 
         let session = session_id_from_uuid(session_uuid);
-        let command = durable_command_id_from_uuid(command_uuid);
-        let direct = direct_model_selection_from_uuid(direct_uuid);
-        let alias = model_alias_from_uuid(alias_uuid);
+        let command = durable_command_id_from_uuid(command_uuid).expect("non-sentinel command");
 
         assert_eq!(session, SessionId::from_uuid(session_uuid));
         assert_eq!(command, DurableCommandId::from_uuid(command_uuid));
-        assert_eq!(direct, DirectModelSelection::from_uuid(direct_uuid));
-        assert_eq!(alias, ModelAlias::from_uuid(alias_uuid));
         assert_eq!(session_id_to_uuid(session), session_uuid);
         assert_eq!(durable_command_id_to_uuid(command), command_uuid);
-        assert_eq!(direct_model_selection_to_uuid(direct), direct_uuid);
-        assert_eq!(model_alias_to_uuid(alias), alias_uuid);
+    }
+
+    /// INV-002 / ADR-0033: the durable-command boundary rejects the nil and max
+    /// sentinel UUIDs rather than admitting them as command identities.
+    #[test]
+    fn inv002_durable_command_mapping_rejects_sentinel_uuids() {
+        assert_eq!(
+            durable_command_id_from_uuid(Uuid::nil()),
+            Err(DurableCommandIdMappingError::SentinelUuid)
+        );
+        assert_eq!(
+            durable_command_id_from_uuid(Uuid::max()),
+            Err(DurableCommandIdMappingError::SentinelUuid)
+        );
+
+        let valid = Uuid::from_u128(7);
+        assert_eq!(
+            durable_command_id_from_uuid(valid),
+            Ok(DurableCommandId::from_uuid(valid))
+        );
     }
 }
