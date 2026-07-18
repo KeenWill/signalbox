@@ -10,9 +10,9 @@ use signalbox_domain::{
     ModelAlias, ModelSelectionOverride, ModelSelectionRequest, NonEmptyUnicodeTextFailure,
     PerInputConfigurationChoices, PreparedSubmitInput, ReconstitutedSubmitInput,
     SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
-    SessionInputPosition, SubmitInput, SubmitInputReconstitutionFailure,
-    SubmitInputReconstitutionInput, SubmitInputRejectedResult, SubmitInputResult, ToolRequestId,
-    TurnId, UserContent,
+    SessionInputPosition, SubmitInput, SubmitInputPreparationFailure,
+    SubmitInputReconstitutionFailure, SubmitInputReconstitutionInput, SubmitInputRejectedResult,
+    SubmitInputResult, ToolRequestId, TurnId, UserContent,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -188,7 +188,7 @@ impl SubmitInputRepository {
         &self,
         command: SubmitInput,
         accepted_input: AcceptedInputId,
-        turn: TurnId,
+        turn: Option<TurnId>,
     ) -> Result<SubmitInputHandlingOutcome, SubmitInputRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let decision = handle_in_transaction(&mut transaction, command, accepted_input, turn).await;
@@ -240,7 +240,7 @@ impl SubmitInputTransaction for SubmitInputRepository {
         &mut self,
         command: SubmitInput,
         accepted_input: AcceptedInputId,
-        turn: TurnId,
+        turn: Option<TurnId>,
     ) -> Result<SubmitInputOutcome, Self::Error> {
         let outcome = SubmitInputRepository::handle(self, command, accepted_input, turn).await?;
 
@@ -257,7 +257,7 @@ async fn handle_in_transaction(
     connection: &mut PgConnection,
     command: SubmitInput,
     accepted_input: AcceptedInputId,
-    turn: TurnId,
+    turn: Option<TurnId>,
 ) -> Result<TransactionDecision, SubmitInputRepositoryError> {
     let command_id = command.command_id();
     match inspect_registry(connection, command_id).await? {
@@ -338,7 +338,7 @@ async fn prepare_against_locked_state(
     connection: &mut PgConnection,
     command: SubmitInput,
     accepted_input: AcceptedInputId,
-    turn: TurnId,
+    turn: Option<TurnId>,
 ) -> Result<PreparedSubmitInput, SubmitInputRepositoryError> {
     let session_exists = sqlx::query_scalar::<_, Uuid>(
         "SELECT session_id FROM session WHERE session_id = $1 FOR UPDATE",
@@ -410,7 +410,15 @@ async fn prepare_against_locked_state(
 
     command
         .prepare_when_no_active_turn(&session, accepted_input, turn, previous_position, |_| None)
-        .map_err(|_| SubmitInputCorruption::Inconsistent("current session ownership").into())
+        .map_err(|error| {
+            let relationship = match error.failure() {
+                SubmitInputPreparationFailure::SessionMismatch { .. } => {
+                    "current session ownership"
+                }
+                SubmitInputPreparationFailure::TurnCandidateMismatch => "delivery turn candidate",
+            };
+            SubmitInputCorruption::Inconsistent(relationship).into()
+        })
 }
 
 async fn insert_prepared(
@@ -943,14 +951,17 @@ fn decode_complete(
     require_spelling(&row, "typed_kind", SUBMIT_INPUT_KIND)?;
     require_version(&row, "typed_version", STORAGE_VERSION)?;
 
+    let actor = decode_actor(
+        required(&row, "actor_kind")?,
+        row.try_get("actor_turn_id")?,
+        row.try_get("actor_tool_request_id")?,
+    )?;
+    if actor != Actor::Owner {
+        return Err(SubmitInputCorruption::Inconsistent("baseline command actor").into());
+    }
     let command = SubmitInput::new(
         command_id,
         session_id_from_uuid(required(&row, "command_session_id")?),
-        decode_actor(
-            required(&row, "actor_kind")?,
-            row.try_get("actor_turn_id")?,
-            row.try_get("actor_tool_request_id")?,
-        )?,
         decode_content(
             required(&row, "command_content_kind")?,
             required(&row, "command_content_text")?,

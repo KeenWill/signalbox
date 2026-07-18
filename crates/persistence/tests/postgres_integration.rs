@@ -7,7 +7,7 @@ use signalbox_application::{
     SubmitInputRequest, SubmitInputService,
 };
 use signalbox_domain::{
-    AcceptedInputId, Actor, CreateSession, DeliveryRequest, DurableCommandId, ModelAlias,
+    AcceptedInputId, CreateSession, DeliveryRequest, DurableCommandId, ModelAlias,
     ModelSelectionOverride, ModelSelectionRequest, PerInputConfigurationChoices,
     PreparedCreateSession, ReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult,
     ReplaceSessionDefaultsResult, SessionConfigurationDefaults,
@@ -141,7 +141,6 @@ fn start_input(
     SubmitInput::new(
         DurableCommandId::from_uuid(Uuid::from_u128(command)),
         SessionId::from_uuid(Uuid::from_u128(session)),
-        Actor::Owner,
         UserContent::try_text(content.to_owned()).expect("test content is admitted"),
         DeliveryRequest::StartWhenNoActiveTurn {
             configuration: input_choices(expected, model),
@@ -158,7 +157,6 @@ fn input_with_delivery(
     SubmitInput::new(
         DurableCommandId::from_uuid(Uuid::from_u128(command)),
         SessionId::from_uuid(Uuid::from_u128(session)),
-        Actor::Owner,
         UserContent::try_text(content.to_owned()).expect("test content is admitted"),
         delivery,
     )
@@ -1410,7 +1408,7 @@ async fn inv012_cross_kind_reuse_is_conflict_not_corruption_or_absence()
             .handle(
                 input_reuse.clone(),
                 AcceptedInputId::from_uuid(Uuid::from_u128(0x921)),
-                TurnId::from_uuid(Uuid::from_u128(0xa21)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xa21))),
             )
             .await?,
         SubmitInputHandlingOutcome::ConflictingReuse {
@@ -1453,7 +1451,7 @@ async fn inv012_cross_kind_reuse_is_conflict_not_corruption_or_absence()
         .handle(
             input.clone(),
             AcceptedInputId::from_uuid(Uuid::from_u128(0x923)),
-            TurnId::from_uuid(Uuid::from_u128(0xa23)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xa23))),
         )
         .await?;
     let defaults_reuse = replacement(0x223, 0x721, 2, direct(0x826));
@@ -2039,7 +2037,7 @@ async fn inv002_inv007_inv008_inv012_submit_schema_is_closed_and_normalized()
         .handle(
             command,
             AcceptedInputId::from_uuid(Uuid::from_u128(0x9fe)),
-            TurnId::from_uuid(Uuid::from_u128(0xafe)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xafe))),
         )
         .await?;
     let error = sqlx::query(
@@ -2069,7 +2067,7 @@ async fn inv002_inv007_inv008_inv012_submit_schema_is_closed_and_normalized()
                 ModelSelectionOverride::UseSessionDefault,
             ),
             AcceptedInputId::from_uuid(Uuid::from_u128(0x9fd)),
-            TurnId::from_uuid(Uuid::from_u128(0xafd)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xafd))),
         )
         .await?;
     let mut transaction = pool.begin().await?;
@@ -2279,7 +2277,7 @@ async fn s01_inv008_inv012_submit_records_authoritative_rejections() -> Result<(
         .handle(
             missing.clone(),
             AcceptedInputId::from_uuid(Uuid::from_u128(0x913)),
-            TurnId::from_uuid(Uuid::from_u128(0xa13)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xa13))),
         )
         .await?;
     assert!(matches!(
@@ -2294,7 +2292,7 @@ async fn s01_inv008_inv012_submit_records_authoritative_rejections() -> Result<(
             .handle(
                 missing,
                 AcceptedInputId::from_uuid(Uuid::from_u128(0x91a)),
-                TurnId::from_uuid(Uuid::from_u128(0xa1a)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xa1a))),
             )
             .await?,
         missing_recorded
@@ -2315,13 +2313,22 @@ async fn s01_inv008_inv012_submit_records_authoritative_rejections() -> Result<(
         },
     ];
     for (offset, delivery) in active_modes.into_iter().enumerate() {
+        let turn = match delivery {
+            DeliveryRequest::NextSafePoint { .. } => None,
+            DeliveryRequest::Interrupt { .. } | DeliveryRequest::AfterCurrentTurn { .. } => {
+                Some(TurnId::from_uuid(Uuid::from_u128(0xa14 + offset as u128)))
+            }
+            DeliveryRequest::StartWhenNoActiveTurn { .. } => {
+                unreachable!("the table contains only active-work delivery modes")
+            }
+        };
         let command = input_with_delivery(0x314 + offset as u128, 0x711, "active", delivery);
         assert!(matches!(
             repository
                 .handle(
                     command,
                     AcceptedInputId::from_uuid(Uuid::from_u128(0x914 + offset as u128)),
-                    TurnId::from_uuid(Uuid::from_u128(0xa14 + offset as u128)),
+                    turn,
                 )
                 .await?,
             SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
@@ -2344,7 +2351,7 @@ async fn s01_inv008_inv012_submit_records_authoritative_rejections() -> Result<(
         .handle(
             stale.clone(),
             AcceptedInputId::from_uuid(Uuid::from_u128(0x918)),
-            TurnId::from_uuid(Uuid::from_u128(0xa18)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xa18))),
         )
         .await?;
     assert!(matches!(
@@ -2365,7 +2372,7 @@ async fn s01_inv008_inv012_submit_records_authoritative_rejections() -> Result<(
             .handle(
                 stale,
                 AcceptedInputId::from_uuid(Uuid::from_u128(0x91b)),
-                TurnId::from_uuid(Uuid::from_u128(0xa1b)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xa1b))),
             )
             .await?,
         stale_recorded
@@ -2383,7 +2390,7 @@ async fn s01_inv008_inv012_submit_records_authoritative_rejections() -> Result<(
             .handle(
                 unknown,
                 AcceptedInputId::from_uuid(Uuid::from_u128(0x919)),
-                TurnId::from_uuid(Uuid::from_u128(0xa19)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xa19))),
             )
             .await?,
         SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
@@ -2403,7 +2410,7 @@ async fn s01_inv008_inv012_submit_records_authoritative_rejections() -> Result<(
             .handle(
                 explicit_unknown,
                 AcceptedInputId::from_uuid(Uuid::from_u128(0x91c)),
-                TurnId::from_uuid(Uuid::from_u128(0xa1c)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xa1c))),
             )
             .await?,
         SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
@@ -2452,7 +2459,7 @@ async fn inv007_inv008_inv012_submit_serializes_positions_and_rolls_back_failure
                         ModelSelectionOverride::UseSessionDefault,
                     ),
                     AcceptedInputId::from_uuid(Uuid::from_u128(0x922 + offset)),
-                    TurnId::from_uuid(Uuid::from_u128(0xa22 + offset)),
+                    Some(TurnId::from_uuid(Uuid::from_u128(0xa22 + offset))),
                 )
                 .await
         }));
@@ -2480,7 +2487,7 @@ async fn inv007_inv008_inv012_submit_serializes_positions_and_rolls_back_failure
         .handle(
             colliding.clone(),
             AcceptedInputId::from_uuid(Uuid::from_u128(0x922)),
-            TurnId::from_uuid(Uuid::from_u128(0xa28)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xa28))),
         )
         .await
         .expect_err("an accepted-input identity collision must abort the transaction");
@@ -2491,7 +2498,7 @@ async fn inv007_inv008_inv012_submit_serializes_positions_and_rolls_back_failure
         .handle(
             colliding,
             AcceptedInputId::from_uuid(Uuid::from_u128(0x928)),
-            TurnId::from_uuid(Uuid::from_u128(0xa28)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xa28))),
         )
         .await?
     else {
@@ -2518,7 +2525,7 @@ async fn inv007_inv008_inv012_submit_serializes_positions_and_rolls_back_failure
                     .handle(
                         command,
                         AcceptedInputId::from_uuid(Uuid::from_u128(0x929)),
-                        TurnId::from_uuid(Uuid::from_u128(0xa29)),
+                        Some(TurnId::from_uuid(Uuid::from_u128(0xa29))),
                     )
                     .await
             }
@@ -2533,7 +2540,7 @@ async fn inv007_inv008_inv012_submit_serializes_positions_and_rolls_back_failure
                     .handle(
                         command,
                         AcceptedInputId::from_uuid(Uuid::from_u128(0x92a)),
-                        TurnId::from_uuid(Uuid::from_u128(0xa2a)),
+                        Some(TurnId::from_uuid(Uuid::from_u128(0xa2a))),
                     )
                     .await
             }
@@ -2590,9 +2597,42 @@ async fn inv002_inv008_inv012_submit_corruption_and_position_exhaustion_fail_clo
         .handle(
             first.clone(),
             AcceptedInputId::from_uuid(Uuid::from_u128(0x932)),
-            TurnId::from_uuid(Uuid::from_u128(0xa32)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xa32))),
         )
         .await?;
+
+    sqlx::query(
+        "ALTER TABLE submit_input_command
+            DISABLE TRIGGER submit_input_command_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE submit_input_command
+            SET actor_kind = 'recovery'
+          WHERE command_id = $1",
+    )
+    .bind(Uuid::from_u128(0x332))
+    .execute(&pool)
+    .await?;
+    let non_owner = repository
+        .load(first.command_id())
+        .await
+        .expect_err("the baseline command boundary rejects a stored non-owner actor");
+    assert!(matches!(
+        non_owner,
+        SubmitInputRepositoryError::Corruption(SubmitInputCorruption::Inconsistent(
+            "baseline command actor"
+        ))
+    ));
+    sqlx::query(
+        "UPDATE submit_input_command
+            SET actor_kind = 'owner'
+          WHERE command_id = $1",
+    )
+    .bind(Uuid::from_u128(0x332))
+    .execute(&pool)
+    .await?;
 
     sqlx::query(
         "ALTER TABLE accepted_input
@@ -2649,7 +2689,7 @@ async fn inv002_inv008_inv012_submit_corruption_and_position_exhaustion_fail_clo
             .handle(
                 exhausted,
                 AcceptedInputId::from_uuid(Uuid::from_u128(0x933)),
-                TurnId::from_uuid(Uuid::from_u128(0xa33)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xa33))),
             )
             .await?,
         SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
