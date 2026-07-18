@@ -12,6 +12,16 @@ An append-only, dated record of decisions below foundation weight, newest first.
 
 **Affects.** `crates/persistence/tests/postgres_integration.rs`, the Docker-backed CI test baseline, and future production database-version selection. It changes no domain, transaction, migration, or schema semantics.
 
+## 2026-07-17 — Materialize complete membership for first context-frontier storage
+
+**Context.** [ADR-0022](decisions/0022-persistence-representation.md) and [ADR-0030](decisions/0030-context-frontier-snapshots.md) deliberately permit complete membership, parent-plus-append, or shared immutable prefixes when each representation resolves to the same complete ordered-distinct source-qualified sequence. The first S01/S03 persistence slice benefits more from direct constraints and inspectability than from prefix compression, and choosing among those already-permitted physical forms does not change domain semantics.
+
+**Decision.** Store one immutable snapshot header for the composite `(owning session, context-frontier identity)` and materialize one membership row per one-based ordered position carrying the source session and semantic-entry identity. Enforce unique position and unique source-qualified entry membership within each snapshot, require every member to reference its immutable semantic entry, and insert the complete contiguous membership in the transaction that first binds the snapshot. Load and reconstitution read the complete sequence directly; no parent traversal, cache, digest, or content canonicalization is part of the first representation.
+
+**Rejected alternatives.** Parent-plus-append reduces repeated rows but makes complete validation, missing-parent behavior, and query depth part of the first adapter. Shared-prefix nodes can save more space but add reference accounting and migration complexity before measurements exist. A serialized identity array weakens relational foreign keys and duplicate enforcement. Content-addressed deduplication would change identity and authority semantics rather than merely optimize storage.
+
+**Affects.** The first context-frontier migration, persistence records and mappings, complete-snapshot integration tests, and ADR-0035 reconstitution queries. Equal-content snapshots still retain distinct identities. A later measured migration may introduce parent or shared-prefix storage only if it preserves every existing composite identity and exact resolved sequence required by ADR-0030.
+
 ## 2026-07-17 — Prepared model calls borrow resolved frontier projections
 
 **Context.** [ADR-0005](decisions/0005-model-call-retry-semantics.md) and [ADR-0030](decisions/0030-context-frontier-snapshots.md) require the exact call frontier to exist on the prepared record before send authorization. The preceding value slice makes a resolved projection available through a sealed construction seam, while the existing `CurrentModelCall::prepared` accepts only the call identity and turn-wide pinned target.

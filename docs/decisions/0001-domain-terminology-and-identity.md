@@ -7,7 +7,7 @@
 - Supersedes: none
 - Superseded by: none
 - Accepted with: ADR-0003, ADR-0004, ADR-0005, and ADR-0027 as one atomic foundation set
-- Refined by: [ADR-0022](0022-persistence-representation.md) for native Postgres encoding of the accepted UUID-backed identities and [ADR-0030](0030-context-frontier-snapshots.md) for the context-frontier identity boundary
+- Refined by: [ADR-0022](0022-persistence-representation.md) for native Postgres encoding of the accepted UUID-backed identities, [ADR-0030](0030-context-frontier-snapshots.md) for the context-frontier identity boundary, [ADR-0033](0033-identity-generation-supply-and-encoding.md) for identity generation, supply, and remaining baseline Postgres encoding, and [ADR-0034](0034-durable-command-storage-and-equality.md) for typed command storage and structural replay equality
 - Decision questions: owner-global durable-command identity scope; final names and boundaries for session, accepted input, turn, turn attempt, model call, tool request, and tool attempt
 
 ## Context

@@ -7,6 +7,7 @@
 - Superseded by: none
 - Depends on: the accepted foundation set ([ADR-0001](0001-domain-terminology-and-identity.md), [ADR-0003](0003-session-creation-and-transcript-ancestry.md), [ADR-0004](0004-turn-and-attempt-lifecycle.md), [ADR-0005](0005-model-call-retry-semantics.md), and [ADR-0027](0027-input-delivery-lifecycle.md))
 - Refines: ADR-0001's identity boundary, ADR-0003's transcript-frontier boundary, and ADR-0027's context-frontier and eligibility rules
+- Refined by: [ADR-0033](0033-identity-generation-supply-and-encoding.md) for snapshot and semantic-entry identity generation, supply, and Postgres encoding
 - Decision questions: context-frontier identity and resolved contents; identity versus semantic-content equality; immutability and prefix preservation; trusted construction and eligibility proof; domain, application, and persistence responsibilities; transcript-ancestry resolution
 
 ## Context
