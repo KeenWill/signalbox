@@ -6,7 +6,7 @@
 - Supersedes: none
 - Superseded by: none
 - Accepted with: ADR-0001, ADR-0003, ADR-0004, and ADR-0005 as one atomic foundation set
-- Refined by: [ADR-0030](0030-context-frontier-snapshots.md) and [ADR-0034](0034-durable-command-storage-and-equality.md) for typed durable-command storage and structural replay equality
+- Refined by: [ADR-0030](0030-context-frontier-snapshots.md), [ADR-0034](0034-durable-command-storage-and-equality.md) for typed durable-command storage and structural replay equality, and [ADR-0037](0037-baseline-user-content.md) for the concrete baseline `UserContent` algebra
 - Decision questions: no-active-turn input; durable-command deduplication; versioned session defaults; safe points, inherited configuration provenance, and terminal disposition; queued work creation, constructible effective configuration, and configuration freeze; state-specific interrupt and successor order; context frontiers; baseline queue mutation scope
 
 ## Context

@@ -5,13 +5,13 @@
 - Reviewers: pull-request review; no specialist human reviewer assigned
 - Supersedes: none
 - Superseded by: none
-- Coupled with: [ADR-0019](0019-process-protocol.md), proposed together as one pair to be decided together — the process protocol whose every exchange performs this negotiation
+- Accepted with: [ADR-0019](0019-process-protocol.md) as one coupled pair — the process protocol whose every exchange performs this negotiation
 - Depends on: the accepted foundation set ([ADR-0001](0001-domain-terminology-and-identity.md), [ADR-0003](0003-session-creation-and-transcript-ancestry.md), [ADR-0004](0004-turn-and-attempt-lifecycle.md), [ADR-0005](0005-model-call-retry-semantics.md), [ADR-0027](0027-input-delivery-lifecycle.md)) and [ADR-0009](0009-dispatch-fencing.md), whose open compatibility-window question this baseline frames
 - Decision questions: the version-plus-capability handshake and its explicit-incompatibility rule (INV-033); what the version names and what capabilities may change; the compatibility window version one promises; the fixture discipline that enforces the window; which process boundaries the baseline governs
 
 ## Context
 
-This record addresses two foundational questions listed under [protocols and persistence](../open-questions.md#protocols-and-persistence-reserved-adr-0019-through-adr-0023): protocol version and capability negotiation, whose recorded leaning is a version-plus-capability handshake with explicit incompatibility, and the cross-release compatibility policy, whose recorded leaning is a small documented compatibility window with fixtures and whose exact window is open (S12, S24). Both scenarios name the compatibility window among their remaining questions, and ADR-0009 leaves the window open for result delivery as well.
+This record addresses two foundational questions listed under [protocols and persistence](../open-questions.md#protocols-and-persistence-adr-0019-through-adr-0023): protocol version and capability negotiation, whose recorded leaning is a version-plus-capability handshake with explicit incompatibility, and the cross-release compatibility policy, whose recorded leaning is a small documented compatibility window with fixtures and whose exact window is open (S12, S24). Both scenarios name the compatibility window among their remaining questions, and ADR-0009 leaves the window open for result delivery as well.
 
 INV-033 is the catalog constraint this pair exists to make enforceable: unknown or incompatible protocol versions and required fields fail explicitly rather than being silently reinterpreted, with negotiation rules and compatibility fixtures as the anticipated enforcement. The consumers make a small window honest rather than restrictive: every version-one client — the native Swift applications, the Rust terminal client, and the browser client — is owner-controlled and released alongside the hub, so the window's job is to make skew during upgrades and development explicit and survivable, not to support an ecosystem of third-party clients.
 

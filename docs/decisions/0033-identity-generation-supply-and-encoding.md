@@ -195,8 +195,9 @@ forbidden without a separate decision.
 
 ## Open questions
 
-- Wire field types, public URL forms, compatibility rules, and protocol
-  serialization remain with reserved ADR-0019 through ADR-0021.
+- Wire field types, public URL forms, and protocol serialization remain open
+  within the [ADR-0019](0019-process-protocol.md) and
+  [ADR-0021](0021-compatibility-and-negotiation.md) baselines.
 - Runner identity supply, configuration-key assignment, and trusted
   `TranscriptFrontier` production remain with their owning feature decisions.
 - A multi-owner or externally exposed authority model must reassess information

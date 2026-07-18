@@ -7,7 +7,7 @@
 - Superseded by: none
 - Accepted with: [ADR-0010](0010-initial-scheduler-mechanics.md) as one coupled pair — the scheduler transactions that carry this fence
 - Depends on: the accepted foundation set ([ADR-0001](0001-domain-terminology-and-identity.md), [ADR-0003](0003-session-creation-and-transcript-ancestry.md), [ADR-0004](0004-turn-and-attempt-lifecycle.md), [ADR-0005](0005-model-call-retry-semantics.md), [ADR-0027](0027-input-delivery-lifecycle.md))
-- Coordinated with: Proposed [ADR-0022](0022-persistence-representation.md) (the guarded-row discipline and reserved dispatch-generation placement); if it changes, the references here follow it
+- Coordinated with: [ADR-0022](0022-persistence-representation.md) (the guarded-row discipline and reserved dispatch-generation placement); if it changes, the references here follow it
 - Decision questions: what fence a stale dispatch or result presents; the generation value's scope and ordering; the exact result-acceptance compare-and-set (INV-011); duplicate-delivery disposition; late-result routing after terminal classification
 
 ## Context
@@ -26,7 +26,7 @@ This resolves the glossary's provisional points as follows: the generation is mo
 
 ### Fence at dispatch authorization
 
-The transaction that authorizes a dispatch validates, with current-state predicates over durable rows, that the tool request is authorized and not closed or terminally disposed, that the issuing turn attempt is the turn's current live attempt and not stop-requested or dispatch-guarded under ADR-0004, and that the turn holds its slot in `Active(Running)`. The same transaction increments the attempt's current generation and records the dispatch fact. A stale scheduler pass therefore cannot mint a dispatch: after ADR-0004's terminalization guard closes the request, the guarded update matches zero rows and fails loudly rather than dispatching (the transaction discipline proposed by ADR-0022). Whether a second dispatch of the same attempt is ever permitted — as opposed to a new policy-authorized attempt — is tool-effect policy reserved for ADR-0011 through ADR-0014; this record only guarantees that when one is authorized, exactly one generation is current.
+The transaction that authorizes a dispatch validates, with current-state predicates over durable rows, that the tool request is authorized and not closed or terminally disposed, that the issuing turn attempt is the turn's current live attempt and not stop-requested or dispatch-guarded under ADR-0004, and that the turn holds its slot in `Active(Running)`. The same transaction increments the attempt's current generation and records the dispatch fact. A stale scheduler pass therefore cannot mint a dispatch: after ADR-0004's terminalization guard closes the request, the guarded update matches zero rows and fails loudly rather than dispatching (the transaction discipline defined by ADR-0022). Whether a second dispatch of the same attempt is ever permitted — as opposed to a new policy-authorized attempt — is tool-effect policy reserved for ADR-0011 through ADR-0014; this record only guarantees that when one is authorized, exactly one generation is current.
 
 ### Fence at result acceptance
 
@@ -73,10 +73,10 @@ This record fixes the enforcement mechanics of INV-011 (the exact result-accepta
 
 ## Open questions
 
-- Result acknowledgement protocol, retention policy for rejected stale or conflicting envelopes, and the compatibility window remain open (S12).
+- Result acknowledgement protocol and retention policy for rejected stale or conflicting envelopes remain open (S12); [ADR-0021](0021-compatibility-and-negotiation.md) fixes the compatibility window.
 - Who may record separate resolving evidence for a terminal-ambiguous attempt, and its representation, remain open (S06).
 - Storage placement of the current generation and per-dispatch records (an attempt column, a dispatch record, or both) is reserved to the persistence slice under ADR-0022's open question; this record fixes the semantics, not the DDL.
-- Wire encoding of the fence fields belongs to the protocol decisions (reserved ADR-0019 through ADR-0021).
+- Wire encoding of the fence fields belongs to the runner protocol (reserved ADR-0008) under [ADR-0021's](0021-compatibility-and-negotiation.md) compatibility baseline.
 
 ## Explicit non-decisions
 
