@@ -1332,7 +1332,7 @@ pub trait SubmitInputTransaction {
         &mut self,
         command: SubmitInput,
         accepted_input: AcceptedInputId,
-        turn: TurnId,
+        turn: Option<TurnId>,
     ) -> impl Future<Output = Result<SubmitInputOutcome, Self::Error>> + Send;
 }
 

@@ -8,7 +8,7 @@
 use std::future::Future;
 
 use signalbox_domain::{
-    AcceptedInputId, Actor, DeliveryRequest, DurableCommandId, SessionId,
+    AcceptedInputId, DeliveryRequest, DurableCommandId, SessionId,
     SubmitInput as DomainSubmitInput, SubmitInputResult, TurnId, UserContent,
 };
 
@@ -76,7 +76,9 @@ impl SubmitInputRequest {
 ///
 /// Production implementations return distinct UUIDv7-backed values. A
 /// candidate can remain unused when the transaction resolves replay or records
-/// a rejection. UUID timestamps are not domain order or authority.
+/// a rejection. A turn candidate is requested only for a delivery mode that
+/// creates a turn when applied; `NextSafePoint` initially creates none. UUID
+/// timestamps are not domain order or authority.
 pub trait SubmitInputIdGenerator {
     /// Generates one candidate accepted-input identity.
     fn next_accepted_input_id(&mut self) -> AcceptedInputId;
@@ -116,8 +118,11 @@ pub enum SubmitInputOutcome {
 /// Implementations look up the owner-global command identity before mutable
 /// session validation. For an unseen command they load authoritative state,
 /// allocate ordering, prepare, and atomically record the terminal result and
-/// any accepted queued-work facts. Infrastructure failure claims no identity.
-/// The application neither preloads state nor retries this port.
+/// any accepted queued-work facts. A failure proven to precede commit claims no
+/// identity, but an adapter error may be commit-ambiguous. Callers retain the
+/// command identity and exact payload until a terminal response and resubmit
+/// that same command for recovery. The application neither preloads state nor
+/// retries this port automatically.
 pub trait SubmitInputTransaction {
     /// Adapter-specific infrastructure or integrity failure.
     type Error;
@@ -127,7 +132,7 @@ pub trait SubmitInputTransaction {
         &mut self,
         command: DomainSubmitInput,
         accepted_input: AcceptedInputId,
-        turn: TurnId,
+        turn: Option<TurnId>,
     ) -> impl Future<Output = Result<SubmitInputOutcome, Self::Error>> + Send;
 }
 
@@ -165,15 +170,19 @@ where
         &mut self,
         request: SubmitInputRequest,
     ) -> Result<SubmitInputOutcome, Transaction::Error> {
+        let turn = match request.delivery {
+            DeliveryRequest::NextSafePoint { .. } => None,
+            DeliveryRequest::StartWhenNoActiveTurn { .. }
+            | DeliveryRequest::Interrupt { .. }
+            | DeliveryRequest::AfterCurrentTurn { .. } => Some(self.ids.next_turn_id()),
+        };
         let command = DomainSubmitInput::new(
             request.command_id,
             request.session,
-            Actor::Owner,
             request.content,
             request.delivery,
         );
         let accepted_input = self.ids.next_accepted_input_id();
-        let turn = self.ids.next_turn_id();
 
         self.transaction.handle(command, accepted_input, turn).await
     }
@@ -189,7 +198,7 @@ mod tests {
     };
 
     use signalbox_domain::{
-        DirectModelSelection, ModelAlias, ModelSelectionOverride, ModelSelectionRequest,
+        Actor, DirectModelSelection, ModelAlias, ModelSelectionOverride, ModelSelectionRequest,
         PerInputConfigurationChoices, SessionConfigurationDefaults,
         SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
         SessionInputPosition, SessionReconstitutionInput, SubmitInputRejectedResult,
@@ -198,7 +207,7 @@ mod tests {
     use uuid::{Uuid, Variant, Version};
 
     use super::{
-        AcceptedInputId, Actor, DeliveryRequest, DomainSubmitInput, DurableCommandId,
+        AcceptedInputId, DeliveryRequest, DomainSubmitInput, DurableCommandId,
         InvalidDurableCommandId, SessionId, SubmitInputIdGenerator, SubmitInputOutcome,
         SubmitInputRequest, SubmitInputResult, SubmitInputService, SubmitInputTransaction, TurnId,
         UserContent, UuidV7SubmitInputIdGenerator,
@@ -278,7 +287,6 @@ mod tests {
         DomainSubmitInput::new(
             request.command_id(),
             request.session(),
-            Actor::Owner,
             request.content().clone(),
             request.delivery(),
         )
@@ -290,7 +298,13 @@ mod tests {
         turn: TurnId,
     ) -> SubmitInputResult {
         let (_, result) = command_for(request)
-            .prepare_when_no_active_turn(&current_session(), accepted_input, turn, None, |_| None)
+            .prepare_when_no_active_turn(
+                &current_session(),
+                accepted_input,
+                Some(turn),
+                None,
+                |_| None,
+            )
             .expect("the command target matches the current session")
             .into_parts();
         result
@@ -352,7 +366,7 @@ mod tests {
     #[derive(Debug)]
     struct FakeTransaction {
         responses: VecDeque<Result<SubmitInputOutcome, FakeTransactionError>>,
-        observed: Vec<(DomainSubmitInput, AcceptedInputId, TurnId)>,
+        observed: Vec<(DomainSubmitInput, AcceptedInputId, Option<TurnId>)>,
     }
 
     impl FakeTransaction {
@@ -373,7 +387,7 @@ mod tests {
             &mut self,
             command: DomainSubmitInput,
             accepted_input: AcceptedInputId,
-            turn: TurnId,
+            turn: Option<TurnId>,
         ) -> impl Future<Output = Result<SubmitInputOutcome, Self::Error>> + Send {
             self.observed.push((command, accepted_input, turn));
             ready(
@@ -465,7 +479,41 @@ mod tests {
         assert_eq!(command.content(), request.content());
         assert_eq!(command.delivery(), request.delivery());
         assert_eq!(*observed_input, accepted_input);
-        assert_eq!(*observed_turn, turn);
+        assert_eq!(*observed_turn, Some(turn));
+    }
+
+    /// S08 / INV-002 / INV-028: safe-point steering supplies no turn
+    /// candidate because successful acceptance initially creates no turn.
+    #[test]
+    fn s08_inv002_inv028_next_safe_point_mints_no_turn() {
+        let request = SubmitInputRequest::try_new(
+            command_id(1),
+            session_id(2),
+            content("steer"),
+            DeliveryRequest::NextSafePoint {
+                expected_active_turn: turn_id(3),
+            },
+        )
+        .expect("ordinary command identity is admitted");
+        let expected = SubmitInputOutcome::Recorded(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::NoActiveTurn {
+                session: session_id(2),
+                expected_active_turn: turn_id(3),
+            },
+        ));
+        let mut service = SubmitInputService::new(
+            FakeIds::new([accepted_input_id(4)], []),
+            FakeTransaction::returning([Ok(expected.clone())]),
+        );
+
+        assert_eq!(
+            run_ready(service.execute(request)).expect("fake transaction succeeds"),
+            expected
+        );
+        let (ids, transaction) = service.into_parts();
+        assert_eq!(ids.accepted_input_calls, 1);
+        assert_eq!(ids.turn_calls, 0);
+        assert_eq!(transaction.observed[0].2, None);
     }
 
     /// S01 / INV-012: every closed recorded result shape passes through
