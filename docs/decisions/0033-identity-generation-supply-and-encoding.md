@@ -1,8 +1,6 @@
 # ADR-0033: Identity generation, supply, and encoding
 
 - Date: 2026-07-17
-- Owners: Repository owner
-- Reviewers: Codex (identity-boundary and persistence consistency review); no
   specialist human reviewer assigned
 - Supersedes: none
 - Superseded by: none

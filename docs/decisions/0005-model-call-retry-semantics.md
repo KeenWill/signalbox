@@ -2,8 +2,6 @@
 
 - Date: 2026-07-13
 - Amended: 2026-07-17 — [ADR-0031](0031-direct-fatal-terminalization.md) clarifies closed-boundary fatal terminalization
-- Owners: Repository owner
-- Reviewers: Codex (independent adversarial architecture review); no specialist human reviewer assigned
 - Supersedes: none
 - Superseded by: none
 - Accepted with: ADR-0001, ADR-0003, ADR-0004, and ADR-0027 as one atomic foundation set

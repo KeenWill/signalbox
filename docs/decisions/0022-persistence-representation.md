@@ -1,8 +1,6 @@
 # ADR-0022: Persistence representation
 
 - Date: 2026-07-17
-- Owners: Repository owner
-- Reviewers: Codex (architecture and acceptance consistency review); no specialist human reviewer assigned
 - Supersedes: none
 - Superseded by: none
 - Depends on: the accepted foundation set ([ADR-0001](0001-domain-terminology-and-identity.md), [ADR-0003](0003-session-creation-and-transcript-ancestry.md), [ADR-0004](0004-turn-and-attempt-lifecycle.md), [ADR-0005](0005-model-call-retry-semantics.md), [ADR-0027](0027-input-delivery-lifecycle.md)) and the accepted frontier and fatal-terminalization refinements ([ADR-0030](0030-context-frontier-snapshots.md), [ADR-0031](0031-direct-fatal-terminalization.md))
