@@ -168,7 +168,7 @@ Any future semantic compaction, selective omission, rebasing, or context-window 
 ## Open questions
 
 - Semantic transcript-entry payload variants, commit granularity, and rendering remain open; this ADR uses their already-distinct identities without defining their contents.
-- Identity generation, UUID version or other backing, database and wire encoding, and public formatting for `ContextFrontierId` remain open. ADR-0022 selects native Postgres columns only for the UUID-backed identities it names; it does not silently choose this identity's backing or boundary encodings. Its semantic ownership remains session-scoped regardless of eventual representation.
+- The [initial Rust representation](../decisions.md#2026-07-17--uuid-backed-context-frontier-values-and-sealed-prefix-derivation) selects private UUID-backed `ContextFrontierId` and `SemanticTranscriptEntryId` values. Identity generation, UUID version, caller supply versus hub minting, database and wire encoding, serialization, and public formatting remain open. ADR-0022 selects native Postgres columns only for the UUID-backed identities it names; the in-process choice does not silently extend that database mapping. Context-frontier semantic ownership remains session-scoped regardless of eventual representation.
 - Which terminal semantic boundaries a client may select as a `TranscriptFrontier` remains separate from how a validated selection resolves.
 - Physical snapshot layout, lookup interfaces, caching, integrity checks, and layout-specific migration details/tooling remain persistence concerns within ADR-0022's accepted migration discipline.
 - Non-input origin frontiers, multi-source ancestry, and semantic compaction remain future foundation decisions.

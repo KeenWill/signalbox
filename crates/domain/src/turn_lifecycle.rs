@@ -1,18 +1,18 @@
 //! Turn-lifecycle phase, ambiguity, reconciliation, and disposition values.
 //!
-//! ADR-0004 is normative. This module deliberately stops at value
-//! constructibility: exact starting-frontier construction and authoritative
-//! terminal transitions require decisions or evidence boundaries that do not
-//! yet exist. The sealed fatal-mismatch binding can construct a marker only
-//! from its exact derived ambiguity remainder and causes, but that marker
-//! remains part of an uncommitted candidate. Standalone values are not proof
-//! that aggregate guards hold.
+//! ADR-0004, ADR-0027, ADR-0030, and ADR-0031 are normative. This module
+//! deliberately stops at value constructibility: authoritative eligibility
+//! and terminal aggregate transitions require complete evidence boundaries
+//! that are not yet implemented. The sealed fatal-mismatch binding can
+//! construct a marker only from its exact derived ambiguity remainder and
+//! causes, but that marker remains part of an uncommitted candidate.
+//! Standalone values are not proof that aggregate guards hold.
 
 use std::collections::BTreeSet;
 
 use crate::{
-    AppliedInterruptProof, CurrentTurnAttempt, DurableCommandId, FatalMismatchStopCauses,
-    ModelCallId, ToolAttemptId, ToolRequestId, TurnId,
+    AppliedInterruptProof, ContextFrontier, CurrentTurnAttempt, DurableCommandId,
+    FatalMismatchStopCauses, ModelCallId, ToolAttemptId, ToolRequestId, TurnId,
     fatal_mismatch::lifecycle::FatalMismatchReconciliationMarkerCandidate,
 };
 
@@ -26,6 +26,46 @@ pub enum AcceptedInputStartingLineage {
         /// The predecessor fixed from durable total order at eligibility.
         immediate_predecessor: TurnId,
     },
+}
+
+/// The exact starting lineage and frontier fixed together for an
+/// accepted-input-origin turn.
+///
+/// This value is intentionally opaque. It has no public or crate-wide
+/// constructor: the later eligibility transition must derive both fields from
+/// authoritative queue, slot, ancestry, predecessor, and semantic-entry facts
+/// before its module-local trusted producer is added.
+///
+/// Raw values are not an eligibility proof:
+///
+/// ```compile_fail
+/// use signalbox_domain::{
+///     AcceptedInputStartingLineage, AcceptedInputTurnStart, ContextFrontier,
+/// };
+///
+/// fn raw_values_are_not_a_turn_start(
+///     lineage: AcceptedInputStartingLineage,
+///     frontier: ContextFrontier,
+/// ) {
+///     let _ = AcceptedInputTurnStart { lineage, frontier };
+/// }
+/// ```
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct AcceptedInputTurnStart {
+    lineage: AcceptedInputStartingLineage,
+    frontier: ContextFrontier,
+}
+
+impl AcceptedInputTurnStart {
+    /// Returns the eligibility-selected starting lineage.
+    pub const fn lineage(&self) -> AcceptedInputStartingLineage {
+        self.lineage
+    }
+
+    /// Returns the exact immutable starting frontier fixed with the lineage.
+    pub const fn frontier(&self) -> ContextFrontier {
+        self.frontier
+    }
 }
 
 /// One exact issued physical operation that remains ambiguous.
@@ -298,11 +338,12 @@ pub enum TurnDisposition {
 mod tests {
     use super::*;
     use crate::{
-        AppliedInterruptState,
+        AppliedInterruptState, ResolvedContextFrontierSnapshot, SemanticTranscriptEntryRef,
         applied_interrupt::test_applied_interrupt_proof,
         test_support::{
-            command_id, model_call_id, provider_target_evidence_id, tool_attempt_id,
-            tool_request_id, turn_attempt_id, turn_id,
+            command_id, context_frontier_id, model_call_id, provider_target_evidence_id,
+            semantic_transcript_entry_id, session_id, tool_attempt_id, tool_request_id,
+            turn_attempt_id, turn_id,
         },
         turn_attempt::test_fatal_mismatch_stop_causes,
     };
@@ -398,7 +439,7 @@ mod tests {
     }
 
     /// S01 / S07 / S09 / INV-009: starting lineage remains a closed typed
-    /// algebra without choosing a context-frontier representation.
+    /// algebra independently of frontier construction authority.
     #[test]
     fn starting_lineage_distinguishes_first_and_exact_predecessor() {
         let after = AcceptedInputStartingLineage::After {
@@ -418,6 +459,36 @@ mod tests {
                 immediate_predecessor
             } if immediate_predecessor == turn_id(1)
         ));
+    }
+
+    /// S01 / S09: the opaque start value retains the exact lineage/frontier
+    /// pair, but its module-private construction does not claim the later
+    /// eligibility transition is implemented.
+    #[test]
+    fn s01_s09_turn_start_shape_couples_lineage_and_exact_frontier() {
+        let snapshot = ResolvedContextFrontierSnapshot::try_from_candidate(
+            session_id(1),
+            context_frontier_id(1),
+            vec![SemanticTranscriptEntryRef::from_source(
+                session_id(1),
+                semantic_transcript_entry_id(1),
+            )],
+        )
+        .expect("test snapshot entries are ordered and distinct");
+        let start = AcceptedInputTurnStart {
+            lineage: AcceptedInputStartingLineage::After {
+                immediate_predecessor: turn_id(1),
+            },
+            frontier: snapshot.frontier(),
+        };
+
+        assert!(matches!(
+            start.lineage(),
+            AcceptedInputStartingLineage::After {
+                immediate_predecessor
+            } if immediate_predecessor == turn_id(1)
+        ));
+        assert_eq!(start.frontier(), snapshot.frontier());
     }
 
     /// S04 / S06 / S10 / INV-006 / INV-009 / INV-010: every active phase
