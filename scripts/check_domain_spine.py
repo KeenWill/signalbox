@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
 """Check that docs/domain-spine.md stays in sync with the public API.
 
-Ground truth is each crate's lib.rs export surface: `pub use` re-exports plus
-the `define_identity!` invocations in the domain crate. The check fails when
+Ground truth is each crate's lib.rs: `pub use` re-exports, the domain crate's
+`define_identity!` invocations, and any directly declared crate-root public
+item. The spine is parsed per `## crate: module` section, taking column-0
+`pub struct/enum/trait/fn` lines as its declarations. The check fails when
 
-1. an exported public name does not appear in the spine, or
-2. a per-module count in the spine's Inventory table disagrees with the
-   number of names lib.rs exports from that module.
+1. an exported name has no declaration in its owning module's section
+   (a mention elsewhere in the document does not count),
+2. a section declares a name its module no longer exports (stale declaration),
+3. a lib.rs declares a public item outside `pub use`/`define_identity!`
+   that this mapping does not cover, or
+4. a per-module count in the Inventory table disagrees with the export
+   surface, or an exporting module has no Inventory row.
 
-The spine may say more than the export surface (sealed markers, semantics
-notes); it may not say less. Run from the repository root: exits nonzero with
-a per-item report on any mismatch.
+The spine may say more than declarations (sealed markers, accessor notes); it
+may not disagree with the export surface. Run from the repository root; exits
+nonzero with a per-item report on any mismatch.
 """
 
 from __future__ import annotations
@@ -24,6 +30,13 @@ CRATES = {
     "domain": Path("crates/domain/src/lib.rs"),
     "application": Path("crates/application/src/lib.rs"),
 }
+IDENTITY_SECTION = "lib.rs — identities"
+
+DECLARATION = re.compile(r"^pub (?:struct|enum|trait|fn) ([A-Za-z_][A-Za-z0-9_]*)")
+ROOT_DECLARATION = re.compile(
+    r"^pub (?:struct|enum|trait|fn|const|static|type) ([A-Za-z_][A-Za-z0-9_]*)",
+    re.MULTILINE,
+)
 
 
 def parse_exports(lib_rs: Path) -> dict[str, set[str]]:
@@ -42,17 +55,38 @@ def parse_exports(lib_rs: Path) -> dict[str, set[str]]:
 
 def parse_identities(lib_rs: Path) -> set[str]:
     """Names declared through define_identity! invocations."""
-    text = lib_rs.read_text()
     return set(
         re.findall(
             r"define_identity!\(\s*(?:///[^\n]*\n\s*)*([A-Za-z_][A-Za-z0-9_]*)\s*\)",
-            text,
+            lib_rs.read_text(),
         )
     )
 
 
+def parse_root_declarations(lib_rs: Path) -> set[str]:
+    """Public items declared directly at column 0 of lib.rs."""
+    return set(ROOT_DECLARATION.findall(lib_rs.read_text()))
+
+
+def parse_spine_sections(spine_text: str) -> dict[tuple[str, str], set[str]]:
+    """Map (crate, section label) -> declared names in that section."""
+    sections: dict[tuple[str, str], set[str]] = {}
+    current: tuple[str, str] | None = None
+    for line in spine_text.splitlines():
+        header = re.match(r"^## (domain|application): (.+)$", line)
+        if header:
+            current = (header.group(1), header.group(2).strip())
+            sections.setdefault(current, set())
+            continue
+        if current:
+            declared = DECLARATION.match(line)
+            if declared:
+                sections[current].add(declared.group(1))
+    return sections
+
+
 def parse_inventory(spine_text: str) -> dict[tuple[str, str], int]:
-    """Map (crate, module-label) -> expected export count from the table.
+    """Map (crate, module label) -> expected export count from the table.
 
     A cell like `5 (+1 free fn)` expects 5 types plus 1 function = 6 exports;
     `8 (incl. 2 traits)` expects 8 (traits are already types).
@@ -72,20 +106,51 @@ def main() -> int:
     failures: list[str] = []
 
     identities = parse_identities(CRATES["domain"])
-    all_exports: dict[str, dict[str, set[str]]] = {
-        crate: parse_exports(path) for crate, path in CRATES.items()
-    }
+    all_exports = {crate: parse_exports(path) for crate, path in CRATES.items()}
+    sections = parse_spine_sections(spine_text)
 
-    for name in sorted(identities):
-        if not re.search(rf"\b{name}\b", spine_text):
-            failures.append(f"identity {name} is missing from the spine")
+    # Root-declared items must be the identity macros; anything else needs
+    # this mapping extended before it can pass.
+    for crate, path in CRATES.items():
+        allowed = identities if crate == "domain" else set()
+        for name in sorted(parse_root_declarations(path) - allowed):
+            failures.append(
+                f"{crate} lib.rs declares public item {name} directly; add it to"
+                " the spine and extend scripts/check_domain_spine.py to cover it"
+            )
+
+    # Declaration-level comparison per module section, both directions.
+    identity_declared = sections.get(("domain", IDENTITY_SECTION), set())
+    for name in sorted(identities - identity_declared):
+        failures.append(f"identity {name} has no declaration in the identities section")
+    for name in sorted(identity_declared - identities):
+        failures.append(
+            f"identities section declares {name}, which lib.rs does not define"
+        )
+
     for crate, exports in all_exports.items():
         for module, names in exports.items():
-            for name in sorted(names):
-                if not re.search(rf"\b{name}\b", spine_text):
-                    failures.append(
-                        f"{crate}::{module}::{name} is exported but missing from the spine"
-                    )
+            declared = sections.get((crate, module))
+            if declared is None:
+                failures.append(f"{crate}: {module} has exports but no spine section")
+                continue
+            for name in sorted(names - declared):
+                failures.append(
+                    f"{crate}::{module}::{name} is exported but not declared in"
+                    f" the '{crate}: {module}' section"
+                )
+            for name in sorted(declared - names):
+                failures.append(
+                    f"'{crate}: {module}' section declares {name}, which the"
+                    " module no longer exports"
+                )
+    for crate, label in sections:
+        if label == IDENTITY_SECTION:
+            continue
+        if label not in all_exports[crate] and sections[(crate, label)]:
+            failures.append(
+                f"spine section '{crate}: {label}' matches no exporting module"
+            )
 
     expected = parse_inventory(spine_text)
     if not expected:
