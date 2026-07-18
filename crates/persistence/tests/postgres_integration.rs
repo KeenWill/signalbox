@@ -2,13 +2,14 @@ use std::{collections::VecDeque, error::Error, sync::Arc};
 
 use signalbox_application::{
     CreateSessionError, CreateSessionOutcome, CreateSessionRequest, CreateSessionService,
-    LoadSessionService, SessionIdGenerator,
+    LoadSessionService, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
+    ReplaceSessionDefaultsService, SessionIdGenerator,
 };
 use signalbox_domain::{
     CreateSession, DurableCommandId, ModelAlias, ModelSelectionRequest, PreparedCreateSession,
-    ReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-    SessionId, TranscriptAncestry,
+    ReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
+    SessionCreationProvenance, SessionId, TranscriptAncestry,
 };
 use signalbox_persistence::{
     create_session::{
@@ -96,6 +97,22 @@ fn replacement(
             .expect("test versions are positive"),
         SessionConfigurationDefaults::new(selection),
     )
+}
+
+fn replacement_request(
+    command: u128,
+    session: u128,
+    expected: u64,
+    selection: ModelSelectionRequest,
+) -> ReplaceSessionDefaultsRequest {
+    ReplaceSessionDefaultsRequest::try_new(
+        DurableCommandId::from_uuid(Uuid::from_u128(command)),
+        SessionId::from_uuid(Uuid::from_u128(session)),
+        SessionConfigurationDefaultsVersion::try_from_u64(expected)
+            .expect("test versions are positive"),
+        SessionConfigurationDefaults::new(selection),
+    )
+    .expect("ordinary test command identities are admitted")
 }
 
 #[derive(Debug)]
@@ -1131,44 +1148,48 @@ async fn inv002_inv008_inv012_defaults_schema_enforces_typed_receipts() -> Resul
     Ok(())
 }
 
-/// S01 / INV-002 / INV-008 / INV-012: defaults replacement records applied
-/// and stale outcomes, replays historical receipts without rereading the
-/// pointer, and leaves creation-time history distinct from current Session.
+/// S01 / INV-002 / INV-008 / INV-012: the application service through the
+/// Postgres adapter records applied and stale outcomes, replays historical
+/// receipts, and leaves creation history distinct from current Session.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s01_inv002_inv008_inv012_defaults_apply_replay_stale_and_history()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let create_repository = CreateSessionRepository::new(pool.clone());
-    let defaults_repository = ReplaceSessionDefaultsRepository::new(pool.clone());
-    let session_repository = SessionRepository::new(pool.clone());
+    let mut defaults_service =
+        ReplaceSessionDefaultsService::new(ReplaceSessionDefaultsRepository::new(pool.clone()));
+    let load_service = LoadSessionService::new(SessionRepository::new(pool.clone()));
     let creation = prepared(0x211, 0x711, direct(0x811));
     create_repository.handle(creation).await?;
 
-    let first = replacement(0x212, 0x711, 1, alias(0x812));
-    let first_outcome = defaults_repository.handle(first).await?;
-    let ReplaceSessionDefaultsHandlingOutcome::Applied(first_applied) = first_outcome else {
+    let first = replacement_request(0x212, 0x711, 1, alias(0x812));
+    let first_outcome = defaults_service.execute(first).await?;
+    let ReplaceSessionDefaultsOutcome::Recorded(ReplaceSessionDefaultsResult::Applied(
+        first_applied,
+    )) = first_outcome
+    else {
         panic!("the first replacement must apply");
     };
     assert_eq!(
         first_applied.installed().version(),
         SessionConfigurationDefaultsVersion::try_from_u64(2).expect("positive version")
     );
-    assert_eq!(defaults_repository.handle(first).await?, first_outcome);
+    assert_eq!(defaults_service.execute(first).await?, first_outcome);
 
-    let conflict = replacement(0x212, 0x711, 1, direct(0x813));
+    let conflict = replacement_request(0x212, 0x711, 1, direct(0x813));
     assert_eq!(
-        defaults_repository.handle(conflict).await?,
-        ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse {
+        defaults_service.execute(conflict).await?,
+        ReplaceSessionDefaultsOutcome::ConflictingReuse {
             command_id: first.command_id()
         }
     );
 
-    let stale = replacement(0x213, 0x711, 1, direct(0x814));
-    let stale_outcome = defaults_repository.handle(stale).await?;
-    let ReplaceSessionDefaultsHandlingOutcome::Rejected(
+    let stale = replacement_request(0x213, 0x711, 1, direct(0x814));
+    let stale_outcome = defaults_service.execute(stale).await?;
+    let ReplaceSessionDefaultsOutcome::Recorded(ReplaceSessionDefaultsResult::Rejected(
         ReplaceSessionDefaultsRejectedResult::CurrentVersionMismatch(stale_result),
-    ) = stale_outcome
+    )) = stale_outcome
     else {
         panic!("the unseen stale command must record a mismatch");
     };
@@ -1177,25 +1198,25 @@ async fn s01_inv002_inv008_inv012_defaults_apply_replay_stale_and_history()
         SessionConfigurationDefaultsVersion::try_from_u64(2).expect("positive version")
     );
 
-    let later = replacement(0x214, 0x711, 2, direct(0x815));
+    let later = replacement_request(0x214, 0x711, 2, direct(0x815));
     assert!(matches!(
-        defaults_repository.handle(later).await?,
-        ReplaceSessionDefaultsHandlingOutcome::Applied(_)
+        defaults_service.execute(later).await?,
+        ReplaceSessionDefaultsOutcome::Recorded(ReplaceSessionDefaultsResult::Applied(_))
     ));
 
     assert_eq!(
-        defaults_repository.handle(first).await?,
+        defaults_service.execute(first).await?,
         first_outcome,
         "historical applied replay must not require the mutable pointer"
     );
     assert_eq!(
-        defaults_repository.handle(stale).await?,
+        defaults_service.execute(stale).await?,
         stale_outcome,
         "recorded stale rejection must survive later state"
     );
 
-    let current = session_repository
-        .load_session(creation.session().id())
+    let current = load_service
+        .execute(creation.session().id())
         .await?
         .expect("the session remains current");
     assert_eq!(
@@ -1291,38 +1312,44 @@ async fn inv012_cross_kind_reuse_is_conflict_not_corruption_or_absence()
     Ok(())
 }
 
-/// INV-008 / INV-012: two distinct unseen commands expecting one version use
-/// the pointer CAS as their linearization boundary. Exactly one installs the
-/// successor and the loser records the winner's version as a stale rejection.
+/// INV-008 / INV-012: two application-service calls expecting one version use
+/// the adapter's pointer CAS as their linearization boundary. Exactly one
+/// installs the successor and the loser records the winner's version as stale.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv008_inv012_concurrent_defaults_replacements_have_one_winner()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let create_repository = CreateSessionRepository::new(pool.clone());
-    let defaults_repository = ReplaceSessionDefaultsRepository::new(pool.clone());
     create_repository
         .handle(prepared(0x231, 0x731, direct(0x831)))
         .await?;
-    let left_command = replacement(0x232, 0x731, 1, direct(0x832));
-    let right_command = replacement(0x233, 0x731, 1, alias(0x833));
+    let mut left_service =
+        ReplaceSessionDefaultsService::new(ReplaceSessionDefaultsRepository::new(pool.clone()));
+    let mut right_service =
+        ReplaceSessionDefaultsService::new(ReplaceSessionDefaultsRepository::new(pool.clone()));
+    let left_command = replacement_request(0x232, 0x731, 1, direct(0x832));
+    let right_command = replacement_request(0x233, 0x731, 1, alias(0x833));
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
 
     let (left, right) = tokio::join!(
         async {
             barrier.wait().await;
-            defaults_repository.handle(left_command).await
+            left_service.execute(left_command).await
         },
         async {
             barrier.wait().await;
-            defaults_repository.handle(right_command).await
+            right_service.execute(right_command).await
         }
     );
     let outcomes = [left?, right?];
     assert_eq!(
         outcomes
             .iter()
-            .filter(|outcome| matches!(outcome, ReplaceSessionDefaultsHandlingOutcome::Applied(_)))
+            .filter(|outcome| matches!(
+                outcome,
+                ReplaceSessionDefaultsOutcome::Recorded(ReplaceSessionDefaultsResult::Applied(_))
+            ))
             .count(),
         1
     );
@@ -1331,9 +1358,9 @@ async fn inv008_inv012_concurrent_defaults_replacements_have_one_winner()
             .iter()
             .filter(|outcome| matches!(
                 outcome,
-                ReplaceSessionDefaultsHandlingOutcome::Rejected(
+                ReplaceSessionDefaultsOutcome::Recorded(ReplaceSessionDefaultsResult::Rejected(
                     ReplaceSessionDefaultsRejectedResult::CurrentVersionMismatch(_)
-                )
+                ))
             ))
             .count(),
         1
@@ -1416,10 +1443,11 @@ async fn inv008_inv012_exhaustion_and_precommit_failure_are_distinct() -> Result
     .bind(Uuid::from_u128(0x845))
     .execute(&pool)
     .await?;
-    let fails_after_claim = replacement(0x244, 0x742, 1, alias(0x846));
+    let fails_after_claim = replacement_request(0x244, 0x742, 1, alias(0x846));
+    let mut failing_service = ReplaceSessionDefaultsService::new(defaults_repository.clone());
     assert!(matches!(
-        defaults_repository
-            .handle(fails_after_claim)
+        failing_service
+            .execute(fails_after_claim)
             .await
             .expect_err("the colliding immutable successor aborts the transaction"),
         ReplaceSessionDefaultsRepositoryError::Database(_)

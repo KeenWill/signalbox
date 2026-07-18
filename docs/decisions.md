@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-18 — Postgres implements the application defaults-replacement port
+
+**Context.** The application crate owns the one-call `ReplaceSessionDefaultsTransaction` port and its closed recorded-or-conflict outcome, while the persistence crate already owns the atomic PostgreSQL handler required by ADR-0027 and ADR-0034. The final adapter must connect those seams without duplicating replay, current-pointer, or reconstruction policy.
+
+**Decision.** Implement the application port directly for `ReplaceSessionDefaultsRepository`. Delegate to its existing atomic handler and exhaustively translate repository applied and rejected variants into the application's recorded domain result, while translating owner-global conflicting reuse to the application conflict and retaining `ReplaceSessionDefaultsRepositoryError` unchanged. Exercise the application service through the real adapter for first apply, equal replay, conflict, recorded stale rejection and later replay, concurrent same-expected replacement, current-session observation, immutable creation receipt, and infrastructure failure.
+
+**Rejected alternatives.** Making application depend on persistence would reverse the adapter direction. A wrapper type would add a second public repository without policy. Repeating SQL, preparation, or domain reconstruction in the trait method would create a competing transaction path. Erasing repository errors would discard the infrastructure-versus-integrity distinction.
+
+**Affects.** `crates/persistence/src/replace_session_defaults.rs`, S01/INV-002/INV-008/INV-012 PostgreSQL integration enforcement, and the corresponding invariant-catalog wording. It adds no schema, domain or application semantics, protocol, authentication, client, retry policy, or dependency.
+
 ## 2026-07-18 — Application-owned session-defaults replacement orchestration
 
 **Context.** The domain replacement slice defines the exact canonical command and typed applied-or-rejected results, while ADR-0027 and ADR-0034 require owner-global command lookup before mutable current-state validation and make one transaction authoritative for replay, rejection, and compare-and-set installation. Application orchestration must validate boundary identity and invoke that transaction without preloading a `Session` or preparing against a potentially stale snapshot.
