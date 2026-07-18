@@ -3,6 +3,7 @@
 use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
+use signalbox_application::{ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsTransaction};
 use signalbox_domain::{
     DirectModelSelection, DurableCommandId, ModelAlias, ModelSelectionRequest,
     PreparedReplaceSessionDefaults, ReconstitutedReplaceSessionDefaults, ReplaceSessionDefaults,
@@ -310,6 +311,33 @@ impl ReplaceSessionDefaultsRepository {
                 Err(ReplaceSessionDefaultsRepositoryError::DifferentCommandKind { command_id })
             }
         }
+    }
+}
+
+impl ReplaceSessionDefaultsTransaction for ReplaceSessionDefaultsRepository {
+    type Error = ReplaceSessionDefaultsRepositoryError;
+
+    async fn handle(
+        &mut self,
+        command: ReplaceSessionDefaults,
+    ) -> Result<ReplaceSessionDefaultsOutcome, Self::Error> {
+        let outcome = ReplaceSessionDefaultsRepository::handle(self, command).await?;
+
+        Ok(match outcome {
+            ReplaceSessionDefaultsHandlingOutcome::Applied(result) => {
+                ReplaceSessionDefaultsOutcome::Recorded(ReplaceSessionDefaultsResult::Applied(
+                    result,
+                ))
+            }
+            ReplaceSessionDefaultsHandlingOutcome::Rejected(result) => {
+                ReplaceSessionDefaultsOutcome::Recorded(ReplaceSessionDefaultsResult::Rejected(
+                    result,
+                ))
+            }
+            ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id } => {
+                ReplaceSessionDefaultsOutcome::ConflictingReuse { command_id }
+            }
+        })
     }
 }
 
