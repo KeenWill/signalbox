@@ -74,6 +74,17 @@ and listed there: `DirectModelSelection`, `ModelAlias` (configuration),
 `ProviderModelIdentity` (model_call), `ContextFrontierId`,
 `SemanticTranscriptEntryId` (context_frontier).
 
+## domain: actor
+
+```rust
+pub enum Actor {
+    Owner,
+    Model { turn: TurnId },
+    Recovery,
+    Tool { request: ToolRequestId },
+}
+```
+
 ## domain: session
 
 ```rust
@@ -409,6 +420,209 @@ pub enum DeliveryRequest {
         expected_active_turn: TurnId,
         configuration: PerInputConfigurationChoices,
     },
+}
+```
+
+## domain: user_content
+
+```rust
+pub struct NonEmptyUnicodeText(/* private String */);
+impl NonEmptyUnicodeText {
+    pub fn try_new(value: String) -> Result<Self, NonEmptyUnicodeTextError>;
+    pub fn into_string(self) -> String;
+    // accessors: as_str()
+}
+
+pub enum NonEmptyUnicodeTextFailure {
+    Empty,
+    ContainsNull,
+}
+
+pub struct NonEmptyUnicodeTextError { /* private */ }
+impl NonEmptyUnicodeTextError {
+    pub fn into_parts(self) -> (String, NonEmptyUnicodeTextFailure);
+    // accessors: failure(), value()
+}
+
+pub enum UserContent {
+    Text { value: NonEmptyUnicodeText },
+}
+impl UserContent {
+    pub fn try_text(value: String) -> Result<Self, NonEmptyUnicodeTextError>;
+    // accessors: text()
+}
+```
+
+## domain: submit_input
+
+```rust
+pub struct SubmitInput { /* private */ }
+impl SubmitInput {
+    pub const fn new(
+        command_id: DurableCommandId,
+        session: SessionId,
+        actor: Actor,
+        content: UserContent,
+        delivery: DeliveryRequest,
+    ) -> Self;
+    pub fn prepare_session_not_found(self) -> PreparedSubmitInput;
+    pub fn prepare_when_no_active_turn(
+        self,
+        session: &Session,
+        accepted_input: AcceptedInputId,
+        turn: TurnId,
+        previous_position: Option<SessionInputPosition>,
+        select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+    ) -> Result<PreparedSubmitInput, SubmitInputPreparationError>;
+    // accessors: command_id(), session(), actor(), content(), delivery()
+}
+// Eq/Hash exclude command_id; all other fields participate
+
+pub enum SubmitInputResult {
+    Applied(SubmitInputAppliedResult),
+    Rejected(SubmitInputRejectedResult),
+}
+
+pub struct SubmitInputAppliedResult { /* private */ }
+// sealed: SubmitInput preparation or SubmitInputReconstitutionInput::reconstitute
+impl SubmitInputAppliedResult {
+    // accessors: accepted_input(), session(), turn(), disposition(),
+    // queue_order(), acceptance_position(), origin_configuration()
+}
+
+pub enum SubmitInputRejectedResult {
+    SessionNotFound {
+        session: SessionId,
+    },
+    NoActiveTurn {
+        session: SessionId,
+        expected_active_turn: TurnId,
+    },
+    SessionDefaultsVersionMismatch {
+        session: SessionId,
+        expected: SessionConfigurationDefaultsVersion,
+        current: SessionConfigurationDefaultsVersion,
+    },
+    UnknownModelAlias {
+        session: SessionId,
+        alias: ModelAlias,
+    },
+    AcceptancePositionExhausted {
+        session: SessionId,
+        last: SessionInputPosition,
+    },
+}
+
+pub struct PreparedSubmitInput { /* private */ }
+// sealed: SubmitInput preparation
+impl PreparedSubmitInput {
+    pub fn into_parts(self) -> (SubmitInput, SubmitInputResult);
+    // accessors: command(), result()
+}
+
+pub struct SubmitInputPreparationError { /* private */ }
+// sealed: Err of SubmitInput::prepare_when_no_active_turn; not terminal
+impl SubmitInputPreparationError {
+    pub fn into_parts(self) -> (SubmitInput, SessionId);
+    // accessors: command(), provided_session()
+}
+
+pub struct SubmitInputReconstitutionInput { /* private */ }
+impl SubmitInputReconstitutionInput {
+    pub fn applied(
+        command: SubmitInput,
+        result_session: SessionId,
+        result_accepted_input: AcceptedInputId,
+        result_turn: TurnId,
+        accepted_command: DurableCommandId,
+        accepted_input: AcceptedInputId,
+        accepted_session: SessionId,
+        accepted_content: UserContent,
+        accepted_delivery: DeliveryRequest,
+        accepted_position: SessionInputPosition,
+        accepted_disposition: AcceptedInputDisposition,
+        queue_session: SessionId,
+        queue_turn: TurnId,
+        queue_order: AcceptedInputQueueOrder,
+        defaults_session: SessionId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+        stored_requested_model: ModelSelectionRequest,
+        stored_frozen_model: FrozenModelSelection,
+    ) -> Self;
+    pub const fn rejected_session_not_found(
+        command: SubmitInput,
+        result_session: SessionId,
+    ) -> Self;
+    pub const fn rejected_no_active_turn(
+        command: SubmitInput,
+        result_session: SessionId,
+        result_expected_active_turn: TurnId,
+    ) -> Self;
+    pub const fn rejected_defaults_version_mismatch(
+        command: SubmitInput,
+        result_session: SessionId,
+        result_expected: SessionConfigurationDefaultsVersion,
+        result_current: SessionConfigurationDefaultsVersion,
+    ) -> Self;
+    pub const fn rejected_unknown_model_alias(
+        command: SubmitInput,
+        result_session: SessionId,
+        result_alias: ModelAlias,
+        defaults_session: SessionId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+    ) -> Self;
+    pub const fn rejected_acceptance_position_exhausted(
+        command: SubmitInput,
+        result_session: SessionId,
+        result_last_position: SessionInputPosition,
+    ) -> Self;
+    pub fn reconstitute(self)
+        -> Result<ReconstitutedSubmitInput, SubmitInputReconstitutionError>;
+    // accessors: command()
+}
+
+pub enum SubmitInputReconstitutionFailure {
+    AppliedDeliveryIsNotStart,
+    ResultSessionMismatch,
+    AcceptedCommandMismatch,
+    AcceptedInputMismatch,
+    AcceptedSessionMismatch,
+    AcceptedContentMismatch,
+    AcceptedDeliveryMismatch,
+    AcceptedDispositionMismatch,
+    QueueSessionMismatch,
+    QueueTurnMismatch,
+    QueuePositionMismatch,
+    QueuePriorityMismatch,
+    RejectionDeliveryIsNotStart,
+    ExpectedActiveTurnMismatch,
+    ExpectedDefaultsVersionMismatch,
+    RejectedDefaultsVersionsAreEqual,
+    DefaultsSessionMismatch,
+    DefaultsVersionMismatch,
+    RequestedModelMismatch,
+    FrozenModelMismatch,
+    UnknownAliasMismatch,
+    RejectionDidNotSelectAlias,
+    PositionIsNotExhausted,
+}
+
+pub struct SubmitInputReconstitutionError { /* private */ }
+// sealed: Err of SubmitInputReconstitutionInput::reconstitute
+impl SubmitInputReconstitutionError {
+    pub fn into_parts(
+        self,
+    ) -> (SubmitInputReconstitutionInput, SubmitInputReconstitutionFailure);
+    // accessors: failure(), input()
+}
+
+pub struct ReconstitutedSubmitInput { /* private */ }
+// sealed: SubmitInputReconstitutionInput::reconstitute; authorizes no effect
+impl ReconstitutedSubmitInput {
+    pub fn into_parts(self) -> (SubmitInput, SubmitInputResult);
+    // accessors: command(), result()
 }
 ```
 
@@ -1086,10 +1300,13 @@ impl<Transaction: ReplaceSessionDefaultsTransaction> ReplaceSessionDefaultsServi
 | Module | Public types |
 | --- | --- |
 | domain: lib.rs identities | 9 |
+| domain: actor | 1 |
 | domain: session | 18 |
 | domain: configuration | 19 |
 | domain: accepted_input | 5 |
 | domain: delivery_request | 2 |
+| domain: user_content | 4 |
+| domain: submit_input | 10 |
 | domain: queue_order | 5 (+1 free fn) |
 | domain: turn_lifecycle | 10 |
 | domain: turn_attempt | 13 |
@@ -1099,7 +1316,7 @@ impl<Transaction: ReplaceSessionDefaultsTransaction> ReplaceSessionDefaultsServi
 | domain: applied_interrupt | 2 |
 | domain: fatal_mismatch | 0 |
 | domain: replace_session_defaults | 13 |
-| **signalbox-domain total** | **113 (+1 free fn)** |
+| **signalbox-domain total** | **128 (+1 free fn)** |
 | application: create_session | 8 (incl. 2 traits) |
 | application: load_session | 2 (incl. 1 trait) |
 | application: replace_session_defaults | 4 (incl. 1 trait) |
