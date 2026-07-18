@@ -53,8 +53,9 @@ pub use session::{
     CreateSession, CreateSessionAppliedResult, CreateSessionPreparationError,
     CreateSessionPreparationFailure, CreateSessionReconstitutionError,
     CreateSessionReconstitutionFailure, CreateSessionReconstitutionInput, InitialSession,
-    PreparedCreateSession, ReconstitutedSessionCreation, SessionCreationCause,
-    SessionCreationProvenance, TranscriptAncestry, TranscriptFrontier,
+    PreparedCreateSession, ReconstitutedSessionCreation, Session, SessionCreationCause,
+    SessionCreationProvenance, SessionReconstitutionError, SessionReconstitutionFailure,
+    SessionReconstitutionInput, TranscriptAncestry, TranscriptFrontier,
 };
 pub use turn_attempt::{
     AppliedInterruptState, AttemptEnd, CancellationStopDisposition, CurrentTurnAttempt,
