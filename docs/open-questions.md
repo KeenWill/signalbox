@@ -6,7 +6,7 @@ Some questions carry an ADR number reserved by earlier planning and cited from a
 
 ## Identity representation
 
-- **Wire identity representation.** [ADR-0033](decisions/0033-identity-generation-supply-and-encoding.md) closes generation, supply, minting authority, and baseline Postgres encoding. Protocol field types, public URL forms, compatibility, and wire serialization remain with reserved ADR-0019 through ADR-0021. Blocks cross-process protocols, not persistence. (S01, S02, S04, S08, S10, S12)
+- **Wire identity representation.** [ADR-0033](decisions/0033-identity-generation-supply-and-encoding.md) closes generation, supply, minting authority, and baseline Postgres encoding. Protocol field types, public URL forms, and wire serialization remain open within the [ADR-0019](decisions/0019-process-protocol.md) and [ADR-0021](decisions/0021-compatibility-and-negotiation.md) baselines. Blocks cross-process protocols, not persistence. (S01, S02, S04, S08, S10, S12)
 - **Semantic transcript-entry extensions and rendering.** [ADR-0036](decisions/0036-initial-semantic-transcript-entries.md) fixes origin-accepted-input and failed-turn payloads plus their eligibility and terminal-failure commit boundaries. Assistant content and completion, refusal, cancellation, reconciliation, mismatch, accepted-risk, steering, tool, approval, and delegation variants remain open together with provider/client rendering. Blocks those later semantic-history slices, not the first origin activation slice. (S02–S04, S08, S09, S17)
 - **Selectable transcript-frontier boundaries.** Which terminal semantic boundaries a client may select as a `TranscriptFrontier` remains open; ADR-0030 decides only how a validated selection resolves into a new session's context. Blocks fork selection. (S17)
 
@@ -75,14 +75,11 @@ Provider and integration credential lifecycle (storage, delivery, and rotation) 
 - **Runner enrollment, authentication, and revocation.** Strong runner identity distinct from capability claims, with rotation. Blocks remote runners. (S05, S06, S12–S16)
 - **First-release resource limits.** Leaning: explicit bounded concurrency and configurable usage limits at effect boundaries. Blocks public release. (S02–S06, S13–S18)
 
-## Protocols and persistence (reserved ADR-0019 through ADR-0023)
+## Protocols and persistence (ADR-0019 through ADR-0023)
 
-- **Process protocol (Protobuf/gRPC, Connect, JSON/HTTP, other).** Leaning: define semantics and fixtures before selecting transport. Blocks cross-process implementation. (S01, S02, S12, S24)
 - **Browser transport.** Preserve authoritative-snapshot-plus-transient-stream semantics; technology open. Blocks the web client. (S02, S24)
-- **Protocol version and capability negotiation.** Leaning: version plus capability handshake with explicit incompatibility. Blocks remote clients and runners. (S12, S24)
 - **Persistence implementation within the accepted relational baseline.** [ADR-0022](decisions/0022-persistence-representation.md) closes the broad stable-storage question, [ADR-0032](decisions/0032-postgres-implementation-dependencies.md) selects the driver, pool, migration, runtime, and ephemeral-test stack, [ADR-0034](decisions/0034-durable-command-storage-and-equality.md) closes canonical command payload/result storage and equality, and [ADR-0035](decisions/0035-domain-owned-persistence-reconstitution.md) fixes the domain-owned complete-projection boundary for reconstructing opaque values. Streaming checkpoints, dispatch-generation placement, archival form, and exact cancellation-delivery records remain open. The [first physical frontier-layout choice](decisions.md#2026-07-17--materialize-complete-membership-for-first-context-frontier-storage) materializes complete ordered membership while preserving ADR-0030's freedom for a later semantics-preserving migration. Those remaining questions block only their corresponding adapter slices; the generic scaffold and first typed command family are not blocked. (S03, S04, S17, S25, S27)
 - **Swift client type generation.** Leaning: generated boundary types mapped to hand-written client domain types. Deferrable until the Swift client. (S01, S24)
-- **Cross-release compatibility policy.** Leaning: small documented compatibility window with fixtures; exact window open. Blocks the first public release. (S12, S24)
 
 ## Client scope (reserved ADR-0024, ADR-0025, ADR-0026)
 
