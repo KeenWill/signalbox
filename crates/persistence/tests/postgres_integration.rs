@@ -1,7 +1,18 @@
-use std::error::Error;
+use std::{error::Error, sync::Arc};
 
-use signalbox_persistence::{local_test_connection_options, migrate};
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use signalbox_domain::{
+    CreateSession, DurableCommandId, ModelAlias, ModelSelectionRequest, PreparedCreateSession,
+    SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance, SessionId,
+    TranscriptAncestry,
+};
+use signalbox_persistence::{
+    create_session::{
+        CreateSessionCorruption, CreateSessionHandlingOutcome, CreateSessionRepository,
+        CreateSessionRepositoryError,
+    },
+    local_test_connection_options, migrate,
+};
+use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
     postgres::Postgres,
     testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
@@ -12,7 +23,7 @@ const DATABASE_NAME: &str = "signalbox_integration";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
 
-async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
+async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>> {
     let container = Postgres::default()
         .with_db_name(DATABASE_NAME)
         .with_user(DATABASE_USER)
@@ -26,19 +37,46 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
     let database_url =
         format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
     let pool = PgPoolOptions::new()
-        .max_connections(1)
+        .max_connections(8)
         .connect_with(local_test_connection_options(&database_url)?)
         .await?;
 
     migrate(&pool).await?;
 
-    Ok((container, pool))
+    Ok((container, pool, database_url))
+}
+
+fn prepared(
+    command: u128,
+    session: u128,
+    selection: ModelSelectionRequest,
+) -> PreparedCreateSession {
+    CreateSession::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(command)),
+        SessionCreationProvenance::new(
+            SessionCreationCause::OwnerInitiated,
+            TranscriptAncestry::None,
+        ),
+        SessionConfigurationDefaults::new(selection),
+    )
+    .prepare(SessionId::from_uuid(Uuid::from_u128(session)))
+    .expect("owner-initiated creation without ancestry is preparable")
+}
+
+fn direct(value: u128) -> ModelSelectionRequest {
+    ModelSelectionRequest::Direct(signalbox_domain::DirectModelSelection::from_uuid(
+        Uuid::from_u128(value),
+    ))
+}
+
+fn alias(value: u128) -> ModelSelectionRequest {
+    ModelSelectionRequest::Alias(ModelAlias::from_uuid(Uuid::from_u128(value)))
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn embedded_migrator_connects_and_is_idempotent() -> Result<(), Box<dyn Error>> {
-    let (container, pool) = migrated_postgres().await?;
+    let (container, pool, _database_url) = migrated_postgres().await?;
     migrate(&pool).await?;
     let connected: i32 = sqlx::query_scalar("SELECT 1").fetch_one(&pool).await?;
     assert_eq!(connected, 1);
@@ -53,7 +91,7 @@ async fn embedded_migrator_connects_and_is_idempotent() -> Result<(), Box<dyn Er
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s01_inv003_inv008_inv012_create_session_schema_preserves_typed_facts()
 -> Result<(), Box<dyn Error>> {
-    let (container, pool) = migrated_postgres().await?;
+    let (container, pool, _database_url) = migrated_postgres().await?;
     let mut transaction = pool.begin().await?;
 
     sqlx::query(
@@ -167,7 +205,7 @@ async fn s01_inv003_inv008_inv012_create_session_schema_preserves_typed_facts()
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv012_registry_and_create_session_constraints_reject_torn_or_conflicting_records()
 -> Result<(), Box<dyn Error>> {
-    let (container, pool) = migrated_postgres().await?;
+    let (container, pool, _database_url) = migrated_postgres().await?;
 
     let mut registry_only = pool.begin().await?;
     sqlx::query(
@@ -256,7 +294,7 @@ async fn inv012_registry_and_create_session_constraints_reject_torn_or_conflicti
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s01_schema_rejects_invalid_provenance_defaults_and_mutation() -> Result<(), Box<dyn Error>>
 {
-    let (container, pool) = migrated_postgres().await?;
+    let (container, pool, _database_url) = migrated_postgres().await?;
 
     for statement in [
         "INSERT INTO session (session_id, creation_cause, ancestry_kind)
@@ -444,5 +482,313 @@ async fn s01_schema_rejects_invalid_provenance_defaults_and_mutation() -> Result
     pool.close().await;
     drop(container);
 
+    Ok(())
+}
+
+/// S01 / INV-012: first handling commits the complete typed creation, equal
+/// replay returns the recorded identity, and structural conflict changes
+/// nothing. Direct and alias defaults round-trip through reconstitution.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s01_inv012_transaction_apply_replay_conflict_and_restart() -> Result<(), Box<dyn Error>> {
+    let (container, pool, database_url) = migrated_postgres().await?;
+    let repository = CreateSessionRepository::new(pool.clone());
+    let first = prepared(0x101, 0x701, direct(0x801));
+
+    assert_eq!(
+        repository.handle(first).await?,
+        CreateSessionHandlingOutcome::Applied(first.applied_result())
+    );
+
+    let replay_candidate = prepared(0x101, 0x702, direct(0x801));
+    assert_eq!(
+        repository.handle(replay_candidate).await?,
+        CreateSessionHandlingOutcome::Applied(first.applied_result())
+    );
+
+    let conflicting = prepared(0x101, 0x703, alias(0x802));
+    assert_eq!(
+        repository.handle(conflicting).await?,
+        CreateSessionHandlingOutcome::ConflictingReuse {
+            command_id: first.command().command_id()
+        }
+    );
+
+    let separate = prepared(0x102, 0x704, direct(0x801));
+    let alias_creation = prepared(0x103, 0x705, alias(0x803));
+    assert_eq!(
+        repository.handle(separate).await?,
+        CreateSessionHandlingOutcome::Applied(separate.applied_result())
+    );
+    assert_eq!(
+        repository.handle(alias_creation).await?,
+        CreateSessionHandlingOutcome::Applied(alias_creation.applied_result())
+    );
+    let loaded_alias = repository
+        .load(alias_creation.command().command_id())
+        .await?
+        .expect("the applied alias creation must load");
+    assert_eq!(loaded_alias.command(), alias_creation.command());
+    assert_eq!(
+        loaded_alias.applied_result(),
+        alias_creation.applied_result()
+    );
+
+    let counts: (i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM durable_command),
+            (SELECT count(*) FROM create_session_command),
+            (SELECT count(*) FROM session),
+            (SELECT count(*) FROM session_defaults_version),
+            (SELECT count(*) FROM session_current_defaults)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(counts, (3, 3, 3, 3, 3));
+
+    pool.close().await;
+    let restarted_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(local_test_connection_options(&database_url)?)
+        .await?;
+    let restarted = CreateSessionRepository::new(restarted_pool.clone());
+    let reconstituted = restarted
+        .load(first.command().command_id())
+        .await?
+        .expect("committed creation must survive a new pool");
+    assert_eq!(reconstituted.command(), first.command());
+    assert_eq!(reconstituted.session().id(), first.session().id());
+    assert_eq!(reconstituted.applied_result(), first.applied_result());
+
+    restarted_pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S01 / INV-012: the owner-global primary key is the concurrency boundary.
+/// Equal duplicates return one winner; unequal duplicates retain that winner
+/// and report one typed conflict.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s01_inv012_concurrent_duplicates_converge_on_the_committed_winner()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = CreateSessionRepository::new(pool.clone());
+
+    let equal_left = prepared(0x111, 0x711, direct(0x811));
+    let equal_right = prepared(0x111, 0x712, direct(0x811));
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let (left, right) = tokio::join!(
+        async {
+            barrier.wait().await;
+            repository.handle(equal_left).await
+        },
+        async {
+            barrier.wait().await;
+            repository.handle(equal_right).await
+        }
+    );
+    let (left, right) = (left?, right?);
+    let (
+        CreateSessionHandlingOutcome::Applied(left_result),
+        CreateSessionHandlingOutcome::Applied(right_result),
+    ) = (left, right)
+    else {
+        panic!("equal duplicates must both return the recorded applied result");
+    };
+    assert_eq!(left_result, right_result);
+
+    let conflict_left = prepared(0x112, 0x713, direct(0x812));
+    let conflict_right = prepared(0x112, 0x714, alias(0x813));
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let (left, right) = tokio::join!(
+        async {
+            barrier.wait().await;
+            repository.handle(conflict_left).await
+        },
+        async {
+            barrier.wait().await;
+            repository.handle(conflict_right).await
+        }
+    );
+    let outcomes = [left?, right?];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, CreateSessionHandlingOutcome::Applied(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(
+                outcome,
+                CreateSessionHandlingOutcome::ConflictingReuse { .. }
+            ))
+            .count(),
+        1
+    );
+
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM durable_command),
+            (SELECT count(*) FROM session)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(counts, (2, 2));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S01 / INV-012: a later write failure rolls back the provisional registry
+/// insert, so the same command ID remains available for a valid retry.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_infrastructure_failure_leaves_the_command_unclaimed() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = CreateSessionRepository::new(pool.clone());
+    let existing = prepared(0x121, 0x721, direct(0x821));
+    repository.handle(existing).await?;
+
+    let colliding = prepared(0x122, 0x721, direct(0x822));
+    let error = repository
+        .handle(colliding)
+        .await
+        .expect_err("the session identity collision must abort first handling");
+    assert!(matches!(error, CreateSessionRepositoryError::Database(_)));
+    assert!(
+        repository
+            .load(colliding.command().command_id())
+            .await?
+            .is_none()
+    );
+
+    let retry = prepared(0x122, 0x722, direct(0x822));
+    assert_eq!(
+        repository.handle(retry).await?,
+        CreateSessionHandlingOutcome::Applied(retry.applied_result())
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-012: an observed owner-global claim is never treated as unseen merely
+/// because its typed record is missing or its storage version is unknown.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_incomplete_or_unknown_claims_fail_closed_as_corruption()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    sqlx::query(
+        "ALTER TABLE durable_command
+         DROP CONSTRAINT durable_command_typed_record_fk",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE durable_command
+         DROP CONSTRAINT durable_command_storage_version_supported",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES
+            ('10000000-0000-4000-8000-000000000131',
+             'create_session', 1, transaction_timestamp()),
+            ('10000000-0000-4000-8000-000000000132',
+             'create_session', 99, transaction_timestamp())",
+    )
+    .execute(&pool)
+    .await?;
+
+    let repository = CreateSessionRepository::new(pool.clone());
+    let missing_id =
+        DurableCommandId::from_uuid(Uuid::parse_str("10000000-0000-4000-8000-000000000131")?);
+    let missing = repository
+        .load(missing_id)
+        .await
+        .expect_err("a claimed identifier without its typed record is corruption");
+    assert!(matches!(
+        missing,
+        CreateSessionRepositoryError::Corruption(CreateSessionCorruption::Missing(
+            "typed_command_id"
+        ))
+    ));
+
+    let unknown_id =
+        DurableCommandId::from_uuid(Uuid::parse_str("10000000-0000-4000-8000-000000000132")?);
+    let unknown = repository
+        .load(unknown_id)
+        .await
+        .expect_err("an unknown representation version is corruption");
+    assert!(matches!(
+        unknown,
+        CreateSessionRepositoryError::Corruption(CreateSessionCorruption::Unsupported {
+            field: "registry_version",
+            ..
+        })
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S01 / INV-012 (ADR-0022, ADR-0034): the mutable `session_current_defaults`
+/// pointer is advanced independently by later defaults replacements and must not
+/// gate CreateSession reconstitution. Advancing the pointer past the initial
+/// version leaves the immutable version-one record intact, so `load` must still
+/// reconstitute the original creation instead of failing closed.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_advanced_current_pointer_does_not_gate_reconstitution() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = CreateSessionRepository::new(pool.clone());
+    let creation = prepared(0x501, 0x901, direct(0x801));
+    assert_eq!(
+        repository.handle(creation).await?,
+        CreateSessionHandlingOutcome::Applied(creation.applied_result())
+    );
+
+    let session_id = Uuid::from_u128(0x901);
+    sqlx::query(
+        "INSERT INTO session_defaults_version
+            (session_id, version, model_selection_kind,
+             direct_model_selection_id, model_alias_id)
+         VALUES ($1, 2, 'direct', $2, NULL)",
+    )
+    .bind(session_id)
+    .bind(Uuid::from_u128(0x802))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE session_current_defaults
+         SET current_version = 2
+         WHERE session_id = $1",
+    )
+    .bind(session_id)
+    .execute(&pool)
+    .await?;
+
+    let reconstituted = repository
+        .load(creation.command().command_id())
+        .await?
+        .expect("an advanced current pointer must not hide the committed creation");
+    assert_eq!(reconstituted.command(), creation.command());
+    assert_eq!(reconstituted.session().id(), creation.session().id());
+    assert_eq!(reconstituted.applied_result(), creation.applied_result());
+
+    pool.close().await;
+    drop(container);
     Ok(())
 }
