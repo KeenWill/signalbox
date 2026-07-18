@@ -3,6 +3,7 @@
 use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
+use signalbox_application::{SubmitInputOutcome, SubmitInputTransaction};
 use signalbox_domain::{
     AcceptedInputDisposition, AcceptedInputId, AcceptedInputQueueOrder, Actor, DeliveryRequest,
     DirectModelSelection, DurableCommandId, FrozenAliasDefinition, FrozenModelSelection,
@@ -229,6 +230,26 @@ impl SubmitInputRepository {
 
     fn wrong_kind(command_id: DurableCommandId) -> SubmitInputRepositoryError {
         SubmitInputRepositoryError::DifferentCommandKind { command_id }
+    }
+}
+
+impl SubmitInputTransaction for SubmitInputRepository {
+    type Error = SubmitInputRepositoryError;
+
+    async fn handle(
+        &mut self,
+        command: SubmitInput,
+        accepted_input: AcceptedInputId,
+        turn: TurnId,
+    ) -> Result<SubmitInputOutcome, Self::Error> {
+        let outcome = SubmitInputRepository::handle(self, command, accepted_input, turn).await?;
+
+        Ok(match outcome {
+            SubmitInputHandlingOutcome::Recorded(result) => SubmitInputOutcome::Recorded(result),
+            SubmitInputHandlingOutcome::ConflictingReuse { command_id } => {
+                SubmitInputOutcome::ConflictingReuse { command_id }
+            }
+        })
     }
 }
 

@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-18 — Postgres implements the application durable-input port
+
+**Context.** The application crate now owns the one-call `SubmitInputTransaction` port and its closed recorded-or-conflict outcome, while `SubmitInputRepository` owns the corresponding atomic PostgreSQL handling and complete replay behavior. The adapter must join those existing seams without adding a second handling path or moving identity generation into persistence.
+
+**Decision.** Implement `SubmitInputTransaction` directly for `SubmitInputRepository`, delegate to its inherent atomic handler, and exhaustively translate recorded domain results and conflicting reuse into the application outcome while retaining `SubmitInputRepositoryError`. Exercise `SubmitInputService` with deterministic fresh accepted-input and turn candidates before and after a pool/repository restart; replay returns the original recorded identities and leaves one typed command, accepted input, and queued origin.
+
+**Rejected alternatives.** A wrapper repository would add another public type without policy. Repeating transaction logic in the trait method would create a competing lookup and commit path. Generating candidates in the adapter would cross the application-owned identity boundary. Testing only the inherent repository would not enforce the composed service contract.
+
+**Affects.** `crates/persistence/src/submit_input.rs`, the restarted S01 PostgreSQL integration test, and direct application-plus-persistence enforcement wording for INV-002, INV-007, INV-008, INV-010, INV-012, and INV-028. It adds no schema, domain or application semantics, protocol, retry policy, alias source, lifecycle state, or dependency.
+
 ## 2026-07-18 — Atomic Postgres durable input acceptance
 
 **Context.** ADR-0022, ADR-0027, ADR-0034, and ADR-0035 require normalized typed command and effect records, owner-global lookup before mutable validation, immutable accepted-input ordering and configuration provenance, atomic terminal handling, and checked historical replay. The domain now supplies complete no-active-turn preparation and reconstitution, while turn lifecycle and alias-definition storage remain later boundaries.

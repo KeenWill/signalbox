@@ -3,7 +3,8 @@ use std::{collections::VecDeque, error::Error, sync::Arc};
 use signalbox_application::{
     CreateSessionError, CreateSessionOutcome, CreateSessionRequest, CreateSessionService,
     LoadSessionService, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
-    ReplaceSessionDefaultsService, SessionIdGenerator,
+    ReplaceSessionDefaultsService, SessionIdGenerator, SubmitInputIdGenerator, SubmitInputOutcome,
+    SubmitInputRequest, SubmitInputService,
 };
 use signalbox_domain::{
     AcceptedInputId, Actor, CreateSession, DeliveryRequest, DurableCommandId, ModelAlias,
@@ -181,6 +182,38 @@ impl SessionIdGenerator for FixedSessionIds {
         self.remaining
             .pop_front()
             .expect("the integration test supplies one identity per invocation")
+    }
+}
+
+#[derive(Debug)]
+struct FixedSubmitInputIds {
+    accepted_inputs: VecDeque<AcceptedInputId>,
+    turns: VecDeque<TurnId>,
+}
+
+impl FixedSubmitInputIds {
+    fn new(
+        accepted_inputs: impl IntoIterator<Item = AcceptedInputId>,
+        turns: impl IntoIterator<Item = TurnId>,
+    ) -> Self {
+        Self {
+            accepted_inputs: accepted_inputs.into_iter().collect(),
+            turns: turns.into_iter().collect(),
+        }
+    }
+}
+
+impl SubmitInputIdGenerator for FixedSubmitInputIds {
+    fn next_accepted_input_id(&mut self) -> AcceptedInputId {
+        self.accepted_inputs
+            .pop_front()
+            .expect("the integration test supplies one accepted-input candidate per invocation")
+    }
+
+    fn next_turn_id(&mut self) -> TurnId {
+        self.turns
+            .pop_front()
+            .expect("the integration test supplies one turn candidate per invocation")
     }
 }
 
@@ -2108,7 +2141,6 @@ async fn s01_inv005_inv008_inv010_inv012_inv028_submit_apply_replay_conflict_and
     CreateSessionRepository::new(pool.clone())
         .handle(prepared(0x301, 0x701, direct(0x801)))
         .await?;
-    let repository = SubmitInputRepository::new(pool.clone());
     let exact = " \tline one\r\ncafe\u{301}\n ";
     let command = start_input(
         0x302,
@@ -2119,42 +2151,47 @@ async fn s01_inv005_inv008_inv010_inv012_inv028_submit_apply_replay_conflict_and
     );
     let accepted = AcceptedInputId::from_uuid(Uuid::from_u128(0x901));
     let turn = TurnId::from_uuid(Uuid::from_u128(0xa01));
+    let request = SubmitInputRequest::try_new(
+        command.command_id(),
+        command.session(),
+        command.content().clone(),
+        command.delivery(),
+    )?;
+    let mut service = SubmitInputService::new(
+        FixedSubmitInputIds::new(
+            [
+                accepted,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x902)),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x903)),
+            ],
+            [
+                turn,
+                TurnId::from_uuid(Uuid::from_u128(0xa02)),
+                TurnId::from_uuid(Uuid::from_u128(0xa03)),
+            ],
+        ),
+        SubmitInputRepository::new(pool.clone()),
+    );
 
-    let first = repository.handle(command.clone(), accepted, turn).await?;
-    let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(applied)) = first.clone()
-    else {
+    let first = service.execute(request.clone()).await?;
+    let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(applied)) = first.clone() else {
         panic!("no-active-turn start must apply");
     };
     assert_eq!(applied.accepted_input(), accepted);
     assert_eq!(applied.turn(), turn);
     assert_eq!(applied.acceptance_position().as_u64(), 1);
-    assert_eq!(
-        repository
-            .handle(
-                command.clone(),
-                AcceptedInputId::from_uuid(Uuid::from_u128(0x902)),
-                TurnId::from_uuid(Uuid::from_u128(0xa02)),
-            )
-            .await?,
-        first
-    );
+    assert_eq!(service.execute(request.clone()).await?, first);
 
-    let conflicting = start_input(
-        0x302,
-        0x701,
-        "different",
-        1,
-        ModelSelectionOverride::UseSessionDefault,
-    );
+    let conflicting = SubmitInputRequest::try_new(
+        command.command_id(),
+        command.session(),
+        UserContent::try_text("different".to_owned())
+            .expect("conflicting test content is admitted"),
+        command.delivery(),
+    )?;
     assert_eq!(
-        repository
-            .handle(
-                conflicting,
-                AcceptedInputId::from_uuid(Uuid::from_u128(0x903)),
-                TurnId::from_uuid(Uuid::from_u128(0xa03)),
-            )
-            .await?,
-        SubmitInputHandlingOutcome::ConflictingReuse {
+        service.execute(conflicting).await?,
+        SubmitInputOutcome::ConflictingReuse {
             command_id: command.command_id(),
         }
     );
@@ -2177,28 +2214,42 @@ async fn s01_inv005_inv008_inv010_inv012_inv028_submit_apply_replay_conflict_and
         (exact.to_owned(), exact.to_owned(), "ordinary".into(), 1)
     );
 
+    drop(service);
     pool.close().await;
     let restarted_pool = PgPoolOptions::new()
         .max_connections(4)
         .connect_with(local_test_connection_options(&database_url)?)
         .await?;
     let restarted = SubmitInputRepository::new(restarted_pool.clone());
+    let mut restarted_service = SubmitInputService::new(
+        FixedSubmitInputIds::new(
+            [AcceptedInputId::from_uuid(Uuid::from_u128(0x904))],
+            [TurnId::from_uuid(Uuid::from_u128(0xa04))],
+        ),
+        restarted.clone(),
+    );
     let loaded = restarted
         .load(command.command_id())
         .await?
         .expect("the committed receipt survives adapter restart");
     assert_eq!(loaded.command(), &command);
-    assert_eq!(
-        restarted
-            .handle(
-                command,
-                AcceptedInputId::from_uuid(Uuid::from_u128(0x904)),
-                TurnId::from_uuid(Uuid::from_u128(0xa04)),
-            )
-            .await?,
-        first
-    );
+    assert_eq!(restarted_service.execute(request).await?, first);
+    let effect_counts: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM submit_input_command WHERE command_id = $1),
+            (SELECT count(*) FROM accepted_input WHERE accepting_command_id = $1),
+            (SELECT count(*)
+               FROM queued_input_origin AS queued
+               JOIN accepted_input AS accepted
+                 ON accepted.accepted_input_id = queued.accepted_input_id
+              WHERE accepted.accepting_command_id = $1)",
+    )
+    .bind(Uuid::from_u128(0x302))
+    .fetch_one(&restarted_pool)
+    .await?;
+    assert_eq!(effect_counts, (1, 1, 1));
 
+    drop(restarted_service);
     restarted_pool.close().await;
     drop(container);
     Ok(())
