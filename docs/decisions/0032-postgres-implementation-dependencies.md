@@ -69,10 +69,13 @@ reviewed SQL migration set. Persistence queries use SQLx's runtime query API,
 static SQL, `Row::try_get`, hand-written record structs, and explicit fallible
 record/domain conversions. The persistence boundary does not use `query!`,
 `query_as!`, `FromRow` derives, SQLx type derives, or an ORM-generated domain or
-record model. SQLx 0.9 exposes query macros through `macros`; derive macros are a
-separate `derive` feature, which Signalbox does not enable. Availability of the
-query macros is not authority to use them. The stack does not enable `any`,
-another database driver, or JSON support before ADR-0022's canonical
+record model. Implementation verification of the SQLx 0.9 feature graph
+clarified that `macros` necessarily activates the query-macro, `derive`, and
+offline feature surfaces transitively even though Signalbox does not select
+`derive` or offline support directly. Availability of those surfaces is not
+authority to use them: repository code uses only `migrate!`, and query macros
+and SQLx derives remain prohibited by this boundary. The stack does not enable
+`any`, another database driver, or JSON support before ADR-0022's canonical
 durable-command payload encoding is decided.
 
 SQLx's built-in
@@ -252,8 +255,9 @@ Testcontainers increase download, compile, audit, and upgrade surface. In
 return, Signalbox does not own a pool, migration ledger, migration lock, TLS
 stack integration, or container lifecycle wrapper. Default-feature suppression
 keeps unused database drivers and JSON mapping out of the initial graph. The
-`macros` feature necessarily makes SQLx query macros available, but repository
-code uses only `migrate!`; the separate `derive` feature remains disabled.
+`macros` feature necessarily makes SQLx query macros, derives, and offline
+support available transitively, but repository code uses only `migrate!`; those
+other surfaces remain prohibited rather than directly selected.
 
 The persistence crate stays hand-written and Postgres-specific. Tests exercise
 the same database semantics as production and make Docker use explicit.
