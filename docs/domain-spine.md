@@ -535,6 +535,7 @@ pub struct SubmitInputReconstitutionInput { /* private */ }
 impl SubmitInputReconstitutionInput {
     pub fn applied(
         command: SubmitInput,
+        stored_actor: Actor,
         result_session: SessionId,
         result_accepted_input: AcceptedInputId,
         result_turn: TurnId,
@@ -556,21 +557,25 @@ impl SubmitInputReconstitutionInput {
     ) -> Self;
     pub const fn rejected_session_not_found(
         command: SubmitInput,
+        stored_actor: Actor,
         result_session: SessionId,
     ) -> Self;
     pub const fn rejected_no_active_turn(
         command: SubmitInput,
+        stored_actor: Actor,
         result_session: SessionId,
         result_expected_active_turn: TurnId,
     ) -> Self;
     pub const fn rejected_defaults_version_mismatch(
         command: SubmitInput,
+        stored_actor: Actor,
         result_session: SessionId,
         result_expected: SessionConfigurationDefaultsVersion,
         result_current: SessionConfigurationDefaultsVersion,
     ) -> Self;
     pub const fn rejected_unknown_model_alias(
         command: SubmitInput,
+        stored_actor: Actor,
         result_session: SessionId,
         result_alias: ModelAlias,
         defaults_session: SessionId,
@@ -579,6 +584,7 @@ impl SubmitInputReconstitutionInput {
     ) -> Self;
     pub const fn rejected_acceptance_position_exhausted(
         command: SubmitInput,
+        stored_actor: Actor,
         result_session: SessionId,
         result_last_position: SessionInputPosition,
     ) -> Self;
@@ -588,6 +594,7 @@ impl SubmitInputReconstitutionInput {
 }
 
 pub enum SubmitInputReconstitutionFailure {
+    StoredActorMismatch,
     AppliedDeliveryIsNotStart,
     ResultSessionMismatch,
     AcceptedCommandMismatch,

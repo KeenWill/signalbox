@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-18 — Domain-owned stored-actor validation and submit lock mode
+
+**Context.** The SubmitInput persistence adapter compared the stored actor against the baseline owner itself, so that semantic payload check lived outside the domain reconstitution seam and the natural adapter path would launder a corrupted stored actor into `Owner`. Separately, submit's session-row `FOR UPDATE` formed a lock-order cycle with defaults replacement: submit orders session row before pointer row, while a replacement holds the pointer row when its version-row insert requests `FOR KEY SHARE` on the session row through the non-deferrable session foreign key.
+
+**Decision.** Every `SubmitInputReconstitutionInput` constructor takes the stored actor, and domain reconstitution compares it against the canonical command's actor as `StoredActorMismatch`; persistence keeps only decode-level rejection of unknown or malformed actor spellings. Submit takes its session-row lock as `FOR NO KEY UPDATE`, which stays self-exclusive for per-session position serialization but does not conflict with referential-integrity `KEY SHARE`, with the constraint recorded beside the query and the interleaving forced deterministically in the Postgres suite. Domain unit tests now exercise every reconstitution-failure variant and both preparation failures.
+
+**Rejected alternatives.** Keeping the owner comparison in the adapter repeats the semantic check per adapter and leaves any path that skips it laundering a corrupted actor. Accepting an actor in `SubmitInput::new` would open the non-owner command boundary ADR-0039 closes. Reordering submit to lock the pointer row first would leave the session-row ordering read unserialized against concurrent submits. Retrying serialization failures in the adapter would mask the cycle instead of removing it.
+
+**Affects.** `crates/domain/src/submit_input.rs`, `crates/persistence/src/submit_input.rs`, the SubmitInput section of `docs/domain-spine.md`, the INV-012 enforcement wording in `docs/invariants.md`, and the PostgreSQL integration suite. It changes no schema, migration, ADR semantics, application API, or dependency.
+
 ## 2026-07-18 — Postgres implements the application durable-input port
 
 **Context.** The application crate now owns the one-call `SubmitInputTransaction` port and its closed recorded-or-conflict outcome, while `SubmitInputRepository` owns the corresponding atomic PostgreSQL handling and complete replay behavior. The adapter must join those existing seams without adding a second handling path or moving identity generation into persistence.

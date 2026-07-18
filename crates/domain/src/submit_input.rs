@@ -441,9 +441,15 @@ enum SubmitInputReconstitutionFacts {
 }
 
 /// Complete checked domain inputs for reconstructing one recorded submission.
+///
+/// The stored actor is the durable spelling of the command's attributed
+/// agency; the canonical command cannot carry it because its constructor
+/// fixes the baseline owner, so every path supplies it separately for the
+/// domain-owned comparison.
 #[derive(Clone, Debug)]
 pub struct SubmitInputReconstitutionInput {
     command: SubmitInput,
+    stored_actor: Actor,
     facts: SubmitInputReconstitutionFacts,
 }
 
@@ -452,6 +458,7 @@ impl SubmitInputReconstitutionInput {
     #[allow(clippy::too_many_arguments)]
     pub fn applied(
         command: SubmitInput,
+        stored_actor: Actor,
         result_session: SessionId,
         result_accepted_input: AcceptedInputId,
         result_turn: TurnId,
@@ -473,6 +480,7 @@ impl SubmitInputReconstitutionInput {
     ) -> Self {
         Self {
             command,
+            stored_actor,
             facts: SubmitInputReconstitutionFacts::Applied(Box::new(
                 SubmitInputAppliedReconstitutionFacts {
                     result_session,
@@ -501,10 +509,12 @@ impl SubmitInputReconstitutionInput {
     /// Supplies a recorded missing-session result.
     pub const fn rejected_session_not_found(
         command: SubmitInput,
+        stored_actor: Actor,
         result_session: SessionId,
     ) -> Self {
         Self {
             command,
+            stored_actor,
             facts: SubmitInputReconstitutionFacts::RejectedSessionNotFound { result_session },
         }
     }
@@ -512,11 +522,13 @@ impl SubmitInputReconstitutionInput {
     /// Supplies a recorded no-active-turn result.
     pub const fn rejected_no_active_turn(
         command: SubmitInput,
+        stored_actor: Actor,
         result_session: SessionId,
         result_expected_active_turn: TurnId,
     ) -> Self {
         Self {
             command,
+            stored_actor,
             facts: SubmitInputReconstitutionFacts::RejectedNoActiveTurn {
                 result_session,
                 result_expected_active_turn,
@@ -527,12 +539,14 @@ impl SubmitInputReconstitutionInput {
     /// Supplies a recorded defaults-version mismatch.
     pub const fn rejected_defaults_version_mismatch(
         command: SubmitInput,
+        stored_actor: Actor,
         result_session: SessionId,
         result_expected: SessionConfigurationDefaultsVersion,
         result_current: SessionConfigurationDefaultsVersion,
     ) -> Self {
         Self {
             command,
+            stored_actor,
             facts: SubmitInputReconstitutionFacts::RejectedDefaultsVersionMismatch {
                 result_session,
                 result_expected,
@@ -545,6 +559,7 @@ impl SubmitInputReconstitutionInput {
     /// defaults version.
     pub const fn rejected_unknown_model_alias(
         command: SubmitInput,
+        stored_actor: Actor,
         result_session: SessionId,
         result_alias: ModelAlias,
         defaults_session: SessionId,
@@ -553,6 +568,7 @@ impl SubmitInputReconstitutionInput {
     ) -> Self {
         Self {
             command,
+            stored_actor,
             facts: SubmitInputReconstitutionFacts::RejectedUnknownModelAlias {
                 result_session,
                 result_alias,
@@ -566,11 +582,13 @@ impl SubmitInputReconstitutionInput {
     /// Supplies a recorded exhausted-position result.
     pub const fn rejected_acceptance_position_exhausted(
         command: SubmitInput,
+        stored_actor: Actor,
         result_session: SessionId,
         result_last_position: SessionInputPosition,
     ) -> Self {
         Self {
             command,
+            stored_actor,
             facts: SubmitInputReconstitutionFacts::RejectedAcceptancePositionExhausted {
                 result_session,
                 result_last_position,
@@ -590,6 +608,10 @@ impl SubmitInputReconstitutionInput {
             input: Box::new(self.clone()),
             failure,
         };
+
+        if self.stored_actor != self.command.actor {
+            return Err(fail(SubmitInputReconstitutionFailure::StoredActorMismatch));
+        }
 
         let result = match self.facts.clone() {
             SubmitInputReconstitutionFacts::Applied(facts) => {
@@ -907,6 +929,8 @@ fn expected_active_turn(delivery: DeliveryRequest) -> Option<TurnId> {
 /// Why complete typed durable facts cannot reconstruct a recorded submission.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SubmitInputReconstitutionFailure {
+    /// The stored actor attribution differs from the command.
+    StoredActorMismatch,
     /// An applied record carries a non-start delivery request.
     AppliedDeliveryIsNotStart,
     /// A terminal result names another session.
@@ -1079,6 +1103,42 @@ mod tests {
         let mut hasher = DefaultHasher::new();
         value.hash(&mut hasher);
         hasher.finish()
+    }
+
+    /// One complete applied projection whose every fact matches the command.
+    fn applied_input() -> SubmitInputReconstitutionInput {
+        let command = start_command(1, "hello", 1);
+        SubmitInputReconstitutionInput::applied(
+            command.clone(),
+            Actor::Owner,
+            session_id(1),
+            accepted_input_id(3),
+            turn_id(4),
+            command_id(1),
+            accepted_input_id(3),
+            session_id(1),
+            content("hello"),
+            command.delivery(),
+            SessionInputPosition::first(),
+            AcceptedInputDisposition::OriginOf(turn_id(4)),
+            session_id(1),
+            turn_id(4),
+            crate::AcceptedInputQueueOrder::ordinary(SessionInputPosition::first()),
+            session_id(1),
+            version(1),
+            defaults(ModelSelectionRequest::Direct(direct(2))),
+            ModelSelectionRequest::Direct(direct(2)),
+            FrozenModelSelection::Direct(direct(2)),
+        )
+    }
+
+    fn applied_facts(
+        input: &mut SubmitInputReconstitutionInput,
+    ) -> &mut super::SubmitInputAppliedReconstitutionFacts {
+        let super::SubmitInputReconstitutionFacts::Applied(facts) = &mut input.facts else {
+            panic!("the base reconstitution input is applied");
+        };
+        facts
     }
 
     /// S01 / INV-012 / ADR-0039: comparison excludes only command identity and
@@ -1330,32 +1390,7 @@ mod tests {
     /// result, while a cross-wired content fact fails closed.
     #[test]
     fn inv002_inv012_applied_reconstitution_checks_complete_correlations() {
-        let command = start_command(1, "hello", 1);
-        let order = crate::AcceptedInputQueueOrder::ordinary(SessionInputPosition::first());
-        let input = || {
-            SubmitInputReconstitutionInput::applied(
-                command.clone(),
-                session_id(1),
-                accepted_input_id(3),
-                turn_id(4),
-                command_id(1),
-                accepted_input_id(3),
-                session_id(1),
-                content("hello"),
-                command.delivery(),
-                SessionInputPosition::first(),
-                AcceptedInputDisposition::OriginOf(turn_id(4)),
-                session_id(1),
-                turn_id(4),
-                order,
-                session_id(1),
-                version(1),
-                defaults(ModelSelectionRequest::Direct(direct(2))),
-                ModelSelectionRequest::Direct(direct(2)),
-                FrozenModelSelection::Direct(direct(2)),
-            )
-        };
-        let reconstructed = input()
+        let reconstructed = applied_input()
             .reconstitute()
             .expect("complete matching facts reconstruct");
         let SubmitInputResult::Applied(applied) = reconstructed.result() else {
@@ -1363,10 +1398,8 @@ mod tests {
         };
         assert_eq!(applied.turn(), turn_id(4));
 
-        let mut wrong = input();
-        if let super::SubmitInputReconstitutionFacts::Applied(facts) = &mut wrong.facts {
-            facts.accepted_content = content("different");
-        }
+        let mut wrong = applied_input();
+        applied_facts(&mut wrong).accepted_content = content("different");
         assert_eq!(
             wrong
                 .reconstitute()
@@ -1374,6 +1407,134 @@ mod tests {
                 .failure(),
             SubmitInputReconstitutionFailure::AcceptedContentMismatch
         );
+    }
+
+    /// One cross-wiring mutation and the exact failure it must produce.
+    type CrossWiredCase = (
+        fn(&mut SubmitInputReconstitutionInput),
+        SubmitInputReconstitutionFailure,
+    );
+
+    /// INV-002 / INV-012 / ADR-0039: every applied-path reconstitution
+    /// failure variant is reachable from exactly one cross-wired fact and
+    /// fails closed instead of constructing authority.
+    #[test]
+    fn inv002_inv012_applied_reconstitution_rejects_every_cross_wired_fact() {
+        let cases: [CrossWiredCase; 17] = [
+            (
+                |input| input.stored_actor = Actor::Recovery,
+                SubmitInputReconstitutionFailure::StoredActorMismatch,
+            ),
+            (
+                |input| {
+                    input.command = SubmitInput::new(
+                        command_id(1),
+                        session_id(1),
+                        content("hello"),
+                        DeliveryRequest::NextSafePoint {
+                            expected_active_turn: turn_id(9),
+                        },
+                    );
+                },
+                SubmitInputReconstitutionFailure::AppliedDeliveryIsNotStart,
+            ),
+            (
+                |input| applied_facts(input).result_session = session_id(2),
+                SubmitInputReconstitutionFailure::ResultSessionMismatch,
+            ),
+            (
+                |input| applied_facts(input).accepted_command = command_id(2),
+                SubmitInputReconstitutionFailure::AcceptedCommandMismatch,
+            ),
+            (
+                |input| applied_facts(input).accepted_input = accepted_input_id(9),
+                SubmitInputReconstitutionFailure::AcceptedInputMismatch,
+            ),
+            (
+                |input| applied_facts(input).accepted_session = session_id(2),
+                SubmitInputReconstitutionFailure::AcceptedSessionMismatch,
+            ),
+            (
+                |input| applied_facts(input).accepted_content = content("different"),
+                SubmitInputReconstitutionFailure::AcceptedContentMismatch,
+            ),
+            (
+                |input| {
+                    applied_facts(input).accepted_delivery =
+                        DeliveryRequest::StartWhenNoActiveTurn {
+                            configuration: choices(2, ModelSelectionOverride::UseSessionDefault),
+                        };
+                },
+                SubmitInputReconstitutionFailure::AcceptedDeliveryMismatch,
+            ),
+            (
+                |input| {
+                    applied_facts(input).accepted_disposition =
+                        AcceptedInputDisposition::OriginOf(turn_id(9));
+                },
+                SubmitInputReconstitutionFailure::AcceptedDispositionMismatch,
+            ),
+            (
+                |input| applied_facts(input).queue_session = session_id(2),
+                SubmitInputReconstitutionFailure::QueueSessionMismatch,
+            ),
+            (
+                |input| applied_facts(input).queue_turn = turn_id(9),
+                SubmitInputReconstitutionFailure::QueueTurnMismatch,
+            ),
+            (
+                |input| {
+                    applied_facts(input).accepted_position = SessionInputPosition::first()
+                        .checked_next()
+                        .expect("the second position exists");
+                },
+                SubmitInputReconstitutionFailure::QueuePositionMismatch,
+            ),
+            (
+                |input| {
+                    applied_facts(input).queue_order =
+                        crate::AcceptedInputQueueOrder::interrupt_immediately_after(
+                            SessionInputPosition::first(),
+                            turn_id(9),
+                        );
+                },
+                SubmitInputReconstitutionFailure::QueuePriorityMismatch,
+            ),
+            (
+                |input| applied_facts(input).defaults_session = session_id(2),
+                SubmitInputReconstitutionFailure::DefaultsSessionMismatch,
+            ),
+            (
+                |input| applied_facts(input).defaults_version = version(2),
+                SubmitInputReconstitutionFailure::DefaultsVersionMismatch,
+            ),
+            (
+                |input| {
+                    applied_facts(input).stored_requested_model =
+                        ModelSelectionRequest::Direct(direct(9));
+                },
+                SubmitInputReconstitutionFailure::RequestedModelMismatch,
+            ),
+            (
+                |input| {
+                    applied_facts(input).stored_frozen_model =
+                        FrozenModelSelection::Direct(direct(9));
+                },
+                SubmitInputReconstitutionFailure::FrozenModelMismatch,
+            ),
+        ];
+
+        for (mutate, expected) in cases {
+            let mut wrong = applied_input();
+            mutate(&mut wrong);
+            assert_eq!(
+                wrong
+                    .reconstitute()
+                    .expect_err("one cross-wired applied fact fails closed")
+                    .failure(),
+                expected
+            );
+        }
     }
 
     /// INV-012: each rejected receipt reconstructs only from a matching
@@ -1384,6 +1545,7 @@ mod tests {
         let ReconstitutedSubmitInput { .. } =
             SubmitInputReconstitutionInput::rejected_session_not_found(
                 command.clone(),
+                Actor::Owner,
                 session_id(1),
             )
             .reconstitute()
@@ -1392,6 +1554,7 @@ mod tests {
         assert_eq!(
             SubmitInputReconstitutionInput::rejected_defaults_version_mismatch(
                 command,
+                Actor::Owner,
                 session_id(1),
                 version(2),
                 version(3),
@@ -1401,5 +1564,247 @@ mod tests {
             .failure(),
             SubmitInputReconstitutionFailure::ExpectedDefaultsVersionMismatch
         );
+    }
+
+    /// INV-012 / ADR-0039: every rejected-path reconstitution failure
+    /// variant is reachable from exactly one cross-wired fact and fails
+    /// closed, while each matching typed projection reconstructs its
+    /// recorded rejection.
+    #[test]
+    fn inv012_rejected_reconstitution_rejects_every_cross_wired_fact() {
+        let start = start_command(1, "hello", 1);
+        let safe_point = SubmitInput::new(
+            command_id(1),
+            session_id(1),
+            content("hello"),
+            DeliveryRequest::NextSafePoint {
+                expected_active_turn: turn_id(7),
+            },
+        );
+        let maximum = SessionInputPosition::try_from_u64(u64::MAX).expect("positive maximum");
+
+        assert_eq!(
+            SubmitInputReconstitutionInput::rejected_session_not_found(
+                start.clone(),
+                Actor::Recovery,
+                session_id(1),
+            )
+            .reconstitute()
+            .expect_err("a stored non-owner actor fails closed")
+            .failure(),
+            SubmitInputReconstitutionFailure::StoredActorMismatch
+        );
+
+        let cross_wired_sessions = [
+            SubmitInputReconstitutionInput::rejected_session_not_found(
+                start.clone(),
+                Actor::Owner,
+                session_id(2),
+            ),
+            SubmitInputReconstitutionInput::rejected_no_active_turn(
+                safe_point.clone(),
+                Actor::Owner,
+                session_id(2),
+                turn_id(7),
+            ),
+            SubmitInputReconstitutionInput::rejected_defaults_version_mismatch(
+                start.clone(),
+                Actor::Owner,
+                session_id(2),
+                version(1),
+                version(2),
+            ),
+            SubmitInputReconstitutionInput::rejected_unknown_model_alias(
+                start.clone(),
+                Actor::Owner,
+                session_id(2),
+                alias(3),
+                session_id(1),
+                version(1),
+                defaults(ModelSelectionRequest::Direct(direct(2))),
+            ),
+            SubmitInputReconstitutionInput::rejected_acceptance_position_exhausted(
+                start.clone(),
+                Actor::Owner,
+                session_id(2),
+                maximum,
+            ),
+        ];
+        for input in cross_wired_sessions {
+            assert_eq!(
+                input
+                    .reconstitute()
+                    .expect_err("another result session fails closed")
+                    .failure(),
+                SubmitInputReconstitutionFailure::ResultSessionMismatch
+            );
+        }
+
+        SubmitInputReconstitutionInput::rejected_no_active_turn(
+            safe_point.clone(),
+            Actor::Owner,
+            session_id(1),
+            turn_id(7),
+        )
+        .reconstitute()
+        .expect("the matching expected turn reconstructs");
+        assert_eq!(
+            SubmitInputReconstitutionInput::rejected_no_active_turn(
+                safe_point.clone(),
+                Actor::Owner,
+                session_id(1),
+                turn_id(8),
+            )
+            .reconstitute()
+            .expect_err("another expected turn fails closed")
+            .failure(),
+            SubmitInputReconstitutionFailure::ExpectedActiveTurnMismatch
+        );
+
+        assert_eq!(
+            SubmitInputReconstitutionInput::rejected_defaults_version_mismatch(
+                safe_point,
+                Actor::Owner,
+                session_id(1),
+                version(1),
+                version(2),
+            )
+            .reconstitute()
+            .expect_err("a non-start delivery fails closed")
+            .failure(),
+            SubmitInputReconstitutionFailure::RejectionDeliveryIsNotStart
+        );
+        assert_eq!(
+            SubmitInputReconstitutionInput::rejected_defaults_version_mismatch(
+                start.clone(),
+                Actor::Owner,
+                session_id(1),
+                version(1),
+                version(1),
+            )
+            .reconstitute()
+            .expect_err("equal versions are not a mismatch")
+            .failure(),
+            SubmitInputReconstitutionFailure::RejectedDefaultsVersionsAreEqual
+        );
+
+        let alias_command = SubmitInput::new(
+            command_id(1),
+            session_id(1),
+            content("hello"),
+            DeliveryRequest::StartWhenNoActiveTurn {
+                configuration: choices(
+                    1,
+                    ModelSelectionOverride::ReplaceWith(ModelSelectionRequest::Alias(alias(2))),
+                ),
+            },
+        );
+        SubmitInputReconstitutionInput::rejected_unknown_model_alias(
+            alias_command.clone(),
+            Actor::Owner,
+            session_id(1),
+            alias(2),
+            session_id(1),
+            version(1),
+            defaults(ModelSelectionRequest::Direct(direct(2))),
+        )
+        .reconstitute()
+        .expect("the matching unresolved alias reconstructs");
+        for (defaults_session, defaults_version, result_alias, expected) in [
+            (
+                session_id(2),
+                version(1),
+                alias(2),
+                SubmitInputReconstitutionFailure::DefaultsSessionMismatch,
+            ),
+            (
+                session_id(1),
+                version(2),
+                alias(2),
+                SubmitInputReconstitutionFailure::DefaultsVersionMismatch,
+            ),
+            (
+                session_id(1),
+                version(1),
+                alias(3),
+                SubmitInputReconstitutionFailure::UnknownAliasMismatch,
+            ),
+        ] {
+            assert_eq!(
+                SubmitInputReconstitutionInput::rejected_unknown_model_alias(
+                    alias_command.clone(),
+                    Actor::Owner,
+                    session_id(1),
+                    result_alias,
+                    defaults_session,
+                    defaults_version,
+                    defaults(ModelSelectionRequest::Direct(direct(2))),
+                )
+                .reconstitute()
+                .expect_err("one cross-wired unknown-alias fact fails closed")
+                .failure(),
+                expected
+            );
+        }
+        assert_eq!(
+            SubmitInputReconstitutionInput::rejected_unknown_model_alias(
+                start.clone(),
+                Actor::Owner,
+                session_id(1),
+                alias(3),
+                session_id(1),
+                version(1),
+                defaults(ModelSelectionRequest::Direct(direct(2))),
+            )
+            .reconstitute()
+            .expect_err("a direct-selecting request cannot record an unknown alias")
+            .failure(),
+            SubmitInputReconstitutionFailure::RejectionDidNotSelectAlias
+        );
+
+        SubmitInputReconstitutionInput::rejected_acceptance_position_exhausted(
+            start.clone(),
+            Actor::Owner,
+            session_id(1),
+            maximum,
+        )
+        .reconstitute()
+        .expect("the exhausted maximum position reconstructs");
+        assert_eq!(
+            SubmitInputReconstitutionInput::rejected_acceptance_position_exhausted(
+                start,
+                Actor::Owner,
+                session_id(1),
+                SessionInputPosition::first(),
+            )
+            .reconstitute()
+            .expect_err("a position with a successor is not exhausted")
+            .failure(),
+            SubmitInputReconstitutionFailure::PositionIsNotExhausted
+        );
+    }
+
+    /// S01 / INV-012: preparation against another command's session is a
+    /// nonterminal correlation failure retaining the unchanged command.
+    #[test]
+    fn s01_inv012_preparation_rejects_a_cross_wired_session() {
+        let command = start_command(1, "hello", 1);
+        let error = command
+            .clone()
+            .prepare_when_no_active_turn(
+                &session(2, 1, ModelSelectionRequest::Direct(direct(2))),
+                accepted_input_id(3),
+                Some(turn_id(4)),
+                None,
+                |_| None,
+            )
+            .expect_err("another session is an adapter correlation failure");
+        assert_eq!(
+            error.failure(),
+            SubmitInputPreparationFailure::SessionMismatch {
+                provided_session: session_id(2),
+            }
+        );
+        assert_eq!(error.command(), &command);
     }
 }

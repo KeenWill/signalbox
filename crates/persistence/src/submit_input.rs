@@ -340,8 +340,18 @@ async fn prepare_against_locked_state(
     accepted_input: AcceptedInputId,
     turn: Option<TurnId>,
 ) -> Result<PreparedSubmitInput, SubmitInputRepositoryError> {
+    // Lock-mode constraint: this session-row lock must be `FOR NO KEY
+    // UPDATE`, not `FOR UPDATE`. Submit orders the session row before the
+    // current-defaults pointer row, while a concurrent defaults replacement
+    // holds the pointer row (its compare-and-set) when its
+    // `session_defaults_version` insert requests `FOR KEY SHARE` on this
+    // session row through the non-deferrable session foreign key.
+    // `FOR UPDATE` conflicts with `FOR KEY SHARE` and closes that lock-order
+    // cycle into a deadlock (40P01); `FOR NO KEY UPDATE` does not conflict
+    // with referential-integrity `KEY SHARE` locks while remaining
+    // self-exclusive, so per-session position assignment stays serialized.
     let session_exists = sqlx::query_scalar::<_, Uuid>(
-        "SELECT session_id FROM session WHERE session_id = $1 FOR UPDATE",
+        "SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE",
     )
     .bind(session_id_to_uuid(command.session()))
     .fetch_optional(&mut *connection)
@@ -951,14 +961,14 @@ fn decode_complete(
     require_spelling(&row, "typed_kind", SUBMIT_INPUT_KIND)?;
     require_version(&row, "typed_version", STORAGE_VERSION)?;
 
+    // Decode-level checks reject unknown or malformed actor spellings here;
+    // comparing the decoded actor against the canonical command's actor is
+    // domain-owned semantics and happens inside reconstitution.
     let actor = decode_actor(
         required(&row, "actor_kind")?,
         row.try_get("actor_turn_id")?,
         row.try_get("actor_tool_request_id")?,
     )?;
-    if actor != Actor::Owner {
-        return Err(SubmitInputCorruption::Inconsistent("baseline command actor").into());
-    }
     let command = SubmitInput::new(
         command_id,
         session_id_from_uuid(required(&row, "command_session_id")?),
@@ -1015,6 +1025,7 @@ fn decode_complete(
             decode_applied(
                 &row,
                 command,
+                actor,
                 result_session,
                 accepted_input_id_from_uuid(
                     result_accepted
@@ -1039,6 +1050,7 @@ fn decode_complete(
             decode_rejected(
                 &row,
                 command,
+                actor,
                 result_session,
                 kind,
                 result_expected_turn,
@@ -1069,6 +1081,7 @@ fn decode_complete(
 fn decode_applied(
     row: &PgRow,
     command: SubmitInput,
+    stored_actor: Actor,
     result_session: SessionId,
     result_accepted_input: AcceptedInputId,
     result_turn: TurnId,
@@ -1136,6 +1149,7 @@ fn decode_applied(
 
     Ok(SubmitInputReconstitutionInput::applied(
         command,
+        stored_actor,
         result_session,
         result_accepted_input,
         result_turn,
@@ -1161,6 +1175,7 @@ fn decode_applied(
 fn decode_rejected(
     row: &PgRow,
     command: SubmitInput,
+    stored_actor: Actor,
     result_session: SessionId,
     rejection_kind: &str,
     expected_turn: Option<Uuid>,
@@ -1183,6 +1198,7 @@ fn decode_rejected(
             )?;
             Ok(SubmitInputReconstitutionInput::rejected_session_not_found(
                 command,
+                stored_actor,
                 result_session,
             ))
         }
@@ -1199,6 +1215,7 @@ fn decode_rejected(
             }
             Ok(SubmitInputReconstitutionInput::rejected_no_active_turn(
                 command,
+                stored_actor,
                 result_session,
                 turn_id_from_uuid(expected_turn.ok_or(SubmitInputCorruption::Missing(
                     "result_expected_active_turn_id",
@@ -1218,6 +1235,7 @@ fn decode_rejected(
             Ok(
                 SubmitInputReconstitutionInput::rejected_defaults_version_mismatch(
                     command,
+                    stored_actor,
                     result_session,
                     decode_optional_defaults_version(
                         expected_defaults,
@@ -1269,6 +1287,7 @@ fn decode_rejected(
             Ok(
                 SubmitInputReconstitutionInput::rejected_unknown_model_alias(
                     command,
+                    stored_actor,
                     result_session,
                     ModelAlias::from_uuid(
                         unknown_alias
@@ -1295,6 +1314,7 @@ fn decode_rejected(
             Ok(
                 SubmitInputReconstitutionInput::rejected_acceptance_position_exhausted(
                     command,
+                    stored_actor,
                     result_session,
                     decode_optional_position(last_position, "result_last_position")?
                         .ok_or(SubmitInputCorruption::Missing("result_last_position"))?,
