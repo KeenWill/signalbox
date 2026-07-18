@@ -33,6 +33,7 @@ The repository owner accepted the following records beginning on 2026-07-17. The
 | [ADR-0036](0036-initial-semantic-transcript-entries.md) | Initial origin-accepted-input and failed-turn semantic entries, with eligibility and terminal-failure commit granularity |
 | [ADR-0037](0037-baseline-user-content.md) | Text-only baseline accepted-input content, exact decoded-text equality, PostgreSQL text mapping, and additive typed extension boundary |
 | [ADR-0038](0038-session-aggregate-boundary.md) | Minimal long-lived `Session` aggregate, separation from creation receipts and associated history, complete checked reconstitution, and current-pointer load-by-identity semantics |
+| [ADR-0039](0039-actor-attribution.md) | Closed typed actor attribution for durable commands and recorded transitions — owner, turn-scoped model, recovery, and tool-request agency as provenance participating in structural replay equality, with authorization, identity verification, and multi-user scope explicitly excluded |
 | [ADR-0040](0040-transactional-outbox.md) | Transactional outbox as the sole path from committed durable state changes to client-visible update events: in-transaction event append, per-hub commit-ordered sequence as the ADR-0019 subscription cursor, at-least-once idempotent delivery, transient streams excluded, and the ADR-0010 nudge-plus-sweep publisher |
 
 ## Process
