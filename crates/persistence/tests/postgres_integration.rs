@@ -2731,6 +2731,112 @@ async fn inv007_inv008_inv012_submit_serializes_positions_and_rolls_back_failure
     Ok(())
 }
 
+/// INV-007 / INV-008 / INV-012: a defaults replacement holds the pointer-row
+/// lock when its version-row insert requests `FOR KEY SHARE` on the session
+/// row through the non-deferrable session foreign key, while submit orders
+/// the session row before the pointer row. The forced interleaving completes
+/// with typed outcomes because submit's session-row lock is
+/// `FOR NO KEY UPDATE`; `FOR UPDATE` deadlocks here (Postgres 40P01).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv007_inv008_inv012_submit_and_defaults_replacement_interleave_without_deadlock()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0x341, 0x751, direct(0x851)))
+        .await?;
+
+    // Replacement side, first half: hold the pointer-row lock exactly as the
+    // defaults-replacement compare-and-set does before its version insert.
+    // The pointer's version foreign key is deferred, so the successor row may
+    // follow the pointer change inside the same transaction.
+    let mut replacement_side = pool.begin().await?;
+    let cas = sqlx::query(
+        "UPDATE session_current_defaults
+         SET current_version = 2
+         WHERE session_id = $1
+           AND current_version = 1",
+    )
+    .bind(Uuid::from_u128(0x751))
+    .execute(&mut *replacement_side)
+    .await?;
+    assert_eq!(cas.rows_affected(), 1);
+
+    // Submit side: locks the session row, then blocks on the held pointer.
+    let submit = tokio::spawn({
+        let repository = SubmitInputRepository::new(pool.clone());
+        async move {
+            repository
+                .handle(
+                    start_input(
+                        0x342,
+                        0x751,
+                        "interleaved",
+                        1,
+                        ModelSelectionOverride::UseSessionDefault,
+                    ),
+                    AcceptedInputId::from_uuid(Uuid::from_u128(0x942)),
+                    Some(TurnId::from_uuid(Uuid::from_u128(0xa42))),
+                )
+                .await
+        }
+    });
+
+    // Force the interleaving: proceed only once the submit transaction holds
+    // its session-row lock and waits on the pointer row.
+    let mut submit_blocked_on_pointer = false;
+    for _ in 0..400 {
+        let waiting: i64 = sqlx::query_scalar(
+            "SELECT count(*)
+             FROM pg_stat_activity
+             WHERE wait_event_type = 'Lock'
+               AND query LIKE '%FROM session_current_defaults%'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        if waiting > 0 {
+            submit_blocked_on_pointer = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(
+        submit_blocked_on_pointer,
+        "the submit transaction must block on the held pointer row"
+    );
+
+    // Replacement side, second half: the insert's session foreign key takes
+    // `FOR KEY SHARE` on the session row the submit transaction has locked.
+    sqlx::query(
+        "INSERT INTO session_defaults_version
+            (session_id, version, model_selection_kind,
+             direct_model_selection_id, model_alias_id)
+         VALUES ($1, 2, 'direct', $2, NULL)",
+    )
+    .bind(Uuid::from_u128(0x751))
+    .bind(Uuid::from_u128(0x852))
+    .execute(&mut *replacement_side)
+    .await?;
+    replacement_side.commit().await?;
+
+    // The unblocked submit records the advanced pointer as a typed stale
+    // rejection rather than failing on infrastructure.
+    assert!(matches!(
+        submit.await??,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::SessionDefaultsVersionMismatch {
+                expected,
+                current,
+                ..
+            }
+        )) if expected.as_u64() == 1 && current.as_u64() == 2
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-002 / INV-008 / INV-012: checked loads reject cross-wired immutable
 /// effects even when database protections are deliberately disabled, and the
 /// maximum stored position produces a durable exhaustion rejection.
@@ -2775,11 +2881,11 @@ async fn inv002_inv008_inv012_submit_corruption_and_position_exhaustion_fail_clo
     let non_owner = repository
         .load(first.command_id())
         .await
-        .expect_err("the baseline command boundary rejects a stored non-owner actor");
+        .expect_err("domain reconstitution rejects a stored non-owner actor");
     assert!(matches!(
         non_owner,
-        SubmitInputRepositoryError::Corruption(SubmitInputCorruption::Inconsistent(
-            "baseline command actor"
+        SubmitInputRepositoryError::Corruption(SubmitInputCorruption::Domain(
+            SubmitInputReconstitutionFailure::StoredActorMismatch
         ))
     ));
     sqlx::query(
