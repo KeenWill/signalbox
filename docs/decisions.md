@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-18 — Closed initial semantic-entry values and inert reconstitution inputs
+
+**Context.** ADR-0036 fixes exactly two initial semantic transcript-entry payloads, while ADR-0030 and ADR-0035 require opaque entry and resolved-snapshot construction to remain with a complete validating aggregate seam. The first representation boundary must expose typed storage-independent inputs without letting a plausible identifier, payload, or ordered list mint semantic-history or frontier authority.
+
+**Decision.** Represent the initial payload as the closed `OriginAcceptedInput { accepted_input } | TurnFailed { turn }` enum and the immutable semantic entry as a private-field value exposing only identity, source, payload, and source-qualified reference. Add private-field reconstitution-input values for one semantic entry and one complete resolved-snapshot record. These inputs are inert: neither has a public `reconstitute` operation, and the semantic entry has no public producer. The following scheduling boundary must consume the complete collections and validate subject, lifecycle, order, ownership, membership, and frontier correlations before constructing either opaque value.
+
+**Rejected alternatives.** A generic message or “other” variant would reopen the closed ADR-0036 set. Public entry construction from identifiers and payload would skip exact origin/failure correlation. Standalone snapshot construction from an ordered list would let persistence mint a start dependency without the aggregate facts ADR-0035 requires. SQL-shaped nullable discriminators or record types would move storage representation into the domain.
+
+**Affects.** `crates/domain/src/{semantic_entry,context_frontier}.rs`, their exports, the domain spine, and the INV-005 enforcement index. This boundary constructs no semantic entry or resolved snapshot, performs no lifecycle transition, chooses no rendering or storage encoding, and adds no dependency.
+
 ## 2026-07-18 — Domain-owned stored-actor validation and submit lock mode
 
 **Context.** The SubmitInput persistence adapter compared the stored actor against the baseline owner itself, so that semantic payload check lived outside the domain reconstitution seam and the natural adapter path would launder a corrupted stored actor into `Owner`. Separately, submit's session-row `FOR UPDATE` formed a lock-order cycle with defaults replacement: submit orders session row before pointer row, while a replacement holds the pointer row when its version-row insert requests `FOR KEY SHARE` on the session row through the non-deferrable session foreign key.

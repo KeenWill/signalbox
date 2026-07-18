@@ -967,6 +967,17 @@ impl SemanticTranscriptEntryRef {
     // accessors: source_session(), entry()
 }
 
+pub struct ResolvedContextFrontierReconstitutionInput { /* private */ }
+// inert input: only the complete scheduling reconstitution seam can consume it
+impl ResolvedContextFrontierReconstitutionInput {
+    pub fn new(
+        owning_session: SessionId,
+        snapshot: ContextFrontierId,
+        ordered_entries: Vec<SemanticTranscriptEntryRef>,
+    ) -> Self;
+    // accessors: owning_session(), snapshot(), ordered_entries()
+}
+
 pub struct ResolvedContextFrontierSnapshot { /* private */ }
 // sealed: crate-private try_from_candidate and derive_appending_candidate,
 // reserved for later eligibility and call-preparation slices
@@ -981,6 +992,33 @@ impl ResolvedContextFrontierSnapshot {
 }
 // identity equality (Eq) and semantic-content equality are deliberately
 // separate comparisons
+```
+
+## domain: semantic_entry
+
+```rust
+pub enum InitialSemanticTranscriptEntryPayload {
+    OriginAcceptedInput { accepted_input: AcceptedInputId },
+    TurnFailed { turn: TurnId },
+}
+
+pub struct SemanticTranscriptEntry { /* private */ }
+// sealed: checked scheduling reconstitution and live eligibility are the only
+// producers
+impl SemanticTranscriptEntry {
+    // accessors: identity(), source_session(), payload(), reference()
+}
+
+pub struct SemanticTranscriptEntryReconstitutionInput { /* private */ }
+// inert input: cannot independently construct SemanticTranscriptEntry
+impl SemanticTranscriptEntryReconstitutionInput {
+    pub const fn new(
+        identity: SemanticTranscriptEntryId,
+        source_session: SessionId,
+        payload: InitialSemanticTranscriptEntryPayload,
+    ) -> Self;
+    // accessors: identity(), source_session(), payload()
+}
 ```
 
 ## domain: provider_evidence
@@ -1374,12 +1412,13 @@ impl<Generator: SubmitInputIdGenerator, Transaction: SubmitInputTransaction>
 | domain: turn_lifecycle | 10 |
 | domain: turn_attempt | 13 |
 | domain: model_call | 7 |
-| domain: context_frontier | 5 |
+| domain: context_frontier | 6 |
+| domain: semantic_entry | 3 |
 | domain: provider_evidence | 5 |
 | domain: applied_interrupt | 2 |
 | domain: fatal_mismatch | 0 |
 | domain: replace_session_defaults | 13 |
-| **signalbox-domain total** | **129 (+1 free fn)** |
+| **signalbox-domain total** | **133 (+1 free fn)** |
 | application: create_session | 8 (incl. 2 traits) |
 | application: load_session | 2 (incl. 1 trait) |
 | application: replace_session_defaults | 4 (incl. 1 trait) |
