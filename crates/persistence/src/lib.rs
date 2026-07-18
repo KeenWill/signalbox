@@ -5,6 +5,7 @@
 
 pub mod create_session;
 pub mod mapping;
+pub mod session;
 
 use std::str::FromStr;
 

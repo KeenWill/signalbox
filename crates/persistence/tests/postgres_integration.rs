@@ -2,8 +2,8 @@ use std::{error::Error, sync::Arc};
 
 use signalbox_domain::{
     CreateSession, DurableCommandId, ModelAlias, ModelSelectionRequest, PreparedCreateSession,
-    SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance, SessionId,
-    TranscriptAncestry,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
+    SessionCreationProvenance, SessionId, TranscriptAncestry,
 };
 use signalbox_persistence::{
     create_session::{
@@ -11,6 +11,7 @@ use signalbox_persistence::{
         CreateSessionRepositoryError,
     },
     local_test_connection_options, migrate,
+    session::{SessionCorruption, SessionRepository, SessionRepositoryError},
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -743,32 +744,77 @@ async fn inv012_incomplete_or_unknown_claims_fail_closed_as_corruption()
     Ok(())
 }
 
-/// S01 / INV-012 (ADR-0022, ADR-0034): the mutable `session_current_defaults`
-/// pointer is advanced independently by later defaults replacements and must not
-/// gate CreateSession reconstitution. Advancing the pointer past the initial
-/// version leaves the immutable version-one record intact, so `load` must still
-/// reconstitute the original creation instead of failing closed.
+/// S01 / INV-003 / INV-008 / INV-012: load-by-session identity returns the
+/// complete version selected by the current pointer, while creation receipt
+/// replay remains pinned to the immutable creation-time version.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_advanced_current_pointer_does_not_gate_reconstitution() -> Result<(), Box<dyn Error>>
-{
+async fn s01_inv003_inv008_inv012_current_session_load_and_receipt_replay_remain_distinct()
+-> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let repository = CreateSessionRepository::new(pool.clone());
-    let creation = prepared(0x501, 0x901, direct(0x801));
+    let create_repository = CreateSessionRepository::new(pool.clone());
+    let session_repository = SessionRepository::new(pool.clone());
+    let direct_creation = prepared(0x501, 0x901, direct(0x801));
+    let alias_creation = prepared(0x502, 0x902, alias(0x802));
+
+    assert!(
+        session_repository
+            .load_session(SessionId::from_uuid(Uuid::from_u128(0x999)))
+            .await?
+            .is_none(),
+        "only an absent session row is a not-found result"
+    );
     assert_eq!(
-        repository.handle(creation).await?,
-        CreateSessionHandlingOutcome::Applied(creation.applied_result())
+        create_repository.handle(direct_creation).await?,
+        CreateSessionHandlingOutcome::Applied(direct_creation.applied_result())
+    );
+    assert_eq!(
+        create_repository.handle(alias_creation).await?,
+        CreateSessionHandlingOutcome::Applied(alias_creation.applied_result())
     );
 
-    let session_id = Uuid::from_u128(0x901);
+    let loaded_direct = session_repository
+        .load_session(direct_creation.session().id())
+        .await?
+        .expect("the committed direct session must load");
+    assert_eq!(loaded_direct.id(), direct_creation.session().id());
+    assert_eq!(
+        loaded_direct.creation_provenance(),
+        direct_creation.session().provenance()
+    );
+    assert_eq!(
+        loaded_direct.current_configuration_defaults().version(),
+        SessionConfigurationDefaultsVersion::first()
+    );
+    assert_eq!(
+        loaded_direct
+            .current_configuration_defaults()
+            .defaults()
+            .model(),
+        direct(0x801)
+    );
+
+    let loaded_alias = session_repository
+        .load_session(alias_creation.session().id())
+        .await?
+        .expect("the committed alias session must load");
+    assert_eq!(
+        loaded_alias
+            .current_configuration_defaults()
+            .defaults()
+            .model(),
+        alias(0x802)
+    );
+
+    let direct_session_id = Uuid::from_u128(0x901);
     sqlx::query(
         "INSERT INTO session_defaults_version
             (session_id, version, model_selection_kind,
              direct_model_selection_id, model_alias_id)
-         VALUES ($1, 2, 'direct', $2, NULL)",
+         VALUES ($1, 2, 'alias', NULL, $2)",
     )
-    .bind(session_id)
-    .bind(Uuid::from_u128(0x802))
+    .bind(direct_session_id)
+    .bind(Uuid::from_u128(0x803))
     .execute(&pool)
     .await?;
     sqlx::query(
@@ -776,17 +822,245 @@ async fn inv012_advanced_current_pointer_does_not_gate_reconstitution() -> Resul
          SET current_version = 2
          WHERE session_id = $1",
     )
-    .bind(session_id)
+    .bind(direct_session_id)
     .execute(&pool)
     .await?;
 
-    let reconstituted = repository
-        .load(creation.command().command_id())
+    let current = session_repository
+        .load_session(direct_creation.session().id())
+        .await
+        .expect("the advanced current session load must succeed")
+        .expect("the session row remains present");
+    assert_eq!(
+        current.current_configuration_defaults().version(),
+        SessionConfigurationDefaultsVersion::try_from_u64(2)
+            .expect("two is a positive defaults version")
+    );
+    assert_eq!(
+        current.current_configuration_defaults().defaults().model(),
+        alias(0x803)
+    );
+
+    let receipt = create_repository
+        .load(direct_creation.command().command_id())
         .await?
-        .expect("an advanced current pointer must not hide the committed creation");
-    assert_eq!(reconstituted.command(), creation.command());
-    assert_eq!(reconstituted.session().id(), creation.session().id());
-    assert_eq!(reconstituted.applied_result(), creation.applied_result());
+        .expect("creation receipt remains loadable after current defaults advance");
+    assert_eq!(receipt.command(), direct_creation.command());
+    assert_eq!(
+        receipt.session().configuration_defaults().version(),
+        SessionConfigurationDefaultsVersion::first()
+    );
+    assert_eq!(
+        receipt
+            .session()
+            .configuration_defaults()
+            .defaults()
+            .model(),
+        direct(0x801)
+    );
+
+    let replay_candidate = prepared(0x501, 0x903, direct(0x801));
+    assert_eq!(
+        create_repository.handle(replay_candidate).await?,
+        CreateSessionHandlingOutcome::Applied(direct_creation.applied_result())
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-002 / INV-003 / INV-008: once the session row exists, absent,
+/// malformed, unknown, undecodable, or non-unique current projection facts fail
+/// closed as typed corruption rather than becoming `None` or nearby valid
+/// defaults.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv002_inv003_inv008_current_session_corruption_fails_closed() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let create_repository = CreateSessionRepository::new(pool.clone());
+    let session_repository = SessionRepository::new(pool.clone());
+    let missing_pointer = prepared(0x511, 0x911, direct(0x811));
+    let invalid_pointer = prepared(0x512, 0x912, direct(0x812));
+    let missing_selected = prepared(0x513, 0x913, direct(0x813));
+    let malformed_selected = prepared(0x514, 0x914, direct(0x814));
+    let unknown_provenance = prepared(0x515, 0x915, direct(0x815));
+    let duplicate_projection = prepared(0x516, 0x916, direct(0x816));
+    for creation in [
+        missing_pointer,
+        invalid_pointer,
+        missing_selected,
+        malformed_selected,
+        unknown_provenance,
+        duplicate_projection,
+    ] {
+        create_repository.handle(creation).await?;
+    }
+
+    sqlx::query(
+        "ALTER TABLE session
+         DROP CONSTRAINT session_current_defaults_fk",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "DELETE FROM session_current_defaults
+         WHERE session_id = $1",
+    )
+    .bind(Uuid::from_u128(0x911))
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        "ALTER TABLE session_current_defaults
+         DROP CONSTRAINT session_current_defaults_version_fk,
+         DROP CONSTRAINT session_current_defaults_version_positive_u64",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE session_current_defaults
+         SET current_version = 0
+         WHERE session_id = $1",
+    )
+    .bind(Uuid::from_u128(0x912))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE session_current_defaults
+         SET current_version = 2
+         WHERE session_id = $1",
+    )
+    .bind(Uuid::from_u128(0x913))
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        "ALTER TABLE session_defaults_version
+         DROP CONSTRAINT session_defaults_version_model_selection_shape",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_defaults_version
+            (session_id, version, model_selection_kind,
+             direct_model_selection_id, model_alias_id)
+         VALUES ($1, 2, 'direct', NULL, NULL)",
+    )
+    .bind(Uuid::from_u128(0x914))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE session_current_defaults
+         SET current_version = 2
+         WHERE session_id = $1",
+    )
+    .bind(Uuid::from_u128(0x914))
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        "ALTER TABLE create_session_command
+         DROP CONSTRAINT create_session_command_provenance_fk",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE session
+         DROP CONSTRAINT session_creation_cause_closed,
+         DISABLE TRIGGER session_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE session
+         SET creation_cause = 'unknown'
+         WHERE session_id = $1",
+    )
+    .bind(Uuid::from_u128(0x915))
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        "ALTER TABLE session_current_defaults
+         DROP CONSTRAINT session_current_defaults_pkey",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_current_defaults (session_id, current_version)
+         VALUES ($1, 1)",
+    )
+    .bind(Uuid::from_u128(0x916))
+    .execute(&pool)
+    .await?;
+
+    let missing = session_repository
+        .load_session(missing_pointer.session().id())
+        .await
+        .expect_err("a missing pointer is corruption");
+    assert!(matches!(
+        missing,
+        SessionRepositoryError::Corruption(SessionCorruption::Missing(
+            "current_defaults_session_id"
+        ))
+    ));
+
+    let invalid = session_repository
+        .load_session(invalid_pointer.session().id())
+        .await
+        .expect_err("a non-positive pointer version is corruption");
+    assert!(matches!(
+        invalid,
+        SessionRepositoryError::Corruption(SessionCorruption::InvalidOrdinal {
+            field: "current_version",
+            ..
+        })
+    ));
+
+    let missing_selected_row = session_repository
+        .load_session(missing_selected.session().id())
+        .await
+        .expect_err("a missing selected defaults row is corruption");
+    assert!(matches!(
+        missing_selected_row,
+        SessionRepositoryError::Corruption(SessionCorruption::Missing(
+            "selected_defaults_session_id"
+        ))
+    ));
+
+    let malformed = session_repository
+        .load_session(malformed_selected.session().id())
+        .await
+        .expect_err("a malformed selected defaults record is corruption");
+    assert!(matches!(
+        malformed,
+        SessionRepositoryError::Corruption(SessionCorruption::Inconsistent("model selection"))
+    ));
+
+    let unknown = session_repository
+        .load_session(unknown_provenance.session().id())
+        .await
+        .expect_err("an unknown creation cause is corruption");
+    assert!(matches!(
+        unknown,
+        SessionRepositoryError::Corruption(SessionCorruption::Unsupported {
+            field: "creation cause",
+            ..
+        })
+    ));
+
+    let duplicate = session_repository
+        .load_session(duplicate_projection.session().id())
+        .await
+        .expect_err("more than one current projection row is corruption");
+    assert!(matches!(
+        duplicate,
+        SessionRepositoryError::Corruption(SessionCorruption::Inconsistent(
+            "current session projection cardinality"
+        ))
+    ));
 
     pool.close().await;
     drop(container);

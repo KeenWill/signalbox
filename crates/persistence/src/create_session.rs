@@ -327,9 +327,7 @@ async fn load_from_connection(
             v.version AS stored_defaults_version,
             v.model_selection_kind AS stored_model_kind,
             v.direct_model_selection_id AS stored_direct_id,
-            v.model_alias_id AS stored_alias_id,
-            p.session_id AS pointer_session_id,
-            p.current_version
+            v.model_alias_id AS stored_alias_id
          FROM durable_command AS d
          LEFT JOIN create_session_command AS c
            ON c.command_id = d.command_id
@@ -338,8 +336,6 @@ async fn load_from_connection(
          LEFT JOIN session_defaults_version AS v
            ON v.session_id = c.created_session_id
           AND v.version = c.initial_defaults_version
-         LEFT JOIN session_current_defaults AS p
-           ON p.session_id = c.created_session_id
          WHERE d.command_id = $1",
     )
     .bind(durable_command_id_to_uuid(command_id))
@@ -384,18 +380,10 @@ fn decode_complete(
         required(&row, "stored_ancestry")?,
     )?;
     let defaults_session: Uuid = required(&row, "defaults_session_id")?;
-    let pointer_session: Uuid = required(&row, "pointer_session_id")?;
-    if pointer_session != stored_session_uuid {
-        return Err(
-            CreateSessionCorruption::Inconsistent("current defaults pointer ownership").into(),
-        );
+    if defaults_session != stored_session_uuid {
+        return Err(CreateSessionCorruption::Inconsistent("session/defaults ownership").into());
     }
     let stored_version = decode_ordinal(&row, "stored_defaults_version")?;
-    // ADR-0022/ADR-0034: `current_version` is a mutable pointer advanced by later
-    // defaults replacements and must not gate CreateSession reconstitution, which
-    // reconstructs the immutable initial creation from `initial_defaults_version`.
-    // It is decoded only to reject a non-ordinal pointer row.
-    let _current_version = decode_ordinal(&row, "current_version")?;
     let stored_defaults = decode_selection(
         required(&row, "stored_model_kind")?,
         row.try_get("stored_direct_id")?,
