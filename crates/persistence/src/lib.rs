@@ -9,6 +9,7 @@ pub mod create_session;
 pub mod mapping;
 pub mod replace_session_defaults;
 pub mod session;
+pub mod submit_input;
 
 use std::str::FromStr;
 

@@ -177,6 +177,10 @@ impl CreateSessionRepository {
                 transaction.rollback().await?;
                 return Ok(CreateSessionHandlingOutcome::ConflictingReuse { command_id });
             }
+            Some(CommandKind::SubmitInput) => {
+                transaction.rollback().await?;
+                return Ok(CreateSessionHandlingOutcome::ConflictingReuse { command_id });
+            }
             None => {}
         }
 
@@ -205,6 +209,9 @@ impl CreateSessionRepository {
                     existing_outcome(&prepared, &recorded)
                 }
                 Some(CommandKind::ReplaceSessionDefaults) => {
+                    CreateSessionHandlingOutcome::ConflictingReuse { command_id }
+                }
+                Some(CommandKind::SubmitInput) => {
                     CreateSessionHandlingOutcome::ConflictingReuse { command_id }
                 }
                 None => {
@@ -239,6 +246,9 @@ impl CreateSessionRepository {
                 load_from_connection(&mut connection, command_id).await
             }
             Some(CommandKind::ReplaceSessionDefaults) => {
+                Err(CreateSessionRepositoryError::DifferentCommandKind { command_id })
+            }
+            Some(CommandKind::SubmitInput) => {
                 Err(CreateSessionRepositoryError::DifferentCommandKind { command_id })
             }
         }
