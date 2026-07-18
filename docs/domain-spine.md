@@ -1299,6 +1299,58 @@ impl<Transaction: ReplaceSessionDefaultsTransaction> ReplaceSessionDefaultsServi
 }
 ```
 
+## application: submit_input
+
+```rust
+pub struct SubmitInputRequest { /* private */ }
+impl SubmitInputRequest {
+    pub fn try_new(
+        command_id: DurableCommandId,
+        session: SessionId,
+        content: UserContent,
+        delivery: DeliveryRequest,
+    ) -> Result<Self, InvalidDurableCommandId>;
+    // accessors: command_id(), session(), content(), delivery()
+}
+
+pub trait SubmitInputIdGenerator {
+    fn next_accepted_input_id(&mut self) -> AcceptedInputId;
+    fn next_turn_id(&mut self) -> TurnId;
+}
+
+pub struct UuidV7SubmitInputIdGenerator;  // Default; impl SubmitInputIdGenerator
+
+pub enum SubmitInputOutcome {
+    Recorded(SubmitInputResult),
+    ConflictingReuse { command_id: DurableCommandId },
+}
+
+pub trait SubmitInputTransaction {
+    type Error;
+
+    fn handle(
+        &mut self,
+        command: SubmitInput,
+        accepted_input: AcceptedInputId,
+        turn: Option<TurnId>,
+    ) -> impl Future<Output = Result<SubmitInputOutcome, Self::Error>> + Send;
+}
+
+pub struct SubmitInputService<Generator, Transaction> { /* private */ }
+impl<Generator, Transaction> SubmitInputService<Generator, Transaction> {
+    pub const fn new(ids: Generator, transaction: Transaction) -> Self;
+    pub fn into_parts(self) -> (Generator, Transaction);
+}
+impl<Generator: SubmitInputIdGenerator, Transaction: SubmitInputTransaction>
+    SubmitInputService<Generator, Transaction>
+{
+    pub async fn execute(
+        &mut self,
+        request: SubmitInputRequest,
+    ) -> Result<SubmitInputOutcome, Transaction::Error>;
+}
+```
+
 ## Inventory
 
 | Module | Public types |
@@ -1324,4 +1376,5 @@ impl<Transaction: ReplaceSessionDefaultsTransaction> ReplaceSessionDefaultsServi
 | application: create_session | 8 (incl. 2 traits) |
 | application: load_session | 2 (incl. 1 trait) |
 | application: replace_session_defaults | 4 (incl. 1 trait) |
-| **signalbox-application total** | **14** |
+| application: submit_input | 6 (incl. 2 traits) |
+| **signalbox-application total** | **20** |
