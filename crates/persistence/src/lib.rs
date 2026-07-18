@@ -3,6 +3,8 @@
 //! This crate owns persistence-specific types. SQLx types do not cross into the
 //! domain crate.
 
+pub mod mapping;
+
 use std::str::FromStr;
 
 use sqlx::{

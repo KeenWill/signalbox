@@ -20,6 +20,20 @@ use crate::{SessionId, TurnId};
 pub struct SessionInputPosition(u64);
 
 impl SessionInputPosition {
+    /// Reconstitutes a position from its positive ordinal value.
+    ///
+    /// Returns `None` for zero, which is not an acceptance position. Storage
+    /// and protocol boundaries remain responsible for decoding their own
+    /// representations into a `u64` before calling this domain-owned check.
+    pub const fn try_from_u64(value: u64) -> Option<Self> {
+        if value == 0 { None } else { Some(Self(value)) }
+    }
+
+    /// Returns this position's positive ordinal value.
+    pub const fn as_u64(self) -> u64 {
+        self.0
+    }
+
     /// Returns the first position in a session's acceptance order.
     pub const fn first() -> Self {
         Self(1)
@@ -487,6 +501,20 @@ mod tests {
 
         assert!(first < second);
         assert_eq!(SessionInputPosition(u64::MAX).checked_next(), None);
+    }
+
+    /// INV-002: reconstitution accepts the complete positive `u64` domain and
+    /// rejects the zero sentinel without admitting a storage representation.
+    #[test]
+    fn inv002_input_position_checked_u64_boundary() {
+        assert_eq!(SessionInputPosition::try_from_u64(0), None);
+        assert_eq!(
+            SessionInputPosition::try_from_u64(1),
+            Some(SessionInputPosition::first())
+        );
+
+        let maximum = SessionInputPosition::try_from_u64(u64::MAX).expect("positive maximum");
+        assert_eq!(maximum.as_u64(), u64::MAX);
     }
 
     /// INV-009: queue-order facts expose exactly the immutable acceptance
