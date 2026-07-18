@@ -1,5 +1,6 @@
 use std::{collections::VecDeque, error::Error, sync::Arc};
 
+use rust_decimal::Decimal;
 use signalbox_application::{
     CreateSessionError, CreateSessionOutcome, CreateSessionRequest, CreateSessionService,
     LoadSessionService, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
@@ -160,6 +161,67 @@ fn input_with_delivery(
         UserContent::try_text(content.to_owned()).expect("test content is admitted"),
         delivery,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_malformed_submit_rejection(
+    pool: &PgPool,
+    command_id: Uuid,
+    source_command_id: Uuid,
+    rejection_kind: &str,
+    result_expected_active_turn: Option<Uuid>,
+    result_expected_defaults: Option<Decimal>,
+    result_current_defaults: Option<Decimal>,
+    result_unknown_alias: Option<Uuid>,
+    result_selected_defaults: Option<Decimal>,
+    result_last_position: Option<Decimal>,
+) -> Result<(), sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'submit_input', 1, transaction_timestamp())",
+    )
+    .bind(command_id)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO submit_input_command
+            (command_id, command_kind, storage_version, session_id,
+             actor_kind, actor_turn_id, actor_tool_request_id,
+             content_kind, content_text, delivery_kind,
+             expected_active_turn_id, expected_defaults_version,
+             model_override_kind, replacement_model_kind,
+             replacement_direct_model_selection_id, replacement_model_alias_id,
+             result_kind, rejection_kind, result_session_id,
+             result_accepted_input_id, result_turn_id,
+             result_expected_active_turn_id, result_expected_defaults_version,
+             result_current_defaults_version, result_unknown_alias_id,
+             result_selected_defaults_version, result_last_position)
+         SELECT
+             $1, command_kind, storage_version, session_id,
+             actor_kind, actor_turn_id, actor_tool_request_id,
+             content_kind, content_text, delivery_kind,
+             expected_active_turn_id, expected_defaults_version,
+             model_override_kind, replacement_model_kind,
+             replacement_direct_model_selection_id, replacement_model_alias_id,
+             'rejected', $3, result_session_id,
+             NULL, NULL, $4, $5, $6, $7, $8, $9
+           FROM submit_input_command
+          WHERE command_id = $2",
+    )
+    .bind(command_id)
+    .bind(source_command_id)
+    .bind(rejection_kind)
+    .bind(result_expected_active_turn)
+    .bind(result_expected_defaults)
+    .bind(result_current_defaults)
+    .bind(result_unknown_alias)
+    .bind(result_selected_defaults)
+    .bind(result_last_position)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await
 }
 
 #[derive(Debug)]
@@ -1994,6 +2056,7 @@ async fn inv002_inv007_inv008_inv012_submit_schema_is_closed_and_normalized()
            FROM pg_constraint
           WHERE conname IN (
                 'submit_input_command_applied_effect_fk',
+                'submit_input_command_last_position_fk',
                 'submit_input_command_current_defaults_fk',
                 'submit_input_command_selected_defaults_fk',
                 'submit_input_command_actor_shape',
@@ -2006,7 +2069,7 @@ async fn inv002_inv007_inv008_inv012_submit_schema_is_closed_and_normalized()
     )
     .fetch_all(&pool)
     .await?;
-    assert_eq!(constraints.len(), 8);
+    assert_eq!(constraints.len(), 9);
 
     let mut transaction = pool.begin().await?;
     sqlx::query(
@@ -2070,6 +2133,100 @@ async fn inv002_inv007_inv008_inv012_submit_schema_is_closed_and_normalized()
             Some(TurnId::from_uuid(Uuid::from_u128(0xafd))),
         )
         .await?;
+
+    let source_command_id = Uuid::from_u128(0x3fd);
+    let malformed_rejections = [
+        (
+            Uuid::from_u128(0x3fa),
+            "no_active_turn",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
+        (
+            Uuid::from_u128(0x3f9),
+            "session_defaults_version_mismatch",
+            None,
+            None,
+            Some(Decimal::ONE),
+            None,
+            None,
+            None,
+        ),
+        (
+            Uuid::from_u128(0x3f8),
+            "unknown_model_alias",
+            None,
+            None,
+            None,
+            Some(Uuid::from_u128(0x8f8)),
+            None,
+            None,
+        ),
+        (
+            Uuid::from_u128(0x3f7),
+            "acceptance_position_exhausted",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
+    ];
+    for (
+        command_id,
+        rejection_kind,
+        expected_turn,
+        expected_defaults,
+        current_defaults,
+        unknown_alias,
+        selected_defaults,
+        last_position,
+    ) in malformed_rejections
+    {
+        let error = insert_malformed_submit_rejection(
+            &pool,
+            command_id,
+            source_command_id,
+            rejection_kind,
+            expected_turn,
+            expected_defaults,
+            current_defaults,
+            unknown_alias,
+            selected_defaults,
+            last_position,
+        )
+        .await
+        .expect_err("a rejection with missing required evidence must not commit");
+        assert_eq!(
+            error.as_database_error().and_then(|error| error.code()),
+            Some("23514".into())
+        );
+    }
+
+    let error = insert_malformed_submit_rejection(
+        &pool,
+        Uuid::from_u128(0x3f6),
+        source_command_id,
+        "acceptance_position_exhausted",
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(Decimal::from(u64::MAX)),
+    )
+    .await
+    .expect_err("exhaustion must reference the session's actual maximum-position input");
+    assert_eq!(
+        error.as_database_error().and_then(|error| error.code()),
+        Some("23503".into())
+    );
+
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO durable_command

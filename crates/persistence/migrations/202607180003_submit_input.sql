@@ -198,6 +198,7 @@ CREATE TABLE submit_input_command (
             (
                 result_kind = 'applied'
                 AND rejection_kind IS NULL
+                AND delivery_kind = 'start_when_no_active_turn'
                 AND result_accepted_input_id IS NOT NULL
                 AND result_turn_id IS NOT NULL
                 AND result_expected_active_turn_id IS NULL
@@ -224,8 +225,14 @@ CREATE TABLE submit_input_command (
             (
                 result_kind = 'rejected'
                 AND rejection_kind = 'no_active_turn'
+                AND delivery_kind IN (
+                    'interrupt',
+                    'next_safe_point',
+                    'after_current_turn'
+                )
                 AND result_accepted_input_id IS NULL
                 AND result_turn_id IS NULL
+                AND result_expected_active_turn_id IS NOT NULL
                 AND result_expected_active_turn_id = expected_active_turn_id
                 AND result_expected_defaults_version IS NULL
                 AND result_current_defaults_version IS NULL
@@ -237,9 +244,11 @@ CREATE TABLE submit_input_command (
             (
                 result_kind = 'rejected'
                 AND rejection_kind = 'session_defaults_version_mismatch'
+                AND delivery_kind = 'start_when_no_active_turn'
                 AND result_accepted_input_id IS NULL
                 AND result_turn_id IS NULL
                 AND result_expected_active_turn_id IS NULL
+                AND result_expected_defaults_version IS NOT NULL
                 AND result_expected_defaults_version = expected_defaults_version
                 AND result_current_defaults_version IS NOT NULL
                 AND result_current_defaults_version <> result_expected_defaults_version
@@ -251,12 +260,14 @@ CREATE TABLE submit_input_command (
             (
                 result_kind = 'rejected'
                 AND rejection_kind = 'unknown_model_alias'
+                AND delivery_kind = 'start_when_no_active_turn'
                 AND result_accepted_input_id IS NULL
                 AND result_turn_id IS NULL
                 AND result_expected_active_turn_id IS NULL
                 AND result_expected_defaults_version IS NULL
                 AND result_current_defaults_version IS NULL
                 AND result_unknown_alias_id IS NOT NULL
+                AND result_selected_defaults_version IS NOT NULL
                 AND result_selected_defaults_version = expected_defaults_version
                 AND result_last_position IS NULL
             )
@@ -264,6 +275,7 @@ CREATE TABLE submit_input_command (
             (
                 result_kind = 'rejected'
                 AND rejection_kind = 'acceptance_position_exhausted'
+                AND delivery_kind = 'start_when_no_active_turn'
                 AND result_accepted_input_id IS NULL
                 AND result_turn_id IS NULL
                 AND result_expected_active_turn_id IS NULL
@@ -271,6 +283,7 @@ CREATE TABLE submit_input_command (
                 AND result_current_defaults_version IS NULL
                 AND result_unknown_alias_id IS NULL
                 AND result_selected_defaults_version IS NULL
+                AND result_last_position IS NOT NULL
                 AND result_last_position = 18446744073709551615
             )
         ),
@@ -526,6 +539,14 @@ ALTER TABLE submit_input_command
         session_id,
         origin_turn_id
     )
+    ON UPDATE RESTRICT
+    ON DELETE RESTRICT
+    DEFERRABLE INITIALLY DEFERRED;
+
+ALTER TABLE submit_input_command
+    ADD CONSTRAINT submit_input_command_last_position_fk
+    FOREIGN KEY (result_session_id, result_last_position)
+    REFERENCES accepted_input (session_id, acceptance_position)
     ON UPDATE RESTRICT
     ON DELETE RESTRICT
     DEFERRABLE INITIALLY DEFERRED;
