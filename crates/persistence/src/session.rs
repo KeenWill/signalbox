@@ -3,6 +3,7 @@
 use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
+use signalbox_application::SessionReader;
 use signalbox_domain::{
     DirectModelSelection, ModelAlias, ModelSelectionRequest, Session, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
@@ -164,6 +165,17 @@ impl SessionRepository {
             );
         }
         decode_complete(row, requested_session).map(Some)
+    }
+}
+
+impl SessionReader for SessionRepository {
+    type Error = SessionRepositoryError;
+
+    async fn load_session(
+        &self,
+        requested_session: SessionId,
+    ) -> Result<Option<Session>, Self::Error> {
+        SessionRepository::load_session(self, requested_session).await
     }
 }
 

@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-18 — Postgres adapters implement application-owned session ports
+
+**Context.** The application crate owns the atomic `CreateSessionTransaction` and current-snapshot `SessionReader` ports, while the existing persistence repositories already implement their PostgreSQL semantics as inherent operations. The adapter layer must connect those seams without making application depend on SQLx or duplicating command and reconstitution behavior.
+
+**Decision.** Make the persistence crate depend inward on the application crate and implement both application ports directly for their purpose-specific PostgreSQL repositories. Map the closed creation outcome variants exhaustively, retain repository infrastructure and corruption errors as the adapter error types, and delegate the session query to the existing database-consistent complete-projection load. Exercise both services through the real adapters against the pinned PostgreSQL image.
+
+**Rejected alternatives.** Depending on persistence from application would reverse the accepted dependency direction. Wrapper repositories would duplicate no policy and add another public type per port. Reimplementing SQL or domain reconstruction in the trait methods would create competing persistence paths. Erasing repository errors behind strings would discard the infrastructure-versus-integrity boundary.
+
+**Affects.** The persistence crate's focused application dependency, `crates/persistence/src/create_session.rs`, `crates/persistence/src/session.rs`, and S01/INV-002/INV-008/INV-012 integration coverage. It adds no protocol, authentication, client, cache, hub wiring, input submission, defaults replacement, or retry policy.
+
 ## 2026-07-18 — Application-owned current-session query port
 
 **Context.** ADR-0038 defines `load_session(SessionId)` as a separate current-snapshot query that returns the complete domain `Session`, distinguishes true session absence from malformed durable state, and leaves exact repository trait spelling and async types as implementation choices. The application crate needs that query without depending on persistence or reconstructing storage facts.

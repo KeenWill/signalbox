@@ -3,6 +3,7 @@
 use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
+use signalbox_application::{CreateSessionOutcome, CreateSessionTransaction};
 use signalbox_domain::{
     CreateSessionAppliedResult, CreateSessionReconstitutionFailure,
     CreateSessionReconstitutionInput, DirectModelSelection, DurableCommandId, ModelAlias,
@@ -196,6 +197,24 @@ impl CreateSessionRepository {
     ) -> Result<Option<ReconstitutedSessionCreation>, CreateSessionRepositoryError> {
         let mut connection = self.pool.acquire().await?;
         load_from_connection(&mut connection, command_id).await
+    }
+}
+
+impl CreateSessionTransaction for CreateSessionRepository {
+    type Error = CreateSessionRepositoryError;
+
+    async fn handle(
+        &mut self,
+        prepared: PreparedCreateSession,
+    ) -> Result<CreateSessionOutcome, Self::Error> {
+        let outcome = CreateSessionRepository::handle(self, prepared).await?;
+
+        Ok(match outcome {
+            CreateSessionHandlingOutcome::Applied(result) => CreateSessionOutcome::Applied(result),
+            CreateSessionHandlingOutcome::ConflictingReuse { command_id } => {
+                CreateSessionOutcome::ConflictingReuse { command_id }
+            }
+        })
     }
 }
 
