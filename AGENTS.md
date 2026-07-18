@@ -2,7 +2,7 @@
 
 Signalbox is in its design and foundation phase. Implementation is limited to mechanical workspace and tooling scaffolding plus narrowly scoped domain slices authorized by accepted decisions or explicit owner-approved plans; speculative product behavior is not permitted.
 
-Authoritative starting points are `docs/architecture.md`, `docs/invariants.md`, `docs/decisions.md`, `docs/open-questions.md`, and accepted records under `docs/decisions/`. Accepted ADRs are the normative specification for decided semantics; executable tests become the enforcement of record as slices implement them.
+Authoritative starting points are `docs/architecture.md`, `docs/invariants.md`, `docs/decisions.md`, `docs/open-questions.md`, and accepted records under `docs/decisions/`. Accepted ADRs are the normative specification for decided semantics; executable tests become the enforcement of record as slices implement them. When selecting milestones, also consult `docs/target-model.md`, the owner's directional product target — it guides destination and ordering but is not authoritative and never overrides the sources above.
 
 Every normative statement lives in exactly one place — an accepted ADR, a decision-log entry, a catalog row or scenario that is its own statement of record, or an implemented test — and other documents link to it rather than restating it. Do not restate content owned elsewhere in the overview documents (architecture, the invariant catalog's ADR-backed summaries, scenarios); a row or fixture that is itself the statement of record changes only together with the decision that authorizes the change.
 
