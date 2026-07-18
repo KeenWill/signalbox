@@ -13,7 +13,7 @@ The scenarios are frozen design fixtures. New or changed normative behavior belo
 - **Owning component:** Hub owns creation and acceptance; Postgres stores the result; the client owns presentation.
 - **Failure behavior:** A malformed transport, pre-authority, unconstructible typed-command, or pre-commit infrastructure failure that does not reach committed domain handling returns visibly and claims no command identifier; corrected boundary input may reuse it. Canonically equivalent caller forms compare as the same command. The first committed handling of a well-formed typed command under established owner authority records either its applied result or a typed domain rejection. Replay returns that same result before current-state validation; a command rejected after construction cannot later become valid under the same identifier. Corrected domain intent then needs a new identifier, and reuse of a claimed identifier for another command kind, session, or payload is rejected rather than creating a duplicate.
 - **Required invariants:** INV-001, INV-003, INV-007, INV-008, INV-012.
-- **Remaining questions:** First client and process-protocol implementation. Protocol semantics and compatibility are decided by ADR-0019 and ADR-0021; the owner-global idempotency scope and typed relational command representation are decided by ADR-0001 and ADR-0034.
+- **Remaining questions:** First client and process-protocol implementation. Protocol semantics and compatibility are decided by ADR-0019 and ADR-0021; the owner-global idempotency scope and typed relational command representation are decided by ADR-0001 and ADR-0034; the baseline accepted-input content value is decided by ADR-0037.
 
 ## S02 — Stream a centrally called provider response
 
