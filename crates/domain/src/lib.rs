@@ -7,6 +7,7 @@
 //! disposition transitions that preserve an accepted input's identity.
 
 mod accepted_input;
+mod actor;
 mod applied_interrupt;
 mod configuration;
 mod context_frontier;
@@ -17,13 +18,16 @@ mod provider_evidence;
 mod queue_order;
 mod replace_session_defaults;
 mod session;
+mod submit_input;
 mod turn_attempt;
 mod turn_lifecycle;
+mod user_content;
 
 pub use accepted_input::{
     AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputLifecycleTransitionError,
     SteeringBinding, SteeringReclassificationReason,
 };
+pub use actor::Actor;
 pub use applied_interrupt::{AppliedInterruptCommandResult, AppliedInterruptProof};
 pub use configuration::{
     ConfigurationRequest, DirectModelSelection, EffectiveConfiguration, FrozenAliasDefinition,
@@ -66,6 +70,12 @@ pub use session::{
     SessionCreationProvenance, SessionReconstitutionError, SessionReconstitutionFailure,
     SessionReconstitutionInput, TranscriptAncestry, TranscriptFrontier,
 };
+pub use submit_input::{
+    PreparedSubmitInput, ReconstitutedSubmitInput, SubmitInput, SubmitInputAppliedResult,
+    SubmitInputPreparationError, SubmitInputPreparationFailure, SubmitInputReconstitutionError,
+    SubmitInputReconstitutionFailure, SubmitInputReconstitutionInput, SubmitInputRejectedResult,
+    SubmitInputResult,
+};
 pub use turn_attempt::{
     AppliedInterruptState, AttemptEnd, CancellationStopDisposition, CurrentTurnAttempt,
     CurrentTurnAttemptState, EndedTurnAttempt, FatalMismatchStopCauses,
@@ -77,6 +87,9 @@ pub use turn_lifecycle::{
     AcceptedInputStartingLineage, AcceptedInputTurnStart, ActiveTurnPhase,
     AppliedStopForReconciliationProof, IssuedOperationRef, NonEmptyIssuedOperationRefs,
     NonEmptyIssuedOperationRefsError, ReconciliationMarker, ReconciliationReason, TurnDisposition,
+};
+pub use user_content::{
+    NonEmptyUnicodeText, NonEmptyUnicodeTextError, NonEmptyUnicodeTextFailure, UserContent,
 };
 
 macro_rules! define_identity {
