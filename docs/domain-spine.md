@@ -1,0 +1,1108 @@
+# Domain spine
+
+This file is the owner's primary API-review surface. The source files in
+`crates/domain/src/` and `crates/application/src/` are intentionally dense
+with rustdoc, unit tests, and `compile_fail` proofs; domain shape is reviewed
+here instead. This document mirrors the complete public API of
+`signalbox-domain` and `signalbox-application` as bare declarations — no doc
+comments, no tests, no bodies. Any pull request that adds, removes, or changes
+a public item in either crate must update this file in the same change;
+AGENTS.md carries that rule.
+
+Conventions used below:
+
+- Enums are shown with their full variant lists — the variants are the
+  semantic content.
+- Every struct in both crates has private fields. Structs a caller can build
+  show their public constructors as full signatures; structs with no public
+  constructor appear as `pub struct Name { /* private */ }` with a
+  `// sealed:` comment naming the only public producer(s), or noting that the
+  trusted producer is deferred to a later slice.
+- Pure getters are collapsed to one `// accessors:` line per type.
+- Public constructors, transitions, and `into_parts`-style decompositions are
+  spelled out as bodiless `pub fn` signatures.
+
+## domain: lib.rs — identities
+
+Every identity is a UUID-backed newtype produced by one macro, with this
+common shape (private field, `Clone, Copy, Debug, Eq, Hash, Ord, PartialEq,
+PartialOrd`):
+
+```rust
+pub struct <Identity>(/* private uuid::Uuid */);
+
+impl <Identity> {
+    pub const fn from_uuid(value: uuid::Uuid) -> Self;
+    pub const fn as_uuid(&self) -> &uuid::Uuid;
+    pub const fn into_uuid(self) -> uuid::Uuid;
+}
+```
+
+The nine identities defined in `lib.rs`:
+
+```rust
+pub struct DurableCommandId(/* private */);
+pub struct SessionId(/* private */);
+pub struct AcceptedInputId(/* private */);
+pub struct TurnId(/* private */);
+pub struct TurnAttemptId(/* private */);
+pub struct ModelCallId(/* private */);
+pub struct ProviderTargetEvidenceId(/* private */);
+pub struct ToolRequestId(/* private */);
+pub struct ToolAttemptId(/* private */);
+```
+
+Five more identities with the same shape are defined in their owning modules
+and listed there: `DirectModelSelection`, `ModelAlias` (configuration),
+`ProviderModelIdentity` (model_call), `ContextFrontierId`,
+`SemanticTranscriptEntryId` (context_frontier).
+
+## domain: session
+
+```rust
+pub enum SessionCreationCause {
+    OwnerInitiated,
+}
+
+pub struct TranscriptFrontier { /* private */ }
+// sealed: no public producer in this slice; the later semantic-history slice
+// supplies the trusted frontier producer. Copy; equality is exact-boundary.
+
+pub enum TranscriptAncestry {
+    None,
+    SingleSource {
+        source_session: SessionId,
+        source_frontier: TranscriptFrontier,
+    },
+}
+
+pub struct SessionCreationProvenance { /* private */ }
+impl SessionCreationProvenance {
+    pub const fn new(cause: SessionCreationCause, ancestry: TranscriptAncestry) -> Self;
+    // accessors: cause(), ancestry()
+}
+
+pub struct CreateSession { /* private */ }
+impl CreateSession {
+    pub const fn new(
+        command_id: DurableCommandId,
+        provenance: SessionCreationProvenance,
+        initial_configuration_defaults: SessionConfigurationDefaults,
+    ) -> Self;
+    pub const fn establish_initial_defaults(&self) -> VersionedSessionConfigurationDefaults;
+    pub fn prepare(self, session: SessionId)
+        -> Result<PreparedCreateSession, CreateSessionPreparationError>;
+    // accessors: command_id(), provenance(), initial_configuration_defaults()
+}
+// Eq/Hash exclude command_id (ADR-0001 comparison payload)
+
+pub struct InitialSession { /* private */ }
+// sealed: carried only by PreparedCreateSession::session and
+// ReconstitutedSessionCreation::session
+impl InitialSession {
+    // accessors: id(), provenance(), configuration_defaults()
+}
+
+pub struct Session { /* private */ }
+// sealed: SessionReconstitutionInput::reconstitute
+// non-Copy: owned snapshot, cloned deliberately (ADR-0038)
+impl Session {
+    // accessors: id(), creation_provenance(), current_configuration_defaults()
+}
+
+pub struct SessionReconstitutionInput { /* private */ }
+impl SessionReconstitutionInput {
+    pub const fn new(
+        requested_session: SessionId,
+        stored_session: SessionId,
+        provenance: SessionCreationProvenance,
+        current_defaults_session: SessionId,
+        current_defaults_version: SessionConfigurationDefaultsVersion,
+        defaults_session: SessionId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+    ) -> Self;
+    pub fn reconstitute(self) -> Result<Session, SessionReconstitutionError>;
+    // accessors: requested_session(), stored_session(), provenance(),
+    //   current_defaults_session(), current_defaults_version(),
+    //   defaults_session(), defaults_version(), defaults()
+}
+
+pub enum SessionReconstitutionFailure {
+    RequestedSessionMismatch,
+    CurrentDefaultsSessionMismatch,
+    DefaultsSessionMismatch,
+    CurrentDefaultsVersionMismatch,
+}
+
+pub struct SessionReconstitutionError { /* private */ }
+// sealed: Err of SessionReconstitutionInput::reconstitute
+impl SessionReconstitutionError {
+    pub fn into_parts(self) -> (SessionReconstitutionInput, SessionReconstitutionFailure);
+    // accessors: failure(), input()
+}
+
+pub struct CreateSessionAppliedResult { /* private */ }
+// sealed: CreateSession::prepare and CreateSessionReconstitutionInput::reconstitute
+impl CreateSessionAppliedResult {
+    // accessors: session()
+}
+
+pub struct PreparedCreateSession { /* private */ }
+// sealed: CreateSession::prepare
+impl PreparedCreateSession {
+    pub const fn into_parts(self)
+        -> (CreateSession, InitialSession, CreateSessionAppliedResult);
+    // accessors: command(), session(), applied_result()
+}
+
+pub enum CreateSessionPreparationFailure {
+    TranscriptAncestryUnavailable,
+}
+
+pub struct CreateSessionPreparationError { /* private */ }
+// sealed: Err of CreateSession::prepare; not a terminal command rejection
+impl CreateSessionPreparationError {
+    pub fn into_parts(self) -> (SessionId, CreateSession, CreateSessionPreparationFailure);
+    // accessors: failure(), command(), session()
+}
+
+pub struct CreateSessionReconstitutionInput { /* private */ }
+impl CreateSessionReconstitutionInput {
+    pub const fn new(
+        command: CreateSession,
+        result_session: SessionId,
+        session: SessionId,
+        provenance: SessionCreationProvenance,
+        defaults_session: SessionId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+    ) -> Self;
+    pub fn reconstitute(self)
+        -> Result<ReconstitutedSessionCreation, CreateSessionReconstitutionError>;
+    // accessors: command(), result_session(), session(), provenance(),
+    //   defaults_session(), defaults_version(), defaults()
+}
+
+pub enum CreateSessionReconstitutionFailure {
+    SessionResultMismatch,
+    ProvenanceMismatch,
+    DefaultsSessionMismatch,
+    TranscriptAncestryUnavailable,
+    DefaultsVersionIsNotFirst,
+    DefaultsMismatch,
+}
+
+pub struct CreateSessionReconstitutionError { /* private */ }
+// sealed: Err of CreateSessionReconstitutionInput::reconstitute
+impl CreateSessionReconstitutionError {
+    pub fn into_parts(self)
+        -> (CreateSessionReconstitutionInput, CreateSessionReconstitutionFailure);
+    // accessors: failure(), input()
+}
+
+pub struct ReconstitutedSessionCreation { /* private */ }
+// sealed: CreateSessionReconstitutionInput::reconstitute; authorizes no effect
+impl ReconstitutedSessionCreation {
+    // accessors: command(), session(), applied_result()
+}
+```
+
+## domain: configuration
+
+```rust
+pub struct DirectModelSelection(/* private */);  // identity newtype (see lib.rs shape)
+pub struct ModelAlias(/* private */);            // identity newtype (see lib.rs shape)
+
+pub struct FrozenAliasDefinition { /* private */ }
+impl FrozenAliasDefinition {
+    pub const fn selecting(selected: DirectModelSelection) -> Self;
+    // accessors: selected()
+}
+
+pub enum ModelSelectionRequest {
+    Direct(DirectModelSelection),
+    Alias(ModelAlias),
+}
+
+pub enum FrozenModelSelection {
+    Direct(DirectModelSelection),
+    FrozenAlias {
+        alias: ModelAlias,
+        definition: FrozenAliasDefinition,
+    },
+}
+// direct and frozen-alias selections stay unequal even for one exact target
+
+pub enum ModelParameters {
+    ProviderDefaults,
+}
+
+pub enum KnownProviderFailureRetry {
+    Disabled,
+}
+
+pub enum ModelFallback {
+    Disabled,
+}
+
+pub struct EffectiveConfiguration { /* private */ }
+impl EffectiveConfiguration {
+    pub const fn baseline(model: FrozenModelSelection) -> Self;
+    // accessors: model(), parameters(), known_provider_failure_retry(), model_fallback()
+}
+
+pub struct SessionConfigurationDefaultsVersion(/* private u64 */);
+impl SessionConfigurationDefaultsVersion {
+    pub const fn try_from_u64(value: u64) -> Option<Self>;  // None for zero
+    pub const fn as_u64(self) -> u64;
+    pub const fn first() -> Self;
+    pub const fn checked_next(self) -> Option<Self>;  // None at u64::MAX
+}
+
+pub struct SessionConfigurationDefaults { /* private */ }
+impl SessionConfigurationDefaults {
+    pub const fn new(model: ModelSelectionRequest) -> Self;
+    // accessors: model()
+}
+
+pub struct VersionedSessionConfigurationDefaults { /* private */ }
+impl VersionedSessionConfigurationDefaults {
+    pub const fn establish(defaults: SessionConfigurationDefaults) -> Self;  // version one
+    pub fn replace(self, defaults: SessionConfigurationDefaults) -> Option<Self>;
+    pub fn derive_request(
+        &self,
+        expected: SessionConfigurationDefaultsVersion,
+        model: ModelSelectionOverride,
+    ) -> Result<VersionCheckedConfigurationRequest, SessionDefaultsVersionMismatch>;
+    // accessors: version(), defaults()
+}
+// reconstitution pairing of an arbitrary version with a defaults value is
+// crate-private (ADR-0035); owning reconstitution seams are the producers
+
+pub enum ModelSelectionOverride {
+    UseSessionDefault,
+    ReplaceWith(ModelSelectionRequest),
+}
+// UseSessionDefault and ReplaceWith(current default) stay structurally distinct
+
+pub struct ConfigurationRequest { /* private */ }
+// sealed: carried inside VersionCheckedConfigurationRequest (derive_request)
+impl ConfigurationRequest {
+    // accessors: model()
+}
+
+pub struct VersionCheckedConfigurationRequest { /* private */ }
+// sealed: VersionedSessionConfigurationDefaults::derive_request
+impl VersionCheckedConfigurationRequest {
+    // accessors: request(), session_defaults_version()
+}
+
+pub struct SessionDefaultsVersionMismatch { /* private */ }
+// sealed: Err of derive_request; authoritative rejection, no silent adoption
+impl SessionDefaultsVersionMismatch {
+    // accessors: expected(), current()
+}
+
+pub struct OriginConfiguration { /* private */ }
+impl OriginConfiguration {
+    pub fn freeze(
+        checked: VersionCheckedConfigurationRequest,
+        select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+    ) -> Result<Self, UnknownModelAlias>;
+    // accessors: requested(), session_defaults_version(), effective()
+}
+
+pub struct UnknownModelAlias { /* private */ }
+// sealed: Err of OriginConfiguration::freeze
+impl UnknownModelAlias {
+    // accessors: alias()
+}
+
+pub enum TurnConfigurationProvenance {
+    ExplicitOrigin(OriginConfiguration),
+    InheritedForReclassifiedSteering(SteeringBinding),
+}
+// the inherited variant deliberately carries no configuration value
+```
+
+## domain: accepted_input
+
+```rust
+pub struct AcceptedInputLifecycle { /* private */ }
+impl AcceptedInputLifecycle {
+    pub const fn new(id: AcceptedInputId, disposition: AcceptedInputDisposition) -> Self;
+    pub fn consume_as_steering(self, call: ModelCallId)
+        -> Result<Self, AcceptedInputLifecycleTransitionError>;
+    pub fn reclassify_as_turn_origin(self, turn: TurnId, reason: SteeringReclassificationReason)
+        -> Result<Self, AcceptedInputLifecycleTransitionError>;
+    // accessors: id(), disposition()
+}
+// consuming transitions preserve AcceptedInputId; Err returns the lifecycle unchanged
+
+pub enum AcceptedInputLifecycleTransitionError {
+    CannotConsumeAsSteering { lifecycle: AcceptedInputLifecycle },
+    CannotReclassifyAsTurnOrigin { lifecycle: AcceptedInputLifecycle },
+}
+impl AcceptedInputLifecycleTransitionError {
+    pub fn into_lifecycle(self) -> AcceptedInputLifecycle;
+    // accessors: lifecycle()
+}
+
+pub struct SteeringBinding { /* private */ }
+impl SteeringBinding {
+    pub const fn new(source_turn: TurnId) -> Self;
+    // accessors: source_turn()
+}
+
+pub enum AcceptedInputDisposition {
+    OriginOf(TurnId),
+    PendingSteering { binding: SteeringBinding },
+    ConsumedAsSteering { call: ModelCallId },
+    ReclassifiedAsTurnOrigin { turn: TurnId, reason: SteeringReclassificationReason },
+}
+// transitions on a bare disposition are crate-private; AcceptedInputLifecycle
+// is the public transition boundary
+
+pub enum SteeringReclassificationReason {
+    NoSafePointBeforeTerminal,
+}
+```
+
+## domain: delivery_request
+
+```rust
+pub struct PerInputConfigurationChoices { /* private */ }
+impl PerInputConfigurationChoices {
+    pub const fn new(
+        expected_session_defaults_version: SessionConfigurationDefaultsVersion,
+        model: ModelSelectionOverride,
+    ) -> Self;
+    // accessors: expected_session_defaults_version(), model()
+}
+
+pub enum DeliveryRequest {
+    StartWhenNoActiveTurn {
+        configuration: PerInputConfigurationChoices,
+    },
+    Interrupt {
+        expected_active_turn: TurnId,
+        configuration: PerInputConfigurationChoices,
+    },
+    NextSafePoint {
+        expected_active_turn: TurnId,
+    },
+    AfterCurrentTurn {
+        expected_active_turn: TurnId,
+        configuration: PerInputConfigurationChoices,
+    },
+}
+// NextSafePoint carries no configuration by construction
+```
+
+## domain: queue_order
+
+```rust
+pub struct SessionInputPosition(/* private u64 */);
+impl SessionInputPosition {
+    pub const fn try_from_u64(value: u64) -> Option<Self>;  // None for zero
+    pub const fn as_u64(self) -> u64;
+    pub const fn first() -> Self;
+    pub const fn checked_next(self) -> Option<Self>;  // None at u64::MAX
+}
+
+pub enum AcceptedInputQueuePriority {
+    Ordinary,
+    InterruptImmediatelyAfter { predecessor: TurnId },
+}
+
+pub struct AcceptedInputQueueOrder { /* private */ }
+impl AcceptedInputQueueOrder {
+    pub const fn ordinary(acceptance_position: SessionInputPosition) -> Self;
+    pub const fn interrupt_immediately_after(
+        acceptance_position: SessionInputPosition,
+        predecessor: TurnId,
+    ) -> Self;
+    // accessors: acceptance_position(), priority()
+}
+// no form can carry a direct starting predecessor (INV-009)
+
+pub struct AcceptedInputQueueWork { /* private */ }
+impl AcceptedInputQueueWork {
+    pub const fn new(session: SessionId, turn: TurnId, order: AcceptedInputQueueOrder) -> Self;
+    // accessors: session(), turn(), order()
+}
+
+pub enum AcceptedInputQueueOrderError {
+    MixedSessions {
+        first_session: SessionId,
+        second_session: SessionId,
+    },
+    DuplicateTurn {
+        turn: TurnId,
+    },
+    DuplicateAcceptancePosition {
+        position: SessionInputPosition,
+        first_turn: TurnId,
+        second_turn: TurnId,
+    },
+    MissingInterruptPredecessor {
+        turn: TurnId,
+        predecessor: TurnId,
+    },
+    SelfInterruptPredecessor {
+        turn: TurnId,
+    },
+    MultipleInterruptSuccessors {
+        predecessor: TurnId,
+        first_successor: TurnId,
+        second_successor: TurnId,
+    },
+    InterruptCycle {
+        turn: TurnId,
+    },
+    InterruptPositionNotAfterPredecessor {
+        turn: TurnId,
+        predecessor: TurnId,
+        position: SessionInputPosition,
+        predecessor_position: SessionInputPosition,
+    },
+    InterruptPredecessorChronologyReversed {
+        earlier_interrupt: TurnId,
+        earlier_predecessor: TurnId,
+        later_interrupt: TurnId,
+        later_predecessor: TurnId,
+    },
+}
+
+pub fn derive_accepted_input_total_order(
+    currently_known_work: impl IntoIterator<Item = AcceptedInputQueueWork>,
+) -> Result<Vec<TurnId>, AcceptedInputQueueOrderError>;
+// input must be the complete currently known single-session fact set;
+// result is derived order only, never a written-back predecessor pointer
+```
+
+## domain: turn_lifecycle
+
+```rust
+pub enum AcceptedInputStartingLineage {
+    FirstInSession,
+    After { immediate_predecessor: TurnId },
+}
+
+pub struct AcceptedInputTurnStart { /* private */ }
+// sealed: no public or crate-wide producer yet; the later eligibility
+// transition supplies the module-local trusted producer
+impl AcceptedInputTurnStart {
+    // accessors: lineage(), frontier()
+}
+
+pub enum IssuedOperationRef {
+    ModelCall(ModelCallId),
+    ToolAttempt(ToolAttemptId),
+}
+
+pub struct NonEmptyIssuedOperationRefs { /* private */ }
+impl NonEmptyIssuedOperationRefs {
+    pub fn try_from_operations(
+        operations: impl IntoIterator<Item = IssuedOperationRef>,
+    ) -> Result<Self, NonEmptyIssuedOperationRefsError>;
+    pub fn operation_count(&self) -> usize;
+    pub fn contains(&self, operation: IssuedOperationRef) -> bool;
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = IssuedOperationRef> + '_;
+}
+// canonical set; empty and duplicate input rejected
+
+pub enum NonEmptyIssuedOperationRefsError {
+    Empty,
+    Duplicate { operation: IssuedOperationRef },
+}
+
+pub struct AppliedStopForReconciliationProof { /* private */ }
+// sealed: no public producer yet; a later exact-set command-result slice
+// supplies the trusted producer
+impl AppliedStopForReconciliationProof {
+    // accessors: decision_command(), turn()
+}
+
+pub enum ReconciliationReason {
+    OwnerChoseReconciliation { decision: AppliedStopForReconciliationProof },
+    InterruptRequiresReconciliation { interrupt: AppliedInterruptProof },
+    FatalMismatchRequiresReconciliation { causes: FatalMismatchStopCauses },
+}
+
+pub struct ReconciliationMarker { /* private */ }
+// sealed: crate-private construction from the fatal-mismatch candidate binding;
+// no public producer
+impl ReconciliationMarker {
+    // accessors: ambiguous_operations(), reason()
+}
+
+pub enum ActiveTurnPhase {
+    Running { current_attempt: CurrentTurnAttempt },
+    AwaitingApproval { request: ToolRequestId },
+    AwaitingRecoveryDecision { ambiguous_operations: NonEmptyIssuedOperationRefs },
+}
+impl ActiveTurnPhase {
+    pub const fn retains_progressing_slot(&self) -> bool;  // always true
+}
+
+pub enum TurnDisposition {
+    Completed,
+    Refused,
+    Failed,
+    Cancelled { cause: AppliedInterruptProof },
+    ReconciliationRequired { marker: ReconciliationMarker },
+}
+```
+
+## domain: turn_attempt
+
+```rust
+pub struct ProviderTargetMismatchFailureRef { /* private */ }
+// sealed: crate-private constructors; trusted producers are the validating
+// provider_evidence correlations
+impl ProviderTargetMismatchFailureRef {
+    // accessors: kind()
+}
+
+pub enum ProviderTargetMismatchFailureKind {
+    NonterminalCallObservation { evidence: ProviderTargetEvidenceId },
+    TerminalAmbiguityResolution { evidence: ProviderTargetEvidenceId },
+    TerminalCallInvalidation { invalidated_call: ModelCallId },
+}
+
+pub enum AppliedInterruptState {
+    NoAppliedInterrupt,
+    Applied { proof: AppliedInterruptProof },
+}
+
+pub struct FatalMismatchStopCauses { /* private */ }
+impl FatalMismatchStopCauses {
+    pub fn new(failure: ProviderTargetMismatchFailureRef, interrupt: AppliedInterruptState) -> Self;
+    pub fn failures(&self) -> impl ExactSizeIterator<Item = ProviderTargetMismatchFailureRef> + '_;
+    pub fn contains(&self, failure: ProviderTargetMismatchFailureRef) -> bool;
+    // accessors: interrupt()
+}
+// nonempty by construction: initialized from one trusted reference
+
+pub enum TurnAttemptStopCauses {
+    CancellationOnly { interrupt: AppliedInterruptProof },
+    FatalMismatch(FatalMismatchStopCauses),
+}
+impl TurnAttemptStopCauses {
+    pub const fn cancellation_only(interrupt: AppliedInterruptProof) -> Self;
+    pub fn fatal_mismatch(failure: ProviderTargetMismatchFailureRef) -> Self;
+    pub fn add_fatal_mismatch(self, failure: ProviderTargetMismatchFailureRef) -> Self;
+    // cancellation-only upgrades to fatal, retaining its proof
+    pub fn add_interrupt(self, proof: AppliedInterruptProof)
+        -> Result<Self, TurnAttemptStopCauseUnionError>;
+    // equal replay idempotent; a distinct second proof is rejected unchanged
+}
+
+pub struct TurnAttemptStopCauseUnionError { /* private */ }
+// sealed: Err of TurnAttemptStopCauses::add_interrupt
+impl TurnAttemptStopCauseUnionError {
+    pub fn into_parts(self) -> (TurnAttemptStopCauses, AppliedInterruptProof);
+    // accessors: current(), requested()
+}
+
+pub enum AttemptEnd {
+    WithoutStop {
+        disposition: UnstoppedAttemptDisposition,
+    },
+    AfterCancellation {
+        cause: AppliedInterruptProof,
+        disposition: CancellationStopDisposition,
+    },
+    AfterFatalMismatch {
+        causes: FatalMismatchStopCauses,
+        disposition: FatalMismatchStopDisposition,
+    },
+}
+
+pub enum UnstoppedAttemptDisposition {
+    TurnCompleted,
+    TurnRefused,
+    YieldedToDurableWait,
+    KnownFailure,
+    Lost,
+    Ambiguous,
+}
+
+pub enum CancellationStopDisposition {
+    TurnCompleted,
+    TurnRefused,
+    KnownFailure,
+    Lost,
+    Cancelled,
+    Ambiguous,
+}
+// no YieldedToDurableWait after an applied cancellation
+
+pub enum FatalMismatchStopDisposition {
+    KnownFailure,
+    Lost,
+    Ambiguous,
+}
+// fatal stop permits no completion, refusal, cancellation, or wait
+
+pub enum CurrentTurnAttemptState {
+    Prepared,
+    Running,
+    StopRequested { causes: TurnAttemptStopCauses },
+}
+
+pub struct CurrentTurnAttempt { /* private */ }
+// sealed: crate-private prepared-entry constructor; all transitions
+// (begin_running, request_cancellation, request_fatal_mismatch, end_*) are
+// crate-private, reserved for the turn aggregate
+impl CurrentTurnAttempt {
+    // accessors: id(), state()
+}
+
+pub struct EndedTurnAttempt { /* private */ }
+// sealed: crate-private consuming end transitions on CurrentTurnAttempt;
+// exposes no transition back to a current attempt
+impl EndedTurnAttempt {
+    // accessors: id(), end()
+}
+```
+
+## domain: model_call
+
+```rust
+pub struct ProviderModelIdentity(/* private */);  // identity newtype (see lib.rs shape)
+
+pub struct ResolvedProviderTarget { /* private */ }
+impl ResolvedProviderTarget {
+    pub const fn naming(identity: ProviderModelIdentity) -> Self;
+    // accessors: identity()
+}
+
+pub struct PinnedProviderTarget { /* private */ }
+// sealed: crate-private constructor reserved for the later resolution-owning
+// slice; a raw (turn, target) pair cannot claim a pinned turn fact
+impl PinnedProviderTarget {
+    // accessors: turn(), target()
+}
+
+pub enum ModelCallDisposition {
+    Completed,
+    KnownFailed,
+    Refused,
+    Cancelled,
+    Ambiguous,
+}
+
+pub enum CurrentModelCallState {
+    Prepared,
+    InFlight,
+    CancellationRequested,
+}
+
+pub struct CurrentModelCall { /* private */ }
+// sealed: crate-private prepared constructor (consumes the turn's
+// PinnedProviderTarget and a ResolvedContextFrontierSnapshot); transitions
+// (begin_in_flight, request_cancellation, end_classified,
+// end_cancelled_unsent) are crate-private, reserved for the turn aggregate
+impl CurrentModelCall {
+    // accessors: id(), pinned(), turn(), target(), frontier(), state()
+}
+
+pub struct EndedModelCall { /* private */ }
+// sealed: crate-private end transitions on CurrentModelCall; terminal —
+// no transition back to a current call
+impl EndedModelCall {
+    // accessors: id(), pinned(), turn(), target(), frontier(), disposition()
+}
+```
+
+## domain: context_frontier
+
+```rust
+pub struct ContextFrontierId(/* private */);          // identity newtype (see lib.rs shape)
+pub struct SemanticTranscriptEntryId(/* private */);  // identity newtype (see lib.rs shape)
+
+pub struct ContextFrontier { /* private */ }
+// sealed: ResolvedContextFrontierSnapshot::frontier is the only public producer
+impl ContextFrontier {
+    // accessors: owning_session(), snapshot()
+}
+
+pub struct SemanticTranscriptEntryRef { /* private */ }
+impl SemanticTranscriptEntryRef {
+    pub const fn from_source(source_session: SessionId, entry: SemanticTranscriptEntryId) -> Self;
+    // accessors: source_session(), entry()
+}
+
+pub struct ResolvedContextFrontierSnapshot { /* private */ }
+// sealed: crate-private try_from_candidate and derive_appending_candidate,
+// reserved for later eligibility and call-preparation slices
+impl ResolvedContextFrontierSnapshot {
+    pub fn entry_count(&self) -> usize;
+    pub fn ordered_entries(
+        &self,
+    ) -> impl ExactSizeIterator<Item = SemanticTranscriptEntryRef> + DoubleEndedIterator + '_;
+    pub fn same_semantic_content(&self, other: &Self) -> bool;
+    pub fn is_semantic_prefix_of(&self, later: &Self) -> bool;
+    // accessors: frontier()
+}
+// identity equality (Eq) and semantic-content equality are deliberately
+// separate comparisons
+```
+
+## domain: provider_evidence
+
+The module is large (1,245 lines) but its public surface is deliberately
+small: the recording (`record`) and admission (`admit`) mutations, mismatch
+correlation producers, and all rejection/outcome types are crate-private
+seams reserved for the later aggregate slice.
+
+```rust
+pub enum ProviderTargetObservation {
+    MatchesResolvedTarget { reported: ProviderModelIdentity },
+    Mismatch { reported: ProviderModelIdentity },
+}
+// an absent reported identity is not representable
+
+pub struct ProviderTargetEvidence { /* private */ }
+// sealed: crate-private ProviderTargetEvidenceLog recording boundary
+impl ProviderTargetEvidence {
+    // accessors: id(), call(), observation()
+}
+
+pub struct ProviderTargetEvidenceLog { /* private */ }  // also Default
+impl ProviderTargetEvidenceLog {
+    pub fn new() -> Self;
+    pub fn lookup(&self, id: ProviderTargetEvidenceId) -> Option<&ProviderTargetEvidence>;
+    // recording (identifier replay/reuse boundary) is crate-private
+}
+
+pub struct ProviderTargetMismatchInvalidation { /* private */ }
+// sealed: crate-private ProviderTargetMismatchInvalidationLog admission;
+// unique by invalidated call (ADR-0005)
+impl ProviderTargetMismatchInvalidation {
+    // accessors: invalidated_call(), first_mismatch_evidence()
+}
+
+pub struct ProviderTargetMismatchInvalidationLog { /* private */ }  // also Default
+impl ProviderTargetMismatchInvalidationLog {
+    pub fn new() -> Self;
+    pub fn lookup(&self, call: ModelCallId) -> Option<&ProviderTargetMismatchInvalidation>;
+    // admission is crate-private
+}
+```
+
+## domain: applied_interrupt
+
+Another deliberately tiny public surface (768-line module): the
+submit-input correlation seam that produces `AppliedInterruptCommandResult`
+is module-private, reserved for a later transaction-owning adapter.
+
+```rust
+pub struct AppliedInterruptProof { /* private */ }
+// sealed: AppliedInterruptCommandResult::proof is the sole public producer;
+// a raw DurableCommandId is never cancellation authority
+impl AppliedInterruptProof {
+    // accessors: command(), predecessor()
+}
+
+pub struct AppliedInterruptCommandResult { /* private */ }
+// sealed: no public producer yet; module-private correlation of an applied
+// submit-input result constructs it in a later slice
+impl AppliedInterruptCommandResult {
+    // accessors: proof(), session(), accepted_input(), successor(), successor_order()
+}
+```
+
+## domain: fatal_mismatch
+
+Zero public items. The entire subtree (`fatal_mismatch.rs`,
+`fatal_mismatch/lifecycle.rs`, `fatal_mismatch/prepared.rs` — about 1,900
+lines) is `pub(crate)`: post-evidence fact derivation, the reconciliation
+marker candidate, and the sealed attempt/turn lifecycle binding are consumed
+by `turn_lifecycle` and reserved for the next aggregate slice. Its only
+externally visible effect today is that `ReconciliationMarker` (turn_lifecycle)
+can be built from its candidate, crate-internally.
+
+## domain: replace_session_defaults
+
+```rust
+pub struct ReplaceSessionDefaults { /* private */ }
+impl ReplaceSessionDefaults {
+    pub const fn new(
+        command_id: DurableCommandId,
+        session: SessionId,
+        expected_current_version: SessionConfigurationDefaultsVersion,
+        replacement: SessionConfigurationDefaults,
+    ) -> Self;
+    pub const fn prepare_session_not_found(self) -> PreparedReplaceSessionDefaults;
+    pub fn prepare_against(self, current: &Session)
+        -> Result<PreparedReplaceSessionDefaults, ReplaceSessionDefaultsPreparationError>;
+    // accessors: command_id(), session(), expected_current_version(), replacement()
+}
+// Eq/Hash exclude command_id (ADR-0034 comparison payload)
+
+pub enum ReplaceSessionDefaultsResult {
+    Applied(ReplaceSessionDefaultsAppliedResult),
+    Rejected(ReplaceSessionDefaultsRejectedResult),
+}
+
+pub struct ReplaceSessionDefaultsAppliedResult { /* private */ }
+// sealed: live preparation (prepare_against) and checked reconstitution
+impl ReplaceSessionDefaultsAppliedResult {
+    // accessors: session(), installed()
+}
+
+pub enum ReplaceSessionDefaultsRejectedResult {
+    SessionNotFound(ReplaceSessionDefaultsSessionNotFound),
+    CurrentVersionMismatch(ReplaceSessionDefaultsCurrentVersionMismatch),
+    VersionExhausted(ReplaceSessionDefaultsVersionExhausted),
+}
+
+pub struct ReplaceSessionDefaultsSessionNotFound { /* private */ }
+// sealed: prepare_session_not_found and checked reconstitution
+impl ReplaceSessionDefaultsSessionNotFound {
+    // accessors: session()
+}
+
+pub struct ReplaceSessionDefaultsCurrentVersionMismatch { /* private */ }
+// sealed: prepare_against and checked reconstitution
+impl ReplaceSessionDefaultsCurrentVersionMismatch {
+    // accessors: session(), expected(), current()
+}
+
+pub struct ReplaceSessionDefaultsVersionExhausted { /* private */ }
+// sealed: prepare_against and checked reconstitution
+impl ReplaceSessionDefaultsVersionExhausted {
+    // accessors: session(), current()
+}
+
+pub struct PreparedReplaceSessionDefaults { /* private */ }
+// sealed: ReplaceSessionDefaults::prepare_session_not_found / prepare_against
+impl PreparedReplaceSessionDefaults {
+    pub const fn into_parts(self) -> (ReplaceSessionDefaults, ReplaceSessionDefaultsResult);
+    // accessors: command(), result()
+}
+
+pub struct ReplaceSessionDefaultsPreparationError { /* private */ }
+// sealed: Err of prepare_against; adapter correlation failure, not a
+// terminal command rejection
+impl ReplaceSessionDefaultsPreparationError {
+    pub const fn into_parts(self) -> (ReplaceSessionDefaults, SessionId);
+    // accessors: command(), provided_session()
+}
+
+pub struct ReplaceSessionDefaultsReconstitutionInput { /* private */ }
+impl ReplaceSessionDefaultsReconstitutionInput {
+    pub const fn applied(
+        command: ReplaceSessionDefaults,
+        result_session: SessionId,
+        result_version: SessionConfigurationDefaultsVersion,
+        defaults_session: SessionId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+    ) -> Self;
+    pub const fn rejected_session_not_found(
+        command: ReplaceSessionDefaults,
+        result_session: SessionId,
+    ) -> Self;
+    pub const fn rejected_current_version_mismatch(
+        command: ReplaceSessionDefaults,
+        result_session: SessionId,
+        result_expected: SessionConfigurationDefaultsVersion,
+        result_current: SessionConfigurationDefaultsVersion,
+    ) -> Self;
+    pub const fn rejected_version_exhausted(
+        command: ReplaceSessionDefaults,
+        result_session: SessionId,
+        result_current: SessionConfigurationDefaultsVersion,
+    ) -> Self;
+    pub fn reconstitute(self)
+        -> Result<ReconstitutedReplaceSessionDefaults, ReplaceSessionDefaultsReconstitutionError>;
+    // accessors: command()
+}
+
+pub enum ReplaceSessionDefaultsReconstitutionFailure {
+    ResultSessionMismatch,
+    DefaultsSessionMismatch,
+    ResultVersionMismatch,
+    InstalledVersionIsNotSuccessor,
+    StoredDefaultsMismatch,
+    ResultExpectedVersionMismatch,
+    RejectedVersionsAreEqual,
+    ResultVersionIsNotExhausted,
+}
+
+pub struct ReplaceSessionDefaultsReconstitutionError { /* private */ }
+// sealed: Err of ReplaceSessionDefaultsReconstitutionInput::reconstitute
+impl ReplaceSessionDefaultsReconstitutionError {
+    pub fn into_parts(self) -> (
+        ReplaceSessionDefaultsReconstitutionInput,
+        ReplaceSessionDefaultsReconstitutionFailure,
+    );
+    // accessors: failure(), input()
+}
+
+pub struct ReconstitutedReplaceSessionDefaults { /* private */ }
+// sealed: ReplaceSessionDefaultsReconstitutionInput::reconstitute;
+// authorizes no insert, pointer update, repair, or command claim
+impl ReconstitutedReplaceSessionDefaults {
+    // accessors: command(), result()
+}
+```
+
+## application: create_session
+
+```rust
+pub enum InvalidDurableCommandId {
+    Nil,
+    Max,
+}
+// impl Display + std::error::Error
+
+pub struct CreateSessionRequest { /* private */ }
+impl CreateSessionRequest {
+    pub fn try_new(
+        command_id: DurableCommandId,
+        initial_configuration_defaults: SessionConfigurationDefaults,
+    ) -> Result<Self, InvalidDurableCommandId>;
+    // accessors: command_id(), initial_configuration_defaults()
+}
+
+pub trait SessionIdGenerator {
+    fn next_session_id(&mut self) -> SessionId;
+}
+
+pub struct UuidV7SessionIdGenerator;  // Default; impl SessionIdGenerator
+
+pub enum CreateSessionOutcome {
+    Applied(CreateSessionAppliedResult),
+    ConflictingReuse { command_id: DurableCommandId },
+}
+// Applied carries the recorded receipt; on equal replay it may name a
+// different session from this invocation's fresh candidate
+
+pub trait CreateSessionTransaction {
+    type Error;
+
+    fn handle(
+        &mut self,
+        prepared: PreparedCreateSession,
+    ) -> impl Future<Output = Result<CreateSessionOutcome, Self::Error>> + Send;
+}
+
+pub enum CreateSessionError<TransactionError> {
+    Preparation(CreateSessionPreparationFailure),
+    Transaction(TransactionError),
+}
+// impl Display + std::error::Error (bounded on TransactionError)
+
+pub struct CreateSessionService<Generator, Transaction> { /* private */ }
+impl<Generator, Transaction> CreateSessionService<Generator, Transaction> {
+    pub const fn new(session_ids: Generator, transaction: Transaction) -> Self;
+    pub fn into_parts(self) -> (Generator, Transaction);
+}
+impl<Generator: SessionIdGenerator, Transaction: CreateSessionTransaction>
+    CreateSessionService<Generator, Transaction>
+{
+    pub async fn execute(
+        &mut self,
+        request: CreateSessionRequest,
+    ) -> Result<CreateSessionOutcome, CreateSessionError<Transaction::Error>>;
+    // calls the atomic port exactly once; no retry, no receipt fabrication
+}
+```
+
+## application: load_session
+
+```rust
+pub trait SessionReader {
+    type Error;
+
+    fn load_session(
+        &self,
+        session_id: SessionId,
+    ) -> impl Future<Output = Result<Option<Session>, Self::Error>> + Send;
+}
+// Ok(None) means true absence; integrity failure for an existing session is Err
+
+pub struct LoadSessionService<Reader> { /* private */ }
+impl<Reader> LoadSessionService<Reader> {
+    pub const fn new(reader: Reader) -> Self;
+    pub fn into_reader(self) -> Reader;
+}
+impl<Reader: SessionReader> LoadSessionService<Reader> {
+    pub async fn execute(&self, session_id: SessionId)
+        -> Result<Option<Session>, Reader::Error>;
+    // single query; no retry, no translation of absence or failure
+}
+```
+
+## application: replace_session_defaults
+
+```rust
+pub struct ReplaceSessionDefaultsRequest { /* private */ }
+impl ReplaceSessionDefaultsRequest {
+    pub fn try_new(
+        command_id: DurableCommandId,
+        session: SessionId,
+        expected_current_version: SessionConfigurationDefaultsVersion,
+        replacement: SessionConfigurationDefaults,
+    ) -> Result<Self, InvalidDurableCommandId>;
+    // accessors: command_id(), session(), expected_current_version(), replacement()
+}
+
+pub enum ReplaceSessionDefaultsOutcome {
+    Recorded(ReplaceSessionDefaultsResult),
+    ConflictingReuse { command_id: DurableCommandId },
+}
+// Recorded nests the domain's applied-or-rejected receipt unchanged
+
+pub trait ReplaceSessionDefaultsTransaction {
+    type Error;
+
+    fn handle(
+        &mut self,
+        command: ReplaceSessionDefaults,
+    ) -> impl Future<Output = Result<ReplaceSessionDefaultsOutcome, Self::Error>> + Send;
+}
+
+pub struct ReplaceSessionDefaultsService<Transaction> { /* private */ }
+impl<Transaction> ReplaceSessionDefaultsService<Transaction> {
+    pub const fn new(transaction: Transaction) -> Self;
+    pub fn into_transaction(self) -> Transaction;
+}
+impl<Transaction: ReplaceSessionDefaultsTransaction> ReplaceSessionDefaultsService<Transaction> {
+    pub async fn execute(
+        &mut self,
+        request: ReplaceSessionDefaultsRequest,
+    ) -> Result<ReplaceSessionDefaultsOutcome, Transaction::Error>;
+    // constructs the canonical command once, calls the atomic port exactly once
+}
+```
+
+## Inventory
+
+| Module | Public types |
+| --- | --- |
+| domain: lib.rs identities | 9 |
+| domain: session | 18 |
+| domain: configuration | 19 |
+| domain: accepted_input | 5 |
+| domain: delivery_request | 2 |
+| domain: queue_order | 5 (+1 free fn) |
+| domain: turn_lifecycle | 10 |
+| domain: turn_attempt | 13 |
+| domain: model_call | 7 |
+| domain: context_frontier | 5 |
+| domain: provider_evidence | 5 |
+| domain: applied_interrupt | 2 |
+| domain: fatal_mismatch | 0 |
+| domain: replace_session_defaults | 13 |
+| **signalbox-domain total** | **113 (+1 free fn)** |
+| application: create_session | 8 (incl. 2 traits) |
+| application: load_session | 2 (incl. 1 trait) |
+| application: replace_session_defaults | 4 (incl. 1 trait) |
+| **signalbox-application total** | **14** |
