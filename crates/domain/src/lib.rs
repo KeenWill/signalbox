@@ -15,6 +15,7 @@ mod fatal_mismatch;
 mod model_call;
 mod provider_evidence;
 mod queue_order;
+mod replace_session_defaults;
 mod session;
 mod turn_attempt;
 mod turn_lifecycle;
@@ -48,6 +49,14 @@ pub use provider_evidence::{
 pub use queue_order::{
     AcceptedInputQueueOrder, AcceptedInputQueueOrderError, AcceptedInputQueuePriority,
     AcceptedInputQueueWork, SessionInputPosition, derive_accepted_input_total_order,
+};
+pub use replace_session_defaults::{
+    PreparedReplaceSessionDefaults, ReconstitutedReplaceSessionDefaults, ReplaceSessionDefaults,
+    ReplaceSessionDefaultsAppliedResult, ReplaceSessionDefaultsCurrentVersionMismatch,
+    ReplaceSessionDefaultsPreparationError, ReplaceSessionDefaultsReconstitutionError,
+    ReplaceSessionDefaultsReconstitutionFailure, ReplaceSessionDefaultsReconstitutionInput,
+    ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult,
+    ReplaceSessionDefaultsSessionNotFound, ReplaceSessionDefaultsVersionExhausted,
 };
 pub use session::{
     CreateSession, CreateSessionAppliedResult, CreateSessionPreparationError,
