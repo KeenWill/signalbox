@@ -60,7 +60,7 @@ Actor is stored within each command's typed record family under ADR-0022 and ADR
 
 Adoption follows the record-family boundary:
 
-- A command kind whose typed record family is not yet accepted when this record is accepted carries `actor` from its first accepted version. At drafting that includes `SubmitInput`, which has no committed handling, and `ReplaceSessionDefaults`, whose merged four-field domain payload (decision log, 2026-07-18) precedes its still-in-flight record family; extending that payload with `actor` is an ordinary decision-log slice because no committed durable record's replay equality changes.
+- A command kind whose typed record family is not yet accepted when this record is accepted carries `actor` from its first accepted version. At drafting time, this includes `SubmitInput`, which has no committed handling, and `ReplaceSessionDefaults`, whose merged four-field domain payload (decision log, 2026-07-18) precedes its still-in-flight record family; extending that payload with `actor` is an ordinary decision-log slice because no committed durable record's replay equality changes.
 - `CreateSession`, whose typed record family and structural equality are already accepted, is amended only if the owner explicitly chooses. That choice would land as a dated amendment to ADR-0003's `CreateSession` payload plus an ADR-0034 kind-scoped storage version whose decoding of retained records assigns `Owner` — truthful and meaning-preserving, because owner authority was the only admissible issuer of every retained record. This record does not silently amend ADR-0003; declining leaves `CreateSession` attribution implicit and both states coherent.
 
 ## Invariants
