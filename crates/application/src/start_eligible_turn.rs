@@ -129,8 +129,9 @@ mod tests {
     use signalbox_domain::{
         AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputQueueOrder,
         AcceptedInputSchedulingReconstitutionInput, AcceptedInputTurnSchedulingRecord,
-        AcceptedInputTurnSchedulingRecordState, DirectModelSelection, ModelSelectionOverride,
-        ModelSelectionRequest, OriginConfiguration, Session, SessionConfigurationDefaults,
+        AcceptedInputTurnSchedulingRecordState, DeliveryRequest, DirectModelSelection,
+        ModelSelectionOverride, ModelSelectionRequest, OriginConfiguration,
+        PerInputConfigurationChoices, Session, SessionConfigurationDefaults,
         SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
         SessionReconstitutionInput, TranscriptAncestry, TurnId,
     };
@@ -215,6 +216,12 @@ mod tests {
             session.id(),
             turn,
             AcceptedInputQueueOrder::ordinary(signalbox_domain::SessionInputPosition::first()),
+            DeliveryRequest::StartWhenNoActiveTurn {
+                configuration: PerInputConfigurationChoices::new(
+                    SessionConfigurationDefaultsVersion::first(),
+                    ModelSelectionOverride::UseSessionDefault,
+                ),
+            },
             configuration(&session),
             AcceptedInputTurnSchedulingRecordState::Queued,
         );

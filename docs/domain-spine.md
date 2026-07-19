@@ -942,12 +942,13 @@ impl AcceptedInputTurnSchedulingRecord {
         queue_session: SessionId,
         queue_turn: TurnId,
         order: AcceptedInputQueueOrder,
+        origin_delivery: DeliveryRequest,
         origin_configuration: OriginConfiguration,
         state: AcceptedInputTurnSchedulingRecordState,
     ) -> Self;
     // accessors: stored_session(), turn(), accepted_input_session(),
     // accepted_input(), queue_session(), queue_turn(), order(),
-    // origin_configuration(), state()
+    // origin_delivery(), origin_configuration(), state()
 }
 
 pub struct AcceptedInputSchedulingReconstitutionInput { /* private */ }
@@ -975,6 +976,7 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
     QueueSessionMismatch { turn: TurnId },
     QueueTurnMismatch { turn: TurnId },
     AcceptedInputOriginMismatch { turn: TurnId },
+    OriginDeliveryMismatch { turn: TurnId },
     DuplicateAcceptedInput { accepted_input: AcceptedInputId },
     InvalidQueueOrder { error: AcceptedInputQueueOrderError },
     SemanticEntrySourceSessionMismatch { entry: SemanticTranscriptEntryId },

@@ -689,13 +689,16 @@ async fn load_scheduling_projection(
         let recorded = recorded_commands
             .get(&accepting_command)
             .ok_or(SubmitInputCorruption::Missing("batched origin receipt"))?;
-        let origin_configuration = match recorded.result() {
+        let (origin_delivery, origin_configuration) = match recorded.result() {
             SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(applied))
                 if applied.accepted_input() == accepted_input
                     && applied.session() == accepted_session
                     && applied.turn() == queued_turn =>
             {
-                applied.origin_configuration().clone()
+                (
+                    recorded.command().delivery(),
+                    applied.origin_configuration().clone(),
+                )
             }
             _ => {
                 return Err(SubmitInputCorruption::Inconsistent(
@@ -827,6 +830,7 @@ async fn load_scheduling_projection(
             queued_session,
             queued_turn,
             AcceptedInputQueueOrder::ordinary(queued_position),
+            origin_delivery,
             origin_configuration,
             state,
         ));

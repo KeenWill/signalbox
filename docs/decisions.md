@@ -12,6 +12,16 @@ An append-only, dated record of decisions below foundation weight, newest first.
 
 **Affects.** `crates/persistence/migrations/202607180005_occupied_slot_submit_input.sql`, `crates/persistence/src/submit_input.rs`, and PostgreSQL enforcement for INV-002, INV-005, INV-007, INV-008, INV-009, INV-012, INV-015, INV-016, and INV-028. It adds no dependency, interrupt transition, `StopRequested` producer, steering consumption, or protocol behavior.
 
+## 2026-07-19 — Exact accepted delivery in scheduling origin records
+
+**Context.** The ADR-0041 scheduling seam correlated an origin tail entry with its turn, acceptance position, delivery kind, historical target, and queue priority, but the record did not repeat the accepted delivery itself. Independently supplied tail facts could therefore change the versioned configuration choice while retaining the same delivery kind and target, while records outside an active tail could bypass delivery/order validation.
+
+**Decision.** Carry the exact immutable accepted `DeliveryRequest` in every turn scheduling record and validate every origin's delivery/order and historical-target relationship, whether or not an active tail exists. Correlate every configured delivery's expected defaults version with its frozen provenance and every explicit `ReplaceWith` request with the exact frozen requested model; a historical `UseSessionDefault` request cannot be rederived without its immutable defaults row. An active tail origin must additionally equal that complete delivery value, and its claimed observation must reach every origin position known by the same scheduling read. This preserves the structural distinction between using a session default and explicitly replacing it.
+
+**Rejected alternatives.** Comparing only the expected defaults version would still miss a changed explicit model-selection override. Rederiving `UseSessionDefault` would require historical defaults outside this purpose-specific input. Trusting the adapter to repeat the accepted delivery would bypass domain-owned correlation.
+
+**Affects.** `crates/domain/src/turn_eligibility.rs`, its domain-spine constructor, accessor, and failure inventory, one application fixture, and INV-008/INV-009/INV-016 scheduling enforcement. It adds no storage representation, transition, or accepted delivery mode.
+
 ## 2026-07-19 — Checked rejected SubmitInput receipt replay
 
 **Context.** ADR-0034 requires equal replay to return the originally recorded terminal result, while ADR-0035 requires domain-owned validation of complete purpose-specific facts. Rejections produced against an occupied slot name the authoritative active turn directly or depend on the command's expected active turn; accepting only bare result fields would let replay pair them with another session or another turn.
