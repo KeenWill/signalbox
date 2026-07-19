@@ -2194,7 +2194,15 @@ name = "signalbox-domain"
 version = "0.0.0"
 dependencies = [
  "expect-test",
+ "signalbox-expect-table",
  "uuid",
+]
+
+[[package]]
+name = "signalbox-expect-table"
+version = "0.0.0"
+dependencies = [
+ "expect-test",
 ]
 
 [[package]]
