@@ -4175,9 +4175,10 @@ async fn inv016_pending_steering_and_source_terminalization_serialize() -> Resul
     Ok(())
 }
 
-/// S01 / S03 / S08 / INV-008 / INV-012: occupied-slot rejection evidence is
-/// recorded exactly, while the not-yet-supported matching interrupt path
-/// rolls back its command claim and consumes no acceptance position.
+/// S01 / S03 / S08 / S09 / INV-001 / INV-008 / INV-012: occupied-slot
+/// rejection evidence is recorded exactly, generated identities cannot reuse
+/// the active origin, and the not-yet-supported matching interrupt path rolls
+/// back its command claim and consumes no acceptance position.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn occupied_slot_rejections_and_matching_interrupt_rollback_are_exact()
@@ -4276,6 +4277,51 @@ async fn occupied_slot_rejections_and_matching_interrupt_rollback_are_exact()
                 && actual_active_turn == TurnId::from_uuid(Uuid::from_u128(0xa41))
         ));
         stale_records.push((command, outcome));
+    }
+
+    for (command_value, delivery, turn_candidate) in [
+        (
+            0x449,
+            DeliveryRequest::AfterCurrentTurn {
+                expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xa41)),
+                configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+            },
+            Some(TurnId::from_uuid(Uuid::from_u128(0xa49))),
+        ),
+        (
+            0x44a,
+            DeliveryRequest::NextSafePoint {
+                expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xa41)),
+            },
+            None,
+        ),
+    ] {
+        let command =
+            input_with_delivery(command_value, 0x841, "colliding active origin", delivery);
+        let error = repository
+            .handle(
+                command.clone(),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x941)),
+                turn_candidate,
+            )
+            .await
+            .expect_err("new acceptance cannot reuse the active origin identity");
+        assert!(matches!(
+            error,
+            SubmitInputRepositoryError::AcceptedInputIdentityCollision {
+                command_id,
+                active_turn,
+                accepted_input,
+            } if command_id == command.command_id()
+                && active_turn == TurnId::from_uuid(Uuid::from_u128(0xa41))
+                && accepted_input == AcceptedInputId::from_uuid(Uuid::from_u128(0x941))
+        ));
+        let claimed: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM durable_command WHERE command_id = $1")
+                .bind(Uuid::from_u128(command_value))
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(claimed, 0);
     }
 
     let matching_interrupt = input_with_delivery(
