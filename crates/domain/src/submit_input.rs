@@ -830,6 +830,7 @@ struct SubmitInputTurnOriginAppliedReconstitutionFacts {
     result_session: SessionId,
     result_accepted_input: AcceptedInputId,
     result_turn: TurnId,
+    predecessor_origin: Option<ReconstitutedSubmitInput>,
     accepted_command: DurableCommandId,
     accepted_input: AcceptedInputId,
     accepted_session: SessionId,
@@ -927,6 +928,7 @@ impl SubmitInputReconstitutionInput {
         result_session: SessionId,
         result_accepted_input: AcceptedInputId,
         result_turn: TurnId,
+        predecessor_origin: Option<ReconstitutedSubmitInput>,
         accepted_command: DurableCommandId,
         accepted_input: AcceptedInputId,
         accepted_session: SessionId,
@@ -951,6 +953,7 @@ impl SubmitInputReconstitutionInput {
                     result_session,
                     result_accepted_input,
                     result_turn,
+                    predecessor_origin,
                     accepted_command,
                     accepted_input,
                     accepted_session,
@@ -1176,6 +1179,7 @@ impl SubmitInputReconstitutionInput {
                     result_session,
                     result_accepted_input,
                     result_turn,
+                    predecessor_origin,
                     accepted_command,
                     accepted_input,
                     accepted_session,
@@ -1192,24 +1196,23 @@ impl SubmitInputReconstitutionInput {
                     stored_requested_model,
                     stored_frozen_model,
                 } = *facts;
-                if !matches!(
-                    self.command.delivery,
-                    DeliveryRequest::StartWhenNoActiveTurn { .. }
-                        | DeliveryRequest::AfterCurrentTurn { .. }
-                ) {
-                    return Err(fail(
-                        SubmitInputReconstitutionFailure::AppliedDeliveryIsNotTurnOrigin,
-                    ));
-                }
-                if matches!(
-                    self.command.delivery,
+                let expected_predecessor = match self.command.delivery {
+                    DeliveryRequest::StartWhenNoActiveTurn { .. } => None,
                     DeliveryRequest::AfterCurrentTurn {
                         expected_active_turn,
                         ..
-                    } if expected_active_turn == result_turn
-                ) {
-                    return Err(fail(SubmitInputReconstitutionFailure::QueueTurnMismatch));
-                }
+                    } => {
+                        if expected_active_turn == result_turn {
+                            return Err(fail(SubmitInputReconstitutionFailure::QueueTurnMismatch));
+                        }
+                        Some(expected_active_turn)
+                    }
+                    DeliveryRequest::Interrupt { .. } | DeliveryRequest::NextSafePoint { .. } => {
+                        return Err(fail(
+                            SubmitInputReconstitutionFailure::AppliedDeliveryIsNotTurnOrigin,
+                        ));
+                    }
+                };
                 if result_session != self.command.session {
                     return Err(fail(
                         SubmitInputReconstitutionFailure::ResultSessionMismatch,
@@ -1260,6 +1263,38 @@ impl SubmitInputReconstitutionInput {
                     return Err(fail(
                         SubmitInputReconstitutionFailure::QueuePriorityMismatch,
                     ));
+                }
+                match (expected_predecessor, predecessor_origin) {
+                    (None, None) => {}
+                    (Some(expected_predecessor), Some(predecessor_origin)) => {
+                        let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(
+                            predecessor,
+                        )) = predecessor_origin.result()
+                        else {
+                            return Err(fail(
+                                SubmitInputReconstitutionFailure::AfterCurrentPredecessorOriginMismatch,
+                            ));
+                        };
+                        if predecessor.session() != self.command.session
+                            || predecessor.turn() != expected_predecessor
+                            || predecessor.accepted_input() == accepted_input
+                            || predecessor_origin.command().command_id() == accepted_command
+                        {
+                            return Err(fail(
+                                SubmitInputReconstitutionFailure::AfterCurrentPredecessorOriginMismatch,
+                            ));
+                        }
+                        if accepted_position <= predecessor.acceptance_position() {
+                            return Err(fail(
+                                SubmitInputReconstitutionFailure::AfterCurrentAcceptanceDoesNotFollowPredecessorOrigin,
+                            ));
+                        }
+                    }
+                    (None, Some(_)) | (Some(_), None) => {
+                        return Err(fail(
+                            SubmitInputReconstitutionFailure::AfterCurrentPredecessorOriginMismatch,
+                        ));
+                    }
                 }
 
                 let origin_configuration = reconstruct_origin_configuration(
@@ -1714,6 +1749,12 @@ pub enum SubmitInputReconstitutionFailure {
     /// The queue fact names another future turn or an after-current result
     /// reuses its active predecessor.
     QueueTurnMismatch,
+    /// An after-current result omits or cross-wires the canonical origin of
+    /// the active predecessor, or a start result supplies one.
+    AfterCurrentPredecessorOriginMismatch,
+    /// An after-current acceptance does not follow its active predecessor's
+    /// canonical origin in session acceptance order.
+    AfterCurrentAcceptanceDoesNotFollowPredecessorOrigin,
     /// The accepted-input and queue positions differ.
     QueuePositionMismatch,
     /// This slice's queue fact is not ordinary priority.
@@ -2031,6 +2072,7 @@ mod tests {
             session_id(1),
             accepted_input_id(3),
             turn_id(4),
+            None,
             command_id(1),
             accepted_input_id(3),
             session_id(1),
@@ -2067,16 +2109,23 @@ mod tests {
             session_id(1),
             accepted_input_id(3),
             turn_id(8),
+            Some(source_turn_origin()),
             command_id(1),
             accepted_input_id(3),
             session_id(1),
             content("hello"),
             command.delivery(),
-            SessionInputPosition::first(),
+            SessionInputPosition::first()
+                .checked_next()
+                .expect("after-current acceptance follows its predecessor"),
             AcceptedInputDisposition::OriginOf(turn_id(8)),
             session_id(1),
             turn_id(8),
-            AcceptedInputQueueOrder::ordinary(SessionInputPosition::first()),
+            AcceptedInputQueueOrder::ordinary(
+                SessionInputPosition::first()
+                    .checked_next()
+                    .expect("after-current queue order follows its predecessor"),
+            ),
             session_id(1),
             version(1),
             defaults(ModelSelectionRequest::Direct(direct(2))),
@@ -2100,6 +2149,7 @@ mod tests {
             session_id(1),
             accepted_input_id(source_accepted_input),
             turn_id(7),
+            None,
             command_id(source_command),
             accepted_input_id(source_accepted_input),
             session_id(1),
@@ -2906,6 +2956,44 @@ mod tests {
                 .expect_err("the accepted disposition must retain the exact binding")
                 .failure(),
             SubmitInputReconstitutionFailure::AcceptedDispositionMismatch
+        );
+    }
+
+    /// S09 / INV-012: after-current replay carries the active predecessor's
+    /// canonical origin and must follow it in session acceptance order.
+    #[test]
+    fn s09_inv012_after_reconstitution_requires_predecessor_chronology() {
+        let mut missing_predecessor = after_applied_input();
+        applied_facts(&mut missing_predecessor).predecessor_origin = None;
+        assert_eq!(
+            missing_predecessor
+                .reconstitute()
+                .expect_err("after-current replay requires its predecessor origin")
+                .failure(),
+            SubmitInputReconstitutionFailure::AfterCurrentPredecessorOriginMismatch
+        );
+
+        let mut premature = after_applied_input();
+        let premature_facts = applied_facts(&mut premature);
+        premature_facts.accepted_position = SessionInputPosition::first();
+        premature_facts.queue_order =
+            AcceptedInputQueueOrder::ordinary(SessionInputPosition::first());
+        assert_eq!(
+            premature
+                .reconstitute()
+                .expect_err("after-current acceptance must follow its predecessor origin")
+                .failure(),
+            SubmitInputReconstitutionFailure::AfterCurrentAcceptanceDoesNotFollowPredecessorOrigin
+        );
+
+        let mut unexpected_predecessor = applied_input();
+        applied_facts(&mut unexpected_predecessor).predecessor_origin = Some(source_turn_origin());
+        assert_eq!(
+            unexpected_predecessor
+                .reconstitute()
+                .expect_err("vacant-slot start replay has no active predecessor")
+                .failure(),
+            SubmitInputReconstitutionFailure::AfterCurrentPredecessorOriginMismatch
         );
     }
 

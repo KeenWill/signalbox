@@ -1201,6 +1201,7 @@ fn decode_applied(
         result_session,
         result_accepted_input,
         result_turn,
+        None,
         accepting_command,
         accepted_input,
         accepted_session,
