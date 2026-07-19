@@ -47,13 +47,44 @@ Semantics of no document change.
 
 ## 2026-07-19 — Atomic Postgres eligible-turn activation
 
-**Context.** The application eligibility port supplies the three owner-generated identities required by sealed domain preparation, while PostgreSQL stores the complete evidence-free scheduling projection and deferred lifecycle constraints. The missing boundary is one authoritative transaction that turns a nonauthoritative scheduling hint into either a committed earliest-turn activation or a no-op.
+**Context.** The application eligibility port supplies the three owner-generated
+identities required by sealed domain preparation, while PostgreSQL stores the
+complete evidence-free scheduling projection and deferred lifecycle constraints.
+The missing boundary is one authoritative transaction that turns a
+nonauthoritative scheduling hint into either a committed earliest-turn
+activation or a no-op.
 
-**Decision.** Implement the application transaction port as a purpose-specific PostgreSQL repository. Lock the session scheduler row first, reconstruct the current session and complete accepted-input scheduling projection through their checked domain seams, and let the domain select and prepare the earliest queued turn. A missing session or stale guarded update returns `NoEligibleTurn`; the domain's closed result maps an occupied slot or empty queue to the same no-op and maps candidate identity conflicts exactly, while malformed durable records fail closed. For a prepared activation, insert the origin semantic entry, complete ordered starting frontier, and prepared initial attempt before one guarded lifecycle update binds the exact lineage, frontier, and attempt and acquires the active slot. Commit all four effects together only when that update affects exactly one row. Map owner-global entry/frontier and attempt-key conflicts to the supplied identity that collided, rolling back every partial effect. Reuse SubmitInput's fixed-count complete scheduling loader rather than add a second SQL-shaped projection path.
+**Decision.** Implement the application transaction port as a purpose-specific
+PostgreSQL repository. Lock the session scheduler row first, reconstruct the
+current session and complete accepted-input scheduling projection through their
+checked domain seams, and let the domain select and prepare the earliest queued
+turn. A missing session or stale guarded update returns `NoEligibleTurn`; the
+domain's closed result maps an occupied slot or empty queue to the same no-op
+and maps candidate identity conflicts exactly, while malformed durable records
+fail closed. For a prepared activation, insert the origin semantic entry,
+complete ordered starting frontier, and prepared initial attempt before one
+guarded lifecycle update binds the exact lineage, frontier, and attempt and
+acquires the active slot. Commit all four effects together only when that update
+affects exactly one row. Map owner-global entry/frontier and attempt-key
+conflicts to the supplied identity that collided, rolling back every partial
+effect. Reuse SubmitInput's fixed-count complete scheduling loader rather than
+add a second SQL-shaped projection path.
 
-**Rejected alternatives.** Selecting a target in SQL would duplicate domain-owned eligibility and could skip earlier work. Treating a missing session or stale wake-up as corruption would give hints authority they do not have. Committing entry, frontier, or attempt records before guarded activation succeeds would expose unowned partial history. Retrying identity conflicts would hide caller-supplied identity failure. Adding a scheduler loop, wake-up source, startup recovery hook, dispatch, static eligible failure, `StopRequested` production, or interrupt behavior would cross boundaries not authorized by this adapter slice.
+**Rejected alternatives.** Selecting a target in SQL would duplicate
+domain-owned eligibility and could skip earlier work. Treating a missing session
+or stale wake-up as corruption would give hints authority they do not have.
+Committing entry, frontier, or attempt records before guarded activation
+succeeds would expose unowned partial history. Retrying identity conflicts would
+hide caller-supplied identity failure. Adding a scheduler loop, wake-up source,
+startup recovery hook, dispatch, static eligible failure, `StopRequested`
+production, or interrupt behavior would cross boundaries not authorized by this
+adapter slice.
 
-**Affects.** `crates/persistence/src/start_eligible_turn.rs`, shared complete scheduling loading in `crates/persistence/src/submit_input.rs`, and real-PostgreSQL enforcement for INV-001, INV-002, INV-009, and INV-015. It changes no schema, dependency, domain or application API, domain spine, wake-up policy, or recovery orchestration.
+**Affects.** `crates/persistence/src/start_eligible_turn.rs`, shared complete
+scheduling loading in `crates/persistence/src/submit_input.rs`, and
+real-PostgreSQL enforcement for INV-001, INV-002, INV-009, and INV-015. It
+changes no schema, dependency, domain or application API, domain spine, wake-up
+policy, or recovery orchestration.
 
 ## 2026-07-19 — Owner-ratified matching-interrupt milestone deferral
 
