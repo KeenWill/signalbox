@@ -439,6 +439,59 @@ async fn insert_malformed_submit_rejection(
     transaction.commit().await
 }
 
+async fn insert_cross_wired_occupied_rejection(
+    pool: &PgPool,
+    command_id: Uuid,
+    source_command_id: Uuid,
+    expected_active_turn_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'submit_input', 1, transaction_timestamp())",
+    )
+    .bind(command_id)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO submit_input_command
+            (command_id, command_kind, storage_version, session_id,
+             actor_kind, actor_turn_id, actor_tool_request_id,
+             content_kind, content_text, delivery_kind,
+             expected_active_turn_id, expected_defaults_version,
+             model_override_kind, replacement_model_kind,
+             replacement_direct_model_selection_id, replacement_model_alias_id,
+             result_kind, rejection_kind, result_session_id,
+             result_accepted_input_id, result_turn_id,
+             result_actual_active_turn_id, result_expected_active_turn_id,
+             result_expected_defaults_version, result_current_defaults_version,
+             result_unknown_alias_id, result_selected_defaults_version,
+             result_last_position)
+         SELECT
+             $1, command_kind, storage_version, session_id,
+             actor_kind, actor_turn_id, actor_tool_request_id,
+             content_kind, content_text, delivery_kind,
+             $3, expected_defaults_version,
+             model_override_kind, replacement_model_kind,
+             replacement_direct_model_selection_id, replacement_model_alias_id,
+             result_kind, rejection_kind, result_session_id,
+             result_accepted_input_id, result_turn_id,
+             result_actual_active_turn_id, result_expected_active_turn_id,
+             result_expected_defaults_version, result_current_defaults_version,
+             result_unknown_alias_id, result_selected_defaults_version,
+             result_last_position
+           FROM submit_input_command
+          WHERE command_id = $2",
+    )
+    .bind(command_id)
+    .bind(source_command_id)
+    .bind(expected_active_turn_id)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await
+}
+
 #[derive(Debug)]
 struct FixedSessionIds {
     remaining: VecDeque<SessionId>,
@@ -3856,6 +3909,72 @@ async fn occupied_slot_schema_constraints_and_checked_decode_fail_closed()
             Some(TurnId::from_uuid(Uuid::from_u128(0xa62))),
         )
         .await?;
+
+    repository
+        .handle(
+            input_with_delivery(
+                0x46a,
+                0x861,
+                "unknown alias rejection",
+                DeliveryRequest::AfterCurrentTurn {
+                    expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xa61)),
+                    configuration: input_choices(
+                        1,
+                        ModelSelectionOverride::ReplaceWith(alias(0xc69)),
+                    ),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x96a)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xa6a))),
+        )
+        .await?;
+
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0x46b, 0x86b, direct(0xc6b)))
+        .await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                0x46c,
+                0x86b,
+                "other-session origin",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x96b)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xa6b))),
+        )
+        .await?;
+
+    for (command_id, source_turn, description) in [
+        (
+            Uuid::from_u128(0x46d),
+            Uuid::from_u128(0xa6f),
+            "missing source turn",
+        ),
+        (
+            Uuid::from_u128(0x46e),
+            Uuid::from_u128(0xa6b),
+            "cross-session source turn",
+        ),
+    ] {
+        let error = insert_cross_wired_occupied_rejection(
+            &pool,
+            command_id,
+            Uuid::from_u128(0x46a),
+            source_turn,
+        )
+        .await
+        .expect_err(description);
+        let database_error = error
+            .as_database_error()
+            .expect("deferred source-origin validation must return a database error");
+        assert_eq!(database_error.code(), Some("23503".into()));
+        assert_eq!(
+            database_error.constraint(),
+            Some("submit_input_command_rejected_source_origin")
+        );
+    }
 
     let new_constraints: Vec<String> = sqlx::query_scalar(
         "SELECT conname
