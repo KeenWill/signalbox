@@ -815,6 +815,129 @@ fn hash_set_cells_render_in_sorted_entry_order() {
     .assert_eq(&table([Holds { set, count: 4 }]));
 }
 
+/// A map value with custom `Debug` output printing a bare comma
+/// (`10, 11`) stays within its own entry — the comma is not followed by
+/// a map-entry boundary — so each key keeps its value, entries render in
+/// sorted-by-key order, and the sibling `count` column survives.
+#[test]
+fn map_value_custom_debug_comma_keeps_entry_associations() {
+    use std::collections::BTreeMap;
+
+    struct Pair(u8, u8);
+
+    impl std::fmt::Debug for Pair {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "{}, {}", self.0, self.1)
+        }
+    }
+
+    #[derive(Debug)]
+    struct Holds {
+        map: BTreeMap<u32, Pair>,
+        count: u8,
+    }
+
+    expect![[r#"
+        ┌────────────────────────┬───────┐
+        │ map                    │ count │
+        ├────────────────────────┼───────┤
+        │ {1: 10, 11, 2: 20, 21} │     4 │
+        └────────────────────────┴───────┘
+    "#]]
+    .assert_eq(&table([Holds {
+        map: BTreeMap::from([(1, Pair(10, 11)), (2, Pair(20, 21))]),
+        count: 4,
+    }]));
+}
+
+/// Two `HashMap`s with comma-printing custom values, built in opposite
+/// insertion orders, render byte-identically: map-entry boundary
+/// detection keeps each value inside its own entry, so sorting applies
+/// over intact entries and randomized iteration order cannot reach the
+/// snapshot (the crate's determinism contract).
+#[test]
+fn hash_maps_with_comma_printing_values_render_byte_identically() {
+    use std::collections::HashMap;
+
+    #[derive(Clone, Copy)]
+    struct Pair(u8, u8);
+
+    impl std::fmt::Debug for Pair {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "{}, {}", self.0, self.1)
+        }
+    }
+
+    #[derive(Debug)]
+    struct Holds {
+        map: HashMap<u32, Pair>,
+        count: u8,
+    }
+
+    let entries = [(1, Pair(10, 11)), (2, Pair(20, 21)), (3, Pair(30, 31))];
+    let forward: HashMap<u32, Pair> = entries.into_iter().collect();
+    let reverse: HashMap<u32, Pair> = entries.into_iter().rev().collect();
+
+    let rendered = table([Holds {
+        map: forward,
+        count: 4,
+    }]);
+    expect![[r#"
+        ┌───────────────────────────────────┬───────┐
+        │ map                               │ count │
+        ├───────────────────────────────────┼───────┤
+        │ {1: 10, 11, 2: 20, 21, 3: 30, 31} │     4 │
+        └───────────────────────────────────┴───────┘
+    "#]]
+    .assert_eq(&rendered);
+    assert_eq!(
+        table([Holds {
+            map: reverse,
+            count: 4,
+        }]),
+        rendered
+    );
+}
+
+/// A hostile map value whose text itself mimics a map-entry boundary —
+/// `x: y, z: w` — splits at the comma into a phantom `z: w` entry,
+/// because inside a map a comma followed by a `key:` shape is
+/// indistinguishable from a real entry boundary. This snapshot pins the
+/// observed best-effort degradation; it is not a promise. What the crate
+/// does promise is that the split is local and deterministic: entries as
+/// parsed still sort by rendered key, and the sibling `count` column
+/// survives.
+#[test]
+fn hostile_map_value_mimicking_an_entry_boundary_splits_best_effort() {
+    use std::collections::BTreeMap;
+
+    struct Mimic;
+
+    impl std::fmt::Debug for Mimic {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "x: y, z: w")
+        }
+    }
+
+    #[derive(Debug)]
+    struct Holds {
+        map: BTreeMap<u32, Mimic>,
+        count: u8,
+    }
+
+    expect![[r#"
+        ┌─────────────────┬───────┐
+        │ map             │ count │
+        ├─────────────────┼───────┤
+        │ {1: x: y, z: w} │     4 │
+        └─────────────────┴───────┘
+    "#]]
+    .assert_eq(&table([Holds {
+        map: BTreeMap::from([(1, Mimic)]),
+        count: 4,
+    }]));
+}
+
 /// Rows that are not structs carry no field names and render in a single
 /// `value` column.
 #[test]

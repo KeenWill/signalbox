@@ -18,9 +18,15 @@
 //! current element only when what follows looks like the field grammar —
 //! `identifier:` (not `::`, which is a path), the `..` non-exhaustive
 //! marker, or the closing `}`; otherwise the comma came from a custom
-//! `Debug` leaf and belongs to the atom. In tuples and lists a depth-zero
-//! comma always separates items: no field-boundary signal exists there, so
-//! a comma-printing custom leaf splits — the best-effort asymmetry the
+//! `Debug` leaf and belongs to the atom. In a map value it likewise ends
+//! the entry only when a map-entry boundary follows — a nonempty key
+//! region reaching a depth-zero `:` before any depth-zero comma or
+//! closer, or the map's closing `}` — so a comma-printing custom value
+//! stays inside its own entry and its neighbors keep their key/value
+//! associations; a value whose text itself mimics an entry (`x: y, z: w`)
+//! splits best-effort. In tuples, lists, and set entries a depth-zero
+//! comma always separates items: no boundary signal exists there, so a
+//! comma-printing custom leaf splits — the best-effort asymmetry the
 //! crate docs state.
 
 /// A value parsed from derived-`Debug` output.
@@ -92,6 +98,12 @@ enum Context {
     /// A map key inside `{ … }`: as [`Context::ItemList`], except a
     /// depth-zero `:` (never the `::` of a path) also ends the element.
     MapKey,
+    /// A map value inside `{ … }`: a comma separates entries only when a
+    /// map-entry boundary follows — a nonempty key region reaching a
+    /// depth-zero `:` before any depth-zero comma or closer, or the map's
+    /// closing `}` ([`Parser::comma_separates_map_entries`]); otherwise
+    /// it belongs to a degraded leaf.
+    MapValue,
 }
 
 struct Parser<'text> {
@@ -285,6 +297,8 @@ impl Parser<'_> {
 
     /// `key: value` entries after a map's `{`. Returns `None` when the
     /// region is not map-shaped; empty braces parse as an empty map.
+    /// Values parse under [`Context::MapValue`], so a custom `Debug`
+    /// value's bare comma stays inside its own entry.
     fn map_entries(&mut self) -> Option<Vec<(Value, Value)>> {
         self.bump(); // '{'
         let mut entries = Vec::new();
@@ -295,13 +309,21 @@ impl Parser<'_> {
         loop {
             let key = self.map_key()?;
             self.bump(); // the ':' `map_key` stopped on
-            let value = self.element(Context::ItemList);
+            let value = self.element(Context::MapValue);
             if value == Value::Atom(String::new()) {
                 return None;
             }
             entries.push((key, value));
             self.skip_whitespace();
             if self.eat(',') {
+                self.skip_whitespace();
+                // A closer directly after a separating comma only arises
+                // when a custom value's own trailing comma was recognized
+                // against the closing `}` (`{1: v,}`); the map still
+                // closes rather than demanding another entry.
+                if self.eat('}') {
+                    return Some(entries);
+                }
                 continue;
             }
             if self.eat('}') {
@@ -364,12 +386,14 @@ impl Parser<'_> {
         }
     }
 
-    /// One element of a field, tuple, or list: a value that must end at a
-    /// separator or closer. When it does not — a custom `Debug` impl printed
-    /// something the grammar does not cover — the whole element degrades to
-    /// one atom, leaving the enclosing structure parseable. In a struct
-    /// body a comma is a separator only when a field boundary follows it;
-    /// a bare comma from a custom `Debug` leaf belongs to the element.
+    /// One element of a field, tuple, list, or map entry: a value that must
+    /// end at a separator or closer. When it does not — a custom `Debug`
+    /// impl printed something the grammar does not cover — the whole
+    /// element degrades to one atom, leaving the enclosing structure
+    /// parseable. In a struct body a comma is a separator only when a
+    /// field boundary follows it, and in a map value only when a map-entry
+    /// boundary follows it; a bare comma from a custom `Debug` leaf
+    /// belongs to the element.
     fn element(&mut self, context: Context) -> Value {
         self.skip_whitespace();
         let start = self.pos;
@@ -377,10 +401,22 @@ impl Parser<'_> {
         self.skip_whitespace();
         match self.peek() {
             None | Some(')' | ']' | '}') => value,
-            Some(',') if context == Context::ItemList || self.comma_separates_struct_fields() => {
-                value
-            }
+            Some(',') if self.comma_separates(context) => value,
             _ => self.degrade(start, context),
+        }
+    }
+
+    /// With the scanner on a depth-zero comma, decides whether it
+    /// separates elements of `context`: always in item lists and map
+    /// keys; at a recognized field boundary in struct bodies
+    /// ([`Parser::comma_separates_struct_fields`]); at a recognized
+    /// map-entry boundary in map values
+    /// ([`Parser::comma_separates_map_entries`]).
+    fn comma_separates(&self, context: Context) -> bool {
+        match context {
+            Context::ItemList | Context::MapKey => true,
+            Context::StructBody => self.comma_separates_struct_fields(),
+            Context::MapValue => self.comma_separates_map_entries(),
         }
     }
 
@@ -406,6 +442,66 @@ impl Parser<'_> {
             .unwrap_or(after_comma.len());
         let after_ident = after_comma[ident_end..].trim_start();
         after_ident.starts_with(':') && !after_ident.starts_with("::")
+    }
+
+    /// With the scanner on a depth-zero comma inside a map value, decides
+    /// whether the comma separates entries — the map-value mirror of
+    /// [`Parser::comma_separates_struct_fields`]. It does when what
+    /// follows (after whitespace) is the map's closing `}` or an
+    /// entry-boundary shape: a nonempty key region reaching a depth-zero
+    /// `:` (never the `::` of a path) before any depth-zero comma or
+    /// closer. The lookahead is bounded by that comma or closer; string
+    /// and char literals skip escape-aware so their interior colons
+    /// cannot fake a boundary. Anything else means a custom `Debug`
+    /// value printed the comma, and it belongs to the current entry's
+    /// atom.
+    fn comma_separates_map_entries(&self) -> bool {
+        let mut lookahead = Parser {
+            text: self.text,
+            pos: self.pos + 1,
+        };
+        lookahead.skip_whitespace();
+        if lookahead.peek() == Some('}') {
+            return true;
+        }
+        let key_start = lookahead.pos;
+        let mut depth = 0usize;
+        while let Some(next) = lookahead.peek() {
+            match next {
+                '"' => {
+                    lookahead.bump();
+                    lookahead.literal_body('"');
+                }
+                '\'' if lookahead.apostrophe_opens_char_literal() => {
+                    lookahead.bump();
+                    lookahead.literal_body('\'');
+                }
+                '(' | '[' | '{' => {
+                    depth += 1;
+                    lookahead.bump();
+                }
+                ')' | ']' | '}' => {
+                    if depth == 0 {
+                        return false;
+                    }
+                    depth -= 1;
+                    lookahead.bump();
+                }
+                ':' if depth == 0 => {
+                    if lookahead.rest().starts_with("::") {
+                        lookahead.pos += 2;
+                    } else {
+                        // A `:` directly after the comma would make an
+                        // empty key; a real entry boundary has key text
+                        // ahead of its colon.
+                        return lookahead.pos > key_start;
+                    }
+                }
+                ',' if depth == 0 => return false,
+                _ => lookahead.bump(),
+            }
+        }
+        false
     }
 
     /// With the scanner on a `'`, decides whether it opens a genuine char
@@ -471,7 +567,9 @@ impl Parser<'_> {
     /// separator (`,`) or a closer belonging to an enclosing region — or the
     /// input ends. In a struct-body context a depth-zero comma is a
     /// separator only when a field boundary or the closer follows it
-    /// ([`Parser::comma_separates_struct_fields`]); otherwise the comma
+    /// ([`Parser::comma_separates_struct_fields`]), and in a map-value
+    /// context only when a map-entry boundary follows it
+    /// ([`Parser::comma_separates_map_entries`]); otherwise the comma
     /// belongs to the atom and the scan continues. String and char
     /// literals are skipped escape-aware so their delimiters and commas
     /// cannot unbalance the scan; a lifetime apostrophe
@@ -548,6 +646,10 @@ impl Parser<'_> {
                         // and wins over the angle-depth hint, even under
                         // an unclosed `<` from a custom leaf (`a<b`).
                         Context::StructBody => self.comma_separates_struct_fields(),
+                        // Likewise a recognized map-entry boundary — the
+                        // next `key:` region or the closing `}` — is a
+                        // hard boundary and wins over the hint.
+                        Context::MapValue => self.comma_separates_map_entries(),
                     };
                     if separates {
                         return;
@@ -909,6 +1011,55 @@ mod tests {
         assert_eq!(
             parse(&format!("{:?}", vec![BareCommaLeaf])),
             Value::List(vec![atom("x"), atom("y")]),
+        );
+    }
+
+    struct SplitPair(u8, u8);
+
+    impl std::fmt::Debug for SplitPair {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "{}, {}", self.0, self.1)
+        }
+    }
+
+    /// A map value whose custom `Debug` output prints a bare comma
+    /// (`10, 11`) stays in its own entry: the comma is followed by
+    /// `11, 2` — no map-entry boundary — so it belongs to the degraded
+    /// value atom, and every entry keeps its key/value association.
+    #[test]
+    fn map_value_leaf_with_unbracketed_comma_degrades_alone_not_its_map() {
+        let map = BTreeMap::from([(1, SplitPair(10, 11)), (2, SplitPair(20, 21))]);
+        assert_eq!(format!("{map:?}"), "{1: 10, 11, 2: 20, 21}");
+
+        assert_eq!(
+            parse(&format!("{map:?}")),
+            Value::Map(vec![
+                (atom("1"), atom("10, 11")),
+                (atom("2"), atom("20, 21")),
+            ])
+        );
+    }
+
+    struct TrailingCommaLeaf;
+
+    impl std::fmt::Debug for TrailingCommaLeaf {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "v,")
+        }
+    }
+
+    /// A custom map value ending in a bare comma leaves `,}` before the
+    /// closer; the closer is a map-entry boundary, so the comma
+    /// separates and the map still closes around its entry instead of
+    /// degrading whole.
+    #[test]
+    fn map_value_trailing_comma_before_the_closer_still_closes_the_map() {
+        let map = BTreeMap::from([(1, TrailingCommaLeaf)]);
+        assert_eq!(format!("{map:?}"), "{1: v,}");
+
+        assert_eq!(
+            parse(&format!("{map:?}")),
+            Value::Map(vec![(atom("1"), atom("v"))])
         );
     }
 

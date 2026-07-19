@@ -13,11 +13,17 @@
 //! struct body a custom `Debug` leaf that prints an unbracketed comma
 //! (`x, y`) stays one cell and keeps its sibling columns, because a real
 //! field boundary — `identifier:` (never `::`) or the closing brace — is
-//! recognizable ahead of the comma. Inside tuples and lists no such
-//! signal exists, so every depth-zero comma separates items and a
-//! comma-printing custom leaf splits there; a hostile leaf whose text
-//! itself mimics the field grammar (`foo, bar: baz`) may likewise split
-//! inside a struct. Field names using non-ASCII XID-continue characters
+//! recognizable ahead of the comma. A map value degrades the same way: a
+//! comma ends the entry only when a map-entry boundary — the next `key:`
+//! region or the map's closing brace — follows, so a comma-printing
+//! custom value keeps its key/value association, sibling entries keep
+//! parsing, and entry sorting still applies over intact entries. Inside
+//! tuples, lists, and sets no such signal exists, so every depth-zero
+//! comma separates items and a comma-printing custom leaf splits there.
+//! A hostile leaf whose text itself mimics the boundary grammar may
+//! still split: `foo, bar: baz` inside a struct, or a map value printing
+//! `x: y, z: w` — which splits a phantom entry, sorted with the rest —
+//! are best-effort observed behavior, not promises. Field names using non-ASCII XID-continue characters
 //! that are not alphanumeric — combining marks such as in `x́` — stop the
 //! field grammar and degrade the row to the single `value` column: full
 //! Unicode XID tables would require a dependency this zero-dependency
