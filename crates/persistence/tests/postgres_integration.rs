@@ -13,8 +13,8 @@ use signalbox_domain::{
     PreparedCreateSession, ReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult,
     ReplaceSessionDefaultsResult, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-    SessionId, SubmitInput, SubmitInputReconstitutionFailure, SubmitInputRejectedResult,
-    SubmitInputResult, TranscriptAncestry, TurnId, UserContent,
+    SessionId, SubmitInput, SubmitInputAppliedResult, SubmitInputReconstitutionFailure,
+    SubmitInputRejectedResult, SubmitInputResult, TranscriptAncestry, TurnId, UserContent,
 };
 use signalbox_persistence::{
     MIGRATOR,
@@ -2558,7 +2558,10 @@ async fn s01_inv005_inv008_inv010_inv012_inv028_submit_apply_replay_conflict_and
     );
 
     let first = service.execute(request.clone()).await?;
-    let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(applied)) = first.clone() else {
+    let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::TurnOrigin(applied),
+    )) = first.clone()
+    else {
         panic!("no-active-turn start must apply");
     };
     assert_eq!(applied.accepted_input(), accepted);

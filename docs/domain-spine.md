@@ -473,6 +473,13 @@ impl SubmitInput {
         previous_position: Option<SessionInputPosition>,
         select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
     ) -> Result<PreparedSubmitInput, SubmitInputPreparationError>;
+    pub fn prepare_with_active_turn(
+        self,
+        scheduling: &AcceptedInputSchedulingProjection,
+        accepted_input: AcceptedInputId,
+        turn: Option<TurnId>,
+        select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+    ) -> Result<PreparedSubmitInput, SubmitInputPreparationError>;
     // accessors: command_id(), session(), actor(), content(), delivery()
 }
 // Eq/Hash exclude command_id; all other fields participate
@@ -482,11 +489,27 @@ pub enum SubmitInputResult {
     Rejected(SubmitInputRejectedResult),
 }
 
-pub struct SubmitInputAppliedResult { /* private */ }
+pub enum SubmitInputAppliedResult {
+    TurnOrigin(SubmitInputTurnOriginAppliedResult),
+    PendingSteering(SubmitInputPendingSteeringAppliedResult),
+}
 // sealed: SubmitInput preparation or SubmitInputReconstitutionInput::reconstitute
 impl SubmitInputAppliedResult {
+    // accessors: accepted_input(), session(), acceptance_position(),
+    // disposition(), turn_origin(), pending_steering()
+}
+
+pub struct SubmitInputTurnOriginAppliedResult { /* private */ }
+// sealed: SubmitInput preparation or checked applied reconstitution
+impl SubmitInputTurnOriginAppliedResult {
     // accessors: accepted_input(), session(), turn(), disposition(),
     // queue_order(), acceptance_position(), origin_configuration()
+}
+
+pub struct SubmitInputPendingSteeringAppliedResult { /* private */ }
+// sealed: SubmitInput::prepare_with_active_turn
+impl SubmitInputPendingSteeringAppliedResult {
+    // accessors: accepted_input(), session(), acceptance_position(), binding()
 }
 
 pub enum SubmitInputRejectedResult {
@@ -496,6 +519,19 @@ pub enum SubmitInputRejectedResult {
     NoActiveTurn {
         session: SessionId,
         expected_active_turn: TurnId,
+    },
+    ActiveTurnPresent {
+        session: SessionId,
+        active_turn: TurnId,
+    },
+    ActiveTurnMismatch {
+        session: SessionId,
+        expected_active_turn: TurnId,
+        actual_active_turn: TurnId,
+    },
+    SafePointUnavailableWhileStopping {
+        session: SessionId,
+        active_turn: TurnId,
     },
     SessionDefaultsVersionMismatch {
         session: SessionId,
@@ -520,7 +556,7 @@ impl PreparedSubmitInput {
 }
 
 pub struct SubmitInputPreparationError { /* private */ }
-// sealed: Err of SubmitInput::prepare_when_no_active_turn; not terminal
+// sealed: Err of SubmitInput authoritative-state preparation; not terminal
 impl SubmitInputPreparationError {
     pub fn into_parts(self) -> (SubmitInput, SubmitInputPreparationFailure);
     // accessors: command(), failure()
@@ -529,6 +565,12 @@ impl SubmitInputPreparationError {
 pub enum SubmitInputPreparationFailure {
     SessionMismatch { provided_session: SessionId },
     TurnCandidateMismatch,
+    AcceptedInputCandidateReusesActiveOrigin {
+        active_turn: TurnId,
+        accepted_input: AcceptedInputId,
+    },
+    ActiveTurnProjectionMissing,
+    InterruptApplicationUnavailable,
 }
 
 pub struct SubmitInputReconstitutionInput { /* private */ }
@@ -1697,7 +1739,7 @@ impl<Generator: SubmitInputIdGenerator, Transaction: SubmitInputTransaction>
 | domain: accepted_input | 5 |
 | domain: delivery_request | 2 |
 | domain: user_content | 4 |
-| domain: submit_input | 11 |
+| domain: submit_input | 13 |
 | domain: queue_order | 5 (+1 free fn) |
 | domain: turn_lifecycle | 10 |
 | domain: turn_eligibility | 16 |
@@ -1709,7 +1751,7 @@ impl<Generator: SubmitInputIdGenerator, Transaction: SubmitInputTransaction>
 | domain: applied_interrupt | 2 |
 | domain: fatal_mismatch | 0 |
 | domain: replace_session_defaults | 13 |
-| **signalbox-domain total** | **149 (+1 free fn)** |
+| **signalbox-domain total** | **151 (+1 free fn)** |
 | application: create_session | 8 (incl. 2 traits) |
 | application: load_session | 2 (incl. 1 trait) |
 | application: replace_session_defaults | 4 (incl. 1 trait) |
