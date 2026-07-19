@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-18 — Matching-interrupt milestone deferral and StopRequested obligation
+
+**Context.** The occupied-slot domain and persistence slices cannot yet construct the cancellation, immediate successor, and correlated applied-interrupt proof required by [ADR-0027](decisions/0027-input-delivery-lifecycle.md). They therefore return a nonclaiming preparation failure for a matching `Interrupt`. Selecting that milestone behavior required owner judgment and should have been reported as an owner gate under [goal-mode.md](goal-mode.md), rather than decided within the delivery run.
+
+**Decision.** The owner ratifies the nonclaiming preparation failure as the decided behavior for this milestone only. It retains the unchanged command and commits no durable-command claim, accepted input, input position, or applied-or-rejected result. This deferral does not replace ADR-0027's final interrupt behavior. The slice that first adds durable `StopRequested` storage must also implement and test ADR-0027's two recorded interrupt rejections: the current attempt's stop value is `CancellationOnly`, or its `FatalMismatch.interrupt` is already `Applied`. Future work must report an owner gate before choosing behavior when required proof or transition authority is absent.
+
+**Rejected alternatives.** Treating the nonclaiming outcome as the permanent interrupt contract would contradict ADR-0027. Landing `StopRequested` storage without both recorded-rejection paths would leave a knowingly incomplete authoritative state branch. Recording an applied or rejected result now would claim proof and transition authority this milestone does not have.
+
+**Affects.** The existing occupied-slot deferral and the required scope of the first `StopRequested` persistence slice. It changes no code, schema, accepted ADR, lifecycle transition, or current pull-request behavior.
+
 ## 2026-07-18 — Atomic Postgres occupied-slot input handling
 
 **Context.** The occupied-slot domain slice admits after-current origins, configuration-free pending steering, three active-slot rejections, and a nonclaiming matching-interrupt failure. PostgreSQL already stores vacant-slot SubmitInput receipts and complete scheduling facts, but first handling still prepared every unseen command as though no turn were active.
