@@ -435,13 +435,6 @@ impl CurrentTurnAttempt {
         }
     }
 
-    pub(crate) const fn reconstituted(
-        id: crate::TurnAttemptId,
-        state: CurrentTurnAttemptState,
-    ) -> Self {
-        Self { id, state }
-    }
-
     /// Returns the physical attempt identity preserved by transitions.
     pub const fn id(&self) -> crate::TurnAttemptId {
         self.id

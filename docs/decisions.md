@@ -4,13 +4,13 @@ An append-only, dated record of decisions below foundation weight, newest first.
 
 ## 2026-07-19 — Exact accepted delivery in scheduling origin records
 
-**Context.** The ADR-0041 scheduling seam correlated an origin tail entry with its turn, acceptance position, delivery kind, historical target, and queue priority, but the record did not repeat the accepted delivery itself. Independently supplied tail facts could therefore change the versioned configuration choice while retaining the same delivery kind and target.
+**Context.** The ADR-0041 scheduling seam correlated an origin tail entry with its turn, acceptance position, delivery kind, historical target, and queue priority, but the record did not repeat the accepted delivery itself. Independently supplied tail facts could therefore change the versioned configuration choice while retaining the same delivery kind and target, while records outside an active tail could bypass delivery/order validation.
 
-**Decision.** Carry the exact immutable accepted `DeliveryRequest` in every turn scheduling record. An active tail origin must equal that complete delivery value before its target and priority relationship is validated. This preserves the structural distinction between using a session default and explicitly replacing it, without asking the scheduling seam to rederive historical defaults.
+**Decision.** Carry the exact immutable accepted `DeliveryRequest` in every turn scheduling record and validate every origin's delivery/order and historical-target relationship, whether or not an active tail exists. Correlate every configured delivery's expected defaults version with its frozen provenance and every explicit `ReplaceWith` request with the exact frozen requested model; a historical `UseSessionDefault` request cannot be rederived without its immutable defaults row. An active tail origin must additionally equal that complete delivery value, and its claimed observation must reach every origin position known by the same scheduling read. This preserves the structural distinction between using a session default and explicitly replacing it.
 
-**Rejected alternatives.** Comparing only the expected defaults version would still miss a changed model-selection override. Rederiving `UseSessionDefault` would require historical defaults outside this purpose-specific input. Trusting the adapter to repeat the accepted delivery would bypass domain-owned correlation.
+**Rejected alternatives.** Comparing only the expected defaults version would still miss a changed explicit model-selection override. Rederiving `UseSessionDefault` would require historical defaults outside this purpose-specific input. Trusting the adapter to repeat the accepted delivery would bypass domain-owned correlation.
 
-**Affects.** `crates/domain/src/turn_eligibility.rs`, its domain-spine constructor and accessor, one application fixture, and INV-008/INV-009/INV-016 scheduling enforcement. It adds no storage representation, transition, or accepted delivery mode.
+**Affects.** `crates/domain/src/turn_eligibility.rs`, its domain-spine constructor, accessor, and failure inventory, one application fixture, and INV-008/INV-009/INV-016 scheduling enforcement. It adds no storage representation, transition, or accepted delivery mode.
 
 ## 2026-07-19 — Checked rejected SubmitInput receipt replay
 
@@ -51,7 +51,6 @@ An append-only, dated record of decisions below foundation weight, newest first.
 **Rejected alternatives.** Independent session, active-turn, phase, and last-position arguments would allow cross-wired preparation. Nullable turn-origin fields would permit impossible applied shapes. Treating stale targets or active-slot presence as adapter errors would leave a committed command without its authoritative terminal meaning. Claiming matching interrupt before its transition boundary exists would violate the ratified milestone deferral.
 
 **Affects.** `crates/domain/src/{submit_input,turn_eligibility}.rs`, domain exports and spine, and live-preparation enforcement links for INV-007, INV-008, INV-012, INV-016, and INV-028. Existing vacant-slot persistence receives only mechanical exhaustive-match updates; occupied-slot replay, storage, interrupt application, steering consumption, lifecycle transition, and acknowledgement remain later slices.
-
 
 ## 2026-07-19 — Evidence-free active scheduling reconstitution
 
