@@ -818,7 +818,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
         owning_turn: TurnId,
         current_attempt: TurnAttemptId,
     ) -> Self;
-    // accessors: owning_turn(), phase()
+    // accessor: owning_turn()
 }
 
 pub struct SessionAcceptanceTailEntryReconstitutionInput { /* private */ }
@@ -897,6 +897,10 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
     MissingFailureEntry { turn: TurnId },
     CurrentAttemptOwnershipMismatch { turn: TurnId, attempt: TurnAttemptId },
     DuplicateCurrentAttempt { attempt: TurnAttemptId },
+    ActivePhaseEvidenceMismatch {
+        turn: TurnId,
+        accepted_input: AcceptedInputId,
+    },
     MissingActiveAcceptanceTail { turn: TurnId },
     UnexpectedActiveAcceptanceTail,
     AcceptanceTailSessionMismatch {

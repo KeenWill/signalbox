@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-19 — Validated scheduling input construction and historical tail correlation
+
+**Context.** The first ADR-0041 scheduling slice stored a canonical active phase inside its public reconstitution input and compared every later origin delivery with the currently active turn. That exposed a phase before aggregate validation and rejected valid histories accepted during a scheduler gap or against a previously active turn. Identity-only tail checks also left an origin position available to a different pending-steering entry.
+
+**Decision.** Keep prepared and running reconstitution inputs as inert owner, attempt, and state facts; construct the canonical attempt and phase only inside successful aggregate reconstitution. Correlate each tail origin's immutable delivery with its own queue priority and an earlier nonqueued historical target when the delivery names one. Correlate pending steering against both the complete origin identity and position inventories. If the complete tail contains an accepted interrupt against the current active owner, reject the evidence-free phase instead of ignoring the proof-bearing conclusion it requires.
+
+**Rejected alternatives.** Requiring every post-anchor origin to target the current active turn erases valid acceptance history. Checking only delivery discriminants misses priority and predecessor corruption. Exposing a canonical phase from the unvalidated input bypasses its owning seam. Treating an accepted interrupt as compatible with an evidence-free phase lets the stored lifecycle conclusion omit its contradictory evidence.
+
+**Affects.** `crates/domain/src/turn_eligibility.rs`, its domain-spine declarations, and the ADR-0041 enforcement summary in `docs/invariants.md`. It adds no proof constructor, storage representation, wait phase, stop phase, or lifecycle transition.
+
 ## 2026-07-19 — Evidence-free active scheduling reconstitution
 
 **Context.** The accepted scheduling projection predates ADR-0041 and admitted only one prepared current attempt, while the refinement requires a validated active-origin-anchored acceptance tail and closes proof-bearing phases until their complete owner facts exist. Implementing that refinement must preserve the decision log's original record rather than retroactively rewriting it.
