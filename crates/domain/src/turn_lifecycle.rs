@@ -31,10 +31,10 @@ pub enum AcceptedInputStartingLineage {
 /// The exact starting lineage and frontier fixed together for an
 /// accepted-input-origin turn.
 ///
-/// This value is intentionally opaque. It has no public or crate-wide
-/// constructor: the later eligibility transition must derive both fields from
-/// authoritative queue, slot, ancestry, predecessor, and semantic-entry facts
-/// before its module-local trusted producer is added.
+/// This value is intentionally opaque. The crate-private producer is consumed
+/// only by checked scheduling reconstitution and live eligibility after they
+/// derive both fields from complete queue, slot, ancestry, predecessor, and
+/// semantic-entry facts.
 ///
 /// Raw values are not an eligibility proof:
 ///
@@ -57,6 +57,13 @@ pub struct AcceptedInputTurnStart {
 }
 
 impl AcceptedInputTurnStart {
+    pub(crate) const fn from_validated_eligibility(
+        lineage: AcceptedInputStartingLineage,
+        frontier: ContextFrontier,
+    ) -> Self {
+        Self { lineage, frontier }
+    }
+
     /// Returns the eligibility-selected starting lineage.
     pub const fn lineage(&self) -> AcceptedInputStartingLineage {
         self.lineage

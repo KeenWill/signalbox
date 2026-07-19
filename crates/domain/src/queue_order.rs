@@ -448,13 +448,14 @@ mod tests {
     use std::collections::BTreeMap;
 
     use expect_test::expect;
+    use signalbox_expect_table::table;
 
     use super::{
         AcceptedInputQueueOrder, AcceptedInputQueueOrderError, AcceptedInputQueuePriority,
         AcceptedInputQueueWork, SessionInputPosition, derive_accepted_input_total_order,
     };
-    use crate::test_support::{session_id, table, turn_id};
     use crate::{SessionId, TurnId};
+    use crate::test_support::{session_id, turn_id};
 
     fn positions(count: usize) -> Vec<SessionInputPosition> {
         let mut positions = Vec::with_capacity(count);
@@ -538,9 +539,22 @@ mod tests {
         SessionInputPosition::try_from_u64(ordinal).expect("test acceptance ordinals are positive")
     }
 
-    /// Renders the derived total order for snapshot review: one row per
-    /// derived slot, holding only the acceptance ordinal and priority fact
-    /// the derivation depends on (`docs/testing-style.md`, rule 12).
+    /// One derived slot's snapshot row: only the acceptance ordinal and
+    /// priority fact the derivation depends on (`docs/testing-style.md`,
+    /// rule 12). The field names are the rendered column headers.
+    #[derive(Debug)]
+    #[allow(
+        dead_code,
+        reason = "the table renderer reads every field through the Debug derive"
+    )]
+    struct DerivedSlotRow {
+        derived: usize,
+        accepted: u64,
+        priority: String,
+    }
+
+    /// Renders the derived total order for snapshot review, one
+    /// [`DerivedSlotRow`] per derived slot.
     fn derived_order_table(facts: &[AcceptedInputQueueWork]) -> String {
         let derived = derive_accepted_input_total_order(facts.iter().copied())
             .expect("snapshot rendering requires a derivable fact set");
@@ -548,7 +562,7 @@ mod tests {
             .iter()
             .map(|work| (work.turn(), work.order()))
             .collect();
-        let rows: Vec<Vec<String>> = derived
+        let rows: Vec<DerivedSlotRow> = derived
             .iter()
             .enumerate()
             .map(|(index, turn)| {
@@ -562,15 +576,54 @@ mod tests {
                         )
                     }
                 };
-                vec![
-                    (index + 1).to_string(),
-                    order.acceptance_position().as_u64().to_string(),
+                DerivedSlotRow {
+                    derived: index + 1,
+                    accepted: order.acceptance_position().as_u64(),
                     priority,
-                ]
+                }
             })
             .collect();
 
-        table(&["derived", "accepted", "priority"], &rows)
+        table(rows)
+    }
+
+    /// The rendering helper contains lookup and branching logic, so it gets
+    /// its own tests (`docs/testing-style.md`, rule 2): rows follow the
+    /// derived order under a one-based derived index, not fact iteration
+    /// order.
+    #[test]
+    fn derived_order_table_renders_rows_in_derived_order_not_iteration_order() {
+        let first = accepted_ordinary(1);
+        let second = accepted_ordinary(2);
+
+        expect![[r#"
+            ┌─────────┬──────────┬──────────┐
+            │ derived │ accepted │ priority │
+            ├─────────┼──────────┼──────────┤
+            │       1 │        1 │ ordinary │
+            │       2 │        2 │ ordinary │
+            └─────────┴──────────┴──────────┘
+        "#]]
+        .assert_eq(&derived_order_table(&[second, first]));
+    }
+
+    /// The interrupt branch names its predecessor by the predecessor's own
+    /// acceptance position, looked up through the turn map — not by the
+    /// interrupt's position.
+    #[test]
+    fn derived_order_table_names_an_interrupt_predecessor_by_acceptance_position() {
+        let first = accepted_ordinary(1);
+        let interrupt = accepted_interrupt(2, first);
+
+        expect![[r#"
+            ┌─────────┬──────────┬─────────────────────────────────────┐
+            │ derived │ accepted │ priority                            │
+            ├─────────┼──────────┼─────────────────────────────────────┤
+            │       1 │        1 │ ordinary                            │
+            │       2 │        2 │ interrupt immediately after input 1 │
+            └─────────┴──────────┴─────────────────────────────────────┘
+        "#]]
+        .assert_eq(&derived_order_table(&[first, interrupt]));
     }
 
     #[test]
@@ -678,12 +731,14 @@ mod tests {
             ])
         );
         expect![[r#"
-            derived | accepted | priority
-            ------- | -------- | -----------------------------------
-            1       | 1        | ordinary
-            2       | 3        | interrupt immediately after input 1
-            3       | 4        | interrupt immediately after input 3
-            4       | 2        | ordinary
+            ┌─────────┬──────────┬─────────────────────────────────────┐
+            │ derived │ accepted │ priority                            │
+            ├─────────┼──────────┼─────────────────────────────────────┤
+            │       1 │        1 │ ordinary                            │
+            │       2 │        3 │ interrupt immediately after input 1 │
+            │       3 │        4 │ interrupt immediately after input 3 │
+            │       4 │        2 │ ordinary                            │
+            └─────────┴──────────┴─────────────────────────────────────┘
         "#]]
         .assert_eq(&derived_order_table(&facts));
     }
@@ -708,12 +763,14 @@ mod tests {
             ])
         );
         expect![[r#"
-            derived | accepted | priority
-            ------- | -------- | -----------------------------------
-            1       | 1        | ordinary
-            2       | 3        | interrupt immediately after input 1
-            3       | 2        | ordinary
-            4       | 4        | ordinary
+            ┌─────────┬──────────┬─────────────────────────────────────┐
+            │ derived │ accepted │ priority                            │
+            ├─────────┼──────────┼─────────────────────────────────────┤
+            │       1 │        1 │ ordinary                            │
+            │       2 │        3 │ interrupt immediately after input 1 │
+            │       3 │        2 │ ordinary                            │
+            │       4 │        4 │ ordinary                            │
+            └─────────┴──────────┴─────────────────────────────────────┘
         "#]]
         .assert_eq(&derived_order_table(&facts));
     }

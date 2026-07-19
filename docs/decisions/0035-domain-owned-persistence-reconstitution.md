@@ -3,7 +3,7 @@
 - Date: 2026-07-17
 - Supersedes: none
 - Superseded by: none
-- Refined by: [ADR-0038](0038-session-aggregate-boundary.md) for the complete long-lived session projection
+- Refined by: [ADR-0038](0038-session-aggregate-boundary.md) for the complete long-lived session projection and [ADR-0041](0041-evidence-bearing-reconstitution.md) for evidence-bearing active-turn completeness
 - Depends on: the accepted foundation set ([ADR-0001](0001-domain-terminology-and-identity.md), [ADR-0003](0003-session-creation-and-transcript-ancestry.md), [ADR-0004](0004-turn-and-attempt-lifecycle.md), [ADR-0005](0005-model-call-retry-semantics.md), and [ADR-0027](0027-input-delivery-lifecycle.md)) and the accepted persistence, frontier, and fatal-terminalization refinements ([ADR-0022](0022-persistence-representation.md), [ADR-0030](0030-context-frontier-snapshots.md), [ADR-0031](0031-direct-fatal-terminalization.md), and [ADR-0034](0034-durable-command-storage-and-equality.md))
 - Refines: ADR-0022's storage-record/domain-type mapping and proof-rehydration boundary
 - Resolves: the domain/persistence reconstitution-seam question left open by ADR-0022

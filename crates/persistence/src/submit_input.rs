@@ -10,7 +10,7 @@ use signalbox_domain::{
     ModelAlias, ModelSelectionOverride, ModelSelectionRequest, NonEmptyUnicodeTextFailure,
     PerInputConfigurationChoices, PreparedSubmitInput, ReconstitutedSubmitInput,
     SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
-    SessionInputPosition, SubmitInput, SubmitInputPreparationFailure,
+    SessionInputPosition, SubmitInput, SubmitInputAppliedResult, SubmitInputPreparationFailure,
     SubmitInputReconstitutionFailure, SubmitInputReconstitutionInput, SubmitInputRejectedResult,
     SubmitInputResult, ToolRequestId, TurnId, UserContent,
 };
@@ -342,8 +342,8 @@ async fn prepare_against_locked_state(
 ) -> Result<PreparedSubmitInput, SubmitInputRepositoryError> {
     // Lock-mode constraint: this session-row lock must be `FOR NO KEY
     // UPDATE`, not `FOR UPDATE`. Submit orders the session row before the
-    // current-defaults pointer row, while a concurrent defaults replacement
-    // holds the pointer row (its compare-and-set) when its
+    // scheduler row and current-defaults pointer row, while a concurrent
+    // defaults replacement holds the pointer row (its compare-and-set) when its
     // `session_defaults_version` insert requests `FOR KEY SHARE` on this
     // session row through the non-deferrable session foreign key.
     // `FOR UPDATE` conflicts with `FOR KEY SHARE` and closes that lock-order
@@ -359,6 +359,23 @@ async fn prepare_against_locked_state(
     .is_some();
     if !session_exists {
         return Ok(command.prepare_session_not_found());
+    }
+
+    let scheduler_exists = sqlx::query_scalar::<_, Uuid>(
+        "SELECT session_id
+           FROM session_scheduler
+          WHERE session_id = $1
+          FOR UPDATE",
+    )
+    .bind(session_id_to_uuid(command.session()))
+    .fetch_optional(&mut *connection)
+    .await?
+    .is_some();
+    if !scheduler_exists {
+        return Err(
+            SubmitInputCorruption::CurrentSession(SessionCorruption::Missing("scheduler row"))
+                .into(),
+        );
     }
 
     let pointer_exists = sqlx::query_scalar::<_, Decimal>(
@@ -426,6 +443,13 @@ async fn prepare_against_locked_state(
                     "current session ownership"
                 }
                 SubmitInputPreparationFailure::TurnCandidateMismatch => "delivery turn candidate",
+                SubmitInputPreparationFailure::AcceptedInputCandidateReusesActiveOrigin {
+                    ..
+                }
+                | SubmitInputPreparationFailure::ActiveTurnProjectionMissing
+                | SubmitInputPreparationFailure::InterruptApplicationUnavailable => {
+                    unreachable!("occupied-slot SubmitInput preparation is not implemented")
+                }
             };
             SubmitInputCorruption::Inconsistent(relationship).into()
         })
@@ -488,7 +512,9 @@ async fn insert_prepared(
     .execute(&mut *connection)
     .await?;
 
-    if let SubmitInputResult::Applied(applied) = prepared.result() {
+    if let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(applied)) =
+        prepared.result()
+    {
         let origin = applied.origin_configuration();
         let requested = encode_selection(origin.requested().model());
         let frozen = encode_frozen_model(origin.effective().model());
@@ -555,6 +581,19 @@ async fn insert_prepared(
         .bind("provider_defaults")
         .bind("disabled")
         .bind("disabled")
+        .execute(&mut *connection)
+        .await?;
+
+        sqlx::query(
+            "INSERT INTO turn_lifecycle
+                (turn_id, session_id, origin_accepted_input_id,
+                 acceptance_position, state_kind)
+             VALUES ($1, $2, $3, $4, 'queued')",
+        )
+        .bind(turn_id_to_uuid(applied.turn()))
+        .bind(session_id_to_uuid(applied.session()))
+        .bind(accepted_input_id_to_uuid(applied.accepted_input()))
+        .bind(input_position_to_numeric(position))
         .execute(&mut *connection)
         .await?;
     }
@@ -731,7 +770,7 @@ struct EncodedResult {
 
 fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> EncodedResult {
     match result {
-        SubmitInputResult::Applied(result) => EncodedResult {
+        SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(result)) => EncodedResult {
             kind: APPLIED,
             rejection_kind: None,
             session: result.session(),
@@ -744,6 +783,9 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
             selected_defaults_version: None,
             last_position: None,
         },
+        SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(_)) => {
+            unreachable!("occupied-slot SubmitInput persistence is not implemented")
+        }
         SubmitInputResult::Rejected(SubmitInputRejectedResult::SessionNotFound { session }) => {
             EncodedResult {
                 kind: REJECTED,
@@ -827,6 +869,12 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
             selected_defaults_version: None,
             last_position: Some(input_position_to_numeric(*last)),
         },
+        SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::ActiveTurnPresent { .. }
+            | SubmitInputRejectedResult::ActiveTurnMismatch { .. },
+        ) => {
+            unreachable!("occupied-slot SubmitInput persistence is not implemented")
+        }
     }
 }
 
@@ -1147,12 +1195,13 @@ fn decode_applied(
         row.try_get("frozen_alias_selected_direct_id")?,
     )?;
 
-    Ok(SubmitInputReconstitutionInput::applied(
+    Ok(SubmitInputReconstitutionInput::applied_turn_origin(
         command,
         stored_actor,
         result_session,
         result_accepted_input,
         result_turn,
+        None,
         accepting_command,
         accepted_input,
         accepted_session,
@@ -1251,6 +1300,7 @@ fn decode_rejected(
                     .ok_or(SubmitInputCorruption::Missing(
                         "result_current_defaults_version",
                     ))?,
+                    None,
                 ),
             )
         }
@@ -1296,6 +1346,7 @@ fn decode_rejected(
                     defaults_session,
                     defaults_version,
                     defaults,
+                    None,
                 ),
             )
         }
@@ -1318,6 +1369,7 @@ fn decode_rejected(
                     result_session,
                     decode_optional_position(last_position, "result_last_position")?
                         .ok_or(SubmitInputCorruption::Missing("result_last_position"))?,
+                    None,
                 ),
             )
         }

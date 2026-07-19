@@ -17,9 +17,11 @@ mod model_call;
 mod provider_evidence;
 mod queue_order;
 mod replace_session_defaults;
+mod semantic_entry;
 mod session;
 mod submit_input;
 mod turn_attempt;
+mod turn_eligibility;
 mod turn_lifecycle;
 mod user_content;
 
@@ -38,8 +40,8 @@ pub use configuration::{
     VersionCheckedConfigurationRequest, VersionedSessionConfigurationDefaults,
 };
 pub use context_frontier::{
-    ContextFrontier, ContextFrontierId, ResolvedContextFrontierSnapshot, SemanticTranscriptEntryId,
-    SemanticTranscriptEntryRef,
+    ContextFrontier, ContextFrontierId, ResolvedContextFrontierReconstitutionInput,
+    ResolvedContextFrontierSnapshot, SemanticTranscriptEntryId, SemanticTranscriptEntryRef,
 };
 pub use delivery_request::{DeliveryRequest, PerInputConfigurationChoices};
 pub use model_call::{
@@ -62,6 +64,10 @@ pub use replace_session_defaults::{
     ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult,
     ReplaceSessionDefaultsSessionNotFound, ReplaceSessionDefaultsVersionExhausted,
 };
+pub use semantic_entry::{
+    InitialSemanticTranscriptEntryPayload, SemanticTranscriptEntry,
+    SemanticTranscriptEntryReconstitutionInput,
+};
 pub use session::{
     CreateSession, CreateSessionAppliedResult, CreateSessionPreparationError,
     CreateSessionPreparationFailure, CreateSessionReconstitutionError,
@@ -72,9 +78,10 @@ pub use session::{
 };
 pub use submit_input::{
     PreparedSubmitInput, ReconstitutedSubmitInput, SubmitInput, SubmitInputAppliedResult,
-    SubmitInputPreparationError, SubmitInputPreparationFailure, SubmitInputReconstitutionError,
+    SubmitInputPendingSteeringAppliedResult, SubmitInputPreparationError,
+    SubmitInputPreparationFailure, SubmitInputReconstitutionError,
     SubmitInputReconstitutionFailure, SubmitInputReconstitutionInput, SubmitInputRejectedResult,
-    SubmitInputResult,
+    SubmitInputResult, SubmitInputTurnOriginAppliedResult,
 };
 pub use turn_attempt::{
     AppliedInterruptState, AttemptEnd, CancellationStopDisposition, CurrentTurnAttempt,
@@ -82,6 +89,16 @@ pub use turn_attempt::{
     FatalMismatchStopDisposition, ProviderTargetMismatchFailureKind,
     ProviderTargetMismatchFailureRef, TurnAttemptStopCauseUnionError, TurnAttemptStopCauses,
     UnstoppedAttemptDisposition,
+};
+pub use turn_eligibility::{
+    AcceptedInputEligibilityError, AcceptedInputEligibilityFailure,
+    AcceptedInputSchedulingProjection, AcceptedInputSchedulingReconstitutionError,
+    AcceptedInputSchedulingReconstitutionFailure, AcceptedInputSchedulingReconstitutionInput,
+    AcceptedInputTurnActivationIdentities, AcceptedInputTurnSchedulingProjection,
+    AcceptedInputTurnSchedulingRecord, AcceptedInputTurnSchedulingRecordState,
+    AcceptedInputTurnSchedulingStatus, ActivatedAcceptedInputTurn,
+    ActiveTurnSchedulingReconstitutionInput, PreparedAcceptedInputTurnActivation,
+    SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
 };
 pub use turn_lifecycle::{
     AcceptedInputStartingLineage, AcceptedInputTurnStart, ActiveTurnPhase,
@@ -173,9 +190,9 @@ pub(crate) mod test_support {
     //! Every unit test needs deterministic identity values, and each identity
     //! is a distinct UUID-backed newtype built by [`define_identity`]. These
     //! constructors keep the `from_uuid(Uuid::from_u128(..))` pattern in one
-    //! place instead of repeating it in each module's test helpers. [`table`]
-    //! renders snapshot tables for the expect tests described in
-    //! `docs/testing-style.md`.
+    //! place instead of repeating it in each module's test helpers. Snapshot
+    //! tables for the expect tests described in `docs/testing-style.md` come
+    //! from the `signalbox-expect-table` dev-dependency.
 
     macro_rules! identity_constructors {
         ($($constructor:ident -> $identity:ty),+ $(,)?) => {
@@ -202,88 +219,6 @@ pub(crate) mod test_support {
         tool_attempt_id -> crate::ToolAttemptId,
         direct -> crate::DirectModelSelection,
         alias -> crate::ModelAlias,
-    }
-
-    /// Renders one pipe-separated, left-aligned table for expect-test
-    /// snapshots (`docs/testing-style.md`, rule 12).
-    ///
-    /// Each column pads to the widest of its header and cells, the header is
-    /// underlined with dashes, and every line is right-trimmed — trailing
-    /// padding would be invisible in a snapshot literal and break blessing —
-    /// with one trailing newline ending the table.
-    ///
-    /// # Panics
-    ///
-    /// Panics when a row's arity differs from the header's.
-    pub(crate) fn table(headers: &[&str], rows: &[Vec<String>]) -> String {
-        let mut widths: Vec<usize> = headers
-            .iter()
-            .map(|header| header.chars().count())
-            .collect();
-        for row in rows {
-            assert_eq!(
-                row.len(),
-                headers.len(),
-                "every table row must have one cell per header"
-            );
-            for (width, cell) in widths.iter_mut().zip(row) {
-                *width = (*width).max(cell.chars().count());
-            }
-        }
-
-        let underlines: Vec<String> = widths.iter().map(|width| "-".repeat(*width)).collect();
-        let mut lines = Vec::with_capacity(rows.len() + 2);
-        lines.push(rendered_row(headers.iter().copied(), &widths));
-        lines.push(rendered_row(underlines.iter().map(String::as_str), &widths));
-        for row in rows {
-            lines.push(rendered_row(row.iter().map(String::as_str), &widths));
-        }
-
-        let mut rendered = lines.join("\n");
-        rendered.push('\n');
-        rendered
-    }
-
-    fn rendered_row<'cells>(cells: impl Iterator<Item = &'cells str>, widths: &[usize]) -> String {
-        let padded: Vec<String> = cells
-            .zip(widths)
-            .map(|(cell, width)| format!("{cell:<width$}"))
-            .collect();
-        padded.join(" | ").trim_end().to_string()
-    }
-
-    mod tests {
-        use super::table;
-
-        #[test]
-        fn table_pads_to_the_widest_of_header_and_cells_and_right_trims() {
-            let rendered = table(
-                &["turn", "outcome"],
-                &[
-                    vec!["t1".to_string(), "applied".to_string()],
-                    vec!["t2-long".to_string(), String::new()],
-                ],
-            );
-
-            assert_eq!(
-                rendered,
-                "turn    | outcome\n\
-                 ------- | -------\n\
-                 t1      | applied\n\
-                 t2-long |\n"
-            );
-        }
-
-        #[test]
-        fn table_with_no_rows_is_a_header_and_its_underline() {
-            assert_eq!(table(&["only"], &[]), "only\n----\n");
-        }
-
-        #[test]
-        #[should_panic(expected = "one cell per header")]
-        fn table_rejects_a_row_with_missing_cells() {
-            table(&["first", "second"], &[vec!["lonely".to_string()]]);
-        }
     }
 }
 

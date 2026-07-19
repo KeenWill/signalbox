@@ -307,6 +307,14 @@ async fn insert_prepared(
     .await?;
 
     sqlx::query(
+        "INSERT INTO session_scheduler (session_id)
+         VALUES ($1)",
+    )
+    .bind(session_id_to_uuid(session.id()))
+    .execute(&mut *connection)
+    .await?;
+
+    sqlx::query(
         "INSERT INTO session_defaults_version
             (session_id, version, model_selection_kind,
              direct_model_selection_id, model_alias_id)
