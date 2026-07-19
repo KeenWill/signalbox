@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-19 — Owner-ratified matching-interrupt milestone deferral
+
+**Context.** Choosing the milestone outcome for a matching `Interrupt` required owner judgment because the current slices cannot construct ADR-0027's cancellation, immediate-successor, and applied-proof authority. That choice was an owner gate and should have blocked the autonomous run under [goal-mode.md](goal-mode.md), rather than being made within it.
+
+**Decision.** The owner ratifies the current nonclaiming preparation failure for this milestone. The existing “Authoritative occupied-slot SubmitInput preparation” entry below remains the single statement of record for that behavior and for the required scope of the first `StopRequested` storage slice. Future autonomous runs report an equivalent owner gate instead of deciding it.
+
+**Rejected alternatives.** Treating the milestone outcome as permanent would conflict with ADR-0027. Repeating its detailed behavior or the `StopRequested` obligation here would create a second normative statement. Omitting the gate correction would leave the delivery record inaccurate.
+
+**Affects.** The provenance of the existing deferral and future application of the blocker rule. It changes no code, schema, ADR, transition, or current pull-request behavior.
+
 ## 2026-07-19 — Atomic Postgres occupied-slot input handling
 
 **Context.** The domain now admits checked occupied-slot preparation and replay, while PostgreSQL stores only vacant-slot receipts. First handling must use the same complete scheduling projection as restart and must not persist results whose owner evidence is not representable.
