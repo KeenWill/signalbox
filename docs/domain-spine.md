@@ -3,15 +3,15 @@
 This file is the owner's primary API-review surface. The crates are
 authoritative: this is a hand-maintained mirror of their public API, updated
 from source and never edited in source's place. The source files in
-`crates/domain/src/` and `crates/application/src/` are intentionally dense
-with rustdoc, unit tests, and `compile_fail` proofs; domain shape is reviewed
-here instead. The mirror covers the public type and function surface of
+`crates/domain/src/` and `crates/application/src/` are intentionally dense with
+rustdoc, unit tests, and `compile_fail` proofs; domain shape is reviewed here
+instead. The mirror covers the public type and function surface of
 `signalbox-domain` and `signalbox-application` as bare declarations — no doc
-comments, no tests, no bodies. Any pull request that adds, removes, or
-changes a public item in either crate must update this file in the same
-change; `AGENTS.md` carries that rule, and CI (`scripts/check_domain_spine.py`)
-fails when an exported name is missing here or an inventory count disagrees
-with source.
+comments, no tests, no bodies. Any pull request that adds, removes, or changes a
+public item in either crate must update this file in the same change;
+`AGENTS.md` carries that rule, and CI (`scripts/check_domain_spine.py`) fails
+when an exported name is missing here or an inventory count disagrees with
+source.
 
 Conventions used below:
 
@@ -19,31 +19,30 @@ Conventions used below:
   `pub struct Name { /* private */ }` marks a struct whose real fields are
   private — it is not a fieldless struct. Resolve exact field shapes and
   accessor return types in source.
-- Enums are shown with their full variant lists — the variants are the
-  semantic content.
-- Structs have private fields unless declared as unit structs (a unit
-  struct such as `UuidV7SessionIdGenerator;` is directly constructible).
-  Structs a caller can build
-  show their public constructors as full signatures; structs with no public
-  constructor appear with a `// sealed:` comment naming the only public
-  producer(s), or noting that the trusted producer is deferred to a later
+- Enums are shown with their full variant lists — the variants are the semantic
+  content.
+- Structs have private fields unless declared as unit structs (a unit struct
+  such as `UuidV7SessionIdGenerator;` is directly constructible). Structs a
+  caller can build show their public constructors as full signatures; structs
+  with no public constructor appear with a `// sealed:` comment naming the only
+  public producer(s), or noting that the trusted producer is deferred to a later
   slice.
 - Pure getters are collapsed to one `// accessors:` line per type.
 - Public constructors, transitions, and `into_parts`-style decompositions are
   spelled out as bodiless `pub fn` signatures.
 - Derives and trait implementations appear only where load-bearing (`Copy`
-  versus non-`Copy`, equality composition, error traits); adding or removing
-  one on a public type is a public-API change — update the relevant note when
-  it matters, and treat source as the complete record.
+  versus non-`Copy`, equality composition, error traits); adding or removing one
+  on a public type is a public-API change — update the relevant note when it
+  matters, and treat source as the complete record.
 - Comments state API shape only — sealed producers, crate-private seams,
-  equality composition. Decided semantics live in the accepted ADRs and are
-  not restated here.
+  equality composition. Decided semantics live in the accepted ADRs and are not
+  restated here.
 
 ## domain: lib.rs — identities
 
-Every identity is a UUID-backed newtype produced by one macro, with this
-common shape (private field, `Clone, Copy, Debug, Eq, Hash, Ord, PartialEq,
-PartialOrd`):
+Every identity is a UUID-backed newtype produced by one macro, with this common
+shape (private field,
+`Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd`):
 
 ```rust
 pub struct <Identity>(/* private uuid::Uuid */);
@@ -69,8 +68,8 @@ pub struct ToolRequestId(/* private */);
 pub struct ToolAttemptId(/* private */);
 ```
 
-Five more identities with the same shape are defined in their owning modules
-and listed there: `DirectModelSelection`, `ModelAlias` (configuration),
+Five more identities with the same shape are defined in their owning modules and
+listed there: `DirectModelSelection`, `ModelAlias` (configuration),
 `ProviderModelIdentity` (model_call), `ContextFrontierId`,
 `SemanticTranscriptEntryId` (context_frontier).
 
@@ -1395,10 +1394,10 @@ impl SemanticTranscriptEntryReconstitutionInput {
 
 ## domain: provider_evidence
 
-The module is large but its public surface is deliberately
-small: the recording (`record`) and admission (`admit`) mutations, mismatch
-correlation producers, and all rejection/outcome types are crate-private
-seams reserved for the later aggregate slice.
+The module is large but its public surface is deliberately small: the recording
+(`record`) and admission (`admit`) mutations, mismatch correlation producers,
+and all rejection/outcome types are crate-private seams reserved for the later
+aggregate slice.
 
 ```rust
 pub enum ProviderTargetObservation {
@@ -1437,9 +1436,9 @@ impl ProviderTargetMismatchInvalidationLog {
 
 ## domain: applied_interrupt
 
-Another deliberately tiny public surface: the
-submit-input correlation seam that produces `AppliedInterruptCommandResult`
-is module-private, reserved for a later transaction-owning adapter.
+Another deliberately tiny public surface: the submit-input correlation seam that
+produces `AppliedInterruptCommandResult` is module-private, reserved for a later
+transaction-owning adapter.
 
 ```rust
 pub struct AppliedInterruptProof { /* private */ }
@@ -1461,11 +1460,11 @@ impl AppliedInterruptCommandResult {
 
 Zero public items. The entire subtree (`fatal_mismatch.rs`,
 `fatal_mismatch/lifecycle.rs`, `fatal_mismatch/prepared.rs` — large) is
-`pub(crate)`: post-evidence fact derivation, the reconciliation
-marker candidate, and the sealed attempt/turn lifecycle binding are consumed
-by `turn_lifecycle` and reserved for the next aggregate slice. Its only
-externally visible effect today is that `ReconciliationMarker` (turn_lifecycle)
-can be built from its candidate, crate-internally.
+`pub(crate)`: post-evidence fact derivation, the reconciliation marker
+candidate, and the sealed attempt/turn lifecycle binding are consumed by
+`turn_lifecycle` and reserved for the next aggregate slice. Its only externally
+visible effect today is that `ReconciliationMarker` (turn_lifecycle) can be
+built from its candidate, crate-internally.
 
 ## domain: replace_session_defaults
 
@@ -1813,31 +1812,31 @@ impl<Generator: SubmitInputIdGenerator, Transaction: SubmitInputTransaction>
 
 ## Inventory
 
-| Module | Public types |
-| --- | --- |
-| domain: lib.rs identities | 9 |
-| domain: actor | 1 |
-| domain: session | 18 |
-| domain: configuration | 19 |
-| domain: accepted_input | 5 |
-| domain: delivery_request | 2 |
-| domain: user_content | 4 |
-| domain: submit_input | 15 |
-| domain: queue_order | 5 (+1 free fn) |
-| domain: turn_lifecycle | 10 |
-| domain: turn_eligibility | 16 |
-| domain: turn_attempt | 13 |
-| domain: model_call | 7 |
-| domain: context_frontier | 6 |
-| domain: semantic_entry | 3 |
-| domain: provider_evidence | 5 |
-| domain: applied_interrupt | 2 |
-| domain: fatal_mismatch | 0 |
-| domain: replace_session_defaults | 13 |
-| **signalbox-domain total** | **153 (+1 free fn)** |
-| application: create_session | 8 (incl. 2 traits) |
-| application: load_session | 2 (incl. 1 trait) |
-| application: replace_session_defaults | 4 (incl. 1 trait) |
-| application: start_eligible_turn | 5 (incl. 2 traits) |
-| application: submit_input | 6 (incl. 2 traits) |
-| **signalbox-application total** | **25** |
+| Module                                | Public types         |
+| ------------------------------------- | -------------------- |
+| domain: lib.rs identities             | 9                    |
+| domain: actor                         | 1                    |
+| domain: session                       | 18                   |
+| domain: configuration                 | 19                   |
+| domain: accepted_input                | 5                    |
+| domain: delivery_request              | 2                    |
+| domain: user_content                  | 4                    |
+| domain: submit_input                  | 15                   |
+| domain: queue_order                   | 5 (+1 free fn)       |
+| domain: turn_lifecycle                | 10                   |
+| domain: turn_eligibility              | 16                   |
+| domain: turn_attempt                  | 13                   |
+| domain: model_call                    | 7                    |
+| domain: context_frontier              | 6                    |
+| domain: semantic_entry                | 3                    |
+| domain: provider_evidence             | 5                    |
+| domain: applied_interrupt             | 2                    |
+| domain: fatal_mismatch                | 0                    |
+| domain: replace_session_defaults      | 13                   |
+| **signalbox-domain total**            | **153 (+1 free fn)** |
+| application: create_session           | 8 (incl. 2 traits)   |
+| application: load_session             | 2 (incl. 1 trait)    |
+| application: replace_session_defaults | 4 (incl. 1 trait)    |
+| application: start_eligible_turn      | 5 (incl. 2 traits)   |
+| application: submit_input             | 6 (incl. 2 traits)   |
+| **signalbox-application total**       | **25**               |
