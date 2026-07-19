@@ -4,17 +4,20 @@ use rust_decimal::Decimal;
 use signalbox_application::{
     CreateSessionError, CreateSessionOutcome, CreateSessionRequest, CreateSessionService,
     LoadSessionService, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
-    ReplaceSessionDefaultsService, SessionIdGenerator, SubmitInputIdGenerator, SubmitInputOutcome,
+    ReplaceSessionDefaultsService, SessionIdGenerator, StartEligibleTurnIdGenerator,
+    StartEligibleTurnOutcome, StartEligibleTurnService, SubmitInputIdGenerator, SubmitInputOutcome,
     SubmitInputRequest, SubmitInputService,
 };
 use signalbox_domain::{
-    AcceptedInputId, CreateSession, DeliveryRequest, DurableCommandId, ModelAlias,
+    AcceptedInputId, AcceptedInputStartingLineage, ActiveTurnPhase, ContextFrontierId,
+    CreateSession, CurrentTurnAttemptState, DeliveryRequest, DurableCommandId, ModelAlias,
     ModelSelectionOverride, ModelSelectionRequest, PerInputConfigurationChoices,
     PreparedCreateSession, ReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult,
-    ReplaceSessionDefaultsResult, SessionConfigurationDefaults,
+    ReplaceSessionDefaultsResult, SemanticTranscriptEntryId, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
     SessionId, SubmitInput, SubmitInputAppliedResult, SubmitInputReconstitutionFailure,
-    SubmitInputRejectedResult, SubmitInputResult, TranscriptAncestry, TurnId, UserContent,
+    SubmitInputRejectedResult, SubmitInputResult, TranscriptAncestry, TurnAttemptId, TurnId,
+    UserContent,
 };
 use signalbox_persistence::{
     MIGRATOR,
@@ -28,6 +31,10 @@ use signalbox_persistence::{
         ReplaceSessionDefaultsRepository, ReplaceSessionDefaultsRepositoryError,
     },
     session::{SessionCorruption, SessionRepository, SessionRepositoryError},
+    start_eligible_turn::{
+        StartEligibleTurnCorruption, StartEligibleTurnIdentityCollision,
+        StartEligibleTurnRepository, StartEligibleTurnRepositoryError,
+    },
     submit_input::{
         SubmitInputCorruption, SubmitInputHandlingOutcome, SubmitInputRepository,
         SubmitInputRepositoryError,
@@ -542,6 +549,47 @@ impl SubmitInputIdGenerator for FixedSubmitInputIds {
         self.turns
             .pop_front()
             .expect("the integration test supplies one turn candidate per invocation")
+    }
+}
+
+#[derive(Debug)]
+struct FixedStartEligibleTurnIds {
+    origin_entries: VecDeque<SemanticTranscriptEntryId>,
+    starting_frontiers: VecDeque<ContextFrontierId>,
+    initial_attempts: VecDeque<TurnAttemptId>,
+}
+
+impl FixedStartEligibleTurnIds {
+    fn new(
+        origin_entries: impl IntoIterator<Item = SemanticTranscriptEntryId>,
+        starting_frontiers: impl IntoIterator<Item = ContextFrontierId>,
+        initial_attempts: impl IntoIterator<Item = TurnAttemptId>,
+    ) -> Self {
+        Self {
+            origin_entries: origin_entries.into_iter().collect(),
+            starting_frontiers: starting_frontiers.into_iter().collect(),
+            initial_attempts: initial_attempts.into_iter().collect(),
+        }
+    }
+}
+
+impl StartEligibleTurnIdGenerator for FixedStartEligibleTurnIds {
+    fn next_origin_entry_id(&mut self) -> SemanticTranscriptEntryId {
+        self.origin_entries
+            .pop_front()
+            .expect("the integration test supplies one origin-entry candidate per pass")
+    }
+
+    fn next_starting_frontier_id(&mut self) -> ContextFrontierId {
+        self.starting_frontiers
+            .pop_front()
+            .expect("the integration test supplies one starting-frontier candidate per pass")
+    }
+
+    fn next_initial_attempt_id(&mut self) -> TurnAttemptId {
+        self.initial_attempts
+            .pop_front()
+            .expect("the integration test supplies one initial-attempt candidate per pass")
     }
 }
 
@@ -2854,7 +2902,632 @@ async fn s01_inv005_inv008_inv010_inv012_inv028_submit_apply_replay_conflict_and
     Ok(())
 }
 
-/// S01 / INV-006 / INV-009 / INV-015: one complete future eligibility
+/// S01 / S03 / INV-002 / INV-009 / INV-015: the real application service
+/// commits one complete activation, and a fresh repository and pool observe
+/// the same occupied slot after restart without activating it again.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s01_s03_inv002_inv009_inv015_start_eligible_turn_survives_restart()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0x381, 0x781, direct(0x881)))
+        .await?;
+    let session = SessionId::from_uuid(Uuid::from_u128(0x781));
+    let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x981));
+    let turn = TurnId::from_uuid(Uuid::from_u128(0xa81));
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                0x382,
+                0x781,
+                "restart-boundary activation",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            accepted_input,
+            Some(turn),
+        )
+        .await?;
+
+    let origin_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xd81));
+    let starting_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0xe81));
+    let initial_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(0xb81));
+    let mut service = StartEligibleTurnService::new(
+        FixedStartEligibleTurnIds::new([origin_entry], [starting_frontier], [initial_attempt]),
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+
+    let StartEligibleTurnOutcome::Activated(activated) = service.execute(session).await? else {
+        panic!("the sole queued turn must activate");
+    };
+    assert_eq!(activated.session(), session);
+    assert_eq!(activated.turn(), turn);
+    assert_eq!(activated.accepted_input().id(), accepted_input);
+    assert_eq!(
+        activated.start().lineage(),
+        AcceptedInputStartingLineage::FirstInSession
+    );
+    assert_eq!(activated.start().frontier().snapshot(), starting_frontier);
+    let ActiveTurnPhase::Running { current_attempt } = activated.phase() else {
+        panic!("initial activation must return the running phase");
+    };
+    assert_eq!(current_attempt.id(), initial_attempt);
+    assert_eq!(current_attempt.state(), &CurrentTurnAttemptState::Prepared);
+
+    let stored: (String, String, String, Uuid, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            turn.state_kind,
+            turn.active_phase_kind,
+            attempt.state_kind,
+            turn.current_attempt_id,
+            frontier.member_count::bigint,
+            (SELECT count(*)
+               FROM turn_lifecycle AS active
+              WHERE active.session_id = turn.session_id
+                AND active.state_kind = 'active'),
+            (SELECT count(*)
+               FROM session_scheduler AS scheduler
+              WHERE scheduler.session_id = turn.session_id)
+         FROM turn_lifecycle AS turn
+         JOIN turn_attempt AS attempt
+           ON attempt.turn_attempt_id = turn.current_attempt_id
+         JOIN context_frontier AS frontier
+           ON frontier.owning_session_id = turn.session_id
+          AND frontier.context_frontier_id = turn.starting_frontier_id
+        WHERE turn.turn_id = $1",
+    )
+    .bind(turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        stored,
+        (
+            "active".into(),
+            "running".into(),
+            "prepared".into(),
+            initial_attempt.into_uuid(),
+            1,
+            1,
+            1,
+        )
+    );
+
+    drop(service);
+    pool.close().await;
+    let restarted_pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(local_test_connection_options(&database_url)?)
+        .await?;
+    let mut restarted_service = StartEligibleTurnService::new(
+        FixedStartEligibleTurnIds::new(
+            [SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xd82))],
+            [ContextFrontierId::from_uuid(Uuid::from_u128(0xe82))],
+            [TurnAttemptId::from_uuid(Uuid::from_u128(0xb82))],
+        ),
+        StartEligibleTurnRepository::new(restarted_pool.clone()),
+    );
+    assert_eq!(
+        restarted_service.execute(session).await?,
+        StartEligibleTurnOutcome::NoEligibleTurn
+    );
+    let persisted: (String, Uuid, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            state_kind,
+            current_attempt_id,
+            (SELECT count(*) FROM semantic_transcript_entry),
+            (SELECT count(*) FROM context_frontier),
+            (SELECT count(*) FROM turn_attempt)
+         FROM turn_lifecycle
+        WHERE turn_id = $1",
+    )
+    .bind(turn.into_uuid())
+    .fetch_one(&restarted_pool)
+    .await?;
+    assert_eq!(
+        persisted,
+        ("active".into(), initial_attempt.into_uuid(), 1, 1, 1,)
+    );
+
+    drop(restarted_service);
+    restarted_pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S01 / INV-009: scheduler-row locking serializes concurrent passes for one
+/// session so exactly one service activates and the other observes the winner.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s01_inv009_concurrent_start_eligible_turn_passes_activate_once()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0x391, 0x791, direct(0x891)))
+        .await?;
+    let session = SessionId::from_uuid(Uuid::from_u128(0x791));
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                0x392,
+                0x791,
+                "concurrent activation",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x991)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xa91))),
+        )
+        .await?;
+
+    let mut first = StartEligibleTurnService::new(
+        FixedStartEligibleTurnIds::new(
+            [SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xd91))],
+            [ContextFrontierId::from_uuid(Uuid::from_u128(0xe91))],
+            [TurnAttemptId::from_uuid(Uuid::from_u128(0xb91))],
+        ),
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    let mut second = StartEligibleTurnService::new(
+        FixedStartEligibleTurnIds::new(
+            [SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xd92))],
+            [ContextFrontierId::from_uuid(Uuid::from_u128(0xe92))],
+            [TurnAttemptId::from_uuid(Uuid::from_u128(0xb92))],
+        ),
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    let (first_outcome, second_outcome) =
+        tokio::join!(first.execute(session), second.execute(session));
+    let first_outcome = first_outcome?;
+    let second_outcome = second_outcome?;
+    assert!(
+        matches!(
+            (&first_outcome, &second_outcome),
+            (
+                StartEligibleTurnOutcome::Activated(_),
+                StartEligibleTurnOutcome::NoEligibleTurn
+            ) | (
+                StartEligibleTurnOutcome::NoEligibleTurn,
+                StartEligibleTurnOutcome::Activated(_)
+            )
+        ),
+        "unexpected concurrent outcomes: {first_outcome:?}, {second_outcome:?}"
+    );
+
+    let counts: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*)
+               FROM turn_lifecycle
+              WHERE session_id = $1 AND state_kind = 'active'),
+            (SELECT count(*)
+               FROM semantic_transcript_entry
+              WHERE source_session_id = $1),
+            (SELECT count(*)
+               FROM context_frontier
+              WHERE owning_session_id = $1),
+            (SELECT count(*)
+               FROM turn_attempt
+              WHERE session_id = $1)",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(counts, (1, 1, 1, 1));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S03 / INV-009: nonexistent and empty sessions are false wake-ups that
+/// return `NoEligibleTurn` and create no lifecycle effects.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s03_inv009_start_eligible_turn_false_wakeups_are_noops() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let missing = SessionId::from_uuid(Uuid::from_u128(0x7a0));
+    let empty = SessionId::from_uuid(Uuid::from_u128(0x7a1));
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0x3a1, 0x7a1, direct(0x8a1)))
+        .await?;
+
+    let mut service = StartEligibleTurnService::new(
+        FixedStartEligibleTurnIds::new(
+            [
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xda0)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xda1)),
+            ],
+            [
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xea0)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xea1)),
+            ],
+            [
+                TurnAttemptId::from_uuid(Uuid::from_u128(0xba0)),
+                TurnAttemptId::from_uuid(Uuid::from_u128(0xba1)),
+            ],
+        ),
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    assert_eq!(
+        service.execute(missing).await?,
+        StartEligibleTurnOutcome::NoEligibleTurn
+    );
+    assert_eq!(
+        service.execute(empty).await?,
+        StartEligibleTurnOutcome::NoEligibleTurn
+    );
+    let effects: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM turn_lifecycle),
+            (SELECT count(*) FROM semantic_transcript_entry),
+            (SELECT count(*) FROM context_frontier),
+            (SELECT count(*) FROM turn_attempt)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(effects, (0, 0, 0, 0));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-001 / INV-009: each durable candidate-identity collision is
+/// typed and rolls back all earlier activation writes.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv001_inv009_start_eligible_turn_identity_collisions_roll_back()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0x3b1, 0x7b1, direct(0x8b1)))
+        .await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                0x3b2,
+                0x7b1,
+                "identity source",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x9b1)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xab1))),
+        )
+        .await?;
+    let existing_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdb1));
+    let existing_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0xeb1));
+    let existing_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(0xbb1));
+    let mut source_service = StartEligibleTurnService::new(
+        FixedStartEligibleTurnIds::new([existing_entry], [existing_frontier], [existing_attempt]),
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    assert!(matches!(
+        source_service
+            .execute(SessionId::from_uuid(Uuid::from_u128(0x7b1)))
+            .await?,
+        StartEligibleTurnOutcome::Activated(_)
+    ));
+
+    for (offset, origin, frontier, attempt, expected) in [
+        (
+            2_u128,
+            existing_entry,
+            ContextFrontierId::from_uuid(Uuid::from_u128(0xeb2)),
+            TurnAttemptId::from_uuid(Uuid::from_u128(0xbb2)),
+            StartEligibleTurnIdentityCollision::OriginEntry,
+        ),
+        (
+            3,
+            SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdb3)),
+            existing_frontier,
+            TurnAttemptId::from_uuid(Uuid::from_u128(0xbb3)),
+            StartEligibleTurnIdentityCollision::StartingFrontier,
+        ),
+        (
+            4,
+            SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdb4)),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0xeb4)),
+            existing_attempt,
+            StartEligibleTurnIdentityCollision::InitialAttempt,
+        ),
+    ] {
+        let session_uuid = Uuid::from_u128(0x7b0 + offset);
+        let session = SessionId::from_uuid(session_uuid);
+        let turn = TurnId::from_uuid(Uuid::from_u128(0xab0 + offset));
+        CreateSessionRepository::new(pool.clone())
+            .handle(prepared(
+                0x3b0 + offset * 2,
+                0x7b0 + offset,
+                direct(0x8b0 + offset),
+            ))
+            .await?;
+        SubmitInputRepository::new(pool.clone())
+            .handle(
+                start_input(
+                    0x3b1 + offset * 2,
+                    0x7b0 + offset,
+                    "identity collision target",
+                    1,
+                    ModelSelectionOverride::UseSessionDefault,
+                ),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x9b0 + offset)),
+                Some(turn),
+            )
+            .await?;
+        let mut service = StartEligibleTurnService::new(
+            FixedStartEligibleTurnIds::new([origin], [frontier], [attempt]),
+            StartEligibleTurnRepository::new(pool.clone()),
+        );
+        let error = service
+            .execute(session)
+            .await
+            .expect_err("the reused durable candidate must fail");
+        assert!(
+            matches!(
+                error,
+                StartEligibleTurnRepositoryError::IdentityCollision(actual)
+                    if actual == expected
+            ),
+            "unexpected collision result: {error:?}"
+        );
+        let unchanged: (String, i64, i64, i64) = sqlx::query_as(
+            "SELECT
+                state_kind,
+                (SELECT count(*)
+                   FROM semantic_transcript_entry
+                  WHERE source_session_id = $2),
+                (SELECT count(*)
+                   FROM context_frontier
+                  WHERE owning_session_id = $2),
+                (SELECT count(*)
+                   FROM turn_attempt
+                  WHERE session_id = $2)
+             FROM turn_lifecycle
+            WHERE turn_id = $1",
+        )
+        .bind(turn.into_uuid())
+        .bind(session_uuid)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(unchanged, ("queued".into(), 0, 0, 0));
+    }
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-002 / INV-009: an incomplete scheduling inventory fails closed before
+/// any origin entry, frontier, attempt, or lifecycle transition is written.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv002_inv009_start_eligible_turn_corrupt_projection_fails_closed()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0x3c1, 0x7c1, direct(0x8c1)))
+        .await?;
+    let session = SessionId::from_uuid(Uuid::from_u128(0x7c1));
+    let turn = TurnId::from_uuid(Uuid::from_u128(0xac1));
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                0x3c2,
+                0x7c1,
+                "corrupt projection",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x9c1)),
+            Some(turn),
+        )
+        .await?;
+    sqlx::query(
+        "ALTER TABLE queued_input_origin
+            DROP CONSTRAINT queued_input_origin_turn_lifecycle_fk",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE turn_lifecycle
+            DROP CONSTRAINT turn_lifecycle_queued_origin_fk",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM turn_lifecycle WHERE turn_id = $1")
+        .bind(turn.into_uuid())
+        .execute(&pool)
+        .await?;
+
+    let mut service = StartEligibleTurnService::new(
+        FixedStartEligibleTurnIds::new(
+            [SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdc1))],
+            [ContextFrontierId::from_uuid(Uuid::from_u128(0xec1))],
+            [TurnAttemptId::from_uuid(Uuid::from_u128(0xbc1))],
+        ),
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    let error = service
+        .execute(session)
+        .await
+        .expect_err("the incomplete inventory must not authorize activation");
+    assert!(matches!(
+        error,
+        StartEligibleTurnRepositoryError::Corruption(StartEligibleTurnCorruption::Scheduling(
+            SubmitInputCorruption::Inconsistent("complete scheduling turn inventory")
+        ))
+    ));
+    let effects: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM semantic_transcript_entry),
+            (SELECT count(*) FROM context_frontier),
+            (SELECT count(*) FROM turn_attempt)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(effects, (0, 0, 0));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S09 / INV-009 / INV-015: after the first queued turn fails, the adapter
+/// activates the next turn with exact predecessor lineage and a
+/// prefix-preserving starting frontier.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s09_inv009_inv015_start_eligible_turn_preserves_failed_predecessor_prefix()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0x3d1, 0x7d1, direct(0x8d1)))
+        .await?;
+    let session = SessionId::from_uuid(Uuid::from_u128(0x7d1));
+    let accepted_first = AcceptedInputId::from_uuid(Uuid::from_u128(0x9d1));
+    let accepted_second = AcceptedInputId::from_uuid(Uuid::from_u128(0x9d2));
+    let first_turn = TurnId::from_uuid(Uuid::from_u128(0xad1));
+    let second_turn = TurnId::from_uuid(Uuid::from_u128(0xad2));
+    let submit = SubmitInputRepository::new(pool.clone());
+    submit
+        .handle(
+            start_input(
+                0x3d2,
+                0x7d1,
+                "first queued",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            accepted_first,
+            Some(first_turn),
+        )
+        .await?;
+    submit
+        .handle(
+            start_input(
+                0x3d3,
+                0x7d1,
+                "second queued",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            accepted_second,
+            Some(second_turn),
+        )
+        .await?;
+
+    let first_origin = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdd1));
+    let first_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0xed1));
+    let first_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(0xbd1));
+    let mut first_service = StartEligibleTurnService::new(
+        FixedStartEligibleTurnIds::new([first_origin], [first_frontier], [first_attempt]),
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    assert!(matches!(
+        first_service.execute(session).await?,
+        StartEligibleTurnOutcome::Activated(_)
+    ));
+
+    let failure_entry = Uuid::from_u128(0xdd2);
+    let terminal_frontier = Uuid::from_u128(0xed2);
+    let mut terminalize = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             origin_accepted_input_id, failed_turn_id)
+         VALUES ($1, $2, 'turn_failed', NULL, $3)",
+    )
+    .bind(session.into_uuid())
+    .bind(failure_entry)
+    .bind(first_turn.into_uuid())
+    .execute(&mut *terminalize)
+    .await?;
+    insert_frontier(
+        &mut terminalize,
+        session.into_uuid(),
+        terminal_frontier,
+        Decimal::from(2_u64),
+        &[
+            (Decimal::ONE, session.into_uuid(), first_origin.into_uuid()),
+            (Decimal::from(2_u64), session.into_uuid(), failure_entry),
+        ],
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended',
+                end_variant = 'without_stop',
+                end_disposition = 'known_failure'
+          WHERE turn_attempt_id = $1",
+    )
+    .bind(first_attempt.into_uuid())
+    .execute(&mut *terminalize)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET state_kind = 'terminal',
+                terminal_frontier_id = $1,
+                active_phase_kind = NULL,
+                current_attempt_id = NULL,
+                terminal_disposition_kind = 'failed'
+          WHERE turn_id = $2",
+    )
+    .bind(terminal_frontier)
+    .bind(first_turn.into_uuid())
+    .execute(&mut *terminalize)
+    .await?;
+    terminalize.commit().await?;
+
+    let second_origin = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdd3));
+    let second_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0xed3));
+    let second_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(0xbd3));
+    let mut second_service = StartEligibleTurnService::new(
+        FixedStartEligibleTurnIds::new([second_origin], [second_frontier], [second_attempt]),
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    let StartEligibleTurnOutcome::Activated(activated) = second_service.execute(session).await?
+    else {
+        panic!("the successor must activate after its failed predecessor");
+    };
+    assert_eq!(activated.turn(), second_turn);
+    assert_eq!(
+        activated.start().lineage(),
+        AcceptedInputStartingLineage::After {
+            immediate_predecessor: first_turn,
+        }
+    );
+    assert_eq!(activated.start().frontier().snapshot(), second_frontier);
+
+    let members: Vec<(i64, Uuid)> = sqlx::query_as(
+        "SELECT member_position::bigint, semantic_entry_id
+           FROM context_frontier_member
+          WHERE owning_session_id = $1
+            AND context_frontier_id = $2
+          ORDER BY member_position",
+    )
+    .bind(session.into_uuid())
+    .bind(second_frontier.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        members,
+        vec![
+            (1, first_origin.into_uuid()),
+            (2, failure_entry),
+            (3, second_origin.into_uuid()),
+        ]
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S01 / INV-006 / INV-009 / INV-015: one complete schema-level eligibility
 /// transaction can bind the exact origin frontier and prepared attempt, while
 /// the database independently rejects contradictory lifecycle histories.
 #[tokio::test(flavor = "multi_thread")]
