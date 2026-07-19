@@ -17,7 +17,11 @@
 //! signal exists, so every depth-zero comma separates items and a
 //! comma-printing custom leaf splits there; a hostile leaf whose text
 //! itself mimics the field grammar (`foo, bar: baz`) may likewise split
-//! inside a struct.
+//! inside a struct. Field names using non-ASCII XID-continue characters
+//! that are not alphanumeric — combining marks such as in `x́` — stop the
+//! field grammar and degrade the row to the single `value` column: full
+//! Unicode XID tables would require a dependency this zero-dependency
+//! crate deliberately omits, and the degradation is local and verbatim.
 //!
 //! Rendering rules:
 //!
@@ -50,6 +54,11 @@
 //!   nested struct in the derived-`Debug` grammar, so its payload flattens
 //!   to dotted columns the same way; below the depth limit it renders
 //!   compactly as `Variant { field: payload }`.
+//! - A `finish_non_exhaustive` struct keeps its `..` marker in compact
+//!   cells (`Redacted { shown: 1, .. }`; a fieldless `Secret { .. }` stays
+//!   one verbatim leaf). As a row or flattened prefix its shown fields
+//!   still become columns, and the marker — naming no field — contributes
+//!   no column.
 //! - Borders are Unicode box-drawing characters, cells pad by char count, a
 //!   column whose non-empty cells all parse as integers or floats is
 //!   right-aligned, every line is right-trimmed, and the table ends with one

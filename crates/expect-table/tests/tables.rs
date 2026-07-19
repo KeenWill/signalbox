@@ -355,6 +355,96 @@ fn custom_debug_leaf_with_unbracketed_comma_keeps_sibling_columns() {
     }]));
 }
 
+/// A custom `Debug` leaf may print an unmatched `<` directly after an
+/// identifier (`a<b`), tentatively opening an angle-bracket hint that
+/// never closes. Angle brackets are hints and hard boundaries win: the
+/// recognized field boundary after the comma still ends the leaf, so the
+/// genuine sibling column survives.
+#[test]
+fn custom_debug_leaf_with_unmatched_angle_keeps_sibling_columns() {
+    struct Angle;
+
+    impl std::fmt::Debug for Angle {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "a<b")
+        }
+    }
+
+    #[derive(Debug)]
+    struct Holds {
+        leaf: Angle,
+        count: u8,
+    }
+
+    expect![[r#"
+        ┌──────┬───────┐
+        │ leaf │ count │
+        ├──────┼───────┤
+        │ a<b  │     4 │
+        └──────┴───────┘
+    "#]]
+    .assert_eq(&table([Holds {
+        leaf: Angle,
+        count: 4,
+    }]));
+}
+
+/// A `finish_non_exhaustive` struct keeps its `..` marker wherever the
+/// whole value renders compactly — here through `cases` — so the snapshot
+/// never claims `Redacted { shown: 1 }` was exhaustive.
+#[test]
+fn non_exhaustive_marker_survives_in_compact_cells() {
+    struct Redacted;
+
+    impl std::fmt::Debug for Redacted {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter
+                .debug_struct("Redacted")
+                .field("shown", &1u8)
+                .finish_non_exhaustive()
+        }
+    }
+
+    expect![[r#"
+        ┌───────┬───────────────────────────┐
+        │ input │ output                    │
+        ├───────┼───────────────────────────┤
+        │     0 │ Redacted { shown: 1, .. } │
+        └───────┴───────────────────────────┘
+    "#]]
+    .assert_eq(&cases([0u8], |_| Redacted));
+}
+
+/// A top-level non-exhaustive row still infers its shown fields as
+/// columns; the `..` marker names no field and so contributes no column.
+/// Compactly rendered cells keep the marker (previous test) — this is the
+/// decided column-inference interaction, not an erasure.
+#[test]
+fn top_level_non_exhaustive_rows_infer_their_shown_fields_as_columns() {
+    struct Redacted {
+        shown: u8,
+    }
+
+    impl std::fmt::Debug for Redacted {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter
+                .debug_struct("Redacted")
+                .field("shown", &self.shown)
+                .finish_non_exhaustive()
+        }
+    }
+
+    expect![[r#"
+        ┌───────┐
+        │ shown │
+        ├───────┤
+        │     1 │
+        │     2 │
+        └───────┘
+    "#]]
+    .assert_eq(&table([Redacted { shown: 1 }, Redacted { shown: 2 }]));
+}
+
 /// A hostile custom `Debug` leaf whose text mimics the field grammar —
 /// `foo, bar: baz` — splits at the comma, because inside a struct body a
 /// comma followed by `identifier:` is indistinguishable from a real field

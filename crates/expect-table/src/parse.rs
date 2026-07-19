@@ -23,10 +23,15 @@ pub(crate) enum Value {
     /// `Name { field: value, .. }` — a struct or a struct enum variant.
     ///
     /// The parser guarantees `fields` is nonempty; a bare name parses as an
-    /// [`Value::Atom`] instead.
+    /// [`Value::Atom`] instead (as does a fieldless non-exhaustive body,
+    /// `Name { .. }`, kept verbatim).
     Struct {
         name: String,
         fields: Vec<(String, Value)>,
+        /// `true` when the body ended with the `..` marker
+        /// (`finish_non_exhaustive`); compact rendering keeps the marker
+        /// so the cell never looks falsely exhaustive.
+        non_exhaustive: bool,
     },
     /// `Name(a, b)` — a tuple struct or tuple enum variant — or, with no
     /// name, a plain `(a, b)` tuple.
@@ -133,8 +138,21 @@ impl Parser<'_> {
         self.skip_whitespace();
         match self.peek() {
             Some('{') => match self.struct_fields() {
-                Some(fields) if fields.is_empty() => Value::Atom(name),
-                Some(fields) => Value::Struct { name, fields },
+                // A fieldless non-exhaustive body (`Secret { .. }`) keeps
+                // its marker verbatim as a leaf; only a genuinely empty
+                // body collapses to the bare name.
+                Some((fields, non_exhaustive)) if fields.is_empty() => {
+                    if non_exhaustive {
+                        Value::Atom(self.text[start..self.pos].trim().to_string())
+                    } else {
+                        Value::Atom(name)
+                    }
+                }
+                Some((fields, non_exhaustive)) => Value::Struct {
+                    name,
+                    fields,
+                    non_exhaustive,
+                },
                 None => self.degrade(start, context),
             },
             Some('(') => match self.items(')') {
@@ -160,20 +178,21 @@ impl Parser<'_> {
     }
 
     /// `field: value` pairs after a struct's `{`, accepting a trailing `..`
-    /// marker (`finish_non_exhaustive`). Returns `None` when the braced
-    /// region does not follow the field grammar; the caller degrades it.
-    fn struct_fields(&mut self) -> Option<Vec<(String, Value)>> {
+    /// marker (`finish_non_exhaustive`), reported in the returned flag.
+    /// Returns `None` when the braced region does not follow the field
+    /// grammar; the caller degrades it.
+    fn struct_fields(&mut self) -> Option<(Vec<(String, Value)>, bool)> {
         self.bump(); // '{'
         let mut fields = Vec::new();
         loop {
             self.skip_whitespace();
             if self.eat('}') {
-                return Some(fields);
+                return Some((fields, false));
             }
             if self.rest().starts_with("..") {
                 self.pos += 2;
                 self.skip_whitespace();
-                return self.eat('}').then_some(fields);
+                return self.eat('}').then_some((fields, true));
             }
             let name = self.ident();
             if name.is_empty() {
@@ -189,7 +208,7 @@ impl Parser<'_> {
                 continue;
             }
             if self.eat('}') {
-                return Some(fields);
+                return Some((fields, false));
             }
             return None;
         }
@@ -321,9 +340,15 @@ impl Parser<'_> {
     /// `PhantomData<(u32, u32)>` or `PhantomData<Result<u32, u32>>` stay one
     /// atom instead of ending at an interior comma: `<` opens a
     /// generic-argument list only directly after an identifier character
-    /// (`Vec<`), never after anything else (`a < b`), and an enclosing
-    /// closer at depth zero still ends the atom even inside an unclosed
-    /// `<` — that `<` was a plain less-than after all.
+    /// (`Vec<`), never after anything else (`a < b`). Angle depth is a
+    /// hint, and hard boundaries win over it: an enclosing closer at depth
+    /// zero still ends the atom even inside an unclosed `<`, and in a
+    /// struct body a depth-zero comma followed by a recognized field
+    /// boundary ends the atom too — an unmatched `<` from a custom leaf
+    /// (`a<b`) was a plain less-than after all and must not swallow a
+    /// genuine `, count: 4` sibling. Genuine generic nesting is safe from
+    /// that lookahead: inside `Result<u32, u32>` the comma is followed by
+    /// a value-shaped token (`u32>`), never by `identifier:`.
     fn consume_balanced_element(&mut self, context: Context) {
         let mut depth = 0usize;
         let mut angle_depth = 0usize;
@@ -358,12 +383,22 @@ impl Parser<'_> {
                     angle_depth -= 1;
                     self.bump();
                 }
-                ',' if depth == 0 && angle_depth == 0 => {
-                    if context == Context::ItemList || self.comma_separates_struct_fields() {
+                ',' if depth == 0 => {
+                    let separates = match context {
+                        // No field-boundary signal exists in item lists,
+                        // so only the angle-depth hint disambiguates: a
+                        // depth-zero comma outside `<…>` separates items.
+                        Context::ItemList => angle_depth == 0,
+                        // A recognized field boundary is a hard boundary
+                        // and wins over the angle-depth hint, even under
+                        // an unclosed `<` from a custom leaf (`a<b`).
+                        Context::StructBody => self.comma_separates_struct_fields(),
+                    };
+                    if separates {
                         return;
                     }
-                    // A custom `Debug` leaf printed this comma; it stays
-                    // in the atom.
+                    // A custom `Debug` leaf printed this comma, or it sits
+                    // inside a generic-argument list; it stays in the atom.
                     self.bump();
                 }
                 _ => self.bump(),
@@ -415,12 +450,14 @@ mod tests {
             parse(&format!("{placed:?}")),
             Value::Struct {
                 name: "Placed".to_string(),
+                non_exhaustive: false,
                 fields: vec![
                     field("label", Value::Str("start".to_string())),
                     field(
                         "origin",
                         Value::Struct {
                             name: "Position".to_string(),
+                            non_exhaustive: false,
                             fields: vec![field("x", atom("-3")), field("y", atom("40"))],
                         }
                     ),
@@ -458,6 +495,7 @@ mod tests {
             parse(&format!("{:?}", Shape::Sized { width: 7 })),
             Value::Struct {
                 name: "Sized".to_string(),
+                non_exhaustive: false,
                 fields: vec![field("width", atom("7"))],
             }
         );
@@ -471,6 +509,7 @@ mod tests {
                 name: Some("Some".to_string()),
                 items: vec![Value::Struct {
                     name: "Sized".to_string(),
+                    non_exhaustive: false,
                     fields: vec![field("width", atom("7"))],
                 }],
             }
@@ -504,12 +543,14 @@ mod tests {
             parse(&format!("{hostile:?}")),
             Value::Struct {
                 name: "Placed".to_string(),
+                non_exhaustive: false,
                 fields: vec![
                     field("label", Value::Str("a { b, \\\" c".to_string())),
                     field(
                         "origin",
                         Value::Struct {
                             name: "Position".to_string(),
+                            non_exhaustive: false,
                             fields: vec![field("x", atom("1")), field("y", atom("2"))],
                         }
                     ),
@@ -623,6 +664,7 @@ mod tests {
             parse(&format!("{holds:?}")),
             Value::Struct {
                 name: "HoldsCustom".to_string(),
+                non_exhaustive: false,
                 fields: vec![
                     field("tag", atom("PhantomData<u32>")),
                     field("count", atom("4")),
@@ -658,6 +700,7 @@ mod tests {
             parse(&format!("{holds:?}")),
             Value::Struct {
                 name: "HoldsBareComma".to_string(),
+                non_exhaustive: false,
                 fields: vec![
                     field("before", atom("1")),
                     field("pair", atom("x, y")),
@@ -691,13 +734,68 @@ mod tests {
     }
 
     #[test]
-    fn non_exhaustive_marker_after_a_comma_still_closes_the_struct() {
+    fn non_exhaustive_marker_after_a_comma_closes_the_struct_and_sets_the_flag() {
         assert_eq!(
             parse(&format!("{:?}", Redacted)),
             Value::Struct {
                 name: "Redacted".to_string(),
+                non_exhaustive: true,
                 fields: vec![field("shown", atom("1"))],
             }
+        );
+    }
+
+    struct AngleLeaf;
+
+    impl std::fmt::Debug for AngleLeaf {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "a<b")
+        }
+    }
+
+    #[derive(Debug)]
+    struct HoldsAngleLeaf {
+        leaf: AngleLeaf,
+        count: u8,
+    }
+
+    /// An unmatched `<` after an identifier tentatively opens an
+    /// angle-bracket hint that never closes; the recognized field boundary
+    /// after the comma is a hard boundary and wins, so the sibling field
+    /// survives.
+    #[test]
+    fn struct_leaf_with_unmatched_angle_keeps_the_sibling_field() {
+        let holds = HoldsAngleLeaf {
+            leaf: AngleLeaf,
+            count: 4,
+        };
+
+        assert_eq!(
+            parse(&format!("{holds:?}")),
+            Value::Struct {
+                name: "HoldsAngleLeaf".to_string(),
+                non_exhaustive: false,
+                fields: vec![field("leaf", atom("a<b")), field("count", atom("4"))],
+            }
+        );
+    }
+
+    struct FullyRedacted;
+
+    impl std::fmt::Debug for FullyRedacted {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.debug_struct("Secret").finish_non_exhaustive()
+        }
+    }
+
+    /// `finish_non_exhaustive` with no shown fields prints `Secret { .. }`;
+    /// the marker is meaningful Debug output and stays in the leaf instead
+    /// of collapsing to a falsely unit-like `Secret`.
+    #[test]
+    fn fully_non_exhaustive_struct_keeps_its_marker_as_a_leaf() {
+        assert_eq!(
+            parse(&format!("{:?}", FullyRedacted)),
+            atom("Secret { .. }")
         );
     }
 
@@ -720,6 +818,7 @@ mod tests {
             parse(&format!("{holds:?}")),
             Value::Struct {
                 name: "HoldsCommaGenerics".to_string(),
+                non_exhaustive: false,
                 fields: vec![
                     field("pair", atom("PhantomData<(u32, u32)>")),
                     field(

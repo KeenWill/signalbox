@@ -44,12 +44,19 @@ fn compact(value: &Value) -> String {
             name: Some(name),
             items,
         } => format!("{name}({})", compact_items(items)),
-        Value::Struct { name, fields } => {
+        Value::Struct {
+            name,
+            fields,
+            non_exhaustive,
+        } => {
             let fields: Vec<String> = fields
                 .iter()
                 .map(|(field, value)| format!("{field}: {}", compact(value)))
                 .collect();
-            format!("{name} {{ {} }}", fields.join(", "))
+            // `finish_non_exhaustive`'s marker is meaningful Debug output:
+            // dropping it would make the cell look falsely exhaustive.
+            let marker = if *non_exhaustive { ", .." } else { "" };
+            format!("{name} {{ {}{marker} }}", fields.join(", "))
         }
     }
 }
@@ -92,7 +99,9 @@ fn escape_control(text: &str) -> String {
 
 /// Flattens one parsed row into `(column, cell)` pairs: struct fields become
 /// dotted columns down to `max_depth` segments; any other value is one
-/// [`VALUE_COLUMN`] cell.
+/// [`VALUE_COLUMN`] cell. A non-exhaustive row (or flattened prefix) still
+/// infers its shown fields; the `..` marker names no field and contributes
+/// no column — only compact cells keep it.
 pub(crate) fn row_cells(value: &Value, max_depth: usize) -> Vec<(String, String)> {
     match through_some(value) {
         Value::Struct { fields, .. } => {
