@@ -686,6 +686,7 @@ pub enum SubmitInputReconstitutionFailure {
     AcceptedDispositionMismatch,
     SteeringSourceTurnMismatch,
     SteeringSourceTurnOriginMismatch,
+    SteeringAcceptanceDoesNotFollowSourceOrigin,
     QueueSessionMismatch,
     QueueTurnMismatch,
     QueuePositionMismatch,

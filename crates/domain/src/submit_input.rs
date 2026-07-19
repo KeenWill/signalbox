@@ -1314,6 +1314,11 @@ impl SubmitInputReconstitutionInput {
                         SubmitInputReconstitutionFailure::SteeringSourceTurnOriginMismatch,
                     ));
                 }
+                if accepted_position <= source_origin.acceptance_position() {
+                    return Err(fail(
+                        SubmitInputReconstitutionFailure::SteeringAcceptanceDoesNotFollowSourceOrigin,
+                    ));
+                }
                 if accepted_command != self.command.command_id {
                     return Err(fail(
                         SubmitInputReconstitutionFailure::AcceptedCommandMismatch,
@@ -1680,6 +1685,8 @@ pub enum SubmitInputReconstitutionFailure {
     /// The supplied source-turn origin does not establish the exact
     /// session-owned source and its canonical configuration.
     SteeringSourceTurnOriginMismatch,
+    /// Pending steering does not follow its source origin in acceptance order.
+    SteeringAcceptanceDoesNotFollowSourceOrigin,
     /// The queue fact belongs to another session.
     QueueSessionMismatch,
     /// The queue fact names another future turn.
@@ -2097,7 +2104,9 @@ mod tests {
             session_id(1),
             content("hello"),
             command.delivery(),
-            SessionInputPosition::first(),
+            SessionInputPosition::first()
+                .checked_next()
+                .expect("pending steering follows its source origin"),
             AcceptedInputDisposition::PendingSteering {
                 binding: SteeringBinding::new(turn_id(7)),
             },
@@ -2828,6 +2837,16 @@ mod tests {
                 .expect_err("the source origin must establish the exact source turn")
                 .failure(),
             SubmitInputReconstitutionFailure::SteeringSourceTurnOriginMismatch
+        );
+
+        let mut wrong_position = pending_steering_input();
+        pending_facts(&mut wrong_position).accepted_position = SessionInputPosition::first();
+        assert_eq!(
+            wrong_position
+                .reconstitute()
+                .expect_err("pending steering must follow its source origin")
+                .failure(),
+            SubmitInputReconstitutionFailure::SteeringAcceptanceDoesNotFollowSourceOrigin
         );
 
         let mut wrong_disposition = pending_steering_input();
