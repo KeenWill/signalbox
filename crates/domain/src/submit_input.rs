@@ -1859,6 +1859,11 @@ fn validate_turn_origin_reconstitution_input(
                 {
                     return None;
                 }
+                if let Some(command) = terminal_disposition_command(&source_terminal.disposition)
+                    && !command_ids.insert(command)
+                {
+                    return None;
+                }
                 (
                     *turn,
                     AcceptedInputQueueOrder::ordinary(applied.acceptance_position()),
@@ -1892,6 +1897,27 @@ fn validate_turn_origin_reconstitution_input(
         command_ids,
         turns,
     })
+}
+
+fn terminal_disposition_command(disposition: &TurnDisposition) -> Option<DurableCommandId> {
+    match disposition {
+        TurnDisposition::Completed | TurnDisposition::Refused | TurnDisposition::Failed => None,
+        TurnDisposition::Cancelled { cause } => Some(cause.command()),
+        TurnDisposition::ReconciliationRequired { marker } => match marker.reason() {
+            ReconciliationReason::OwnerChoseReconciliation { decision } => {
+                Some(decision.decision_command())
+            }
+            ReconciliationReason::InterruptRequiresReconciliation { interrupt } => {
+                Some(interrupt.command())
+            }
+            ReconciliationReason::FatalMismatchRequiresReconciliation { causes } => {
+                match causes.interrupt() {
+                    AppliedInterruptState::NoAppliedInterrupt => None,
+                    AppliedInterruptState::Applied { proof } => Some(proof.command()),
+                }
+            }
+        },
+    }
 }
 
 fn terminal_disposition_matches_turn(disposition: &TurnDisposition, turn: TurnId) -> bool {
@@ -2115,10 +2141,14 @@ mod tests {
     };
     use crate::applied_interrupt::test_applied_interrupt_proof;
     use crate::test_support::{
-        accepted_input_id, alias, command_id, direct, model_call_id, session_id, turn_id,
+        accepted_input_id, alias, command_id, direct, model_call_id, provider_target_evidence_id,
+        session_id, turn_id,
     };
     use crate::test_support::{context_frontier_id, semantic_transcript_entry_id, turn_attempt_id};
-    use crate::turn_lifecycle::test_reconciliation_marker;
+    use crate::turn_attempt::test_fatal_mismatch_stop_causes;
+    use crate::turn_lifecycle::{
+        test_applied_stop_for_reconciliation_proof, test_reconciliation_marker,
+    };
     use crate::{
         AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputQueueOrder,
         AcceptedInputSchedulingProjection, AcceptedInputSchedulingReconstitutionInput,
@@ -3841,6 +3871,95 @@ mod tests {
         );
         facts.queue_turn = turn_id(7);
         assert!(super::validate_turn_origin_reconstitution_input(&turn_reuse).is_none());
+    }
+
+    /// S08 / INV-001 / INV-012: the owner-global command identity set includes
+    /// every command carried by terminal authority in the origin chain.
+    #[test]
+    fn s08_inv001_inv012_reclassified_origin_tracks_terminal_proof_commands() {
+        let proof_command = command_id(0x90);
+        let proof_dispositions = [
+            TurnDisposition::Cancelled {
+                cause: test_applied_interrupt_proof(proof_command, turn_id(7)),
+            },
+            TurnDisposition::ReconciliationRequired {
+                marker: test_reconciliation_marker(
+                    NonEmptyIssuedOperationRefs::try_from_operations([
+                        IssuedOperationRef::ModelCall(model_call_id(0x91)),
+                    ])
+                    .expect("the test ambiguity set is nonempty"),
+                    ReconciliationReason::OwnerChoseReconciliation {
+                        decision: test_applied_stop_for_reconciliation_proof(
+                            proof_command,
+                            turn_id(7),
+                        ),
+                    },
+                ),
+            },
+            TurnDisposition::ReconciliationRequired {
+                marker: test_reconciliation_marker(
+                    NonEmptyIssuedOperationRefs::try_from_operations([
+                        IssuedOperationRef::ModelCall(model_call_id(0x92)),
+                    ])
+                    .expect("the test ambiguity set is nonempty"),
+                    ReconciliationReason::InterruptRequiresReconciliation {
+                        interrupt: test_applied_interrupt_proof(proof_command, turn_id(7)),
+                    },
+                ),
+            },
+            TurnDisposition::ReconciliationRequired {
+                marker: test_reconciliation_marker(
+                    NonEmptyIssuedOperationRefs::try_from_operations([
+                        IssuedOperationRef::ModelCall(model_call_id(0x93)),
+                    ])
+                    .expect("the test ambiguity set is nonempty"),
+                    ReconciliationReason::FatalMismatchRequiresReconciliation {
+                        causes: test_fatal_mismatch_stop_causes(
+                            provider_target_evidence_id(0x94),
+                            crate::AppliedInterruptState::Applied {
+                                proof: test_applied_interrupt_proof(proof_command, turn_id(7)),
+                            },
+                        ),
+                    },
+                ),
+            },
+        ];
+
+        for disposition in proof_dispositions {
+            let origin = reclassified_turn_origin_with_disposition(disposition);
+            let validated = super::validate_turn_origin_reconstitution_input(&origin)
+                .expect("a unique terminal proof command is valid");
+            assert!(validated.command_ids.contains(&proof_command));
+        }
+
+        let colliding_disposition = TurnDisposition::Cancelled {
+            cause: test_applied_interrupt_proof(command_id(0x72), turn_id(7)),
+        };
+        assert!(
+            super::validate_turn_origin_reconstitution_input(
+                &reclassified_turn_origin_with_disposition(colliding_disposition)
+            )
+            .is_none(),
+            "terminal proof commands cannot reuse a receipt command"
+        );
+
+        let replay_command = 0x90;
+        let rejection = SubmitInputReconstitutionInput::rejected_active_turn_present(
+            start_command(replay_command, "rejected start", 1),
+            Actor::Owner,
+            session_id(1),
+            turn_id(8),
+            reclassified_turn_origin_with_disposition(TurnDisposition::Cancelled {
+                cause: test_applied_interrupt_proof(command_id(replay_command), turn_id(7)),
+            }),
+        );
+        assert_eq!(
+            rejection
+                .reconstitute()
+                .expect_err("the replay command cannot reuse terminal authority")
+                .failure(),
+            SubmitInputReconstitutionFailure::RejectionActiveTurnOriginCommandReused
+        );
     }
 
     /// S09 / INV-012: after-current replay carries the active predecessor's
