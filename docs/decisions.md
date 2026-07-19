@@ -12,6 +12,16 @@ An append-only, dated record of decisions below foundation weight, newest first.
 
 **Affects.** `crates/expect-table` (new workspace member), the domain crate's `[dev-dependencies]` and the snapshots in `queue_order.rs` and `replace_session_defaults.rs`, and rule 12's helper naming in [testing-style.md](testing-style.md). Production dependency graphs, the domain spine (test-only dev-dependency; not spine-covered), and all runtime crates are unaffected.
 
+## 2026-07-19 — Adaptive review-fix waves and reply-at-push triage
+
+**Context.** The finished-pull-request rules capped review-fix waves at a fixed two, and the cap was repeatedly overridden in practice. A wave's value tracks the prior wave's hit rate and the content under review — hand-written parser code stayed substantive for five waves, while style-guide reviews went self-referential by wave three — and deferring reviewer replies to a later batch decoupled fix commits from their rationale.
+
+**Decision.** The finished-pull-request rules in [AGENTS.md](../AGENTS.md) now govern review-fix waves by adaptive hit-rate continuation with a five-wave escalation backstop and push-time reply triage, and the goal-mode owner alignment-review request in [goal-mode.md](goal-mode.md) reports each pull request's wave history. Those two documents are the rules' single normative homes; this entry records the ownership and rationale without restating the operative rules.
+
+**Rejected alternatives.** Raising the fixed cap: the same arbitrariness, wrong for both extremes. Unbounded continuation: no churn bound. Agent-judged "review quality" thresholds: self-serving without the accepted-finding anchor.
+
+**Affects.** The finished-pull-request rules in [AGENTS.md](../AGENTS.md), owner alignment-review reporting in [goal-mode.md](goal-mode.md), and every future review loop. It changes no code, ADR, or validation rule.
+
 ## 2026-07-18 — Separate queued-origin facts from guarded turn lifecycle storage
 
 **Context.** The durable-input slice already stores immutable origin order and frozen configuration in append-only `queued_input_origin`, while ADR-0004, ADR-0010, ADR-0022, ADR-0030, and ADR-0036 require later eligibility to serialize per session and atomically bind lifecycle, semantic, frontier, and attempt facts. The storage foundation needs database enforcement and migration-safe backfill before the authoritative aggregate transition exists, without making raw SQL or a repository method an eligibility producer.

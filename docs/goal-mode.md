@@ -17,7 +17,7 @@ Rules for autonomous milestone-delivering runs (for example Codex Goal mode). [`
 
 ## Finishing
 
-A milestone is complete when all of its pull requests are finished (per `AGENTS.md`) and merged by the owner; finished pull requests awaiting merge are not a reason to stop other work. When the milestone's work is delivered, request an owner alignment review before selecting the next milestone.
+A milestone is complete when all of its pull requests are finished (per `AGENTS.md`) and merged by the owner; finished pull requests awaiting merge are not a reason to stop other work. When the milestone's work is delivered, request an owner alignment review before selecting the next milestone. That request includes each pull request's one-line review-wave history — accepted and declined counts partitioned per wave, in wave order, never aggregated across waves — so the owner sees the degradation curve.
 
 ## Writing a goal
 
