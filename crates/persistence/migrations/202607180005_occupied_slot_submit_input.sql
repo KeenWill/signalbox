@@ -330,6 +330,112 @@ ALTER TABLE accepted_input
     ON DELETE RESTRICT
     DEFERRABLE INITIALLY DEFERRED;
 
+CREATE FUNCTION require_pending_steering_active_source()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    checked_state text;
+BEGIN
+    IF TG_TABLE_NAME = 'accepted_input' THEN
+        IF NEW.disposition_kind = 'pending_steering' THEN
+            SELECT state_kind
+              INTO checked_state
+              FROM turn_lifecycle
+             WHERE turn_id = NEW.expected_active_turn_id
+               AND session_id = NEW.session_id;
+
+            IF checked_state IS DISTINCT FROM 'active' THEN
+                RAISE EXCEPTION
+                    'pending steering % does not name an active source turn',
+                    NEW.accepted_input_id
+                    USING
+                        ERRCODE = '23514',
+                        CONSTRAINT = 'accepted_input_pending_source_active';
+            END IF;
+        END IF;
+    ELSIF NEW.state_kind = 'terminal'
+          AND EXISTS (
+              SELECT 1
+                FROM accepted_input
+               WHERE session_id = NEW.session_id
+                 AND expected_active_turn_id = NEW.turn_id
+                 AND disposition_kind = 'pending_steering'
+          )
+    THEN
+        RAISE EXCEPTION
+            'turn % cannot become terminal while pending steering remains',
+            NEW.turn_id
+            USING
+                ERRCODE = '23514',
+                CONSTRAINT = 'turn_lifecycle_pending_steering_closed';
+    END IF;
+
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER accepted_input_pending_requires_active_source
+AFTER INSERT OR UPDATE ON accepted_input
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_pending_steering_active_source();
+
+CREATE CONSTRAINT TRIGGER turn_terminal_requires_closed_pending_steering
+AFTER INSERT OR UPDATE ON turn_lifecycle
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_pending_steering_active_source();
+
+CREATE OR REPLACE FUNCTION require_semantic_entry_turn_state()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    checked_payload_kind text;
+    checked_source_session_id uuid;
+    checked_origin_input_id uuid;
+    checked_failed_turn_id uuid;
+    checked_turn_id uuid;
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        checked_payload_kind := OLD.payload_kind;
+        checked_source_session_id := OLD.source_session_id;
+        checked_origin_input_id := OLD.origin_accepted_input_id;
+        checked_failed_turn_id := OLD.failed_turn_id;
+    ELSE
+        checked_payload_kind := NEW.payload_kind;
+        checked_source_session_id := NEW.source_session_id;
+        checked_origin_input_id := NEW.origin_accepted_input_id;
+        checked_failed_turn_id := NEW.failed_turn_id;
+    END IF;
+
+    IF checked_payload_kind = 'origin_accepted_input' THEN
+        SELECT origin_turn_id
+          INTO checked_turn_id
+          FROM accepted_input
+         WHERE accepted_input_id = checked_origin_input_id
+           AND session_id = checked_source_session_id
+           AND disposition_kind = 'origin_of'
+           AND origin_turn_id IS NOT NULL;
+
+        IF NOT FOUND THEN
+            RAISE EXCEPTION
+                'semantic origin input % is not a turn origin',
+                checked_origin_input_id
+                USING
+                    ERRCODE = '23514',
+                    CONSTRAINT = 'semantic_transcript_entry_origin_disposition';
+        END IF;
+    ELSE
+        checked_turn_id := checked_failed_turn_id;
+    END IF;
+
+    PERFORM assert_turn_lifecycle_final_state(checked_turn_id);
+    RETURN NULL;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION require_submit_input_effect_correlation()
 RETURNS trigger
 LANGUAGE plpgsql
