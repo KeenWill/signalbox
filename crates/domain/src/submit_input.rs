@@ -297,6 +297,19 @@ impl SubmitInput {
                 ),
             });
         }
+        if matches!(
+            delivery,
+            DeliveryRequest::NextSafePoint { .. } | DeliveryRequest::AfterCurrentTurn { .. }
+        ) && accepted_input == active_turn.accepted_input().id()
+        {
+            return Err(SubmitInputPreparationError {
+                command: Box::new(self),
+                failure: SubmitInputPreparationFailure::AcceptedInputCandidateReusesActiveOrigin {
+                    active_turn: actual_active_turn,
+                    accepted_input,
+                },
+            });
+        }
 
         match delivery {
             DeliveryRequest::Interrupt { .. } => Err(SubmitInputPreparationError {
@@ -774,6 +787,14 @@ pub enum SubmitInputPreparationFailure {
     /// `NextSafePoint` initially creates no turn; every other delivery mode
     /// needs a turn candidate for the state in which it can apply.
     TurnCandidateMismatch,
+    /// A new accepted-input candidate reused the active turn's canonical
+    /// origin identity.
+    AcceptedInputCandidateReusesActiveOrigin {
+        /// The authoritative active turn.
+        active_turn: TurnId,
+        /// The colliding accepted-input candidate and active origin.
+        accepted_input: AcceptedInputId,
+    },
     /// The supplied active turn belongs to another session.
     ActiveTurnSessionMismatch {
         /// The cross-wired session carried by the projection.
@@ -2747,6 +2768,31 @@ mod tests {
             reused_active_turn.failure(),
             SubmitInputPreparationFailure::TurnCandidateMismatch
         );
+
+        for (command, turn_candidate) in [
+            (after_command(2, 7), Some(turn_id(8))),
+            (safe_point_command(3, 7), None),
+        ] {
+            let active = active_turn(&current);
+            let active_origin = active.accepted_input().id();
+            let reused_active_origin = command
+                .prepare_with_active_turn(
+                    &current,
+                    &active,
+                    active_origin,
+                    turn_candidate,
+                    Some(SessionInputPosition::first()),
+                    |_| None,
+                )
+                .expect_err("new acceptance cannot reuse the active origin identity");
+            assert_eq!(
+                reused_active_origin.failure(),
+                SubmitInputPreparationFailure::AcceptedInputCandidateReusesActiveOrigin {
+                    active_turn: turn_id(7),
+                    accepted_input: active_origin,
+                }
+            );
+        }
 
         let extra_turn = safe_point_command(2, 7)
             .prepare_with_active_turn(

@@ -443,7 +443,10 @@ async fn prepare_against_locked_state(
                     "current session ownership"
                 }
                 SubmitInputPreparationFailure::TurnCandidateMismatch => "delivery turn candidate",
-                SubmitInputPreparationFailure::ActiveTurnSessionMismatch { .. }
+                SubmitInputPreparationFailure::AcceptedInputCandidateReusesActiveOrigin {
+                    ..
+                }
+                | SubmitInputPreparationFailure::ActiveTurnSessionMismatch { .. }
                 | SubmitInputPreparationFailure::ActiveTurnProjectionIsNotActive { .. }
                 | SubmitInputPreparationFailure::AcceptanceTailPrecedesActiveOrigin { .. }
                 | SubmitInputPreparationFailure::InterruptApplicationUnavailable => {

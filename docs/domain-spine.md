@@ -567,6 +567,10 @@ impl SubmitInputPreparationError {
 pub enum SubmitInputPreparationFailure {
     SessionMismatch { provided_session: SessionId },
     TurnCandidateMismatch,
+    AcceptedInputCandidateReusesActiveOrigin {
+        active_turn: TurnId,
+        accepted_input: AcceptedInputId,
+    },
     ActiveTurnSessionMismatch { provided_session: SessionId },
     ActiveTurnProjectionIsNotActive { provided_turn: TurnId },
     AcceptanceTailPrecedesActiveOrigin {
