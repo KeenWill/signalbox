@@ -27,9 +27,11 @@ several (fork selection, delegation) remain
 [open decisions](docs/open-questions.md).
 
 > **Status:** design and foundation phase, not yet a usable product. The
-> domain and persistence core exists behind accepted decisions; provider
-> adapters, runners, and the clients are milestones ahead, and APIs,
-> protocols, and storage details are not yet stable.
+> initial domain and persistence slices exist behind accepted decisions —
+> session creation and loading, defaults replacement, durable input
+> acceptance — with turn activation next; provider adapters, runners, and
+> the clients are milestones ahead, and APIs, protocols, and storage details
+> are not yet stable.
 
 ```text
  Terminal       Web       macOS / iOS
