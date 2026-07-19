@@ -547,6 +547,20 @@ mod tests {
         assert!(running.retains_progressing_slot());
         assert!(awaiting_approval.retains_progressing_slot());
         assert!(awaiting_recovery.retains_progressing_slot());
+        assert!(matches!(
+            &running,
+            ActiveTurnPhase::Running { current_attempt }
+                if current_attempt.id() == attempt_id
+        ));
+        assert!(matches!(
+            &awaiting_approval,
+            ActiveTurnPhase::AwaitingApproval { request } if *request == request_id
+        ));
+        assert!(matches!(
+            &awaiting_recovery,
+            ActiveTurnPhase::AwaitingRecoveryDecision { ambiguous_operations }
+                if ambiguous_operations == &ambiguous
+        ));
     }
 
     /// S04 / S06 / S07 / INV-006 / INV-025 / INV-026 / INV-029: every marker
