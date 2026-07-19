@@ -186,6 +186,17 @@ impl AppliedStopForReconciliationProof {
     }
 }
 
+#[cfg(test)]
+pub(crate) const fn test_applied_stop_for_reconciliation_proof(
+    decision_command: DurableCommandId,
+    turn: TurnId,
+) -> AppliedStopForReconciliationProof {
+    AppliedStopForReconciliationProof {
+        decision_command,
+        turn,
+    }
+}
+
 /// The typed reason an exact ambiguity set requires reconciliation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReconciliationReason {
