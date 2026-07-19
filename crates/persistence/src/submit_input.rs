@@ -342,8 +342,8 @@ async fn prepare_against_locked_state(
 ) -> Result<PreparedSubmitInput, SubmitInputRepositoryError> {
     // Lock-mode constraint: this session-row lock must be `FOR NO KEY
     // UPDATE`, not `FOR UPDATE`. Submit orders the session row before the
-    // current-defaults pointer row, while a concurrent defaults replacement
-    // holds the pointer row (its compare-and-set) when its
+    // scheduler row and current-defaults pointer row, while a concurrent
+    // defaults replacement holds the pointer row (its compare-and-set) when its
     // `session_defaults_version` insert requests `FOR KEY SHARE` on this
     // session row through the non-deferrable session foreign key.
     // `FOR UPDATE` conflicts with `FOR KEY SHARE` and closes that lock-order
@@ -359,6 +359,23 @@ async fn prepare_against_locked_state(
     .is_some();
     if !session_exists {
         return Ok(command.prepare_session_not_found());
+    }
+
+    let scheduler_exists = sqlx::query_scalar::<_, Uuid>(
+        "SELECT session_id
+           FROM session_scheduler
+          WHERE session_id = $1
+          FOR UPDATE",
+    )
+    .bind(session_id_to_uuid(command.session()))
+    .fetch_optional(&mut *connection)
+    .await?
+    .is_some();
+    if !scheduler_exists {
+        return Err(
+            SubmitInputCorruption::CurrentSession(SessionCorruption::Missing("scheduler row"))
+                .into(),
+        );
     }
 
     let pointer_exists = sqlx::query_scalar::<_, Decimal>(
@@ -555,6 +572,19 @@ async fn insert_prepared(
         .bind("provider_defaults")
         .bind("disabled")
         .bind("disabled")
+        .execute(&mut *connection)
+        .await?;
+
+        sqlx::query(
+            "INSERT INTO turn_lifecycle
+                (turn_id, session_id, origin_accepted_input_id,
+                 acceptance_position, state_kind)
+             VALUES ($1, $2, $3, $4, 'queued')",
+        )
+        .bind(turn_id_to_uuid(applied.turn()))
+        .bind(session_id_to_uuid(applied.session()))
+        .bind(accepted_input_id_to_uuid(applied.accepted_input()))
+        .bind(input_position_to_numeric(position))
         .execute(&mut *connection)
         .await?;
     }

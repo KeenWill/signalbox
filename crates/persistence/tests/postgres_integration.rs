@@ -17,6 +17,7 @@ use signalbox_domain::{
     SubmitInputResult, TranscriptAncestry, TurnId, UserContent,
 };
 use signalbox_persistence::{
+    MIGRATOR,
     create_session::{
         CreateSessionCorruption, CreateSessionHandlingOutcome, CreateSessionRepository,
         CreateSessionRepositoryError,
@@ -32,7 +33,7 @@ use signalbox_persistence::{
         SubmitInputRepositoryError,
     },
 };
-use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
+use sqlx::{PgConnection, PgPool, migrate::Migrate, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
     postgres::Postgres,
     testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
@@ -44,6 +45,15 @@ const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>> {
+    let (container, pool, database_url) = unmigrated_postgres().await?;
+
+    migrate(&pool).await?;
+
+    Ok((container, pool, database_url))
+}
+
+async fn unmigrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>>
+{
     let container = Postgres::default()
         .with_db_name(DATABASE_NAME)
         .with_user(DATABASE_USER)
@@ -61,9 +71,74 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String
         .connect_with(local_test_connection_options(&database_url)?)
         .await?;
 
-    migrate(&pool).await?;
-
     Ok((container, pool, database_url))
+}
+
+async fn insert_origin_frontier(
+    connection: &mut PgConnection,
+    session: Uuid,
+    accepted_input: Uuid,
+    semantic_entry: Uuid,
+    frontier: Uuid,
+    declared_member_count: Decimal,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             origin_accepted_input_id, failed_turn_id)
+         VALUES ($1, $2, 'origin_accepted_input', $3, NULL)",
+    )
+    .bind(session)
+    .bind(semantic_entry)
+    .bind(accepted_input)
+    .execute(&mut *connection)
+    .await?;
+
+    insert_frontier(
+        connection,
+        session,
+        frontier,
+        declared_member_count,
+        &[(Decimal::ONE, session, semantic_entry)],
+    )
+    .await
+}
+
+async fn insert_frontier(
+    connection: &mut PgConnection,
+    owning_session: Uuid,
+    frontier: Uuid,
+    member_count: Decimal,
+    members: &[(Decimal, Uuid, Uuid)],
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count)
+         VALUES ($1, $2, $3)",
+    )
+    .bind(owning_session)
+    .bind(frontier)
+    .bind(member_count)
+    .execute(&mut *connection)
+    .await?;
+
+    for (member_position, source_session, semantic_entry) in members {
+        sqlx::query(
+            "INSERT INTO context_frontier_member
+                (owning_session_id, context_frontier_id, member_position,
+                 source_session_id, semantic_entry_id)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(owning_session)
+        .bind(frontier)
+        .bind(member_position)
+        .bind(source_session)
+        .bind(semantic_entry)
+        .execute(&mut *connection)
+        .await?;
+    }
+
+    Ok(())
 }
 
 fn prepared(
@@ -291,6 +366,141 @@ async fn embedded_migrator_connects_and_is_idempotent() -> Result<(), Box<dyn Er
     Ok(())
 }
 
+/// INV-007 / INV-009: migration 004 gives every preexisting session its
+/// scheduler serialization row and every accepted queued origin one queued
+/// lifecycle row without inventing start, frontier, semantic, or attempt facts.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv007_inv009_turn_storage_migration_backfills_existing_queued_work()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = unmigrated_postgres().await?;
+    let mut connection = pool.acquire().await?;
+    connection
+        .ensure_migrations_table("_sqlx_migrations")
+        .await?;
+    for migration in MIGRATOR.iter().take(3) {
+        connection.apply("_sqlx_migrations", migration).await?;
+    }
+    drop(connection);
+
+    let mut transaction = pool.begin().await?;
+    sqlx::raw_sql(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES
+            ('10000000-0000-4000-8000-000000000401',
+             'create_session', 1, transaction_timestamp());
+         INSERT INTO session (session_id, creation_cause, ancestry_kind)
+         VALUES
+            ('70000000-0000-7000-8000-000000000401',
+             'owner_initiated', 'none');
+         INSERT INTO session_defaults_version
+            (session_id, version, model_selection_kind,
+             direct_model_selection_id, model_alias_id)
+         VALUES
+            ('70000000-0000-7000-8000-000000000401', 1, 'direct',
+             '80000000-0000-7000-8000-000000000401', NULL);
+         INSERT INTO session_current_defaults (session_id, current_version)
+         VALUES ('70000000-0000-7000-8000-000000000401', 1);
+         INSERT INTO create_session_command
+            (command_id, command_kind, storage_version,
+             creation_cause, ancestry_kind, initial_defaults_version,
+             model_selection_kind, direct_model_selection_id, model_alias_id,
+             result_kind, created_session_id)
+         VALUES
+            ('10000000-0000-4000-8000-000000000401',
+             'create_session', 1, 'owner_initiated', 'none', 1,
+             'direct', '80000000-0000-7000-8000-000000000401', NULL,
+             'applied', '70000000-0000-7000-8000-000000000401');
+         INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES
+            ('30000000-0000-4000-8000-000000000401',
+             'submit_input', 1, transaction_timestamp());
+         INSERT INTO submit_input_command
+            (command_id, command_kind, storage_version, session_id,
+             actor_kind, actor_turn_id, actor_tool_request_id,
+             content_kind, content_text, delivery_kind,
+             expected_active_turn_id, expected_defaults_version,
+             model_override_kind, replacement_model_kind,
+             replacement_direct_model_selection_id, replacement_model_alias_id,
+             result_kind, rejection_kind, result_session_id,
+             result_accepted_input_id, result_turn_id,
+             result_expected_active_turn_id, result_expected_defaults_version,
+             result_current_defaults_version, result_unknown_alias_id,
+             result_selected_defaults_version, result_last_position)
+         VALUES
+            ('30000000-0000-4000-8000-000000000401',
+             'submit_input', 1,
+             '70000000-0000-7000-8000-000000000401',
+             'owner', NULL, NULL, 'text', 'queued before migration',
+             'start_when_no_active_turn', NULL, 1,
+             'use_session_default', NULL, NULL, NULL,
+             'applied', NULL,
+             '70000000-0000-7000-8000-000000000401',
+             '90000000-0000-7000-8000-000000000401',
+             'a0000000-0000-7000-8000-000000000401',
+             NULL, NULL, NULL, NULL, NULL, NULL);
+         INSERT INTO accepted_input
+            (accepted_input_id, accepting_command_id, session_id,
+             content_kind, content_text, delivery_kind,
+             expected_active_turn_id, expected_defaults_version,
+             model_override_kind, replacement_model_kind,
+             replacement_direct_model_selection_id, replacement_model_alias_id,
+             acceptance_position, disposition_kind, origin_turn_id)
+         VALUES
+            ('90000000-0000-7000-8000-000000000401',
+             '30000000-0000-4000-8000-000000000401',
+             '70000000-0000-7000-8000-000000000401',
+             'text', 'queued before migration',
+             'start_when_no_active_turn', NULL, 1,
+             'use_session_default', NULL, NULL, NULL,
+             1, 'origin_of',
+             'a0000000-0000-7000-8000-000000000401');
+         INSERT INTO queued_input_origin
+            (turn_id, accepted_input_id, session_id, acceptance_position,
+             priority_kind, defaults_version,
+             requested_model_kind, requested_direct_model_selection_id,
+             requested_model_alias_id, frozen_model_kind,
+             frozen_direct_model_selection_id, frozen_model_alias_id,
+             frozen_alias_selected_direct_id, model_parameters,
+             known_provider_failure_retry, model_fallback)
+         VALUES
+            ('a0000000-0000-7000-8000-000000000401',
+             '90000000-0000-7000-8000-000000000401',
+             '70000000-0000-7000-8000-000000000401',
+             1, 'ordinary', 1,
+             'direct', '80000000-0000-7000-8000-000000000401', NULL,
+             'direct', '80000000-0000-7000-8000-000000000401', NULL, NULL,
+             'provider_defaults', 'disabled', 'disabled');",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+
+    migrate(&pool).await?;
+
+    let backfilled: (i64, String, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM session_scheduler WHERE session_id = $1),
+            turn.state_kind,
+            (SELECT count(*) FROM semantic_transcript_entry),
+            (SELECT count(*) FROM context_frontier),
+            (SELECT count(*) FROM turn_attempt)
+         FROM turn_lifecycle AS turn
+         WHERE turn.turn_id = $2",
+    )
+    .bind(Uuid::from_u128(0x70000000000070008000000000000401))
+    .bind(Uuid::from_u128(0xa0000000000070008000000000000401))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(backfilled, (1, "queued".to_owned(), 0, 0, 0));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S01 / INV-002 / INV-008 / INV-012: the Postgres adapters preserve
 /// application command outcomes, return the complete current session
 /// projection, and keep infrastructure failure nonterminal.
@@ -328,14 +538,15 @@ async fn s01_inv002_inv008_inv012_application_session_services_use_postgres_adap
         service.execute(conflicting_request).await?,
         CreateSessionOutcome::ConflictingReuse { command_id }
     );
-    let committed_counts: (i64, i64) = sqlx::query_as(
+    let committed_counts: (i64, i64, i64) = sqlx::query_as(
         "SELECT
             (SELECT count(*) FROM durable_command),
-            (SELECT count(*) FROM session)",
+            (SELECT count(*) FROM session),
+            (SELECT count(*) FROM session_scheduler)",
     )
     .fetch_one(&pool)
     .await?;
-    assert_eq!(committed_counts, (1, 1));
+    assert_eq!(committed_counts, (1, 1, 1));
 
     let load_service = LoadSessionService::new(SessionRepository::new(pool.clone()));
     let loaded = load_service
@@ -398,6 +609,12 @@ async fn s01_inv003_inv008_inv012_create_session_schema_preserves_typed_facts()
          VALUES
             ('70000000-0000-7000-8000-000000000001',
              'owner_initiated', 'none')",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_scheduler (session_id)
+         VALUES ('70000000-0000-7000-8000-000000000001')",
     )
     .execute(&mut *transaction)
     .await?;
@@ -547,6 +764,12 @@ async fn inv012_registry_and_create_session_constraints_reject_torn_or_conflicti
     .execute(&mut *session_without_command)
     .await?;
     sqlx::query(
+        "INSERT INTO session_scheduler (session_id)
+         VALUES ('70000000-0000-7000-8000-000000000021')",
+    )
+    .execute(&mut *session_without_command)
+    .await?;
+    sqlx::query(
         "INSERT INTO session_defaults_version
             (session_id, version, model_selection_kind,
              direct_model_selection_id, model_alias_id)
@@ -624,6 +847,12 @@ async fn s01_schema_rejects_invalid_provenance_defaults_and_mutation() -> Result
          VALUES
             ('70000000-0000-7000-8000-000000000013',
              'owner_initiated', 'none')",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_scheduler (session_id)
+         VALUES ('70000000-0000-7000-8000-000000000013')",
     )
     .execute(&mut *transaction)
     .await?;
@@ -2351,14 +2580,16 @@ async fn s01_inv005_inv008_inv010_inv012_inv028_submit_apply_replay_conflict_and
         }
     );
 
-    let stored: (String, String, String, i64) = sqlx::query_as(
+    let stored: (String, String, String, i64, String) = sqlx::query_as(
         "SELECT typed.content_text, accepted.content_text, queued.priority_kind,
-                queued.acceptance_position::bigint
+                queued.acceptance_position::bigint, turn.state_kind
            FROM submit_input_command AS typed
            JOIN accepted_input AS accepted
              ON accepted.accepting_command_id = typed.command_id
            JOIN queued_input_origin AS queued
              ON queued.accepted_input_id = accepted.accepted_input_id
+           JOIN turn_lifecycle AS turn
+             ON turn.turn_id = queued.turn_id
           WHERE typed.command_id = $1",
     )
     .bind(Uuid::from_u128(0x302))
@@ -2366,7 +2597,13 @@ async fn s01_inv005_inv008_inv010_inv012_inv028_submit_apply_replay_conflict_and
     .await?;
     assert_eq!(
         stored,
-        (exact.to_owned(), exact.to_owned(), "ordinary".into(), 1)
+        (
+            exact.to_owned(),
+            exact.to_owned(),
+            "ordinary".into(),
+            1,
+            "queued".into()
+        )
     );
 
     drop(service);
@@ -2389,7 +2626,7 @@ async fn s01_inv005_inv008_inv010_inv012_inv028_submit_apply_replay_conflict_and
         .expect("the committed receipt survives adapter restart");
     assert_eq!(loaded.command(), &command);
     assert_eq!(restarted_service.execute(request).await?, first);
-    let effect_counts: (i64, i64, i64) = sqlx::query_as(
+    let effect_counts: (i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
             (SELECT count(*) FROM submit_input_command WHERE command_id = $1),
             (SELECT count(*) FROM accepted_input WHERE accepting_command_id = $1),
@@ -2397,15 +2634,1484 @@ async fn s01_inv005_inv008_inv010_inv012_inv028_submit_apply_replay_conflict_and
                FROM queued_input_origin AS queued
                JOIN accepted_input AS accepted
                  ON accepted.accepted_input_id = queued.accepted_input_id
+              WHERE accepted.accepting_command_id = $1),
+            (SELECT count(*)
+               FROM turn_lifecycle AS turn
+               JOIN accepted_input AS accepted
+                 ON accepted.origin_turn_id = turn.turn_id
               WHERE accepted.accepting_command_id = $1)",
     )
     .bind(Uuid::from_u128(0x302))
     .fetch_one(&restarted_pool)
     .await?;
-    assert_eq!(effect_counts, (1, 1, 1));
+    assert_eq!(effect_counts, (1, 1, 1, 1));
 
     drop(restarted_service);
     restarted_pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S01 / INV-006 / INV-009 / INV-015: one complete future eligibility
+/// transaction can bind the exact origin frontier and prepared attempt, while
+/// the database independently rejects contradictory lifecycle histories.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s01_inv006_inv009_inv015_turn_storage_enforces_lifecycle_consistency()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0x401, 0x801, direct(0xc01)))
+        .await?;
+    let submit = SubmitInputRepository::new(pool.clone());
+    submit
+        .handle(
+            start_input(
+                0x402,
+                0x801,
+                "first",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x901)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xa01))),
+        )
+        .await?;
+    submit
+        .handle(
+            start_input(
+                0x403,
+                0x801,
+                "second",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x902)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xa02))),
+        )
+        .await?;
+
+    let session = Uuid::from_u128(0x801);
+    let first_turn = Uuid::from_u128(0xa01);
+    let first_attempt = Uuid::from_u128(0xb01);
+    let first_entry = Uuid::from_u128(0xd01);
+    let first_frontier = Uuid::from_u128(0xe01);
+    let mut activation = pool.begin().await?;
+    insert_origin_frontier(
+        &mut activation,
+        session,
+        Uuid::from_u128(0x901),
+        first_entry,
+        first_frontier,
+        Decimal::ONE,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO turn_attempt
+            (turn_attempt_id, turn_id, session_id, continued_from_attempt_id,
+             state_kind, end_variant, end_disposition)
+         VALUES ($1, $2, $3, NULL, 'prepared', NULL, NULL)",
+    )
+    .bind(first_attempt)
+    .bind(first_turn)
+    .bind(session)
+    .execute(&mut *activation)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET state_kind = 'active',
+                start_lineage_kind = 'first_in_session',
+                starting_frontier_id = $1,
+                active_phase_kind = 'running',
+                current_attempt_id = $2
+          WHERE turn_id = $3
+            AND state_kind = 'queued'",
+    )
+    .bind(first_frontier)
+    .bind(first_attempt)
+    .bind(first_turn)
+    .execute(&mut *activation)
+    .await?;
+    activation.commit().await?;
+
+    let active_shape: (String, String, String, String, i64) = sqlx::query_as(
+        "SELECT turn.state_kind, turn.start_lineage_kind,
+                turn.active_phase_kind, attempt.state_kind,
+                frontier.member_count::bigint
+           FROM turn_lifecycle AS turn
+           JOIN turn_attempt AS attempt
+             ON attempt.turn_attempt_id = turn.current_attempt_id
+           JOIN context_frontier AS frontier
+             ON frontier.owning_session_id = turn.session_id
+            AND frontier.context_frontier_id = turn.starting_frontier_id
+          WHERE turn.turn_id = $1",
+    )
+    .bind(first_turn)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        active_shape,
+        (
+            "active".into(),
+            "first_in_session".into(),
+            "running".into(),
+            "prepared".into(),
+            1
+        )
+    );
+
+    let born_active = sqlx::query(
+        "INSERT INTO turn_lifecycle
+            (turn_id, session_id, origin_accepted_input_id, acceptance_position,
+             state_kind, start_lineage_kind, immediate_predecessor_turn_id,
+             starting_frontier_id, terminal_frontier_id, active_phase_kind,
+             current_attempt_id, terminal_disposition_kind)
+         SELECT turn_id, session_id, origin_accepted_input_id, acceptance_position,
+                state_kind, start_lineage_kind, immediate_predecessor_turn_id,
+                starting_frontier_id, terminal_frontier_id, active_phase_kind,
+                current_attempt_id, terminal_disposition_kind
+           FROM turn_lifecycle
+          WHERE turn_id = $1",
+    )
+    .bind(first_turn)
+    .execute(&pool)
+    .await
+    .expect_err("even a complete active shape must first be inserted as queued");
+    assert_eq!(
+        born_active
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into())
+    );
+    assert_eq!(
+        born_active
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("turn_lifecycle_inserted_queued")
+    );
+
+    for (attempt_id, state_kind, end_variant, end_disposition) in [
+        (Uuid::from_u128(0xb05), "running", None, None),
+        (
+            Uuid::from_u128(0xb06),
+            "ended",
+            Some("without_stop"),
+            Some("known_failure"),
+        ),
+    ] {
+        let born_nonprepared = sqlx::query(
+            "INSERT INTO turn_attempt
+                (turn_attempt_id, turn_id, session_id, continued_from_attempt_id,
+                 state_kind, end_variant, end_disposition)
+             VALUES ($1, $2, $3, NULL, $4, $5, $6)",
+        )
+        .bind(attempt_id)
+        .bind(Uuid::from_u128(0xa02))
+        .bind(session)
+        .bind(state_kind)
+        .bind(end_variant)
+        .bind(end_disposition)
+        .execute(&pool)
+        .await
+        .expect_err("every attempt must first be inserted as prepared");
+        assert_eq!(
+            born_nonprepared
+                .as_database_error()
+                .and_then(|error| error.code()),
+            Some("23514".into())
+        );
+        assert_eq!(
+            born_nonprepared
+                .as_database_error()
+                .and_then(|error| error.constraint()),
+            Some("turn_attempt_inserted_prepared"),
+            "unexpected insert guard for born-{state_kind} attempt"
+        );
+    }
+
+    let mut second_activation = pool.begin().await?;
+    insert_origin_frontier(
+        &mut second_activation,
+        session,
+        Uuid::from_u128(0x902),
+        Uuid::from_u128(0xd02),
+        Uuid::from_u128(0xe02),
+        Decimal::ONE,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO turn_attempt
+            (turn_attempt_id, turn_id, session_id, continued_from_attempt_id,
+             state_kind, end_variant, end_disposition)
+         VALUES ($1, $2, $3, NULL, 'prepared', NULL, NULL)",
+    )
+    .bind(Uuid::from_u128(0xb02))
+    .bind(Uuid::from_u128(0xa02))
+    .bind(session)
+    .execute(&mut *second_activation)
+    .await?;
+    let second_active = sqlx::query(
+        "UPDATE turn_lifecycle
+            SET state_kind = 'active',
+                start_lineage_kind = 'after',
+                immediate_predecessor_turn_id = $1,
+                starting_frontier_id = $2,
+                active_phase_kind = 'running',
+                current_attempt_id = $3
+          WHERE turn_id = $4",
+    )
+    .bind(first_turn)
+    .bind(Uuid::from_u128(0xe02))
+    .bind(Uuid::from_u128(0xb02))
+    .bind(Uuid::from_u128(0xa02))
+    .execute(&mut *second_activation)
+    .await
+    .expect_err("the partial unique index must reject a second active turn");
+    assert_eq!(
+        second_active
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("turn_lifecycle_one_active_per_session")
+    );
+    second_activation.rollback().await?;
+
+    let mut duplicate_live = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO turn_attempt
+            (turn_attempt_id, turn_id, session_id, continued_from_attempt_id,
+             state_kind, end_variant, end_disposition)
+         VALUES ($1, $2, $3, NULL, 'prepared', NULL, NULL)",
+    )
+    .bind(Uuid::from_u128(0xb03))
+    .bind(Uuid::from_u128(0xa02))
+    .bind(session)
+    .execute(&mut *duplicate_live)
+    .await?;
+    let second_live = sqlx::query(
+        "INSERT INTO turn_attempt
+            (turn_attempt_id, turn_id, session_id, continued_from_attempt_id,
+             state_kind, end_variant, end_disposition)
+         VALUES ($1, $2, $3, $4, 'prepared', NULL, NULL)",
+    )
+    .bind(Uuid::from_u128(0xb04))
+    .bind(Uuid::from_u128(0xa02))
+    .bind(session)
+    .bind(Uuid::from_u128(0xb03))
+    .execute(&mut *duplicate_live)
+    .await
+    .expect_err("the partial unique index must reject a second live attempt");
+    assert_eq!(
+        second_live
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("turn_attempt_one_live_per_turn")
+    );
+    duplicate_live.rollback().await?;
+
+    let immutable_start = sqlx::query(
+        "UPDATE turn_lifecycle
+            SET starting_frontier_id = $1
+          WHERE turn_id = $2",
+    )
+    .bind(Uuid::from_u128(0xeff))
+    .bind(first_turn)
+    .execute(&pool)
+    .await
+    .expect_err("a committed turn start must be write-once");
+    assert_eq!(
+        immutable_start
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into())
+    );
+
+    let immutable_member = sqlx::query(
+        "UPDATE context_frontier_member
+            SET member_position = 2
+          WHERE owning_session_id = $1
+            AND context_frontier_id = $2",
+    )
+    .bind(session)
+    .bind(first_frontier)
+    .execute(&pool)
+    .await
+    .expect_err("committed frontier membership must be immutable");
+    assert_eq!(
+        immutable_member
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into())
+    );
+
+    let out_of_bounds_member = sqlx::query(
+        "INSERT INTO context_frontier_member
+            (owning_session_id, context_frontier_id, member_position,
+             source_session_id, semantic_entry_id)
+         VALUES ($1, $2, 2, $1, $3)",
+    )
+    .bind(session)
+    .bind(first_frontier)
+    .bind(first_entry)
+    .execute(&pool)
+    .await
+    .expect_err("committed frontier membership cannot exceed its declared count");
+    assert_eq!(
+        out_of_bounds_member
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("context_frontier_member_within_declared_count")
+    );
+
+    let duplicate_frontier = Uuid::from_u128(0xe04);
+    let mut duplicate_membership = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count)
+         VALUES ($1, $2, 2)",
+    )
+    .bind(session)
+    .bind(duplicate_frontier)
+    .execute(&mut *duplicate_membership)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier_member
+            (owning_session_id, context_frontier_id, member_position,
+             source_session_id, semantic_entry_id)
+         VALUES ($1, $2, 1, $1, $3)",
+    )
+    .bind(session)
+    .bind(duplicate_frontier)
+    .bind(first_entry)
+    .execute(&mut *duplicate_membership)
+    .await?;
+    let duplicate_member = sqlx::query(
+        "INSERT INTO context_frontier_member
+            (owning_session_id, context_frontier_id, member_position,
+             source_session_id, semantic_entry_id)
+         VALUES ($1, $2, 2, $1, $3)",
+    )
+    .bind(session)
+    .bind(duplicate_frontier)
+    .bind(first_entry)
+    .execute(&mut *duplicate_membership)
+    .await
+    .expect_err("one exact source-qualified entry cannot occur twice");
+    assert_eq!(
+        duplicate_member
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("context_frontier_member_entry_once")
+    );
+    duplicate_membership.rollback().await?;
+
+    let mut unavailable_continuation = pool.begin().await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended',
+                end_variant = 'without_stop',
+                end_disposition = 'known_failure'
+          WHERE turn_attempt_id = $1",
+    )
+    .bind(first_attempt)
+    .execute(&mut *unavailable_continuation)
+    .await?;
+    let successor_attempt = Uuid::from_u128(0xb02);
+    sqlx::query(
+        "INSERT INTO turn_attempt
+            (turn_attempt_id, turn_id, session_id, continued_from_attempt_id,
+             state_kind, end_variant, end_disposition)
+         VALUES ($1, $2, $3, $4, 'prepared', NULL, NULL)",
+    )
+    .bind(successor_attempt)
+    .bind(first_turn)
+    .bind(session)
+    .bind(first_attempt)
+    .execute(&mut *unavailable_continuation)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET current_attempt_id = $1
+          WHERE turn_id = $2",
+    )
+    .bind(successor_attempt)
+    .bind(first_turn)
+    .execute(&mut *unavailable_continuation)
+    .await?;
+    let unavailable_continuation_error = unavailable_continuation
+        .commit()
+        .await
+        .expect_err("even an ended predecessor cannot admit continuation yet");
+    assert_eq!(
+        unavailable_continuation_error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("turn_attempt_continuation_unavailable")
+    );
+
+    let failure_entry = Uuid::from_u128(0xd03);
+    let terminal_frontier = Uuid::from_u128(0xe03);
+    for contradictory_disposition in [
+        "turn_completed",
+        "turn_refused",
+        "yielded_to_durable_wait",
+        "ambiguous",
+    ] {
+        let mut contradictory_terminal = pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO semantic_transcript_entry
+                (source_session_id, semantic_entry_id, payload_kind,
+                 origin_accepted_input_id, failed_turn_id)
+             VALUES ($1, $2, 'turn_failed', NULL, $3)",
+        )
+        .bind(session)
+        .bind(failure_entry)
+        .bind(first_turn)
+        .execute(&mut *contradictory_terminal)
+        .await?;
+        insert_frontier(
+            &mut contradictory_terminal,
+            session,
+            terminal_frontier,
+            Decimal::from(2_u64),
+            &[
+                (Decimal::ONE, session, first_entry),
+                (Decimal::from(2_u64), session, failure_entry),
+            ],
+        )
+        .await?;
+        sqlx::query(
+            "UPDATE turn_attempt
+                SET state_kind = 'ended',
+                    end_variant = 'without_stop',
+                    end_disposition = $1
+              WHERE turn_attempt_id = $2",
+        )
+        .bind(contradictory_disposition)
+        .bind(first_attempt)
+        .execute(&mut *contradictory_terminal)
+        .await?;
+        sqlx::query(
+            "UPDATE turn_lifecycle
+                SET state_kind = 'terminal',
+                    active_phase_kind = NULL,
+                    current_attempt_id = NULL,
+                    terminal_frontier_id = $1,
+                    terminal_disposition_kind = 'failed'
+              WHERE turn_id = $2",
+        )
+        .bind(terminal_frontier)
+        .bind(first_turn)
+        .execute(&mut *contradictory_terminal)
+        .await?;
+
+        let contradictory_terminal_error = contradictory_terminal
+            .commit()
+            .await
+            .expect_err("a failed turn cannot retain a contradictory ended attempt");
+        let database_error = contradictory_terminal_error
+            .as_database_error()
+            .expect("deferred lifecycle validation must return a database error");
+        assert_eq!(database_error.code(), Some("23514".into()));
+        assert!(
+            database_error
+                .message()
+                .contains("permits only known_failure or lost ended attempts"),
+            "unexpected terminal consistency error for {contradictory_disposition}: {}",
+            database_error.message()
+        );
+    }
+
+    let mut terminalize = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             origin_accepted_input_id, failed_turn_id)
+         VALUES ($1, $2, 'turn_failed', NULL, $3)",
+    )
+    .bind(session)
+    .bind(failure_entry)
+    .bind(first_turn)
+    .execute(&mut *terminalize)
+    .await?;
+    insert_frontier(
+        &mut terminalize,
+        session,
+        terminal_frontier,
+        Decimal::from(2_u64),
+        &[
+            (Decimal::ONE, session, first_entry),
+            (Decimal::from(2_u64), session, failure_entry),
+        ],
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended',
+                end_variant = 'without_stop',
+                end_disposition = 'known_failure'
+          WHERE turn_attempt_id = $1",
+    )
+    .bind(first_attempt)
+    .execute(&mut *terminalize)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET state_kind = 'terminal',
+                active_phase_kind = NULL,
+                current_attempt_id = NULL,
+                terminal_frontier_id = $1,
+                terminal_disposition_kind = 'failed'
+          WHERE turn_id = $2",
+    )
+    .bind(terminal_frontier)
+    .bind(first_turn)
+    .execute(&mut *terminalize)
+    .await?;
+    terminalize.commit().await?;
+
+    let immutable_attempt = sqlx::query(
+        "UPDATE turn_attempt
+            SET end_disposition = 'lost'
+          WHERE turn_attempt_id = $1",
+    )
+    .bind(first_attempt)
+    .execute(&pool)
+    .await
+    .expect_err("an ended attempt must be immutable");
+    assert_eq!(
+        immutable_attempt
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into())
+    );
+
+    let born_terminal = sqlx::query(
+        "INSERT INTO turn_lifecycle
+            (turn_id, session_id, origin_accepted_input_id, acceptance_position,
+             state_kind, start_lineage_kind, immediate_predecessor_turn_id,
+             starting_frontier_id, terminal_frontier_id, active_phase_kind,
+             current_attempt_id, terminal_disposition_kind)
+         SELECT turn_id, session_id, origin_accepted_input_id, acceptance_position,
+                state_kind, start_lineage_kind, immediate_predecessor_turn_id,
+                starting_frontier_id, terminal_frontier_id, active_phase_kind,
+                current_attempt_id, terminal_disposition_kind
+           FROM turn_lifecycle
+          WHERE turn_id = $1",
+    )
+    .bind(first_turn)
+    .execute(&pool)
+    .await
+    .expect_err("even a complete terminal shape must first be inserted as queued");
+    assert_eq!(
+        born_terminal
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into())
+    );
+    assert_eq!(
+        born_terminal
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("turn_lifecycle_inserted_queued")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-007 / INV-009 / INV-015: an incomplete frontier cannot expose any
+/// semantic entry, start binding, slot owner, or attempt after rollback.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv007_inv009_inv015_malformed_atomic_start_rolls_back_every_fact()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0x411, 0x811, direct(0xc11)))
+        .await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                0x412,
+                0x811,
+                "malformed future start",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x911)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xa11))),
+        )
+        .await?;
+
+    let session = Uuid::from_u128(0x811);
+    let turn = Uuid::from_u128(0xa11);
+    let mut malformed = pool.begin().await?;
+    insert_origin_frontier(
+        &mut malformed,
+        session,
+        Uuid::from_u128(0x911),
+        Uuid::from_u128(0xd11),
+        Uuid::from_u128(0xe11),
+        Decimal::from(2_u64),
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO turn_attempt
+            (turn_attempt_id, turn_id, session_id, continued_from_attempt_id,
+             state_kind, end_variant, end_disposition)
+         VALUES ($1, $2, $3, NULL, 'prepared', NULL, NULL)",
+    )
+    .bind(Uuid::from_u128(0xb11))
+    .bind(turn)
+    .bind(session)
+    .execute(&mut *malformed)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET state_kind = 'active',
+                start_lineage_kind = 'first_in_session',
+                starting_frontier_id = $1,
+                active_phase_kind = 'running',
+                current_attempt_id = $2
+          WHERE turn_id = $3",
+    )
+    .bind(Uuid::from_u128(0xe11))
+    .bind(Uuid::from_u128(0xb11))
+    .bind(turn)
+    .execute(&mut *malformed)
+    .await?;
+    let incomplete = malformed
+        .commit()
+        .await
+        .expect_err("a gapped one-member frontier must not commit");
+    assert_eq!(
+        incomplete
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into())
+    );
+
+    let unchanged: (String, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            state_kind,
+            (SELECT count(*) FROM semantic_transcript_entry),
+            (SELECT count(*) FROM context_frontier),
+            (SELECT count(*) FROM turn_attempt)
+         FROM turn_lifecycle
+         WHERE turn_id = $1",
+    )
+    .bind(turn)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(unchanged, ("queued".to_owned(), 0, 0, 0));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-001 / INV-005 / INV-009 / INV-015: the initial semantic variants
+/// preserve globally unique identities and exact source correlations; eligible
+/// failure records origin then failure without putting the later failure
+/// marker in the starting frontier.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv005_inv009_inv015_initial_semantic_entries_are_turn_correlated()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0x421, 0x821, direct(0xc21)))
+        .await?;
+    let submit = SubmitInputRepository::new(pool.clone());
+    submit
+        .handle(
+            start_input(
+                0x422,
+                0x821,
+                "will fail eligibility",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x921)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xa21))),
+        )
+        .await?;
+
+    let session = Uuid::from_u128(0x821);
+    let turn = Uuid::from_u128(0xa21);
+    let origin_entry = Uuid::from_u128(0xd21);
+    let failure_entry = Uuid::from_u128(0xd22);
+    let starting_frontier = Uuid::from_u128(0xe21);
+    let terminal_frontier = Uuid::from_u128(0xe22);
+
+    let mut missing_terminal_frontier = pool.begin().await?;
+    insert_origin_frontier(
+        &mut missing_terminal_frontier,
+        session,
+        Uuid::from_u128(0x921),
+        origin_entry,
+        starting_frontier,
+        Decimal::ONE,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             origin_accepted_input_id, failed_turn_id)
+         VALUES ($1, $2, 'turn_failed', NULL, $3)",
+    )
+    .bind(session)
+    .bind(failure_entry)
+    .bind(turn)
+    .execute(&mut *missing_terminal_frontier)
+    .await?;
+    let missing_terminal_frontier_error = sqlx::query(
+        "UPDATE turn_lifecycle
+            SET state_kind = 'terminal',
+                start_lineage_kind = 'first_in_session',
+                starting_frontier_id = $1,
+                terminal_disposition_kind = 'failed'
+          WHERE turn_id = $2",
+    )
+    .bind(starting_frontier)
+    .bind(turn)
+    .execute(&mut *missing_terminal_frontier)
+    .await
+    .expect_err("a failed terminal turn must name its terminal frontier");
+    assert_eq!(
+        missing_terminal_frontier_error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("turn_lifecycle_state_payload_shape")
+    );
+    missing_terminal_frontier.rollback().await?;
+
+    let mut gapped_terminal_frontier = pool.begin().await?;
+    insert_origin_frontier(
+        &mut gapped_terminal_frontier,
+        session,
+        Uuid::from_u128(0x921),
+        origin_entry,
+        starting_frontier,
+        Decimal::ONE,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             origin_accepted_input_id, failed_turn_id)
+         VALUES ($1, $2, 'turn_failed', NULL, $3)",
+    )
+    .bind(session)
+    .bind(failure_entry)
+    .bind(turn)
+    .execute(&mut *gapped_terminal_frontier)
+    .await?;
+    insert_frontier(
+        &mut gapped_terminal_frontier,
+        session,
+        terminal_frontier,
+        Decimal::from(3_u64),
+        &[
+            (Decimal::ONE, session, origin_entry),
+            (Decimal::from(3_u64), session, failure_entry),
+        ],
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET state_kind = 'terminal',
+                start_lineage_kind = 'first_in_session',
+                starting_frontier_id = $1,
+                terminal_frontier_id = $2,
+                terminal_disposition_kind = 'failed'
+          WHERE turn_id = $3",
+    )
+    .bind(starting_frontier)
+    .bind(terminal_frontier)
+    .bind(turn)
+    .execute(&mut *gapped_terminal_frontier)
+    .await?;
+    let gapped = gapped_terminal_frontier
+        .commit()
+        .await
+        .expect_err("a terminal frontier with a membership gap must not commit");
+    assert_eq!(
+        gapped.as_database_error().and_then(|error| error.code()),
+        Some("23514".into())
+    );
+
+    let mut cross_wired_terminal_frontier = pool.begin().await?;
+    insert_origin_frontier(
+        &mut cross_wired_terminal_frontier,
+        session,
+        Uuid::from_u128(0x921),
+        origin_entry,
+        starting_frontier,
+        Decimal::ONE,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             origin_accepted_input_id, failed_turn_id)
+         VALUES ($1, $2, 'turn_failed', NULL, $3)",
+    )
+    .bind(session)
+    .bind(failure_entry)
+    .bind(turn)
+    .execute(&mut *cross_wired_terminal_frontier)
+    .await?;
+    insert_frontier(
+        &mut cross_wired_terminal_frontier,
+        session,
+        terminal_frontier,
+        Decimal::from(2_u64),
+        &[
+            (Decimal::ONE, session, failure_entry),
+            (Decimal::from(2_u64), session, origin_entry),
+        ],
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET state_kind = 'terminal',
+                start_lineage_kind = 'first_in_session',
+                starting_frontier_id = $1,
+                terminal_frontier_id = $2,
+                terminal_disposition_kind = 'failed'
+          WHERE turn_id = $3",
+    )
+    .bind(starting_frontier)
+    .bind(terminal_frontier)
+    .bind(turn)
+    .execute(&mut *cross_wired_terminal_frontier)
+    .await?;
+    let cross_wired = cross_wired_terminal_frontier
+        .commit()
+        .await
+        .expect_err("a reordered terminal frontier must not commit");
+    assert_eq!(
+        cross_wired
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into())
+    );
+
+    let mut attempted_failure = pool.begin().await?;
+    insert_origin_frontier(
+        &mut attempted_failure,
+        session,
+        Uuid::from_u128(0x921),
+        origin_entry,
+        starting_frontier,
+        Decimal::ONE,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             origin_accepted_input_id, failed_turn_id)
+         VALUES ($1, $2, 'turn_failed', NULL, $3)",
+    )
+    .bind(session)
+    .bind(failure_entry)
+    .bind(turn)
+    .execute(&mut *attempted_failure)
+    .await?;
+    insert_frontier(
+        &mut attempted_failure,
+        session,
+        terminal_frontier,
+        Decimal::from(2_u64),
+        &[
+            (Decimal::ONE, session, origin_entry),
+            (Decimal::from(2_u64), session, failure_entry),
+        ],
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO turn_attempt
+            (turn_attempt_id, turn_id, session_id, continued_from_attempt_id,
+             state_kind, end_variant, end_disposition)
+         VALUES ($1, $2, $3, NULL, 'prepared', NULL, NULL)",
+    )
+    .bind(Uuid::from_u128(0xb21))
+    .bind(turn)
+    .bind(session)
+    .execute(&mut *attempted_failure)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended',
+                end_variant = 'without_stop',
+                end_disposition = 'known_failure'
+          WHERE turn_attempt_id = $1",
+    )
+    .bind(Uuid::from_u128(0xb21))
+    .execute(&mut *attempted_failure)
+    .await?;
+    let attempted_failure_error = sqlx::query(
+        "UPDATE turn_lifecycle
+            SET state_kind = 'terminal',
+                start_lineage_kind = 'first_in_session',
+                starting_frontier_id = $1,
+                terminal_frontier_id = $2,
+                terminal_disposition_kind = 'failed'
+          WHERE turn_id = $3",
+    )
+    .bind(starting_frontier)
+    .bind(terminal_frontier)
+    .bind(turn)
+    .execute(&mut *attempted_failure)
+    .await
+    .expect_err("a direct queued failure cannot carry an ended attempt");
+    assert_eq!(
+        attempted_failure_error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("turn_lifecycle_queued_failure_without_attempt")
+    );
+    attempted_failure.rollback().await?;
+
+    let mut failure = pool.begin().await?;
+    insert_origin_frontier(
+        &mut failure,
+        session,
+        Uuid::from_u128(0x921),
+        origin_entry,
+        starting_frontier,
+        Decimal::ONE,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             origin_accepted_input_id, failed_turn_id)
+         VALUES ($1, $2, 'turn_failed', NULL, $3)",
+    )
+    .bind(session)
+    .bind(failure_entry)
+    .bind(turn)
+    .execute(&mut *failure)
+    .await?;
+    insert_frontier(
+        &mut failure,
+        session,
+        terminal_frontier,
+        Decimal::from(2_u64),
+        &[
+            (Decimal::ONE, session, origin_entry),
+            (Decimal::from(2_u64), session, failure_entry),
+        ],
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET state_kind = 'terminal',
+                start_lineage_kind = 'first_in_session',
+                starting_frontier_id = $1,
+                terminal_frontier_id = $2,
+                terminal_disposition_kind = 'failed'
+          WHERE turn_id = $3",
+    )
+    .bind(starting_frontier)
+    .bind(terminal_frontier)
+    .bind(turn)
+    .execute(&mut *failure)
+    .await?;
+    failure.commit().await?;
+
+    let semantic_shape: (String, i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            turn.state_kind,
+            (SELECT count(*)
+               FROM semantic_transcript_entry
+              WHERE source_session_id = $1),
+            (SELECT count(*)
+               FROM turn_attempt
+              WHERE turn_id = $3),
+            starting.member_count::bigint,
+            terminal.member_count::bigint,
+            (SELECT count(*)
+               FROM context_frontier_member AS member
+               JOIN semantic_transcript_entry AS entry
+                 ON entry.source_session_id = member.source_session_id
+                AND entry.semantic_entry_id = member.semantic_entry_id
+              WHERE member.owning_session_id = $1
+                AND member.context_frontier_id = $2
+                AND entry.payload_kind = 'turn_failed')
+         FROM turn_lifecycle AS turn
+         JOIN context_frontier AS starting
+           ON starting.owning_session_id = turn.session_id
+          AND starting.context_frontier_id = turn.starting_frontier_id
+         JOIN context_frontier AS terminal
+           ON terminal.owning_session_id = turn.session_id
+          AND terminal.context_frontier_id = turn.terminal_frontier_id
+         WHERE turn.turn_id = $3",
+    )
+    .bind(session)
+    .bind(starting_frontier)
+    .bind(turn)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(semantic_shape, ("terminal".to_owned(), 2, 0, 1, 2, 0));
+
+    let late_attempt = sqlx::query(
+        "INSERT INTO turn_attempt
+            (turn_attempt_id, turn_id, session_id, continued_from_attempt_id,
+             state_kind, end_variant, end_disposition)
+         VALUES ($1, $2, $3, NULL, 'prepared', NULL, NULL)",
+    )
+    .bind(Uuid::from_u128(0xb22))
+    .bind(turn)
+    .bind(session)
+    .execute(&pool)
+    .await
+    .expect_err("an attempt cannot be inserted after direct terminalization");
+    assert_eq!(
+        late_attempt
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into())
+    );
+
+    let overrun = sqlx::query(
+        "INSERT INTO context_frontier_member
+            (owning_session_id, context_frontier_id, member_position,
+             source_session_id, semantic_entry_id)
+         VALUES ($1, $2, 3, $1, $3)",
+    )
+    .bind(session)
+    .bind(terminal_frontier)
+    .bind(failure_entry)
+    .execute(&pool)
+    .await
+    .expect_err("a committed frontier cannot grow beyond its declared count");
+    assert_eq!(
+        overrun
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("context_frontier_member_within_declared_count")
+    );
+
+    let trigger_inventory: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            count(*) FILTER (
+                WHERE relation.relname = 'context_frontier'
+                  AND candidate.tgname = 'context_frontier_requires_complete_membership'
+                  AND candidate.tgdeferrable
+            ),
+            count(*) FILTER (
+                WHERE relation.relname = 'context_frontier_member'
+                  AND candidate.tgname = 'context_frontier_member_requires_complete_membership'
+            ),
+            count(*) FILTER (
+                WHERE relation.relname = 'context_frontier_member'
+                  AND candidate.tgname = 'context_frontier_member_stays_within_declared_count'
+                  AND NOT candidate.tgdeferrable
+            ),
+            count(*) FILTER (
+                WHERE relation.relname = 'context_frontier_member'
+                  AND candidate.tgname = 'context_frontier_member_rechecks_declared_count'
+                  AND candidate.tgdeferrable
+            )
+         FROM pg_trigger AS candidate
+         JOIN pg_class AS relation
+           ON relation.oid = candidate.tgrelid
+         WHERE NOT candidate.tgisinternal",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(trigger_inventory, (1, 0, 1, 1));
+
+    let index_inventory: (i64, i64) = sqlx::query_as(
+        "SELECT
+            count(*) FILTER (
+                WHERE indexname = 'turn_attempt_by_turn_session'
+                  AND indexdef LIKE '%(turn_id, session_id)%'
+            ),
+            count(*) FILTER (
+                WHERE indexname = 'turn_lifecycle_by_session_position'
+                  AND indexdef LIKE '%(session_id, acceptance_position)%'
+            )
+         FROM pg_indexes
+         WHERE schemaname = current_schema()",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(index_inventory, (1, 1));
+
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0x424, 0x822, direct(0xc24)))
+        .await?;
+    submit
+        .handle(
+            start_input(
+                0x425,
+                0x822,
+                "cross-session identity probe",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x924)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xa24))),
+        )
+        .await?;
+    let semantic_id_reuse = sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             origin_accepted_input_id, failed_turn_id)
+         VALUES ($1, $2, 'origin_accepted_input', $3, NULL)",
+    )
+    .bind(Uuid::from_u128(0x822))
+    .bind(origin_entry)
+    .bind(Uuid::from_u128(0x924))
+    .execute(&pool)
+    .await
+    .expect_err("a semantic entry identifier cannot be reused by another session");
+    assert_eq!(
+        semantic_id_reuse
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("semantic_transcript_entry_id_global")
+    );
+
+    let frontier_id_reuse = sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count)
+         VALUES ($1, $2, 0)",
+    )
+    .bind(Uuid::from_u128(0x822))
+    .bind(starting_frontier)
+    .execute(&pool)
+    .await
+    .expect_err("a context frontier identifier cannot be reused by another session");
+    assert_eq!(
+        frontier_id_reuse
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("context_frontier_id_global")
+    );
+
+    submit
+        .handle(
+            start_input(
+                0x423,
+                0x821,
+                "still queued",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x922)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xa22))),
+        )
+        .await?;
+
+    let second_turn = Uuid::from_u128(0xa22);
+    let second_origin = Uuid::from_u128(0xd23);
+    let second_starting_frontier = Uuid::from_u128(0xe23);
+    let second_attempt = Uuid::from_u128(0xb23);
+    let mut omitted_predecessor_frontier = pool.begin().await?;
+    insert_origin_frontier(
+        &mut omitted_predecessor_frontier,
+        session,
+        Uuid::from_u128(0x922),
+        second_origin,
+        second_starting_frontier,
+        Decimal::ONE,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO turn_attempt
+            (turn_attempt_id, turn_id, session_id, continued_from_attempt_id,
+             state_kind, end_variant, end_disposition)
+         VALUES ($1, $2, $3, NULL, 'prepared', NULL, NULL)",
+    )
+    .bind(second_attempt)
+    .bind(second_turn)
+    .bind(session)
+    .execute(&mut *omitted_predecessor_frontier)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET state_kind = 'active',
+                start_lineage_kind = 'after',
+                immediate_predecessor_turn_id = $1,
+                starting_frontier_id = $2,
+                active_phase_kind = 'running',
+                current_attempt_id = $3
+          WHERE turn_id = $4",
+    )
+    .bind(turn)
+    .bind(second_starting_frontier)
+    .bind(second_attempt)
+    .bind(second_turn)
+    .execute(&mut *omitted_predecessor_frontier)
+    .await?;
+    let omitted = omitted_predecessor_frontier
+        .commit()
+        .await
+        .expect_err("a successor start cannot omit its predecessor terminal frontier");
+    assert_eq!(
+        omitted.as_database_error().and_then(|error| error.code()),
+        Some("23514".into())
+    );
+
+    let mut reordered_predecessor_frontier = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             origin_accepted_input_id, failed_turn_id)
+         VALUES ($1, $2, 'origin_accepted_input', $3, NULL)",
+    )
+    .bind(session)
+    .bind(second_origin)
+    .bind(Uuid::from_u128(0x922))
+    .execute(&mut *reordered_predecessor_frontier)
+    .await?;
+    insert_frontier(
+        &mut reordered_predecessor_frontier,
+        session,
+        second_starting_frontier,
+        Decimal::from(3_u64),
+        &[
+            (Decimal::ONE, session, failure_entry),
+            (Decimal::from(2_u64), session, origin_entry),
+            (Decimal::from(3_u64), session, second_origin),
+        ],
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO turn_attempt
+            (turn_attempt_id, turn_id, session_id, continued_from_attempt_id,
+             state_kind, end_variant, end_disposition)
+         VALUES ($1, $2, $3, NULL, 'prepared', NULL, NULL)",
+    )
+    .bind(second_attempt)
+    .bind(second_turn)
+    .bind(session)
+    .execute(&mut *reordered_predecessor_frontier)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET state_kind = 'active',
+                start_lineage_kind = 'after',
+                immediate_predecessor_turn_id = $1,
+                starting_frontier_id = $2,
+                active_phase_kind = 'running',
+                current_attempt_id = $3
+          WHERE turn_id = $4",
+    )
+    .bind(turn)
+    .bind(second_starting_frontier)
+    .bind(second_attempt)
+    .bind(second_turn)
+    .execute(&mut *reordered_predecessor_frontier)
+    .await?;
+    let reordered = reordered_predecessor_frontier
+        .commit()
+        .await
+        .expect_err("a successor start cannot reorder predecessor membership");
+    assert_eq!(
+        reordered.as_database_error().and_then(|error| error.code()),
+        Some("23514".into())
+    );
+
+    let mut invalid_failure = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             origin_accepted_input_id, failed_turn_id)
+         VALUES ($1, $2, 'turn_failed', NULL, $3)",
+    )
+    .bind(session)
+    .bind(Uuid::from_u128(0xd23))
+    .bind(second_turn)
+    .execute(&mut *invalid_failure)
+    .await?;
+    let queued_failure = invalid_failure
+        .commit()
+        .await
+        .expect_err("a queued turn cannot acquire a failure entry");
+    assert_eq!(
+        queued_failure
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into())
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-009 / INV-015: direct queued failure and immutable frontier membership
+/// remain closed under transactions that begin from stale concurrent snapshots.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv009_inv015_concurrent_attempt_and_frontier_inserts_fail_closed()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0x451, 0x851, direct(0xc51)))
+        .await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                0x452,
+                0x851,
+                "concurrent static failure",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x951)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xa51))),
+        )
+        .await?;
+
+    let session = Uuid::from_u128(0x851);
+    let turn = Uuid::from_u128(0xa51);
+    let origin_entry = Uuid::from_u128(0xd51);
+    let failure_entry = Uuid::from_u128(0xd52);
+    let starting_frontier = Uuid::from_u128(0xe51);
+    let terminal_frontier = Uuid::from_u128(0xe52);
+
+    let mut terminalize = pool.begin().await?;
+    insert_origin_frontier(
+        &mut terminalize,
+        session,
+        Uuid::from_u128(0x951),
+        origin_entry,
+        starting_frontier,
+        Decimal::ONE,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             origin_accepted_input_id, failed_turn_id)
+         VALUES ($1, $2, 'turn_failed', NULL, $3)",
+    )
+    .bind(session)
+    .bind(failure_entry)
+    .bind(turn)
+    .execute(&mut *terminalize)
+    .await?;
+    insert_frontier(
+        &mut terminalize,
+        session,
+        terminal_frontier,
+        Decimal::from(2_u64),
+        &[
+            (Decimal::ONE, session, origin_entry),
+            (Decimal::from(2_u64), session, failure_entry),
+        ],
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET state_kind = 'terminal',
+                start_lineage_kind = 'first_in_session',
+                starting_frontier_id = $1,
+                terminal_frontier_id = $2,
+                terminal_disposition_kind = 'failed'
+          WHERE turn_id = $3",
+    )
+    .bind(starting_frontier)
+    .bind(terminal_frontier)
+    .bind(turn)
+    .execute(&mut *terminalize)
+    .await?;
+
+    let concurrent_attempt = tokio::spawn({
+        let pool = pool.clone();
+        async move {
+            sqlx::query(
+                "INSERT INTO turn_attempt
+                    (turn_attempt_id, turn_id, session_id, continued_from_attempt_id,
+                     state_kind, end_variant, end_disposition)
+                 VALUES ($1, $2, $3, NULL, 'prepared', NULL, NULL)",
+            )
+            .bind(Uuid::from_u128(0xb51))
+            .bind(turn)
+            .bind(session)
+            .execute(&pool)
+            .await
+        }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !concurrent_attempt.is_finished(),
+        "attempt insertion must serialize on the lifecycle row"
+    );
+    terminalize.commit().await?;
+    let attempt_error = concurrent_attempt
+        .await?
+        .expect_err("an attempt racing direct terminalization must fail");
+    assert_eq!(
+        attempt_error
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into())
+    );
+    let attempt_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM turn_attempt WHERE turn_id = $1")
+            .bind(turn)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(attempt_count, 0);
+
+    let racing_frontier = Uuid::from_u128(0xe53);
+    let mut header = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count)
+         VALUES ($1, $2, 0)",
+    )
+    .bind(session)
+    .bind(racing_frontier)
+    .execute(&mut *header)
+    .await?;
+
+    let mut member = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO context_frontier_member
+            (owning_session_id, context_frontier_id, member_position,
+             source_session_id, semantic_entry_id)
+         VALUES ($1, $2, 1, $1, $3)",
+    )
+    .bind(session)
+    .bind(racing_frontier)
+    .bind(failure_entry)
+    .execute(&mut *member)
+    .await?;
+    let concurrent_member = tokio::spawn(async move { member.commit().await });
+    header.commit().await?;
+    let member_error = concurrent_member
+        .await?
+        .expect_err("a member racing an uncommitted header must fail closed");
+    assert!(matches!(
+        member_error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23503" | "23514")
+    ));
+    let member_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM context_frontier_member
+          WHERE owning_session_id = $1
+            AND context_frontier_id = $2",
+    )
+    .bind(session)
+    .bind(racing_frontier)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(member_count, 0);
+
+    pool.close().await;
     drop(container);
     Ok(())
 }
@@ -2711,7 +4417,7 @@ async fn inv007_inv008_inv012_submit_serializes_positions_and_rolls_back_failure
         panic!("equal concurrent first handling must converge on an application");
     };
     assert_eq!(equal_applied.acceptance_position().as_u64(), 8);
-    let equal_counts: (i64, i64, i64) = sqlx::query_as(
+    let equal_counts: (i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
             (SELECT count(*) FROM submit_input_command WHERE command_id = $1),
             (SELECT count(*) FROM accepted_input WHERE accepting_command_id = $1),
@@ -2719,12 +4425,17 @@ async fn inv007_inv008_inv012_submit_serializes_positions_and_rolls_back_failure
                FROM queued_input_origin AS queued
                JOIN accepted_input AS accepted
                  ON accepted.accepted_input_id = queued.accepted_input_id
+              WHERE accepted.accepting_command_id = $1),
+            (SELECT count(*)
+               FROM turn_lifecycle AS turn
+               JOIN accepted_input AS accepted
+                 ON accepted.origin_turn_id = turn.turn_id
               WHERE accepted.accepting_command_id = $1)",
     )
     .bind(Uuid::from_u128(0x329))
     .fetch_one(&pool)
     .await?;
-    assert_eq!(equal_counts, (1, 1, 1));
+    assert_eq!(equal_counts, (1, 1, 1, 1));
 
     pool.close().await;
     drop(container);
@@ -2918,6 +4629,18 @@ async fn inv002_inv008_inv012_submit_corruption_and_position_exhaustion_fail_clo
     sqlx::query(
         "ALTER TABLE accepted_input
             DROP CONSTRAINT accepted_input_queued_origin_fk",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE turn_lifecycle
+            DROP CONSTRAINT turn_lifecycle_queued_origin_fk",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE queued_input_origin
+            DROP CONSTRAINT queued_input_origin_turn_lifecycle_fk",
     )
     .execute(&pool)
     .await?;
