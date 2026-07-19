@@ -97,7 +97,7 @@ pub use turn_eligibility::{
     AcceptedInputTurnActivationIdentities, AcceptedInputTurnSchedulingProjection,
     AcceptedInputTurnSchedulingRecord, AcceptedInputTurnSchedulingRecordState,
     AcceptedInputTurnSchedulingStatus, ActivatedAcceptedInputTurn,
-    PreparedAcceptedInputTurnActivation, PreparedTurnAttemptReconstitutionInput,
+    ActiveTurnSchedulingReconstitutionInput, PreparedAcceptedInputTurnActivation,
 };
 pub use turn_lifecycle::{
     AcceptedInputStartingLineage, AcceptedInputTurnStart, ActiveTurnPhase,

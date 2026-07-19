@@ -569,6 +569,11 @@ pub enum SubmitInputPreparationFailure {
     TurnCandidateMismatch,
     ActiveTurnSessionMismatch { provided_session: SessionId },
     ActiveTurnProjectionIsNotActive { provided_turn: TurnId },
+    AcceptanceTailPrecedesActiveOrigin {
+        active_turn: TurnId,
+        active_position: SessionInputPosition,
+        observed_tail: Option<SessionInputPosition>,
+    },
     InterruptApplicationUnavailable,
 }
 
@@ -602,6 +607,7 @@ impl SubmitInputReconstitutionInput {
         result_session: SessionId,
         result_accepted_input: AcceptedInputId,
         result_source_turn: TurnId,
+        source_turn_origin: ReconstitutedSubmitInput,
         accepted_command: DurableCommandId,
         accepted_input: AcceptedInputId,
         accepted_session: SessionId,
@@ -679,6 +685,7 @@ pub enum SubmitInputReconstitutionFailure {
     AcceptedDeliveryMismatch,
     AcceptedDispositionMismatch,
     SteeringSourceTurnMismatch,
+    SteeringSourceTurnOriginMismatch,
     QueueSessionMismatch,
     QueueTurnMismatch,
     QueuePositionMismatch,
@@ -879,7 +886,7 @@ pub enum AcceptedInputTurnSchedulingRecordState {
     Active {
         starting_lineage: AcceptedInputStartingLineage,
         starting_frontier: ContextFrontierId,
-        current_attempt: PreparedTurnAttemptReconstitutionInput,
+        phase: ActiveTurnSchedulingReconstitutionInput,
     },
     TerminalFailed {
         starting_lineage: AcceptedInputStartingLineage,
@@ -888,14 +895,10 @@ pub enum AcceptedInputTurnSchedulingRecordState {
     },
 }
 
-pub struct PreparedTurnAttemptReconstitutionInput { /* private */ }
-impl PreparedTurnAttemptReconstitutionInput {
-    pub const fn new(
-        owning_turn: TurnId,
-        attempt: TurnAttemptId,
-        state: CurrentTurnAttemptState,
-    ) -> Self;
-    // accessors: owning_turn(), attempt(), state()
+pub struct ActiveTurnSchedulingReconstitutionInput { /* private */ }
+impl ActiveTurnSchedulingReconstitutionInput {
+    pub const fn new(owning_turn: TurnId, phase: ActiveTurnPhase) -> Self;
+    // accessors: owning_turn(), phase()
 }
 
 pub struct AcceptedInputTurnSchedulingRecord { /* private */ }
@@ -949,7 +952,7 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
     MissingOriginEntry { turn: TurnId },
     MissingFailureEntry { turn: TurnId },
     CurrentAttemptOwnershipMismatch { turn: TurnId, attempt: TurnAttemptId },
-    UnsupportedCurrentAttemptState { turn: TurnId, attempt: TurnAttemptId },
+    ActivePhaseOwnershipMismatch { turn: TurnId, provided_turn: TurnId },
     DuplicateCurrentAttempt { attempt: TurnAttemptId },
     SnapshotOwningSessionMismatch { snapshot: ContextFrontierId },
     DuplicateSnapshot { snapshot: ContextFrontierId },

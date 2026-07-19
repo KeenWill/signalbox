@@ -445,6 +445,7 @@ async fn prepare_against_locked_state(
                 SubmitInputPreparationFailure::TurnCandidateMismatch => "delivery turn candidate",
                 SubmitInputPreparationFailure::ActiveTurnSessionMismatch { .. }
                 | SubmitInputPreparationFailure::ActiveTurnProjectionIsNotActive { .. }
+                | SubmitInputPreparationFailure::AcceptanceTailPrecedesActiveOrigin { .. }
                 | SubmitInputPreparationFailure::InterruptApplicationUnavailable => {
                     unreachable!("occupied-slot SubmitInput preparation is not implemented")
                 }

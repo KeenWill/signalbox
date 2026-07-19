@@ -7,9 +7,9 @@
 //! total order consists of a failed-terminal prefix, at most one active slot,
 //! and a queued suffix.
 //!
-//! The only admitted active shape in this initial slice is `Running` with one
-//! exact checked `Prepared` current attempt. Later attempt states and durable
-//! waits require their own complete evidence projections.
+//! Active records carry one exact checked phase. Running phases retain their
+//! current attempt in any canonical nonterminal state, while durable waits
+//! retain their exact subject.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -17,7 +17,7 @@ use crate::{
     AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputQueueOrder,
     AcceptedInputQueueOrderError, AcceptedInputQueueWork, AcceptedInputStartingLineage,
     AcceptedInputTurnStart, ActiveTurnPhase, ContextFrontierId, CurrentTurnAttempt,
-    CurrentTurnAttemptState, InitialSemanticTranscriptEntryPayload, OriginConfiguration,
+    InitialSemanticTranscriptEntryPayload, OriginConfiguration,
     ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
     SemanticTranscriptEntry, SemanticTranscriptEntryId, SemanticTranscriptEntryReconstitutionInput,
     SemanticTranscriptEntryRef, Session, SessionId, TranscriptAncestry, TurnAttemptId, TurnId,
@@ -39,8 +39,8 @@ pub enum AcceptedInputTurnSchedulingRecordState {
         starting_lineage: AcceptedInputStartingLineage,
         /// The stored starting snapshot identity.
         starting_frontier: ContextFrontierId,
-        /// The exact current attempt record owned by this active turn.
-        current_attempt: PreparedTurnAttemptReconstitutionInput,
+        /// The exact phase and its asserted owning turn.
+        phase: ActiveTurnSchedulingReconstitutionInput,
     },
     /// The turn reached the only terminal disposition whose complete semantic
     /// frontier is constructible in this closed slice.
@@ -54,46 +54,31 @@ pub enum AcceptedInputTurnSchedulingRecordState {
     },
 }
 
-/// Complete stored facts for the initial current-attempt shape admitted by
-/// this scheduling slice.
+/// Complete stored facts for one active scheduling phase.
 ///
-/// Supplying [`CurrentTurnAttemptState`] does not construct an attempt. The
-/// owning scheduling seam validates exact turn ownership and accepts only
-/// `Prepared` before creating `Active(Running)`.
+/// The phase is already a canonical domain value. The owning scheduling seam
+/// still validates that the record asserting it belongs to the exact active
+/// turn before returning the projection.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PreparedTurnAttemptReconstitutionInput {
+pub struct ActiveTurnSchedulingReconstitutionInput {
     owning_turn: TurnId,
-    attempt: TurnAttemptId,
-    state: CurrentTurnAttemptState,
+    phase: ActiveTurnPhase,
 }
 
-impl PreparedTurnAttemptReconstitutionInput {
-    /// Supplies the stored owning turn, attempt identity, and exact state.
-    pub const fn new(
-        owning_turn: TurnId,
-        attempt: TurnAttemptId,
-        state: CurrentTurnAttemptState,
-    ) -> Self {
-        Self {
-            owning_turn,
-            attempt,
-            state,
-        }
+impl ActiveTurnSchedulingReconstitutionInput {
+    /// Supplies the asserted owner and canonical active phase.
+    pub const fn new(owning_turn: TurnId, phase: ActiveTurnPhase) -> Self {
+        Self { owning_turn, phase }
     }
 
-    /// Returns the turn named as owner by the attempt record.
+    /// Returns the turn named as owner by the active-phase record.
     pub const fn owning_turn(&self) -> TurnId {
         self.owning_turn
     }
 
-    /// Returns the stored current-attempt identity.
-    pub const fn attempt(&self) -> TurnAttemptId {
-        self.attempt
-    }
-
-    /// Borrows the exact stored current-attempt state.
-    pub const fn state(&self) -> &CurrentTurnAttemptState {
-        &self.state
+    /// Borrows the exact canonical active phase.
+    pub const fn phase(&self) -> &ActiveTurnPhase {
+        &self.phase
     }
 }
 
@@ -326,13 +311,12 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
         /// The affected attempt.
         attempt: TurnAttemptId,
     },
-    /// The active record is not the initial `Running(Prepared)` shape admitted
-    /// by this slice.
-    UnsupportedCurrentAttemptState {
-        /// The active turn.
+    /// A durable-wait phase record names a different owning turn.
+    ActivePhaseOwnershipMismatch {
+        /// The active turn whose phase is cross-wired.
         turn: TurnId,
-        /// The affected current attempt.
-        attempt: TurnAttemptId,
+        /// The owner asserted by the phase record.
+        provided_turn: TurnId,
     },
     /// The same current-attempt identity appeared on multiple active records.
     DuplicateCurrentAttempt {
@@ -537,24 +521,6 @@ impl AcceptedInputTurnSchedulingProjection {
                 None
             }
         }
-    }
-}
-
-#[cfg(test)]
-impl AcceptedInputTurnSchedulingProjection {
-    /// Replaces the phase only for sibling unit tests that exercise consumers
-    /// of already-validated active projections. This cannot enter production
-    /// or persistence reconstitution.
-    pub(crate) fn test_with_active_phase(mut self, phase: ActiveTurnPhase) -> Self {
-        let ReconstitutedSchedulingState::Active {
-            phase: current_phase,
-            ..
-        } = &mut self.state
-        else {
-            panic!("test phase replacement requires an active projection");
-        };
-        *current_phase = phase;
-        self
     }
 }
 
@@ -1005,7 +971,7 @@ fn reconstitute_inner(
             AcceptedInputTurnSchedulingRecordState::Active {
                 starting_lineage,
                 starting_frontier,
-                current_attempt,
+                phase,
             } => {
                 if active.is_some() || queued_seen {
                     return Err(
@@ -1015,29 +981,31 @@ fn reconstitute_inner(
                     );
                 }
                 active = Some(turn);
-                if current_attempt.owning_turn != turn {
-                    return Err(
-                        AcceptedInputSchedulingReconstitutionFailure::CurrentAttemptOwnershipMismatch {
-                            turn,
-                            attempt: current_attempt.attempt,
-                        },
-                    );
+                if phase.owning_turn != turn {
+                    return Err(match &phase.phase {
+                        ActiveTurnPhase::Running { current_attempt } => {
+                            AcceptedInputSchedulingReconstitutionFailure::CurrentAttemptOwnershipMismatch {
+                                turn,
+                                attempt: current_attempt.id(),
+                            }
+                        }
+                        ActiveTurnPhase::AwaitingApproval { .. }
+                        | ActiveTurnPhase::AwaitingRecoveryDecision { .. } => {
+                            AcceptedInputSchedulingReconstitutionFailure::ActivePhaseOwnershipMismatch {
+                                turn,
+                                provided_turn: phase.owning_turn,
+                            }
+                        }
+                    });
                 }
-                if current_attempt.state != CurrentTurnAttemptState::Prepared {
-                    return Err(
-                        AcceptedInputSchedulingReconstitutionFailure::UnsupportedCurrentAttemptState {
-                            turn,
-                            attempt: current_attempt.attempt,
-                        },
-                    );
-                }
-                if current_attempts
-                    .insert(current_attempt.attempt, turn)
-                    .is_some()
+                if let ActiveTurnPhase::Running { current_attempt } = &phase.phase
+                    && current_attempts
+                        .insert(current_attempt.id(), turn)
+                        .is_some()
                 {
                     return Err(
                         AcceptedInputSchedulingReconstitutionFailure::DuplicateCurrentAttempt {
-                            attempt: current_attempt.attempt,
+                            attempt: current_attempt.id(),
                         },
                     );
                 }
@@ -1053,9 +1021,7 @@ fn reconstitute_inner(
                 )?;
                 ReconstitutedSchedulingState::Active {
                     start,
-                    phase: ActiveTurnPhase::Running {
-                        current_attempt: CurrentTurnAttempt::prepared(current_attempt.attempt),
-                    },
+                    phase: phase.phase.clone(),
                 }
             }
             AcceptedInputTurnSchedulingRecordState::TerminalFailed {
@@ -1368,12 +1334,13 @@ fn prepare_earliest_queued_activation(
 mod tests {
     use super::*;
     use crate::{
-        AcceptedInputDisposition, ModelSelectionOverride, ModelSelectionRequest,
+        AcceptedInputDisposition, CurrentTurnAttemptState, IssuedOperationRef,
+        ModelSelectionOverride, ModelSelectionRequest, NonEmptyIssuedOperationRefs,
         SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
         SessionCreationProvenance, SessionReconstitutionInput,
         test_support::{
-            accepted_input_id, context_frontier_id, direct, semantic_transcript_entry_id,
-            session_id, turn_attempt_id, turn_id,
+            accepted_input_id, context_frontier_id, direct, model_call_id,
+            semantic_transcript_entry_id, session_id, tool_request_id, turn_attempt_id, turn_id,
         },
     };
 
@@ -1626,10 +1593,11 @@ mod tests {
             AcceptedInputTurnSchedulingRecordState::Active {
                 starting_lineage: AcceptedInputStartingLineage::FirstInSession,
                 starting_frontier: context_frontier_id(40),
-                current_attempt: PreparedTurnAttemptReconstitutionInput::new(
+                phase: ActiveTurnSchedulingReconstitutionInput::new(
                     turn_id(10),
-                    turn_attempt_id(50),
-                    CurrentTurnAttemptState::Prepared,
+                    ActiveTurnPhase::Running {
+                        current_attempt: crate::CurrentTurnAttempt::prepared(turn_attempt_id(50)),
+                    },
                 ),
             },
         );
@@ -1668,6 +1636,64 @@ mod tests {
         );
     }
 
+    /// S04 / S06 / S08 / S10 / INV-009 / INV-016: production scheduling
+    /// reconstitution admits every canonical active phase needed by
+    /// occupied-slot input handling, not only the initial prepared window.
+    #[test]
+    fn active_reconstitution_preserves_running_and_durable_wait_phases() {
+        let session = current_session();
+        let running = crate::CurrentTurnAttempt::prepared(turn_attempt_id(50))
+            .begin_running()
+            .expect("the prepared attempt begins running");
+        let recovery_operations =
+            NonEmptyIssuedOperationRefs::try_from_operations([IssuedOperationRef::ModelCall(
+                model_call_id(60),
+            )])
+            .expect("the recovery wait has one exact operation");
+        let phases = [
+            ActiveTurnPhase::Running {
+                current_attempt: running,
+            },
+            ActiveTurnPhase::AwaitingApproval {
+                request: tool_request_id(70),
+            },
+            ActiveTurnPhase::AwaitingRecoveryDecision {
+                ambiguous_operations: recovery_operations,
+            },
+        ];
+
+        for phase in phases {
+            let projection = AcceptedInputSchedulingReconstitutionInput::new(
+                session.clone(),
+                vec![record(
+                    &session,
+                    10,
+                    20,
+                    1,
+                    AcceptedInputTurnSchedulingRecordState::Active {
+                        starting_lineage: AcceptedInputStartingLineage::FirstInSession,
+                        starting_frontier: context_frontier_id(40),
+                        phase: ActiveTurnSchedulingReconstitutionInput::new(
+                            turn_id(10),
+                            phase.clone(),
+                        ),
+                    },
+                )],
+                vec![origin_entry(&session, 30, 20)],
+                vec![snapshot(&session, 40, &[30])],
+            )
+            .reconstitute()
+            .expect("the canonical active phase reconstructs");
+            assert_eq!(
+                projection
+                    .active_turn()
+                    .expect("the turn owns the active slot")
+                    .active_phase(),
+                Some(&phase)
+            );
+        }
+    }
+
     /// S03 / INV-009: a current attempt owned by another turn cannot
     /// reconstruct an active aggregate.
     #[test]
@@ -1683,10 +1709,13 @@ mod tests {
                 AcceptedInputTurnSchedulingRecordState::Active {
                     starting_lineage: AcceptedInputStartingLineage::FirstInSession,
                     starting_frontier: context_frontier_id(40),
-                    current_attempt: PreparedTurnAttemptReconstitutionInput::new(
+                    phase: ActiveTurnSchedulingReconstitutionInput::new(
                         turn_id(99),
-                        turn_attempt_id(50),
-                        CurrentTurnAttemptState::Prepared,
+                        ActiveTurnPhase::Running {
+                            current_attempt: crate::CurrentTurnAttempt::prepared(turn_attempt_id(
+                                50,
+                            )),
+                        },
                     ),
                 },
             )],
