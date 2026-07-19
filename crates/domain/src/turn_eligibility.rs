@@ -275,6 +275,7 @@ pub struct AcceptedInputTurnSchedulingRecord {
     queue_session: SessionId,
     queue_turn: TurnId,
     order: AcceptedInputQueueOrder,
+    origin_delivery: DeliveryRequest,
     origin_configuration: OriginConfiguration,
     state: AcceptedInputTurnSchedulingRecordState,
 }
@@ -290,6 +291,7 @@ impl AcceptedInputTurnSchedulingRecord {
         queue_session: SessionId,
         queue_turn: TurnId,
         order: AcceptedInputQueueOrder,
+        origin_delivery: DeliveryRequest,
         origin_configuration: OriginConfiguration,
         state: AcceptedInputTurnSchedulingRecordState,
     ) -> Self {
@@ -301,6 +303,7 @@ impl AcceptedInputTurnSchedulingRecord {
             queue_session,
             queue_turn,
             order,
+            origin_delivery,
             origin_configuration,
             state,
         }
@@ -339,6 +342,11 @@ impl AcceptedInputTurnSchedulingRecord {
     /// Returns the immutable queue-order facts.
     pub const fn order(&self) -> AcceptedInputQueueOrder {
         self.order
+    }
+
+    /// Returns the immutable accepted delivery that created this origin.
+    pub const fn origin_delivery(&self) -> DeliveryRequest {
+        self.origin_delivery
     }
 
     /// Borrows the complete frozen origin configuration.
@@ -1465,7 +1473,12 @@ fn reconstitute_active_acceptance_tail(
                 records_by_turn.get(origin).is_some_and(|record| {
                     record.accepted_input.id() == accepted_input
                         && record.order.acceptance_position() == entry.position
-                        && origin_delivery_matches_record(entry.delivery, record, records_by_turn)
+                        && entry.delivery == record.origin_delivery
+                        && origin_delivery_matches_record(
+                            record.origin_delivery,
+                            record,
+                            records_by_turn,
+                        )
                 })
             }
             AcceptedInputDisposition::PendingSteering { binding } => {
@@ -1862,6 +1875,15 @@ mod tests {
             .expect("a direct model selection does not consult aliases")
     }
 
+    fn default_origin_delivery() -> DeliveryRequest {
+        DeliveryRequest::StartWhenNoActiveTurn {
+            configuration: PerInputConfigurationChoices::new(
+                SessionConfigurationDefaultsVersion::first(),
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+        }
+    }
+
     fn record(
         session: &Session,
         turn_value: u128,
@@ -1877,6 +1899,7 @@ mod tests {
                 crate::SessionInputPosition::try_from_u64(position)
                     .expect("test positions are positive"),
             ),
+            default_origin_delivery(),
             state,
         )
     }
@@ -1886,6 +1909,7 @@ mod tests {
         turn_value: u128,
         accepted_input_value: u128,
         order: AcceptedInputQueueOrder,
+        origin_delivery: DeliveryRequest,
         state: AcceptedInputTurnSchedulingRecordState,
     ) -> AcceptedInputTurnSchedulingRecord {
         let turn = turn_id(turn_value);
@@ -1901,6 +1925,7 @@ mod tests {
             session.id(),
             turn,
             order,
+            origin_delivery,
             configuration(session),
             state,
         )
@@ -2040,11 +2065,14 @@ mod tests {
                 delivery,
             ));
         let mut input = active_input(session, Some(tail));
-        input.turns.push(record(
+        input.turns.push(record_with_order(
             session,
             11,
             21,
-            2,
+            AcceptedInputQueueOrder::ordinary(
+                SessionInputPosition::try_from_u64(2).expect("positive test position"),
+            ),
+            delivery,
             AcceptedInputTurnSchedulingRecordState::Queued,
         ));
         input
@@ -2065,11 +2093,21 @@ mod tests {
                 terminal_frontier: context_frontier_id(40),
             },
         );
-        let active = record(
+        let active_delivery = DeliveryRequest::AfterCurrentTurn {
+            expected_active_turn: turn_id(9),
+            configuration: PerInputConfigurationChoices::new(
+                SessionConfigurationDefaultsVersion::first(),
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+        };
+        let active = record_with_order(
             session,
             10,
             20,
-            2,
+            AcceptedInputQueueOrder::ordinary(
+                SessionInputPosition::try_from_u64(2).expect("positive test position"),
+            ),
+            active_delivery,
             AcceptedInputTurnSchedulingRecordState::Active {
                 starting_lineage: AcceptedInputStartingLineage::After {
                     immediate_predecessor: turn_id(9),
@@ -2081,20 +2119,16 @@ mod tests {
                 ),
             },
         );
-        let queued = record(
+        let queued = record_with_order(
             session,
             11,
             21,
-            3,
+            AcceptedInputQueueOrder::ordinary(
+                SessionInputPosition::try_from_u64(3).expect("positive test position"),
+            ),
+            delivery,
             AcceptedInputTurnSchedulingRecordState::Queued,
         );
-        let active_delivery = DeliveryRequest::AfterCurrentTurn {
-            expected_active_turn: turn_id(9),
-            configuration: PerInputConfigurationChoices::new(
-                SessionConfigurationDefaultsVersion::first(),
-                ModelSelectionOverride::UseSessionDefault,
-            ),
-        };
         let tail = SessionAcceptanceTailReconstitutionInput::new(
             session.id(),
             accepted_input_id(20),
@@ -2235,6 +2269,7 @@ mod tests {
             queued.queue_session(),
             queued.queue_turn(),
             queued.order(),
+            queued.origin_delivery(),
             queued.origin_configuration().clone(),
             queued.state().clone(),
         );
@@ -2631,6 +2666,38 @@ mod tests {
         );
     }
 
+    /// S03 / INV-008 / INV-016 / ADR-0041: the tail repeats the exact
+    /// immutable versioned delivery stored for its origin rather than
+    /// supplying an independently plausible configuration choice.
+    #[test]
+    fn active_reconstitution_rejects_origin_delivery_configuration_mismatch() {
+        let session = current_session();
+        let tail = active_tail(&session, 10, 20, 1);
+        let mut input = active_input(&session, tail);
+        input
+            .active_acceptance_tail
+            .as_mut()
+            .expect("the helper supplies an active tail")
+            .entries[0]
+            .delivery = DeliveryRequest::StartWhenNoActiveTurn {
+            configuration: PerInputConfigurationChoices::new(
+                SessionConfigurationDefaultsVersion::try_from_u64(2)
+                    .expect("the mismatched test version is positive"),
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+        };
+
+        let error = input
+            .reconstitute()
+            .expect_err("tail delivery must equal the origin record's accepted delivery");
+        assert_eq!(
+            error.failure(),
+            &AcceptedInputSchedulingReconstitutionFailure::AcceptanceTailDispositionMismatch {
+                accepted_input: accepted_input_id(20),
+            }
+        );
+    }
+
     /// S03 / S07 / INV-001 / INV-009 / ADR-0041: an accepted interrupt
     /// against the current owner prevents evidence-free phase reconstruction.
     #[test]
@@ -2652,6 +2719,7 @@ mod tests {
                 SessionInputPosition::try_from_u64(2).expect("positive test position"),
                 turn_id(10),
             ),
+            delivery,
             AcceptedInputTurnSchedulingRecordState::Queued,
         );
 
