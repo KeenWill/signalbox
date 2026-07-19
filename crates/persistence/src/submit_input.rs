@@ -568,7 +568,7 @@ async fn prepare_against_locked_state(
     })
 }
 
-async fn load_scheduling_projection(
+pub(crate) async fn load_scheduling_projection(
     connection: &mut PgConnection,
     session: Session,
 ) -> Result<AcceptedInputSchedulingProjection, SubmitInputRepositoryError> {
