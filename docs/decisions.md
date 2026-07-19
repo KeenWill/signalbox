@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-18 — Repository-owned testing style guide
+
+**Context.** The [testing section of CONTRIBUTING.md](../CONTRIBUTING.md#testing) owns what to test — layers, determinism, merge gates — but nothing owned how tests are written: fixture shape, what an assertion may reference, or snapshot discipline. Each pull request re-derived those choices, reviews re-litigated them per test, and multi-positional-integer fixture helpers and re-encoded magic seeds were accumulating in domain test modules.
+
+**Decision.** Test style — fixture and assertion rules plus forward-looking expect-test snapshot norms — is owned by [docs/testing-style.md](testing-style.md) as numbered rules cited by number in review. This entry authorizes that document as the rules' single home and does not restate them. CONTRIBUTING.md keeps owning what to test; the two documents cross-link and restate nothing.
+
+**Rejected alternatives.** Inlining the style rules into CONTRIBUTING.md's testing section: it merges two ownerships into one section, and style rules would be diluted among layer requirements that change on a different cadence. Leaving style to per-agent prompting: rules stated only in prompts are unreviewable, drift between runs, and cannot be cited by number in review.
+
+**Affects.** `docs/testing-style.md` (created); pointer lines in `AGENTS.md`, `CONTRIBUTING.md`, and `README.md`. The expect-test dev-dependency, the `table` helper, and exemplar conversions land in a stacked follow-up.
+
 ## 2026-07-18 — Closed accepted-input scheduling projection and eligibility candidate
 
 **Context.** ADR-0035 requires restart to reconstruct a purpose-specific complete scheduling projection rather than minting starts, attempts, entries, or snapshots from isolated records. The currently decided semantic-entry set can represent an ancestry-free first turn and continuation after a failed predecessor, but not ancestry prefixes or terminal outcomes whose required semantic markers remain open. No accepted predicate yet selects ADR-0027's static eligible-failure alternative.

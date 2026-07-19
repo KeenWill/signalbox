@@ -30,6 +30,7 @@ The hub is the source of truth; a client device and an execution machine need no
 - [Scenarios](docs/scenarios.md)
 - [Invariant catalog](docs/invariants.md)
 - [Domain spine](docs/domain-spine.md)
+- [Testing style](docs/testing-style.md)
 - [Decision log](docs/decisions.md)
 - [Open questions](docs/open-questions.md)
 - [Architecture decision records](docs/decisions/README.md)
