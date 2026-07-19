@@ -261,7 +261,14 @@ mod tests {
 
     /// The recorded applied receipt the authoritative port would return after
     /// first handling this request's canonical baseline command sealed with
-    /// `candidate`, for scripting a fake transaction's response.
+    /// `candidate`, for scripting a fake transaction's response only.
+    ///
+    /// Receipts are sealed: domain preparation is their only producer, so a
+    /// fully independent construction is impossible. Because this derivation
+    /// walks the same path as the service, tests never assert whole-receipt
+    /// equality against it — they state independent facts from their own
+    /// fixture values — and the helper's own fact is pinned by
+    /// `receipt_for_helper_names_exactly_the_sealed_candidate`.
     fn receipt_for(
         request: CreateSessionRequest,
         candidate: SessionId,
@@ -277,6 +284,19 @@ mod tests {
         .prepare(candidate)
         .expect("the fixed baseline command prepares against a fresh candidate")
         .applied_result()
+    }
+
+    /// Pins the scripting helper's one derived fact: the receipt it returns
+    /// names exactly the candidate it was sealed with, so scripting a fake
+    /// with `receipt_for(request, candidate)` scripts a receipt for
+    /// `candidate` and nothing else.
+    #[test]
+    fn receipt_for_helper_names_exactly_the_sealed_candidate() {
+        let request = CreateSessionRequest::try_new(command_id(1), defaults(2))
+            .expect("ordinary command identity is admitted");
+        let candidate = session_id(9);
+
+        assert_eq!(receipt_for(request, candidate).session(), candidate);
     }
 
     fn run_ready<Output>(future: impl Future<Output = Output>) -> Output {
@@ -420,8 +440,10 @@ mod tests {
         let outcome = run_ready(service.execute(request))
             .expect("fake transaction applies the first handling");
 
-        assert_eq!(outcome, CreateSessionOutcome::Applied(recorded));
-        assert_eq!(recorded.session(), candidate);
+        let CreateSessionOutcome::Applied(applied) = outcome else {
+            panic!("scripted first handling must surface as Applied");
+        };
+        assert_eq!(applied.session(), candidate);
         let (generator, transaction) = service.into_parts();
         assert_eq!(generator.calls, 1);
         assert_eq!(transaction.observed.len(), 1);
@@ -470,10 +492,12 @@ mod tests {
         let first = run_ready(service.execute(request)).expect("first invocation applies creation");
         let replay = run_ready(service.execute(request)).expect("equal replay succeeds");
 
-        assert_eq!(first, CreateSessionOutcome::Applied(recorded));
-        assert_eq!(replay, first);
-        assert_eq!(recorded.session(), winner);
-        assert_ne!(recorded.session(), replay_candidate);
+        assert_eq!(replay, first, "equal replay must return the first receipt");
+        let CreateSessionOutcome::Applied(replayed) = replay else {
+            panic!("scripted equal replay must surface as Applied");
+        };
+        assert_eq!(replayed.session(), winner);
+        assert_ne!(replayed.session(), replay_candidate);
         let (generator, transaction) = service.into_parts();
         assert_eq!(generator.calls, 2);
         assert_eq!(transaction.observed.len(), 2);
