@@ -11,10 +11,10 @@ Authoritative starting points are `docs/architecture.md`, `docs/invariants.md`, 
 **Finished pull requests.** The owner merges every pull request; deliver each one finished and awaiting owner merge:
 
 - CI is green on the final commit.
-- Every reviewer-bot comment is triaged in-thread: fixed with the fixing commit named, or declined with a reason.
-- External reviews are re-requested on the final commit after any rebase, and outdated review threads are resolved.
+- Every reviewer comment receives an in-thread reply, never deferred to a later wave: an actionable finding is fixed with the fixing commit named or declined with a stated reason; a question or informational comment is answered in-thread, no disposition recorded. Replies post when the wave's fix commit is pushed, or when the wave concludes without one; outdated threads are resolved at the same time, a replied thread a later fix commit or rebase outdates is resolved then, and a final sweep before declaring the pull request finished confirms no unresolved outdated thread remains.
+- External reviews are re-requested on the final commit after any rebase.
 - The description is at most 350 words, states the count of meaningfully changed lines (excluding lockfiles), and claims only what the code enforces — a contract binding future implementors is described as a contract, not an enforcement.
-- At most two review-fix waves, where one wave is one round of fix commits responding to a review pass; then stop work on that pull request and escalate to the owner.
+- Review-fix waves continue while the latest wave produced at least one accepted finding. One wave is one review pass and its disposition round — every actionable finding accepted and fixed or declined with its reason stated — whether or not any fix commit results; a quiet wave, whose review pass returns no actionable findings or whose findings are all declined, produces no accepted finding and concludes the loop: the pull request is finished and awaits owner merge. After five waves on one pull request, stop and escalate to the owner regardless of hit rate, reporting the wave history in one line.
 
 **Stacked pull requests.** Stacks may grow as deep as the work requires; the owner merges in batches, so never wait on a merge to continue. Keep every stack linear and healthy:
 

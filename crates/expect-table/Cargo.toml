@@ -1,5 +1,5 @@
 [package]
-name = "signalbox-domain"
+name = "signalbox-expect-table"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,12 +7,8 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-[dependencies]
-uuid = { version = "1.24.0", default-features = false }
+[dev-dependencies]
+expect-test = "1.5.1"
 
 [lints]
 workspace = true
-
-[dev-dependencies]
-expect-test = "1.5.1"
-signalbox-expect-table = { path = "../expect-table" }
