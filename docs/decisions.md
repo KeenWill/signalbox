@@ -45,6 +45,30 @@ sequence in [AGENTS.md](../AGENTS.md), the documentation checklist in
 [CONTRIBUTING.md](../CONTRIBUTING.md), and `scripts/check_domain_spine.py`.
 Semantics of no document change.
 
+## 2026-07-19 — Owner-ratified matching-interrupt milestone deferral
+
+**Context.** Choosing the milestone outcome for a matching `Interrupt` required
+owner judgment because the current slices cannot construct ADR-0027's
+cancellation, immediate-successor, and applied-proof authority. That choice was
+an owner gate and should have blocked and been reported on the affected
+matching-interrupt track under [goal-mode.md](goal-mode.md), while other
+unblocked work continued, rather than being made within that track.
+
+**Decision.** The owner ratifies the current nonclaiming preparation failure for
+this milestone. The existing “Authoritative occupied-slot SubmitInput
+preparation” entry below remains the single statement of record for that
+behavior and for the required scope of the first `StopRequested` storage slice.
+Future autonomous runs report an equivalent owner gate instead of deciding it.
+
+**Rejected alternatives.** Treating the milestone outcome as permanent would
+conflict with ADR-0027. Repeating its detailed behavior or the `StopRequested`
+obligation here would create a second normative statement. Omitting the gate
+correction would leave the delivery record inaccurate.
+
+**Affects.** The provenance of the existing deferral and future application of
+the blocker rule. It changes no code, schema, ADR, transition, or current
+pull-request behavior.
+
 ## 2026-07-19 — Canonical replay origins include reclassified steering
 
 **Context.** SubmitInput replay used another turn's immutable applied result as
