@@ -172,8 +172,8 @@ mod tests {
 
         assert_eq!(loaded, current);
         assert_eq!(
-            loaded.current_configuration_defaults().version().as_u64(),
-            4
+            loaded.current_configuration_defaults().version(),
+            current.current_configuration_defaults().version()
         );
         assert_eq!(service.into_reader().observed(), [requested]);
     }

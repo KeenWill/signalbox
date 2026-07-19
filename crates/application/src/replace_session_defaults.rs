@@ -301,20 +301,25 @@ mod tests {
     #[test]
     fn s01_inv001_inv012_sentinel_rejection_calls_no_transaction() {
         let target = session_id(1);
-        for (raw, expected) in [
-            (Uuid::nil(), InvalidDurableCommandId::Nil),
-            (Uuid::max(), InvalidDurableCommandId::Max),
-        ] {
-            assert_eq!(
-                ReplaceSessionDefaultsRequest::try_new(
-                    DurableCommandId::from_uuid(raw),
-                    target,
-                    version(1),
-                    defaults(2),
-                ),
-                Err(expected)
-            );
-        }
+
+        assert_eq!(
+            ReplaceSessionDefaultsRequest::try_new(
+                DurableCommandId::from_uuid(Uuid::nil()),
+                target,
+                version(1),
+                defaults(2),
+            ),
+            Err(InvalidDurableCommandId::Nil)
+        );
+        assert_eq!(
+            ReplaceSessionDefaultsRequest::try_new(
+                DurableCommandId::from_uuid(Uuid::max()),
+                target,
+                version(1),
+                defaults(2),
+            ),
+            Err(InvalidDurableCommandId::Max)
+        );
 
         let service = ReplaceSessionDefaultsService::new(FakeTransaction::expecting_no_calls());
         assert!(service.into_transaction().observed.is_empty());
@@ -357,43 +362,69 @@ mod tests {
         assert_eq!(observed.replacement(), request.replacement());
     }
 
-    /// S01 / INV-008 / INV-012: recorded applied and authoritative-rejected
-    /// replay results pass through without recomputation or reshaping.
+    /// S01 / INV-008 / INV-012: a recorded applied replay result passes
+    /// through without recomputation or reshaping.
     #[test]
-    fn s01_inv008_inv012_recorded_applied_and_rejected_results_pass_through() {
-        let target = session_id(1);
-        let applied_command =
-            DomainReplaceSessionDefaults::new(command_id(1), target, version(1), defaults(2));
-        let rejected_command =
-            DomainReplaceSessionDefaults::new(command_id(2), target, version(1), defaults(3));
-        let applied = recorded_applied(applied_command);
-        let rejected = recorded_stale_rejection(rejected_command);
+    fn s01_inv008_inv012_recorded_applied_result_passes_through() {
+        let command = DomainReplaceSessionDefaults::new(
+            command_id(1),
+            session_id(1),
+            version(1),
+            defaults(2),
+        );
+        let applied = recorded_applied(command);
         assert!(matches!(applied, ReplaceSessionDefaultsResult::Applied(_)));
+        let request = ReplaceSessionDefaultsRequest::try_new(
+            command.command_id(),
+            command.session(),
+            command.expected_current_version(),
+            command.replacement(),
+        )
+        .expect("ordinary command identity is admitted");
+        let expected = ReplaceSessionDefaultsOutcome::Recorded(applied);
+        let mut service =
+            ReplaceSessionDefaultsService::new(FakeTransaction::returning([Ok(expected)]));
+
+        let actual =
+            run_ready(service.execute(request)).expect("recorded replay result is returned");
+
+        assert_eq!(actual, expected);
+        assert_eq!(service.into_transaction().observed, [command]);
+    }
+
+    /// S01 / INV-008 / INV-012: a recorded authoritative-rejected replay
+    /// result passes through without recomputation or reshaping.
+    #[test]
+    fn s01_inv008_inv012_recorded_rejected_result_passes_through() {
+        let command = DomainReplaceSessionDefaults::new(
+            command_id(2),
+            session_id(1),
+            version(1),
+            defaults(3),
+        );
+        let rejected = recorded_stale_rejection(command);
         assert!(matches!(
             rejected,
             ReplaceSessionDefaultsResult::Rejected(
                 ReplaceSessionDefaultsRejectedResult::CurrentVersionMismatch(_)
             )
         ));
+        let request = ReplaceSessionDefaultsRequest::try_new(
+            command.command_id(),
+            command.session(),
+            command.expected_current_version(),
+            command.replacement(),
+        )
+        .expect("ordinary command identity is admitted");
+        let expected = ReplaceSessionDefaultsOutcome::Recorded(rejected);
+        let mut service =
+            ReplaceSessionDefaultsService::new(FakeTransaction::returning([Ok(expected)]));
 
-        for (command, recorded) in [(applied_command, applied), (rejected_command, rejected)] {
-            let request = ReplaceSessionDefaultsRequest::try_new(
-                command.command_id(),
-                command.session(),
-                command.expected_current_version(),
-                command.replacement(),
-            )
-            .expect("ordinary command identity is admitted");
-            let expected = ReplaceSessionDefaultsOutcome::Recorded(recorded);
-            let mut service =
-                ReplaceSessionDefaultsService::new(FakeTransaction::returning([Ok(expected)]));
+        let actual =
+            run_ready(service.execute(request)).expect("recorded replay result is returned");
 
-            let actual =
-                run_ready(service.execute(request)).expect("recorded replay result is returned");
-
-            assert_eq!(actual, expected);
-            assert_eq!(service.into_transaction().observed, [command]);
-        }
+        assert_eq!(actual, expected);
+        assert_eq!(service.into_transaction().observed, [command]);
     }
 
     /// S01 / INV-012: conflicting owner-global reuse is returned unchanged and
