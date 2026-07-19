@@ -871,8 +871,7 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
         },
         SubmitInputResult::Rejected(
             SubmitInputRejectedResult::ActiveTurnPresent { .. }
-            | SubmitInputRejectedResult::ActiveTurnMismatch { .. }
-            | SubmitInputRejectedResult::SafePointUnavailableWhileStopping { .. },
+            | SubmitInputRejectedResult::ActiveTurnMismatch { .. },
         ) => {
             unreachable!("occupied-slot SubmitInput persistence is not implemented")
         }
