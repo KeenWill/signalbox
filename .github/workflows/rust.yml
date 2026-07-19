@@ -21,6 +21,13 @@ jobs:
         run: python3 scripts/check_domain_spine.py
       - name: Check formatting
         run: cargo fmt --all -- --check
+      # Must run after the non-compiling checks above: a failure before any
+      # compilation would otherwise save a dependency-less cache under the
+      # exact key, which rust-cache never replaces on later exact-key hits.
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          cache-on-failure: true
       - name: Check workspace
         run: cargo check --workspace --all-targets --all-features
       - name: Run Clippy
@@ -36,6 +43,10 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          cache-on-failure: true
       - name: Run ephemeral Postgres integration tests
         run: >-
           cargo test -p signalbox-persistence
