@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-19 — Canonical replay origins include reclassified steering
+
+**Context.** SubmitInput replay used another turn's immutable applied result as its complete origin evidence. ADR-0027 also permits pending steering to become visible turn-origin work without rewriting that original `PendingSteering` command result, so a later command targeting the reclassified turn could not replay through the receipt-only seam.
+
+**Decision.** Supply a purpose-specific turn-origin input containing the immutable receipt, current accepted-input lifecycle, and immutable queue association. Domain reconstitution admits either a directly created `TurnOrigin` correlated with `OriginOf`, or a `PendingSteering` receipt correlated with `ReclassifiedAsTurnOrigin`; in both cases accepted-input identity, session, turn, acceptance position, and queue order must agree. Applied predecessor/source replay and occupied-state rejection replay consume this checked shape. Replaying the pending command itself still ignores later lifecycle progress and returns its immutable original result.
+
+**Rejected alternatives.** Treating every origin as a `TurnOrigin` receipt excludes valid reclassification. Trusting a reclassified disposition without queue facts accepts a turn association that this purpose cannot prove. Rewriting the original pending receipt would violate durable replay.
+
+**Affects.** `crates/domain/src/submit_input.rs`, its spine, and INV-009/INV-012 replay enforcement. It adds no reclassification producer, storage spelling, transition, or persistence behavior.
+
 ## 2026-07-19 — Adaptive review-fix waves and reply-at-push triage
 
 **Context.** The finished-pull-request rules capped review-fix waves at a fixed two, and the cap was repeatedly overridden in practice. A wave's value tracks the prior wave's hit rate and the content under review — hand-written parser code stayed substantive for five waves, while style-guide reviews went self-referential by wave three — and deferring reviewer replies to a later batch decoupled fix commits from their rationale.

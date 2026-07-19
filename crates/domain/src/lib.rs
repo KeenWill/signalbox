@@ -82,6 +82,7 @@ pub use submit_input::{
     SubmitInputPreparationFailure, SubmitInputReconstitutionError,
     SubmitInputReconstitutionFailure, SubmitInputReconstitutionInput, SubmitInputRejectedResult,
     SubmitInputResult, SubmitInputTurnOriginAppliedResult,
+    SubmitInputTurnOriginReconstitutionInput,
 };
 pub use turn_attempt::{
     AppliedInterruptState, AttemptEnd, CancellationStopDisposition, CurrentTurnAttempt,
