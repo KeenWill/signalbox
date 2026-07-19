@@ -4028,6 +4028,153 @@ async fn occupied_slot_schema_constraints_and_checked_decode_fail_closed()
     Ok(())
 }
 
+/// S08 / INV-016: pending-steering acceptance and source terminalization
+/// serialize on the source lifecycle row, so racing commits cannot both
+/// succeed from snapshots in which the reciprocal effect is not yet visible.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv016_pending_steering_and_source_terminalization_serialize() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0x471, 0x871, direct(0xc71)))
+        .await?;
+    let repository = SubmitInputRepository::new(pool.clone());
+    repository
+        .handle(
+            start_input(
+                0x472,
+                0x871,
+                "active source",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x971)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xa71))),
+        )
+        .await?;
+    activate_prepared_turn(
+        &pool,
+        Uuid::from_u128(0x871),
+        Uuid::from_u128(0x971),
+        Uuid::from_u128(0xa71),
+        Uuid::from_u128(0xd71),
+        Uuid::from_u128(0xe71),
+        Uuid::from_u128(0xb71),
+    )
+    .await?;
+
+    let mut terminalize_source = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             origin_accepted_input_id, failed_turn_id)
+         VALUES ($1, $2, 'turn_failed', NULL, $3)",
+    )
+    .bind(Uuid::from_u128(0x871))
+    .bind(Uuid::from_u128(0xd72))
+    .bind(Uuid::from_u128(0xa71))
+    .execute(&mut *terminalize_source)
+    .await?;
+    insert_frontier(
+        &mut terminalize_source,
+        Uuid::from_u128(0x871),
+        Uuid::from_u128(0xe72),
+        Decimal::from(2_u64),
+        &[
+            (Decimal::ONE, Uuid::from_u128(0x871), Uuid::from_u128(0xd71)),
+            (
+                Decimal::from(2_u64),
+                Uuid::from_u128(0x871),
+                Uuid::from_u128(0xd72),
+            ),
+        ],
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended',
+                end_variant = 'without_stop',
+                end_disposition = 'known_failure'
+          WHERE turn_attempt_id = $1",
+    )
+    .bind(Uuid::from_u128(0xb71))
+    .execute(&mut *terminalize_source)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET state_kind = 'terminal',
+                active_phase_kind = NULL,
+                current_attempt_id = NULL,
+                terminal_frontier_id = $1,
+                terminal_disposition_kind = 'failed'
+          WHERE turn_id = $2",
+    )
+    .bind(Uuid::from_u128(0xe72))
+    .bind(Uuid::from_u128(0xa71))
+    .execute(&mut *terminalize_source)
+    .await?;
+
+    let pending_acceptance = tokio::spawn(async move {
+        repository
+            .handle(
+                input_with_delivery(
+                    0x473,
+                    0x871,
+                    "racing steering",
+                    DeliveryRequest::NextSafePoint {
+                        expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xa71)),
+                    },
+                ),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x972)),
+                None,
+            )
+            .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !pending_acceptance.is_finished(),
+        "pending acceptance must wait for the source lifecycle row"
+    );
+
+    terminalize_source.commit().await?;
+    let pending_error = pending_acceptance
+        .await?
+        .expect_err("steering must fail after racing source terminalization commits");
+    let SubmitInputRepositoryError::Database(pending_database_error) = pending_error else {
+        panic!("the rejected racing commit must report its database constraint");
+    };
+    assert_eq!(
+        pending_database_error
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into())
+    );
+    assert_eq!(
+        pending_database_error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("accepted_input_pending_source_active")
+    );
+
+    let durable_effects: (i64, i64, String) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM durable_command WHERE command_id = $1),
+            (SELECT count(*) FROM accepted_input WHERE accepted_input_id = $2),
+            (SELECT state_kind FROM turn_lifecycle WHERE turn_id = $3)",
+    )
+    .bind(Uuid::from_u128(0x473))
+    .bind(Uuid::from_u128(0x972))
+    .bind(Uuid::from_u128(0xa71))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(durable_effects, (0, 0, "terminal".to_owned()));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S01 / S03 / S08 / INV-008 / INV-012: occupied-slot rejection evidence is
 /// recorded exactly, while the not-yet-supported matching interrupt path
 /// rolls back its command claim and consumes no acceptance position.

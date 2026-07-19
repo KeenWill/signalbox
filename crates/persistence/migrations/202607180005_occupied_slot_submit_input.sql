@@ -343,7 +343,8 @@ BEGIN
               INTO checked_state
               FROM turn_lifecycle
              WHERE turn_id = NEW.expected_active_turn_id
-               AND session_id = NEW.session_id;
+               AND session_id = NEW.session_id
+               FOR UPDATE;
 
             IF checked_state IS DISTINCT FROM 'active' THEN
                 RAISE EXCEPTION
