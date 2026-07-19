@@ -10,18 +10,18 @@ use signalbox_domain::{
     AcceptedInputSchedulingProjection, AcceptedInputSchedulingReconstitutionFailure,
     AcceptedInputSchedulingReconstitutionInput, AcceptedInputStartingLineage,
     AcceptedInputTurnSchedulingRecord, AcceptedInputTurnSchedulingRecordState,
-    ActiveTurnSchedulingReconstitutionInput, Actor, ContextFrontierId, CurrentTurnAttemptState,
-    DeliveryRequest, DirectModelSelection, DurableCommandId, FrozenAliasDefinition,
-    FrozenModelSelection, InitialSemanticTranscriptEntryPayload, ModelAlias,
-    ModelSelectionOverride, ModelSelectionRequest, NonEmptyUnicodeTextFailure,
-    PerInputConfigurationChoices, PreparedSubmitInput, ReconstitutedSubmitInput,
-    ResolvedContextFrontierReconstitutionInput, SemanticTranscriptEntryId,
-    SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
-    SessionInputPosition, SteeringBinding, SubmitInput, SubmitInputAppliedResult,
-    SubmitInputPreparationFailure, SubmitInputReconstitutionFailure,
-    SubmitInputReconstitutionInput, SubmitInputRejectedResult, SubmitInputResult, ToolRequestId,
-    TurnAttemptId, TurnId, UserContent,
+    ActiveTurnSchedulingReconstitutionInput, Actor, ContextFrontierId, DeliveryRequest,
+    DirectModelSelection, DurableCommandId, FrozenAliasDefinition, FrozenModelSelection,
+    InitialSemanticTranscriptEntryPayload, ModelAlias, ModelSelectionOverride,
+    ModelSelectionRequest, NonEmptyUnicodeTextFailure, PerInputConfigurationChoices,
+    PreparedSubmitInput, ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput,
+    SemanticTranscriptEntryId, SemanticTranscriptEntryReconstitutionInput,
+    SemanticTranscriptEntryRef, Session, SessionAcceptanceTailEntryReconstitutionInput,
+    SessionAcceptanceTailReconstitutionInput, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition, SteeringBinding,
+    SubmitInput, SubmitInputAppliedResult, SubmitInputPreparationFailure,
+    SubmitInputReconstitutionFailure, SubmitInputReconstitutionInput, SubmitInputRejectedResult,
+    SubmitInputResult, ToolRequestId, TurnAttemptId, TurnId, UserContent,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -494,44 +494,36 @@ async fn prepare_against_locked_state(
     };
 
     let scheduling = load_scheduling_projection(connection, session.clone()).await?;
-    let previous_position = sqlx::query_scalar::<_, Decimal>(
-        "SELECT acceptance_position
-           FROM accepted_input
-          WHERE session_id = $1
-          ORDER BY acceptance_position DESC
-          LIMIT 1",
-    )
-    .bind(session_id_to_uuid(command.session()))
-    .fetch_optional(&mut *connection)
-    .await?
-    .map(|value| {
-        input_position_from_numeric(value).map_err(|reason| {
-            SubmitInputRepositoryError::Corruption(SubmitInputCorruption::InvalidOrdinal {
-                field: "previous acceptance_position",
-                reason,
+    let active_turn_id = scheduling.active_turn().map(|active| active.turn());
+    let prepared = if active_turn_id.is_some() {
+        command.prepare_with_active_turn(&scheduling, accepted_input, turn, |_| None)
+    } else {
+        let previous_position = sqlx::query_scalar::<_, Decimal>(
+            "SELECT acceptance_position
+               FROM accepted_input
+              WHERE session_id = $1
+              ORDER BY acceptance_position DESC
+              LIMIT 1",
+        )
+        .bind(session_id_to_uuid(command.session()))
+        .fetch_optional(&mut *connection)
+        .await?
+        .map(|value| {
+            input_position_from_numeric(value).map_err(|reason| {
+                SubmitInputRepositoryError::Corruption(SubmitInputCorruption::InvalidOrdinal {
+                    field: "previous acceptance_position",
+                    reason,
+                })
             })
         })
-    })
-    .transpose()?;
-
-    let active_turn = scheduling.active_turn();
-    let active_turn_id = active_turn.map(|active| active.turn());
-    let prepared = match active_turn {
-        Some(active) => command.prepare_with_active_turn(
-            &session,
-            active,
-            accepted_input,
-            turn,
-            previous_position,
-            |_| None,
-        ),
-        None => command.prepare_when_no_active_turn(
+        .transpose()?;
+        command.prepare_when_no_active_turn(
             &session,
             accepted_input,
             turn,
             previous_position,
             |_| None,
-        ),
+        )
     };
 
     prepared.map_err(|error| match error.failure() {
@@ -549,14 +541,8 @@ async fn prepare_against_locked_state(
             active_turn,
             accepted_input,
         },
-        SubmitInputPreparationFailure::ActiveTurnSessionMismatch { .. } => {
-            SubmitInputCorruption::Inconsistent("active turn session ownership").into()
-        }
-        SubmitInputPreparationFailure::ActiveTurnProjectionIsNotActive { .. } => {
-            SubmitInputCorruption::Inconsistent("selected active turn state").into()
-        }
-        SubmitInputPreparationFailure::AcceptanceTailPrecedesActiveOrigin { .. } => {
-            SubmitInputCorruption::Inconsistent("occupied acceptance tail").into()
+        SubmitInputPreparationFailure::ActiveTurnProjectionMissing => {
+            SubmitInputCorruption::Inconsistent("selected active scheduling state").into()
         }
         SubmitInputPreparationFailure::InterruptApplicationUnavailable => {
             SubmitInputRepositoryError::InterruptApplicationUnavailable {
@@ -743,9 +729,14 @@ pub(crate) async fn load_scheduling_projection(
                         SubmitInputCorruption::Inconsistent("active current attempt").into(),
                     );
                 }
-                let current_attempt_state = match attempt_state.as_str() {
-                    "prepared" => CurrentTurnAttemptState::Prepared,
-                    "running" => CurrentTurnAttemptState::Running,
+                let phase = match attempt_state.as_str() {
+                    "prepared" => ActiveTurnSchedulingReconstitutionInput::prepared(
+                        lifecycle_turn,
+                        attempt_id,
+                    ),
+                    "running" => {
+                        ActiveTurnSchedulingReconstitutionInput::running(lifecycle_turn, attempt_id)
+                    }
                     value => {
                         return Err(SubmitInputCorruption::Unsupported {
                             field: "active attempt state_kind",
@@ -760,11 +751,7 @@ pub(crate) async fn load_scheduling_projection(
                         starting_frontier
                             .ok_or(SubmitInputCorruption::Missing("starting_frontier_id"))?,
                     ),
-                    phase: ActiveTurnSchedulingReconstitutionInput::running(
-                        lifecycle_turn,
-                        attempt_id,
-                        current_attempt_state,
-                    ),
+                    phase,
                 }
             }
             "terminal" => {
@@ -813,6 +800,9 @@ pub(crate) async fn load_scheduling_projection(
             state,
         ));
     }
+
+    let active_acceptance_tail =
+        load_active_acceptance_tail(connection, session_id, &turns).await?;
 
     let semantic_rows = sqlx::query(
         "SELECT
@@ -942,12 +932,125 @@ pub(crate) async fn load_scheduling_projection(
         );
     }
 
-    AcceptedInputSchedulingReconstitutionInput::new(session, turns, semantic_entries, snapshots)
-        .reconstitute()
-        .map_err(|error| {
-            let (_, failure) = error.into_parts();
-            SubmitInputCorruption::Scheduling(failure).into()
-        })
+    AcceptedInputSchedulingReconstitutionInput::new(
+        session,
+        turns,
+        semantic_entries,
+        snapshots,
+        active_acceptance_tail,
+    )
+    .reconstitute()
+    .map_err(|error| {
+        let (_, failure) = error.into_parts();
+        SubmitInputCorruption::Scheduling(failure).into()
+    })
+}
+
+async fn load_active_acceptance_tail(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turns: &[AcceptedInputTurnSchedulingRecord],
+) -> Result<Option<SessionAcceptanceTailReconstitutionInput>, SubmitInputRepositoryError> {
+    let Some(active) = turns.iter().find(|record| {
+        matches!(
+            record.state(),
+            AcceptedInputTurnSchedulingRecordState::Active { .. }
+        )
+    }) else {
+        return Ok(None);
+    };
+
+    let rows = sqlx::query(
+        "SELECT
+            accepted_input_id,
+            session_id,
+            acceptance_position,
+            disposition_kind,
+            origin_turn_id,
+            delivery_kind,
+            expected_active_turn_id,
+            expected_defaults_version,
+            model_override_kind,
+            replacement_model_kind,
+            replacement_direct_model_selection_id,
+            replacement_model_alias_id
+           FROM accepted_input
+          WHERE session_id = $1
+            AND acceptance_position >= $2
+          ORDER BY acceptance_position",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(input_position_to_numeric(
+        active.order().acceptance_position(),
+    ))
+    .fetch_all(&mut *connection)
+    .await?;
+
+    let mut entries = Vec::with_capacity(rows.len());
+    for row in rows {
+        let accepted_input = accepted_input_id_from_uuid(required(&row, "accepted_input_id")?);
+        let entry_session = session_id_from_uuid(required(&row, "session_id")?);
+        let position = decode_position(&row, "acceptance_position")?;
+        let expected_active_turn: Option<Uuid> = row.try_get("expected_active_turn_id")?;
+        let delivery = decode_delivery(
+            required(&row, "delivery_kind")?,
+            expected_active_turn,
+            row.try_get("expected_defaults_version")?,
+            row.try_get("model_override_kind")?,
+            row.try_get("replacement_model_kind")?,
+            row.try_get("replacement_direct_model_selection_id")?,
+            row.try_get("replacement_model_alias_id")?,
+            "active acceptance-tail delivery",
+        )?;
+        let disposition_kind: String = required(&row, "disposition_kind")?;
+        let origin_turn: Option<Uuid> = row.try_get("origin_turn_id")?;
+        let disposition = match (disposition_kind.as_str(), origin_turn, delivery) {
+            ("origin_of", Some(origin), _) => {
+                AcceptedInputDisposition::OriginOf(turn_id_from_uuid(origin))
+            }
+            (
+                "pending_steering",
+                None,
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn,
+                },
+            ) => AcceptedInputDisposition::PendingSteering {
+                binding: SteeringBinding::new(expected_active_turn),
+            },
+            ("origin_of" | "pending_steering", _, _) => {
+                return Err(SubmitInputCorruption::Inconsistent(
+                    "active acceptance-tail disposition",
+                )
+                .into());
+            }
+            (value, _, _) => {
+                return Err(SubmitInputCorruption::Unsupported {
+                    field: "active acceptance-tail disposition_kind",
+                    value: value.to_owned(),
+                }
+                .into());
+            }
+        };
+        entries.push(SessionAcceptanceTailEntryReconstitutionInput::new(
+            entry_session,
+            AcceptedInputLifecycle::new(accepted_input, disposition),
+            position,
+            delivery,
+        ));
+    }
+
+    let observed_last_position = entries
+        .last()
+        .map(SessionAcceptanceTailEntryReconstitutionInput::position)
+        .ok_or(SubmitInputCorruption::Missing(
+            "active acceptance-tail origin",
+        ))?;
+    Ok(Some(SessionAcceptanceTailReconstitutionInput::new(
+        session,
+        active.accepted_input().id(),
+        observed_last_position,
+        entries,
+    )))
 }
 
 fn decode_starting_lineage(

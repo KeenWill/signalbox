@@ -475,11 +475,9 @@ impl SubmitInput {
     ) -> Result<PreparedSubmitInput, SubmitInputPreparationError>;
     pub fn prepare_with_active_turn(
         self,
-        session: &Session,
-        active_turn: &AcceptedInputTurnSchedulingProjection,
+        scheduling: &AcceptedInputSchedulingProjection,
         accepted_input: AcceptedInputId,
         turn: Option<TurnId>,
-        previous_position: Option<SessionInputPosition>,
         select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
     ) -> Result<PreparedSubmitInput, SubmitInputPreparationError>;
     // accessors: command_id(), session(), actor(), content(), delivery()
@@ -571,13 +569,7 @@ pub enum SubmitInputPreparationFailure {
         active_turn: TurnId,
         accepted_input: AcceptedInputId,
     },
-    ActiveTurnSessionMismatch { provided_session: SessionId },
-    ActiveTurnProjectionIsNotActive { provided_turn: TurnId },
-    AcceptanceTailPrecedesActiveOrigin {
-        active_turn: TurnId,
-        active_position: SessionInputPosition,
-        observed_tail: Option<SessionInputPosition>,
-    },
+    ActiveTurnProjectionMissing,
     InterruptApplicationUnavailable,
 }
 
@@ -905,20 +897,37 @@ pub enum AcceptedInputTurnSchedulingRecordState {
 
 pub struct ActiveTurnSchedulingReconstitutionInput { /* private */ }
 impl ActiveTurnSchedulingReconstitutionInput {
+    pub const fn prepared(
+        owning_turn: TurnId,
+        current_attempt: TurnAttemptId,
+    ) -> Self;
     pub const fn running(
         owning_turn: TurnId,
         current_attempt: TurnAttemptId,
-        current_attempt_state: CurrentTurnAttemptState,
-    ) -> Self;
-    pub const fn awaiting_approval(
-        owning_turn: TurnId,
-        request: ToolRequestId,
-    ) -> Self;
-    pub const fn awaiting_recovery_decision(
-        owning_turn: TurnId,
-        ambiguous_operations: NonEmptyIssuedOperationRefs,
     ) -> Self;
     // accessors: owning_turn(), phase()
+}
+
+pub struct SessionAcceptanceTailEntryReconstitutionInput { /* private */ }
+impl SessionAcceptanceTailEntryReconstitutionInput {
+    pub const fn new(
+        session: SessionId,
+        accepted_input: AcceptedInputLifecycle,
+        position: SessionInputPosition,
+        delivery: DeliveryRequest,
+    ) -> Self;
+    // accessors: session(), accepted_input(), position(), delivery()
+}
+
+pub struct SessionAcceptanceTailReconstitutionInput { /* private */ }
+impl SessionAcceptanceTailReconstitutionInput {
+    pub fn new(
+        session: SessionId,
+        anchor: AcceptedInputId,
+        observed_last_position: SessionInputPosition,
+        entries: Vec<SessionAcceptanceTailEntryReconstitutionInput>,
+    ) -> Self;
+    // accessors: session(), anchor(), observed_last_position(), entries()
 }
 
 pub struct AcceptedInputTurnSchedulingRecord { /* private */ }
@@ -946,13 +955,15 @@ impl AcceptedInputSchedulingReconstitutionInput {
         turns: Vec<AcceptedInputTurnSchedulingRecord>,
         semantic_entries: Vec<SemanticTranscriptEntryReconstitutionInput>,
         snapshots: Vec<ResolvedContextFrontierReconstitutionInput>,
+        active_acceptance_tail: Option<SessionAcceptanceTailReconstitutionInput>,
     ) -> Self;
     pub fn reconstitute(self)
         -> Result<
             AcceptedInputSchedulingProjection,
             AcceptedInputSchedulingReconstitutionError,
         >;
-    // accessors: session(), turns(), semantic_entries(), snapshots()
+    // accessors: session(), turns(), semantic_entries(), snapshots(),
+    // active_acceptance_tail()
 }
 
 pub enum AcceptedInputSchedulingReconstitutionFailure {
@@ -972,8 +983,30 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
     MissingOriginEntry { turn: TurnId },
     MissingFailureEntry { turn: TurnId },
     CurrentAttemptOwnershipMismatch { turn: TurnId, attempt: TurnAttemptId },
-    ActivePhaseOwnershipMismatch { turn: TurnId, provided_turn: TurnId },
     DuplicateCurrentAttempt { attempt: TurnAttemptId },
+    MissingActiveAcceptanceTail { turn: TurnId },
+    UnexpectedActiveAcceptanceTail,
+    AcceptanceTailSessionMismatch {
+        expected: SessionId,
+        actual: SessionId,
+    },
+    AcceptanceTailAnchorMismatch {
+        turn: TurnId,
+        expected: AcceptedInputId,
+        actual: AcceptedInputId,
+    },
+    AcceptanceTailEntrySessionMismatch { accepted_input: AcceptedInputId },
+    DuplicateAcceptanceTailEntry { accepted_input: AcceptedInputId },
+    AcceptanceTailPositionMismatch {
+        accepted_input: AcceptedInputId,
+        expected: SessionInputPosition,
+        actual: SessionInputPosition,
+    },
+    AcceptanceTailLastPositionMismatch {
+        expected: SessionInputPosition,
+        actual: Option<SessionInputPosition>,
+    },
+    AcceptanceTailDispositionMismatch { accepted_input: AcceptedInputId },
     SnapshotOwningSessionMismatch { snapshot: ContextFrontierId },
     DuplicateSnapshot { snapshot: ContextFrontierId },
     InvalidSnapshotMembership { snapshot: ContextFrontierId },
@@ -1037,7 +1070,7 @@ impl AcceptedInputSchedulingProjection {
         self,
         identities: AcceptedInputTurnActivationIdentities,
     ) -> Result<PreparedAcceptedInputTurnActivation, AcceptedInputEligibilityError>;
-    // accessors: session()
+    // accessor: session()
 }
 
 pub struct AcceptedInputTurnActivationIdentities { /* private */ }
@@ -1755,7 +1788,7 @@ impl<Generator: SubmitInputIdGenerator, Transaction: SubmitInputTransaction>
 | domain: submit_input | 13 |
 | domain: queue_order | 5 (+1 free fn) |
 | domain: turn_lifecycle | 10 |
-| domain: turn_eligibility | 14 |
+| domain: turn_eligibility | 16 |
 | domain: turn_attempt | 13 |
 | domain: model_call | 7 |
 | domain: context_frontier | 6 |
@@ -1764,7 +1797,7 @@ impl<Generator: SubmitInputIdGenerator, Transaction: SubmitInputTransaction>
 | domain: applied_interrupt | 2 |
 | domain: fatal_mismatch | 0 |
 | domain: replace_session_defaults | 13 |
-| **signalbox-domain total** | **149 (+1 free fn)** |
+| **signalbox-domain total** | **151 (+1 free fn)** |
 | application: create_session | 8 (incl. 2 traits) |
 | application: load_session | 2 (incl. 1 trait) |
 | application: replace_session_defaults | 4 (incl. 1 trait) |
