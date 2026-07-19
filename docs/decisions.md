@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-19 — Adaptive review-fix waves and reply-at-push triage
+
+**Context.** The finished-pull-request rules capped review-fix waves at a fixed two, and the cap was repeatedly overridden in practice. A wave's value tracks the prior wave's hit rate and the content under review — hand-written parser code stayed substantive for five waves, while style-guide reviews went self-referential by wave three — and deferring reviewer replies to a later batch decoupled fix commits from their rationale.
+
+**Decision.** The finished-pull-request rules in [AGENTS.md](../AGENTS.md) now govern review-fix waves by adaptive hit-rate continuation with a five-wave escalation backstop and push-time reply triage, and the goal-mode owner alignment-review request in [goal-mode.md](goal-mode.md) reports each pull request's wave history. Those two documents are the rules' single normative homes; this entry records the ownership and rationale without restating the operative rules.
+
+**Rejected alternatives.** Raising the fixed cap: the same arbitrariness, wrong for both extremes. Unbounded continuation: no churn bound. Agent-judged "review quality" thresholds: self-serving without the accepted-finding anchor.
+
+**Affects.** The finished-pull-request rules in [AGENTS.md](../AGENTS.md), owner alignment-review reporting in [goal-mode.md](goal-mode.md), and every future review loop. It changes no code, ADR, or validation rule.
+
 ## 2026-07-19 — Workspace expect-table crate for Debug-derived snapshot tables
 
 **Context.** [Testing-style](testing-style.md) rules 9–12 send value-shaped claims to expect-test snapshots and require curated, byte-stable tables, but the only renderer was the ad-hoc `table(headers, rows)` helper in the domain crate's `test_support`, which took pre-stringified cells, forced each test module to hand-build `Vec<Vec<String>>` plumbing, and could not be imported by other crates' tests. Rule 12 already anticipated lifting it into shared test support.
