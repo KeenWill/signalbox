@@ -10,7 +10,11 @@ pub(crate) const DEFAULT_MAX_DEPTH: usize = 3;
 pub(crate) const VALUE_COLUMN: &str = "value";
 
 /// Returns the value inside any number of `Some` wrappers, so options render
-/// as their payload (and `None`, an atom, renders as an empty cell).
+/// as their payload. A non-`Option` single-item tuple variant that happens
+/// to be named `Some` would unwrap too; that collision is accepted as
+/// implausible (see the crate docs). A unit `None` stays a plain atom and
+/// renders as the literal text `None` — the grammar cannot prove it is
+/// `Option::None` rather than a domain unit variant named `None`.
 fn through_some(value: &Value) -> &Value {
     match value {
         Value::Tuple {
@@ -49,37 +53,35 @@ fn compact_items(items: &[Value]) -> String {
     items.join(", ")
 }
 
-/// Renders one whole-cell value: `None` is empty, `Some` unwraps, string and
-/// char literals drop their quotes (keeping non-quote escapes visible, so a
-/// cell can never contain a control character), everything else is compact.
+/// Renders one whole-cell value under the crate's single escaping story
+/// (stated once, in the crate docs): `Some` unwraps, a unit `None` renders
+/// as the literal text `None`, string and char literals drop only their
+/// surrounding quotes — every escape sequence in the body stays exactly as
+/// derived `Debug` emitted it, so `"a\nb"` and `"a\\nb"` render distinctly —
+/// and raw control characters escape so a cell is always one physical line.
 pub(crate) fn cell(value: &Value) -> String {
-    match through_some(value) {
-        Value::Atom(text) if text == "None" => String::new(),
-        Value::Str(body) | Value::Char(body) => unescape_quotes(body),
+    let text = match through_some(value) {
+        Value::Str(body) | Value::Char(body) => body.clone(),
         other => compact(other),
-    }
+    };
+    escape_control(&text)
 }
 
-/// Unescapes only `\"`, `\'`, and `\\`; every other escape stays visible as
-/// written, so `Debug`-escaped control characters cannot break a table line.
-fn unescape_quotes(body: &str) -> String {
-    let mut unescaped = String::with_capacity(body.len());
-    let mut chars = body.chars();
-    while let Some(next) = chars.next() {
-        if next != '\\' {
-            unescaped.push(next);
-            continue;
-        }
-        match chars.next() {
-            Some(escaped @ ('"' | '\'' | '\\')) => unescaped.push(escaped),
-            Some(other) => {
-                unescaped.push('\\');
-                unescaped.push(other);
-            }
-            None => unescaped.push('\\'),
+/// Escapes raw control characters with [`char::escape_debug`] — the form
+/// derived `Debug` would have emitted (`\n`, `\r`, `\t`, `\u{…}`) — so one
+/// logical row is always one physical, correctly padded line. Derived
+/// `Debug` never emits raw control characters; only custom `Debug` output
+/// reaches this arm.
+fn escape_control(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        if character.is_control() {
+            escaped.extend(character.escape_debug());
+        } else {
+            escaped.push(character);
         }
     }
-    unescaped
+    escaped
 }
 
 /// Flattens one parsed row into `(column, cell)` pairs: struct fields become
@@ -115,6 +117,47 @@ fn flatten_fields(
             _ => cells.push((column, cell(value))),
         }
     }
+}
+
+/// Drops each bare prefix column that is redundant with its dotted
+/// descendants: when some `prefix.child` column exists and every cell of
+/// the bare `prefix` column is empty or the literal `None`, the bare column
+/// shows nothing its descendants do not already show — rows mixing `None`
+/// with `Some(Inner { .. })` would otherwise carry both an all-but-empty
+/// `nested` column and `nested.x` descendants. A bare column holding any
+/// other value (a unit variant, a tuple payload, a compact struct from a
+/// differently shaped row) stays. Under a suppressed prefix a `None` row
+/// reads as an empty run of descendant cells; in a flat column `None` stays
+/// literal — the asymmetry the crate docs state.
+pub(crate) fn suppress_redundant_prefix_columns(
+    headers: Vec<String>,
+    rows: Vec<Vec<String>>,
+) -> (Vec<String>, Vec<Vec<String>>) {
+    let redundant: Vec<bool> = headers
+        .iter()
+        .enumerate()
+        .map(|(column, header)| {
+            let dotted = format!("{header}.");
+            headers.iter().any(|other| other.starts_with(&dotted))
+                && rows
+                    .iter()
+                    .all(|row| row[column].is_empty() || row[column] == "None")
+        })
+        .collect();
+    if !redundant.contains(&true) {
+        return (headers, rows);
+    }
+    let keep = |cells: Vec<String>| -> Vec<String> {
+        cells
+            .into_iter()
+            .zip(&redundant)
+            .filter(|(_, redundant)| !**redundant)
+            .map(|(cell, _)| cell)
+            .collect()
+    };
+    let headers = keep(headers);
+    let rows = rows.into_iter().map(keep).collect();
+    (headers, rows)
 }
 
 /// Renders headers and dense rows as one Unicode box-drawing table.

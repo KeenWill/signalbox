@@ -155,10 +155,12 @@ fn numeric_columns_right_align_and_mixed_columns_left_align() {
     ]));
 }
 
-/// `None` renders as an empty cell and `Some` unwraps to its payload, in
-/// both numeric and text columns.
+/// `Some` unwraps to its payload and a unit `None` renders as the literal
+/// text `None` in a flat column — the grammar cannot tell `Option::None`
+/// from a domain unit variant named `None`, so neither is erased. A `None`
+/// cell also keeps the column left-aligned: `None` is not a number.
 #[test]
-fn none_renders_empty_and_some_unwraps_to_its_payload() {
+fn none_renders_literally_and_some_unwraps_to_its_payload() {
     #[derive(Debug)]
     struct Optional {
         checked: Option<u32>,
@@ -169,8 +171,8 @@ fn none_renders_empty_and_some_unwraps_to_its_payload() {
         ┌─────────┬─────────┐
         │ checked │ label   │
         ├─────────┼─────────┤
-        │       7 │         │
-        │         │ present │
+        │ 7       │ None    │
+        │ None    │ present │
         └─────────┴─────────┘
     "#]]
     .assert_eq(&table([
@@ -181,6 +183,86 @@ fn none_renders_empty_and_some_unwraps_to_its_payload() {
         Optional {
             checked: None,
             label: Some("present"),
+        },
+    ]));
+}
+
+/// A unit variant named `None` on a non-`Option` enum is a real domain
+/// value — signalbox's `TranscriptAncestry::None` is one — and renders as
+/// the literal text `None`, never as an erased empty cell.
+#[test]
+fn non_option_none_variant_renders_literally() {
+    #[derive(Debug)]
+    enum Ancestry {
+        None,
+        Forked,
+    }
+
+    #[derive(Debug)]
+    struct Row {
+        label: &'static str,
+        ancestry: Ancestry,
+    }
+
+    expect![[r#"
+        ┌───────┬──────────┐
+        │ label │ ancestry │
+        ├───────┼──────────┤
+        │ root  │ None     │
+        │ child │ Forked   │
+        └───────┴──────────┘
+    "#]]
+    .assert_eq(&table([
+        Row {
+            label: "root",
+            ancestry: Ancestry::None,
+        },
+        Row {
+            label: "child",
+            ancestry: Ancestry::Forked,
+        },
+    ]));
+}
+
+/// When rows mix `None` with `Some(Inner { .. })`, the dotted descendants
+/// carry the data and the redundant bare prefix column — holding only
+/// `None` and empty cells — is suppressed. The asymmetry is deliberate and
+/// visible in one table: `None` stays literal in the flat `flat` column,
+/// while the `None` row under the flattened `nested` prefix reads as an
+/// empty run of descendant cells.
+#[test]
+fn redundant_none_prefix_column_is_suppressed_when_descendants_exist() {
+    #[derive(Debug)]
+    struct Inner {
+        x: u32,
+        y: u32,
+    }
+
+    #[derive(Debug)]
+    struct Row {
+        label: &'static str,
+        flat: Option<u32>,
+        nested: Option<Inner>,
+    }
+
+    expect![[r#"
+        ┌───────┬──────┬──────────┬──────────┐
+        │ label │ flat │ nested.x │ nested.y │
+        ├───────┼──────┼──────────┼──────────┤
+        │ has   │ None │        7 │       11 │
+        │ hasnt │ 3    │          │          │
+        └───────┴──────┴──────────┴──────────┘
+    "#]]
+    .assert_eq(&table([
+        Row {
+            label: "has",
+            flat: None,
+            nested: Some(Inner { x: 7, y: 11 }),
+        },
+        Row {
+            label: "hasnt",
+            flat: Some(3),
+            nested: None,
         },
     ]));
 }
@@ -206,6 +288,93 @@ fn custom_debug_leaf_renders_verbatim() {
         tag: PhantomData,
         count: 4,
     }]));
+}
+
+/// A degraded mid-struct atom whose text carries commas inside its own
+/// brackets — parenthesized as in `PhantomData<(u32, u32)>` or
+/// angle-bracketed only as in `PhantomData<Result<u32, u32>>` — ends at
+/// the enclosing field separator, not at an interior comma, so sibling
+/// fields survive and the row keeps its columns.
+#[test]
+fn degraded_atom_with_interior_commas_leaves_siblings_intact() {
+    #[derive(Debug)]
+    struct HoldsCommaGeneric {
+        before: u8,
+        tag: PhantomData<(u32, u32)>,
+        route: PhantomData<Result<u32, u32>>,
+        after: u8,
+    }
+
+    expect![[r#"
+        ┌────────┬─────────────────────────┬─────────────────────────────────────────────┬───────┐
+        │ before │ tag                     │ route                                       │ after │
+        ├────────┼─────────────────────────┼─────────────────────────────────────────────┼───────┤
+        │      1 │ PhantomData<(u32, u32)> │ PhantomData<core::result::Result<u32, u32>> │     2 │
+        └────────┴─────────────────────────┴─────────────────────────────────────────────┴───────┘
+    "#]]
+    .assert_eq(&table([HoldsCommaGeneric {
+        before: 1,
+        tag: PhantomData,
+        route: PhantomData,
+        after: 2,
+    }]));
+}
+
+/// A custom `Debug` impl emitting a raw newline cannot split a table row:
+/// control characters escape at cell rendering (`escape_debug`-style), so
+/// one logical row is always one physical, correctly padded line.
+#[test]
+fn multiline_custom_debug_output_stays_on_one_physical_line() {
+    struct Multiline;
+
+    impl std::fmt::Debug for Multiline {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "first\nsecond")
+        }
+    }
+
+    #[derive(Debug)]
+    struct Holds {
+        block: Multiline,
+        count: u8,
+    }
+
+    expect![[r#"
+        ┌───────────────┬───────┐
+        │ block         │ count │
+        ├───────────────┼───────┤
+        │ first\nsecond │     4 │
+        └───────────────┴───────┘
+    "#]]
+    .assert_eq(&table([Holds {
+        block: Multiline,
+        count: 4,
+    }]));
+}
+
+/// A string containing a real newline and one containing a literal
+/// backslash-n render distinctly: escape sequences stay exactly as derived
+/// `Debug` emits them, minus only the surrounding quotes, so a snapshot
+/// can tell the two values apart.
+#[test]
+fn real_newline_and_literal_backslash_n_strings_render_distinctly() {
+    #[derive(Debug)]
+    struct Text {
+        content: &'static str,
+    }
+
+    expect![[r#"
+        ┌─────────┐
+        │ content │
+        ├─────────┤
+        │ a\nb    │
+        │ a\\nb   │
+        └─────────┘
+    "#]]
+    .assert_eq(&table([
+        Text { content: "a\nb" },
+        Text { content: "a\\nb" },
+    ]));
 }
 
 /// Unit and tuple enum variants render compactly in their field's own
@@ -241,7 +410,10 @@ fn unit_and_tuple_variant_cells_render_compactly() {
 
 /// A struct enum variant is indistinguishable from a nested struct in the
 /// derived-`Debug` grammar, so its payload flattens to dotted columns the
-/// same way, and a unit-variant row leaves those columns empty.
+/// same way, and a unit-variant row leaves those columns empty. The bare
+/// `shape` column stays alongside its descendants because `Unit` is real
+/// content — only a bare prefix column holding nothing but `None` and
+/// empty cells is suppressed.
 #[test]
 fn struct_variant_payloads_flatten_like_nested_structs() {
     #[derive(Debug)]
@@ -289,15 +461,16 @@ fn non_struct_rows_render_in_a_single_value_column() {
 
 /// String content hostile to the grammar — braces, commas, an escaped
 /// quote — stays one verbatim cell because the parser reads it as one
-/// string literal.
+/// string literal; the quote keeps its `Debug` escape, as every escape
+/// sequence in a string body does.
 #[test]
 fn strings_keep_hostile_content_verbatim_in_cells() {
     expect![[r#"
-        ┌────────────┬───────┐
-        │ sensor     │ value │
-        ├────────────┼───────┤
-        │ a { b, " c │     1 │
-        └────────────┴───────┘
+        ┌─────────────┬───────┐
+        │ sensor      │ value │
+        ├─────────────┼───────┤
+        │ a { b, \" c │     1 │
+        └─────────────┴───────┘
     "#]]
     .assert_eq(&table([Reading {
         sensor: "a { b, \" c",
@@ -305,19 +478,43 @@ fn strings_keep_hostile_content_verbatim_in_cells() {
     }]));
 }
 
-/// `cases` renders one `input | output` row per input in input order.
+/// `cases` renders one `input | output` row per input in input order; a
+/// `None` outcome stays literal, so an absent result is never mistaken for
+/// an empty one.
 #[test]
 fn cases_renders_one_input_output_row_per_input() {
     expect![[r#"
         ┌───────┬────────┐
         │ input │ output │
         ├───────┼────────┤
-        │     3 │        │
-        │     5 │      0 │
-        │    12 │      7 │
+        │     3 │ None   │
+        │     5 │ 0      │
+        │    12 │ 7      │
         └───────┴────────┘
     "#]]
     .assert_eq(&cases([3u8, 5, 12], |n| n.checked_sub(5)));
+}
+
+/// `cases` renders each input before invoking the callback, so a callback
+/// mutating its input through interior mutability cannot rewrite the
+/// reported input: the `input` column shows the pre-call value.
+#[test]
+fn cases_reports_inputs_as_rendered_before_the_callback_runs() {
+    use std::cell::Cell;
+
+    expect![[r#"
+        ┌───────────────────┬────────┐
+        │ input             │ output │
+        ├───────────────────┼────────┤
+        │ Cell { value: 1 } │      1 │
+        │ Cell { value: 2 } │      2 │
+        └───────────────────┴────────┘
+    "#]]
+    .assert_eq(&cases([Cell::new(1u32), Cell::new(2)], |cell| {
+        let seen = cell.get();
+        cell.set(99);
+        seen
+    }));
 }
 
 /// `transposed` renders one record with its (dotted) fields as rows.

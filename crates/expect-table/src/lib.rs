@@ -16,8 +16,25 @@
 //! - Nested structs flatten to dotted columns (`origin.position`) up to
 //!   three path segments by default ([`Table::max_depth`] adjusts); deeper
 //!   values render as one compact cell.
-//! - `None` renders as an empty cell and `Some` unwraps to its payload;
-//!   missing fields render empty; string and char cells drop their quotes.
+//! - `Some` unwraps to its payload; a unit `None` renders as the literal
+//!   text `None`, because the derived-`Debug` grammar cannot tell
+//!   `Option::None` from a domain unit variant named `None` and erasing a
+//!   domain value is the worse failure. (A non-`Option` single-item tuple
+//!   variant named `Some` would unwrap too; that collision is accepted as
+//!   implausible.) Missing fields render empty.
+//! - When dotted descendant columns exist for a prefix, a bare prefix
+//!   column whose cells are all empty or `None` is suppressed as
+//!   redundant, so rows mixing `None` with `Some(Inner { .. })` render
+//!   descendants only. The asymmetry is deliberate: `None` stays literal
+//!   in a flat column but reads as an empty run of descendant cells under
+//!   a flattened prefix.
+//! - Cells follow one escaping story: string and char cells drop only
+//!   their surrounding quotes and keep every derived-`Debug` escape
+//!   sequence in the body verbatim, so a real newline (rendered `\n`) and
+//!   a literal backslash-n (rendered `\\n`) stay distinct; raw control
+//!   characters — reachable only through custom `Debug` output — are
+//!   escaped `escape_debug`-style, so one logical row is always one
+//!   physical line.
 //! - Unit and tuple enum variants render compactly (`Variant`,
 //!   `Variant(payload)`). A struct variant is indistinguishable from a
 //!   nested struct in the derived-`Debug` grammar, so its payload flattens
@@ -85,8 +102,11 @@ pub fn cases<I: Debug, O: Debug>(
     let rows: Vec<Vec<String>> = inputs
         .into_iter()
         .map(|input| {
+            // The input renders before the callback runs, so interior
+            // mutability inside `f` cannot rewrite the reported input.
+            let input_cell = whole_cell(&input);
             let output = f(&input);
-            vec![whole_cell(&input), whole_cell(&output)]
+            vec![input_cell, whole_cell(&output)]
         })
         .collect();
     if rows.is_empty() {
@@ -179,6 +199,7 @@ impl Display for Table {
             })
             .collect();
 
+        let (headers, rows) = render::suppress_redundant_prefix_columns(headers, rows);
         formatter.write_str(&render::render(&headers, &rows))
     }
 }

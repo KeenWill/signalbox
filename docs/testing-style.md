@@ -124,20 +124,23 @@ for d in all_cancellation_dispositions() {
 // "rejected":
 //     Err(error) => { assert_eq!(error.current().id(), source_id); "rejected" }
 // so the table supplements the per-edge asserts (rule 10); it never
-// replaces them.
+// replaces them. The helper emits one `#[derive(Debug)]` row struct per
+// edge; the struct's field names are the rendered column headers.
 assert!(prepared().end_after_cancellation(proof(1), Cancelled).is_ok());
-let rows = after_cancellation_rows(&prepared, "after cancellation (exact proof)", proof(1));
+let rows = after_cancellation_rows(&prepared, proof(1));
 expect![[r#"
-    attempted end                                   | outcome
-    ----------------------------------------------- | --------
-    after cancellation (exact proof): TurnCompleted | rejected
-    after cancellation (exact proof): TurnRefused   | rejected
-    after cancellation (exact proof): KnownFailure  | rejected
-    after cancellation (exact proof): Lost          | rejected
-    after cancellation (exact proof): Cancelled     | ends
-    after cancellation (exact proof): Ambiguous     | rejected
+    ┌───────────────┬──────────┐
+    │ attempted_end │ outcome  │
+    ├───────────────┼──────────┤
+    │ TurnCompleted │ rejected │
+    │ TurnRefused   │ rejected │
+    │ KnownFailure  │ rejected │
+    │ Lost          │ rejected │
+    │ Cancelled     │ ends     │
+    │ Ambiguous     │ rejected │
+    └───────────────┴──────────┘
 "#]]
-.assert_eq(&table(&["attempted end", "outcome"], &rows));
+.assert_eq(&table(rows));
 ```
 
 ## Laws versus values
@@ -272,11 +275,13 @@ Because this test is linked from an invariant enforcement column, the exact asse
 
 ```rust
 expect![[r#"
-    derived | accepted | priority
-    ------- | -------- | --------
-    1       | 1        | ordinary
-    2       | 3        | interrupt immediately after input 1
-    3       | 2        | ordinary
+    ┌─────────┬──────────┬─────────────────────────────────────┐
+    │ derived │ accepted │ priority                            │
+    ├─────────┼──────────┼─────────────────────────────────────┤
+    │       1 │        1 │ ordinary                            │
+    │       2 │        3 │ interrupt immediately after input 1 │
+    │       3 │        2 │ ordinary                            │
+    └─────────┴──────────┴─────────────────────────────────────┘
 "#]]
 .assert_eq(&derived_order_table(&[first, second, interrupt]));
 ```

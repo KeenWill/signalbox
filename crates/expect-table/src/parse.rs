@@ -4,8 +4,9 @@
 //! one [`Value::Atom`] leaf holding the raw text, scoped as locally as
 //! possible — an unparseable field value degrades alone while the rest of its
 //! struct still parses. Degradation consumes a balanced region (respecting
-//! parentheses, brackets, braces, and string/char literals with escapes), so
-//! a custom `Debug` impl renders verbatim instead of derailing its neighbors.
+//! parentheses, brackets, braces, best-effort angle brackets, and
+//! string/char literals with escapes), so a custom `Debug` impl renders
+//! verbatim — interior commas included — instead of derailing its neighbors.
 
 /// A value parsed from derived-`Debug` output.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -254,8 +255,18 @@ impl Parser<'_> {
     /// separator (`,`) or a closer belonging to an enclosing region — or the
     /// input ends. String and char literals are skipped escape-aware so
     /// their delimiters and commas cannot unbalance the scan.
+    ///
+    /// Angle brackets balance best-effort so type names like
+    /// `PhantomData<(u32, u32)>` or `PhantomData<Result<u32, u32>>` stay one
+    /// atom instead of ending at an interior comma: `<` opens a
+    /// generic-argument list only directly after an identifier character
+    /// (`Vec<`), never after anything else (`a < b`), and an enclosing
+    /// closer at depth zero still ends the atom even inside an unclosed
+    /// `<` — that `<` was a plain less-than after all.
     fn consume_balanced_element(&mut self) {
         let mut depth = 0usize;
+        let mut angle_depth = 0usize;
+        let mut previous: Option<char> = None;
         while let Some(next) = self.peek() {
             match next {
                 '"' => {
@@ -277,9 +288,19 @@ impl Parser<'_> {
                     depth -= 1;
                     self.bump();
                 }
-                ',' if depth == 0 => return,
+                '<' if matches!(previous, Some(prior) if prior.is_alphanumeric() || prior == '_') =>
+                {
+                    angle_depth += 1;
+                    self.bump();
+                }
+                '>' if angle_depth > 0 => {
+                    angle_depth -= 1;
+                    self.bump();
+                }
+                ',' if depth == 0 && angle_depth == 0 => return,
                 _ => self.bump(),
             }
+            previous = Some(next);
         }
     }
 }
@@ -512,6 +533,37 @@ mod tests {
                 name: "HoldsCustom".to_string(),
                 fields: vec![
                     field("tag", atom("PhantomData<u32>")),
+                    field("count", atom("4")),
+                ],
+            }
+        );
+    }
+
+    #[derive(Debug)]
+    struct HoldsCommaGenerics {
+        pair: PhantomData<(u32, u32)>,
+        nested: PhantomData<Result<u32, u32>>,
+        count: u8,
+    }
+
+    #[test]
+    fn degraded_atom_keeps_commas_inside_its_own_brackets() {
+        let holds = HoldsCommaGenerics {
+            pair: PhantomData,
+            nested: PhantomData,
+            count: 4,
+        };
+
+        assert_eq!(
+            parse(&format!("{holds:?}")),
+            Value::Struct {
+                name: "HoldsCommaGenerics".to_string(),
+                fields: vec![
+                    field("pair", atom("PhantomData<(u32, u32)>")),
+                    field(
+                        "nested",
+                        atom("PhantomData<core::result::Result<u32, u32>>"),
+                    ),
                     field("count", atom("4")),
                 ],
             }
