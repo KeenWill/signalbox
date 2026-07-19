@@ -3277,9 +3277,10 @@ async fn s01_inv006_inv009_inv015_turn_storage_enforces_lifecycle_consistency()
     Ok(())
 }
 
-/// S01 / S03 / S08 / S09 / INV-007 / INV-008 / INV-009 / INV-012:
+/// S01 / S03 / S08 / S09 / INV-002 / INV-007 / INV-008 / INV-009 / INV-012:
 /// occupied-slot After and NextSafePoint handling commits the exact distinct
-/// effects, and checked replay survives a pool/repository restart.
+/// effects, checked replay survives a pool/repository restart, and the
+/// restarted adapter advances from the complete validated acceptance tail.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn occupied_slot_after_and_safe_point_apply_replay_and_restart() -> Result<(), Box<dyn Error>>
@@ -3497,6 +3498,29 @@ async fn occupied_slot_after_and_safe_point_apply_replay_and_restart() -> Result
             .await?,
         safe_point_outcome
     );
+
+    let after_restart = input_with_delivery(
+        0x435,
+        0x831,
+        "after restart",
+        DeliveryRequest::AfterCurrentTurn {
+            expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xa31)),
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    );
+    let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::TurnOrigin(after_restart),
+    )) = restarted
+        .handle(
+            after_restart,
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x934)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xa33))),
+        )
+        .await?
+    else {
+        panic!("restart must preserve occupied-slot origin submission");
+    };
+    assert_eq!(after_restart.acceptance_position().as_u64(), 4);
 
     restarted_pool.close().await;
     drop(container);
