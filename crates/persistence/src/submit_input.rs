@@ -137,6 +137,15 @@ pub enum SubmitInputRepositoryError {
         /// The owner-global identifier that names another kind.
         command_id: DurableCommandId,
     },
+    /// A generated accepted-input candidate reused the active turn's origin.
+    AcceptedInputIdentityCollision {
+        /// The unclaimed durable command.
+        command_id: DurableCommandId,
+        /// The authoritative active turn.
+        active_turn: TurnId,
+        /// The colliding accepted-input candidate and active origin.
+        accepted_input: AcceptedInputId,
+    },
     /// Durable records cannot reconstruct the requested domain value.
     Corruption(SubmitInputCorruption),
     /// A matching interrupt reached the intentionally unavailable transition.
@@ -158,6 +167,14 @@ impl fmt::Display for SubmitInputRepositoryError {
                     "durable command {command_id:?} does not name SubmitInput"
                 )
             }
+            Self::AcceptedInputIdentityCollision {
+                command_id,
+                active_turn,
+                accepted_input,
+            } => write!(
+                formatter,
+                "SubmitInput command {command_id:?} proposed accepted input {accepted_input:?}, which is already the origin of active turn {active_turn:?}"
+            ),
             Self::Corruption(error) => error.fmt(formatter),
             Self::InterruptApplicationUnavailable {
                 command_id,
@@ -174,9 +191,9 @@ impl Error for SubmitInputRepositoryError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Database(error) => Some(error),
-            Self::DifferentCommandKind { .. } | Self::InterruptApplicationUnavailable { .. } => {
-                None
-            }
+            Self::DifferentCommandKind { .. }
+            | Self::AcceptedInputIdentityCollision { .. }
+            | Self::InterruptApplicationUnavailable { .. } => None,
             Self::Corruption(error) => Some(error),
         }
     }
@@ -524,6 +541,14 @@ async fn prepare_against_locked_state(
         SubmitInputPreparationFailure::TurnCandidateMismatch => {
             SubmitInputCorruption::Inconsistent("delivery turn candidate").into()
         }
+        SubmitInputPreparationFailure::AcceptedInputCandidateReusesActiveOrigin {
+            active_turn,
+            accepted_input,
+        } => SubmitInputRepositoryError::AcceptedInputIdentityCollision {
+            command_id: error.command().command_id(),
+            active_turn,
+            accepted_input,
+        },
         SubmitInputPreparationFailure::ActiveTurnSessionMismatch { .. } => {
             SubmitInputCorruption::Inconsistent("active turn session ownership").into()
         }
