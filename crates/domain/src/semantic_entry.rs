@@ -144,20 +144,21 @@ mod tests {
     /// typed reference to its distinct accepted-input or turn subject.
     #[test]
     fn initial_payload_variants_preserve_exact_typed_subjects() {
-        let origin = InitialSemanticTranscriptEntryPayload::OriginAcceptedInput {
-            accepted_input: accepted_input_id(1),
-        };
-        let failed = InitialSemanticTranscriptEntryPayload::TurnFailed { turn: turn_id(1) };
+        let accepted_input = accepted_input_id(1);
+        let turn = turn_id(1);
+        let origin = InitialSemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input };
+        let failed = InitialSemanticTranscriptEntryPayload::TurnFailed { turn };
 
         assert_ne!(origin, failed);
         assert!(matches!(
             origin,
-            InitialSemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input }
-                if accepted_input == accepted_input_id(1)
+            InitialSemanticTranscriptEntryPayload::OriginAcceptedInput {
+                accepted_input: actual,
+            } if actual == accepted_input
         ));
         assert!(matches!(
             failed,
-            InitialSemanticTranscriptEntryPayload::TurnFailed { turn } if turn == turn_id(1)
+            InitialSemanticTranscriptEntryPayload::TurnFailed { turn: actual } if actual == turn
         ));
     }
 }
