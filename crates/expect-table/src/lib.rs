@@ -14,16 +14,18 @@
 //! (`x, y`) stays one cell and keeps its sibling columns, because a real
 //! field boundary — `identifier:` (never `::`) or the closing brace — is
 //! recognizable ahead of the comma. A map value degrades the same way: a
-//! comma ends the entry only when a map-entry boundary — the next `key:`
-//! region or the map's closing brace — follows, so a comma-printing
-//! custom value keeps its key/value association, sibling entries keep
-//! parsing, and entry sorting still applies over intact entries. Inside
-//! tuples, lists, and sets no such signal exists, so every depth-zero
-//! comma separates items and a comma-printing custom leaf splits there.
-//! A hostile leaf whose text itself mimics the boundary grammar may
-//! still split: `foo, bar: baz` inside a struct, or a map value printing
-//! `x: y, z: w` — which splits a phantom entry, sorted with the rest —
-//! are best-effort observed behavior, not promises. Field names using non-ASCII XID-continue characters
+//! comma ends the entry only when a map-entry boundary — the next key
+//! region reaching its `": "` colon-space separator, or the map's
+//! closing brace — follows, so a comma-printing custom value keeps its
+//! key/value association, sibling entries keep parsing, and entry
+//! sorting still applies over intact entries. Inside tuples, lists, and
+//! sets no such signal exists, so every depth-zero comma separates items
+//! and a comma-printing custom leaf splits there. A hostile leaf whose
+//! text itself mimics the boundary grammar may still split: `foo, bar:
+//! baz` inside a struct, a map value printing `x: y, z: w` — which
+//! splits a phantom entry, sorted with the rest — or a custom map key
+//! whose own text contains `": "`, indistinguishable from the key/value
+//! separator, are best-effort observed behavior, not promises. Field names using non-ASCII XID-continue characters
 //! that are not alphanumeric — combining marks such as in `x́` — stop the
 //! field grammar and degrade the row to the single `value` column: full
 //! Unicode XID tables would require a dependency this zero-dependency
@@ -60,10 +62,16 @@
 //!   quotes-kept as `""`, never as an empty cell a missing field could be
 //!   confused with. Raw control characters — reachable only through
 //!   custom `Debug` output — are escaped `escape_debug`-style, so one
-//!   logical row is always one physical line.
+//!   logical row is always one physical line. An unterminated literal —
+//!   custom `Debug` output opening a quote it never closes — is not a
+//!   literal: it degrades verbatim, quotes kept, never quote-stripped.
 //! - Braced map `Debug` output (`{1: "a"}`) parses entry by entry, and
 //!   set output (`{"a", "b"}` — entries without `: `) likewise; a braced
 //!   region following neither grammar degrades to one verbatim atom.
+//!   Keys split from values only at the `": "` colon-space separator
+//!   compact `DebugMap` output emits, so atomic key text with interior
+//!   colons (an `Ipv6Addr` key renders `{2001:db8::1: 10}`) stays whole
+//!   and an `Ipv6Addr` set stays a set.
 //!   Entries render in sorted-by-rendered-text order — maps by key text
 //!   (value text tie-breaking), sets by entry text — not iteration
 //!   order: a deliberate normalization so `HashMap`- and

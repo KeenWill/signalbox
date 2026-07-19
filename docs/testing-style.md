@@ -210,14 +210,18 @@ assert!(matches!(end, AttemptEnd::WithoutStop { disposition: actual }
     if actual == disposition));
 
 // Good: the retained cause is read back from the observed value and
-// displayed where a reviewer can see it (rule 12).
+// displayed where a reviewer can see it (rule 12). The helper emits one
+// #[derive(Debug)] row struct per end — field names are the column
+// headers — rendered through the shared crate (rule 12).
 expect![[r#"
-    family             | disposition | retained cause
-    ------------------ | ----------- | -------------------
-    without stop       | Lost        | -
-    after cancellation | Cancelled   | interrupt command 1
+    ┌────────────────────┬─────────────┬─────────────────────┐
+    │ family             │ disposition │ retained_cause      │
+    ├────────────────────┼─────────────┼─────────────────────┤
+    │ without stop       │ Lost        │ -                   │
+    │ after cancellation │ Cancelled   │ interrupt command 1 │
+    └────────────────────┴─────────────┴─────────────────────┘
 "#]]
-.assert_eq(&attempt_end_family_table(&ends));
+.assert_eq(&table(attempt_end_family_rows(&ends)));
 ```
 
 ## Failure messages

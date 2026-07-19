@@ -815,6 +815,59 @@ fn hash_set_cells_render_in_sorted_entry_order() {
     .assert_eq(&table([Holds { set, count: 4 }]));
 }
 
+/// A map key whose own `Debug` text contains colons — an `Ipv6Addr` —
+/// stays whole: only the `": "` colon-space separator compact `DebugMap`
+/// emits splits key from value, so every entry keeps its association and
+/// `HashMap` entries still render in sorted-by-key order.
+#[test]
+fn map_keys_with_interior_colons_keep_their_associations() {
+    use std::collections::HashMap;
+    use std::net::Ipv6Addr;
+
+    #[derive(Debug)]
+    struct Holds {
+        map: HashMap<Ipv6Addr, u8>,
+        count: u8,
+    }
+
+    let map: HashMap<Ipv6Addr, u8> = HashMap::from([
+        ("2001:db8::1".parse().unwrap(), 10),
+        ("2001:db8::2".parse().unwrap(), 20),
+    ]);
+    expect![[r#"
+        ┌────────────────────────────────────┬───────┐
+        │ map                                │ count │
+        ├────────────────────────────────────┼───────┤
+        │ {2001:db8::1: 10, 2001:db8::2: 20} │     4 │
+        └────────────────────────────────────┴───────┘
+    "#]]
+    .assert_eq(&table([Holds { map, count: 4 }]));
+}
+
+/// Custom `Debug` output opening a quote it never closes renders
+/// verbatim — `"secret`, quotes kept — never quote-stripped as `secret`:
+/// an unterminated literal is not a literal, so the region degrades to
+/// its verbatim atom (the crate's degradation contract).
+#[test]
+fn unterminated_quote_from_custom_debug_renders_verbatim() {
+    struct Leaky;
+
+    impl std::fmt::Debug for Leaky {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "\"secret")
+        }
+    }
+
+    expect![[r#"
+        ┌─────────┐
+        │ value   │
+        ├─────────┤
+        │ "secret │
+        └─────────┘
+    "#]]
+    .assert_eq(&table([Leaky]));
+}
+
 /// A map value with custom `Debug` output printing a bare comma
 /// (`10, 11`) stays within its own entry — the comma is not followed by
 /// a map-entry boundary — so each key keeps its value, entries render in

@@ -7,12 +7,20 @@
 //! parentheses, brackets, braces, best-effort angle brackets, and
 //! string/char literals with escapes), so a custom `Debug` impl renders
 //! verbatim — interior commas included — instead of derailing its neighbors.
+//! A literal whose terminator never arrives — custom `Debug` output only —
+//! is no literal at all: it degrades verbatim, quotes kept, rather than
+//! parsing as a complete literal whose presumed quotes rendering strips.
 //!
 //! Bare-braced regions are collection `Debug` output: `{k: v, …}` parses
-//! as a map and `{a, …}` as a set (its entries carry no `: `); a braced
-//! region following neither grammar degrades verbatim like any other
-//! unrecognized region. Entries keep parse order in the tree — rendering
-//! owns the sorted-entry normalization the crate docs state.
+//! as a map and `{a, …}` as a set; a braced region following neither
+//! grammar degrades verbatim like any other unrecognized region. The
+//! map/set discriminator is the `": "` colon-space separator compact
+//! `DebugMap` output puts between key and value: interior colons of
+//! atomic key or entry text — an `Ipv6Addr`'s `:` and `::`, a path's
+//! `::` — are never colon-space, so `{2001:db8::1: 10}` keeps its
+//! key/value association and a `HashSet<Ipv6Addr>` stays a set. Entries
+//! keep parse order in the tree — rendering owns the sorted-entry
+//! normalization the crate docs state.
 //!
 //! A depth-zero comma is context-sensitive. In a struct body it ends the
 //! current element only when what follows looks like the field grammar —
@@ -20,7 +28,7 @@
 //! marker, or the closing `}`; otherwise the comma came from a custom
 //! `Debug` leaf and belongs to the atom. In a map value it likewise ends
 //! the entry only when a map-entry boundary follows — a nonempty key
-//! region reaching a depth-zero `:` before any depth-zero comma or
+//! region reaching a depth-zero `": "` before any depth-zero comma or
 //! closer, or the map's closing `}` — so a comma-printing custom value
 //! stays inside its own entry and its neighbors keep their key/value
 //! associations; a value whose text itself mimics an entry (`x: y, z: w`)
@@ -96,13 +104,14 @@ enum Context {
     /// comma always separates items.
     ItemList,
     /// A map key inside `{ … }`: as [`Context::ItemList`], except a
-    /// depth-zero `:` (never the `::` of a path) also ends the element.
+    /// depth-zero `": "` colon-space separator (never an interior colon
+    /// of atomic key text) also ends the element.
     MapKey,
     /// A map value inside `{ … }`: a comma separates entries only when a
     /// map-entry boundary follows — a nonempty key region reaching a
-    /// depth-zero `:` before any depth-zero comma or closer, or the map's
-    /// closing `}` ([`Parser::comma_separates_map_entries`]); otherwise
-    /// it belongs to a degraded leaf.
+    /// depth-zero `": "` before any depth-zero comma or closer, or the
+    /// map's closing `}` ([`Parser::comma_separates_map_entries`]);
+    /// otherwise it belongs to a degraded leaf.
     MapValue,
 }
 
@@ -146,10 +155,16 @@ impl Parser<'_> {
         let start = self.pos;
         match self.peek() {
             None => Value::Atom(String::new()),
-            Some('"') => self.string_literal(),
+            Some('"') => match self.string_literal() {
+                Some(value) => value,
+                None => self.degrade(start, context),
+            },
             // A lifetime apostrophe (`'_`, `'a`) falls through to the
             // degraded-atom arm and stays plain token text.
-            Some('\'') if self.apostrophe_opens_char_literal() => self.char_literal(),
+            Some('\'') if self.apostrophe_opens_char_literal() => match self.char_literal() {
+                Some(value) => value,
+                None => self.degrade(start, context),
+            },
             Some('(') => match self.items(')') {
                 Some(items) => Value::Tuple { name: None, items },
                 None => self.degrade(start, context),
@@ -333,10 +348,10 @@ impl Parser<'_> {
         }
     }
 
-    /// One map key: a value ending at a depth-zero `:` (never the `::`
-    /// of a path, which belongs to a degraded leaf). Returns `None` —
-    /// the region was not a map after all — when no such boundary
-    /// follows, leaving the scanner wherever the caller resets it.
+    /// One map key: a value ending at a depth-zero `": "` colon-space
+    /// separator. Returns `None` — the region was not a map after all —
+    /// when no such boundary follows, leaving the scanner wherever the
+    /// caller resets it.
     fn map_key(&mut self) -> Option<Value> {
         self.skip_whitespace();
         let start = self.pos;
@@ -352,10 +367,12 @@ impl Parser<'_> {
         (key != Value::Atom(String::new())).then_some(key)
     }
 
-    /// Whether the scanner sits on a map entry's `:` — one colon, not a
-    /// `::` path separator.
+    /// Whether the scanner sits on a map entry's key/value separator —
+    /// the `": "` colon-space compact `DebugMap` output emits. Interior
+    /// colons of atomic key text (an IPv6 address's `:` and `::`, a
+    /// path's `::`) are never colon-space, so they cannot end a key.
     fn scanner_on_entry_colon(&self) -> bool {
-        self.rest().starts_with(':') && !self.rest().starts_with("::")
+        self.rest().starts_with(": ")
     }
 
     /// Comma-separated entries after a set's `{`. Returns `None` when
@@ -449,12 +466,14 @@ impl Parser<'_> {
     /// [`Parser::comma_separates_struct_fields`]. It does when what
     /// follows (after whitespace) is the map's closing `}` or an
     /// entry-boundary shape: a nonempty key region reaching a depth-zero
-    /// `:` (never the `::` of a path) before any depth-zero comma or
-    /// closer. The lookahead is bounded by that comma or closer; string
-    /// and char literals skip escape-aware so their interior colons
-    /// cannot fake a boundary. Anything else means a custom `Debug`
-    /// value printed the comma, and it belongs to the current entry's
-    /// atom.
+    /// `": "` colon-space separator before any depth-zero comma or
+    /// closer. An interior colon of atomic key text (an IPv6 address, a
+    /// `::` path) is never colon-space and stays in the key region; the
+    /// lookahead is bounded by the depth-zero comma or closer, and
+    /// string and char literals skip escape-aware so their interior
+    /// colons cannot fake a boundary. Anything else means a custom
+    /// `Debug` value printed the comma, and it belongs to the current
+    /// entry's atom.
     fn comma_separates_map_entries(&self) -> bool {
         let mut lookahead = Parser {
             text: self.text,
@@ -470,11 +489,11 @@ impl Parser<'_> {
             match next {
                 '"' => {
                     lookahead.bump();
-                    lookahead.literal_body('"');
+                    let _ = lookahead.literal_body('"');
                 }
                 '\'' if lookahead.apostrophe_opens_char_literal() => {
                     lookahead.bump();
-                    lookahead.literal_body('\'');
+                    let _ = lookahead.literal_body('\'');
                 }
                 '(' | '[' | '{' => {
                     depth += 1;
@@ -487,15 +506,11 @@ impl Parser<'_> {
                     depth -= 1;
                     lookahead.bump();
                 }
-                ':' if depth == 0 => {
-                    if lookahead.rest().starts_with("::") {
-                        lookahead.pos += 2;
-                    } else {
-                        // A `:` directly after the comma would make an
-                        // empty key; a real entry boundary has key text
-                        // ahead of its colon.
-                        return lookahead.pos > key_start;
-                    }
+                ':' if depth == 0 && lookahead.rest().starts_with(": ") => {
+                    // A `": "` directly after the comma would make an
+                    // empty key; a real entry boundary has key text
+                    // ahead of its colon-space.
+                    return lookahead.pos > key_start;
                 }
                 ',' if depth == 0 => return false,
                 _ => lookahead.bump(),
@@ -524,21 +539,26 @@ impl Parser<'_> {
         }
     }
 
-    /// `"…"` with `\`-escapes; an unterminated literal takes the rest.
-    fn string_literal(&mut self) -> Value {
+    /// `"…"` with `\`-escapes; `None` when the terminator never arrives.
+    fn string_literal(&mut self) -> Option<Value> {
         self.bump(); // opening quote
-        let body = self.literal_body('"');
-        Value::Str(body)
+        self.literal_body('"').map(Value::Str)
     }
 
-    /// `'…'` with `\`-escapes; an unterminated literal takes the rest.
-    fn char_literal(&mut self) -> Value {
+    /// `'…'` with `\`-escapes; `None` when the terminator never arrives.
+    fn char_literal(&mut self) -> Option<Value> {
         self.bump(); // opening quote
-        let body = self.literal_body('\'');
-        Value::Char(body)
+        self.literal_body('\'').map(Value::Char)
     }
 
-    fn literal_body(&mut self, terminator: char) -> String {
+    /// The escaped body up to `terminator`. Reaching EOF first returns
+    /// `None` — only a custom `Debug` impl can leave a literal
+    /// unterminated, and treating it as complete would strip presumed
+    /// quotes from text that never closed them; the caller degrades the
+    /// region to a verbatim atom instead. Either way the scanner ends
+    /// past the consumed text, which is what degraded scanning wants
+    /// when it skips a literal region.
+    fn literal_body(&mut self, terminator: char) -> Option<String> {
         let start = self.pos;
         while let Some(next) = self.peek() {
             if next == '\\' {
@@ -549,11 +569,11 @@ impl Parser<'_> {
             if next == terminator {
                 let body = self.text[start..self.pos].to_string();
                 self.bump();
-                return body;
+                return Some(body);
             }
             self.bump();
         }
-        self.text[start..].to_string()
+        None
     }
 
     /// Restarts at `start` and consumes one balanced element as an atom.
@@ -598,13 +618,13 @@ impl Parser<'_> {
             match next {
                 '"' => {
                     self.bump();
-                    self.literal_body('"');
+                    let _ = self.literal_body('"');
                 }
                 // A lifetime apostrophe (`'_`, `'a`) is plain token text;
                 // only a genuine char literal skips escape-aware.
                 '\'' if self.apostrophe_opens_char_literal() => {
                     self.bump();
-                    self.literal_body('\'');
+                    let _ = self.literal_body('\'');
                 }
                 '(' | '[' | '{' => {
                     depth += 1;
@@ -626,14 +646,16 @@ impl Parser<'_> {
                     angle_depth -= 1;
                     self.bump();
                 }
-                // A map key ends at a depth-zero entry colon; the `::` of
-                // a degraded path leaf stays in the atom.
-                ':' if depth == 0 && context == Context::MapKey => {
-                    if self.rest().starts_with("::") {
-                        self.pos += 2;
-                    } else {
-                        return;
-                    }
+                // A map key ends at the depth-zero `": "` colon-space
+                // separator compact `DebugMap` output emits; an interior
+                // colon of atomic key text (an IPv6 address's `:` and
+                // `::`, a `::` path) is never colon-space and stays in
+                // the atom.
+                ':' if depth == 0
+                    && context == Context::MapKey
+                    && self.rest().starts_with(": ") =>
+                {
+                    return;
                 }
                 ',' if depth == 0 => {
                     let separates = match context {
@@ -671,8 +693,9 @@ impl Parser<'_> {
     reason = "grammar fixtures are read only through their Debug derives"
 )]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::{BTreeMap, BTreeSet, HashSet};
     use std::marker::PhantomData;
+    use std::net::Ipv6Addr;
 
     use super::{Value, parse};
 
@@ -884,6 +907,40 @@ mod tests {
         );
     }
 
+    struct UnterminatedString;
+
+    impl std::fmt::Debug for UnterminatedString {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "\"secret")
+        }
+    }
+
+    /// Custom `Debug` output opening a quote it never closes is no
+    /// string literal: treating it as one would strip the presumed
+    /// quotes and render `secret`, silently altering the output. The
+    /// literal parser reports the missing terminator and the region
+    /// degrades to a verbatim atom instead.
+    #[test]
+    fn unterminated_string_literal_degrades_to_a_verbatim_atom() {
+        assert_eq!(parse(&format!("{UnterminatedString:?}")), atom("\"secret"));
+    }
+
+    struct UnterminatedChar;
+
+    impl std::fmt::Debug for UnterminatedChar {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "'\\x")
+        }
+    }
+
+    /// The char-literal mirror of the unterminated string: `'\x` opens
+    /// like an escape but never closes, so it degrades verbatim rather
+    /// than parsing as a quote-stripped char.
+    #[test]
+    fn unterminated_char_literal_degrades_to_a_verbatim_atom() {
+        assert_eq!(parse(&format!("{UnterminatedChar:?}")), atom("'\\x"));
+    }
+
     #[test]
     fn map_debug_output_parses_entry_by_entry() {
         let map = BTreeMap::from([(1, "one"), (2, "two")]);
@@ -907,6 +964,68 @@ mod tests {
                 Value::Str("a".to_string()),
                 Value::Str("b".to_string()),
             ])
+        );
+    }
+
+    /// Compact `DebugMap` output separates a key from its value with
+    /// `": "` — colon-space — and the interior colons of atomic key text
+    /// are never colon-space, so an `Ipv6Addr` key stays whole instead
+    /// of splitting at its first colon.
+    #[test]
+    fn map_key_with_interior_colons_stays_whole() {
+        let map = BTreeMap::from([("2001:db8::1".parse::<Ipv6Addr>().unwrap(), 10u8)]);
+        assert_eq!(format!("{map:?}"), "{2001:db8::1: 10}");
+
+        assert_eq!(
+            parse(&format!("{map:?}")),
+            Value::Map(vec![(atom("2001:db8::1"), atom("10"))])
+        );
+    }
+
+    /// Set entries carry no `": "` separator: interior colons alone (an
+    /// `Ipv6Addr` entry's `:` and `::`) do not make braced output a map,
+    /// so a `HashSet<Ipv6Addr>` classifies as a set.
+    #[test]
+    fn set_entries_with_interior_colons_stay_a_set() {
+        let singleton: HashSet<Ipv6Addr> = HashSet::from(["2001:db8::1".parse().unwrap()]);
+        assert_eq!(format!("{singleton:?}"), "{2001:db8::1}");
+        assert_eq!(
+            parse(&format!("{singleton:?}")),
+            Value::Set(vec![atom("2001:db8::1")])
+        );
+
+        let pair: BTreeSet<Ipv6Addr> = BTreeSet::from([
+            "2001:db8::1".parse().unwrap(),
+            "2001:db8::2".parse().unwrap(),
+        ]);
+        assert_eq!(format!("{pair:?}"), "{2001:db8::1, 2001:db8::2}");
+        assert_eq!(
+            parse(&format!("{pair:?}")),
+            Value::Set(vec![atom("2001:db8::1"), atom("2001:db8::2")])
+        );
+    }
+
+    #[derive(PartialEq, Eq, PartialOrd, Ord)]
+    struct ColonSpaceKey;
+
+    impl std::fmt::Debug for ColonSpaceKey {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "k: v")
+        }
+    }
+
+    /// A custom key whose own text contains `": "` is indistinguishable
+    /// from the key/value separator compact `DebugMap` emits: the key
+    /// splits there, best-effort. This pins observed behavior; it is not
+    /// a promise (see the crate docs).
+    #[test]
+    fn custom_key_containing_colon_space_splits_best_effort() {
+        let map = BTreeMap::from([(ColonSpaceKey, 1u8)]);
+        assert_eq!(format!("{map:?}"), "{k: v: 1}");
+
+        assert_eq!(
+            parse(&format!("{map:?}")),
+            Value::Map(vec![(atom("k"), atom("v: 1"))])
         );
     }
 
