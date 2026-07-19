@@ -6,12 +6,12 @@
 //! snapshot, and offers only prefix-preserving append derivation from an
 //! already-resolved snapshot.
 //!
-//! These are pure domain values, not lifecycle or commit authority. The later
-//! turn aggregate must establish entry existence and eligibility, derive a
-//! starting lineage with its frontier, correlate a call with its turn and
-//! attempt, and commit every new entry, snapshot, disposition, and lifecycle
-//! fact atomically. Persistence rehydration also remains a separate validated
-//! boundary.
+//! These are pure domain values, not lifecycle or commit authority. The
+//! accepted-input scheduling seam establishes entry existence and
+//! eligibility when it reconstructs or prepares a start. Later call
+//! preparation must separately correlate a call with its turn and attempt.
+//! Persistence commits every new entry, snapshot, disposition, and lifecycle
+//! fact atomically.
 
 #![cfg_attr(
     not(test),
@@ -151,6 +151,62 @@ impl SemanticTranscriptEntryRef {
 pub struct ResolvedContextFrontierSnapshot {
     frontier: ContextFrontier,
     ordered_entries: Box<[SemanticTranscriptEntryRef]>,
+}
+
+/// Complete checked values supplied for one stored context snapshot.
+///
+/// This input cannot independently construct a resolved snapshot. The
+/// scheduling reconstitution seam validates complete membership together with
+/// every semantic entry and lifecycle correlation that authorizes a start.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedContextFrontierReconstitutionInput {
+    owning_session: SessionId,
+    snapshot: ContextFrontierId,
+    ordered_entries: Vec<SemanticTranscriptEntryRef>,
+}
+
+impl ResolvedContextFrontierReconstitutionInput {
+    /// Supplies one snapshot's complete stored identity and membership.
+    pub fn new(
+        owning_session: SessionId,
+        snapshot: ContextFrontierId,
+        ordered_entries: Vec<SemanticTranscriptEntryRef>,
+    ) -> Self {
+        Self {
+            owning_session,
+            snapshot,
+            ordered_entries,
+        }
+    }
+
+    /// Returns the stored owning session.
+    pub const fn owning_session(&self) -> SessionId {
+        self.owning_session
+    }
+
+    /// Returns the stored session-scoped snapshot identity.
+    pub const fn snapshot(&self) -> ContextFrontierId {
+        self.snapshot
+    }
+
+    /// Returns the complete stored ordered membership.
+    pub fn ordered_entries(&self) -> &[SemanticTranscriptEntryRef] {
+        &self.ordered_entries
+    }
+
+    #[allow(
+        dead_code,
+        reason = "checked scheduling reconstitution consumes this inert input"
+    )]
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        SessionId,
+        ContextFrontierId,
+        Vec<SemanticTranscriptEntryRef>,
+    ) {
+        (self.owning_session, self.snapshot, self.ordered_entries)
+    }
 }
 
 impl ResolvedContextFrontierSnapshot {

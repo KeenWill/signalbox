@@ -17,9 +17,11 @@ mod model_call;
 mod provider_evidence;
 mod queue_order;
 mod replace_session_defaults;
+mod semantic_entry;
 mod session;
 mod submit_input;
 mod turn_attempt;
+mod turn_eligibility;
 mod turn_lifecycle;
 mod user_content;
 
@@ -38,8 +40,8 @@ pub use configuration::{
     VersionCheckedConfigurationRequest, VersionedSessionConfigurationDefaults,
 };
 pub use context_frontier::{
-    ContextFrontier, ContextFrontierId, ResolvedContextFrontierSnapshot, SemanticTranscriptEntryId,
-    SemanticTranscriptEntryRef,
+    ContextFrontier, ContextFrontierId, ResolvedContextFrontierReconstitutionInput,
+    ResolvedContextFrontierSnapshot, SemanticTranscriptEntryId, SemanticTranscriptEntryRef,
 };
 pub use delivery_request::{DeliveryRequest, PerInputConfigurationChoices};
 pub use model_call::{
@@ -62,6 +64,10 @@ pub use replace_session_defaults::{
     ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult,
     ReplaceSessionDefaultsSessionNotFound, ReplaceSessionDefaultsVersionExhausted,
 };
+pub use semantic_entry::{
+    InitialSemanticTranscriptEntryPayload, SemanticTranscriptEntry,
+    SemanticTranscriptEntryReconstitutionInput,
+};
 pub use session::{
     CreateSession, CreateSessionAppliedResult, CreateSessionPreparationError,
     CreateSessionPreparationFailure, CreateSessionReconstitutionError,
@@ -82,6 +88,15 @@ pub use turn_attempt::{
     FatalMismatchStopDisposition, ProviderTargetMismatchFailureKind,
     ProviderTargetMismatchFailureRef, TurnAttemptStopCauseUnionError, TurnAttemptStopCauses,
     UnstoppedAttemptDisposition,
+};
+pub use turn_eligibility::{
+    AcceptedInputEligibilityError, AcceptedInputEligibilityFailure,
+    AcceptedInputSchedulingProjection, AcceptedInputSchedulingReconstitutionError,
+    AcceptedInputSchedulingReconstitutionFailure, AcceptedInputSchedulingReconstitutionInput,
+    AcceptedInputTurnActivationIdentities, AcceptedInputTurnSchedulingProjection,
+    AcceptedInputTurnSchedulingRecord, AcceptedInputTurnSchedulingRecordState,
+    AcceptedInputTurnSchedulingStatus, ActivatedAcceptedInputTurn,
+    PreparedAcceptedInputTurnActivation, PreparedTurnAttemptReconstitutionInput,
 };
 pub use turn_lifecycle::{
     AcceptedInputStartingLineage, AcceptedInputTurnStart, ActiveTurnPhase,

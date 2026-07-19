@@ -726,8 +726,8 @@ pub enum AcceptedInputStartingLineage {
 }
 
 pub struct AcceptedInputTurnStart { /* private */ }
-// sealed: no public or crate-wide producer yet; the later eligibility
-// transition supplies the module-local trusted producer
+// sealed: checked scheduling reconstitution and live eligibility are the only
+// producers
 impl AcceptedInputTurnStart {
     // accessors: lineage(), frontier()
 }
@@ -788,6 +788,204 @@ pub enum TurnDisposition {
     Failed,
     Cancelled { cause: AppliedInterruptProof },
     ReconciliationRequired { marker: ReconciliationMarker },
+}
+```
+
+## domain: turn_eligibility
+
+```rust
+pub enum AcceptedInputTurnSchedulingRecordState {
+    Queued,
+    Active {
+        starting_lineage: AcceptedInputStartingLineage,
+        starting_frontier: ContextFrontierId,
+        current_attempt: PreparedTurnAttemptReconstitutionInput,
+    },
+    TerminalFailed {
+        starting_lineage: AcceptedInputStartingLineage,
+        starting_frontier: ContextFrontierId,
+        terminal_frontier: ContextFrontierId,
+    },
+}
+
+pub struct PreparedTurnAttemptReconstitutionInput { /* private */ }
+impl PreparedTurnAttemptReconstitutionInput {
+    pub const fn new(
+        owning_turn: TurnId,
+        attempt: TurnAttemptId,
+        state: CurrentTurnAttemptState,
+    ) -> Self;
+    // accessors: owning_turn(), attempt(), state()
+}
+
+pub struct AcceptedInputTurnSchedulingRecord { /* private */ }
+impl AcceptedInputTurnSchedulingRecord {
+    pub fn new(
+        stored_session: SessionId,
+        turn: TurnId,
+        accepted_input_session: SessionId,
+        accepted_input: AcceptedInputLifecycle,
+        queue_session: SessionId,
+        queue_turn: TurnId,
+        order: AcceptedInputQueueOrder,
+        origin_configuration: OriginConfiguration,
+        state: AcceptedInputTurnSchedulingRecordState,
+    ) -> Self;
+    // accessors: stored_session(), turn(), accepted_input_session(),
+    // accepted_input(), queue_session(), queue_turn(), order(),
+    // origin_configuration(), state()
+}
+
+pub struct AcceptedInputSchedulingReconstitutionInput { /* private */ }
+impl AcceptedInputSchedulingReconstitutionInput {
+    pub fn new(
+        session: Session,
+        turns: Vec<AcceptedInputTurnSchedulingRecord>,
+        semantic_entries: Vec<SemanticTranscriptEntryReconstitutionInput>,
+        snapshots: Vec<ResolvedContextFrontierReconstitutionInput>,
+    ) -> Self;
+    pub fn reconstitute(self)
+        -> Result<
+            AcceptedInputSchedulingProjection,
+            AcceptedInputSchedulingReconstitutionError,
+        >;
+    // accessors: session(), turns(), semantic_entries(), snapshots()
+}
+
+pub enum AcceptedInputSchedulingReconstitutionFailure {
+    UnsupportedSessionAncestry,
+    TurnSessionMismatch { turn: TurnId },
+    AcceptedInputSessionMismatch { turn: TurnId },
+    QueueSessionMismatch { turn: TurnId },
+    QueueTurnMismatch { turn: TurnId },
+    AcceptedInputOriginMismatch { turn: TurnId },
+    DuplicateAcceptedInput { accepted_input: AcceptedInputId },
+    InvalidQueueOrder { error: AcceptedInputQueueOrderError },
+    SemanticEntrySourceSessionMismatch { entry: SemanticTranscriptEntryId },
+    DuplicateSemanticEntry { entry: SemanticTranscriptEntryRef },
+    SemanticEntrySubjectMissing { entry: SemanticTranscriptEntryId },
+    SemanticEntryStateMismatch { entry: SemanticTranscriptEntryId },
+    DuplicateSemanticEntryForSubject { entry: SemanticTranscriptEntryId },
+    MissingOriginEntry { turn: TurnId },
+    MissingFailureEntry { turn: TurnId },
+    CurrentAttemptOwnershipMismatch { turn: TurnId, attempt: TurnAttemptId },
+    UnsupportedCurrentAttemptState { turn: TurnId, attempt: TurnAttemptId },
+    DuplicateCurrentAttempt { attempt: TurnAttemptId },
+    SnapshotOwningSessionMismatch { snapshot: ContextFrontierId },
+    DuplicateSnapshot { snapshot: ContextFrontierId },
+    InvalidSnapshotMembership { snapshot: ContextFrontierId },
+    SnapshotEntryMissing {
+        snapshot: ContextFrontierId,
+        entry: SemanticTranscriptEntryRef,
+    },
+    StartingSnapshotMissing { turn: TurnId },
+    TerminalSnapshotMissing { turn: TurnId },
+    InvalidLifecycleOrder { turn: TurnId },
+    StartingLineageMismatch {
+        turn: TurnId,
+        expected: AcceptedInputStartingLineage,
+        actual: AcceptedInputStartingLineage,
+    },
+    StartingFrontierMismatch { turn: TurnId },
+    TerminalFrontierMismatch { turn: TurnId },
+    UnreferencedSnapshot { snapshot: ContextFrontierId },
+}
+
+pub struct AcceptedInputSchedulingReconstitutionError { /* private */ }
+// sealed: Err of AcceptedInputSchedulingReconstitutionInput::reconstitute
+impl AcceptedInputSchedulingReconstitutionError {
+    pub fn into_parts(
+        self,
+    ) -> (
+        AcceptedInputSchedulingReconstitutionInput,
+        AcceptedInputSchedulingReconstitutionFailure,
+    );
+    // accessors: input(), failure()
+}
+
+pub enum AcceptedInputTurnSchedulingStatus {
+    Queued,
+    Active,
+    TerminalFailed,
+}
+
+pub struct AcceptedInputTurnSchedulingProjection { /* private */ }
+// sealed: AcceptedInputSchedulingReconstitutionInput::reconstitute
+impl AcceptedInputTurnSchedulingProjection {
+    // accessors: session(), turn(), accepted_input(), order(),
+    // origin_configuration(), status(), start(), active_phase(),
+    // failed_terminal_frontier()
+}
+
+pub struct AcceptedInputSchedulingProjection { /* private */ }
+// sealed: AcceptedInputSchedulingReconstitutionInput::reconstitute
+impl AcceptedInputSchedulingProjection {
+    pub fn turns(
+        &self,
+    ) -> impl ExactSizeIterator<Item = &AcceptedInputTurnSchedulingProjection>;
+    pub fn turn(
+        &self,
+        turn: TurnId,
+    ) -> Option<&AcceptedInputTurnSchedulingProjection>;
+    pub fn active_turn(&self) -> Option<&AcceptedInputTurnSchedulingProjection>;
+    pub fn earliest_queued_turn(&self)
+        -> Option<&AcceptedInputTurnSchedulingProjection>;
+    pub fn prepare_earliest_queued_activation(
+        self,
+        identities: AcceptedInputTurnActivationIdentities,
+    ) -> Result<PreparedAcceptedInputTurnActivation, AcceptedInputEligibilityError>;
+    // accessors: session()
+}
+
+pub struct AcceptedInputTurnActivationIdentities { /* private */ }
+impl AcceptedInputTurnActivationIdentities {
+    pub const fn new(
+        origin_entry: SemanticTranscriptEntryId,
+        starting_frontier: ContextFrontierId,
+        initial_attempt: TurnAttemptId,
+    ) -> Self;
+    // accessors: origin_entry(), starting_frontier(), initial_attempt()
+}
+
+pub struct ActivatedAcceptedInputTurn { /* private */ }
+// sealed: PreparedAcceptedInputTurnActivation
+impl ActivatedAcceptedInputTurn {
+    // accessors: session(), turn(), accepted_input(), order(), configuration(),
+    // start(), phase()
+}
+
+pub struct PreparedAcceptedInputTurnActivation { /* private */ }
+// sealed: AcceptedInputSchedulingProjection::prepare_earliest_queued_activation
+impl PreparedAcceptedInputTurnActivation {
+    pub fn into_parts(
+        self,
+    ) -> (
+        ActivatedAcceptedInputTurn,
+        SemanticTranscriptEntry,
+        ResolvedContextFrontierSnapshot,
+    );
+    // accessors: turn(), origin_entry(), starting_snapshot(), start()
+}
+
+pub enum AcceptedInputEligibilityFailure {
+    ActiveTurnPresent { turn: TurnId },
+    NoQueuedTurn,
+    OriginEntryIdentityAlreadyExists,
+    StartingFrontierIdentityAlreadyExists,
+    InitialAttemptIdentityAlreadyExists,
+}
+
+pub struct AcceptedInputEligibilityError { /* private */ }
+// sealed: Err of prepare_earliest_queued_activation
+impl AcceptedInputEligibilityError {
+    pub fn into_parts(
+        self,
+    ) -> (
+        AcceptedInputSchedulingProjection,
+        AcceptedInputTurnActivationIdentities,
+        AcceptedInputEligibilityFailure,
+    );
+    // accessors: projection(), identities(), failure()
 }
 ```
 
@@ -967,6 +1165,17 @@ impl SemanticTranscriptEntryRef {
     // accessors: source_session(), entry()
 }
 
+pub struct ResolvedContextFrontierReconstitutionInput { /* private */ }
+// inert input: only the complete scheduling reconstitution seam can consume it
+impl ResolvedContextFrontierReconstitutionInput {
+    pub fn new(
+        owning_session: SessionId,
+        snapshot: ContextFrontierId,
+        ordered_entries: Vec<SemanticTranscriptEntryRef>,
+    ) -> Self;
+    // accessors: owning_session(), snapshot(), ordered_entries()
+}
+
 pub struct ResolvedContextFrontierSnapshot { /* private */ }
 // sealed: crate-private try_from_candidate and derive_appending_candidate,
 // reserved for later eligibility and call-preparation slices
@@ -981,6 +1190,33 @@ impl ResolvedContextFrontierSnapshot {
 }
 // identity equality (Eq) and semantic-content equality are deliberately
 // separate comparisons
+```
+
+## domain: semantic_entry
+
+```rust
+pub enum InitialSemanticTranscriptEntryPayload {
+    OriginAcceptedInput { accepted_input: AcceptedInputId },
+    TurnFailed { turn: TurnId },
+}
+
+pub struct SemanticTranscriptEntry { /* private */ }
+// sealed: checked scheduling reconstitution and live eligibility are the only
+// producers
+impl SemanticTranscriptEntry {
+    // accessors: identity(), source_session(), payload(), reference()
+}
+
+pub struct SemanticTranscriptEntryReconstitutionInput { /* private */ }
+// inert input: cannot independently construct SemanticTranscriptEntry
+impl SemanticTranscriptEntryReconstitutionInput {
+    pub const fn new(
+        identity: SemanticTranscriptEntryId,
+        source_session: SessionId,
+        payload: InitialSemanticTranscriptEntryPayload,
+    ) -> Self;
+    // accessors: identity(), source_session(), payload()
+}
 ```
 
 ## domain: provider_evidence
@@ -1372,14 +1608,16 @@ impl<Generator: SubmitInputIdGenerator, Transaction: SubmitInputTransaction>
 | domain: submit_input | 11 |
 | domain: queue_order | 5 (+1 free fn) |
 | domain: turn_lifecycle | 10 |
+| domain: turn_eligibility | 14 |
 | domain: turn_attempt | 13 |
 | domain: model_call | 7 |
-| domain: context_frontier | 5 |
+| domain: context_frontier | 6 |
+| domain: semantic_entry | 3 |
 | domain: provider_evidence | 5 |
 | domain: applied_interrupt | 2 |
 | domain: fatal_mismatch | 0 |
 | domain: replace_session_defaults | 13 |
-| **signalbox-domain total** | **129 (+1 free fn)** |
+| **signalbox-domain total** | **147 (+1 free fn)** |
 | application: create_session | 8 (incl. 2 traits) |
 | application: load_session | 2 (incl. 1 trait) |
 | application: replace_session_defaults | 4 (incl. 1 trait) |
