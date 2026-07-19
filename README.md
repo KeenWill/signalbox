@@ -1,20 +1,35 @@
 # Signalbox
 
-Signalbox is an independently designed, personal LLM session platform for
-durable, resumable work across machines and interfaces. An always-on central hub
-will coordinate conversation state, model calls, approvals, tools, and outbound
-execution runners while preserving enough provenance to explain and recover
-accepted work.
+Signalbox is a personal, self-hosted platform for durable LLM-assisted work —
+your own always-on agent and chat hub rather than an account on someone else's
+product. One central hub owns your sessions and keeps them alive across
+restarts, disconnects, and device switches; terminal, web, macOS, and iOS
+clients connect to it from anywhere, and runners you operate execute tools on
+your own machines.
 
-> **Status:** design and foundation phase. This repository currently contains
-> architectural framing, development policy, Rust workspace scaffolding, and the
-> first domain types, not a usable product. The first domain terminology and
-> lifecycle foundation is accepted; APIs, protocols, storage models, and
-> implementation details are not yet stable.
+What it is being built to do:
 
-Intended product surfaces include a central hub, remote runners, shared
-protocols and tool infrastructure, a terminal client, a web client, and native
-macOS and iOS clients.
+- **Sessions you can shape.** Steer a running turn mid-flight, fork a
+  conversation from any earlier point, and delegate work into sub-sessions.
+- **Tools where the work lives.** Outbound-connected runners execute tools on
+  your workstations, servers, and sandboxes — the machine that holds the files,
+  not necessarily the one you are typing on.
+- **Approvals you can inspect.** Risky tool use waits for an explicit decision
+  bound to exactly the action requested.
+- **Honest reliability.** Reconnecting never presents a draft as final;
+  interrupted work is recorded as what actually happened, ambiguity included,
+  with provenance for who or what caused each change.
+
+The [vision](docs/vision.md) and [target model](docs/target-model.md) describe
+the purpose, deployment shape, and destination in full; the target model details
+these capabilities directionally — accepted records decide them — and several
+(fork selection, delegation) remain [open decisions](docs/open-questions.md).
+
+> **Status:** design and foundation phase, not yet a usable product. The initial
+> domain and persistence slices exist behind accepted decisions — session
+> creation and loading, defaults replacement, durable input acceptance — with
+> turn activation next; provider adapters, runners, and the clients are
+> milestones ahead, and APIs, protocols, and storage details are not yet stable.
 
 ```text
  Terminal       Web       macOS / iOS
@@ -37,6 +52,7 @@ boundaries and important qualifications behind this sketch.
 ## Design documents
 
 - [Vision](docs/vision.md)
+- [Target model](docs/target-model.md)
 - [Architecture](docs/architecture.md)
 - [Glossary](docs/glossary.md)
 - [Scenarios](docs/scenarios.md)
