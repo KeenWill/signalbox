@@ -497,29 +497,37 @@ mod tests {
     }
 
     /// Ordinary work accepted at the given ordinal; its turn seed derives
-    /// from that one knob (`docs/testing-style.md`, rule 4).
+    /// from that one knob, decorrelated (`docs/testing-style.md`, rule 4).
     fn accepted_ordinary(acceptance: u64) -> AcceptedInputQueueWork {
         AcceptedInputQueueWork::new(
             session_id(100),
-            turn_id(u128::from(acceptance)),
+            decorrelated_turn(acceptance),
             AcceptedInputQueueOrder::ordinary(nth_position(acceptance)),
         )
     }
 
     /// Interrupt work accepted at the given ordinal, immediately after the
-    /// exact predecessor fixture; its turn seed derives from that one knob.
+    /// exact predecessor fixture; its turn seed derives from that one knob,
+    /// decorrelated (`docs/testing-style.md`, rule 4).
     fn accepted_interrupt(
         acceptance: u64,
         predecessor: AcceptedInputQueueWork,
     ) -> AcceptedInputQueueWork {
         AcceptedInputQueueWork::new(
             session_id(100),
-            turn_id(u128::from(acceptance)),
+            decorrelated_turn(acceptance),
             AcceptedInputQueueOrder::interrupt_immediately_after(
                 nth_position(acceptance),
                 predecessor.turn(),
             ),
         )
+    }
+
+    /// A turn identity seed descending as the acceptance ordinal ascends, so
+    /// identity order and acceptance order disagree by construction and a
+    /// derivation ordering by identity cannot accidentally pass.
+    fn decorrelated_turn(acceptance: u64) -> TurnId {
+        turn_id(u128::from(u64::MAX - acceptance))
     }
 
     fn nth_position(ordinal: u64) -> SessionInputPosition {
