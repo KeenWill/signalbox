@@ -559,15 +559,21 @@ mod tests {
         assert_eq!(service.into_parts().1.observed.len(), 1);
     }
 
-    /// S01 / INV-012: every closed recorded result shape passes through
-    /// unchanged without application preparation or translation.
+    /// S01 / INV-012: a recorded applied result passes through unchanged
+    /// without application preparation or translation.
     #[test]
-    fn s01_inv012_recorded_applied_and_rejected_results_pass_through() {
+    fn s01_inv012_recorded_applied_result_passes_through() {
         assert_recorded_result_passes_through(applied_result(
             &request(1),
             accepted_input_id(4),
             turn_id(5),
         ));
+    }
+
+    /// S01 / INV-012: every closed rejected result shape passes through
+    /// unchanged without application preparation or translation.
+    #[test]
+    fn s01_inv012_recorded_rejected_results_pass_through() {
         assert_recorded_result_passes_through(SubmitInputResult::Rejected(
             SubmitInputRejectedResult::SessionNotFound {
                 session: session_id(2),
