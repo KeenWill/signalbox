@@ -570,6 +570,44 @@ BEGIN
             END IF;
             matching_records := 0;
         END IF;
+
+        IF matching_records = 0
+           AND NEW.rejection_kind IN (
+               'session_defaults_version_mismatch',
+               'unknown_model_alias',
+               'acceptance_position_exhausted'
+           )
+           AND NEW.delivery_kind IN (
+               'after_current_turn',
+               'next_safe_point'
+           )
+        THEN
+            SELECT count(*)
+              INTO matching_records
+              FROM turn_lifecycle AS turn
+              JOIN queued_input_origin AS queued
+                ON queued.turn_id = turn.turn_id
+               AND queued.session_id = turn.session_id
+               AND queued.accepted_input_id = turn.origin_accepted_input_id
+              JOIN accepted_input AS accepted
+                ON accepted.accepted_input_id = queued.accepted_input_id
+               AND accepted.session_id = turn.session_id
+               AND accepted.origin_turn_id = turn.turn_id
+               AND accepted.disposition_kind = 'origin_of'
+             WHERE turn.turn_id = NEW.expected_active_turn_id
+               AND turn.session_id = NEW.result_session_id;
+
+            IF matching_records <> 1 THEN
+                RAISE EXCEPTION
+                    'submit-input rejection % has cross-wired source-turn evidence',
+                    NEW.command_id
+                    USING
+                        ERRCODE = '23503',
+                        CONSTRAINT =
+                            'submit_input_command_rejected_source_origin';
+            END IF;
+            matching_records := 0;
+        END IF;
     END IF;
 
     IF matching_records <> (
