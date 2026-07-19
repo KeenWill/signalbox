@@ -21,7 +21,8 @@ use signalbox_domain::{
     SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition, SteeringBinding,
     SubmitInput, SubmitInputAppliedResult, SubmitInputPreparationFailure,
     SubmitInputReconstitutionFailure, SubmitInputReconstitutionInput, SubmitInputRejectedResult,
-    SubmitInputResult, ToolRequestId, TurnAttemptId, TurnId, UserContent,
+    SubmitInputResult, SubmitInputTurnOriginReconstitutionInput, ToolRequestId, TurnAttemptId,
+    TurnId, UserContent,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -48,6 +49,8 @@ type StoredTurnOriginKey = (Uuid, Uuid);
 struct StoredTurnOriginLink {
     command_id: DurableCommandId,
     predecessor: Option<StoredTurnOriginKey>,
+    accepted_input: AcceptedInputId,
+    queue_order: AcceptedInputQueueOrder,
 }
 
 /// The committed outcome of handling one canonical input submission.
@@ -1781,7 +1784,7 @@ async fn load_from_connection(
 async fn load_related_turn_origin(
     connection: &mut PgConnection,
     row: &PgRow,
-) -> Result<Option<ReconstitutedSubmitInput>, SubmitInputRepositoryError> {
+) -> Result<Option<SubmitInputTurnOriginReconstitutionInput>, SubmitInputRepositoryError> {
     let Some(key) = related_turn_origin_key(row)? else {
         return Ok(None);
     };
@@ -1826,7 +1829,10 @@ fn related_turn_origin_key(
 async fn load_turn_origin_graph(
     connection: &mut PgConnection,
     roots: &BTreeSet<StoredTurnOriginKey>,
-) -> Result<BTreeMap<StoredTurnOriginKey, ReconstitutedSubmitInput>, SubmitInputRepositoryError> {
+) -> Result<
+    BTreeMap<StoredTurnOriginKey, SubmitInputTurnOriginReconstitutionInput>,
+    SubmitInputRepositoryError,
+> {
     if roots.is_empty() {
         return Ok(BTreeMap::new());
     }
@@ -1864,6 +1870,9 @@ async fn load_turn_origin_graph(
             current.session_id AS origin_session_id,
             current.turn_id AS origin_turn_id,
             accepted.accepting_command_id AS origin_command_id,
+            accepted.accepted_input_id AS origin_accepted_input_id,
+            queued.acceptance_position AS origin_acceptance_position,
+            queued.priority_kind AS origin_priority_kind,
             command.delivery_kind AS origin_delivery_kind,
             command.expected_active_turn_id AS origin_predecessor_turn_id
           FROM origin_turn AS current
@@ -1898,6 +1907,10 @@ async fn load_turn_origin_graph(
         let command_uuid: Uuid = required(&row, "origin_command_id")?;
         let command_id = durable_command_id_from_uuid(command_uuid)
             .map_err(|_| SubmitInputCorruption::Inconsistent("turn origin command identity"))?;
+        let accepted_input =
+            accepted_input_id_from_uuid(required(&row, "origin_accepted_input_id")?);
+        let queue_position = decode_position(&row, "origin_acceptance_position")?;
+        require_spelling(&row, "origin_priority_kind", "ordinary")?;
         let delivery_kind: String = required(&row, "origin_delivery_kind")?;
         let predecessor_turn: Option<Uuid> = row.try_get("origin_predecessor_turn_id")?;
         let predecessor = match (delivery_kind.as_str(), predecessor_turn) {
@@ -1920,6 +1933,8 @@ async fn load_turn_origin_graph(
                 StoredTurnOriginLink {
                     command_id,
                     predecessor,
+                    accepted_input,
+                    queue_order: AcceptedInputQueueOrder::ordinary(queue_position),
                 },
             )
             .is_some()
@@ -2004,7 +2019,19 @@ async fn load_turn_origin_graph(
         {
             return Err(SubmitInputCorruption::Inconsistent("turn origin correlation").into());
         }
-        decoded.insert(ready, origin);
+        decoded.insert(
+            ready,
+            SubmitInputTurnOriginReconstitutionInput::new(
+                origin,
+                AcceptedInputLifecycle::new(
+                    link.accepted_input,
+                    AcceptedInputDisposition::OriginOf(turn_id_from_uuid(ready.1)),
+                ),
+                session_id_from_uuid(ready.0),
+                turn_id_from_uuid(ready.1),
+                link.queue_order,
+            ),
+        );
     }
 
     Ok(decoded)
@@ -2013,7 +2040,7 @@ async fn load_turn_origin_graph(
 fn decode_complete(
     row: PgRow,
     command_id: DurableCommandId,
-    related_turn_origin: Option<ReconstitutedSubmitInput>,
+    related_turn_origin: Option<SubmitInputTurnOriginReconstitutionInput>,
 ) -> Result<ReconstitutedSubmitInput, SubmitInputRepositoryError> {
     require_spelling(&row, "registry_kind", SUBMIT_INPUT_KIND)?;
     require_version(&row, "registry_version", STORAGE_VERSION)?;
@@ -2174,7 +2201,7 @@ fn decode_applied_turn_origin(
     result_session: SessionId,
     result_accepted_input: AcceptedInputId,
     result_turn: TurnId,
-    predecessor_origin: Option<ReconstitutedSubmitInput>,
+    predecessor_origin: Option<SubmitInputTurnOriginReconstitutionInput>,
 ) -> Result<SubmitInputReconstitutionInput, SubmitInputRepositoryError> {
     let accepting_command_uuid: Uuid = required(row, "accepting_command_id")?;
     let accepting_command = durable_command_id_from_uuid(accepting_command_uuid)
@@ -2269,7 +2296,7 @@ fn decode_applied_pending_steering(
     result_session: SessionId,
     result_accepted_input: AcceptedInputId,
     result_source_turn: TurnId,
-    source_turn_origin: ReconstitutedSubmitInput,
+    source_turn_origin: SubmitInputTurnOriginReconstitutionInput,
 ) -> Result<SubmitInputReconstitutionInput, SubmitInputRepositoryError> {
     let accepting_command_uuid: Uuid = required(row, "accepting_command_id")?;
     let accepting_command = durable_command_id_from_uuid(accepting_command_uuid)
@@ -2315,7 +2342,7 @@ fn decode_rejected(
     command: SubmitInput,
     stored_actor: Actor,
     result_session: SessionId,
-    active_turn_origin: Option<ReconstitutedSubmitInput>,
+    active_turn_origin: Option<SubmitInputTurnOriginReconstitutionInput>,
     rejection_kind: &str,
     actual_turn: Option<Uuid>,
     expected_turn: Option<Uuid>,

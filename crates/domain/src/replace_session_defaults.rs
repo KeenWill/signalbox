@@ -654,7 +654,9 @@ mod tests {
         ReplaceSessionDefaultsReconstitutionInput, ReplaceSessionDefaultsRejectedResult,
         ReplaceSessionDefaultsResult,
     };
-    use crate::test_support::{command_id, direct, session_id, table};
+    use signalbox_expect_table::table;
+
+    use crate::test_support::{command_id, direct, session_id};
     use crate::{
         ModelSelectionRequest, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
         SessionCreationCause, SessionCreationProvenance, SessionReconstitutionInput,
@@ -968,40 +970,53 @@ mod tests {
             ReplaceSessionDefaultsReconstitutionFailure::StoredDefaultsMismatch
         );
 
+        /// One fail-closed perturbation and the typed failure it produced,
+        /// rendered as a snapshot row supplementing the targeted asserts
+        /// above (`docs/testing-style.md`, rules 10 and 12). The field names
+        /// are the rendered column headers.
+        #[derive(Debug)]
+        #[allow(
+            dead_code,
+            reason = "the table renderer reads every field through the Debug derive"
+        )]
+        struct PerturbedFactRow {
+            perturbed_stored_fact: &'static str,
+            failure: ReplaceSessionDefaultsReconstitutionFailure,
+        }
+
         expect![[r#"
-            perturbed stored fact              | failure
-            ---------------------------------- | ------------------------------
-            result session cross-wired         | ResultSessionMismatch
-            defaults owner cross-wired         | DefaultsSessionMismatch
-            result and installed versions torn | ResultVersionMismatch
-            installed version skips successor  | InstalledVersionIsNotSuccessor
-            stored replacement differs         | StoredDefaultsMismatch
+            ┌────────────────────────────────────┬────────────────────────────────┐
+            │ perturbed_stored_fact              │ failure                        │
+            ├────────────────────────────────────┼────────────────────────────────┤
+            │ result session cross-wired         │ ResultSessionMismatch          │
+            │ defaults owner cross-wired         │ DefaultsSessionMismatch        │
+            │ result and installed versions torn │ ResultVersionMismatch          │
+            │ installed version skips successor  │ InstalledVersionIsNotSuccessor │
+            │ stored replacement differs         │ StoredDefaultsMismatch         │
+            └────────────────────────────────────┴────────────────────────────────┘
         "#]]
-        .assert_eq(&table(
-            &["perturbed stored fact", "failure"],
-            &[
-                vec![
-                    "result session cross-wired".to_string(),
-                    format!("{cross_wired_result:?}"),
-                ],
-                vec![
-                    "defaults owner cross-wired".to_string(),
-                    format!("{cross_wired_defaults_owner:?}"),
-                ],
-                vec![
-                    "result and installed versions torn".to_string(),
-                    format!("{torn_result_version:?}"),
-                ],
-                vec![
-                    "installed version skips successor".to_string(),
-                    format!("{skipped_successor:?}"),
-                ],
-                vec![
-                    "stored replacement differs".to_string(),
-                    format!("{replaced_defaults:?}"),
-                ],
-            ],
-        ));
+        .assert_eq(&table([
+            PerturbedFactRow {
+                perturbed_stored_fact: "result session cross-wired",
+                failure: cross_wired_result,
+            },
+            PerturbedFactRow {
+                perturbed_stored_fact: "defaults owner cross-wired",
+                failure: cross_wired_defaults_owner,
+            },
+            PerturbedFactRow {
+                perturbed_stored_fact: "result and installed versions torn",
+                failure: torn_result_version,
+            },
+            PerturbedFactRow {
+                perturbed_stored_fact: "installed version skips successor",
+                failure: skipped_successor,
+            },
+            PerturbedFactRow {
+                perturbed_stored_fact: "stored replacement differs",
+                failure: replaced_defaults,
+            },
+        ]));
     }
 
     /// S01 / INV-002 / INV-012: each rejected record validates its command
