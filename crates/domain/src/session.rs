@@ -897,6 +897,7 @@ const fn test_frontier(value: u128) -> TranscriptFrontier {
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
+    use signalbox_expect_table::table;
 
     use super::{
         CreateSession, CreateSessionPreparationFailure, CreateSessionReconstitutionFailure,
@@ -904,7 +905,7 @@ mod tests {
         SessionReconstitutionFailure, SessionReconstitutionInput, TranscriptAncestry,
         test_frontier,
     };
-    use crate::test_support::{command_id, direct, session_id, table};
+    use crate::test_support::{command_id, direct, session_id};
     use crate::{
         ModelSelectionRequest, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
         VersionedSessionConfigurationDefaults,
@@ -919,6 +920,16 @@ mod tests {
             SessionCreationCause::OwnerInitiated,
             TranscriptAncestry::None,
         )
+    }
+
+    #[derive(Debug)]
+    #[allow(
+        dead_code,
+        reason = "the table renderer reads every field through the Debug derive"
+    )]
+    struct ReconstitutionFailureRow {
+        perturbed_stored_fact: &'static str,
+        failure: String,
     }
 
     fn matching_session_input(
@@ -1190,34 +1201,33 @@ mod tests {
         );
 
         expect![[r#"
-            perturbed stored fact            | failure
-            -------------------------------- | ------------------------------
-            requested session differs        | RequestedSessionMismatch
-            defaults pointer owned elsewhere | CurrentDefaultsSessionMismatch
-            defaults record owned elsewhere  | DefaultsSessionMismatch
-            pointer and record versions torn | CurrentDefaultsVersionMismatch
+            ┌──────────────────────────────────┬────────────────────────────────┐
+            │ perturbed_stored_fact            │ failure                        │
+            ├──────────────────────────────────┼────────────────────────────────┤
+            │ requested session differs        │ RequestedSessionMismatch       │
+            │ defaults pointer owned elsewhere │ CurrentDefaultsSessionMismatch │
+            │ defaults record owned elsewhere  │ DefaultsSessionMismatch        │
+            │ pointer and record versions torn │ CurrentDefaultsVersionMismatch │
+            └──────────────────────────────────┴────────────────────────────────┘
         "#]]
-        .assert_eq(&table(
-            &["perturbed stored fact", "failure"],
-            &[
-                vec![
-                    "requested session differs".to_string(),
-                    format!("{requested_other_session:?}"),
-                ],
-                vec![
-                    "defaults pointer owned elsewhere".to_string(),
-                    format!("{pointer_owned_elsewhere:?}"),
-                ],
-                vec![
-                    "defaults record owned elsewhere".to_string(),
-                    format!("{defaults_owned_elsewhere:?}"),
-                ],
-                vec![
-                    "pointer and record versions torn".to_string(),
-                    format!("{pointer_and_record_versions_torn:?}"),
-                ],
-            ],
-        ));
+        .assert_eq(&table([
+            ReconstitutionFailureRow {
+                perturbed_stored_fact: "requested session differs",
+                failure: format!("{requested_other_session:?}"),
+            },
+            ReconstitutionFailureRow {
+                perturbed_stored_fact: "defaults pointer owned elsewhere",
+                failure: format!("{pointer_owned_elsewhere:?}"),
+            },
+            ReconstitutionFailureRow {
+                perturbed_stored_fact: "defaults record owned elsewhere",
+                failure: format!("{defaults_owned_elsewhere:?}"),
+            },
+            ReconstitutionFailureRow {
+                perturbed_stored_fact: "pointer and record versions torn",
+                failure: format!("{pointer_and_record_versions_torn:?}"),
+            },
+        ]));
     }
 
     /// S01 / INV-003: the creation payload couples the durable command
@@ -1556,43 +1566,42 @@ mod tests {
         );
 
         expect![[r#"
-            perturbed stored fact              | failure
-            ---------------------------------- | -----------------------------
-            result session cross-wired         | SessionResultMismatch
-            stored provenance replaced         | ProvenanceMismatch
-            single-source ancestry unvalidated | TranscriptAncestryUnavailable
-            defaults owner cross-wired         | DefaultsSessionMismatch
-            defaults version is not first      | DefaultsVersionIsNotFirst
-            stored defaults differ             | DefaultsMismatch
+            ┌────────────────────────────────────┬───────────────────────────────┐
+            │ perturbed_stored_fact              │ failure                       │
+            ├────────────────────────────────────┼───────────────────────────────┤
+            │ result session cross-wired         │ SessionResultMismatch         │
+            │ stored provenance replaced         │ ProvenanceMismatch            │
+            │ single-source ancestry unvalidated │ TranscriptAncestryUnavailable │
+            │ defaults owner cross-wired         │ DefaultsSessionMismatch       │
+            │ defaults version is not first      │ DefaultsVersionIsNotFirst     │
+            │ stored defaults differ             │ DefaultsMismatch              │
+            └────────────────────────────────────┴───────────────────────────────┘
         "#]]
-        .assert_eq(&table(
-            &["perturbed stored fact", "failure"],
-            &[
-                vec![
-                    "result session cross-wired".to_string(),
-                    format!("{cross_wired_result:?}"),
-                ],
-                vec![
-                    "stored provenance replaced".to_string(),
-                    format!("{replaced_provenance:?}"),
-                ],
-                vec![
-                    "single-source ancestry unvalidated".to_string(),
-                    format!("{unvalidated_ancestry:?}"),
-                ],
-                vec![
-                    "defaults owner cross-wired".to_string(),
-                    format!("{cross_wired_defaults_owner:?}"),
-                ],
-                vec![
-                    "defaults version is not first".to_string(),
-                    format!("{later_defaults_version:?}"),
-                ],
-                vec![
-                    "stored defaults differ".to_string(),
-                    format!("{replaced_defaults:?}"),
-                ],
-            ],
-        ));
+        .assert_eq(&table([
+            ReconstitutionFailureRow {
+                perturbed_stored_fact: "result session cross-wired",
+                failure: format!("{cross_wired_result:?}"),
+            },
+            ReconstitutionFailureRow {
+                perturbed_stored_fact: "stored provenance replaced",
+                failure: format!("{replaced_provenance:?}"),
+            },
+            ReconstitutionFailureRow {
+                perturbed_stored_fact: "single-source ancestry unvalidated",
+                failure: format!("{unvalidated_ancestry:?}"),
+            },
+            ReconstitutionFailureRow {
+                perturbed_stored_fact: "defaults owner cross-wired",
+                failure: format!("{cross_wired_defaults_owner:?}"),
+            },
+            ReconstitutionFailureRow {
+                perturbed_stored_fact: "defaults version is not first",
+                failure: format!("{later_defaults_version:?}"),
+            },
+            ReconstitutionFailureRow {
+                perturbed_stored_fact: "stored defaults differ",
+                failure: format!("{replaced_defaults:?}"),
+            },
+        ]));
     }
 }

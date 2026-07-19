@@ -454,8 +454,8 @@ mod tests {
         AcceptedInputQueueOrder, AcceptedInputQueueOrderError, AcceptedInputQueuePriority,
         AcceptedInputQueueWork, SessionInputPosition, derive_accepted_input_total_order,
     };
-    use crate::{SessionId, TurnId};
     use crate::test_support::{session_id, turn_id};
+    use crate::{SessionId, TurnId};
 
     fn positions(count: usize) -> Vec<SessionInputPosition> {
         let mut positions = Vec::with_capacity(count);

@@ -723,13 +723,24 @@ impl CurrentTurnAttemptTransitionError {
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
+    use signalbox_expect_table::table;
 
     use super::*;
     use crate::applied_interrupt::test_applied_interrupt_proof;
     use crate::test_support::{
-        command_id, model_call_id, provider_target_evidence_id as evidence, table,
+        command_id, model_call_id, provider_target_evidence_id as evidence,
         turn_attempt_id as attempt_id, turn_id,
     };
+
+    #[derive(Clone, Debug)]
+    #[allow(
+        dead_code,
+        reason = "the table renderer reads every field through the Debug derive"
+    )]
+    struct AttemptEndRow {
+        attempted_end: String,
+        outcome: String,
+    }
 
     fn proof(value: u128) -> AppliedInterruptProof {
         test_applied_interrupt_proof(command_id(value), turn_id(100))
@@ -919,28 +930,30 @@ mod tests {
         .concat();
 
         expect![[r#"
-            attempted end                                       | outcome
-            --------------------------------------------------- | --------
-            without stop: TurnCompleted                         | rejected
-            without stop: TurnRefused                           | rejected
-            without stop: YieldedToDurableWait                  | rejected
-            without stop: KnownFailure                          | ends
-            without stop: Lost                                  | ends
-            without stop: Ambiguous                             | rejected
-            after cancellation (exact proof): TurnCompleted     | rejected
-            after cancellation (exact proof): TurnRefused       | rejected
-            after cancellation (exact proof): KnownFailure      | rejected
-            after cancellation (exact proof): Lost              | rejected
-            after cancellation (exact proof): Cancelled         | ends
-            after cancellation (exact proof): Ambiguous         | rejected
-            after fatal mismatch (no interrupt): KnownFailure   | ends
-            after fatal mismatch (no interrupt): Lost           | ends
-            after fatal mismatch (no interrupt): Ambiguous      | rejected
-            after fatal mismatch (with interrupt): KnownFailure | rejected
-            after fatal mismatch (with interrupt): Lost         | rejected
-            after fatal mismatch (with interrupt): Ambiguous    | rejected
+            ┌─────────────────────────────────────────────────────┬──────────┐
+            │ attempted_end                                       │ outcome  │
+            ├─────────────────────────────────────────────────────┼──────────┤
+            │ without stop: TurnCompleted                         │ rejected │
+            │ without stop: TurnRefused                           │ rejected │
+            │ without stop: YieldedToDurableWait                  │ rejected │
+            │ without stop: KnownFailure                          │ ends     │
+            │ without stop: Lost                                  │ ends     │
+            │ without stop: Ambiguous                             │ rejected │
+            │ after cancellation (exact proof): TurnCompleted     │ rejected │
+            │ after cancellation (exact proof): TurnRefused       │ rejected │
+            │ after cancellation (exact proof): KnownFailure      │ rejected │
+            │ after cancellation (exact proof): Lost              │ rejected │
+            │ after cancellation (exact proof): Cancelled         │ ends     │
+            │ after cancellation (exact proof): Ambiguous         │ rejected │
+            │ after fatal mismatch (no interrupt): KnownFailure   │ ends     │
+            │ after fatal mismatch (no interrupt): Lost           │ ends     │
+            │ after fatal mismatch (no interrupt): Ambiguous      │ rejected │
+            │ after fatal mismatch (with interrupt): KnownFailure │ rejected │
+            │ after fatal mismatch (with interrupt): Lost         │ rejected │
+            │ after fatal mismatch (with interrupt): Ambiguous    │ rejected │
+            └─────────────────────────────────────────────────────┴──────────┘
         "#]]
-        .assert_eq(&table(&["attempted end", "outcome"], &rows));
+        .assert_eq(&table(&rows));
     }
 
     /// S02 / S04 / S06 / S07 / S10 / S23 / INV-004 / INV-006: Running may
@@ -970,28 +983,30 @@ mod tests {
         .concat();
 
         expect![[r#"
-            attempted end                                       | outcome
-            --------------------------------------------------- | -------
-            without stop: TurnCompleted                         | ends
-            without stop: TurnRefused                           | ends
-            without stop: YieldedToDurableWait                  | ends
-            without stop: KnownFailure                          | ends
-            without stop: Lost                                  | ends
-            without stop: Ambiguous                             | ends
-            after cancellation: TurnCompleted                   | ends
-            after cancellation: TurnRefused                     | ends
-            after cancellation: KnownFailure                    | ends
-            after cancellation: Lost                            | ends
-            after cancellation: Cancelled                       | ends
-            after cancellation: Ambiguous                       | ends
-            after fatal mismatch (no interrupt): KnownFailure   | ends
-            after fatal mismatch (no interrupt): Lost           | ends
-            after fatal mismatch (no interrupt): Ambiguous      | ends
-            after fatal mismatch (with interrupt): KnownFailure | ends
-            after fatal mismatch (with interrupt): Lost         | ends
-            after fatal mismatch (with interrupt): Ambiguous    | ends
+            ┌─────────────────────────────────────────────────────┬─────────┐
+            │ attempted_end                                       │ outcome │
+            ├─────────────────────────────────────────────────────┼─────────┤
+            │ without stop: TurnCompleted                         │ ends    │
+            │ without stop: TurnRefused                           │ ends    │
+            │ without stop: YieldedToDurableWait                  │ ends    │
+            │ without stop: KnownFailure                          │ ends    │
+            │ without stop: Lost                                  │ ends    │
+            │ without stop: Ambiguous                             │ ends    │
+            │ after cancellation: TurnCompleted                   │ ends    │
+            │ after cancellation: TurnRefused                     │ ends    │
+            │ after cancellation: KnownFailure                    │ ends    │
+            │ after cancellation: Lost                            │ ends    │
+            │ after cancellation: Cancelled                       │ ends    │
+            │ after cancellation: Ambiguous                       │ ends    │
+            │ after fatal mismatch (no interrupt): KnownFailure   │ ends    │
+            │ after fatal mismatch (no interrupt): Lost           │ ends    │
+            │ after fatal mismatch (no interrupt): Ambiguous      │ ends    │
+            │ after fatal mismatch (with interrupt): KnownFailure │ ends    │
+            │ after fatal mismatch (with interrupt): Lost         │ ends    │
+            │ after fatal mismatch (with interrupt): Ambiguous    │ ends    │
+            └─────────────────────────────────────────────────────┴─────────┘
         "#]]
-        .assert_eq(&table(&["attempted end", "outcome"], &rows));
+        .assert_eq(&table(&rows));
     }
 
     /// S04 / S07 / S23 / INV-006 / INV-029 / INV-034: CancellationOnly ends
@@ -1036,31 +1051,33 @@ mod tests {
         .concat();
 
         expect![[r#"
-            attempted end                                       | outcome
-            --------------------------------------------------- | --------
-            after cancellation (exact proof): TurnCompleted     | ends
-            after cancellation (exact proof): TurnRefused       | ends
-            after cancellation (exact proof): KnownFailure      | ends
-            after cancellation (exact proof): Lost              | ends
-            after cancellation (exact proof): Cancelled         | ends
-            after cancellation (exact proof): Ambiguous         | ends
-            after cancellation (different proof): TurnCompleted | rejected
-            after cancellation (different proof): TurnRefused   | rejected
-            after cancellation (different proof): KnownFailure  | rejected
-            after cancellation (different proof): Lost          | rejected
-            after cancellation (different proof): Cancelled     | rejected
-            after cancellation (different proof): Ambiguous     | rejected
-            without stop: TurnCompleted                         | rejected
-            without stop: TurnRefused                           | rejected
-            without stop: YieldedToDurableWait                  | rejected
-            without stop: KnownFailure                          | rejected
-            without stop: Lost                                  | rejected
-            without stop: Ambiguous                             | rejected
-            after fatal mismatch: KnownFailure                  | rejected
-            after fatal mismatch: Lost                          | rejected
-            after fatal mismatch: Ambiguous                     | rejected
+            ┌─────────────────────────────────────────────────────┬──────────┐
+            │ attempted_end                                       │ outcome  │
+            ├─────────────────────────────────────────────────────┼──────────┤
+            │ after cancellation (exact proof): TurnCompleted     │ ends     │
+            │ after cancellation (exact proof): TurnRefused       │ ends     │
+            │ after cancellation (exact proof): KnownFailure      │ ends     │
+            │ after cancellation (exact proof): Lost              │ ends     │
+            │ after cancellation (exact proof): Cancelled         │ ends     │
+            │ after cancellation (exact proof): Ambiguous         │ ends     │
+            │ after cancellation (different proof): TurnCompleted │ rejected │
+            │ after cancellation (different proof): TurnRefused   │ rejected │
+            │ after cancellation (different proof): KnownFailure  │ rejected │
+            │ after cancellation (different proof): Lost          │ rejected │
+            │ after cancellation (different proof): Cancelled     │ rejected │
+            │ after cancellation (different proof): Ambiguous     │ rejected │
+            │ without stop: TurnCompleted                         │ rejected │
+            │ without stop: TurnRefused                           │ rejected │
+            │ without stop: YieldedToDurableWait                  │ rejected │
+            │ without stop: KnownFailure                          │ rejected │
+            │ without stop: Lost                                  │ rejected │
+            │ without stop: Ambiguous                             │ rejected │
+            │ after fatal mismatch: KnownFailure                  │ rejected │
+            │ after fatal mismatch: Lost                          │ rejected │
+            │ after fatal mismatch: Ambiguous                     │ rejected │
+            └─────────────────────────────────────────────────────┴──────────┘
         "#]]
-        .assert_eq(&table(&["attempted end", "outcome"], &rows));
+        .assert_eq(&table(&rows));
     }
 
     /// S04 / S06 / S21 / S23 / INV-006 / INV-034: FatalMismatch ends only as
@@ -1129,44 +1146,44 @@ mod tests {
         .concat();
 
         expect![[r#"
-            attempted end                                      | outcome
-            -------------------------------------------------- | --------
-            matching causes (no interrupt): KnownFailure       | ends
-            matching causes (no interrupt): Lost               | ends
-            matching causes (no interrupt): Ambiguous          | ends
-            matching complete causes: KnownFailure             | ends
-            matching complete causes: Lost                     | ends
-            matching complete causes: Ambiguous                | ends
-            subset causes: KnownFailure                        | rejected
-            subset causes: Lost                                | rejected
-            subset causes: Ambiguous                           | rejected
-            without stop: TurnCompleted                        | rejected
-            without stop: TurnRefused                          | rejected
-            without stop: YieldedToDurableWait                 | rejected
-            without stop: KnownFailure                         | rejected
-            without stop: Lost                                 | rejected
-            without stop: Ambiguous                            | rejected
-            after cancellation (retained proof): TurnCompleted | rejected
-            after cancellation (retained proof): TurnRefused   | rejected
-            after cancellation (retained proof): KnownFailure  | rejected
-            after cancellation (retained proof): Lost          | rejected
-            after cancellation (retained proof): Cancelled     | rejected
-            after cancellation (retained proof): Ambiguous     | rejected
+            ┌────────────────────────────────────────────────────┬──────────┐
+            │ attempted_end                                      │ outcome  │
+            ├────────────────────────────────────────────────────┼──────────┤
+            │ matching causes (no interrupt): KnownFailure       │ ends     │
+            │ matching causes (no interrupt): Lost               │ ends     │
+            │ matching causes (no interrupt): Ambiguous          │ ends     │
+            │ matching complete causes: KnownFailure             │ ends     │
+            │ matching complete causes: Lost                     │ ends     │
+            │ matching complete causes: Ambiguous                │ ends     │
+            │ subset causes: KnownFailure                        │ rejected │
+            │ subset causes: Lost                                │ rejected │
+            │ subset causes: Ambiguous                           │ rejected │
+            │ without stop: TurnCompleted                        │ rejected │
+            │ without stop: TurnRefused                          │ rejected │
+            │ without stop: YieldedToDurableWait                 │ rejected │
+            │ without stop: KnownFailure                         │ rejected │
+            │ without stop: Lost                                 │ rejected │
+            │ without stop: Ambiguous                            │ rejected │
+            │ after cancellation (retained proof): TurnCompleted │ rejected │
+            │ after cancellation (retained proof): TurnRefused   │ rejected │
+            │ after cancellation (retained proof): KnownFailure  │ rejected │
+            │ after cancellation (retained proof): Lost          │ rejected │
+            │ after cancellation (retained proof): Cancelled     │ rejected │
+            │ after cancellation (retained proof): Ambiguous     │ rejected │
+            └────────────────────────────────────────────────────┴──────────┘
         "#]]
-        .assert_eq(&table(&["attempted end", "outcome"], &rows));
+        .assert_eq(&table(&rows));
     }
 
     /// Renders `without stop` rows for ending fresh copies of one source
     /// attempt through every unstopped disposition; every outcome also
     /// asserts that the source identity is preserved unchanged.
-    fn without_stop_rows(source: &dyn Fn() -> CurrentTurnAttempt) -> Vec<Vec<String>> {
+    fn without_stop_rows(source: &dyn Fn() -> CurrentTurnAttempt) -> Vec<AttemptEndRow> {
         all_unstopped_dispositions()
             .into_iter()
-            .map(|disposition| {
-                vec![
-                    format!("without stop: {disposition:?}"),
-                    end_outcome(source().id(), source().end_without_stop(disposition)),
-                ]
+            .map(|disposition| AttemptEndRow {
+                attempted_end: format!("without stop: {disposition:?}"),
+                outcome: end_outcome(source().id(), source().end_without_stop(disposition)),
             })
             .collect()
     }
@@ -1176,17 +1193,15 @@ mod tests {
         source: &dyn Fn() -> CurrentTurnAttempt,
         label: &str,
         cause: AppliedInterruptProof,
-    ) -> Vec<Vec<String>> {
+    ) -> Vec<AttemptEndRow> {
         all_cancellation_dispositions()
             .into_iter()
-            .map(|disposition| {
-                vec![
-                    format!("{label}: {disposition:?}"),
-                    end_outcome(
-                        source().id(),
-                        source().end_after_cancellation(cause, disposition),
-                    ),
-                ]
+            .map(|disposition| AttemptEndRow {
+                attempted_end: format!("{label}: {disposition:?}"),
+                outcome: end_outcome(
+                    source().id(),
+                    source().end_after_cancellation(cause, disposition),
+                ),
             })
             .collect()
     }
@@ -1196,17 +1211,15 @@ mod tests {
         source: &dyn Fn() -> CurrentTurnAttempt,
         label: &str,
         causes: &FatalMismatchStopCauses,
-    ) -> Vec<Vec<String>> {
+    ) -> Vec<AttemptEndRow> {
         all_fatal_dispositions()
             .into_iter()
-            .map(|disposition| {
-                vec![
-                    format!("{label}: {disposition:?}"),
-                    end_outcome(
-                        source().id(),
-                        source().end_after_fatal_mismatch(causes.clone(), disposition),
-                    ),
-                ]
+            .map(|disposition| AttemptEndRow {
+                attempted_end: format!("{label}: {disposition:?}"),
+                outcome: end_outcome(
+                    source().id(),
+                    source().end_after_fatal_mismatch(causes.clone(), disposition),
+                ),
             })
             .collect()
     }
@@ -1392,23 +1405,25 @@ mod tests {
         ];
 
         expect![[r#"
-            family               | disposition          | retained cause
-            -------------------- | -------------------- | ---------------------------------
-            without stop         | TurnCompleted        | -
-            without stop         | TurnRefused          | -
-            without stop         | YieldedToDurableWait | -
-            without stop         | KnownFailure         | -
-            without stop         | Lost                 | -
-            without stop         | Ambiguous            | -
-            after cancellation   | TurnCompleted        | interrupt command 1
-            after cancellation   | TurnRefused          | interrupt command 1
-            after cancellation   | KnownFailure         | interrupt command 1
-            after cancellation   | Lost                 | interrupt command 1
-            after cancellation   | Cancelled            | interrupt command 1
-            after cancellation   | Ambiguous            | interrupt command 1
-            after fatal mismatch | KnownFailure         | 1 failure(s), interrupt command 1
-            after fatal mismatch | Lost                 | 1 failure(s), interrupt command 1
-            after fatal mismatch | Ambiguous            | 1 failure(s), interrupt command 1
+            ┌──────────────────────┬──────────────────────┬───────────────────────────────────┐
+            │ family               │ disposition          │ retained_cause                    │
+            ├──────────────────────┼──────────────────────┼───────────────────────────────────┤
+            │ without stop         │ TurnCompleted        │ -                                 │
+            │ without stop         │ TurnRefused          │ -                                 │
+            │ without stop         │ YieldedToDurableWait │ -                                 │
+            │ without stop         │ KnownFailure         │ -                                 │
+            │ without stop         │ Lost                 │ -                                 │
+            │ without stop         │ Ambiguous            │ -                                 │
+            │ after cancellation   │ TurnCompleted        │ interrupt command 1               │
+            │ after cancellation   │ TurnRefused          │ interrupt command 1               │
+            │ after cancellation   │ KnownFailure         │ interrupt command 1               │
+            │ after cancellation   │ Lost                 │ interrupt command 1               │
+            │ after cancellation   │ Cancelled            │ interrupt command 1               │
+            │ after cancellation   │ Ambiguous            │ interrupt command 1               │
+            │ after fatal mismatch │ KnownFailure         │ 1 failure(s), interrupt command 1 │
+            │ after fatal mismatch │ Lost                 │ 1 failure(s), interrupt command 1 │
+            │ after fatal mismatch │ Ambiguous            │ 1 failure(s), interrupt command 1 │
+            └──────────────────────┴──────────────────────┴───────────────────────────────────┘
         "#]]
         .assert_eq(&attempt_end_family_table(&ends));
     }
@@ -1417,19 +1432,33 @@ mod tests {
     /// cause, read back from the observed values
     /// (`docs/testing-style.md`, rule 12).
     fn attempt_end_family_table(ends: &[AttemptEnd]) -> String {
-        let rows: Vec<Vec<String>> = ends
+        #[derive(Debug)]
+        #[allow(
+            dead_code,
+            reason = "the table renderer reads every field through the Debug derive"
+        )]
+        struct Row {
+            family: &'static str,
+            disposition: String,
+            retained_cause: String,
+        }
+
+        let rows: Vec<Row> = ends
             .iter()
             .map(|end| match end {
-                AttemptEnd::WithoutStop { disposition } => vec![
-                    "without stop".to_string(),
-                    format!("{disposition:?}"),
-                    "-".to_string(),
-                ],
-                AttemptEnd::AfterCancellation { cause, disposition } => vec![
-                    "after cancellation".to_string(),
-                    format!("{disposition:?}"),
-                    format!("interrupt command {}", cause.command().as_uuid().as_u128()),
-                ],
+                AttemptEnd::WithoutStop { disposition } => Row {
+                    family: "without stop",
+                    disposition: format!("{disposition:?}"),
+                    retained_cause: "-".to_string(),
+                },
+                AttemptEnd::AfterCancellation { cause, disposition } => Row {
+                    family: "after cancellation",
+                    disposition: format!("{disposition:?}"),
+                    retained_cause: format!(
+                        "interrupt command {}",
+                        cause.command().as_uuid().as_u128()
+                    ),
+                },
                 AttemptEnd::AfterFatalMismatch {
                     causes,
                     disposition,
@@ -1440,16 +1469,19 @@ mod tests {
                             format!("interrupt command {}", proof.command().as_uuid().as_u128())
                         }
                     };
-                    vec![
-                        "after fatal mismatch".to_string(),
-                        format!("{disposition:?}"),
-                        format!("{} failure(s), {interrupt}", causes.failures().len()),
-                    ]
+                    Row {
+                        family: "after fatal mismatch",
+                        disposition: format!("{disposition:?}"),
+                        retained_cause: format!(
+                            "{} failure(s), {interrupt}",
+                            causes.failures().len()
+                        ),
+                    }
                 }
             })
             .collect();
 
-        table(&["family", "disposition", "retained cause"], &rows)
+        table(rows)
     }
 
     /// INV-018: refusal remains representable without fatal stop and after a
