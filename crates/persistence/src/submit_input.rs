@@ -1300,6 +1300,7 @@ fn decode_rejected(
                     .ok_or(SubmitInputCorruption::Missing(
                         "result_current_defaults_version",
                     ))?,
+                    None,
                 ),
             )
         }
@@ -1345,6 +1346,7 @@ fn decode_rejected(
                     defaults_session,
                     defaults_version,
                     defaults,
+                    None,
                 ),
             )
         }
@@ -1367,6 +1369,7 @@ fn decode_rejected(
                     result_session,
                     decode_optional_position(last_position, "result_last_position")?
                         .ok_or(SubmitInputCorruption::Missing("result_last_position"))?,
+                    None,
                 ),
             )
         }
