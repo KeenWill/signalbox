@@ -632,7 +632,10 @@ mod tests {
         assert_eq!(ids.accepted_input_calls, 2);
         assert_eq!(ids.turn_calls, 2);
         assert_eq!(transaction.observed.len(), 2);
-        let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(applied)) = replay else {
+        let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
+            signalbox_domain::SubmitInputAppliedResult::TurnOrigin(applied),
+        )) = replay
+        else {
             panic!("recorded replay remains applied");
         };
         assert_eq!(applied.accepted_input(), winner_input);

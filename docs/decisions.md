@@ -42,6 +42,16 @@ An append-only, dated record of decisions below foundation weight, newest first.
 
 **Affects.** `crates/domain/src/turn_eligibility.rs`, its domain-spine declarations, and the ADR-0041 enforcement summary in `docs/invariants.md`. It adds no proof constructor, storage representation, wait phase, stop phase, or lifecycle transition.
 
+## 2026-07-19 — Authoritative occupied-slot SubmitInput preparation
+
+**Context.** ADR-0027 defines the terminal outcomes for input submitted while a turn owns the session slot, and ADR-0041 now provides one checked scheduling aggregate containing the active turn, its canonical origin, exact phase, current session, and validated acceptance tail. The existing domain boundary prepared only the no-active-turn state and could not safely correlate occupied-slot candidates.
+
+**Decision.** Add purpose-named preparation consuming that complete scheduling projection. Represent applied acceptance as the closed `TurnOrigin | PendingSteering` algebra: after-current input creates ordinary origin work with frozen configuration, while next-safe-point input creates a configuration-free steering binding to the exact active turn. Derive the next position only from the aggregate's validated tail and reject any new accepted-input or turn candidate that reuses the active origin's identity. Record active-slot presence and stale active targets as typed terminal results. Matching interrupt remains a nonclaiming preparation failure until interrupt application can construct its complete correlated authority. Defer stopping safe-point handling until `StopRequested` has a complete owner projection; that slice must add its ADR-0027 safe-point rejection and the matching-interrupt recorded rejections for cancellation-only stop and already-applied fatal-mismatch interrupt.
+
+**Rejected alternatives.** Independent session, active-turn, phase, and last-position arguments would allow cross-wired preparation. Nullable turn-origin fields would permit impossible applied shapes. Treating stale targets or active-slot presence as adapter errors would leave a committed command without its authoritative terminal meaning. Claiming matching interrupt before its transition boundary exists would violate the ratified milestone deferral.
+
+**Affects.** `crates/domain/src/{submit_input,turn_eligibility}.rs`, domain exports and spine, and live-preparation enforcement links for INV-007, INV-008, INV-012, INV-016, and INV-028. Existing vacant-slot persistence receives only mechanical exhaustive-match updates; occupied-slot replay, storage, interrupt application, steering consumption, lifecycle transition, and acknowledgement remain later slices.
+
 ## 2026-07-19 — Evidence-free active scheduling reconstitution
 
 **Context.** The accepted scheduling projection predates ADR-0041 and admitted only one prepared current attempt, while the refinement requires a validated active-origin-anchored acceptance tail and closes proof-bearing phases until their complete owner facts exist. Implementing that refinement must preserve the decision log's original record rather than retroactively rewriting it.

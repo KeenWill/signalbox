@@ -256,6 +256,12 @@ pub(crate) struct SessionAcceptanceTail {
     entries: Box<[SessionAcceptanceTailEntry]>,
 }
 
+impl SessionAcceptanceTail {
+    pub(crate) const fn observed_last_position(&self) -> SessionInputPosition {
+        self.observed_last_position
+    }
+}
+
 /// Complete checked values supplied for one accepted-input scheduling record.
 ///
 /// Repeated session and turn correlations retain independently stored facts so
@@ -794,6 +800,10 @@ impl AcceptedInputSchedulingProjection {
     /// Borrows the complete current-session snapshot.
     pub const fn session(&self) -> &Session {
         &self.session
+    }
+
+    pub(crate) const fn active_acceptance_tail(&self) -> Option<&SessionAcceptanceTail> {
+        self.active_acceptance_tail.as_ref()
     }
 
     /// Iterates over every turn in derived durable total order.
