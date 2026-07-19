@@ -12,7 +12,7 @@ The numbered rules are normative for new and modified tests; cite them by number
 
 3. **DAMP over DRY.** Duplication between tests is fine when it helps each test read on its own; extract only plumbing that is irrelevant to the behavior under test. ([Tests too DRY? Make them DAMP](https://testing.googleblog.com/2019/12/testing-on-toilet-tests-too-dry-make.html))
 
-4. **One meaningful knob per fixture.** Fixture constructors and builders carry canonical defaults; each test states only the values the behavior depends on, at the call site — never a helper taking five positional integers whose meanings live at the definition. Where a fixture also needs an identity seed, derive it from the one knob instead of adding a second free integer.
+4. **One meaningful knob per fixture.** Fixture constructors and builders carry canonical defaults; each test states only the values the behavior depends on, at the call site — never a helper taking five positional integers whose meanings live at the definition. Where a fixture also needs an identity seed, derive it from the one knob instead of adding a second free integer — decorrelated (for example, descending as the knob ascends), so an implementation reading identity where it should read the knob's value cannot accidentally pass. When the independence of two values is itself the behavior under test, the fixture takes both as named knobs.
 
 5. **A test that cares about a value states it.** State a value the test depends on explicitly even when the canonical default happens to match; a test's meaning must not depend on defaults defined elsewhere.
 
@@ -54,7 +54,8 @@ assert_eq!(
 The reader must know that `interrupt`'s trailing `1` re-encodes the first `ordinary` call's turn seed, and that `turn_id(3)` re-derives the interrupt's identity from another magic integer. The one-knob rewrite keeps a single meaningful parameter — the acceptance ordinal — and derives the identity seed from it:
 
 ```rust
-/// Ordinary work accepted at the given ordinal; its turn seed derives from it.
+/// Ordinary work accepted at the given ordinal; its turn seed derives from
+/// it, decorrelated per rule 4.
 fn accepted_ordinary(acceptance: u64) -> AcceptedInputQueueWork { /* … */ }
 
 /// Interrupt work accepted at the given ordinal, immediately after the
@@ -78,7 +79,7 @@ assert_eq!(
 );
 ```
 
-Each fixture call states exactly one acceptance ordinal — its identity seed derives from it — the interrupt relation names the predecessor fixture itself, and the expected order is spelled in fixture values, so the assertion cannot silently diverge from the setup.
+Each fixture call states exactly one acceptance ordinal — its identity seed derives from it, decorrelated so a derivation ordering by identity instead of acceptance cannot pass — the interrupt relation names the predecessor fixture itself, and the expected order is spelled in fixture values, so the assertion cannot silently diverge from the setup.
 
 Because this test is linked from an invariant enforcement column, the exact assert above is decisive and stays (rule 10). A snapshot may supplement it to make the derived shape reviewable at a glance (rules 9 and 12):
 
