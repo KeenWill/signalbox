@@ -8,7 +8,7 @@ The numbered rules are normative for new and modified tests; cite them by number
 
 1. **A test's body contains its whole story.** A reader determines what is verified, with which inputs, and why the expected result is correct from the test body alone: complete (everything needed to understand the result is present) and concise (nothing else is). ([Software Engineering at Google, ch. 12](https://abseil.io/resources/swe-book/html/ch12.html))
 
-2. **Tests are verified by inspection, not by tests of tests.** Test bodies are straight-line code: no loops, no conditionals, no computed expectations — hardcode the literal expected value. Logic that must exist moves into a helper, and a nontrivial helper gets its own tests. ([Don't put logic in tests](https://testing.googleblog.com/2014/07/testing-on-toilet-dont-put-logic-in.html))
+2. **Tests are verified by inspection, not by tests of tests.** Test bodies are straight-line code: no loops, no conditionals, and no expectation recalculated by logic mirroring the code under test. An expected value is a hardcoded literal or a value the fixture already states (rule 6). Logic that must exist moves into a helper, and a nontrivial helper gets its own tests. ([Don't put logic in tests](https://testing.googleblog.com/2014/07/testing-on-toilet-dont-put-logic-in.html))
 
 3. **DAMP over DRY.** Duplication between tests is fine when it helps each test read on its own; extract only plumbing that is irrelevant to the behavior under test. ([Tests too DRY? Make them DAMP](https://testing.googleblog.com/2019/12/testing-on-toilet-tests-too-dry-make.html))
 
@@ -32,7 +32,7 @@ Snapshot assertions use [`expect-test`](https://github.com/rust-analyzer/expect-
 
 11. **Never bless a diff you haven't read.** Review a snapshot update with the same care as a code change; the snapshot diff is the review surface.
 
-12. **Curate snapshots for the reader.** Deterministic ordering, relevant fields only, rendered from the observed value under test. A snapshot of everything asserts nothing and degenerates into a [change-detector test](https://testing.googleblog.com/2015/01/testing-on-toilet-change-detector-tests.html). Table-shaped output uses the shared `table` helper in the domain crate's `test_support` module (arriving with the expect-test adoption): pipe-separated, left-aligned, right-trimmed lines that stay byte-stable under re-blessing. Prior art for tables in expect tests: [expectable](https://github.com/janestreet/expectable).
+12. **Curate snapshots for the reader.** Deterministic ordering, relevant fields only, rendered from the observed value under test. A snapshot of everything asserts nothing and degenerates into a [change-detector test](https://testing.googleblog.com/2015/01/testing-on-toilet-change-detector-tests.html). Table-shaped output in domain unit tests uses the `table` helper in that crate's `test_support` module (arriving with the expect-test adoption): pipe-separated, left-aligned, right-trimmed lines that stay byte-stable under re-blessing. Another test crate's first table-shaped snapshot lifts that helper into test support it can import instead of hand-rolling a variant. Prior art for tables in expect tests: [expectable](https://github.com/janestreet/expectable).
 
 ## Example
 
