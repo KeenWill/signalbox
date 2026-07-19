@@ -2027,6 +2027,7 @@ async fn load_turn_origin_graph(
                     link.accepted_input,
                     AcceptedInputDisposition::OriginOf(turn_id_from_uuid(ready.1)),
                 ),
+                link.accepted_input,
                 session_id_from_uuid(ready.0),
                 turn_id_from_uuid(ready.1),
                 link.queue_order,

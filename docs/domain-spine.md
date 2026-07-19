@@ -574,9 +574,19 @@ impl SubmitInputTurnOriginReconstitutionInput {
     pub const fn new(
         receipt: ReconstitutedSubmitInput,
         lifecycle: AcceptedInputLifecycle,
+        queue_accepted_input: AcceptedInputId,
         queue_session: SessionId,
         queue_turn: TurnId,
         queue_order: AcceptedInputQueueOrder,
+    ) -> Self;
+    pub fn reclassified(
+        receipt: ReconstitutedSubmitInput,
+        lifecycle: AcceptedInputLifecycle,
+        queue_accepted_input: AcceptedInputId,
+        queue_session: SessionId,
+        queue_turn: TurnId,
+        queue_order: AcceptedInputQueueOrder,
+        source_terminal: AcceptedInputTurnSchedulingProjection,
     ) -> Self;
 }
 
