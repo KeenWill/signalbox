@@ -529,10 +529,6 @@ pub enum SubmitInputRejectedResult {
         expected_active_turn: TurnId,
         actual_active_turn: TurnId,
     },
-    SafePointUnavailableWhileStopping {
-        session: SessionId,
-        active_turn: TurnId,
-    },
     SessionDefaultsVersionMismatch {
         session: SessionId,
         expected: SessionConfigurationDefaultsVersion,
@@ -911,7 +907,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
         owning_turn: TurnId,
         current_attempt: TurnAttemptId,
     ) -> Self;
-    // accessors: owning_turn(), phase()
+    // accessor: owning_turn()
 }
 
 pub struct SessionAcceptanceTailEntryReconstitutionInput { /* private */ }
@@ -946,12 +942,13 @@ impl AcceptedInputTurnSchedulingRecord {
         queue_session: SessionId,
         queue_turn: TurnId,
         order: AcceptedInputQueueOrder,
+        origin_delivery: DeliveryRequest,
         origin_configuration: OriginConfiguration,
         state: AcceptedInputTurnSchedulingRecordState,
     ) -> Self;
     // accessors: stored_session(), turn(), accepted_input_session(),
     // accepted_input(), queue_session(), queue_turn(), order(),
-    // origin_configuration(), state()
+    // origin_delivery(), origin_configuration(), state()
 }
 
 pub struct AcceptedInputSchedulingReconstitutionInput { /* private */ }
@@ -979,6 +976,7 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
     QueueSessionMismatch { turn: TurnId },
     QueueTurnMismatch { turn: TurnId },
     AcceptedInputOriginMismatch { turn: TurnId },
+    OriginDeliveryMismatch { turn: TurnId },
     DuplicateAcceptedInput { accepted_input: AcceptedInputId },
     InvalidQueueOrder { error: AcceptedInputQueueOrderError },
     SemanticEntrySourceSessionMismatch { entry: SemanticTranscriptEntryId },
@@ -990,6 +988,10 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
     MissingFailureEntry { turn: TurnId },
     CurrentAttemptOwnershipMismatch { turn: TurnId, attempt: TurnAttemptId },
     DuplicateCurrentAttempt { attempt: TurnAttemptId },
+    ActivePhaseEvidenceMismatch {
+        turn: TurnId,
+        accepted_input: AcceptedInputId,
+    },
     MissingActiveAcceptanceTail { turn: TurnId },
     UnexpectedActiveAcceptanceTail,
     AcceptanceTailSessionMismatch {

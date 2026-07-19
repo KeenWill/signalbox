@@ -189,6 +189,98 @@ async fn activate_prepared_turn(
     transaction.commit().await
 }
 
+async fn run_mixed_occupied_acceptances(
+    repository: SubmitInputRepository,
+) -> Result<(Vec<u64>, u64, u64), Box<dyn Error>> {
+    let mut tasks = Vec::new();
+    for offset in 0..6_u128 {
+        let repository = repository.clone();
+        tasks.push(tokio::spawn(async move {
+            let delivery = if offset % 2 == 0 {
+                DeliveryRequest::AfterCurrentTurn {
+                    expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xa51)),
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                }
+            } else {
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xa51)),
+                }
+            };
+            repository
+                .handle(
+                    input_with_delivery(
+                        0x453 + offset,
+                        0x851,
+                        &format!("mixed occupied {offset}"),
+                        delivery,
+                    ),
+                    AcceptedInputId::from_uuid(Uuid::from_u128(0x952 + offset)),
+                    (offset % 2 == 0).then(|| TurnId::from_uuid(Uuid::from_u128(0xa52 + offset))),
+                )
+                .await
+        }));
+    }
+
+    let mut positions = Vec::new();
+    let mut turn_origins = 0_u64;
+    let mut pending_steering = 0_u64;
+    for task in tasks {
+        let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(applied)) =
+            task.await??
+        else {
+            panic!("each mixed occupied-slot submission must apply");
+        };
+        positions.push(applied.acceptance_position().as_u64());
+        match applied {
+            SubmitInputAppliedResult::TurnOrigin(_) => turn_origins += 1,
+            SubmitInputAppliedResult::PendingSteering(_) => pending_steering += 1,
+        }
+    }
+    positions.sort_unstable();
+    Ok((positions, turn_origins, pending_steering))
+}
+
+async fn record_stale_active_input(
+    repository: &SubmitInputRepository,
+    command_value: u128,
+    delivery: DeliveryRequest,
+    accepted_input: u128,
+    turn: Option<u128>,
+) -> Result<(SubmitInput, SubmitInputHandlingOutcome), SubmitInputRepositoryError> {
+    let command = input_with_delivery(command_value, 0x841, "stale active", delivery);
+    let outcome = repository
+        .handle(
+            command.clone(),
+            AcceptedInputId::from_uuid(Uuid::from_u128(accepted_input)),
+            turn.map(|value| TurnId::from_uuid(Uuid::from_u128(value))),
+        )
+        .await?;
+    Ok((command, outcome))
+}
+
+async fn active_origin_collision(
+    repository: &SubmitInputRepository,
+    pool: &PgPool,
+    command_value: u128,
+    delivery: DeliveryRequest,
+    turn: Option<u128>,
+) -> Result<(SubmitInputRepositoryError, i64), Box<dyn Error>> {
+    let command = input_with_delivery(command_value, 0x841, "colliding active origin", delivery);
+    let error = repository
+        .handle(
+            command,
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x941)),
+            turn.map(|value| TurnId::from_uuid(Uuid::from_u128(value))),
+        )
+        .await
+        .expect_err("new acceptance cannot reuse the active origin identity");
+    let claimed = sqlx::query_scalar("SELECT count(*) FROM durable_command WHERE command_id = $1")
+        .bind(Uuid::from_u128(command_value))
+        .fetch_one(pool)
+        .await?;
+    Ok((error, claimed))
+}
+
 fn prepared(
     command: u128,
     session: u128,
@@ -3280,7 +3372,8 @@ async fn s01_inv006_inv009_inv015_turn_storage_enforces_lifecycle_consistency()
 /// S01 / S03 / S08 / S09 / INV-002 / INV-007 / INV-008 / INV-009 / INV-012:
 /// occupied-slot After and NextSafePoint handling commits the exact distinct
 /// effects, checked replay survives a pool/repository restart, and the
-/// restarted adapter advances from the complete validated acceptance tail.
+/// restarted adapter advances from the complete validated acceptance tail
+/// without admitting an unrelated non-lifecycle frontier into the projection.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn occupied_slot_after_and_safe_point_apply_replay_and_restart() -> Result<(), Box<dyn Error>>
@@ -3313,6 +3406,16 @@ async fn occupied_slot_after_and_safe_point_apply_replay_and_restart() -> Result
         Uuid::from_u128(0xb31),
     )
     .await?;
+    let mut unrelated_frontier = pool.begin().await?;
+    insert_frontier(
+        &mut unrelated_frontier,
+        Uuid::from_u128(0x831),
+        Uuid::from_u128(0xef31),
+        Decimal::ONE,
+        &[(Decimal::ONE, Uuid::from_u128(0x831), Uuid::from_u128(0xd31))],
+    )
+    .await?;
+    unrelated_frontier.commit().await?;
 
     let after = input_with_delivery(
         0x433,
@@ -3563,51 +3666,8 @@ async fn occupied_slot_mixed_acceptances_serialize_positions_and_effects()
     )
     .await?;
 
-    let mut tasks = Vec::new();
-    for offset in 0..6_u128 {
-        let repository = repository.clone();
-        tasks.push(tokio::spawn(async move {
-            let delivery = if offset % 2 == 0 {
-                DeliveryRequest::AfterCurrentTurn {
-                    expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xa51)),
-                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
-                }
-            } else {
-                DeliveryRequest::NextSafePoint {
-                    expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xa51)),
-                }
-            };
-            repository
-                .handle(
-                    input_with_delivery(
-                        0x453 + offset,
-                        0x851,
-                        &format!("mixed occupied {offset}"),
-                        delivery,
-                    ),
-                    AcceptedInputId::from_uuid(Uuid::from_u128(0x952 + offset)),
-                    (offset % 2 == 0).then(|| TurnId::from_uuid(Uuid::from_u128(0xa52 + offset))),
-                )
-                .await
-        }));
-    }
-
-    let mut positions = Vec::new();
-    let mut turn_origins = 0_u64;
-    let mut pending_steering = 0_u64;
-    for task in tasks {
-        let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(applied)) =
-            task.await??
-        else {
-            panic!("each mixed occupied-slot submission must apply");
-        };
-        positions.push(applied.acceptance_position().as_u64());
-        match applied {
-            SubmitInputAppliedResult::TurnOrigin(_) => turn_origins += 1,
-            SubmitInputAppliedResult::PendingSteering(_) => pending_steering += 1,
-        }
-    }
-    positions.sort_unstable();
+    let (positions, turn_origins, pending_steering) =
+        run_mixed_occupied_acceptances(repository).await?;
     assert_eq!(positions, vec![2, 3, 4, 5, 6, 7]);
     assert_eq!((turn_origins, pending_steering), (3, 3));
 
@@ -3813,6 +3873,34 @@ async fn occupied_slot_schema_constraints_and_checked_decode_fail_closed()
     .fetch_all(&pool)
     .await?;
     assert_eq!(new_constraints.len(), 6);
+
+    let scheduling_support_indexes: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT
+            indexname,
+            indexdef LIKE
+                CASE indexname
+                    WHEN 'accepted_input_pending_by_source_turn'
+                        THEN '%(session_id, expected_active_turn_id) WHERE (disposition_kind = ''pending_steering''::text)'
+                    WHEN 'queued_input_origin_by_session_position'
+                        THEN '%(session_id, acceptance_position)'
+                END
+           FROM pg_indexes
+          WHERE schemaname = current_schema()
+            AND indexname IN (
+                'accepted_input_pending_by_source_turn',
+                'queued_input_origin_by_session_position'
+            )
+          ORDER BY indexname",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        scheduling_support_indexes,
+        vec![
+            ("accepted_input_pending_by_source_turn".to_owned(), true),
+            ("queued_input_origin_by_session_position".to_owned(), true),
+        ]
+    );
 
     let forbidden_configuration = sqlx::query(
         "INSERT INTO accepted_input
@@ -4175,92 +4263,115 @@ async fn occupied_slot_rejections_and_matching_interrupt_rollback_are_exact()
             && active_turn == TurnId::from_uuid(Uuid::from_u128(0xa41))
     ));
 
-    let stale_deliveries = [
+    let stale_after = record_stale_active_input(
+        &repository,
+        0x444,
         DeliveryRequest::AfterCurrentTurn {
             expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xaff)),
             configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
         },
+        0x943,
+        Some(0xa43),
+    )
+    .await?;
+    let stale_safe_point = record_stale_active_input(
+        &repository,
+        0x445,
         DeliveryRequest::NextSafePoint {
             expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xaff)),
         },
+        0x944,
+        None,
+    )
+    .await?;
+    let stale_interrupt = record_stale_active_input(
+        &repository,
+        0x446,
         DeliveryRequest::Interrupt {
             expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xaff)),
             configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
         },
-    ];
-    let mut stale_records = Vec::new();
-    for (offset, delivery) in stale_deliveries.into_iter().enumerate() {
-        let command = input_with_delivery(0x444 + offset as u128, 0x841, "stale active", delivery);
-        let turn = if matches!(command.delivery(), DeliveryRequest::NextSafePoint { .. }) {
-            None
-        } else {
-            Some(TurnId::from_uuid(Uuid::from_u128(0xa43 + offset as u128)))
-        };
-        let outcome = repository
-            .handle(
-                command.clone(),
-                AcceptedInputId::from_uuid(Uuid::from_u128(0x943 + offset as u128)),
-                turn,
-            )
-            .await?;
-        assert!(matches!(
-            outcome,
-            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
-                SubmitInputRejectedResult::ActiveTurnMismatch {
-                    expected_active_turn,
-                    actual_active_turn,
-                    ..
-                }
-            )) if expected_active_turn == TurnId::from_uuid(Uuid::from_u128(0xaff))
-                && actual_active_turn == TurnId::from_uuid(Uuid::from_u128(0xa41))
-        ));
-        stale_records.push((command, outcome));
-    }
+        0x945,
+        Some(0xa45),
+    )
+    .await?;
+    assert!(matches!(
+        stale_after.1.clone(),
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::ActiveTurnMismatch {
+                expected_active_turn,
+                actual_active_turn,
+                ..
+            }
+        )) if expected_active_turn == TurnId::from_uuid(Uuid::from_u128(0xaff))
+            && actual_active_turn == TurnId::from_uuid(Uuid::from_u128(0xa41))
+    ));
+    assert!(matches!(
+        stale_safe_point.1.clone(),
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::ActiveTurnMismatch {
+                expected_active_turn,
+                actual_active_turn,
+                ..
+            }
+        )) if expected_active_turn == TurnId::from_uuid(Uuid::from_u128(0xaff))
+            && actual_active_turn == TurnId::from_uuid(Uuid::from_u128(0xa41))
+    ));
+    assert!(matches!(
+        stale_interrupt.1.clone(),
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::ActiveTurnMismatch {
+                expected_active_turn,
+                actual_active_turn,
+                ..
+            }
+        )) if expected_active_turn == TurnId::from_uuid(Uuid::from_u128(0xaff))
+            && actual_active_turn == TurnId::from_uuid(Uuid::from_u128(0xa41))
+    ));
 
-    for (command_value, delivery, turn_candidate) in [
-        (
-            0x449,
-            DeliveryRequest::AfterCurrentTurn {
-                expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xa41)),
-                configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
-            },
-            Some(TurnId::from_uuid(Uuid::from_u128(0xa49))),
-        ),
-        (
-            0x44a,
-            DeliveryRequest::NextSafePoint {
-                expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xa41)),
-            },
-            None,
-        ),
-    ] {
-        let command =
-            input_with_delivery(command_value, 0x841, "colliding active origin", delivery);
-        let error = repository
-            .handle(
-                command.clone(),
-                AcceptedInputId::from_uuid(Uuid::from_u128(0x941)),
-                turn_candidate,
-            )
-            .await
-            .expect_err("new acceptance cannot reuse the active origin identity");
-        assert!(matches!(
-            error,
-            SubmitInputRepositoryError::AcceptedInputIdentityCollision {
-                command_id,
-                active_turn,
-                accepted_input,
-            } if command_id == command.command_id()
-                && active_turn == TurnId::from_uuid(Uuid::from_u128(0xa41))
-                && accepted_input == AcceptedInputId::from_uuid(Uuid::from_u128(0x941))
-        ));
-        let claimed: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM durable_command WHERE command_id = $1")
-                .bind(Uuid::from_u128(command_value))
-                .fetch_one(&pool)
-                .await?;
-        assert_eq!(claimed, 0);
-    }
+    let after_collision = active_origin_collision(
+        &repository,
+        &pool,
+        0x449,
+        DeliveryRequest::AfterCurrentTurn {
+            expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xa41)),
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+        Some(0xa49),
+    )
+    .await?;
+    let safe_point_collision = active_origin_collision(
+        &repository,
+        &pool,
+        0x44a,
+        DeliveryRequest::NextSafePoint {
+            expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xa41)),
+        },
+        None,
+    )
+    .await?;
+    assert!(matches!(
+        after_collision.0,
+        SubmitInputRepositoryError::AcceptedInputIdentityCollision {
+            command_id,
+            active_turn,
+            accepted_input,
+        } if command_id == DurableCommandId::from_uuid(Uuid::from_u128(0x449))
+            && active_turn == TurnId::from_uuid(Uuid::from_u128(0xa41))
+            && accepted_input == AcceptedInputId::from_uuid(Uuid::from_u128(0x941))
+    ));
+    assert_eq!(after_collision.1, 0);
+    assert!(matches!(
+        safe_point_collision.0,
+        SubmitInputRepositoryError::AcceptedInputIdentityCollision {
+            command_id,
+            active_turn,
+            accepted_input,
+        } if command_id == DurableCommandId::from_uuid(Uuid::from_u128(0x44a))
+            && active_turn == TurnId::from_uuid(Uuid::from_u128(0xa41))
+            && accepted_input == AcceptedInputId::from_uuid(Uuid::from_u128(0x941))
+    ));
+    assert_eq!(safe_point_collision.1, 0);
 
     let matching_interrupt = input_with_delivery(
         0x447,
@@ -4364,23 +4475,36 @@ async fn occupied_slot_rejections_and_matching_interrupt_rollback_are_exact()
             .await?,
         active_start_outcome
     );
-    for (command, expected) in stale_records {
-        let turn = if matches!(command.delivery(), DeliveryRequest::NextSafePoint { .. }) {
-            None
-        } else {
-            Some(TurnId::from_uuid(Uuid::from_u128(0xafe)))
-        };
-        assert_eq!(
-            repository
-                .handle(
-                    command,
-                    AcceptedInputId::from_uuid(Uuid::from_u128(0x9fe)),
-                    turn,
-                )
-                .await?,
-            expected
-        );
-    }
+    assert_eq!(
+        repository
+            .handle(
+                stale_after.0,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x9fe)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xafe))),
+            )
+            .await?,
+        stale_after.1
+    );
+    assert_eq!(
+        repository
+            .handle(
+                stale_safe_point.0,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x9fe)),
+                None,
+            )
+            .await?,
+        stale_safe_point.1
+    );
+    assert_eq!(
+        repository
+            .handle(
+                stale_interrupt.0,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x9fe)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xafe))),
+            )
+            .await?,
+        stale_interrupt.1
+    );
 
     pool.close().await;
     drop(container);
