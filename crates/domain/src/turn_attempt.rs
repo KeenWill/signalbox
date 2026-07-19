@@ -722,12 +722,25 @@ impl CurrentTurnAttemptTransitionError {
 
 #[cfg(test)]
 mod tests {
+    use expect_test::expect;
+    use signalbox_expect_table::table;
+
     use super::*;
     use crate::applied_interrupt::test_applied_interrupt_proof;
     use crate::test_support::{
         command_id, model_call_id, provider_target_evidence_id as evidence,
         turn_attempt_id as attempt_id, turn_id,
     };
+
+    #[derive(Clone, Debug)]
+    #[allow(
+        dead_code,
+        reason = "the table renderer reads every field through the Debug derive"
+    )]
+    struct AttemptEndRow {
+        attempted_end: String,
+        outcome: String,
+    }
 
     fn proof(value: u128) -> AppliedInterruptProof {
         test_applied_interrupt_proof(command_id(value), turn_id(100))
@@ -781,13 +794,18 @@ mod tests {
     /// returns that state unchanged.
     #[test]
     fn begin_running_rejects_every_other_current_state_unchanged() {
-        for current in [running(), cancellation_stopped(), fatal_stopped()] {
-            let error = current.clone().begin_running().unwrap_err();
-            assert_eq!(
-                error.into_parts(),
-                (current, AttemptedTurnAttemptTransition::BeginRunning)
-            );
-        }
+        assert_begin_running_rejects_unchanged(running());
+        assert_begin_running_rejects_unchanged(cancellation_stopped());
+        assert_begin_running_rejects_unchanged(fatal_stopped());
+    }
+
+    #[track_caller]
+    fn assert_begin_running_rejects_unchanged(current: CurrentTurnAttempt) {
+        let error = current.clone().begin_running().unwrap_err();
+        assert_eq!(
+            error.into_parts(),
+            (current, AttemptedTurnAttemptTransition::BeginRunning)
+        );
     }
 
     /// S07 / INV-006 / INV-029: Running accepts either singleton stop; stopped
@@ -853,207 +871,510 @@ mod tests {
     #[test]
     fn conflicting_interrupt_returns_the_unchanged_stopped_attempt() {
         let fatal_with_interrupt = fatal_stopped().request_cancellation(proof(1)).unwrap();
-        for current in [cancellation_stopped(), fatal_with_interrupt] {
-            let error = current.clone().request_cancellation(proof(2)).unwrap_err();
-            assert_eq!(error.current(), &current);
-            assert_eq!(
-                error.attempted(),
-                &AttemptedTurnAttemptTransition::RequestCancellation { proof: proof(2) }
-            );
-        }
+        assert_second_interrupt_rejects_unchanged(cancellation_stopped());
+        assert_second_interrupt_rejects_unchanged(fatal_with_interrupt);
+    }
+
+    #[track_caller]
+    fn assert_second_interrupt_rejects_unchanged(current: CurrentTurnAttempt) {
+        let error = current.clone().request_cancellation(proof(2)).unwrap_err();
+        assert_eq!(error.current(), &current);
+        assert_eq!(
+            error.attempted(),
+            &AttemptedTurnAttemptTransition::RequestCancellation { proof: proof(2) }
+        );
     }
 
     /// S03 / S04 / S07 / INV-006 / INV-029 / INV-034: Prepared accepts exactly
     /// the restricted unsent and startup terminal branches from ADR-0004.
     #[test]
     fn prepared_terminal_matrix_is_complete() {
-        for disposition in all_unstopped_dispositions() {
-            let allowed = matches!(
-                disposition,
-                UnstoppedAttemptDisposition::KnownFailure | UnstoppedAttemptDisposition::Lost
-            );
-            assert_eq!(
-                prepared().end_without_stop(disposition).is_ok(),
-                allowed,
-                "unexpected Prepared/WithoutStop result for {disposition:?}"
-            );
-        }
-        for disposition in all_cancellation_dispositions() {
-            assert_eq!(
-                prepared()
-                    .end_after_cancellation(proof(1), disposition)
-                    .is_ok(),
-                disposition == CancellationStopDisposition::Cancelled,
-                "unexpected Prepared/AfterCancellation result for {disposition:?}"
-            );
-        }
-        for disposition in all_fatal_dispositions() {
-            let allowed = disposition != FatalMismatchStopDisposition::Ambiguous;
-            assert_eq!(
-                prepared()
-                    .end_after_fatal_mismatch(
-                        FatalMismatchStopCauses::new(
-                            failure(1),
-                            AppliedInterruptState::NoAppliedInterrupt,
-                        ),
-                        disposition,
-                    )
-                    .is_ok(),
-                allowed,
-                "unexpected Prepared/AfterFatalMismatch result for {disposition:?}"
-            );
-            assert!(
-                prepared()
-                    .end_after_fatal_mismatch(
-                        FatalMismatchStopCauses::new(
-                            failure(1),
-                            AppliedInterruptState::Applied { proof: proof(1) },
-                        ),
-                        disposition,
-                    )
-                    .is_err()
-            );
-        }
+        let causes_without_interrupt =
+            FatalMismatchStopCauses::new(failure(1), AppliedInterruptState::NoAppliedInterrupt);
+        let causes_with_interrupt = FatalMismatchStopCauses::new(
+            failure(1),
+            AppliedInterruptState::Applied { proof: proof(1) },
+        );
+        assert_without_stop_rejects(prepared(), UnstoppedAttemptDisposition::TurnCompleted);
+        assert_without_stop_rejects(prepared(), UnstoppedAttemptDisposition::TurnRefused);
+        assert_without_stop_rejects(
+            prepared(),
+            UnstoppedAttemptDisposition::YieldedToDurableWait,
+        );
+        assert_without_stop_ends_for(prepared(), UnstoppedAttemptDisposition::KnownFailure);
+        assert_without_stop_ends_for(prepared(), UnstoppedAttemptDisposition::Lost);
+        assert_without_stop_rejects(prepared(), UnstoppedAttemptDisposition::Ambiguous);
+        assert_after_cancellation_rejects(
+            prepared(),
+            proof(1),
+            CancellationStopDisposition::TurnCompleted,
+        );
+        assert_after_cancellation_rejects(
+            prepared(),
+            proof(1),
+            CancellationStopDisposition::TurnRefused,
+        );
+        assert_after_cancellation_rejects(
+            prepared(),
+            proof(1),
+            CancellationStopDisposition::KnownFailure,
+        );
+        assert_after_cancellation_rejects(prepared(), proof(1), CancellationStopDisposition::Lost);
+        assert_after_cancellation_ends_for(
+            prepared(),
+            proof(1),
+            CancellationStopDisposition::Cancelled,
+        );
+        assert_after_cancellation_rejects(
+            prepared(),
+            proof(1),
+            CancellationStopDisposition::Ambiguous,
+        );
+        assert_after_fatal_ends_for(
+            prepared(),
+            causes_without_interrupt.clone(),
+            FatalMismatchStopDisposition::KnownFailure,
+        );
+        assert_after_fatal_ends_for(
+            prepared(),
+            causes_without_interrupt.clone(),
+            FatalMismatchStopDisposition::Lost,
+        );
+        assert_after_fatal_rejects(
+            prepared(),
+            causes_without_interrupt.clone(),
+            FatalMismatchStopDisposition::Ambiguous,
+        );
+        assert_after_fatal_rejects(
+            prepared(),
+            causes_with_interrupt.clone(),
+            FatalMismatchStopDisposition::KnownFailure,
+        );
+        assert_after_fatal_rejects(
+            prepared(),
+            causes_with_interrupt.clone(),
+            FatalMismatchStopDisposition::Lost,
+        );
+        assert_after_fatal_rejects(
+            prepared(),
+            causes_with_interrupt.clone(),
+            FatalMismatchStopDisposition::Ambiguous,
+        );
+        let rows = [
+            without_stop_rows(&prepared),
+            after_cancellation_rows(&prepared, "after cancellation (exact proof)", proof(1)),
+            after_fatal_rows(
+                &prepared,
+                "after fatal mismatch (no interrupt)",
+                &causes_without_interrupt,
+            ),
+            after_fatal_rows(
+                &prepared,
+                "after fatal mismatch (with interrupt)",
+                &causes_with_interrupt,
+            ),
+        ]
+        .concat();
+
+        expect![[r#"
+            ┌─────────────────────────────────────────────────────┬──────────┐
+            │ attempted_end                                       │ outcome  │
+            ├─────────────────────────────────────────────────────┼──────────┤
+            │ without stop: TurnCompleted                         │ rejected │
+            │ without stop: TurnRefused                           │ rejected │
+            │ without stop: YieldedToDurableWait                  │ rejected │
+            │ without stop: KnownFailure                          │ ends     │
+            │ without stop: Lost                                  │ ends     │
+            │ without stop: Ambiguous                             │ rejected │
+            │ after cancellation (exact proof): TurnCompleted     │ rejected │
+            │ after cancellation (exact proof): TurnRefused       │ rejected │
+            │ after cancellation (exact proof): KnownFailure      │ rejected │
+            │ after cancellation (exact proof): Lost              │ rejected │
+            │ after cancellation (exact proof): Cancelled         │ ends     │
+            │ after cancellation (exact proof): Ambiguous         │ rejected │
+            │ after fatal mismatch (no interrupt): KnownFailure   │ ends     │
+            │ after fatal mismatch (no interrupt): Lost           │ ends     │
+            │ after fatal mismatch (no interrupt): Ambiguous      │ rejected │
+            │ after fatal mismatch (with interrupt): KnownFailure │ rejected │
+            │ after fatal mismatch (with interrupt): Lost         │ rejected │
+            │ after fatal mismatch (with interrupt): Ambiguous    │ rejected │
+            └─────────────────────────────────────────────────────┴──────────┘
+        "#]]
+        .assert_eq(&table(&rows));
     }
 
     /// S02 / S04 / S06 / S07 / S10 / S23 / INV-004 / INV-006: Running may
     /// enter every type-valid terminal branch once slice 5 establishes guards.
     #[test]
     fn running_accepts_every_type_valid_terminal_value() {
-        for disposition in all_unstopped_dispositions() {
-            assert_eq!(
-                running()
-                    .end_without_stop(disposition)
-                    .expect("Running accepts every unstopped disposition")
-                    .id(),
-                attempt_id(1)
-            );
-        }
-        for disposition in all_cancellation_dispositions() {
-            assert!(
-                running()
-                    .end_after_cancellation(proof(1), disposition)
-                    .is_ok()
-            );
-        }
-        for interrupt in [
-            AppliedInterruptState::NoAppliedInterrupt,
+        let causes_without_interrupt =
+            FatalMismatchStopCauses::new(failure(1), AppliedInterruptState::NoAppliedInterrupt);
+        let causes_with_interrupt = FatalMismatchStopCauses::new(
+            failure(1),
             AppliedInterruptState::Applied { proof: proof(1) },
-        ] {
-            for disposition in all_fatal_dispositions() {
-                assert!(
-                    running()
-                        .end_after_fatal_mismatch(
-                            FatalMismatchStopCauses::new(failure(1), interrupt),
-                            disposition,
-                        )
-                        .is_ok()
-                );
-            }
-        }
+        );
+
+        assert_without_stop_ends(UnstoppedAttemptDisposition::TurnCompleted);
+        assert_without_stop_ends(UnstoppedAttemptDisposition::TurnRefused);
+        assert_without_stop_ends(UnstoppedAttemptDisposition::YieldedToDurableWait);
+        assert_without_stop_ends(UnstoppedAttemptDisposition::KnownFailure);
+        assert_without_stop_ends(UnstoppedAttemptDisposition::Lost);
+        assert_without_stop_ends(UnstoppedAttemptDisposition::Ambiguous);
+        assert_after_cancellation_ends(CancellationStopDisposition::TurnCompleted);
+        assert_after_cancellation_ends(CancellationStopDisposition::TurnRefused);
+        assert_after_cancellation_ends(CancellationStopDisposition::KnownFailure);
+        assert_after_cancellation_ends(CancellationStopDisposition::Lost);
+        assert_after_cancellation_ends(CancellationStopDisposition::Cancelled);
+        assert_after_cancellation_ends(CancellationStopDisposition::Ambiguous);
+        assert_after_fatal_ends(
+            causes_without_interrupt.clone(),
+            FatalMismatchStopDisposition::KnownFailure,
+        );
+        assert_after_fatal_ends(
+            causes_without_interrupt.clone(),
+            FatalMismatchStopDisposition::Lost,
+        );
+        assert_after_fatal_ends(
+            causes_without_interrupt.clone(),
+            FatalMismatchStopDisposition::Ambiguous,
+        );
+        assert_after_fatal_ends(
+            causes_with_interrupt.clone(),
+            FatalMismatchStopDisposition::KnownFailure,
+        );
+        assert_after_fatal_ends(
+            causes_with_interrupt.clone(),
+            FatalMismatchStopDisposition::Lost,
+        );
+        assert_after_fatal_ends(
+            causes_with_interrupt.clone(),
+            FatalMismatchStopDisposition::Ambiguous,
+        );
+
+        let rows = [
+            without_stop_rows(&running),
+            after_cancellation_rows(&running, "after cancellation", proof(1)),
+            after_fatal_rows(
+                &running,
+                "after fatal mismatch (no interrupt)",
+                &causes_without_interrupt,
+            ),
+            after_fatal_rows(
+                &running,
+                "after fatal mismatch (with interrupt)",
+                &causes_with_interrupt,
+            ),
+        ]
+        .concat();
+
+        expect![[r#"
+            ┌─────────────────────────────────────────────────────┬─────────┐
+            │ attempted_end                                       │ outcome │
+            ├─────────────────────────────────────────────────────┼─────────┤
+            │ without stop: TurnCompleted                         │ ends    │
+            │ without stop: TurnRefused                           │ ends    │
+            │ without stop: YieldedToDurableWait                  │ ends    │
+            │ without stop: KnownFailure                          │ ends    │
+            │ without stop: Lost                                  │ ends    │
+            │ without stop: Ambiguous                             │ ends    │
+            │ after cancellation: TurnCompleted                   │ ends    │
+            │ after cancellation: TurnRefused                     │ ends    │
+            │ after cancellation: KnownFailure                    │ ends    │
+            │ after cancellation: Lost                            │ ends    │
+            │ after cancellation: Cancelled                       │ ends    │
+            │ after cancellation: Ambiguous                       │ ends    │
+            │ after fatal mismatch (no interrupt): KnownFailure   │ ends    │
+            │ after fatal mismatch (no interrupt): Lost           │ ends    │
+            │ after fatal mismatch (no interrupt): Ambiguous      │ ends    │
+            │ after fatal mismatch (with interrupt): KnownFailure │ ends    │
+            │ after fatal mismatch (with interrupt): Lost         │ ends    │
+            │ after fatal mismatch (with interrupt): Ambiguous    │ ends    │
+            └─────────────────────────────────────────────────────┴─────────┘
+        "#]]
+        .assert_eq(&table(&rows));
+    }
+
+    #[track_caller]
+    fn assert_without_stop_ends(disposition: UnstoppedAttemptDisposition) {
+        assert!(
+            running().end_without_stop(disposition).is_ok(),
+            "Running must accept the stated unstopped terminal disposition"
+        );
+    }
+
+    #[track_caller]
+    fn assert_after_cancellation_ends(disposition: CancellationStopDisposition) {
+        assert!(
+            running()
+                .end_after_cancellation(proof(1), disposition)
+                .is_ok(),
+            "Running must accept the stated cancellation terminal disposition"
+        );
+    }
+
+    #[track_caller]
+    fn assert_after_fatal_ends(
+        causes: FatalMismatchStopCauses,
+        disposition: FatalMismatchStopDisposition,
+    ) {
+        assert!(
+            running()
+                .end_after_fatal_mismatch(causes, disposition)
+                .is_ok(),
+            "Running must accept the stated fatal-mismatch terminal disposition"
+        );
+    }
+
+    #[track_caller]
+    fn assert_without_stop_ends_for(
+        current: CurrentTurnAttempt,
+        disposition: UnstoppedAttemptDisposition,
+    ) {
+        assert!(
+            current.end_without_stop(disposition).is_ok(),
+            "the stated current attempt must accept the stated unstopped disposition"
+        );
+    }
+
+    #[track_caller]
+    fn assert_without_stop_rejects(
+        current: CurrentTurnAttempt,
+        disposition: UnstoppedAttemptDisposition,
+    ) {
+        assert!(
+            current.end_without_stop(disposition).is_err(),
+            "the stated current attempt must reject the stated unstopped disposition"
+        );
+    }
+
+    #[track_caller]
+    fn assert_after_cancellation_ends_for(
+        current: CurrentTurnAttempt,
+        cause: AppliedInterruptProof,
+        disposition: CancellationStopDisposition,
+    ) {
+        assert!(
+            current.end_after_cancellation(cause, disposition).is_ok(),
+            "the stated current attempt and proof must accept the stated cancellation disposition"
+        );
+    }
+
+    #[track_caller]
+    fn assert_after_cancellation_rejects(
+        current: CurrentTurnAttempt,
+        cause: AppliedInterruptProof,
+        disposition: CancellationStopDisposition,
+    ) {
+        assert!(
+            current.end_after_cancellation(cause, disposition).is_err(),
+            "the stated current attempt and proof must reject the stated cancellation disposition"
+        );
+    }
+
+    #[track_caller]
+    fn assert_after_fatal_ends_for(
+        current: CurrentTurnAttempt,
+        causes: FatalMismatchStopCauses,
+        disposition: FatalMismatchStopDisposition,
+    ) {
+        assert!(
+            current
+                .end_after_fatal_mismatch(causes, disposition)
+                .is_ok(),
+            "the stated current attempt and causes must accept the stated fatal disposition"
+        );
+    }
+
+    #[track_caller]
+    fn assert_after_fatal_rejects(
+        current: CurrentTurnAttempt,
+        causes: FatalMismatchStopCauses,
+        disposition: FatalMismatchStopDisposition,
+    ) {
+        assert!(
+            current
+                .end_after_fatal_mismatch(causes, disposition)
+                .is_err(),
+            "the stated current attempt and causes must reject the stated fatal disposition"
+        );
     }
 
     /// S04 / S07 / S23 / INV-006 / INV-029 / INV-034: CancellationOnly ends
     /// only as AfterCancellation with its exact proof and any honest result.
     #[test]
     fn cancellation_stopped_terminal_matrix_is_complete() {
-        for disposition in all_cancellation_dispositions() {
-            assert!(
-                cancellation_stopped()
-                    .end_after_cancellation(proof(1), disposition)
-                    .is_ok()
-            );
-            assert!(
-                cancellation_stopped()
-                    .end_after_cancellation(proof(2), disposition)
-                    .is_err()
-            );
-        }
-        for disposition in all_unstopped_dispositions() {
-            assert!(
-                cancellation_stopped()
-                    .end_without_stop(disposition)
-                    .is_err()
-            );
-        }
-        for disposition in all_fatal_dispositions() {
-            assert!(
-                cancellation_stopped()
-                    .end_after_fatal_mismatch(
-                        FatalMismatchStopCauses::new(
-                            failure(1),
-                            AppliedInterruptState::Applied { proof: proof(1) },
-                        ),
-                        disposition,
-                    )
-                    .is_err()
-            );
-        }
+        let matching_fatal = FatalMismatchStopCauses::new(
+            failure(1),
+            AppliedInterruptState::Applied { proof: proof(1) },
+        );
+        assert_after_cancellation_ends_for(
+            cancellation_stopped(),
+            proof(1),
+            CancellationStopDisposition::TurnCompleted,
+        );
+        assert_after_cancellation_ends_for(
+            cancellation_stopped(),
+            proof(1),
+            CancellationStopDisposition::TurnRefused,
+        );
+        assert_after_cancellation_ends_for(
+            cancellation_stopped(),
+            proof(1),
+            CancellationStopDisposition::KnownFailure,
+        );
+        assert_after_cancellation_ends_for(
+            cancellation_stopped(),
+            proof(1),
+            CancellationStopDisposition::Lost,
+        );
+        assert_after_cancellation_ends_for(
+            cancellation_stopped(),
+            proof(1),
+            CancellationStopDisposition::Cancelled,
+        );
+        assert_after_cancellation_ends_for(
+            cancellation_stopped(),
+            proof(1),
+            CancellationStopDisposition::Ambiguous,
+        );
+        assert_after_cancellation_rejects(
+            cancellation_stopped(),
+            proof(2),
+            CancellationStopDisposition::TurnCompleted,
+        );
+        assert_after_cancellation_rejects(
+            cancellation_stopped(),
+            proof(2),
+            CancellationStopDisposition::TurnRefused,
+        );
+        assert_after_cancellation_rejects(
+            cancellation_stopped(),
+            proof(2),
+            CancellationStopDisposition::KnownFailure,
+        );
+        assert_after_cancellation_rejects(
+            cancellation_stopped(),
+            proof(2),
+            CancellationStopDisposition::Lost,
+        );
+        assert_after_cancellation_rejects(
+            cancellation_stopped(),
+            proof(2),
+            CancellationStopDisposition::Cancelled,
+        );
+        assert_after_cancellation_rejects(
+            cancellation_stopped(),
+            proof(2),
+            CancellationStopDisposition::Ambiguous,
+        );
+        assert_without_stop_rejects(
+            cancellation_stopped(),
+            UnstoppedAttemptDisposition::TurnCompleted,
+        );
+        assert_without_stop_rejects(
+            cancellation_stopped(),
+            UnstoppedAttemptDisposition::TurnRefused,
+        );
+        assert_without_stop_rejects(
+            cancellation_stopped(),
+            UnstoppedAttemptDisposition::YieldedToDurableWait,
+        );
+        assert_without_stop_rejects(
+            cancellation_stopped(),
+            UnstoppedAttemptDisposition::KnownFailure,
+        );
+        assert_without_stop_rejects(cancellation_stopped(), UnstoppedAttemptDisposition::Lost);
+        assert_without_stop_rejects(
+            cancellation_stopped(),
+            UnstoppedAttemptDisposition::Ambiguous,
+        );
+        assert_after_fatal_rejects(
+            cancellation_stopped(),
+            matching_fatal.clone(),
+            FatalMismatchStopDisposition::KnownFailure,
+        );
+        assert_after_fatal_rejects(
+            cancellation_stopped(),
+            matching_fatal.clone(),
+            FatalMismatchStopDisposition::Lost,
+        );
+        assert_after_fatal_rejects(
+            cancellation_stopped(),
+            matching_fatal.clone(),
+            FatalMismatchStopDisposition::Ambiguous,
+        );
+        let rows = [
+            after_cancellation_rows(
+                &cancellation_stopped,
+                "after cancellation (exact proof)",
+                proof(1),
+            ),
+            after_cancellation_rows(
+                &cancellation_stopped,
+                "after cancellation (different proof)",
+                proof(2),
+            ),
+            without_stop_rows(&cancellation_stopped),
+            after_fatal_rows(
+                &cancellation_stopped,
+                "after fatal mismatch",
+                &matching_fatal,
+            ),
+        ]
+        .concat();
+
+        expect![[r#"
+            ┌─────────────────────────────────────────────────────┬──────────┐
+            │ attempted_end                                       │ outcome  │
+            ├─────────────────────────────────────────────────────┼──────────┤
+            │ after cancellation (exact proof): TurnCompleted     │ ends     │
+            │ after cancellation (exact proof): TurnRefused       │ ends     │
+            │ after cancellation (exact proof): KnownFailure      │ ends     │
+            │ after cancellation (exact proof): Lost              │ ends     │
+            │ after cancellation (exact proof): Cancelled         │ ends     │
+            │ after cancellation (exact proof): Ambiguous         │ ends     │
+            │ after cancellation (different proof): TurnCompleted │ rejected │
+            │ after cancellation (different proof): TurnRefused   │ rejected │
+            │ after cancellation (different proof): KnownFailure  │ rejected │
+            │ after cancellation (different proof): Lost          │ rejected │
+            │ after cancellation (different proof): Cancelled     │ rejected │
+            │ after cancellation (different proof): Ambiguous     │ rejected │
+            │ without stop: TurnCompleted                         │ rejected │
+            │ without stop: TurnRefused                           │ rejected │
+            │ without stop: YieldedToDurableWait                  │ rejected │
+            │ without stop: KnownFailure                          │ rejected │
+            │ without stop: Lost                                  │ rejected │
+            │ without stop: Ambiguous                             │ rejected │
+            │ after fatal mismatch: KnownFailure                  │ rejected │
+            │ after fatal mismatch: Lost                          │ rejected │
+            │ after fatal mismatch: Ambiguous                     │ rejected │
+            └─────────────────────────────────────────────────────┴──────────┘
+        "#]]
+        .assert_eq(&table(&rows));
     }
 
     /// S04 / S06 / S21 / S23 / INV-006 / INV-034: FatalMismatch ends only as
     /// AfterFatalMismatch with the exact complete cause value.
     #[test]
     fn fatal_stopped_terminal_matrix_is_complete() {
-        let without_interrupt = fatal_stopped();
-        let exact_without_interrupt = fatal_causes(&without_interrupt);
-        for disposition in all_fatal_dispositions() {
-            assert!(
-                without_interrupt
-                    .clone()
-                    .end_after_fatal_mismatch(exact_without_interrupt.clone(), disposition)
-                    .is_ok()
-            );
-        }
-
-        let current = fatal_stopped()
-            .request_fatal_mismatch(failure(2))
-            .and_then(|attempt| attempt.request_cancellation(proof(1)))
-            .expect("compatible fatal causes union");
-        let exact = fatal_causes(&current);
-        for disposition in all_fatal_dispositions() {
-            assert!(
-                current
-                    .clone()
-                    .end_after_fatal_mismatch(exact.clone(), disposition)
-                    .is_ok()
-            );
-            assert!(
-                current
-                    .clone()
-                    .end_after_fatal_mismatch(
-                        FatalMismatchStopCauses::new(
-                            failure(1),
-                            AppliedInterruptState::Applied { proof: proof(1) },
-                        ),
-                        disposition,
-                    )
-                    .is_err()
-            );
-        }
-        for disposition in all_unstopped_dispositions() {
-            assert!(current.clone().end_without_stop(disposition).is_err());
-        }
-        for disposition in all_cancellation_dispositions() {
-            assert!(
-                current
-                    .clone()
-                    .end_after_cancellation(proof(1), disposition)
-                    .is_err()
-            );
-        }
+        let exact_without_interrupt = fatal_causes(&fatal_stopped());
+        let upgraded = || {
+            fatal_stopped()
+                .request_fatal_mismatch(failure(2))
+                .and_then(|attempt| attempt.request_cancellation(proof(1)))
+                .expect("compatible fatal causes union")
+        };
+        let exact = fatal_causes(&upgraded());
+        let subset = FatalMismatchStopCauses::new(
+            failure(1),
+            AppliedInterruptState::Applied { proof: proof(1) },
+        );
 
         let TurnAttemptStopCauses::FatalMismatch(superset) =
             TurnAttemptStopCauses::FatalMismatch(exact.clone()).add_fatal_mismatch(failure(3))
         else {
             panic!("adding a fatal failure must stay fatal");
         };
-        assert!(
-            current
-                .clone()
-                .end_after_fatal_mismatch(superset, FatalMismatchStopDisposition::KnownFailure,)
-                .is_err()
-        );
         let TurnAttemptStopCauses::FatalMismatch(different_interrupt) =
             TurnAttemptStopCauses::fatal_mismatch(failure(1))
                 .add_fatal_mismatch(failure(2))
@@ -1062,14 +1383,225 @@ mod tests {
         else {
             panic!("adding an interrupt must stay fatal");
         };
-        assert!(
-            current
-                .end_after_fatal_mismatch(
-                    different_interrupt,
-                    FatalMismatchStopDisposition::KnownFailure,
-                )
-                .is_err()
+        assert_after_fatal_ends_for(
+            fatal_stopped(),
+            exact_without_interrupt.clone(),
+            FatalMismatchStopDisposition::KnownFailure,
         );
+        assert_after_fatal_ends_for(
+            fatal_stopped(),
+            exact_without_interrupt.clone(),
+            FatalMismatchStopDisposition::Lost,
+        );
+        assert_after_fatal_ends_for(
+            fatal_stopped(),
+            exact_without_interrupt.clone(),
+            FatalMismatchStopDisposition::Ambiguous,
+        );
+        assert_after_fatal_ends_for(
+            upgraded(),
+            exact.clone(),
+            FatalMismatchStopDisposition::KnownFailure,
+        );
+        assert_after_fatal_ends_for(
+            upgraded(),
+            exact.clone(),
+            FatalMismatchStopDisposition::Lost,
+        );
+        assert_after_fatal_ends_for(
+            upgraded(),
+            exact.clone(),
+            FatalMismatchStopDisposition::Ambiguous,
+        );
+        assert_after_fatal_rejects(
+            upgraded(),
+            subset.clone(),
+            FatalMismatchStopDisposition::KnownFailure,
+        );
+        assert_after_fatal_rejects(
+            upgraded(),
+            subset.clone(),
+            FatalMismatchStopDisposition::Lost,
+        );
+        assert_after_fatal_rejects(
+            upgraded(),
+            subset.clone(),
+            FatalMismatchStopDisposition::Ambiguous,
+        );
+        assert_after_fatal_rejects(
+            upgraded(),
+            superset.clone(),
+            FatalMismatchStopDisposition::KnownFailure,
+        );
+        assert_after_fatal_rejects(
+            upgraded(),
+            superset.clone(),
+            FatalMismatchStopDisposition::Lost,
+        );
+        assert_after_fatal_rejects(
+            upgraded(),
+            superset,
+            FatalMismatchStopDisposition::Ambiguous,
+        );
+        assert_after_fatal_rejects(
+            upgraded(),
+            different_interrupt.clone(),
+            FatalMismatchStopDisposition::KnownFailure,
+        );
+        assert_after_fatal_rejects(
+            upgraded(),
+            different_interrupt.clone(),
+            FatalMismatchStopDisposition::Lost,
+        );
+        assert_after_fatal_rejects(
+            upgraded(),
+            different_interrupt,
+            FatalMismatchStopDisposition::Ambiguous,
+        );
+        assert_without_stop_rejects(upgraded(), UnstoppedAttemptDisposition::TurnCompleted);
+        assert_without_stop_rejects(upgraded(), UnstoppedAttemptDisposition::TurnRefused);
+        assert_without_stop_rejects(
+            upgraded(),
+            UnstoppedAttemptDisposition::YieldedToDurableWait,
+        );
+        assert_without_stop_rejects(upgraded(), UnstoppedAttemptDisposition::KnownFailure);
+        assert_without_stop_rejects(upgraded(), UnstoppedAttemptDisposition::Lost);
+        assert_without_stop_rejects(upgraded(), UnstoppedAttemptDisposition::Ambiguous);
+        assert_after_cancellation_rejects(
+            upgraded(),
+            proof(1),
+            CancellationStopDisposition::TurnCompleted,
+        );
+        assert_after_cancellation_rejects(
+            upgraded(),
+            proof(1),
+            CancellationStopDisposition::TurnRefused,
+        );
+        assert_after_cancellation_rejects(
+            upgraded(),
+            proof(1),
+            CancellationStopDisposition::KnownFailure,
+        );
+        assert_after_cancellation_rejects(upgraded(), proof(1), CancellationStopDisposition::Lost);
+        assert_after_cancellation_rejects(
+            upgraded(),
+            proof(1),
+            CancellationStopDisposition::Cancelled,
+        );
+        assert_after_cancellation_rejects(
+            upgraded(),
+            proof(1),
+            CancellationStopDisposition::Ambiguous,
+        );
+
+        let rows = [
+            after_fatal_rows(
+                &fatal_stopped,
+                "matching causes (no interrupt)",
+                &exact_without_interrupt,
+            ),
+            after_fatal_rows(&upgraded, "matching complete causes", &exact),
+            after_fatal_rows(&upgraded, "subset causes", &subset),
+            without_stop_rows(&upgraded),
+            after_cancellation_rows(&upgraded, "after cancellation (retained proof)", proof(1)),
+        ]
+        .concat();
+
+        expect![[r#"
+            ┌────────────────────────────────────────────────────┬──────────┐
+            │ attempted_end                                      │ outcome  │
+            ├────────────────────────────────────────────────────┼──────────┤
+            │ matching causes (no interrupt): KnownFailure       │ ends     │
+            │ matching causes (no interrupt): Lost               │ ends     │
+            │ matching causes (no interrupt): Ambiguous          │ ends     │
+            │ matching complete causes: KnownFailure             │ ends     │
+            │ matching complete causes: Lost                     │ ends     │
+            │ matching complete causes: Ambiguous                │ ends     │
+            │ subset causes: KnownFailure                        │ rejected │
+            │ subset causes: Lost                                │ rejected │
+            │ subset causes: Ambiguous                           │ rejected │
+            │ without stop: TurnCompleted                        │ rejected │
+            │ without stop: TurnRefused                          │ rejected │
+            │ without stop: YieldedToDurableWait                 │ rejected │
+            │ without stop: KnownFailure                         │ rejected │
+            │ without stop: Lost                                 │ rejected │
+            │ without stop: Ambiguous                            │ rejected │
+            │ after cancellation (retained proof): TurnCompleted │ rejected │
+            │ after cancellation (retained proof): TurnRefused   │ rejected │
+            │ after cancellation (retained proof): KnownFailure  │ rejected │
+            │ after cancellation (retained proof): Lost          │ rejected │
+            │ after cancellation (retained proof): Cancelled     │ rejected │
+            │ after cancellation (retained proof): Ambiguous     │ rejected │
+            └────────────────────────────────────────────────────┴──────────┘
+        "#]]
+        .assert_eq(&table(&rows));
+    }
+
+    /// Renders `without stop` rows for ending fresh copies of one source
+    /// attempt through every unstopped disposition; every outcome also
+    /// asserts that the source identity is preserved unchanged.
+    fn without_stop_rows(source: &dyn Fn() -> CurrentTurnAttempt) -> Vec<AttemptEndRow> {
+        all_unstopped_dispositions()
+            .into_iter()
+            .map(|disposition| AttemptEndRow {
+                attempted_end: format!("without stop: {disposition:?}"),
+                outcome: end_outcome(source().id(), source().end_without_stop(disposition)),
+            })
+            .collect()
+    }
+
+    /// Renders one row per cancellation disposition attempted with `cause`.
+    fn after_cancellation_rows(
+        source: &dyn Fn() -> CurrentTurnAttempt,
+        label: &str,
+        cause: AppliedInterruptProof,
+    ) -> Vec<AttemptEndRow> {
+        all_cancellation_dispositions()
+            .into_iter()
+            .map(|disposition| AttemptEndRow {
+                attempted_end: format!("{label}: {disposition:?}"),
+                outcome: end_outcome(
+                    source().id(),
+                    source().end_after_cancellation(cause, disposition),
+                ),
+            })
+            .collect()
+    }
+
+    /// Renders one row per fatal disposition attempted with `causes`.
+    fn after_fatal_rows(
+        source: &dyn Fn() -> CurrentTurnAttempt,
+        label: &str,
+        causes: &FatalMismatchStopCauses,
+    ) -> Vec<AttemptEndRow> {
+        all_fatal_dispositions()
+            .into_iter()
+            .map(|disposition| AttemptEndRow {
+                attempted_end: format!("{label}: {disposition:?}"),
+                outcome: end_outcome(
+                    source().id(),
+                    source().end_after_fatal_mismatch(causes.clone(), disposition),
+                ),
+            })
+            .collect()
+    }
+
+    /// Classifies one attempted end, asserting the physical identity is
+    /// preserved by terminal history and returned unchanged by rejection.
+    fn end_outcome(
+        source_id: crate::TurnAttemptId,
+        result: Result<EndedTurnAttempt, CurrentTurnAttemptTransitionError>,
+    ) -> String {
+        match result {
+            Ok(ended) => {
+                assert_eq!(ended.id(), source_id);
+                "ends".to_string()
+            }
+            Err(error) => {
+                assert_eq!(error.current().id(), source_id);
+                "rejected".to_string()
+            }
+        }
     }
 
     /// INV-006: fatal stop is nonempty and repeated additions are canonical set
@@ -1172,63 +1704,146 @@ mod tests {
     /// each terminal family retains its exact typed cause and disposition.
     #[test]
     fn every_allowed_terminal_disposition_stays_in_its_typed_family() {
+        let cause = proof(1);
         let fatal = FatalMismatchStopCauses::new(
             failure(1),
-            AppliedInterruptState::Applied { proof: proof(1) },
+            AppliedInterruptState::Applied { proof: cause },
         );
-        for disposition in [
-            UnstoppedAttemptDisposition::TurnCompleted,
-            UnstoppedAttemptDisposition::TurnRefused,
-            UnstoppedAttemptDisposition::YieldedToDurableWait,
-            UnstoppedAttemptDisposition::KnownFailure,
-            UnstoppedAttemptDisposition::Lost,
-            UnstoppedAttemptDisposition::Ambiguous,
-        ] {
-            let end = AttemptEnd::WithoutStop { disposition };
-            assert!(matches!(
-                end,
-                AttemptEnd::WithoutStop {
-                    disposition: actual,
-                } if actual == disposition
-            ));
-        }
-        for disposition in [
-            CancellationStopDisposition::TurnCompleted,
-            CancellationStopDisposition::TurnRefused,
-            CancellationStopDisposition::KnownFailure,
-            CancellationStopDisposition::Lost,
-            CancellationStopDisposition::Cancelled,
-            CancellationStopDisposition::Ambiguous,
-        ] {
-            let end = AttemptEnd::AfterCancellation {
-                cause: proof(1),
-                disposition,
-            };
-            assert!(matches!(
-                end,
-                AttemptEnd::AfterCancellation {
-                    cause,
-                    disposition: actual,
-                } if cause == proof(1) && actual == disposition
-            ));
-        }
-        for disposition in [
-            FatalMismatchStopDisposition::KnownFailure,
-            FatalMismatchStopDisposition::Lost,
-            FatalMismatchStopDisposition::Ambiguous,
-        ] {
-            let end = AttemptEnd::AfterFatalMismatch {
+        let ends = [
+            AttemptEnd::WithoutStop {
+                disposition: UnstoppedAttemptDisposition::TurnCompleted,
+            },
+            AttemptEnd::WithoutStop {
+                disposition: UnstoppedAttemptDisposition::TurnRefused,
+            },
+            AttemptEnd::WithoutStop {
+                disposition: UnstoppedAttemptDisposition::YieldedToDurableWait,
+            },
+            AttemptEnd::WithoutStop {
+                disposition: UnstoppedAttemptDisposition::KnownFailure,
+            },
+            AttemptEnd::WithoutStop {
+                disposition: UnstoppedAttemptDisposition::Lost,
+            },
+            AttemptEnd::WithoutStop {
+                disposition: UnstoppedAttemptDisposition::Ambiguous,
+            },
+            AttemptEnd::AfterCancellation {
+                cause,
+                disposition: CancellationStopDisposition::TurnCompleted,
+            },
+            AttemptEnd::AfterCancellation {
+                cause,
+                disposition: CancellationStopDisposition::TurnRefused,
+            },
+            AttemptEnd::AfterCancellation {
+                cause,
+                disposition: CancellationStopDisposition::KnownFailure,
+            },
+            AttemptEnd::AfterCancellation {
+                cause,
+                disposition: CancellationStopDisposition::Lost,
+            },
+            AttemptEnd::AfterCancellation {
+                cause,
+                disposition: CancellationStopDisposition::Cancelled,
+            },
+            AttemptEnd::AfterCancellation {
+                cause,
+                disposition: CancellationStopDisposition::Ambiguous,
+            },
+            AttemptEnd::AfterFatalMismatch {
                 causes: fatal.clone(),
-                disposition,
-            };
-            assert!(matches!(
-                end,
+                disposition: FatalMismatchStopDisposition::KnownFailure,
+            },
+            AttemptEnd::AfterFatalMismatch {
+                causes: fatal.clone(),
+                disposition: FatalMismatchStopDisposition::Lost,
+            },
+            AttemptEnd::AfterFatalMismatch {
+                causes: fatal,
+                disposition: FatalMismatchStopDisposition::Ambiguous,
+            },
+        ];
+
+        expect![[r#"
+            ┌──────────────────────┬──────────────────────┬───────────────────────────────────┐
+            │ family               │ disposition          │ retained_cause                    │
+            ├──────────────────────┼──────────────────────┼───────────────────────────────────┤
+            │ without stop         │ TurnCompleted        │ -                                 │
+            │ without stop         │ TurnRefused          │ -                                 │
+            │ without stop         │ YieldedToDurableWait │ -                                 │
+            │ without stop         │ KnownFailure         │ -                                 │
+            │ without stop         │ Lost                 │ -                                 │
+            │ without stop         │ Ambiguous            │ -                                 │
+            │ after cancellation   │ TurnCompleted        │ interrupt command 1               │
+            │ after cancellation   │ TurnRefused          │ interrupt command 1               │
+            │ after cancellation   │ KnownFailure         │ interrupt command 1               │
+            │ after cancellation   │ Lost                 │ interrupt command 1               │
+            │ after cancellation   │ Cancelled            │ interrupt command 1               │
+            │ after cancellation   │ Ambiguous            │ interrupt command 1               │
+            │ after fatal mismatch │ KnownFailure         │ 1 failure(s), interrupt command 1 │
+            │ after fatal mismatch │ Lost                 │ 1 failure(s), interrupt command 1 │
+            │ after fatal mismatch │ Ambiguous            │ 1 failure(s), interrupt command 1 │
+            └──────────────────────┴──────────────────────┴───────────────────────────────────┘
+        "#]]
+        .assert_eq(&attempt_end_family_table(&ends));
+    }
+
+    /// Renders each constructed end's family, disposition, and retained typed
+    /// cause, read back from the observed values
+    /// (`docs/testing-style.md`, rule 12).
+    fn attempt_end_family_table(ends: &[AttemptEnd]) -> String {
+        #[derive(Debug)]
+        #[allow(
+            dead_code,
+            reason = "the table renderer reads every field through the Debug derive"
+        )]
+        struct Row {
+            family: &'static str,
+            disposition: String,
+            retained_cause: String,
+        }
+
+        let rows: Vec<Row> = ends
+            .iter()
+            .map(|end| match end {
+                AttemptEnd::WithoutStop { disposition } => Row {
+                    family: "without stop",
+                    disposition: format!("{disposition:?}"),
+                    retained_cause: "-".to_string(),
+                },
+                AttemptEnd::AfterCancellation { cause, disposition } => Row {
+                    family: "after cancellation",
+                    disposition: format!("{disposition:?}"),
+                    retained_cause: format!(
+                        "interrupt command {}",
+                        cause.command().as_uuid().as_u128()
+                    ),
+                },
                 AttemptEnd::AfterFatalMismatch {
                     causes,
-                    disposition: actual,
-                } if causes == fatal && actual == disposition
-            ));
-        }
+                    disposition,
+                } => {
+                    let interrupt = match causes.interrupt() {
+                        AppliedInterruptState::NoAppliedInterrupt => "no interrupt".to_string(),
+                        AppliedInterruptState::Applied { proof } => {
+                            format!("interrupt command {}", proof.command().as_uuid().as_u128())
+                        }
+                    };
+                    Row {
+                        family: "after fatal mismatch",
+                        disposition: format!("{disposition:?}"),
+                        retained_cause: format!(
+                            "{} failure(s), {interrupt}",
+                            causes.failures().len()
+                        ),
+                    }
+                }
+            })
+            .collect();
+
+        table(rows)
     }
 
     /// INV-018: refusal remains representable without fatal stop and after a

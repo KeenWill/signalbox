@@ -363,7 +363,7 @@ mod tests {
     };
     use super::*;
     use crate::{
-        AppliedInterruptProof, AppliedInterruptState, AttemptEnd, IssuedOperationRef,
+        AppliedInterruptProof, AppliedInterruptState, AttemptEnd, IssuedOperationRef, ModelCallId,
         ProviderTargetMismatchFailureRef, ReconciliationReason,
         applied_interrupt::test_applied_interrupt_proof,
         provider_evidence::AppliedProviderTargetMismatch,
@@ -383,10 +383,10 @@ mod tests {
         test_applied_interrupt_proof(command_id(value), turn_id(100))
     }
 
-    fn mismatch(call: u128, evidence: u128) -> AppliedProviderTargetMismatch {
+    fn mismatch(affected_call: ModelCallId, evidence: u128) -> AppliedProviderTargetMismatch {
         AppliedProviderTargetMismatch::test_nonterminal(
             provider_target_evidence_id(evidence),
-            model_call_id(call),
+            affected_call,
         )
     }
 
@@ -396,37 +396,51 @@ mod tests {
         ))
     }
 
-    fn fatal_source_cases() -> [(
-        CurrentTurnAttempt,
-        AppliedInterruptState,
-        BTreeSet<ProviderTargetMismatchFailureRef>,
-    ); 3] {
+    /// One fatal-mismatch source attempt and the complete interrupt state and
+    /// failure set its binding must derive after the evidence-1 mismatch.
+    struct FatalSource {
+        attempt: CurrentTurnAttempt,
+        expected_interrupt: AppliedInterruptState,
+        expected_failures: BTreeSet<ProviderTargetMismatchFailureRef>,
+    }
+
+    /// A live running source with no stop; binding derives the new failure
+    /// alone.
+    fn live_running_source() -> FatalSource {
+        FatalSource {
+            attempt: running_attempt(1),
+            expected_interrupt: AppliedInterruptState::NoAppliedInterrupt,
+            expected_failures: BTreeSet::from([failure(1)]),
+        }
+    }
+
+    /// A source with a pre-existing cancellation-only stop; binding retains
+    /// the exact proof alongside the new failure.
+    fn cancellation_stopped_source() -> FatalSource {
         let proof = interrupt(1);
-        let new_failure = failure(1);
+        FatalSource {
+            attempt: running_attempt(2)
+                .request_cancellation(proof)
+                .expect("running attempt accepts applied interrupt"),
+            expected_interrupt: AppliedInterruptState::Applied { proof },
+            expected_failures: BTreeSet::from([failure(1)]),
+        }
+    }
+
+    /// A source with an existing multi-failure fatal stop; binding unions the
+    /// new failure into the complete cause set.
+    fn fatal_stopped_source() -> FatalSource {
+        let proof = interrupt(1);
         let prior_failure = failure(2);
-        [
-            (
-                running_attempt(1),
-                AppliedInterruptState::NoAppliedInterrupt,
-                BTreeSet::from([new_failure]),
-            ),
-            (
-                running_attempt(2)
-                    .request_cancellation(proof)
-                    .expect("running attempt accepts applied interrupt"),
-                AppliedInterruptState::Applied { proof },
-                BTreeSet::from([new_failure]),
-            ),
-            (
-                running_attempt(3)
-                    .request_cancellation(proof)
-                    .expect("running attempt accepts applied interrupt")
-                    .request_fatal_mismatch(prior_failure)
-                    .expect("cancellation stop upgrades to fatal"),
-                AppliedInterruptState::Applied { proof },
-                BTreeSet::from([new_failure, prior_failure]),
-            ),
-        ]
+        FatalSource {
+            attempt: running_attempt(3)
+                .request_cancellation(proof)
+                .expect("running attempt accepts applied interrupt")
+                .request_fatal_mismatch(prior_failure)
+                .expect("cancellation stop upgrades to fatal"),
+            expected_interrupt: AppliedInterruptState::Applied { proof },
+            expected_failures: BTreeSet::from([failure(1), prior_failure]),
+        }
     }
 
     fn projection(
@@ -464,69 +478,79 @@ mod tests {
     /// fatal-stopped attempt, retaining the same source facts and identity.
     #[test]
     fn s27_inv006_inv029_unfinished_work_yields_exact_fatal_stop() {
+        assert_unfinished_work_yields_exact_fatal_stop(live_running_source());
+        assert_unfinished_work_yields_exact_fatal_stop(cancellation_stopped_source());
+        assert_unfinished_work_yields_exact_fatal_stop(fatal_stopped_source());
+    }
+
+    #[track_caller]
+    fn assert_unfinished_work_yields_exact_fatal_stop(source: FatalSource) {
+        let FatalSource {
+            attempt,
+            expected_interrupt,
+            expected_failures,
+        } = source;
+        let owned_call = model_call_id(1);
         let open_request = OwnedLogicalDependencyRef::ToolRequest(tool_request_id(1));
         let unclassified = IssuedOperationRef::ToolAttempt(tool_attempt_id(2));
         let ambiguous = IssuedOperationRef::ToolAttempt(tool_attempt_id(3));
+        let attempt_id = attempt.id();
+        let facts = projection(
+            attempt.clone(),
+            [(open_request, LogicalDependencyClosure::Open)],
+            [
+                (
+                    IssuedOperationRef::ModelCall(owned_call),
+                    IssuedOperationClosure::Unclassified,
+                ),
+                (unclassified, IssuedOperationClosure::Unclassified),
+                (ambiguous, blocking_ambiguity()),
+            ],
+        )
+        .apply(mismatch(owned_call, 1))
+        .expect("owned mismatch produces complete facts");
+        let expected_facts = facts.clone();
+        let source_phase = ActiveTurnPhase::Running {
+            current_attempt: attempt,
+        };
+        let expected_source = source_phase.clone();
+        let binding = facts
+            .bind_lifecycle_candidate(source_phase)
+            .expect("exact running phase binds");
 
-        for (attempt, expected_interrupt, expected_failures) in fatal_source_cases() {
-            let attempt_id = attempt.id();
-            let facts = projection(
-                attempt.clone(),
-                [(open_request, LogicalDependencyClosure::Open)],
-                [
-                    (
-                        IssuedOperationRef::ModelCall(model_call_id(1)),
-                        IssuedOperationClosure::Unclassified,
-                    ),
-                    (unclassified, IssuedOperationClosure::Unclassified),
-                    (ambiguous, blocking_ambiguity()),
-                ],
-            )
-            .apply(mismatch(1, 1))
-            .expect("owned mismatch produces complete facts");
-            let expected_facts = facts.clone();
-            let source_phase = ActiveTurnPhase::Running {
-                current_attempt: attempt,
-            };
-            let expected_source = source_phase.clone();
-            let binding = facts
-                .bind_lifecycle_candidate(source_phase)
-                .expect("exact running phase binds");
-
-            assert_eq!(binding.facts(), &expected_facts);
-            assert_eq!(binding.source_phase(), &expected_source);
-            assert_eq!(
-                binding
-                    .facts()
-                    .unfinished_blockers()
-                    .expect("unfinished binding retains exact blockers")
-                    .collect::<BTreeSet<_>>(),
-                BTreeSet::from([
-                    FatalMismatchOwnedWorkBlocker::LogicalDependency(open_request),
-                    FatalMismatchOwnedWorkBlocker::UnclassifiedOperation(unclassified),
-                ])
-            );
-            assert!(
-                binding
-                    .facts()
-                    .blocking_ambiguities()
-                    .is_some_and(|remainder| remainder.contains(ambiguous))
-            );
-            let FatalMismatchLifecycleBindingView::StopRequested { active_phase } = binding.view()
-            else {
-                panic!("unfinished work cannot select a terminal candidate");
-            };
-            let ActiveTurnPhase::Running { current_attempt } = active_phase else {
-                panic!("stop candidate remains the running active phase");
-            };
-            assert_eq!(current_attempt.id(), attempt_id);
-            assert_eq!(fatal_causes(active_phase), binding.facts().causes());
-            assert_eq!(binding.facts().causes().interrupt(), expected_interrupt);
-            assert_eq!(
-                binding.facts().causes().failures().collect::<BTreeSet<_>>(),
-                expected_failures
-            );
-        }
+        assert_eq!(binding.facts(), &expected_facts);
+        assert_eq!(binding.source_phase(), &expected_source);
+        assert_eq!(
+            binding
+                .facts()
+                .unfinished_blockers()
+                .expect("unfinished binding retains exact blockers")
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                FatalMismatchOwnedWorkBlocker::LogicalDependency(open_request),
+                FatalMismatchOwnedWorkBlocker::UnclassifiedOperation(unclassified),
+            ])
+        );
+        assert!(
+            binding
+                .facts()
+                .blocking_ambiguities()
+                .is_some_and(|remainder| remainder.contains(ambiguous))
+        );
+        let FatalMismatchLifecycleBindingView::StopRequested { active_phase } = binding.view()
+        else {
+            panic!("unfinished work cannot select a terminal candidate");
+        };
+        let ActiveTurnPhase::Running { current_attempt } = active_phase else {
+            panic!("stop candidate remains the running active phase");
+        };
+        assert_eq!(current_attempt.id(), attempt_id);
+        assert_eq!(fatal_causes(active_phase), binding.facts().causes());
+        assert_eq!(binding.facts().causes().interrupt(), expected_interrupt);
+        assert_eq!(
+            binding.facts().causes().failures().collect::<BTreeSet<_>>(),
+            expected_failures
+        );
     }
 
     /// S07 / S27 / INV-006 / INV-029: a live running source, a pre-existing
@@ -535,57 +559,68 @@ mod tests {
     /// stop as aggregate fallback.
     #[test]
     fn s07_s27_inv006_inv029_closed_sources_yield_exact_failure_candidates() {
-        for (attempt, expected_interrupt, expected_failures) in fatal_source_cases() {
-            let attempt_id = attempt.id();
-            let facts = projection(
-                attempt.clone(),
-                [],
-                [(
-                    IssuedOperationRef::ModelCall(model_call_id(1)),
-                    IssuedOperationClosure::Unclassified,
-                )],
-            )
-            .apply(mismatch(1, 1))
-            .expect("last unclassified operation becomes known failed");
-            let expected_causes = facts.causes().clone();
+        assert_closed_source_yields_exact_failure_candidate(live_running_source());
+        assert_closed_source_yields_exact_failure_candidate(cancellation_stopped_source());
+        assert_closed_source_yields_exact_failure_candidate(fatal_stopped_source());
+    }
 
-            let binding = facts
-                .bind_lifecycle_candidate(ActiveTurnPhase::Running {
-                    current_attempt: attempt,
-                })
-                .expect("exact source attempt binds through its running phase");
-            let FatalMismatchLifecycleBindingView::ClosedTerminalCandidate { candidate } =
-                binding.view()
-            else {
-                panic!("closed work selects a terminal candidate");
-            };
+    #[track_caller]
+    fn assert_closed_source_yields_exact_failure_candidate(source: FatalSource) {
+        let FatalSource {
+            attempt,
+            expected_interrupt,
+            expected_failures,
+        } = source;
+        let owned_call = model_call_id(1);
+        let attempt_id = attempt.id();
+        let facts = projection(
+            attempt.clone(),
+            [],
+            [(
+                IssuedOperationRef::ModelCall(owned_call),
+                IssuedOperationClosure::Unclassified,
+            )],
+        )
+        .apply(mismatch(owned_call, 1))
+        .expect("last unclassified operation becomes known failed");
+        let expected_causes = facts.causes().clone();
 
-            assert_eq!(candidate.ended_attempt().id(), attempt_id);
-            assert!(matches!(
-                candidate.ended_attempt().end(),
-                AttemptEnd::AfterFatalMismatch {
-                    causes,
-                    disposition: FatalMismatchStopDisposition::KnownFailure,
-                } if causes == &expected_causes
-            ));
-            assert_eq!(candidate.turn_disposition(), &TurnDisposition::Failed);
-            assert_eq!(
-                fatal_causes(candidate.fatal_stop_fallback()),
-                &expected_causes
-            );
-            let ActiveTurnPhase::Running {
-                current_attempt: fallback_attempt,
-            } = candidate.fatal_stop_fallback()
-            else {
-                panic!("fallback remains the running active phase");
-            };
-            assert_eq!(fallback_attempt.id(), attempt_id);
-            assert_eq!(expected_causes.interrupt(), expected_interrupt);
-            assert_eq!(
-                expected_causes.failures().collect::<BTreeSet<_>>(),
-                expected_failures
-            );
-        }
+        let binding = facts
+            .bind_lifecycle_candidate(ActiveTurnPhase::Running {
+                current_attempt: attempt,
+            })
+            .expect("exact source attempt binds through its running phase");
+        let FatalMismatchLifecycleBindingView::ClosedTerminalCandidate { candidate } =
+            binding.view()
+        else {
+            panic!("closed work selects a terminal candidate");
+        };
+
+        assert_eq!(candidate.ended_attempt().id(), attempt_id);
+        assert!(matches!(
+            candidate.ended_attempt().end(),
+            AttemptEnd::AfterFatalMismatch {
+                causes,
+                disposition: FatalMismatchStopDisposition::KnownFailure,
+            } if causes == &expected_causes
+        ));
+        assert_eq!(candidate.turn_disposition(), &TurnDisposition::Failed);
+        assert_eq!(
+            fatal_causes(candidate.fatal_stop_fallback()),
+            &expected_causes
+        );
+        let ActiveTurnPhase::Running {
+            current_attempt: fallback_attempt,
+        } = candidate.fatal_stop_fallback()
+        else {
+            panic!("fallback remains the running active phase");
+        };
+        assert_eq!(fallback_attempt.id(), attempt_id);
+        assert_eq!(expected_causes.interrupt(), expected_interrupt);
+        assert_eq!(
+            expected_causes.failures().collect::<BTreeSet<_>>(),
+            expected_failures
+        );
     }
 
     /// S07 / S27 / INV-006 / INV-025 / INV-026 / INV-029: a live running
@@ -594,73 +629,83 @@ mod tests {
     /// fallback all carry the same exact F and the marker carries exactly U.
     #[test]
     fn s07_s27_inv006_inv025_inv026_inv029_closed_sources_yield_exact_reconciliation_candidates() {
+        assert_closed_source_yields_exact_reconciliation_candidate(live_running_source());
+        assert_closed_source_yields_exact_reconciliation_candidate(cancellation_stopped_source());
+        assert_closed_source_yields_exact_reconciliation_candidate(fatal_stopped_source());
+    }
+
+    #[track_caller]
+    fn assert_closed_source_yields_exact_reconciliation_candidate(source: FatalSource) {
+        let FatalSource {
+            attempt,
+            expected_interrupt,
+            expected_failures,
+        } = source;
+        let owned_call = model_call_id(1);
         let y = IssuedOperationRef::ToolAttempt(tool_attempt_id(2));
+        let attempt_id = attempt.id();
+        let facts = projection(
+            attempt.clone(),
+            [],
+            [
+                (
+                    IssuedOperationRef::ModelCall(owned_call),
+                    IssuedOperationClosure::Unclassified,
+                ),
+                (y, blocking_ambiguity()),
+            ],
+        )
+        .apply(mismatch(owned_call, 1))
+        .expect("known mismatch closes X while Y remains ambiguous");
+        let expected_causes = facts.causes().clone();
 
-        for (attempt, expected_interrupt, expected_failures) in fatal_source_cases() {
-            let attempt_id = attempt.id();
-            let facts = projection(
-                attempt.clone(),
-                [],
-                [
-                    (
-                        IssuedOperationRef::ModelCall(model_call_id(1)),
-                        IssuedOperationClosure::Unclassified,
-                    ),
-                    (y, blocking_ambiguity()),
-                ],
-            )
-            .apply(mismatch(1, 1))
-            .expect("known mismatch closes X while Y remains ambiguous");
-            let expected_causes = facts.causes().clone();
+        let binding = facts
+            .bind_lifecycle_candidate(ActiveTurnPhase::Running {
+                current_attempt: attempt,
+            })
+            .expect("exact source attempt binds through its running phase");
+        let FatalMismatchLifecycleBindingView::ClosedTerminalCandidate { candidate } =
+            binding.view()
+        else {
+            panic!("closed ambiguity selects a terminal candidate");
+        };
 
-            let binding = facts
-                .bind_lifecycle_candidate(ActiveTurnPhase::Running {
-                    current_attempt: attempt,
-                })
-                .expect("exact source attempt binds through its running phase");
-            let FatalMismatchLifecycleBindingView::ClosedTerminalCandidate { candidate } =
-                binding.view()
-            else {
-                panic!("closed ambiguity selects a terminal candidate");
-            };
-
-            assert_eq!(candidate.ended_attempt().id(), attempt_id);
-            assert!(matches!(
-                candidate.ended_attempt().end(),
-                AttemptEnd::AfterFatalMismatch {
-                    causes,
-                    disposition: FatalMismatchStopDisposition::Ambiguous,
-                } if causes == &expected_causes
-            ));
-            let TurnDisposition::ReconciliationRequired { marker } = candidate.turn_disposition()
-            else {
-                panic!("nonempty exact U requires reconciliation");
-            };
-            assert_eq!(marker.ambiguous_operations().operation_count(), 1);
-            assert!(marker.ambiguous_operations().contains(y));
-            assert!(matches!(
-                marker.reason(),
-                ReconciliationReason::FatalMismatchRequiresReconciliation { causes }
-                    if causes == &expected_causes
-            ));
-            assert_eq!(
-                fatal_causes(candidate.fatal_stop_fallback()),
-                &expected_causes
-            );
-            let ActiveTurnPhase::Running {
-                current_attempt: fallback_attempt,
-            } = candidate.fatal_stop_fallback()
-            else {
-                panic!("fallback remains the running active phase");
-            };
-            assert_eq!(fallback_attempt.id(), attempt_id);
-            assert_eq!(binding.facts().causes(), &expected_causes);
-            assert_eq!(expected_causes.interrupt(), expected_interrupt);
-            assert_eq!(
-                expected_causes.failures().collect::<BTreeSet<_>>(),
-                expected_failures
-            );
-        }
+        assert_eq!(candidate.ended_attempt().id(), attempt_id);
+        assert!(matches!(
+            candidate.ended_attempt().end(),
+            AttemptEnd::AfterFatalMismatch {
+                causes,
+                disposition: FatalMismatchStopDisposition::Ambiguous,
+            } if causes == &expected_causes
+        ));
+        let TurnDisposition::ReconciliationRequired { marker } = candidate.turn_disposition()
+        else {
+            panic!("nonempty exact U requires reconciliation");
+        };
+        assert_eq!(marker.ambiguous_operations().operation_count(), 1);
+        assert!(marker.ambiguous_operations().contains(y));
+        assert!(matches!(
+            marker.reason(),
+            ReconciliationReason::FatalMismatchRequiresReconciliation { causes }
+                if causes == &expected_causes
+        ));
+        assert_eq!(
+            fatal_causes(candidate.fatal_stop_fallback()),
+            &expected_causes
+        );
+        let ActiveTurnPhase::Running {
+            current_attempt: fallback_attempt,
+        } = candidate.fatal_stop_fallback()
+        else {
+            panic!("fallback remains the running active phase");
+        };
+        assert_eq!(fallback_attempt.id(), attempt_id);
+        assert_eq!(binding.facts().causes(), &expected_causes);
+        assert_eq!(expected_causes.interrupt(), expected_interrupt);
+        assert_eq!(
+            expected_causes.failures().collect::<BTreeSet<_>>(),
+            expected_failures
+        );
     }
 
     /// INV-006: local phase-shape and exact-attempt correlation reject with
@@ -668,80 +713,84 @@ mod tests {
     /// aggregate freshness, current-turn ownership, or progressing-slot proof.
     #[test]
     fn inv006_phase_correlation_rejections_return_inputs_unchanged() {
-        let attempt = running_attempt(1);
-        let make_facts = || {
-            projection(
-                attempt.clone(),
-                [],
-                [(
-                    IssuedOperationRef::ModelCall(model_call_id(1)),
-                    IssuedOperationClosure::Unclassified,
-                )],
+        assert_non_running_phase_rejects_unchanged(ActiveTurnPhase::AwaitingApproval {
+            request: tool_request_id(1),
+        });
+        assert_non_running_phase_rejects_unchanged(ActiveTurnPhase::AwaitingRecoveryDecision {
+            ambiguous_operations: NonEmptyIssuedOperationRefs::try_from_operations([
+                IssuedOperationRef::ToolAttempt(tool_attempt_id(1)),
+            ])
+            .expect("one operation is nonempty"),
+        });
+
+        let different_identity = running_attempt(2);
+        let same_identity_not_running = CurrentTurnAttempt::prepared(turn_attempt_id(1));
+        let same_identity_already_stopped = running_attempt(1)
+            .request_cancellation(interrupt(1))
+            .expect("same-identity running attempt accepts interrupt");
+        assert_mismatched_running_phase_rejects_unchanged(different_identity);
+        assert_mismatched_running_phase_rejects_unchanged(same_identity_not_running);
+        assert_mismatched_running_phase_rejects_unchanged(same_identity_already_stopped);
+    }
+
+    /// Closed post-evidence facts whose exact correlated attempt is
+    /// `running_attempt(1)`.
+    fn correlated_facts() -> PostEvidenceFatalMismatchFacts {
+        let owned_call = model_call_id(1);
+        projection(
+            running_attempt(1),
+            [],
+            [(
+                IssuedOperationRef::ModelCall(owned_call),
+                IssuedOperationClosure::Unclassified,
+            )],
+        )
+        .apply(mismatch(owned_call, 1))
+        .expect("closed projection produces facts")
+    }
+
+    #[track_caller]
+    fn assert_non_running_phase_rejects_unchanged(wait: ActiveTurnPhase) {
+        let facts = correlated_facts();
+        let unchanged_facts = facts.clone();
+        let unchanged_wait = wait.clone();
+        let error = facts
+            .bind_lifecycle_candidate(wait)
+            .expect_err("durable wait is not the local running phase");
+        assert_eq!(error.facts(), &unchanged_facts);
+        assert_eq!(error.source_phase(), &unchanged_wait);
+        assert_eq!(
+            error.rejection(),
+            &FatalMismatchLifecycleBindingRejection::SourcePhaseIsNotRunning
+        );
+        assert_eq!(
+            error.into_parts(),
+            (
+                unchanged_facts,
+                unchanged_wait,
+                FatalMismatchLifecycleBindingRejection::SourcePhaseIsNotRunning,
             )
-            .apply(mismatch(1, 1))
-            .expect("closed projection produces facts")
+        );
+    }
+
+    #[track_caller]
+    fn assert_mismatched_running_phase_rejects_unchanged(wrong_attempt: CurrentTurnAttempt) {
+        let facts = correlated_facts();
+        let unchanged_facts = facts.clone();
+        let wrong_phase = ActiveTurnPhase::Running {
+            current_attempt: wrong_attempt,
         };
-
-        let waits = [
-            ActiveTurnPhase::AwaitingApproval {
-                request: tool_request_id(1),
-            },
-            ActiveTurnPhase::AwaitingRecoveryDecision {
-                ambiguous_operations: NonEmptyIssuedOperationRefs::try_from_operations([
-                    IssuedOperationRef::ToolAttempt(tool_attempt_id(1)),
-                ])
-                .expect("one operation is nonempty"),
-            },
-        ];
-        for wait in waits {
-            let facts = make_facts();
-            let unchanged_facts = facts.clone();
-            let unchanged_wait = wait.clone();
-            let error = facts
-                .bind_lifecycle_candidate(wait)
-                .expect_err("durable wait is not the local running phase");
-            assert_eq!(error.facts(), &unchanged_facts);
-            assert_eq!(error.source_phase(), &unchanged_wait);
-            assert_eq!(
-                error.rejection(),
-                &FatalMismatchLifecycleBindingRejection::SourcePhaseIsNotRunning
-            );
-            assert_eq!(
-                error.into_parts(),
-                (
-                    unchanged_facts,
-                    unchanged_wait,
-                    FatalMismatchLifecycleBindingRejection::SourcePhaseIsNotRunning,
-                )
-            );
-        }
-
-        let wrong_attempts = [
-            running_attempt(2),
-            CurrentTurnAttempt::prepared(turn_attempt_id(1)),
-            attempt
-                .clone()
-                .request_cancellation(interrupt(1))
-                .expect("same-identity running attempt accepts interrupt"),
-        ];
-        for wrong_attempt in wrong_attempts {
-            let facts = make_facts();
-            let unchanged_facts = facts.clone();
-            let wrong_phase = ActiveTurnPhase::Running {
-                current_attempt: wrong_attempt,
-            };
-            let unchanged_wrong_phase = wrong_phase.clone();
-            let error = facts
-                .bind_lifecycle_candidate(wrong_phase)
-                .expect_err("different identity or state fails local correlation");
-            assert_eq!(
-                error.into_parts(),
-                (
-                    unchanged_facts,
-                    unchanged_wrong_phase,
-                    FatalMismatchLifecycleBindingRejection::SourceAttemptMismatch,
-                )
-            );
-        }
+        let unchanged_wrong_phase = wrong_phase.clone();
+        let error = facts
+            .bind_lifecycle_candidate(wrong_phase)
+            .expect_err("different identity or state fails local correlation");
+        assert_eq!(
+            error.into_parts(),
+            (
+                unchanged_facts,
+                unchanged_wrong_phase,
+                FatalMismatchLifecycleBindingRejection::SourceAttemptMismatch,
+            )
+        );
     }
 }

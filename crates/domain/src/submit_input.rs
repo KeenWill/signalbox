@@ -2905,69 +2905,67 @@ mod tests {
         ));
     }
 
+    /// Prepares one active-work command against the canonical vacant-slot
+    /// session and asserts the exact recorded rejection; the command and
+    /// every expected field stay at the call site.
+    #[track_caller]
+    fn assert_vacant_slot_records_rejection(
+        command: SubmitInput,
+        turn_candidate: Option<crate::TurnId>,
+        expected: SubmitInputRejectedResult,
+    ) {
+        let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
+        let prepared = command
+            .prepare_when_no_active_turn(
+                &current,
+                accepted_input_id(3),
+                turn_candidate,
+                None,
+                |_| panic!("active-work rejection does not resolve configuration"),
+            )
+            .expect("session matches");
+        assert_eq!(prepared.result(), &SubmitInputResult::Rejected(expected));
+    }
+
     /// S01 / INV-012 / INV-028: active-work variants record the exact
     /// expected turn in a no-active-turn rejection.
     #[test]
     fn s01_inv012_inv028_active_modes_reject_when_no_turn_is_active() {
-        let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
-        let configuration = choices(1, ModelSelectionOverride::UseSessionDefault);
-        for (delivery, turn_candidate) in [
-            (
-                DeliveryRequest::Interrupt {
-                    expected_active_turn: turn_id(7),
-                    configuration,
-                },
-                Some(turn_id(4)),
-            ),
-            (
-                DeliveryRequest::NextSafePoint {
-                    expected_active_turn: turn_id(7),
-                },
-                None,
-            ),
-            (
-                DeliveryRequest::AfterCurrentTurn {
-                    expected_active_turn: turn_id(7),
-                    configuration,
-                },
-                Some(turn_id(4)),
-            ),
-        ] {
-            let prepared =
-                SubmitInput::new(command_id(1), session_id(1), content("hello"), delivery)
-                    .prepare_when_no_active_turn(
-                        &current,
-                        accepted_input_id(3),
-                        turn_candidate,
-                        None,
-                        |_| panic!("active-work rejection does not resolve configuration"),
-                    )
-                    .expect("session matches");
-            assert!(matches!(
-                prepared.result(),
-                SubmitInputResult::Rejected(SubmitInputRejectedResult::NoActiveTurn {
-                    session,
-                    expected_active_turn,
-                }) if *session == session_id(1) && *expected_active_turn == turn_id(7)
-            ));
-        }
-
-        let mismatch = SubmitInput::new(
-            command_id(1),
-            session_id(1),
-            content("hello"),
-            DeliveryRequest::NextSafePoint {
+        assert_vacant_slot_records_rejection(
+            interrupt_command(1, turn_id(7)),
+            Some(turn_id(4)),
+            SubmitInputRejectedResult::NoActiveTurn {
+                session: session_id(1),
                 expected_active_turn: turn_id(7),
             },
-        )
-        .prepare_when_no_active_turn(
-            &current,
-            accepted_input_id(3),
-            Some(turn_id(4)),
+        );
+        assert_vacant_slot_records_rejection(
+            safe_point_command(1, turn_id(7)),
             None,
-            |_| None,
-        )
-        .expect_err("safe-point steering initially creates no turn");
+            SubmitInputRejectedResult::NoActiveTurn {
+                session: session_id(1),
+                expected_active_turn: turn_id(7),
+            },
+        );
+        assert_vacant_slot_records_rejection(
+            after_command(1, turn_id(7)),
+            Some(turn_id(4)),
+            SubmitInputRejectedResult::NoActiveTurn {
+                session: session_id(1),
+                expected_active_turn: turn_id(7),
+            },
+        );
+
+        let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
+        let mismatch = safe_point_command(1, turn_id(7))
+            .prepare_when_no_active_turn(
+                &current,
+                accepted_input_id(3),
+                Some(turn_id(4)),
+                None,
+                |_| None,
+            )
+            .expect_err("safe-point steering initially creates no turn");
         assert_eq!(
             mismatch.failure(),
             SubmitInputPreparationFailure::TurnCandidateMismatch
@@ -3493,6 +3491,26 @@ mod tests {
         assert!(pending.turn_origin().is_none());
     }
 
+    /// Asserts the advanced lifecycle has left pending steering behind while
+    /// replay of the canonical receipt still reconstructs pending steering.
+    #[track_caller]
+    fn assert_replay_survives_lifecycle_progress(advanced: &AcceptedInputLifecycle) {
+        assert!(
+            !matches!(
+                advanced.disposition(),
+                AcceptedInputDisposition::PendingSteering { .. }
+            ),
+            "the lifecycle under test must have progressed past pending steering"
+        );
+        let replayed = pending_steering_input()
+            .reconstitute()
+            .expect("mutable lifecycle progress cannot rewrite the receipt");
+        assert!(matches!(
+            replayed.result(),
+            SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(_))
+        ));
+    }
+
     /// S08 / INV-012 / INV-016: replay reconstructs the immutable original
     /// pending-steering receipt independently of its mutable lifecycle.
     #[test]
@@ -3503,32 +3521,20 @@ mod tests {
                 binding: SteeringBinding::new(turn_id(7)),
             },
         );
-        let advanced = [
-            initial
-                .clone()
-                .consume_as_steering(crate::test_support::model_call_id(0x81))
-                .expect("pending steering can be consumed"),
-            initial
-                .reclassify_as_turn_origin(
-                    turn_id(8),
-                    crate::SteeringReclassificationReason::NoSafePointBeforeTerminal,
-                )
-                .expect("pending steering can be reclassified"),
-        ];
 
-        for current in advanced {
-            assert!(!matches!(
-                current.disposition(),
-                AcceptedInputDisposition::PendingSteering { .. }
-            ));
-            let replayed = pending_steering_input()
-                .reconstitute()
-                .expect("mutable lifecycle progress cannot rewrite the receipt");
-            assert!(matches!(
-                replayed.result(),
-                SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(_))
-            ));
-        }
+        let consumed = initial
+            .clone()
+            .consume_as_steering(crate::test_support::model_call_id(0x81))
+            .expect("pending steering can be consumed");
+        assert_replay_survives_lifecycle_progress(&consumed);
+
+        let reclassified = initial
+            .reclassify_as_turn_origin(
+                turn_id(8),
+                crate::SteeringReclassificationReason::NoSafePointBeforeTerminal,
+            )
+            .expect("pending steering can be reclassified");
+        assert_replay_survives_lifecycle_progress(&reclassified);
     }
 
     /// S08 / S09 / INV-009 / INV-012: a canonical turn origin can come from
@@ -3622,18 +3628,33 @@ mod tests {
         ));
     }
 
+    /// Replays a rejection whose reclassified origin's source turn ended with
+    /// the given terminal disposition and asserts replay authenticates it.
+    #[track_caller]
+    fn assert_terminal_source_authenticates_reclassification(disposition: TurnDisposition) {
+        SubmitInputReconstitutionInput::rejected_active_turn_present(
+            start_command(0x84, "rejected start", 1),
+            Actor::Owner,
+            session_id(1),
+            turn_id(8),
+            reclassified_turn_origin_with_disposition(disposition),
+        )
+        .reconstitute()
+        .expect("every terminal source disposition authenticates reclassification");
+    }
+
     /// S08 / INV-009 / INV-012: reclassification replay admits every
     /// terminal disposition and recursively validates a source turn that was
     /// itself created by steering reclassification.
     #[test]
     fn s08_inv009_inv012_reclassification_accepts_all_terminal_sources_and_chains() {
-        let terminal_dispositions = [
-            TurnDisposition::Completed,
-            TurnDisposition::Refused,
-            TurnDisposition::Failed,
-            TurnDisposition::Cancelled {
-                cause: test_applied_interrupt_proof(command_id(0x90), turn_id(7)),
-            },
+        assert_terminal_source_authenticates_reclassification(TurnDisposition::Completed);
+        assert_terminal_source_authenticates_reclassification(TurnDisposition::Refused);
+        assert_terminal_source_authenticates_reclassification(TurnDisposition::Failed);
+        assert_terminal_source_authenticates_reclassification(TurnDisposition::Cancelled {
+            cause: test_applied_interrupt_proof(command_id(0x90), turn_id(7)),
+        });
+        assert_terminal_source_authenticates_reclassification(
             TurnDisposition::ReconciliationRequired {
                 marker: test_reconciliation_marker(
                     NonEmptyIssuedOperationRefs::try_from_operations([
@@ -3645,18 +3666,7 @@ mod tests {
                     },
                 ),
             },
-        ];
-        for disposition in terminal_dispositions {
-            SubmitInputReconstitutionInput::rejected_active_turn_present(
-                start_command(0x84, "rejected start", 1),
-                Actor::Owner,
-                session_id(1),
-                turn_id(8),
-                reclassified_turn_origin_with_disposition(disposition),
-            )
-            .reconstitute()
-            .expect("every terminal source disposition authenticates reclassification");
-        }
+        );
 
         let source_origin = reclassified_turn_origin_with_disposition(TurnDisposition::Completed);
         let position = SessionInputPosition::first()
@@ -3723,33 +3733,38 @@ mod tests {
         .expect("a terminal reclassified source authenticates the next reclassified origin");
     }
 
+    /// Replays a rejection carrying the given cross-wired reclassified origin
+    /// and asserts the replay fails closed with the origin-mismatch failure.
+    #[track_caller]
+    fn assert_cross_wired_reclassified_origin_fails_closed(
+        origin: SubmitInputTurnOriginReconstitutionInput,
+    ) {
+        assert_eq!(
+            SubmitInputReconstitutionInput::rejected_active_turn_present(
+                start_command(0x84, "rejected start", 1),
+                Actor::Owner,
+                session_id(1),
+                turn_id(8),
+                origin,
+            )
+            .reconstitute()
+            .expect_err("cross-wired reclassified origin facts fail closed")
+            .failure(),
+            SubmitInputReconstitutionFailure::RejectionActiveTurnOriginMismatch
+        );
+    }
+
     /// S08 / INV-009 / INV-012: a pending receipt becomes canonical origin
     /// evidence only with its exact reclassified lifecycle, queue facts, and
     /// earlier distinct terminal source origin.
     #[test]
     fn s08_inv009_inv012_reclassified_turn_origin_rejects_cross_wired_facts() {
-        let assert_invalid = |origin| {
-            assert_eq!(
-                SubmitInputReconstitutionInput::rejected_active_turn_present(
-                    start_command(0x84, "rejected start", 1),
-                    Actor::Owner,
-                    session_id(1),
-                    turn_id(8),
-                    origin,
-                )
-                .reconstitute()
-                .expect_err("cross-wired reclassified origin facts fail closed")
-                .failure(),
-                SubmitInputReconstitutionFailure::RejectionActiveTurnOriginMismatch
-            );
-        };
-
         let mut wrong_lifecycle = reclassified_turn_origin();
         turn_origin_facts(&mut wrong_lifecycle).lifecycle = AcceptedInputLifecycle::new(
             accepted_input_id(0x73),
             AcceptedInputDisposition::OriginOf(turn_id(8)),
         );
-        assert_invalid(wrong_lifecycle);
+        assert_cross_wired_reclassified_origin_fails_closed(wrong_lifecycle);
 
         let mut wrong_input = reclassified_turn_origin();
         turn_origin_facts(&mut wrong_input).lifecycle = AcceptedInputLifecycle::new(
@@ -3759,15 +3774,15 @@ mod tests {
                 reason: crate::SteeringReclassificationReason::NoSafePointBeforeTerminal,
             },
         );
-        assert_invalid(wrong_input);
+        assert_cross_wired_reclassified_origin_fails_closed(wrong_input);
 
         let mut wrong_queue_input = reclassified_turn_origin();
         turn_origin_facts(&mut wrong_queue_input).queue_accepted_input = accepted_input_id(0x74);
-        assert_invalid(wrong_queue_input);
+        assert_cross_wired_reclassified_origin_fails_closed(wrong_queue_input);
 
         let mut wrong_turn = reclassified_turn_origin();
         turn_origin_facts(&mut wrong_turn).queue_turn = turn_id(9);
-        assert_invalid(wrong_turn);
+        assert_cross_wired_reclassified_origin_fails_closed(wrong_turn);
 
         let mut source_turn_reuse = reclassified_turn_origin();
         turn_origin_facts(&mut source_turn_reuse).lifecycle = AcceptedInputLifecycle::new(
@@ -3778,26 +3793,26 @@ mod tests {
             },
         );
         turn_origin_facts(&mut source_turn_reuse).queue_turn = turn_id(7);
-        assert_invalid(source_turn_reuse);
+        assert_cross_wired_reclassified_origin_fails_closed(source_turn_reuse);
 
         let mut wrong_terminal_owner = reclassified_turn_origin();
         let terminal = terminal_source_facts(&mut wrong_terminal_owner);
         terminal.turn = turn_id(9);
         terminal.disposition = TurnDisposition::Completed;
-        assert_invalid(wrong_terminal_owner);
+        assert_cross_wired_reclassified_origin_fails_closed(wrong_terminal_owner);
 
         let mut wrong_terminal_proof = reclassified_turn_origin();
         terminal_source_facts(&mut wrong_terminal_proof).disposition = TurnDisposition::Cancelled {
             cause: test_applied_interrupt_proof(command_id(0x90), turn_id(9)),
         };
-        assert_invalid(wrong_terminal_proof);
+        assert_cross_wired_reclassified_origin_fails_closed(wrong_terminal_proof);
 
         let mut reused_source_command = reclassified_turn_origin();
         replace_source_origin(
             &mut reused_source_command,
             source_turn_origin_with_identities(0x72, 0x71),
         );
-        assert_invalid(reused_source_command);
+        assert_cross_wired_reclassified_origin_fails_closed(reused_source_command);
 
         let steering_position = SessionInputPosition::first()
             .checked_next()
@@ -3807,20 +3822,24 @@ mod tests {
             &mut late_source,
             source_turn_origin_with_position(0x70, 0x71, steering_position),
         );
-        assert_invalid(late_source);
+        assert_cross_wired_reclassified_origin_fails_closed(late_source);
 
         let mut wrong_order = reclassified_turn_origin();
         turn_origin_facts(&mut wrong_order).queue_order =
             AcceptedInputQueueOrder::ordinary(SessionInputPosition::first());
-        assert_invalid(wrong_order);
+        assert_cross_wired_reclassified_origin_fails_closed(wrong_order);
     }
 
-    /// S08 / INV-009 / INV-012: validation remains bounded by heap-backed
-    /// input size rather than call-stack depth.
-    #[test]
-    fn s08_inv009_inv012_reclassified_origin_validation_is_iterative() {
+    /// A coherent reclassification chain grown from the canonical source
+    /// origin to the given final acceptance position; command and
+    /// accepted-input seeds derive from each position, decorrelated, and the
+    /// head turn's seed is its position plus six, the derivation
+    /// `append_unchecked_reclassified_origin` states.
+    fn reclassified_origin_chain_ending_at(
+        final_position: u64,
+    ) -> SubmitInputTurnOriginReconstitutionInput {
         let mut origin = source_turn_origin();
-        for position in 2..=16_384 {
+        for position in 2..=final_position {
             origin = append_unchecked_reclassified_origin(
                 origin,
                 position,
@@ -3828,6 +3847,14 @@ mod tests {
                 0x20_000 + u128::from(position),
             );
         }
+        origin
+    }
+
+    /// S08 / INV-009 / INV-012: validation remains bounded by heap-backed
+    /// input size rather than call-stack depth.
+    #[test]
+    fn s08_inv009_inv012_reclassified_origin_validation_is_iterative() {
+        let origin = reclassified_origin_chain_ending_at(16_384);
 
         let validated = super::validate_turn_origin_reconstitution_input(&origin)
             .expect("a long coherent origin chain validates without recursion");
@@ -3873,15 +3900,35 @@ mod tests {
         assert!(super::validate_turn_origin_reconstitution_input(&turn_reuse).is_none());
     }
 
+    /// Validates a reclassified origin whose source turn ended with the given
+    /// terminal disposition and asserts the tracked owner-global command set
+    /// contains the proof command the disposition carries.
+    #[track_caller]
+    fn assert_terminal_proof_command_is_tracked(
+        disposition: TurnDisposition,
+        proof_command: crate::DurableCommandId,
+    ) {
+        let origin = reclassified_turn_origin_with_disposition(disposition);
+        let validated = super::validate_turn_origin_reconstitution_input(&origin)
+            .expect("a unique terminal proof command is valid");
+        assert!(
+            validated.command_ids.contains(&proof_command),
+            "the origin chain's command identity set must include terminal proof commands"
+        );
+    }
+
     /// S08 / INV-001 / INV-012: the owner-global command identity set includes
     /// every command carried by terminal authority in the origin chain.
     #[test]
     fn s08_inv001_inv012_reclassified_origin_tracks_terminal_proof_commands() {
         let proof_command = command_id(0x90);
-        let proof_dispositions = [
+        assert_terminal_proof_command_is_tracked(
             TurnDisposition::Cancelled {
                 cause: test_applied_interrupt_proof(proof_command, turn_id(7)),
             },
+            proof_command,
+        );
+        assert_terminal_proof_command_is_tracked(
             TurnDisposition::ReconciliationRequired {
                 marker: test_reconciliation_marker(
                     NonEmptyIssuedOperationRefs::try_from_operations([
@@ -3896,6 +3943,9 @@ mod tests {
                     },
                 ),
             },
+            proof_command,
+        );
+        assert_terminal_proof_command_is_tracked(
             TurnDisposition::ReconciliationRequired {
                 marker: test_reconciliation_marker(
                     NonEmptyIssuedOperationRefs::try_from_operations([
@@ -3907,6 +3957,9 @@ mod tests {
                     },
                 ),
             },
+            proof_command,
+        );
+        assert_terminal_proof_command_is_tracked(
             TurnDisposition::ReconciliationRequired {
                 marker: test_reconciliation_marker(
                     NonEmptyIssuedOperationRefs::try_from_operations([
@@ -3923,14 +3976,8 @@ mod tests {
                     },
                 ),
             },
-        ];
-
-        for disposition in proof_dispositions {
-            let origin = reclassified_turn_origin_with_disposition(disposition);
-            let validated = super::validate_turn_origin_reconstitution_input(&origin)
-                .expect("a unique terminal proof command is valid");
-            assert!(validated.command_ids.contains(&proof_command));
-        }
+            proof_command,
+        );
 
         let colliding_disposition = TurnDisposition::Cancelled {
             cause: test_applied_interrupt_proof(command_id(0x72), turn_id(7)),
@@ -4104,73 +4151,73 @@ mod tests {
         );
     }
 
+    /// Applies one cross-wiring mutation to the canonical pending-steering
+    /// projection and asserts the exact closed failure it must produce; the
+    /// mutation and expected failure stay at the call site.
+    #[track_caller]
+    fn assert_pending_steering_fact_fails_closed(
+        cross_wire: impl FnOnce(&mut SubmitInputReconstitutionInput),
+        expected: SubmitInputReconstitutionFailure,
+    ) {
+        let mut wrong = pending_steering_input();
+        cross_wire(&mut wrong);
+        assert_eq!(
+            wrong
+                .reconstitute()
+                .expect_err("one cross-wired pending-steering fact fails closed")
+                .failure(),
+            expected
+        );
+    }
+
     /// S08 / INV-002 / INV-012: every independent pending-steering fact is
     /// checked before the immutable receipt is reconstructed.
     #[test]
     fn pending_steering_reconstitution_rejects_cross_wired_facts() {
-        let mut wrong_delivery = pending_steering_input();
-        wrong_delivery.command = start_command(1, "hello", 1);
-        assert_eq!(
-            wrong_delivery
-                .reconstitute()
-                .expect_err("pending facts require a safe-point command")
-                .failure(),
-            SubmitInputReconstitutionFailure::AppliedDeliveryIsNotNextSafePoint
+        assert_pending_steering_fact_fails_closed(
+            |input| input.command = start_command(1, "hello", 1),
+            SubmitInputReconstitutionFailure::AppliedDeliveryIsNotNextSafePoint,
         );
-
-        let cases: [CrossWiredCase; 9] = [
-            (
-                |input| input.stored_actor = Actor::Recovery,
-                SubmitInputReconstitutionFailure::StoredActorMismatch,
-            ),
-            (
-                |input| pending_facts(input).result_session = session_id(2),
-                SubmitInputReconstitutionFailure::ResultSessionMismatch,
-            ),
-            (
-                |input| pending_facts(input).result_source_turn = turn_id(9),
-                SubmitInputReconstitutionFailure::SteeringSourceTurnMismatch,
-            ),
-            (
-                |input| pending_facts(input).accepted_command = command_id(2),
-                SubmitInputReconstitutionFailure::AcceptedCommandMismatch,
-            ),
-            (
-                |input| pending_facts(input).accepted_input = accepted_input_id(9),
-                SubmitInputReconstitutionFailure::AcceptedInputMismatch,
-            ),
-            (
-                |input| pending_facts(input).accepted_session = session_id(2),
-                SubmitInputReconstitutionFailure::AcceptedSessionMismatch,
-            ),
-            (
-                |input| pending_facts(input).accepted_content = content("different"),
-                SubmitInputReconstitutionFailure::AcceptedContentMismatch,
-            ),
-            (
-                |input| {
-                    pending_facts(input).accepted_delivery = DeliveryRequest::NextSafePoint {
-                        expected_active_turn: turn_id(9),
-                    };
-                },
-                SubmitInputReconstitutionFailure::AcceptedDeliveryMismatch,
-            ),
-            (
-                |input| pending_facts(input).accepted_position = SessionInputPosition::first(),
-                SubmitInputReconstitutionFailure::SteeringAcceptanceDoesNotFollowSourceOrigin,
-            ),
-        ];
-        for (mutate, expected) in cases {
-            let mut wrong = pending_steering_input();
-            mutate(&mut wrong);
-            assert_eq!(
-                wrong
-                    .reconstitute()
-                    .expect_err("one cross-wired pending-steering fact fails closed")
-                    .failure(),
-                expected
-            );
-        }
+        assert_pending_steering_fact_fails_closed(
+            |input| input.stored_actor = Actor::Recovery,
+            SubmitInputReconstitutionFailure::StoredActorMismatch,
+        );
+        assert_pending_steering_fact_fails_closed(
+            |input| pending_facts(input).result_session = session_id(2),
+            SubmitInputReconstitutionFailure::ResultSessionMismatch,
+        );
+        assert_pending_steering_fact_fails_closed(
+            |input| pending_facts(input).result_source_turn = turn_id(9),
+            SubmitInputReconstitutionFailure::SteeringSourceTurnMismatch,
+        );
+        assert_pending_steering_fact_fails_closed(
+            |input| pending_facts(input).accepted_command = command_id(2),
+            SubmitInputReconstitutionFailure::AcceptedCommandMismatch,
+        );
+        assert_pending_steering_fact_fails_closed(
+            |input| pending_facts(input).accepted_input = accepted_input_id(9),
+            SubmitInputReconstitutionFailure::AcceptedInputMismatch,
+        );
+        assert_pending_steering_fact_fails_closed(
+            |input| pending_facts(input).accepted_session = session_id(2),
+            SubmitInputReconstitutionFailure::AcceptedSessionMismatch,
+        );
+        assert_pending_steering_fact_fails_closed(
+            |input| pending_facts(input).accepted_content = content("different"),
+            SubmitInputReconstitutionFailure::AcceptedContentMismatch,
+        );
+        assert_pending_steering_fact_fails_closed(
+            |input| {
+                pending_facts(input).accepted_delivery = DeliveryRequest::NextSafePoint {
+                    expected_active_turn: turn_id(9),
+                };
+            },
+            SubmitInputReconstitutionFailure::AcceptedDeliveryMismatch,
+        );
+        assert_pending_steering_fact_fails_closed(
+            |input| pending_facts(input).accepted_position = SessionInputPosition::first(),
+            SubmitInputReconstitutionFailure::SteeringAcceptanceDoesNotFollowSourceOrigin,
+        );
 
         let mut wrong_source_origin = pending_steering_input();
         pending_facts(&mut wrong_source_origin).source_turn_origin = explicit_turn_origin_input(
@@ -4187,132 +4234,129 @@ mod tests {
         );
     }
 
-    /// One cross-wiring mutation and the exact failure it must produce.
-    type CrossWiredCase = (
-        fn(&mut SubmitInputReconstitutionInput),
-        SubmitInputReconstitutionFailure,
-    );
+    /// Applies one cross-wiring mutation to the canonical applied projection
+    /// and asserts the exact closed failure it must produce; the mutation and
+    /// expected failure stay at the call site.
+    #[track_caller]
+    fn assert_applied_fact_fails_closed(
+        cross_wire: impl FnOnce(&mut SubmitInputReconstitutionInput),
+        expected: SubmitInputReconstitutionFailure,
+    ) {
+        let mut wrong = applied_input();
+        cross_wire(&mut wrong);
+        assert_eq!(
+            wrong
+                .reconstitute()
+                .expect_err("one cross-wired applied fact fails closed")
+                .failure(),
+            expected
+        );
+    }
 
     /// INV-002 / INV-012 / ADR-0039: every applied-path reconstitution
     /// failure variant is reachable from exactly one cross-wired fact and
     /// fails closed instead of constructing authority.
     #[test]
     fn inv002_inv012_applied_reconstitution_rejects_every_cross_wired_fact() {
-        let cases: [CrossWiredCase; 17] = [
-            (
-                |input| input.stored_actor = Actor::Recovery,
-                SubmitInputReconstitutionFailure::StoredActorMismatch,
-            ),
-            (
-                |input| {
-                    input.command = SubmitInput::new(
-                        command_id(1),
-                        session_id(1),
-                        content("hello"),
-                        DeliveryRequest::NextSafePoint {
-                            expected_active_turn: turn_id(9),
-                        },
+        assert_applied_fact_fails_closed(
+            |input| input.stored_actor = Actor::Recovery,
+            SubmitInputReconstitutionFailure::StoredActorMismatch,
+        );
+        assert_applied_fact_fails_closed(
+            |input| {
+                input.command = SubmitInput::new(
+                    command_id(1),
+                    session_id(1),
+                    content("hello"),
+                    DeliveryRequest::NextSafePoint {
+                        expected_active_turn: turn_id(9),
+                    },
+                );
+            },
+            SubmitInputReconstitutionFailure::AppliedDeliveryIsNotTurnOrigin,
+        );
+        assert_applied_fact_fails_closed(
+            |input| applied_facts(input).result_session = session_id(2),
+            SubmitInputReconstitutionFailure::ResultSessionMismatch,
+        );
+        assert_applied_fact_fails_closed(
+            |input| applied_facts(input).accepted_command = command_id(2),
+            SubmitInputReconstitutionFailure::AcceptedCommandMismatch,
+        );
+        assert_applied_fact_fails_closed(
+            |input| applied_facts(input).accepted_input = accepted_input_id(9),
+            SubmitInputReconstitutionFailure::AcceptedInputMismatch,
+        );
+        assert_applied_fact_fails_closed(
+            |input| applied_facts(input).accepted_session = session_id(2),
+            SubmitInputReconstitutionFailure::AcceptedSessionMismatch,
+        );
+        assert_applied_fact_fails_closed(
+            |input| applied_facts(input).accepted_content = content("different"),
+            SubmitInputReconstitutionFailure::AcceptedContentMismatch,
+        );
+        assert_applied_fact_fails_closed(
+            |input| {
+                applied_facts(input).accepted_delivery = DeliveryRequest::StartWhenNoActiveTurn {
+                    configuration: choices(2, ModelSelectionOverride::UseSessionDefault),
+                };
+            },
+            SubmitInputReconstitutionFailure::AcceptedDeliveryMismatch,
+        );
+        assert_applied_fact_fails_closed(
+            |input| {
+                applied_facts(input).accepted_disposition =
+                    AcceptedInputDisposition::OriginOf(turn_id(9));
+            },
+            SubmitInputReconstitutionFailure::AcceptedDispositionMismatch,
+        );
+        assert_applied_fact_fails_closed(
+            |input| applied_facts(input).queue_session = session_id(2),
+            SubmitInputReconstitutionFailure::QueueSessionMismatch,
+        );
+        assert_applied_fact_fails_closed(
+            |input| applied_facts(input).queue_turn = turn_id(9),
+            SubmitInputReconstitutionFailure::QueueTurnMismatch,
+        );
+        assert_applied_fact_fails_closed(
+            |input| {
+                applied_facts(input).accepted_position = SessionInputPosition::first()
+                    .checked_next()
+                    .expect("the second position exists");
+            },
+            SubmitInputReconstitutionFailure::QueuePositionMismatch,
+        );
+        assert_applied_fact_fails_closed(
+            |input| {
+                applied_facts(input).queue_order =
+                    crate::AcceptedInputQueueOrder::interrupt_immediately_after(
+                        SessionInputPosition::first(),
+                        turn_id(9),
                     );
-                },
-                SubmitInputReconstitutionFailure::AppliedDeliveryIsNotTurnOrigin,
-            ),
-            (
-                |input| applied_facts(input).result_session = session_id(2),
-                SubmitInputReconstitutionFailure::ResultSessionMismatch,
-            ),
-            (
-                |input| applied_facts(input).accepted_command = command_id(2),
-                SubmitInputReconstitutionFailure::AcceptedCommandMismatch,
-            ),
-            (
-                |input| applied_facts(input).accepted_input = accepted_input_id(9),
-                SubmitInputReconstitutionFailure::AcceptedInputMismatch,
-            ),
-            (
-                |input| applied_facts(input).accepted_session = session_id(2),
-                SubmitInputReconstitutionFailure::AcceptedSessionMismatch,
-            ),
-            (
-                |input| applied_facts(input).accepted_content = content("different"),
-                SubmitInputReconstitutionFailure::AcceptedContentMismatch,
-            ),
-            (
-                |input| {
-                    applied_facts(input).accepted_delivery =
-                        DeliveryRequest::StartWhenNoActiveTurn {
-                            configuration: choices(2, ModelSelectionOverride::UseSessionDefault),
-                        };
-                },
-                SubmitInputReconstitutionFailure::AcceptedDeliveryMismatch,
-            ),
-            (
-                |input| {
-                    applied_facts(input).accepted_disposition =
-                        AcceptedInputDisposition::OriginOf(turn_id(9));
-                },
-                SubmitInputReconstitutionFailure::AcceptedDispositionMismatch,
-            ),
-            (
-                |input| applied_facts(input).queue_session = session_id(2),
-                SubmitInputReconstitutionFailure::QueueSessionMismatch,
-            ),
-            (
-                |input| applied_facts(input).queue_turn = turn_id(9),
-                SubmitInputReconstitutionFailure::QueueTurnMismatch,
-            ),
-            (
-                |input| {
-                    applied_facts(input).accepted_position = SessionInputPosition::first()
-                        .checked_next()
-                        .expect("the second position exists");
-                },
-                SubmitInputReconstitutionFailure::QueuePositionMismatch,
-            ),
-            (
-                |input| {
-                    applied_facts(input).queue_order =
-                        crate::AcceptedInputQueueOrder::interrupt_immediately_after(
-                            SessionInputPosition::first(),
-                            turn_id(9),
-                        );
-                },
-                SubmitInputReconstitutionFailure::QueuePriorityMismatch,
-            ),
-            (
-                |input| applied_facts(input).defaults_session = session_id(2),
-                SubmitInputReconstitutionFailure::DefaultsSessionMismatch,
-            ),
-            (
-                |input| applied_facts(input).defaults_version = version(2),
-                SubmitInputReconstitutionFailure::DefaultsVersionMismatch,
-            ),
-            (
-                |input| {
-                    applied_facts(input).stored_requested_model =
-                        ModelSelectionRequest::Direct(direct(9));
-                },
-                SubmitInputReconstitutionFailure::RequestedModelMismatch,
-            ),
-            (
-                |input| {
-                    applied_facts(input).stored_frozen_model =
-                        FrozenModelSelection::Direct(direct(9));
-                },
-                SubmitInputReconstitutionFailure::FrozenModelMismatch,
-            ),
-        ];
-
-        for (mutate, expected) in cases {
-            let mut wrong = applied_input();
-            mutate(&mut wrong);
-            assert_eq!(
-                wrong
-                    .reconstitute()
-                    .expect_err("one cross-wired applied fact fails closed")
-                    .failure(),
-                expected
-            );
-        }
+            },
+            SubmitInputReconstitutionFailure::QueuePriorityMismatch,
+        );
+        assert_applied_fact_fails_closed(
+            |input| applied_facts(input).defaults_session = session_id(2),
+            SubmitInputReconstitutionFailure::DefaultsSessionMismatch,
+        );
+        assert_applied_fact_fails_closed(
+            |input| applied_facts(input).defaults_version = version(2),
+            SubmitInputReconstitutionFailure::DefaultsVersionMismatch,
+        );
+        assert_applied_fact_fails_closed(
+            |input| {
+                applied_facts(input).stored_requested_model =
+                    ModelSelectionRequest::Direct(direct(9));
+            },
+            SubmitInputReconstitutionFailure::RequestedModelMismatch,
+        );
+        assert_applied_fact_fails_closed(
+            |input| {
+                applied_facts(input).stored_frozen_model = FrozenModelSelection::Direct(direct(9));
+            },
+            SubmitInputReconstitutionFailure::FrozenModelMismatch,
+        );
     }
 
     /// INV-012: each rejected receipt reconstructs only from a matching
@@ -4373,18 +4417,24 @@ mod tests {
             SubmitInputReconstitutionFailure::StoredActorMismatch
         );
 
-        let cross_wired_sessions = [
+        assert_rejection_reconstitution_fails(
             SubmitInputReconstitutionInput::rejected_session_not_found(
                 start.clone(),
                 Actor::Owner,
                 session_id(2),
             ),
+            SubmitInputReconstitutionFailure::ResultSessionMismatch,
+        );
+        assert_rejection_reconstitution_fails(
             SubmitInputReconstitutionInput::rejected_no_active_turn(
                 safe_point.clone(),
                 Actor::Owner,
                 session_id(2),
                 turn_id(7),
             ),
+            SubmitInputReconstitutionFailure::ResultSessionMismatch,
+        );
+        assert_rejection_reconstitution_fails(
             SubmitInputReconstitutionInput::rejected_defaults_version_mismatch(
                 start.clone(),
                 Actor::Owner,
@@ -4393,6 +4443,9 @@ mod tests {
                 version(2),
                 None,
             ),
+            SubmitInputReconstitutionFailure::ResultSessionMismatch,
+        );
+        assert_rejection_reconstitution_fails(
             SubmitInputReconstitutionInput::rejected_unknown_model_alias(
                 start.clone(),
                 Actor::Owner,
@@ -4403,6 +4456,9 @@ mod tests {
                 defaults(ModelSelectionRequest::Direct(direct(2))),
                 None,
             ),
+            SubmitInputReconstitutionFailure::ResultSessionMismatch,
+        );
+        assert_rejection_reconstitution_fails(
             SubmitInputReconstitutionInput::rejected_acceptance_position_exhausted(
                 start.clone(),
                 Actor::Owner,
@@ -4410,16 +4466,8 @@ mod tests {
                 maximum,
                 None,
             ),
-        ];
-        for input in cross_wired_sessions {
-            assert_eq!(
-                input
-                    .reconstitute()
-                    .expect_err("another result session fails closed")
-                    .failure(),
-                SubmitInputReconstitutionFailure::ResultSessionMismatch
-            );
-        }
+            SubmitInputReconstitutionFailure::ResultSessionMismatch,
+        );
 
         SubmitInputReconstitutionInput::rejected_no_active_turn(
             safe_point.clone(),
@@ -4494,43 +4542,45 @@ mod tests {
         )
         .reconstitute()
         .expect("the matching unresolved alias reconstructs");
-        for (defaults_session, defaults_version, result_alias, expected) in [
-            (
+        assert_rejection_reconstitution_fails(
+            SubmitInputReconstitutionInput::rejected_unknown_model_alias(
+                alias_command.clone(),
+                Actor::Owner,
+                session_id(1),
+                alias(2),
                 session_id(2),
                 version(1),
-                alias(2),
-                SubmitInputReconstitutionFailure::DefaultsSessionMismatch,
+                defaults(ModelSelectionRequest::Direct(direct(2))),
+                None,
             ),
-            (
+            SubmitInputReconstitutionFailure::DefaultsSessionMismatch,
+        );
+        assert_rejection_reconstitution_fails(
+            SubmitInputReconstitutionInput::rejected_unknown_model_alias(
+                alias_command.clone(),
+                Actor::Owner,
+                session_id(1),
+                alias(2),
                 session_id(1),
                 version(2),
-                alias(2),
-                SubmitInputReconstitutionFailure::DefaultsVersionMismatch,
+                defaults(ModelSelectionRequest::Direct(direct(2))),
+                None,
             ),
-            (
+            SubmitInputReconstitutionFailure::DefaultsVersionMismatch,
+        );
+        assert_rejection_reconstitution_fails(
+            SubmitInputReconstitutionInput::rejected_unknown_model_alias(
+                alias_command.clone(),
+                Actor::Owner,
+                session_id(1),
+                alias(3),
                 session_id(1),
                 version(1),
-                alias(3),
-                SubmitInputReconstitutionFailure::UnknownAliasMismatch,
+                defaults(ModelSelectionRequest::Direct(direct(2))),
+                None,
             ),
-        ] {
-            assert_eq!(
-                SubmitInputReconstitutionInput::rejected_unknown_model_alias(
-                    alias_command.clone(),
-                    Actor::Owner,
-                    session_id(1),
-                    result_alias,
-                    defaults_session,
-                    defaults_version,
-                    defaults(ModelSelectionRequest::Direct(direct(2))),
-                    None,
-                )
-                .reconstitute()
-                .expect_err("one cross-wired unknown-alias fact fails closed")
-                .failure(),
-                expected
-            );
-        }
+            SubmitInputReconstitutionFailure::UnknownAliasMismatch,
+        );
         assert_eq!(
             SubmitInputReconstitutionInput::rejected_unknown_model_alias(
                 start.clone(),

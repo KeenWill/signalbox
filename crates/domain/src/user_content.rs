@@ -104,18 +104,23 @@ mod tests {
     /// rejected decoded value.
     #[test]
     fn empty_and_null_text_are_rejected_without_rewriting() {
-        for (value, failure) in [
-            (String::new(), NonEmptyUnicodeTextFailure::Empty),
-            (
-                String::from("before\0after"),
-                NonEmptyUnicodeTextFailure::ContainsNull,
-            ),
-        ] {
-            let error = NonEmptyUnicodeText::try_new(value.clone())
-                .expect_err("the rejected text is outside the baseline");
-            assert_eq!(error.value(), value);
-            assert_eq!(error.into_parts(), (value, failure));
-        }
+        let empty = String::new();
+        let empty_error = NonEmptyUnicodeText::try_new(empty.clone())
+            .expect_err("empty text is outside the baseline");
+        assert_eq!(empty_error.value(), empty);
+        assert_eq!(
+            empty_error.into_parts(),
+            (empty, NonEmptyUnicodeTextFailure::Empty)
+        );
+
+        let with_null = String::from("before\0after");
+        let null_error = NonEmptyUnicodeText::try_new(with_null.clone())
+            .expect_err("text containing U+0000 is outside the baseline");
+        assert_eq!(null_error.value(), with_null);
+        assert_eq!(
+            null_error.into_parts(),
+            (with_null, NonEmptyUnicodeTextFailure::ContainsNull)
+        );
     }
 
     /// INV-005 / INV-012: content preserves exact scalars, whitespace, and
