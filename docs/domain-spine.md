@@ -571,12 +571,13 @@ pub enum SubmitInputPreparationFailure {
 
 pub struct SubmitInputReconstitutionInput { /* private */ }
 impl SubmitInputReconstitutionInput {
-    pub fn applied(
+    pub fn applied_turn_origin(
         command: SubmitInput,
         stored_actor: Actor,
         result_session: SessionId,
         result_accepted_input: AcceptedInputId,
         result_turn: TurnId,
+        predecessor_origin: Option<ReconstitutedSubmitInput>,
         accepted_command: DurableCommandId,
         accepted_input: AcceptedInputId,
         accepted_session: SessionId,
@@ -592,6 +593,20 @@ impl SubmitInputReconstitutionInput {
         defaults: SessionConfigurationDefaults,
         stored_requested_model: ModelSelectionRequest,
         stored_frozen_model: FrozenModelSelection,
+    ) -> Self;
+    pub fn applied_pending_steering(
+        command: SubmitInput,
+        stored_actor: Actor,
+        result_session: SessionId,
+        result_accepted_input: AcceptedInputId,
+        result_source_turn: TurnId,
+        source_turn_origin: ReconstitutedSubmitInput,
+        accepted_command: DurableCommandId,
+        accepted_input: AcceptedInputId,
+        accepted_session: SessionId,
+        accepted_content: UserContent,
+        accepted_delivery: DeliveryRequest,
+        accepted_position: SessionInputPosition,
     ) -> Self;
     pub const fn rejected_session_not_found(
         command: SubmitInput,
@@ -633,7 +648,8 @@ impl SubmitInputReconstitutionInput {
 
 pub enum SubmitInputReconstitutionFailure {
     StoredActorMismatch,
-    AppliedDeliveryIsNotStart,
+    AppliedDeliveryIsNotTurnOrigin,
+    AppliedDeliveryIsNotNextSafePoint,
     ResultSessionMismatch,
     AcceptedCommandMismatch,
     AcceptedInputMismatch,
@@ -641,8 +657,17 @@ pub enum SubmitInputReconstitutionFailure {
     AcceptedContentMismatch,
     AcceptedDeliveryMismatch,
     AcceptedDispositionMismatch,
+    SteeringSourceTurnMismatch,
+    SteeringSourceTurnOriginMismatch,
+    SteeringSourceAcceptedInputReused,
+    SteeringSourceCommandReused,
+    SteeringAcceptanceDoesNotFollowSourceOrigin,
     QueueSessionMismatch,
     QueueTurnMismatch,
+    AfterCurrentPredecessorOriginMismatch,
+    AfterCurrentPredecessorAcceptedInputReused,
+    AfterCurrentPredecessorCommandReused,
+    AfterCurrentAcceptanceDoesNotFollowPredecessorOrigin,
     QueuePositionMismatch,
     QueuePriorityMismatch,
     RejectionDeliveryIsNotStart,

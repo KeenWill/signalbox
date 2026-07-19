@@ -32,6 +32,16 @@ An append-only, dated record of decisions below foundation weight, newest first.
 
 **Affects.** `crates/domain/src/turn_eligibility.rs`, its domain-spine constructor, accessor, and failure inventory, one application fixture, and INV-008/INV-009/INV-016 scheduling enforcement. It adds no storage representation, transition, or accepted delivery mode.
 
+## 2026-07-19 — Checked applied SubmitInput receipt replay
+
+**Context.** ADR-0034 requires equal command replay to return the immutable originally recorded result after mutable aggregate state advances, while ADR-0035 requires the domain seam to validate complete purpose-specific facts rather than trust storage constraints. Vacant-start replay existed, but after-current and pending-steering receipts need their exact predecessor or source origin to prove ownership, identity separation, and acceptance chronology.
+
+**Decision.** Split applied reconstitution into purpose-named turn-origin and pending-steering inputs. Turn-origin replay accepts `StartWhenNoActiveTurn` with no predecessor or `AfterCurrentTurn` with the exact canonical predecessor-origin receipt; after-current validation rejects reused turn, accepted-input, or command identities and requires its position to follow that predecessor. Pending-steering replay requires the exact canonical same-session source-origin receipt, rejects reused accepted-input or command identities, and requires its position to follow the source. It derives the original `PendingSteering` binding from immutable command and acceptance facts and deliberately accepts no current-disposition field, so later consumption or reclassification cannot rewrite command replay.
+
+**Rejected alternatives.** Comparing pending replay to the accepted input's current disposition would report normal lifecycle progress as corruption. Bare source or predecessor identifiers cannot prove same-session canonical origins or chronology. Adapter-owned correlation would make database constraints the semantic authority. A nullable applied record would allow turn-origin and steering-only fields to mix.
+
+**Affects.** `crates/domain/src/submit_input.rs`, the SubmitInput spine, applied-replay enforcement links for INV-002, INV-008, INV-009, INV-012, INV-016, and INV-028, plus a mechanical rename in the existing vacant-start persistence decoder. Rejected-result replay, occupied-slot storage, lifecycle validation, and interrupt application remain later slices.
+
 ## 2026-07-19 — Validated scheduling input construction and historical tail correlation
 
 **Context.** The first ADR-0041 scheduling slice stored a canonical active phase inside its public reconstitution input and compared every later origin delivery with the currently active turn. That exposed a phase before aggregate validation and rejected valid histories accepted during a scheduler gap or against a previously active turn. Identity-only tail checks also left an origin position available to a different pending-steering entry.
