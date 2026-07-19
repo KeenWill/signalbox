@@ -17,11 +17,11 @@ use crate::{
     AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputQueueOrder,
     AcceptedInputQueueOrderError, AcceptedInputQueueWork, AcceptedInputStartingLineage,
     AcceptedInputTurnStart, ActiveTurnPhase, ContextFrontierId, CurrentTurnAttempt,
-    InitialSemanticTranscriptEntryPayload, OriginConfiguration,
-    ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
-    SemanticTranscriptEntry, SemanticTranscriptEntryId, SemanticTranscriptEntryReconstitutionInput,
-    SemanticTranscriptEntryRef, Session, SessionId, TranscriptAncestry, TurnAttemptId, TurnId,
-    derive_accepted_input_total_order,
+    CurrentTurnAttemptState, InitialSemanticTranscriptEntryPayload, NonEmptyIssuedOperationRefs,
+    OriginConfiguration, ResolvedContextFrontierReconstitutionInput,
+    ResolvedContextFrontierSnapshot, SemanticTranscriptEntry, SemanticTranscriptEntryId,
+    SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session, SessionId,
+    ToolRequestId, TranscriptAncestry, TurnAttemptId, TurnId, derive_accepted_input_total_order,
 };
 
 /// The lifecycle fact stored for one accepted-input scheduling record.
@@ -56,9 +56,10 @@ pub enum AcceptedInputTurnSchedulingRecordState {
 
 /// Complete stored facts for one active scheduling phase.
 ///
-/// The phase is already a canonical domain value. The owning scheduling seam
-/// still validates that the record asserting it belongs to the exact active
-/// turn before returning the projection.
+/// Public constructors accept the exact stored facts for every canonical
+/// active phase while keeping attempt transitions sealed. The owning
+/// scheduling seam still validates that the record asserting those facts
+/// belongs to the exact active turn before returning the projection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ActiveTurnSchedulingReconstitutionInput {
     owning_turn: TurnId,
@@ -66,9 +67,47 @@ pub struct ActiveTurnSchedulingReconstitutionInput {
 }
 
 impl ActiveTurnSchedulingReconstitutionInput {
-    /// Supplies the asserted owner and canonical active phase.
-    pub const fn new(owning_turn: TurnId, phase: ActiveTurnPhase) -> Self {
+    #[cfg(test)]
+    pub(crate) const fn new(owning_turn: TurnId, phase: ActiveTurnPhase) -> Self {
         Self { owning_turn, phase }
+    }
+
+    /// Supplies a running phase and the exact stored current-attempt state.
+    pub const fn running(
+        owning_turn: TurnId,
+        current_attempt: TurnAttemptId,
+        current_attempt_state: CurrentTurnAttemptState,
+    ) -> Self {
+        Self {
+            owning_turn,
+            phase: ActiveTurnPhase::Running {
+                current_attempt: CurrentTurnAttempt::reconstituted(
+                    current_attempt,
+                    current_attempt_state,
+                ),
+            },
+        }
+    }
+
+    /// Supplies a durable approval wait and its exact logical request.
+    pub const fn awaiting_approval(owning_turn: TurnId, request: ToolRequestId) -> Self {
+        Self {
+            owning_turn,
+            phase: ActiveTurnPhase::AwaitingApproval { request },
+        }
+    }
+
+    /// Supplies a durable recovery wait and its exact nonempty ambiguity set.
+    pub const fn awaiting_recovery_decision(
+        owning_turn: TurnId,
+        ambiguous_operations: NonEmptyIssuedOperationRefs,
+    ) -> Self {
+        Self {
+            owning_turn,
+            phase: ActiveTurnPhase::AwaitingRecoveryDecision {
+                ambiguous_operations,
+            },
+        }
     }
 
     /// Returns the turn named as owner by the active-phase record.
@@ -1337,9 +1376,10 @@ mod tests {
         AcceptedInputDisposition, CurrentTurnAttemptState, IssuedOperationRef,
         ModelSelectionOverride, ModelSelectionRequest, NonEmptyIssuedOperationRefs,
         SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
-        SessionCreationProvenance, SessionReconstitutionInput,
+        SessionCreationProvenance, SessionReconstitutionInput, TurnAttemptStopCauses,
+        applied_interrupt::test_applied_interrupt_proof,
         test_support::{
-            accepted_input_id, context_frontier_id, direct, model_call_id,
+            accepted_input_id, command_id, context_frontier_id, direct, model_call_id,
             semantic_transcript_entry_id, session_id, tool_request_id, turn_attempt_id, turn_id,
         },
     };
@@ -1593,11 +1633,10 @@ mod tests {
             AcceptedInputTurnSchedulingRecordState::Active {
                 starting_lineage: AcceptedInputStartingLineage::FirstInSession,
                 starting_frontier: context_frontier_id(40),
-                phase: ActiveTurnSchedulingReconstitutionInput::new(
+                phase: ActiveTurnSchedulingReconstitutionInput::running(
                     turn_id(10),
-                    ActiveTurnPhase::Running {
-                        current_attempt: crate::CurrentTurnAttempt::prepared(turn_attempt_id(50)),
-                    },
+                    turn_attempt_id(50),
+                    CurrentTurnAttemptState::Prepared,
                 ),
             },
         );
@@ -1645,24 +1684,63 @@ mod tests {
         let running = crate::CurrentTurnAttempt::prepared(turn_attempt_id(50))
             .begin_running()
             .expect("the prepared attempt begins running");
+        let stopping_causes = TurnAttemptStopCauses::cancellation_only(
+            test_applied_interrupt_proof(command_id(80), turn_id(10)),
+        );
         let recovery_operations =
             NonEmptyIssuedOperationRefs::try_from_operations([IssuedOperationRef::ModelCall(
                 model_call_id(60),
             )])
             .expect("the recovery wait has one exact operation");
         let phases = [
-            ActiveTurnPhase::Running {
-                current_attempt: running,
-            },
-            ActiveTurnPhase::AwaitingApproval {
-                request: tool_request_id(70),
-            },
-            ActiveTurnPhase::AwaitingRecoveryDecision {
-                ambiguous_operations: recovery_operations,
-            },
+            (
+                ActiveTurnSchedulingReconstitutionInput::running(
+                    turn_id(10),
+                    turn_attempt_id(50),
+                    CurrentTurnAttemptState::Running,
+                ),
+                ActiveTurnPhase::Running {
+                    current_attempt: running,
+                },
+            ),
+            (
+                ActiveTurnSchedulingReconstitutionInput::running(
+                    turn_id(10),
+                    turn_attempt_id(51),
+                    CurrentTurnAttemptState::StopRequested {
+                        causes: stopping_causes.clone(),
+                    },
+                ),
+                ActiveTurnPhase::Running {
+                    current_attempt: CurrentTurnAttempt::reconstituted(
+                        turn_attempt_id(51),
+                        CurrentTurnAttemptState::StopRequested {
+                            causes: stopping_causes,
+                        },
+                    ),
+                },
+            ),
+            (
+                ActiveTurnSchedulingReconstitutionInput::awaiting_approval(
+                    turn_id(10),
+                    tool_request_id(70),
+                ),
+                ActiveTurnPhase::AwaitingApproval {
+                    request: tool_request_id(70),
+                },
+            ),
+            (
+                ActiveTurnSchedulingReconstitutionInput::awaiting_recovery_decision(
+                    turn_id(10),
+                    recovery_operations.clone(),
+                ),
+                ActiveTurnPhase::AwaitingRecoveryDecision {
+                    ambiguous_operations: recovery_operations,
+                },
+            ),
         ];
 
-        for phase in phases {
+        for (phase_input, phase) in phases {
             let projection = AcceptedInputSchedulingReconstitutionInput::new(
                 session.clone(),
                 vec![record(
@@ -1673,10 +1751,7 @@ mod tests {
                     AcceptedInputTurnSchedulingRecordState::Active {
                         starting_lineage: AcceptedInputStartingLineage::FirstInSession,
                         starting_frontier: context_frontier_id(40),
-                        phase: ActiveTurnSchedulingReconstitutionInput::new(
-                            turn_id(10),
-                            phase.clone(),
-                        ),
+                        phase: phase_input,
                     },
                 )],
                 vec![origin_entry(&session, 30, 20)],
@@ -1709,13 +1784,10 @@ mod tests {
                 AcceptedInputTurnSchedulingRecordState::Active {
                     starting_lineage: AcceptedInputStartingLineage::FirstInSession,
                     starting_frontier: context_frontier_id(40),
-                    phase: ActiveTurnSchedulingReconstitutionInput::new(
+                    phase: ActiveTurnSchedulingReconstitutionInput::running(
                         turn_id(99),
-                        ActiveTurnPhase::Running {
-                            current_attempt: crate::CurrentTurnAttempt::prepared(turn_attempt_id(
-                                50,
-                            )),
-                        },
+                        turn_attempt_id(50),
+                        CurrentTurnAttemptState::Prepared,
                     ),
                 },
             )],

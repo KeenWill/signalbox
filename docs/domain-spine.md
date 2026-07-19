@@ -897,7 +897,19 @@ pub enum AcceptedInputTurnSchedulingRecordState {
 
 pub struct ActiveTurnSchedulingReconstitutionInput { /* private */ }
 impl ActiveTurnSchedulingReconstitutionInput {
-    pub const fn new(owning_turn: TurnId, phase: ActiveTurnPhase) -> Self;
+    pub const fn running(
+        owning_turn: TurnId,
+        current_attempt: TurnAttemptId,
+        current_attempt_state: CurrentTurnAttemptState,
+    ) -> Self;
+    pub const fn awaiting_approval(
+        owning_turn: TurnId,
+        request: ToolRequestId,
+    ) -> Self;
+    pub const fn awaiting_recovery_decision(
+        owning_turn: TurnId,
+        ambiguous_operations: NonEmptyIssuedOperationRefs,
+    ) -> Self;
     // accessors: owning_turn(), phase()
 }
 
@@ -1168,7 +1180,8 @@ pub enum CurrentTurnAttemptState {
 pub struct CurrentTurnAttempt { /* private */ }
 // sealed: crate-private prepared-entry constructor; all transitions
 // (begin_running, request_cancellation, request_fatal_mismatch, end_*) are
-// crate-private, reserved for the turn aggregate
+// crate-private, reserved for the turn aggregate; the purpose-specific active
+// scheduling reconstitution seam may rebuild exact stored nonterminal state
 impl CurrentTurnAttempt {
     // accessors: id(), state()
 }
