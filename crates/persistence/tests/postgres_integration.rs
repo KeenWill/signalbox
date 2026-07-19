@@ -3696,7 +3696,7 @@ async fn inv005_inv009_inv015_initial_semantic_entries_are_turn_correlated()
         Some("context_frontier_member_within_declared_count")
     );
 
-    let trigger_inventory: (i64, i64, i64) = sqlx::query_as(
+    let trigger_inventory: (i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
             count(*) FILTER (
                 WHERE relation.relname = 'context_frontier'
@@ -3711,6 +3711,11 @@ async fn inv005_inv009_inv015_initial_semantic_entries_are_turn_correlated()
                 WHERE relation.relname = 'context_frontier_member'
                   AND candidate.tgname = 'context_frontier_member_stays_within_declared_count'
                   AND NOT candidate.tgdeferrable
+            ),
+            count(*) FILTER (
+                WHERE relation.relname = 'context_frontier_member'
+                  AND candidate.tgname = 'context_frontier_member_rechecks_declared_count'
+                  AND candidate.tgdeferrable
             )
          FROM pg_trigger AS candidate
          JOIN pg_class AS relation
@@ -3719,7 +3724,24 @@ async fn inv005_inv009_inv015_initial_semantic_entries_are_turn_correlated()
     )
     .fetch_one(&pool)
     .await?;
-    assert_eq!(trigger_inventory, (1, 0, 1));
+    assert_eq!(trigger_inventory, (1, 0, 1, 1));
+
+    let index_inventory: (i64, i64) = sqlx::query_as(
+        "SELECT
+            count(*) FILTER (
+                WHERE indexname = 'turn_attempt_by_turn_session'
+                  AND indexdef LIKE '%(turn_id, session_id)%'
+            ),
+            count(*) FILTER (
+                WHERE indexname = 'turn_lifecycle_by_session_position'
+                  AND indexdef LIKE '%(session_id, acceptance_position)%'
+            )
+         FROM pg_indexes
+         WHERE schemaname = current_schema()",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(index_inventory, (1, 1));
 
     CreateSessionRepository::new(pool.clone())
         .handle(prepared(0x424, 0x822, direct(0xc24)))
@@ -3919,6 +3941,175 @@ async fn inv005_inv009_inv015_initial_semantic_entries_are_turn_correlated()
             .and_then(|error| error.code()),
         Some("23514".into())
     );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-009 / INV-015: direct queued failure and immutable frontier membership
+/// remain closed under transactions that begin from stale concurrent snapshots.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv009_inv015_concurrent_attempt_and_frontier_inserts_fail_closed()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0x451, 0x851, direct(0xc51)))
+        .await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                0x452,
+                0x851,
+                "concurrent static failure",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x951)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xa51))),
+        )
+        .await?;
+
+    let session = Uuid::from_u128(0x851);
+    let turn = Uuid::from_u128(0xa51);
+    let origin_entry = Uuid::from_u128(0xd51);
+    let failure_entry = Uuid::from_u128(0xd52);
+    let starting_frontier = Uuid::from_u128(0xe51);
+    let terminal_frontier = Uuid::from_u128(0xe52);
+
+    let mut terminalize = pool.begin().await?;
+    insert_origin_frontier(
+        &mut terminalize,
+        session,
+        Uuid::from_u128(0x951),
+        origin_entry,
+        starting_frontier,
+        Decimal::ONE,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             origin_accepted_input_id, failed_turn_id)
+         VALUES ($1, $2, 'turn_failed', NULL, $3)",
+    )
+    .bind(session)
+    .bind(failure_entry)
+    .bind(turn)
+    .execute(&mut *terminalize)
+    .await?;
+    insert_frontier(
+        &mut terminalize,
+        session,
+        terminal_frontier,
+        Decimal::from(2_u64),
+        &[
+            (Decimal::ONE, session, origin_entry),
+            (Decimal::from(2_u64), session, failure_entry),
+        ],
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET state_kind = 'terminal',
+                start_lineage_kind = 'first_in_session',
+                starting_frontier_id = $1,
+                terminal_frontier_id = $2,
+                terminal_disposition_kind = 'failed'
+          WHERE turn_id = $3",
+    )
+    .bind(starting_frontier)
+    .bind(terminal_frontier)
+    .bind(turn)
+    .execute(&mut *terminalize)
+    .await?;
+
+    let concurrent_attempt = tokio::spawn({
+        let pool = pool.clone();
+        async move {
+            sqlx::query(
+                "INSERT INTO turn_attempt
+                    (turn_attempt_id, turn_id, session_id, continued_from_attempt_id,
+                     state_kind, end_variant, end_disposition)
+                 VALUES ($1, $2, $3, NULL, 'prepared', NULL, NULL)",
+            )
+            .bind(Uuid::from_u128(0xb51))
+            .bind(turn)
+            .bind(session)
+            .execute(&pool)
+            .await
+        }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !concurrent_attempt.is_finished(),
+        "attempt insertion must serialize on the lifecycle row"
+    );
+    terminalize.commit().await?;
+    let attempt_error = concurrent_attempt
+        .await?
+        .expect_err("an attempt racing direct terminalization must fail");
+    assert_eq!(
+        attempt_error
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into())
+    );
+    let attempt_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM turn_attempt WHERE turn_id = $1")
+            .bind(turn)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(attempt_count, 0);
+
+    let racing_frontier = Uuid::from_u128(0xe53);
+    let mut header = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count)
+         VALUES ($1, $2, 0)",
+    )
+    .bind(session)
+    .bind(racing_frontier)
+    .execute(&mut *header)
+    .await?;
+
+    let mut member = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO context_frontier_member
+            (owning_session_id, context_frontier_id, member_position,
+             source_session_id, semantic_entry_id)
+         VALUES ($1, $2, 1, $1, $3)",
+    )
+    .bind(session)
+    .bind(racing_frontier)
+    .bind(failure_entry)
+    .execute(&mut *member)
+    .await?;
+    let concurrent_member = tokio::spawn(async move { member.commit().await });
+    header.commit().await?;
+    let member_error = concurrent_member
+        .await?
+        .expect_err("a member racing an uncommitted header must fail closed");
+    assert!(matches!(
+        member_error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23503" | "23514")
+    ));
+    let member_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM context_frontier_member
+          WHERE owning_session_id = $1
+            AND context_frontier_id = $2",
+    )
+    .bind(session)
+    .bind(racing_frontier)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(member_count, 0);
 
     pool.close().await;
     drop(container);

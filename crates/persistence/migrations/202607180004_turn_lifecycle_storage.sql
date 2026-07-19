@@ -45,6 +45,7 @@ CREATE TABLE turn_lifecycle (
     session_id uuid NOT NULL,
     origin_accepted_input_id uuid NOT NULL UNIQUE,
     acceptance_position numeric(20, 0) NOT NULL,
+    attempt_history_present boolean NOT NULL DEFAULT false,
     state_kind text NOT NULL,
     start_lineage_kind text,
     immediate_predecessor_turn_id uuid,
@@ -167,6 +168,9 @@ CREATE TABLE turn_lifecycle (
 CREATE UNIQUE INDEX turn_lifecycle_one_active_per_session
     ON turn_lifecycle (session_id)
     WHERE state_kind = 'active';
+
+CREATE INDEX turn_lifecycle_by_session_position
+    ON turn_lifecycle (session_id, acceptance_position);
 
 INSERT INTO turn_lifecycle (
     turn_id,
@@ -371,6 +375,47 @@ BEFORE INSERT ON context_frontier_member
 FOR EACH ROW
 EXECUTE FUNCTION reject_context_frontier_member_out_of_bounds();
 
+CREATE FUNCTION require_context_frontier_member_within_declared_count()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    declared_member_count numeric(20, 0);
+BEGIN
+    SELECT member_count
+      INTO declared_member_count
+      FROM context_frontier
+     WHERE owning_session_id = NEW.owning_session_id
+       AND context_frontier_id = NEW.context_frontier_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION
+            'context frontier header is unavailable for deferred member validation'
+            USING
+                ERRCODE = '23503',
+                CONSTRAINT = 'context_frontier_member_requires_visible_header';
+    END IF;
+
+    IF NEW.member_position > declared_member_count THEN
+        RAISE EXCEPTION
+            'context frontier member position % exceeds declared count %',
+            NEW.member_position,
+            declared_member_count
+            USING
+                ERRCODE = '23514',
+                CONSTRAINT = 'context_frontier_member_within_declared_count';
+    END IF;
+
+    RETURN NULL;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER context_frontier_member_rechecks_declared_count
+AFTER INSERT ON context_frontier_member
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE FUNCTION require_context_frontier_member_within_declared_count();
+
 ALTER TABLE turn_lifecycle
     ADD CONSTRAINT turn_lifecycle_starting_frontier_fk
     FOREIGN KEY (session_id, starting_frontier_id)
@@ -450,6 +495,9 @@ CREATE UNIQUE INDEX turn_attempt_one_initial_per_turn
     ON turn_attempt (turn_id)
     WHERE continued_from_attempt_id IS NULL;
 
+CREATE INDEX turn_attempt_by_turn_session
+    ON turn_attempt (turn_id, session_id);
+
 CREATE UNIQUE INDEX turn_attempt_one_live_per_turn
     ON turn_attempt (turn_id)
     WHERE state_kind <> 'ended';
@@ -473,6 +521,11 @@ BEGIN
                 USING
                     ERRCODE = '23514',
                     CONSTRAINT = 'turn_lifecycle_inserted_queued';
+        END IF;
+
+        IF NEW.attempt_history_present THEN
+            RAISE EXCEPTION 'turn lifecycle must be inserted without attempt history'
+                USING ERRCODE = '23514';
         END IF;
 
         RETURN NEW;
@@ -518,6 +571,11 @@ BEGIN
             USING ERRCODE = '23514';
     END IF;
 
+    IF OLD.attempt_history_present AND NOT NEW.attempt_history_present THEN
+        RAISE EXCEPTION 'turn attempt history marker is write-once'
+            USING ERRCODE = '23514';
+    END IF;
+
     IF NOT (
         OLD.state_kind = NEW.state_kind
         OR (OLD.state_kind = 'queued' AND NEW.state_kind IN ('active', 'terminal'))
@@ -529,12 +587,7 @@ BEGIN
 
     IF OLD.state_kind = 'queued'
        AND NEW.state_kind = 'terminal'
-       AND EXISTS (
-           SELECT 1
-             FROM turn_attempt
-            WHERE turn_id = OLD.turn_id
-              AND session_id = OLD.session_id
-       )
+       AND NEW.attempt_history_present
     THEN
         RAISE EXCEPTION
             'a queued turn must terminalize without attempt history'
@@ -560,13 +613,16 @@ DECLARE
     owning_turn_state text;
 BEGIN
     IF TG_OP = 'INSERT' THEN
-        SELECT state_kind
-          INTO owning_turn_state
-          FROM turn_lifecycle
+        UPDATE turn_lifecycle
+           SET attempt_history_present = true
          WHERE turn_id = NEW.turn_id
-           AND session_id = NEW.session_id;
+           AND session_id = NEW.session_id
+           AND state_kind <> 'terminal'
+        RETURNING state_kind
+          INTO owning_turn_state
+        ;
 
-        IF owning_turn_state = 'terminal' THEN
+        IF NOT FOUND THEN
             RAISE EXCEPTION 'a terminal turn cannot acquire another attempt'
                 USING ERRCODE = '23514';
         END IF;
@@ -732,6 +788,7 @@ DECLARE
     checked_session_id uuid;
     checked_origin_input_id uuid;
     checked_position numeric(20, 0);
+    checked_attempt_history_present boolean;
     checked_state text;
     checked_lineage text;
     checked_predecessor uuid;
@@ -763,6 +820,7 @@ BEGIN
         session_id,
         origin_accepted_input_id,
         acceptance_position,
+        attempt_history_present,
         state_kind,
         start_lineage_kind,
         immediate_predecessor_turn_id,
@@ -773,6 +831,7 @@ BEGIN
         checked_session_id,
         checked_origin_input_id,
         checked_position,
+        checked_attempt_history_present,
         checked_state,
         checked_lineage,
         checked_predecessor,
@@ -805,6 +864,13 @@ BEGIN
       FROM turn_attempt
      WHERE turn_id = checked_turn_id
        AND session_id = checked_session_id;
+
+    IF checked_attempt_history_present IS DISTINCT FROM (attempt_count > 0) THEN
+        RAISE EXCEPTION
+            'turn % attempt history marker disagrees with durable attempts',
+            checked_turn_id
+            USING ERRCODE = '23514';
+    END IF;
 
     SELECT count(*)
       INTO origin_entry_count
