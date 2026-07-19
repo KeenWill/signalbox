@@ -21,6 +21,11 @@ jobs:
         run: python3 scripts/check_domain_spine.py
       - name: Check formatting
         run: cargo fmt --all -- --check
+      - name: Check Markdown formatting
+        run: |
+          python3 -m venv /tmp/mdformat-venv
+          /tmp/mdformat-venv/bin/pip install --quiet mdformat==0.7.22 mdformat-gfm==0.4.1
+          /tmp/mdformat-venv/bin/mdformat --check *.md docs/
       - name: Check workspace
         run: cargo check --workspace --all-targets --all-features
       - name: Run Clippy

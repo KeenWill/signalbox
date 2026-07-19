@@ -1,10 +1,20 @@
 # Signalbox
 
-Signalbox is an independently designed, personal LLM session platform for durable, resumable work across machines and interfaces. An always-on central hub will coordinate conversation state, model calls, approvals, tools, and outbound execution runners while preserving enough provenance to explain and recover accepted work.
+Signalbox is an independently designed, personal LLM session platform for
+durable, resumable work across machines and interfaces. An always-on central hub
+will coordinate conversation state, model calls, approvals, tools, and outbound
+execution runners while preserving enough provenance to explain and recover
+accepted work.
 
-> **Status:** design and foundation phase. This repository currently contains architectural framing, development policy, Rust workspace scaffolding, and the first domain types, not a usable product. The first domain terminology and lifecycle foundation is accepted; APIs, protocols, storage models, and implementation details are not yet stable.
+> **Status:** design and foundation phase. This repository currently contains
+> architectural framing, development policy, Rust workspace scaffolding, and the
+> first domain types, not a usable product. The first domain terminology and
+> lifecycle foundation is accepted; APIs, protocols, storage models, and
+> implementation details are not yet stable.
 
-Intended product surfaces include a central hub, remote runners, shared protocols and tool infrastructure, a terminal client, a web client, and native macOS and iOS clients.
+Intended product surfaces include a central hub, remote runners, shared
+protocols and tool infrastructure, a terminal client, a web client, and native
+macOS and iOS clients.
 
 ```text
  Terminal       Web       macOS / iOS
@@ -20,7 +30,9 @@ Intended product surfaces include a central hub, remote runners, shared protocol
        [ambient runner]  [restricted runner]
 ```
 
-The hub is the source of truth; a client device and an execution machine need not be the same machine. See [Architecture](docs/architecture.md) for the boundaries and important qualifications behind this sketch.
+The hub is the source of truth; a client device and an execution machine need
+not be the same machine. See [Architecture](docs/architecture.md) for the
+boundaries and important qualifications behind this sketch.
 
 ## Design documents
 
@@ -35,13 +47,18 @@ The hub is the source of truth; a client device and an execution machine need no
 - [Open questions](docs/open-questions.md)
 - [Architecture decision records](docs/decisions/README.md)
 
-Project participation is described in [CONTRIBUTING.md](CONTRIBUTING.md), security reporting in [SECURITY.md](SECURITY.md), and repository guidance for coding agents in [AGENTS.md](AGENTS.md).
+Project participation is described in [CONTRIBUTING.md](CONTRIBUTING.md),
+security reporting in [SECURITY.md](SECURITY.md), and repository guidance for
+coding agents in [AGENTS.md](AGENTS.md).
 
 ## Development
 
-Install [rustup](https://rustup.rs/). The repository's `rust-toolchain.toml` makes rustup select the pinned minimal stable toolchain with rustfmt and Clippy.
+Install [rustup](https://rustup.rs/). The repository's `rust-toolchain.toml`
+makes rustup select the pinned minimal stable toolchain with rustfmt and Clippy.
 
-The workspace contains the dependency chain `apps/hubd` → `crates/application` → `crates/domain`. Run the full local validation sequence from the repository root:
+The workspace contains the dependency chain `apps/hubd` → `crates/application` →
+`crates/domain`. Run the full local validation sequence from the repository
+root:
 
 ```bash
 python3 scripts/check_domain_spine.py
