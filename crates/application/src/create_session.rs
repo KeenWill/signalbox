@@ -226,22 +226,23 @@ where
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::{HashMap, VecDeque},
+        collections::VecDeque,
         future::{Future, ready},
         pin::pin,
         task::{Context, Poll, Waker},
     };
 
     use signalbox_domain::{
-        CreateSession as DomainCreateSession, DirectModelSelection, ModelSelectionRequest,
+        CreateSession as DomainCreateSession, CreateSessionAppliedResult, DirectModelSelection,
+        ModelSelectionRequest, PreparedCreateSession,
     };
     use uuid::{Uuid, Variant, Version};
 
     use super::{
         CreateSessionError, CreateSessionOutcome, CreateSessionRequest, CreateSessionService,
         CreateSessionTransaction, InvalidDurableCommandId, SessionConfigurationDefaults,
-        SessionCreationCause, SessionId, SessionIdGenerator, TranscriptAncestry,
-        UuidV7SessionIdGenerator,
+        SessionCreationCause, SessionCreationProvenance, SessionId, SessionIdGenerator,
+        TranscriptAncestry, UuidV7SessionIdGenerator,
     };
 
     fn command_id(value: u128) -> signalbox_domain::DurableCommandId {
@@ -256,6 +257,26 @@ mod tests {
         SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
             DirectModelSelection::from_uuid(Uuid::from_u128(value)),
         ))
+    }
+
+    /// The recorded applied receipt the authoritative port would return after
+    /// first handling this request's canonical baseline command sealed with
+    /// `candidate`, for scripting a fake transaction's response.
+    fn receipt_for(
+        request: CreateSessionRequest,
+        candidate: SessionId,
+    ) -> CreateSessionAppliedResult {
+        DomainCreateSession::new(
+            request.command_id(),
+            SessionCreationProvenance::new(
+                SessionCreationCause::OwnerInitiated,
+                TranscriptAncestry::None,
+            ),
+            request.initial_configuration_defaults(),
+        )
+        .prepare(candidate)
+        .expect("the fixed baseline command prepares against a fresh candidate")
+        .applied_result()
     }
 
     fn run_ready<Output>(future: impl Future<Output = Output>) -> Output {
@@ -305,18 +326,21 @@ mod tests {
 
     impl std::error::Error for FakeTransactionError {}
 
-    #[derive(Clone, Copy, Debug)]
-    struct RecordedCreation {
-        command: DomainCreateSession,
-        result: signalbox_domain::CreateSessionAppliedResult,
+    #[derive(Debug)]
+    struct FakeTransaction {
+        responses: VecDeque<Result<CreateSessionOutcome, FakeTransactionError>>,
+        observed: Vec<PreparedCreateSession>,
     }
 
-    #[derive(Debug, Default)]
-    struct FakeTransaction {
-        records: HashMap<signalbox_domain::DurableCommandId, RecordedCreation>,
-        observed_candidates: Vec<SessionId>,
-        calls: usize,
-        fail_next: bool,
+    impl FakeTransaction {
+        fn returning(
+            responses: impl IntoIterator<Item = Result<CreateSessionOutcome, FakeTransactionError>>,
+        ) -> Self {
+            Self {
+                responses: responses.into_iter().collect(),
+                observed: Vec::new(),
+            }
+        }
     }
 
     impl CreateSessionTransaction for FakeTransaction {
@@ -324,34 +348,14 @@ mod tests {
 
         fn handle(
             &mut self,
-            prepared: signalbox_domain::PreparedCreateSession,
+            prepared: PreparedCreateSession,
         ) -> impl Future<Output = Result<CreateSessionOutcome, Self::Error>> + Send {
-            self.calls += 1;
-            self.observed_candidates.push(prepared.session().id());
-
-            if std::mem::take(&mut self.fail_next) {
-                return ready(Err(FakeTransactionError::Unavailable));
-            }
-
-            let command_id = prepared.command().command_id();
-            let outcome = match self.records.get(&command_id) {
-                Some(recorded) if recorded.command == *prepared.command() => {
-                    CreateSessionOutcome::Applied(recorded.result)
-                }
-                Some(_) => CreateSessionOutcome::ConflictingReuse { command_id },
-                None => {
-                    let result = prepared.applied_result();
-                    self.records.insert(
-                        command_id,
-                        RecordedCreation {
-                            command: *prepared.command(),
-                            result,
-                        },
-                    );
-                    CreateSessionOutcome::Applied(result)
-                }
-            };
-            ready(Ok(outcome))
+            self.observed.push(prepared);
+            ready(
+                self.responses
+                    .pop_front()
+                    .expect("test must supply one response per invocation"),
+            )
         }
     }
 
@@ -407,47 +411,42 @@ mod tests {
         let request = CreateSessionRequest::try_new(command_id(1), defaults(2))
             .expect("ordinary command identity is admitted");
         let candidate = session_id(3);
-        let mut service =
-            CreateSessionService::new(FakeSessionIds::new([candidate]), FakeTransaction::default());
+        let recorded = receipt_for(request, candidate);
+        let mut service = CreateSessionService::new(
+            FakeSessionIds::new([candidate]),
+            FakeTransaction::returning([Ok(CreateSessionOutcome::Applied(recorded))]),
+        );
 
         let outcome = run_ready(service.execute(request))
             .expect("fake transaction applies the first handling");
-        let recorded_result = service
-            .transaction
-            .records
-            .get(&request.command_id())
-            .expect("one record is committed")
-            .result;
-        assert_eq!(outcome, CreateSessionOutcome::Applied(recorded_result));
 
+        assert_eq!(outcome, CreateSessionOutcome::Applied(recorded));
+        assert_eq!(recorded.session(), candidate);
         let (generator, transaction) = service.into_parts();
         assert_eq!(generator.calls, 1);
-        assert_eq!(transaction.calls, 1);
-        assert_eq!(transaction.observed_candidates, [candidate]);
-        let recorded = transaction
-            .records
-            .get(&request.command_id())
-            .expect("one record is committed");
-        assert_eq!(recorded.result.session(), candidate);
+        assert_eq!(transaction.observed.len(), 1);
+        let prepared = &transaction.observed[0];
+        assert_eq!(prepared.session().id(), candidate);
+        assert_eq!(prepared.command().command_id(), request.command_id());
         assert_eq!(
-            recorded.command.provenance().cause(),
+            prepared.command().provenance().cause(),
             SessionCreationCause::OwnerInitiated
         );
         assert_eq!(
-            recorded.command.provenance().ancestry(),
+            prepared.command().provenance().ancestry(),
             TranscriptAncestry::None
         );
         assert_eq!(
-            recorded
-                .command
+            prepared
+                .command()
                 .establish_initial_defaults()
                 .version()
                 .as_u64(),
             1
         );
         assert_eq!(
-            recorded.command.initial_configuration_defaults(),
-            defaults(2)
+            prepared.command().initial_configuration_defaults(),
+            request.initial_configuration_defaults()
         );
     }
 
@@ -459,29 +458,27 @@ mod tests {
             .expect("ordinary command identity is admitted");
         let winner = session_id(3);
         let replay_candidate = session_id(4);
+        let recorded = receipt_for(request, winner);
         let mut service = CreateSessionService::new(
             FakeSessionIds::new([winner, replay_candidate]),
-            FakeTransaction::default(),
+            FakeTransaction::returning([
+                Ok(CreateSessionOutcome::Applied(recorded)),
+                Ok(CreateSessionOutcome::Applied(recorded)),
+            ]),
         );
 
         let first = run_ready(service.execute(request)).expect("first invocation applies creation");
         let replay = run_ready(service.execute(request)).expect("equal replay succeeds");
 
-        assert_eq!(first, replay);
-        assert_eq!(
-            replay,
-            CreateSessionOutcome::Applied(
-                service.transaction.records[&request.command_id()].result
-            )
-        );
-        let CreateSessionOutcome::Applied(recorded_receipt) = replay else {
-            panic!("equal replay must return the recorded applied receipt");
-        };
-        assert_eq!(recorded_receipt.session(), winner);
-        assert_ne!(recorded_receipt.session(), replay_candidate);
-        let (_, transaction) = service.into_parts();
-        assert_eq!(transaction.calls, 2);
-        assert_eq!(transaction.observed_candidates, [winner, replay_candidate]);
+        assert_eq!(first, CreateSessionOutcome::Applied(recorded));
+        assert_eq!(replay, first);
+        assert_eq!(recorded.session(), winner);
+        assert_ne!(recorded.session(), replay_candidate);
+        let (generator, transaction) = service.into_parts();
+        assert_eq!(generator.calls, 2);
+        assert_eq!(transaction.observed.len(), 2);
+        assert_eq!(transaction.observed[0].session().id(), winner);
+        assert_eq!(transaction.observed[1].session().id(), replay_candidate);
     }
 
     /// S01 / INV-012: reusing one command ID for different canonical defaults
@@ -493,9 +490,15 @@ mod tests {
             .expect("ordinary command identity is admitted");
         let conflicting = CreateSessionRequest::try_new(command, defaults(3))
             .expect("ordinary command identity is admitted");
+        let winner = session_id(4);
         let mut service = CreateSessionService::new(
-            FakeSessionIds::new([session_id(4), session_id(5)]),
-            FakeTransaction::default(),
+            FakeSessionIds::new([winner, session_id(5)]),
+            FakeTransaction::returning([
+                Ok(CreateSessionOutcome::Applied(receipt_for(first, winner))),
+                Ok(CreateSessionOutcome::ConflictingReuse {
+                    command_id: command,
+                }),
+            ]),
         );
 
         let _ = run_ready(service.execute(first)).expect("first invocation applies creation");
@@ -509,8 +512,7 @@ mod tests {
             }
         );
         let (_, transaction) = service.into_parts();
-        assert_eq!(transaction.calls, 2);
-        assert_eq!(transaction.records.len(), 1);
+        assert_eq!(transaction.observed.len(), 2);
     }
 
     /// S01 / INV-012: application orchestration neither retries transaction
@@ -519,12 +521,10 @@ mod tests {
     fn s01_inv012_transaction_failure_is_returned_without_retry() {
         let request = CreateSessionRequest::try_new(command_id(1), defaults(2))
             .expect("ordinary command identity is admitted");
-        let transaction = FakeTransaction {
-            fail_next: true,
-            ..FakeTransaction::default()
-        };
-        let mut service =
-            CreateSessionService::new(FakeSessionIds::new([session_id(3)]), transaction);
+        let mut service = CreateSessionService::new(
+            FakeSessionIds::new([session_id(3)]),
+            FakeTransaction::returning([Err(FakeTransactionError::Unavailable)]),
+        );
 
         let error = run_ready(service.execute(request))
             .expect_err("infrastructure failure cannot become a receipt");
@@ -535,7 +535,6 @@ mod tests {
         );
         let (generator, transaction) = service.into_parts();
         assert_eq!(generator.calls, 1);
-        assert_eq!(transaction.calls, 1);
-        assert!(transaction.records.is_empty());
+        assert_eq!(transaction.observed.len(), 1);
     }
 }

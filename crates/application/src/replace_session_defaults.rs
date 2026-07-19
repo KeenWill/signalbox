@@ -193,7 +193,7 @@ mod tests {
         ))
     }
 
-    fn current_session(id: SessionId, current: u64) -> Session {
+    fn current_session(id: SessionId, current: SessionConfigurationDefaultsVersion) -> Session {
         SessionReconstitutionInput::new(
             id,
             id,
@@ -202,21 +202,40 @@ mod tests {
                 TranscriptAncestry::None,
             ),
             id,
-            version(current),
+            current,
             id,
-            version(current),
+            current,
             defaults(1),
         )
         .reconstitute()
         .expect("test facts form one complete current session")
     }
 
-    fn result_for(
-        command: DomainReplaceSessionDefaults,
-        current: u64,
-    ) -> ReplaceSessionDefaultsResult {
+    /// The recorded applied result the authoritative transaction would return
+    /// when the session's current version equals the command's expectation,
+    /// for scripting a fake transaction's response.
+    fn recorded_applied(command: DomainReplaceSessionDefaults) -> ReplaceSessionDefaultsResult {
         command
-            .prepare_against(&current_session(command.session(), current))
+            .prepare_against(&current_session(
+                command.session(),
+                command.expected_current_version(),
+            ))
+            .expect("test command and session identities match")
+            .result()
+    }
+
+    /// The recorded rejection the authoritative transaction would return when
+    /// the session's current version has already moved past the command's
+    /// expectation to its checked successor.
+    fn recorded_stale_rejection(
+        command: DomainReplaceSessionDefaults,
+    ) -> ReplaceSessionDefaultsResult {
+        let moved_past = command
+            .expected_current_version()
+            .checked_next()
+            .expect("test expected versions have a successor");
+        command
+            .prepare_against(&current_session(command.session(), moved_past))
             .expect("test command and session identities match")
             .result()
     }
@@ -252,6 +271,11 @@ mod tests {
                 responses: responses.into_iter().collect(),
                 observed: Vec::new(),
             }
+        }
+
+        /// Deliberately scripted with no responses: any handling call panics.
+        fn expecting_no_calls() -> Self {
+            Self::returning([])
         }
     }
 
@@ -292,7 +316,7 @@ mod tests {
             );
         }
 
-        let service = ReplaceSessionDefaultsService::new(FakeTransaction::returning([]));
+        let service = ReplaceSessionDefaultsService::new(FakeTransaction::expecting_no_calls());
         assert!(service.into_transaction().observed.is_empty());
     }
 
@@ -307,15 +331,12 @@ mod tests {
             defaults(4),
         )
         .expect("ordinary command identity is admitted");
-        let recorded = result_for(
-            DomainReplaceSessionDefaults::new(
-                request.command_id(),
-                request.session(),
-                request.expected_current_version(),
-                request.replacement(),
-            ),
-            3,
-        );
+        let recorded = recorded_applied(DomainReplaceSessionDefaults::new(
+            request.command_id(),
+            request.session(),
+            request.expected_current_version(),
+            request.replacement(),
+        ));
         let expected_outcome = ReplaceSessionDefaultsOutcome::Recorded(recorded);
         let mut service =
             ReplaceSessionDefaultsService::new(FakeTransaction::returning([Ok(expected_outcome)]));
@@ -345,8 +366,8 @@ mod tests {
             DomainReplaceSessionDefaults::new(command_id(1), target, version(1), defaults(2));
         let rejected_command =
             DomainReplaceSessionDefaults::new(command_id(2), target, version(1), defaults(3));
-        let applied = result_for(applied_command, 1);
-        let rejected = result_for(rejected_command, 2);
+        let applied = recorded_applied(applied_command);
+        let rejected = recorded_stale_rejection(rejected_command);
         assert!(matches!(applied, ReplaceSessionDefaultsResult::Applied(_)));
         assert!(matches!(
             rejected,

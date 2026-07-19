@@ -79,9 +79,14 @@ mod tests {
         SessionId::from_uuid(Uuid::from_u128(value))
     }
 
-    fn current_session(id: SessionId, version: u64, model: u128) -> Session {
-        let version = SessionConfigurationDefaultsVersion::try_from_u64(version)
+    /// A complete current session snapshot whose current defaults carry the
+    /// given version. The model-selection seed derives from that one knob,
+    /// decorrelated (`docs/testing-style.md`, rule 4), so a projection reading
+    /// one value where it should read the other cannot accidentally pass.
+    fn current_session(id: SessionId, defaults_version: u64) -> Session {
+        let version = SessionConfigurationDefaultsVersion::try_from_u64(defaults_version)
             .expect("test version is positive");
+        let decorrelated_model = u128::from(u64::MAX - defaults_version);
         SessionReconstitutionInput::new(
             id,
             id,
@@ -94,7 +99,7 @@ mod tests {
             id,
             version,
             SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(
-                DirectModelSelection::from_uuid(Uuid::from_u128(model)),
+                DirectModelSelection::from_uuid(Uuid::from_u128(decorrelated_model)),
             )),
         )
         .reconstitute()
@@ -157,7 +162,7 @@ mod tests {
     #[test]
     fn s01_inv002_inv008_complete_current_session_is_returned_unchanged() {
         let requested = session_id(1);
-        let current = current_session(requested, 4, 5);
+        let current = current_session(requested, 4);
         let service =
             LoadSessionService::new(FakeSessionReader::returning(Ok(Some(current.clone()))));
 
