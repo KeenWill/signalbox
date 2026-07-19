@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-18 — Repository-owned testing style guide
+
+**Context.** The [testing section of CONTRIBUTING.md](../CONTRIBUTING.md#testing) owns what to test — layers, determinism, merge gates — but nothing owned how tests are written: fixture shape, what an assertion may reference, or snapshot discipline. Each pull request re-derived those choices, reviews re-litigated them per test, and multi-positional-integer fixture helpers and re-encoded magic seeds were accumulating in domain test modules.
+
+**Decision.** [docs/testing-style.md](testing-style.md) owns test style as numbered normative rules: complete-and-concise test bodies verified by inspection without computed expectations, DAMP fixtures with one meaningful knob and canonical defaults, values stated at the call site, assertions against fixture values rather than re-derived constants, one named behavior per test, and every test judged as a bug classifier. It also fixes forward-looking expect-test norms — snapshots for shape-is-the-assertion values, supplementing but never replacing invariant-linked asserts, blessed only after reading the diff, curated through a shared `table` helper — ahead of the stacked adoption change. CONTRIBUTING.md keeps owning what to test; the two documents cross-link and restate nothing.
+
+**Rejected alternatives.** Inlining the style rules into CONTRIBUTING.md's testing section: it merges two ownerships into one section, and style rules would be diluted among layer requirements that change on a different cadence. Leaving style to per-agent prompting: rules stated only in prompts are unreviewable, drift between runs, and cannot be cited by number in review.
+
+**Affects.** `docs/testing-style.md` (created); pointer lines in `AGENTS.md`, `CONTRIBUTING.md`, and `README.md`. The expect-test dev-dependency, the `table` helper, and exemplar conversions land in a stacked follow-up.
+
 ## 2026-07-18 — Domain-owned stored-actor validation and submit lock mode
 
 **Context.** The SubmitInput persistence adapter compared the stored actor against the baseline owner itself, so that semantic payload check lived outside the domain reconstitution seam and the natural adapter path would launder a corrupted stored actor into `Owner`. Separately, submit's session-row `FOR UPDATE` formed a lock-order cycle with defaults replacement: submit orders session row before pointer row, while a replacement holds the pointer row when its version-row insert requests `FOR KEY SHARE` on the session row through the non-deferrable session foreign key.

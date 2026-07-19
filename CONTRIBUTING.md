@@ -21,6 +21,8 @@ Read the [vision](docs/vision.md), [architecture](docs/architecture.md), [invari
 
 ## Testing
 
+This section owns what to test; how tests are written — fixture shape, assertion discipline, and snapshot use — is owned by the [testing style guide](docs/testing-style.md).
+
 Tests prove domain transitions and recovery semantics before optimizing transport or deployment; they use the same distinct identities as the production design and assert durable state, not only a returned status or rendered screen. Prefer deterministic inputs: fixed clocks, seeded identifiers, scripted provider and runner fakes, bounded schedulers, and explicitly advanced streams. Tests that depend on real provider availability or timing are never the merge gate. Postgres is the test database for persistence behavior, using ephemeral containers; SQLite is not a substitute for transaction, constraint, locking, or recovery semantics.
 
 Expected layers, each added with the first implementation of the behavior it covers:
