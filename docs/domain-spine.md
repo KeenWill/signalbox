@@ -623,12 +623,28 @@ impl SubmitInputReconstitutionInput {
         result_session: SessionId,
         result_expected_active_turn: TurnId,
     ) -> Self;
+    pub const fn rejected_active_turn_present(
+        command: SubmitInput,
+        stored_actor: Actor,
+        result_session: SessionId,
+        result_active_turn: TurnId,
+        active_turn_origin: ReconstitutedSubmitInput,
+    ) -> Self;
+    pub const fn rejected_active_turn_mismatch(
+        command: SubmitInput,
+        stored_actor: Actor,
+        result_session: SessionId,
+        result_expected_active_turn: TurnId,
+        result_actual_active_turn: TurnId,
+        actual_turn_origin: ReconstitutedSubmitInput,
+    ) -> Self;
     pub const fn rejected_defaults_version_mismatch(
         command: SubmitInput,
         stored_actor: Actor,
         result_session: SessionId,
         result_expected: SessionConfigurationDefaultsVersion,
         result_current: SessionConfigurationDefaultsVersion,
+        active_turn_origin: Option<ReconstitutedSubmitInput>,
     ) -> Self;
     pub const fn rejected_unknown_model_alias(
         command: SubmitInput,
@@ -638,13 +654,17 @@ impl SubmitInputReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
+        active_turn_origin: Option<ReconstitutedSubmitInput>,
     ) -> Self;
     pub const fn rejected_acceptance_position_exhausted(
         command: SubmitInput,
         stored_actor: Actor,
         result_session: SessionId,
         result_last_position: SessionInputPosition,
+        active_turn_origin: Option<ReconstitutedSubmitInput>,
     ) -> Self;
+    // no SafePointUnavailableWhileStopping replay constructor until its exact
+    // owner-correlated StopRequested evidence projection exists
     pub fn reconstitute(self)
         -> Result<ReconstitutedSubmitInput, SubmitInputReconstitutionError>;
     // accessors: command()
@@ -674,8 +694,13 @@ pub enum SubmitInputReconstitutionFailure {
     AfterCurrentAcceptanceDoesNotFollowPredecessorOrigin,
     QueuePositionMismatch,
     QueuePriorityMismatch,
-    RejectionDeliveryIsNotStart,
+    ActiveTurnPresentRejectionMismatch,
     ExpectedActiveTurnMismatch,
+    RejectedActiveTurnsAreEqual,
+    RejectionActiveTurnOriginMismatch,
+    RejectionActiveTurnOriginCommandReused,
+    RejectionHasNoExplicitOriginConfiguration,
+    InterruptConfigurationRejectionUnavailable,
     ExpectedDefaultsVersionMismatch,
     RejectedDefaultsVersionsAreEqual,
     DefaultsSessionMismatch,
@@ -685,6 +710,7 @@ pub enum SubmitInputReconstitutionFailure {
     UnknownAliasMismatch,
     RejectionDidNotSelectAlias,
     PositionIsNotExhausted,
+    PositionExhaustionDeliveryUnavailable,
 }
 
 pub struct SubmitInputReconstitutionError { /* private */ }

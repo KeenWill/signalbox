@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-19 — Checked rejected SubmitInput receipt replay
+
+**Context.** ADR-0034 requires equal replay to return the originally recorded terminal result, while ADR-0035 requires domain-owned validation of complete purpose-specific facts. Rejections produced against an occupied slot name the authoritative active turn directly or depend on the command's expected active turn; accepting only bare result fields would let replay pair them with another session or another turn.
+
+**Decision.** Reconstruct `ActiveTurnPresent` and `ActiveTurnMismatch` only with the actual turn's canonical same-session origin receipt, a distinct durable-command identity, and exact expected/actual turn correlation. Configuration and position rejections for `AfterCurrentTurn`, plus position exhaustion for `NextSafePoint`, require the expected active turn's canonical origin; vacant-start variants require no origin. Session absence and no-active-turn retain their smaller result-specific projections. Matching interrupt configuration and position rejections remain unavailable because preparation is nonclaiming for that state in this milestone. `SafePointUnavailableWhileStopping` replay remains closed until the first `StopRequested` storage slice can supply the exact owner-correlated stop evidence required by ADR-0035 and ADR-0041.
+
+**Rejected alternatives.** Bare active-turn identifiers cannot establish canonical same-session ownership. Optional evidence without delivery-specific requiredness would admit both missing occupied-state facts and invented vacant-state facts. Exposing stopping replay from a copied phase discriminator would make the stored conclusion its own authority. Reconstructing matching-interrupt rejections that live preparation cannot record would create replay-only terminal behavior.
+
+**Affects.** `crates/domain/src/submit_input.rs`, its public reconstitution signatures and spine, INV-002/INV-009/INV-012/INV-028 enforcement wording, and a mechanical vacant-start decoder update in `crates/persistence/src/submit_input.rs`. It adds no schema, occupied-slot storage, stopping proof loader, interrupt application, lifecycle transition, or persistence effect.
+
 ## 2026-07-19 — Checked applied SubmitInput receipt replay
 
 **Context.** ADR-0034 requires equal command replay to return the immutable originally recorded result after mutable aggregate state advances, while ADR-0035 requires the domain seam to validate complete purpose-specific facts rather than trust storage constraints. Vacant-start replay existed, but after-current and pending-steering receipts need their exact predecessor or source origin to prove ownership, identity separation, and acceptance chronology.
