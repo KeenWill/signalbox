@@ -569,6 +569,41 @@ mod tests {
         table(&["derived", "accepted", "priority"], &rows)
     }
 
+    /// The rendering helper contains lookup and branching logic, so it gets
+    /// its own tests (`docs/testing-style.md`, rule 2): rows follow the
+    /// derived order under a one-based derived index, not fact iteration
+    /// order.
+    #[test]
+    fn derived_order_table_renders_rows_in_derived_order_not_iteration_order() {
+        let first = accepted_ordinary(1);
+        let second = accepted_ordinary(2);
+
+        assert_eq!(
+            derived_order_table(&[second, first]),
+            "derived | accepted | priority\n\
+             ------- | -------- | --------\n\
+             1       | 1        | ordinary\n\
+             2       | 2        | ordinary\n"
+        );
+    }
+
+    /// The interrupt branch names its predecessor by the predecessor's own
+    /// acceptance position, looked up through the turn map — not by the
+    /// interrupt's position.
+    #[test]
+    fn derived_order_table_names_an_interrupt_predecessor_by_acceptance_position() {
+        let first = accepted_ordinary(1);
+        let interrupt = accepted_interrupt(2, first);
+
+        assert_eq!(
+            derived_order_table(&[first, interrupt]),
+            "derived | accepted | priority\n\
+             ------- | -------- | -----------------------------------\n\
+             1       | 1        | ordinary\n\
+             2       | 2        | interrupt immediately after input 1\n"
+        );
+    }
+
     #[test]
     fn position_successor_is_checked_instead_of_panicking_at_exhaustion() {
         let first = SessionInputPosition::first();
