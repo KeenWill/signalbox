@@ -573,13 +573,14 @@ pub struct SubmitInputTerminalSourceReconstitutionInput { /* private */ }
 impl SubmitInputTerminalSourceReconstitutionInput {
     pub fn new(
         origin: SubmitInputTurnOriginReconstitutionInput,
+        turn: TurnId,
         disposition: TurnDisposition,
     ) -> Self;
 }
 
 pub struct SubmitInputTurnOriginReconstitutionInput { /* private */ }
 impl SubmitInputTurnOriginReconstitutionInput {
-    pub const fn new(
+    pub fn new(
         receipt: ReconstitutedSubmitInput,
         lifecycle: AcceptedInputLifecycle,
         queue_accepted_input: AcceptedInputId,
