@@ -1195,6 +1195,15 @@ impl SubmitInputReconstitutionInput {
                         SubmitInputReconstitutionFailure::AppliedDeliveryIsNotTurnOrigin,
                     ));
                 }
+                if matches!(
+                    self.command.delivery,
+                    DeliveryRequest::AfterCurrentTurn {
+                        expected_active_turn,
+                        ..
+                    } if expected_active_turn == result_turn
+                ) {
+                    return Err(fail(SubmitInputReconstitutionFailure::QueueTurnMismatch));
+                }
                 if result_session != self.command.session {
                     return Err(fail(
                         SubmitInputReconstitutionFailure::ResultSessionMismatch,
@@ -1327,6 +1336,13 @@ impl SubmitInputReconstitutionInput {
                 if accepted_input != result_accepted_input {
                     return Err(fail(
                         SubmitInputReconstitutionFailure::AcceptedInputMismatch,
+                    ));
+                }
+                if source_origin.accepted_input() == accepted_input
+                    || source_turn_origin.command().command_id() == accepted_command
+                {
+                    return Err(fail(
+                        SubmitInputReconstitutionFailure::SteeringSourceTurnOriginMismatch,
                     ));
                 }
                 if accepted_session != self.command.session {
@@ -1689,7 +1705,8 @@ pub enum SubmitInputReconstitutionFailure {
     SteeringAcceptanceDoesNotFollowSourceOrigin,
     /// The queue fact belongs to another session.
     QueueSessionMismatch,
-    /// The queue fact names another future turn.
+    /// The queue fact names another future turn or an after-current result
+    /// reuses its active predecessor.
     QueueTurnMismatch,
     /// The accepted-input and queue positions differ.
     QueuePositionMismatch,
@@ -2063,15 +2080,22 @@ mod tests {
     }
 
     fn source_turn_origin() -> ReconstitutedSubmitInput {
-        let command = start_command(0x70, "source", 1);
+        source_turn_origin_with_identities(0x70, 0x71)
+    }
+
+    fn source_turn_origin_with_identities(
+        source_command: u128,
+        source_accepted_input: u128,
+    ) -> ReconstitutedSubmitInput {
+        let command = start_command(source_command, "source", 1);
         SubmitInputReconstitutionInput::applied_turn_origin(
             command.clone(),
             Actor::Owner,
             session_id(1),
-            accepted_input_id(0x71),
+            accepted_input_id(source_accepted_input),
             turn_id(7),
-            command_id(0x70),
-            accepted_input_id(0x71),
+            command_id(source_command),
+            accepted_input_id(source_accepted_input),
             session_id(1),
             content("source"),
             command.delivery(),
@@ -2861,6 +2885,45 @@ mod tests {
                 .failure(),
             SubmitInputReconstitutionFailure::AcceptedDispositionMismatch
         );
+    }
+
+    /// S09 / INV-012: after-current replay cannot reuse the active predecessor
+    /// as its claimed new turn, even when every result/queue field agrees.
+    #[test]
+    fn s09_inv012_after_reconstitution_rejects_active_turn_identity_reuse() {
+        let mut self_successor = after_applied_input();
+        let facts = applied_facts(&mut self_successor);
+        facts.result_turn = turn_id(7);
+        facts.accepted_disposition = AcceptedInputDisposition::OriginOf(turn_id(7));
+        facts.queue_turn = turn_id(7);
+
+        assert_eq!(
+            self_successor
+                .reconstitute()
+                .expect_err("after-current work cannot reuse its active predecessor")
+                .failure(),
+            SubmitInputReconstitutionFailure::QueueTurnMismatch
+        );
+    }
+
+    /// S08 / INV-012: pending-steering replay cannot reuse either owner-global
+    /// identity from its canonical source origin.
+    #[test]
+    fn s08_inv012_pending_steering_rejects_source_identity_reuse() {
+        for source_turn_origin in [
+            source_turn_origin_with_identities(0x70, 3),
+            source_turn_origin_with_identities(1, 0x71),
+        ] {
+            let mut reused_identity = pending_steering_input();
+            pending_facts(&mut reused_identity).source_turn_origin = source_turn_origin;
+            assert_eq!(
+                reused_identity
+                    .reconstitute()
+                    .expect_err("source origin and pending steering must have distinct identities")
+                    .failure(),
+                SubmitInputReconstitutionFailure::SteeringSourceTurnOriginMismatch
+            );
+        }
     }
 
     /// One cross-wiring mutation and the exact failure it must produce.
