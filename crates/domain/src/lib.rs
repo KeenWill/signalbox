@@ -21,6 +21,7 @@ mod semantic_entry;
 mod session;
 mod submit_input;
 mod turn_attempt;
+mod turn_eligibility;
 mod turn_lifecycle;
 mod user_content;
 
@@ -87,6 +88,15 @@ pub use turn_attempt::{
     FatalMismatchStopDisposition, ProviderTargetMismatchFailureKind,
     ProviderTargetMismatchFailureRef, TurnAttemptStopCauseUnionError, TurnAttemptStopCauses,
     UnstoppedAttemptDisposition,
+};
+pub use turn_eligibility::{
+    AcceptedInputEligibilityError, AcceptedInputEligibilityFailure,
+    AcceptedInputSchedulingProjection, AcceptedInputSchedulingReconstitutionError,
+    AcceptedInputSchedulingReconstitutionFailure, AcceptedInputSchedulingReconstitutionInput,
+    AcceptedInputTurnActivationIdentities, AcceptedInputTurnSchedulingProjection,
+    AcceptedInputTurnSchedulingRecord, AcceptedInputTurnSchedulingRecordState,
+    AcceptedInputTurnSchedulingStatus, ActivatedAcceptedInputTurn,
+    PreparedAcceptedInputTurnActivation, PreparedTurnAttemptReconstitutionInput,
 };
 pub use turn_lifecycle::{
     AcceptedInputStartingLineage, AcceptedInputTurnStart, ActiveTurnPhase,
