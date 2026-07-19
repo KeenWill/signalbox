@@ -525,7 +525,7 @@ impl Hash for SubmitInput {
 /// The terminal recorded result of one canonical input command.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SubmitInputResult {
-    /// Acceptance created complete durable queued-work facts.
+    /// The input was durably accepted with one treatment-specific effect.
     Applied(SubmitInputAppliedResult),
     /// Authoritative state rejected the caller's requested treatment.
     Rejected(SubmitInputRejectedResult),
