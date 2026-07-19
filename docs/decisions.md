@@ -47,13 +47,40 @@ Semantics of no document change.
 
 ## 2026-07-19 — Canonical replay origins include reclassified steering
 
-**Context.** SubmitInput replay used another turn's immutable applied result as its complete origin evidence. ADR-0027 also permits pending steering to become visible turn-origin work without rewriting that original `PendingSteering` command result, so a later command targeting the reclassified turn could not replay through the receipt-only seam.
+**Context.** SubmitInput replay used another turn's immutable applied result as
+its complete origin evidence. ADR-0027 also permits pending steering to become
+visible turn-origin work without rewriting that original `PendingSteering`
+command result, so a later command targeting the reclassified turn could not
+replay through the receipt-only seam.
 
-**Decision.** Supply a purpose-specific turn-origin input containing the immutable receipt, current accepted-input lifecycle, and accepted-input-keyed immutable queue association. Domain reconstitution admits either a directly created `TurnOrigin` correlated with `OriginOf`, or a `PendingSteering` receipt correlated with `ReclassifiedAsTurnOrigin` plus a purpose-specific terminal source input containing its canonical origin, explicit terminal-record owner, and `TurnDisposition`. Reclassified origins form one flat oldest-to-newest chain: every source must be the bound turn, own its terminal disposition, precede the steering input, and satisfy any turn-bearing cancellation or reconciliation proof, while accepted-input and command identities remain unique across the complete chain. This admits every ADR-0027 terminal outcome and arbitrarily long reclassified-origin chains without recursive validation or coupling replay to the scheduling projection's currently narrower terminal subset. Applied predecessor/source replay and occupied-state rejection replay consume this checked shape. Replaying the pending command itself still ignores later lifecycle progress and returns its immutable original result.
+**Decision.** Supply a purpose-specific turn-origin input containing the
+immutable receipt, current accepted-input lifecycle, and accepted-input-keyed
+immutable queue association. Domain reconstitution admits either a directly
+created `TurnOrigin` correlated with `OriginOf`, or a `PendingSteering` receipt
+correlated with `ReclassifiedAsTurnOrigin` plus a purpose-specific terminal
+source input containing its canonical origin, explicit terminal-record owner,
+and `TurnDisposition`. Reclassified origins form one flat oldest-to-newest
+chain: every source must be the bound turn, own its terminal disposition,
+precede the steering input, and satisfy any turn-bearing cancellation or
+reconciliation proof, while accepted-input and command identities remain unique
+across the complete chain. This admits every ADR-0027 terminal outcome and
+arbitrarily long reclassified-origin chains without recursive validation or
+coupling replay to the scheduling projection's currently narrower terminal
+subset. Applied predecessor/source replay and occupied-state rejection replay
+consume this checked shape. Replaying the pending command itself still ignores
+later lifecycle progress and returns its immutable original result.
 
-**Rejected alternatives.** Treating every origin as a `TurnOrigin` receipt excludes valid reclassification. Reusing the accepted-input scheduling projection excludes terminal outcomes and source turns that projection does not yet construct. Trusting a reclassified disposition without its keyed queue association or checked terminal source accepts cross-record and lifecycle claims that this purpose cannot prove. Rewriting the original pending receipt would violate durable replay.
+**Rejected alternatives.** Treating every origin as a `TurnOrigin` receipt
+excludes valid reclassification. Reusing the accepted-input scheduling
+projection excludes terminal outcomes and source turns that projection does not
+yet construct. Trusting a reclassified disposition without its keyed queue
+association or checked terminal source accepts cross-record and lifecycle claims
+that this purpose cannot prove. Rewriting the original pending receipt would
+violate durable replay.
 
-**Affects.** `crates/domain/src/submit_input.rs`, its spine, and INV-009/INV-012 replay enforcement. It adds no reclassification producer, storage spelling, transition, or persistence behavior.
+**Affects.** `crates/domain/src/submit_input.rs`, its spine, and INV-009/INV-012
+replay enforcement. It adds no reclassification producer, storage spelling,
+transition, or persistence behavior.
 
 ## 2026-07-19 — Dependency caching for the Rust CI jobs
 
