@@ -1486,36 +1486,36 @@ mod tests {
         )
     }
 
-    fn after_command(command: u128, expected_active_turn: u128) -> SubmitInput {
+    fn after_command(command: u128, expected_active_turn: crate::TurnId) -> SubmitInput {
         SubmitInput::new(
             command_id(command),
             session_id(1),
             content("hello"),
             DeliveryRequest::AfterCurrentTurn {
-                expected_active_turn: turn_id(expected_active_turn),
+                expected_active_turn,
                 configuration: choices(1, ModelSelectionOverride::UseSessionDefault),
             },
         )
     }
 
-    fn safe_point_command(command: u128, expected_active_turn: u128) -> SubmitInput {
+    fn safe_point_command(command: u128, expected_active_turn: crate::TurnId) -> SubmitInput {
         SubmitInput::new(
             command_id(command),
             session_id(1),
             content("hello"),
             DeliveryRequest::NextSafePoint {
-                expected_active_turn: turn_id(expected_active_turn),
+                expected_active_turn,
             },
         )
     }
 
-    fn interrupt_command(command: u128, expected_active_turn: u128) -> SubmitInput {
+    fn interrupt_command(command: u128, expected_active_turn: crate::TurnId) -> SubmitInput {
         SubmitInput::new(
             command_id(command),
             session_id(1),
             content("hello"),
             DeliveryRequest::Interrupt {
-                expected_active_turn: turn_id(expected_active_turn),
+                expected_active_turn,
                 configuration: choices(1, ModelSelectionOverride::UseSessionDefault),
             },
         )
@@ -1889,17 +1889,19 @@ mod tests {
     /// creates ordinary queued origin work with the next acceptance position
     /// and exact frozen configuration.
     #[test]
-    fn s09_matching_after_current_prepares_ordinary_turn_origin() {
+    fn s09_inv007_inv008_inv028_matching_after_current_prepares_ordinary_turn_origin() {
         let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
-        let command = after_command(1, 7);
+        let active = active_turn(&current);
+        let active_turn = active
+            .active_turn()
+            .expect("the fixture has one active turn")
+            .turn();
+        let accepted_input = accepted_input_id(3);
+        let turn_candidate = turn_id(8);
+        let command = after_command(1, active_turn);
         let prepared = command
             .clone()
-            .prepare_with_active_turn(
-                &active_turn(&current),
-                accepted_input_id(3),
-                Some(turn_id(8)),
-                |_| None,
-            )
+            .prepare_with_active_turn(&active, accepted_input, Some(turn_candidate), |_| None)
             .expect("matching after-current input is available");
 
         let SubmitInputResult::Applied(applied) = prepared.result() else {
@@ -1908,11 +1910,11 @@ mod tests {
         let origin = applied
             .turn_origin()
             .expect("after-current input creates origin work");
-        assert_eq!(origin.accepted_input(), accepted_input_id(3));
-        assert_eq!(origin.turn(), turn_id(8));
+        assert_eq!(origin.accepted_input(), accepted_input);
+        assert_eq!(origin.turn(), turn_candidate);
         assert_eq!(
             origin.disposition(),
-            AcceptedInputDisposition::OriginOf(turn_id(8))
+            AcceptedInputDisposition::OriginOf(turn_candidate)
         );
         assert_eq!(origin.acceptance_position().as_u64(), 2);
         assert_eq!(
@@ -1929,10 +1931,16 @@ mod tests {
     /// pending steering bound to the exact active turn and carries no
     /// turn-origin fields.
     #[test]
-    fn s08_matching_next_safe_point_prepares_pending_steering() {
+    fn s08_inv007_inv016_inv028_matching_next_safe_point_prepares_pending_steering() {
         let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
-        let prepared = safe_point_command(1, 7)
-            .prepare_with_active_turn(&active_turn(&current), accepted_input_id(3), None, |_| {
+        let active = active_turn(&current);
+        let active_turn = active
+            .active_turn()
+            .expect("the fixture has one active turn")
+            .turn();
+        let accepted_input = accepted_input_id(3);
+        let prepared = safe_point_command(1, active_turn)
+            .prepare_with_active_turn(&active, accepted_input, None, |_| {
                 panic!("safe-point acceptance has no configuration")
             })
             .expect("matching safe-point input is available");
@@ -1940,93 +1948,115 @@ mod tests {
         let SubmitInputResult::Applied(applied) = prepared.result() else {
             panic!("matching safe-point input applies");
         };
-        assert_eq!(applied.accepted_input(), accepted_input_id(3));
+        assert_eq!(applied.accepted_input(), accepted_input);
         assert_eq!(applied.acceptance_position().as_u64(), 2);
         assert_eq!(
             applied.disposition(),
             AcceptedInputDisposition::PendingSteering {
-                binding: SteeringBinding::new(turn_id(7)),
+                binding: SteeringBinding::new(active_turn),
             }
         );
         assert!(applied.turn_origin().is_none());
         let steering = applied
             .pending_steering()
             .expect("safe-point acceptance creates pending steering");
-        assert_eq!(steering.binding().source_turn(), turn_id(7));
+        assert_eq!(steering.binding().source_turn(), active_turn);
     }
 
     /// S01 / INV-012 / INV-028: a vacant-slot start submitted while the slot
     /// is occupied records the exact authoritative active turn.
     #[test]
-    fn occupied_slot_start_records_active_turn_presence() {
+    fn s01_inv012_inv028_occupied_slot_start_records_active_turn_presence() {
         let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
         let active = active_turn(&current);
+        let active_turn = active
+            .active_turn()
+            .expect("the fixture has one active turn")
+            .turn();
+        let accepted_input = accepted_input_id(3);
+        let turn_candidate = turn_id(8);
         let start = start_command(1, "hello", 1)
-            .prepare_with_active_turn(&active, accepted_input_id(3), Some(turn_id(8)), |_| None)
+            .prepare_with_active_turn(&active, accepted_input, Some(turn_candidate), |_| None)
             .expect("active presence is an authoritative rejection");
         assert!(matches!(
             start.result(),
             SubmitInputResult::Rejected(SubmitInputRejectedResult::ActiveTurnPresent {
                 session,
-                active_turn,
-            }) if *session == session_id(1) && *active_turn == turn_id(7)
+                active_turn: recorded_active_turn,
+            }) if *session == current.id() && *recorded_active_turn == active_turn
         ));
     }
 
     /// S07 / S08 / S09 / INV-012 / INV-028: every active-work delivery mode
     /// records its stale target against the exact authoritative active turn.
     #[test]
-    fn occupied_slot_active_work_records_stale_target() {
+    fn s07_s08_s09_inv012_inv028_occupied_slot_active_work_records_stale_target() {
         let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
         let active = active_turn(&current);
+        let actual_active_turn = active
+            .active_turn()
+            .expect("the fixture has one active turn")
+            .turn();
+        let stale_target = turn_id(9);
+        let accepted_input = accepted_input_id(3);
+        let turn_candidate = turn_id(8);
 
-        let stale_after = after_command(2, 9)
-            .prepare_with_active_turn(&active, accepted_input_id(3), Some(turn_id(8)), |_| None)
+        let stale_after = after_command(2, stale_target)
+            .prepare_with_active_turn(&active, accepted_input, Some(turn_candidate), |_| None)
             .expect("a stale after-current target is an authoritative rejection");
         assert!(matches!(
             stale_after.result(),
             SubmitInputResult::Rejected(SubmitInputRejectedResult::ActiveTurnMismatch {
                 expected_active_turn,
-                actual_active_turn,
+                actual_active_turn: recorded_active_turn,
                 ..
-            }) if *expected_active_turn == turn_id(9) && *actual_active_turn == turn_id(7)
+            }) if *expected_active_turn == stale_target
+                && *recorded_active_turn == actual_active_turn
         ));
 
-        let stale_safe_point = safe_point_command(3, 9)
-            .prepare_with_active_turn(&active, accepted_input_id(3), None, |_| None)
+        let stale_safe_point = safe_point_command(3, stale_target)
+            .prepare_with_active_turn(&active, accepted_input, None, |_| None)
             .expect("a stale safe-point target is an authoritative rejection");
         assert!(matches!(
             stale_safe_point.result(),
             SubmitInputResult::Rejected(SubmitInputRejectedResult::ActiveTurnMismatch {
                 expected_active_turn,
-                actual_active_turn,
+                actual_active_turn: recorded_active_turn,
                 ..
-            }) if *expected_active_turn == turn_id(9) && *actual_active_turn == turn_id(7)
+            }) if *expected_active_turn == stale_target
+                && *recorded_active_turn == actual_active_turn
         ));
 
-        let stale_interrupt = interrupt_command(4, 9)
-            .prepare_with_active_turn(&active, accepted_input_id(3), Some(turn_id(8)), |_| None)
+        let stale_interrupt = interrupt_command(4, stale_target)
+            .prepare_with_active_turn(&active, accepted_input, Some(turn_candidate), |_| None)
             .expect("a stale interrupt target is an authoritative rejection");
         assert!(matches!(
             stale_interrupt.result(),
             SubmitInputResult::Rejected(SubmitInputRejectedResult::ActiveTurnMismatch {
                 expected_active_turn,
-                actual_active_turn,
+                actual_active_turn: recorded_active_turn,
                 ..
-            }) if *expected_active_turn == turn_id(9) && *actual_active_turn == turn_id(7)
+            }) if *expected_active_turn == stale_target
+                && *recorded_active_turn == actual_active_turn
         ));
     }
 
     /// S07 / INV-012 / INV-028: a matching interrupt remains nonclaiming until
     /// its correlated application boundary exists.
     #[test]
-    fn occupied_slot_matching_interrupt_remains_nonclaiming() {
+    fn s07_inv012_inv028_occupied_slot_matching_interrupt_remains_nonclaiming() {
         let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
         let active = active_turn(&current);
-        let interrupt = interrupt_command(6, 7);
+        let active_turn = active
+            .active_turn()
+            .expect("the fixture has one active turn")
+            .turn();
+        let accepted_input = accepted_input_id(3);
+        let turn_candidate = turn_id(8);
+        let interrupt = interrupt_command(6, active_turn);
         let unavailable = interrupt
             .clone()
-            .prepare_with_active_turn(&active, accepted_input_id(3), Some(turn_id(8)), |_| None)
+            .prepare_with_active_turn(&active, accepted_input, Some(turn_candidate), |_| None)
             .expect_err("interrupt application cannot claim a command in this slice");
         assert_eq!(
             unavailable.failure(),
@@ -2038,15 +2068,19 @@ mod tests {
     /// S09 / INV-008 / INV-012 / INV-028: after-current preparation records
     /// the exact stale session-defaults version.
     #[test]
-    fn occupied_slot_after_current_records_stale_defaults_version() {
+    fn s09_inv008_inv012_inv028_occupied_slot_after_current_records_stale_defaults_version() {
         let stale_session = session(1, 2, ModelSelectionRequest::Direct(direct(2)));
-        let stale = after_command(1, 7)
-            .prepare_with_active_turn(
-                &active_turn(&stale_session),
-                accepted_input_id(3),
-                Some(turn_id(8)),
-                |_| panic!("stale defaults cannot reach alias resolution"),
-            )
+        let active = active_turn(&stale_session);
+        let active_turn = active
+            .active_turn()
+            .expect("the fixture has one active turn")
+            .turn();
+        let accepted_input = accepted_input_id(3);
+        let turn_candidate = turn_id(8);
+        let stale = after_command(1, active_turn)
+            .prepare_with_active_turn(&active, accepted_input, Some(turn_candidate), |_| {
+                panic!("stale defaults cannot reach alias resolution")
+            })
             .expect("a stale defaults version is an authoritative rejection");
         assert!(matches!(
             stale.result(),
@@ -2063,47 +2097,58 @@ mod tests {
     /// S09 / INV-008 / INV-012: after-current preparation records the exact
     /// unresolved model alias.
     #[test]
-    fn occupied_slot_after_current_records_unknown_alias() {
+    fn s09_inv008_inv012_occupied_slot_after_current_records_unknown_alias() {
         let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
+        let active = active_turn(&current);
+        let active_turn = active
+            .active_turn()
+            .expect("the fixture has one active turn")
+            .turn();
+        let accepted_input = accepted_input_id(3);
+        let turn_candidate = turn_id(8);
+        let unknown_alias = alias(9);
         let alias_command = SubmitInput::new(
             command_id(2),
             session_id(1),
             content("hello"),
             DeliveryRequest::AfterCurrentTurn {
-                expected_active_turn: turn_id(7),
+                expected_active_turn: active_turn,
                 configuration: choices(
                     1,
-                    ModelSelectionOverride::ReplaceWith(ModelSelectionRequest::Alias(alias(9))),
+                    ModelSelectionOverride::ReplaceWith(ModelSelectionRequest::Alias(
+                        unknown_alias,
+                    )),
                 ),
             },
         );
-        let unknown_alias = alias_command
-            .prepare_with_active_turn(
-                &active_turn(&current),
-                accepted_input_id(3),
-                Some(turn_id(8)),
-                |_| None,
-            )
+        let rejected = alias_command
+            .prepare_with_active_turn(&active, accepted_input, Some(turn_candidate), |_| None)
             .expect("an unresolved alias is an authoritative rejection");
         assert!(matches!(
-            unknown_alias.result(),
+            rejected.result(),
             SubmitInputResult::Rejected(SubmitInputRejectedResult::UnknownModelAlias {
                 alias: unknown,
                 ..
-            }) if *unknown == alias(9)
+            }) if *unknown == unknown_alias
         ));
     }
 
     /// S08 / S09 / INV-012 / INV-028: both occupied-slot acceptance paths
     /// record exhaustion of the validated session acceptance tail.
     #[test]
-    fn occupied_slot_acceptance_records_position_exhaustion() {
+    fn s08_s09_inv012_inv028_occupied_slot_acceptance_records_position_exhaustion() {
         let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
         let maximum = SessionInputPosition::try_from_u64(u64::MAX).expect("positive maximum");
         let active = active_turn_at_position(&current, maximum);
+        let active_turn = active
+            .active_turn()
+            .expect("the fixture has one active turn")
+            .turn();
+        let accepted_input = accepted_input_id(3);
+        let turn_candidate = turn_id(8);
 
-        let after = after_command(3, 7)
-            .prepare_with_active_turn(&active, accepted_input_id(3), Some(turn_id(8)), |_| None)
+        let after = after_command(3, active_turn)
+            .prepare_with_active_turn(&active, accepted_input, Some(turn_candidate), |_| None)
             .expect("after-current position exhaustion is authoritative");
         assert!(matches!(
             after.result(),
@@ -2112,8 +2157,8 @@ mod tests {
             ) if *last == maximum
         ));
 
-        let safe_point = safe_point_command(4, 7)
-            .prepare_with_active_turn(&active, accepted_input_id(3), None, |_| None)
+        let safe_point = safe_point_command(4, active_turn)
+            .prepare_with_active_turn(&active, accepted_input, None, |_| None)
             .expect("safe-point position exhaustion is authoritative");
         assert!(matches!(
             safe_point.result(),
@@ -2126,22 +2171,29 @@ mod tests {
     /// S09 / INV-002 / INV-012: occupied-slot preparation rejects a scheduling
     /// projection from another session without claiming the command.
     #[test]
-    fn occupied_slot_preparation_rejects_cross_session_projection() {
-        let command = after_command(1, 7);
+    fn s09_inv002_inv012_occupied_slot_preparation_rejects_cross_session_projection() {
         let wrong_session = session(2, 1, ModelSelectionRequest::Direct(direct(2)));
+        let wrong_projection = active_turn(&wrong_session);
+        let projected_active_turn = wrong_projection
+            .active_turn()
+            .expect("the fixture has one active turn")
+            .turn();
+        let accepted_input = accepted_input_id(3);
+        let turn_candidate = turn_id(8);
+        let command = after_command(1, projected_active_turn);
         let wrong_active_session = command
             .clone()
             .prepare_with_active_turn(
-                &active_turn(&wrong_session),
-                accepted_input_id(3),
-                Some(turn_id(8)),
+                &wrong_projection,
+                accepted_input,
+                Some(turn_candidate),
                 |_| None,
             )
             .expect_err("a cross-session active projection is nonterminal");
         assert_eq!(
             wrong_active_session.failure(),
             SubmitInputPreparationFailure::SessionMismatch {
-                provided_session: session_id(2),
+                provided_session: wrong_session.id(),
             }
         );
         assert_eq!(wrong_active_session.command(), &command);
@@ -2150,17 +2202,20 @@ mod tests {
     /// S09 / INV-002 / INV-012: a queued projection cannot stand in for the
     /// authoritative active turn.
     #[test]
-    fn occupied_slot_preparation_requires_active_projection() {
+    fn s09_inv002_inv012_occupied_slot_preparation_requires_active_projection() {
         let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
-        let command = after_command(1, 7);
+        let queued = queued_turn(&current);
+        let projected_turn = queued
+            .turns()
+            .next()
+            .expect("the fixture has one queued turn")
+            .turn();
+        let accepted_input = accepted_input_id(3);
+        let turn_candidate = turn_id(8);
+        let command = after_command(1, projected_turn);
         let not_active = command
             .clone()
-            .prepare_with_active_turn(
-                &queued_turn(&current),
-                accepted_input_id(3),
-                Some(turn_id(8)),
-                |_| None,
-            )
+            .prepare_with_active_turn(&queued, accepted_input, Some(turn_candidate), |_| None)
             .expect_err("a queued projection cannot stand in for the active turn");
         assert_eq!(
             not_active.failure(),
@@ -2172,28 +2227,34 @@ mod tests {
     /// S08 / S09 / INV-012: each occupied-slot delivery mode requires the
     /// exact candidate shape it can apply.
     #[test]
-    fn occupied_slot_preparation_rejects_mismatched_turn_candidate_shape() {
+    fn s08_s09_inv012_occupied_slot_preparation_rejects_mismatched_turn_candidate_shape() {
         let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
         let active = active_turn(&current);
+        let active_turn = active
+            .active_turn()
+            .expect("the fixture has one active turn")
+            .turn();
+        let accepted_input = accepted_input_id(3);
+        let turn_candidate = turn_id(8);
 
-        let missing_turn = after_command(1, 7)
-            .prepare_with_active_turn(&active_turn(&current), accepted_input_id(3), None, |_| None)
+        let missing_turn = after_command(1, active_turn)
+            .prepare_with_active_turn(&active, accepted_input, None, |_| None)
             .expect_err("after-current input requires a minted turn candidate");
         assert_eq!(
             missing_turn.failure(),
             SubmitInputPreparationFailure::TurnCandidateMismatch
         );
 
-        let reused_active_turn = after_command(2, 7)
-            .prepare_with_active_turn(&active, accepted_input_id(3), Some(turn_id(7)), |_| None)
+        let reused_active_turn = after_command(2, active_turn)
+            .prepare_with_active_turn(&active, accepted_input, Some(active_turn), |_| None)
             .expect_err("after-current work cannot reuse its active predecessor");
         assert_eq!(
             reused_active_turn.failure(),
             SubmitInputPreparationFailure::TurnCandidateMismatch
         );
 
-        let extra_turn = safe_point_command(3, 7)
-            .prepare_with_active_turn(&active, accepted_input_id(3), Some(turn_id(8)), |_| None)
+        let extra_turn = safe_point_command(3, active_turn)
+            .prepare_with_active_turn(&active, accepted_input, Some(turn_candidate), |_| None)
             .expect_err("safe-point input cannot receive a turn candidate");
         assert_eq!(
             extra_turn.failure(),
@@ -2204,33 +2265,38 @@ mod tests {
     /// S08 / S09 / INV-001 / INV-012: no occupied-slot acceptance path can
     /// reuse the active turn's canonical origin identity.
     #[test]
-    fn occupied_slot_preparation_rejects_active_origin_identity_reuse() {
+    fn s08_s09_inv001_inv012_occupied_slot_preparation_rejects_active_origin_identity_reuse() {
         let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
         let active = active_turn(&current);
-        let active_origin = active
+        let active_turn = active
             .active_turn()
             .expect("the test projection has one active turn")
+            .turn();
+        let active_origin = active
+            .turn(active_turn)
+            .expect("the fixture retains its active turn")
             .accepted_input()
             .id();
+        let turn_candidate = turn_id(8);
 
-        let after = after_command(2, 7)
-            .prepare_with_active_turn(&active, active_origin, Some(turn_id(8)), |_| None)
+        let after = after_command(2, active_turn)
+            .prepare_with_active_turn(&active, active_origin, Some(turn_candidate), |_| None)
             .expect_err("after-current acceptance cannot reuse the active origin");
         assert_eq!(
             after.failure(),
             SubmitInputPreparationFailure::AcceptedInputCandidateReusesActiveOrigin {
-                active_turn: turn_id(7),
+                active_turn,
                 accepted_input: active_origin,
             }
         );
 
-        let safe_point = safe_point_command(3, 7)
+        let safe_point = safe_point_command(3, active_turn)
             .prepare_with_active_turn(&active, active_origin, None, |_| None)
             .expect_err("safe-point acceptance cannot reuse the active origin");
         assert_eq!(
             safe_point.failure(),
             SubmitInputPreparationFailure::AcceptedInputCandidateReusesActiveOrigin {
-                active_turn: turn_id(7),
+                active_turn,
                 accepted_input: active_origin,
             }
         );

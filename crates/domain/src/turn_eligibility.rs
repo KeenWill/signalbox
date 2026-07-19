@@ -457,6 +457,12 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
         /// The affected turn.
         turn: TurnId,
     },
+    /// One origin's accepted delivery contradicts its durable queue facts or
+    /// historical target.
+    OriginDeliveryMismatch {
+        /// The affected turn.
+        turn: TurnId,
+    },
     /// Two turn records referenced the same accepted input.
     DuplicateAcceptedInput {
         /// The duplicated accepted input.
@@ -1096,6 +1102,15 @@ fn reconstitute_inner(
         .iter()
         .map(|record| (record.turn, record))
         .collect::<BTreeMap<_, _>>();
+    for record in records_by_turn.values() {
+        if !origin_delivery_matches_record(record.origin_delivery, record, &records_by_turn) {
+            return Err(
+                AcceptedInputSchedulingReconstitutionFailure::OriginDeliveryMismatch {
+                    turn: record.turn,
+                },
+            );
+        }
+    }
 
     let mut semantic_entries = BTreeMap::new();
     let mut origin_by_turn = BTreeMap::new();
@@ -1414,6 +1429,20 @@ fn reconstitute_active_acceptance_tail(
                 turn: active,
                 expected: expected_anchor,
                 actual: candidate.anchor,
+            },
+        );
+    }
+
+    let latest_known_origin_position = records_by_turn
+        .values()
+        .map(|record| record.order.acceptance_position())
+        .max()
+        .expect("the active turn is present in the scheduling inventory");
+    if latest_known_origin_position > candidate.observed_last_position {
+        return Err(
+            AcceptedInputSchedulingReconstitutionFailure::AcceptanceTailLastPositionMismatch {
+                expected: candidate.observed_last_position,
+                actual: Some(latest_known_origin_position),
             },
         );
     }
@@ -2542,7 +2571,7 @@ mod tests {
         let mut cross_wired =
             active_tail(&session, 10, 20, 1).expect("the helper constructs an active tail");
         cross_wired.observed_last_position =
-            SessionInputPosition::try_from_u64(2).expect("positive test position");
+            SessionInputPosition::try_from_u64(3).expect("positive test position");
         cross_wired
             .entries
             .push(SessionAcceptanceTailEntryReconstitutionInput::new(
@@ -2558,6 +2587,21 @@ mod tests {
                         SessionConfigurationDefaultsVersion::first(),
                         ModelSelectionOverride::UseSessionDefault,
                     ),
+                },
+            ));
+        cross_wired
+            .entries
+            .push(SessionAcceptanceTailEntryReconstitutionInput::new(
+                session.id(),
+                AcceptedInputLifecycle::new(
+                    accepted_input_id(22),
+                    AcceptedInputDisposition::PendingSteering {
+                        binding: crate::SteeringBinding::new(turn_id(10)),
+                    },
+                ),
+                SessionInputPosition::try_from_u64(3).expect("positive test position"),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: turn_id(10),
                 },
             ));
         let mut cross_wired_input = active_input(&session, Some(cross_wired));
@@ -2635,8 +2679,8 @@ mod tests {
         .expect_err("after-current delivery requires its historical target record");
         assert_eq!(
             missing_target.failure(),
-            &AcceptedInputSchedulingReconstitutionFailure::AcceptanceTailDispositionMismatch {
-                accepted_input: accepted_input_id(21),
+            &AcceptedInputSchedulingReconstitutionFailure::OriginDeliveryMismatch {
+                turn: turn_id(11),
             }
         );
     }
@@ -2660,8 +2704,41 @@ mod tests {
         .expect_err("interrupt delivery cannot carry ordinary queue priority");
         assert_eq!(
             wrong_priority.failure(),
-            &AcceptedInputSchedulingReconstitutionFailure::AcceptanceTailDispositionMismatch {
-                accepted_input: accepted_input_id(21),
+            &AcceptedInputSchedulingReconstitutionFailure::OriginDeliveryMismatch {
+                turn: turn_id(11),
+            }
+        );
+    }
+
+    /// S01 / INV-009 / INV-016 / ADR-0041: origin delivery and queue facts
+    /// are validated even when no active turn requires an acceptance tail.
+    #[test]
+    fn s01_inv009_inv016_queued_reconstitution_rejects_delivery_order_mismatch() {
+        let session = current_session();
+        let input = AcceptedInputSchedulingReconstitutionInput::new(
+            session.clone(),
+            vec![record_with_order(
+                &session,
+                10,
+                20,
+                AcceptedInputQueueOrder::ordinary(SessionInputPosition::first()),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: turn_id(99),
+                },
+                AcceptedInputTurnSchedulingRecordState::Queued,
+            )],
+            vec![],
+            vec![],
+            None,
+        );
+
+        let error = input
+            .reconstitute()
+            .expect_err("steering-only delivery cannot reconstruct queued turn work");
+        assert_eq!(
+            error.failure(),
+            &AcceptedInputSchedulingReconstitutionFailure::OriginDeliveryMismatch {
+                turn: turn_id(10),
             }
         );
     }
@@ -2842,6 +2919,42 @@ mod tests {
             &AcceptedInputSchedulingReconstitutionFailure::AcceptanceTailLastPositionMismatch {
                 expected: SessionInputPosition::try_from_u64(2).expect("positive test position"),
                 actual: Some(SessionInputPosition::first()),
+            }
+        );
+    }
+
+    /// S03 / INV-009 / INV-016 / ADR-0041: the claimed session observation
+    /// cannot end before a later origin supplied by the same scheduling read.
+    #[test]
+    fn s03_inv009_inv016_active_tail_reaches_every_known_origin() {
+        let session = current_session();
+        let mut input = active_input_with_post_anchor_origin(
+            &session,
+            DeliveryRequest::StartWhenNoActiveTurn {
+                configuration: PerInputConfigurationChoices::new(
+                    SessionConfigurationDefaultsVersion::first(),
+                    ModelSelectionOverride::UseSessionDefault,
+                ),
+            },
+        );
+        let tail = input
+            .active_acceptance_tail
+            .as_mut()
+            .expect("the helper supplies an active tail");
+        tail.observed_last_position = SessionInputPosition::first();
+        tail.entries.truncate(1);
+
+        let error = input
+            .reconstitute()
+            .expect_err("a known later origin disproves the claimed tail observation");
+        assert_eq!(
+            error.failure(),
+            &AcceptedInputSchedulingReconstitutionFailure::AcceptanceTailLastPositionMismatch {
+                expected: SessionInputPosition::first(),
+                actual: Some(
+                    SessionInputPosition::try_from_u64(2)
+                        .expect("the known origin position is positive"),
+                ),
             }
         );
     }
