@@ -646,12 +646,15 @@ impl ReconstitutedReplaceSessionDefaults {
 
 #[cfg(test)]
 mod tests {
+    use expect_test::expect;
+
     use super::{
-        ReplaceSessionDefaults, ReplaceSessionDefaultsReconstitutionFailure,
+        ReconstitutedReplaceSessionDefaults, ReplaceSessionDefaults,
+        ReplaceSessionDefaultsReconstitutionError, ReplaceSessionDefaultsReconstitutionFailure,
         ReplaceSessionDefaultsReconstitutionInput, ReplaceSessionDefaultsRejectedResult,
         ReplaceSessionDefaultsResult,
     };
-    use crate::test_support::{command_id, direct, session_id};
+    use crate::test_support::{command_id, direct, session_id, table};
     use crate::{
         ModelSelectionRequest, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
         SessionCreationCause, SessionCreationProvenance, SessionReconstitutionInput,
@@ -697,6 +700,54 @@ mod tests {
             version(expected),
             defaults(replacement),
         )
+    }
+
+    /// The complete stored facts backing one applied replacement, mirroring
+    /// [`ReplaceSessionDefaultsReconstitutionInput::applied`] field for field
+    /// so a test perturbs exactly the named facts it cares about
+    /// (`docs/testing-style.md`, rules 4 and 5).
+    #[derive(Clone, Copy)]
+    struct AppliedFacts {
+        result_session: crate::SessionId,
+        result_version: SessionConfigurationDefaultsVersion,
+        defaults_session: crate::SessionId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+    }
+
+    impl AppliedFacts {
+        /// The canonical stored facts matching an applied `command`: the
+        /// command's target session owns the checked-successor version
+        /// holding exactly the command's replacement.
+        fn matching(command: &ReplaceSessionDefaults) -> Self {
+            let installed = command
+                .expected_current_version()
+                .checked_next()
+                .expect("test expected versions have a successor");
+            Self {
+                result_session: command.session(),
+                result_version: installed,
+                defaults_session: command.session(),
+                defaults_version: installed,
+                defaults: command.replacement(),
+            }
+        }
+
+        fn reconstitute(
+            self,
+            command: ReplaceSessionDefaults,
+        ) -> Result<ReconstitutedReplaceSessionDefaults, ReplaceSessionDefaultsReconstitutionError>
+        {
+            ReplaceSessionDefaultsReconstitutionInput::applied(
+                command,
+                self.result_session,
+                self.result_version,
+                self.defaults_session,
+                self.defaults_version,
+                self.defaults,
+            )
+            .reconstitute()
+        }
     }
 
     /// S01 / INV-012: comparison excludes only command identity and includes
@@ -852,82 +903,105 @@ mod tests {
     #[test]
     fn s01_inv002_inv012_applied_reconstitution_fails_closed() {
         let target = session_id(1);
+        let another_session = session_id(2);
         let command = command(1, target, 1, 2);
+        let matching = AppliedFacts::matching(&command);
 
-        let wrong_result_session = ReplaceSessionDefaultsReconstitutionInput::applied(
-            command,
-            session_id(2),
-            version(2),
-            target,
-            version(2),
-            defaults(2),
-        )
-        .reconstitute()
-        .expect_err("a cross-wired result session must fail");
+        let cross_wired_result = AppliedFacts {
+            result_session: another_session,
+            ..matching
+        }
+        .reconstitute(command)
+        .expect_err("a cross-wired result session must fail")
+        .failure();
         assert_eq!(
-            wrong_result_session.failure(),
+            cross_wired_result,
             ReplaceSessionDefaultsReconstitutionFailure::ResultSessionMismatch
         );
 
-        let wrong_defaults_owner = ReplaceSessionDefaultsReconstitutionInput::applied(
-            command,
-            target,
-            version(2),
-            session_id(2),
-            version(2),
-            defaults(2),
-        )
-        .reconstitute()
-        .expect_err("a cross-wired defaults owner must fail");
+        let cross_wired_defaults_owner = AppliedFacts {
+            defaults_session: another_session,
+            ..matching
+        }
+        .reconstitute(command)
+        .expect_err("a cross-wired defaults owner must fail")
+        .failure();
         assert_eq!(
-            wrong_defaults_owner.failure(),
+            cross_wired_defaults_owner,
             ReplaceSessionDefaultsReconstitutionFailure::DefaultsSessionMismatch
         );
 
-        let wrong_result_version = ReplaceSessionDefaultsReconstitutionInput::applied(
-            command,
-            target,
-            version(3),
-            target,
-            version(2),
-            defaults(2),
-        )
-        .reconstitute()
-        .expect_err("the result and selected record must name one version");
+        let torn_result_version = AppliedFacts {
+            result_version: version(3),
+            ..matching
+        }
+        .reconstitute(command)
+        .expect_err("the result and selected record must name one version")
+        .failure();
         assert_eq!(
-            wrong_result_version.failure(),
+            torn_result_version,
             ReplaceSessionDefaultsReconstitutionFailure::ResultVersionMismatch
         );
 
-        let skipped_version = ReplaceSessionDefaultsReconstitutionInput::applied(
-            command,
-            target,
-            version(3),
-            target,
-            version(3),
-            defaults(2),
-        )
-        .reconstitute()
-        .expect_err("an installed version must be the checked successor");
+        let skipped_successor = AppliedFacts {
+            result_version: version(3),
+            defaults_version: version(3),
+            ..matching
+        }
+        .reconstitute(command)
+        .expect_err("an installed version must be the checked successor")
+        .failure();
         assert_eq!(
-            skipped_version.failure(),
+            skipped_successor,
             ReplaceSessionDefaultsReconstitutionFailure::InstalledVersionIsNotSuccessor
         );
 
-        let wrong_defaults = ReplaceSessionDefaultsReconstitutionInput::applied(
-            command,
-            target,
-            version(2),
-            target,
-            version(2),
-            defaults(3),
-        )
-        .reconstitute()
-        .expect_err("stored defaults must match the command replacement");
+        let replaced_defaults = AppliedFacts {
+            defaults: defaults(3),
+            ..matching
+        }
+        .reconstitute(command)
+        .expect_err("stored defaults must match the command replacement")
+        .failure();
         assert_eq!(
-            wrong_defaults.failure(),
+            replaced_defaults,
             ReplaceSessionDefaultsReconstitutionFailure::StoredDefaultsMismatch
         );
+
+        expect![[r#"
+            perturbed stored fact              | failure
+            ---------------------------------- | ------------------------------
+            result session cross-wired         | ResultSessionMismatch
+            defaults owner cross-wired         | DefaultsSessionMismatch
+            result and installed versions torn | ResultVersionMismatch
+            installed version skips successor  | InstalledVersionIsNotSuccessor
+            stored replacement differs         | StoredDefaultsMismatch
+        "#]]
+        .assert_eq(&table(
+            &["perturbed stored fact", "failure"],
+            &[
+                vec![
+                    "result session cross-wired".to_string(),
+                    format!("{cross_wired_result:?}"),
+                ],
+                vec![
+                    "defaults owner cross-wired".to_string(),
+                    format!("{cross_wired_defaults_owner:?}"),
+                ],
+                vec![
+                    "result and installed versions torn".to_string(),
+                    format!("{torn_result_version:?}"),
+                ],
+                vec![
+                    "installed version skips successor".to_string(),
+                    format!("{skipped_successor:?}"),
+                ],
+                vec![
+                    "stored replacement differs".to_string(),
+                    format!("{replaced_defaults:?}"),
+                ],
+            ],
+        ));
     }
 
     /// S01 / INV-002 / INV-012: each rejected record validates its command
