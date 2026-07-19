@@ -337,6 +337,40 @@ BEFORE UPDATE OR DELETE ON context_frontier_member
 FOR EACH ROW
 EXECUTE FUNCTION reject_immutable_record_change();
 
+CREATE FUNCTION reject_context_frontier_member_out_of_bounds()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    declared_member_count numeric(20, 0);
+BEGIN
+    SELECT member_count
+      INTO declared_member_count
+      FROM context_frontier
+     WHERE owning_session_id = NEW.owning_session_id
+       AND context_frontier_id = NEW.context_frontier_id;
+
+    -- Members may precede their deferred-FK header in one transaction. The
+    -- header's single deferred completeness check validates that ordering.
+    IF FOUND AND NEW.member_position > declared_member_count THEN
+        RAISE EXCEPTION
+            'context frontier member position % exceeds declared count %',
+            NEW.member_position,
+            declared_member_count
+            USING
+                ERRCODE = '23514',
+                CONSTRAINT = 'context_frontier_member_within_declared_count';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER context_frontier_member_stays_within_declared_count
+BEFORE INSERT ON context_frontier_member
+FOR EACH ROW
+EXECUTE FUNCTION reject_context_frontier_member_out_of_bounds();
+
 ALTER TABLE turn_lifecycle
     ADD CONSTRAINT turn_lifecycle_starting_frontier_fk
     FOREIGN KEY (session_id, starting_frontier_id)
@@ -493,6 +527,22 @@ BEGIN
             USING ERRCODE = '23514';
     END IF;
 
+    IF OLD.state_kind = 'queued'
+       AND NEW.state_kind = 'terminal'
+       AND EXISTS (
+           SELECT 1
+             FROM turn_attempt
+            WHERE turn_id = OLD.turn_id
+              AND session_id = OLD.session_id
+       )
+    THEN
+        RAISE EXCEPTION
+            'a queued turn must terminalize without attempt history'
+            USING
+                ERRCODE = '23514',
+                CONSTRAINT = 'turn_lifecycle_queued_failure_without_attempt';
+    END IF;
+
     RETURN NEW;
 END;
 $$;
@@ -628,17 +678,10 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    IF TG_TABLE_NAME = 'context_frontier' THEN
-        PERFORM assert_context_frontier_complete_membership(
-            CASE WHEN TG_OP = 'DELETE' THEN OLD.owning_session_id ELSE NEW.owning_session_id END,
-            CASE WHEN TG_OP = 'DELETE' THEN OLD.context_frontier_id ELSE NEW.context_frontier_id END
-        );
-    ELSE
-        PERFORM assert_context_frontier_complete_membership(
-            CASE WHEN TG_OP = 'DELETE' THEN OLD.owning_session_id ELSE NEW.owning_session_id END,
-            CASE WHEN TG_OP = 'DELETE' THEN OLD.context_frontier_id ELSE NEW.context_frontier_id END
-        );
-    END IF;
+    PERFORM assert_context_frontier_complete_membership(
+        CASE WHEN TG_OP = 'DELETE' THEN OLD.owning_session_id ELSE NEW.owning_session_id END,
+        CASE WHEN TG_OP = 'DELETE' THEN OLD.context_frontier_id ELSE NEW.context_frontier_id END
+    );
 
     RETURN NULL;
 END;
@@ -646,12 +689,6 @@ $$;
 
 CREATE CONSTRAINT TRIGGER context_frontier_requires_complete_membership
 AFTER INSERT OR UPDATE OR DELETE ON context_frontier
-DEFERRABLE INITIALLY DEFERRED
-FOR EACH ROW
-EXECUTE FUNCTION require_context_frontier_complete_membership();
-
-CREATE CONSTRAINT TRIGGER context_frontier_member_requires_complete_membership
-AFTER INSERT OR UPDATE OR DELETE ON context_frontier_member
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE FUNCTION require_context_frontier_complete_membership();

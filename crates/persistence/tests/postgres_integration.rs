@@ -80,7 +80,7 @@ async fn insert_origin_frontier(
     accepted_input: Uuid,
     semantic_entry: Uuid,
     frontier: Uuid,
-    member_position: Decimal,
+    declared_member_count: Decimal,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO semantic_transcript_entry
@@ -98,8 +98,8 @@ async fn insert_origin_frontier(
         connection,
         session,
         frontier,
-        Decimal::ONE,
-        &[(member_position, session, semantic_entry)],
+        declared_member_count,
+        &[(Decimal::ONE, session, semantic_entry)],
     )
     .await
 }
@@ -2943,7 +2943,7 @@ async fn s01_inv006_inv009_inv015_turn_storage_enforces_lifecycle_consistency()
         Some("23514".into())
     );
 
-    let duplicate_member = sqlx::query(
+    let out_of_bounds_member = sqlx::query(
         "INSERT INTO context_frontier_member
             (owning_session_id, context_frontier_id, member_position,
              source_session_id, semantic_entry_id)
@@ -2954,6 +2954,47 @@ async fn s01_inv006_inv009_inv015_turn_storage_enforces_lifecycle_consistency()
     .bind(first_entry)
     .execute(&pool)
     .await
+    .expect_err("committed frontier membership cannot exceed its declared count");
+    assert_eq!(
+        out_of_bounds_member
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("context_frontier_member_within_declared_count")
+    );
+
+    let duplicate_frontier = Uuid::from_u128(0xe04);
+    let mut duplicate_membership = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count)
+         VALUES ($1, $2, 2)",
+    )
+    .bind(session)
+    .bind(duplicate_frontier)
+    .execute(&mut *duplicate_membership)
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_frontier_member
+            (owning_session_id, context_frontier_id, member_position,
+             source_session_id, semantic_entry_id)
+         VALUES ($1, $2, 1, $1, $3)",
+    )
+    .bind(session)
+    .bind(duplicate_frontier)
+    .bind(first_entry)
+    .execute(&mut *duplicate_membership)
+    .await?;
+    let duplicate_member = sqlx::query(
+        "INSERT INTO context_frontier_member
+            (owning_session_id, context_frontier_id, member_position,
+             source_session_id, semantic_entry_id)
+         VALUES ($1, $2, 2, $1, $3)",
+    )
+    .bind(session)
+    .bind(duplicate_frontier)
+    .bind(first_entry)
+    .execute(&mut *duplicate_membership)
+    .await
     .expect_err("one exact source-qualified entry cannot occur twice");
     assert_eq!(
         duplicate_member
@@ -2961,6 +3002,7 @@ async fn s01_inv006_inv009_inv015_turn_storage_enforces_lifecycle_consistency()
             .and_then(|error| error.constraint()),
         Some("context_frontier_member_entry_once")
     );
+    duplicate_membership.rollback().await?;
 
     let mut unavailable_continuation = pool.begin().await?;
     sqlx::query(
@@ -3370,7 +3412,7 @@ async fn inv005_inv009_inv015_initial_semantic_entries_are_turn_correlated()
         &mut gapped_terminal_frontier,
         session,
         terminal_frontier,
-        Decimal::from(2_u64),
+        Decimal::from(3_u64),
         &[
             (Decimal::ONE, session, origin_entry),
             (Decimal::from(3_u64), session, failure_entry),
@@ -3457,6 +3499,82 @@ async fn inv005_inv009_inv015_initial_semantic_entries_are_turn_correlated()
         Some("23514".into())
     );
 
+    let mut attempted_failure = pool.begin().await?;
+    insert_origin_frontier(
+        &mut attempted_failure,
+        session,
+        Uuid::from_u128(0x921),
+        origin_entry,
+        starting_frontier,
+        Decimal::ONE,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             origin_accepted_input_id, failed_turn_id)
+         VALUES ($1, $2, 'turn_failed', NULL, $3)",
+    )
+    .bind(session)
+    .bind(failure_entry)
+    .bind(turn)
+    .execute(&mut *attempted_failure)
+    .await?;
+    insert_frontier(
+        &mut attempted_failure,
+        session,
+        terminal_frontier,
+        Decimal::from(2_u64),
+        &[
+            (Decimal::ONE, session, origin_entry),
+            (Decimal::from(2_u64), session, failure_entry),
+        ],
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO turn_attempt
+            (turn_attempt_id, turn_id, session_id, continued_from_attempt_id,
+             state_kind, end_variant, end_disposition)
+         VALUES ($1, $2, $3, NULL, 'prepared', NULL, NULL)",
+    )
+    .bind(Uuid::from_u128(0xb21))
+    .bind(turn)
+    .bind(session)
+    .execute(&mut *attempted_failure)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended',
+                end_variant = 'without_stop',
+                end_disposition = 'known_failure'
+          WHERE turn_attempt_id = $1",
+    )
+    .bind(Uuid::from_u128(0xb21))
+    .execute(&mut *attempted_failure)
+    .await?;
+    let attempted_failure_error = sqlx::query(
+        "UPDATE turn_lifecycle
+            SET state_kind = 'terminal',
+                start_lineage_kind = 'first_in_session',
+                starting_frontier_id = $1,
+                terminal_frontier_id = $2,
+                terminal_disposition_kind = 'failed'
+          WHERE turn_id = $3",
+    )
+    .bind(starting_frontier)
+    .bind(terminal_frontier)
+    .bind(turn)
+    .execute(&mut *attempted_failure)
+    .await
+    .expect_err("a direct queued failure cannot carry an ended attempt");
+    assert_eq!(
+        attempted_failure_error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("turn_lifecycle_queued_failure_without_attempt")
+    );
+    attempted_failure.rollback().await?;
+
     let mut failure = pool.begin().await?;
     insert_origin_frontier(
         &mut failure,
@@ -3505,12 +3623,15 @@ async fn inv005_inv009_inv015_initial_semantic_entries_are_turn_correlated()
     .await?;
     failure.commit().await?;
 
-    let semantic_shape: (String, i64, i64, i64, i64) = sqlx::query_as(
+    let semantic_shape: (String, i64, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
             turn.state_kind,
             (SELECT count(*)
                FROM semantic_transcript_entry
               WHERE source_session_id = $1),
+            (SELECT count(*)
+               FROM turn_attempt
+              WHERE turn_id = $3),
             starting.member_count::bigint,
             terminal.member_count::bigint,
             (SELECT count(*)
@@ -3535,7 +3656,70 @@ async fn inv005_inv009_inv015_initial_semantic_entries_are_turn_correlated()
     .bind(turn)
     .fetch_one(&pool)
     .await?;
-    assert_eq!(semantic_shape, ("terminal".to_owned(), 2, 1, 2, 0));
+    assert_eq!(semantic_shape, ("terminal".to_owned(), 2, 0, 1, 2, 0));
+
+    let late_attempt = sqlx::query(
+        "INSERT INTO turn_attempt
+            (turn_attempt_id, turn_id, session_id, continued_from_attempt_id,
+             state_kind, end_variant, end_disposition)
+         VALUES ($1, $2, $3, NULL, 'prepared', NULL, NULL)",
+    )
+    .bind(Uuid::from_u128(0xb22))
+    .bind(turn)
+    .bind(session)
+    .execute(&pool)
+    .await
+    .expect_err("an attempt cannot be inserted after direct terminalization");
+    assert_eq!(
+        late_attempt
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into())
+    );
+
+    let overrun = sqlx::query(
+        "INSERT INTO context_frontier_member
+            (owning_session_id, context_frontier_id, member_position,
+             source_session_id, semantic_entry_id)
+         VALUES ($1, $2, 3, $1, $3)",
+    )
+    .bind(session)
+    .bind(terminal_frontier)
+    .bind(failure_entry)
+    .execute(&pool)
+    .await
+    .expect_err("a committed frontier cannot grow beyond its declared count");
+    assert_eq!(
+        overrun
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("context_frontier_member_within_declared_count")
+    );
+
+    let trigger_inventory: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            count(*) FILTER (
+                WHERE relation.relname = 'context_frontier'
+                  AND candidate.tgname = 'context_frontier_requires_complete_membership'
+                  AND candidate.tgdeferrable
+            ),
+            count(*) FILTER (
+                WHERE relation.relname = 'context_frontier_member'
+                  AND candidate.tgname = 'context_frontier_member_requires_complete_membership'
+            ),
+            count(*) FILTER (
+                WHERE relation.relname = 'context_frontier_member'
+                  AND candidate.tgname = 'context_frontier_member_stays_within_declared_count'
+                  AND NOT candidate.tgdeferrable
+            )
+         FROM pg_trigger AS candidate
+         JOIN pg_class AS relation
+           ON relation.oid = candidate.tgrelid
+         WHERE NOT candidate.tgisinternal",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(trigger_inventory, (1, 0, 1));
 
     CreateSessionRepository::new(pool.clone())
         .handle(prepared(0x424, 0x822, direct(0xc24)))
