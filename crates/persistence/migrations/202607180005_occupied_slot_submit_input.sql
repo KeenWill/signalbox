@@ -26,7 +26,6 @@ ALTER TABLE submit_input_command
             'no_active_turn',
             'active_turn_present',
             'active_turn_mismatch',
-            'safe_point_unavailable_while_stopping',
             'session_defaults_version_mismatch',
             'unknown_model_alias',
             'acceptance_position_exhausted'
@@ -131,22 +130,6 @@ ALTER TABLE submit_input_command
             AND result_expected_active_turn_id IS NOT NULL
             AND result_expected_active_turn_id = expected_active_turn_id
             AND result_actual_active_turn_id <> result_expected_active_turn_id
-            AND result_expected_defaults_version IS NULL
-            AND result_current_defaults_version IS NULL
-            AND result_unknown_alias_id IS NULL
-            AND result_selected_defaults_version IS NULL
-            AND result_last_position IS NULL
-        )
-        OR
-        (
-            result_kind = 'rejected'
-            AND rejection_kind = 'safe_point_unavailable_while_stopping'
-            AND delivery_kind = 'next_safe_point'
-            AND result_accepted_input_id IS NULL
-            AND result_turn_id IS NULL
-            AND result_actual_active_turn_id IS NOT NULL
-            AND result_actual_active_turn_id = expected_active_turn_id
-            AND result_expected_active_turn_id IS NULL
             AND result_expected_defaults_version IS NULL
             AND result_current_defaults_version IS NULL
             AND result_unknown_alias_id IS NULL

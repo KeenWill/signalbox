@@ -1570,11 +1570,11 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
             last_position: Some(input_position_to_numeric(*last)),
         },
         SubmitInputResult::Rejected(
-            SubmitInputRejectedResult::ActiveTurnPresent { .. }
-            | SubmitInputRejectedResult::ActiveTurnMismatch { .. }
-            | SubmitInputRejectedResult::SafePointUnavailableWhileStopping { .. },
+            SubmitInputRejectedResult::SafePointUnavailableWhileStopping { .. },
         ) => {
-            unreachable!("occupied-slot SubmitInput persistence is not implemented")
+            unreachable!(
+                "evidence-free scheduling storage cannot prepare a stopping-state rejection"
+            )
         }
     }
 }
@@ -1720,18 +1720,31 @@ async fn load_related_turn_origin(
     row: &PgRow,
 ) -> Result<Option<ReconstitutedSubmitInput>, SubmitInputRepositoryError> {
     let result_kind: Option<String> = row.try_get("result_kind")?;
+    let rejection_kind: Option<String> = row.try_get("rejection_kind")?;
     let delivery_kind: Option<String> = row.try_get("command_delivery_kind")?;
-    if result_kind.as_deref() != Some(APPLIED)
-        || !matches!(
-            delivery_kind.as_deref(),
-            Some("after_current_turn" | "next_safe_point")
-        )
-    {
-        return Ok(None);
-    }
-
     let source_session: Uuid = required(row, "result_session_id")?;
-    let source_turn: Uuid = required(row, "command_expected_active_turn_id")?;
+    let source_turn = match (
+        result_kind.as_deref(),
+        rejection_kind.as_deref(),
+        delivery_kind.as_deref(),
+    ) {
+        (Some(APPLIED), None, Some("after_current_turn" | "next_safe_point")) => {
+            required(row, "command_expected_active_turn_id")?
+        }
+        (Some(REJECTED), Some("active_turn_present" | "active_turn_mismatch"), _) => {
+            required(row, "result_actual_active_turn_id")?
+        }
+        (
+            Some(REJECTED),
+            Some(
+                "session_defaults_version_mismatch"
+                | "unknown_model_alias"
+                | "acceptance_position_exhausted",
+            ),
+            Some("after_current_turn" | "next_safe_point"),
+        ) => required(row, "command_expected_active_turn_id")?,
+        _ => return Ok(None),
+    };
     load_turn_origin_chain(connection, source_session, source_turn)
         .await
         .map(Some)
@@ -1957,6 +1970,7 @@ fn decode_complete(
                 command,
                 actor,
                 result_session,
+                related_turn_origin,
                 kind,
                 result_actual_turn,
                 result_expected_turn,
@@ -2109,11 +2123,6 @@ fn decode_applied_pending_steering(
         "accepted delivery",
     )?;
     let accepted_position = decode_position(row, "accepted_position")?;
-    require_spelling(row, "disposition_kind", "pending_steering")?;
-    let accepted_origin_turn: Option<Uuid> = row.try_get("origin_turn_id")?;
-    if accepted_origin_turn.is_some() {
-        return Err(SubmitInputCorruption::Inconsistent("pending steering has origin turn").into());
-    }
 
     Ok(SubmitInputReconstitutionInput::applied_pending_steering(
         command,
@@ -2128,9 +2137,6 @@ fn decode_applied_pending_steering(
         accepted_content,
         accepted_delivery,
         accepted_position,
-        AcceptedInputDisposition::PendingSteering {
-            binding: SteeringBinding::new(result_source_turn),
-        },
     ))
 }
 
@@ -2140,6 +2146,7 @@ fn decode_rejected(
     command: SubmitInput,
     stored_actor: Actor,
     result_session: SessionId,
+    active_turn_origin: Option<ReconstitutedSubmitInput>,
     rejection_kind: &str,
     actual_turn: Option<Uuid>,
     expected_turn: Option<Uuid>,
@@ -2209,6 +2216,8 @@ fn decode_rejected(
                     turn_id_from_uuid(actual_turn.ok_or(SubmitInputCorruption::Missing(
                         "result_actual_active_turn_id",
                     ))?),
+                    active_turn_origin
+                        .ok_or(SubmitInputCorruption::Missing("active turn origin"))?,
                 ),
             )
         }
@@ -2235,30 +2244,8 @@ fn decode_rejected(
                     turn_id_from_uuid(actual_turn.ok_or(SubmitInputCorruption::Missing(
                         "result_actual_active_turn_id",
                     ))?),
-                ),
-            )
-        }
-        "safe_point_unavailable_while_stopping" => {
-            if expected_turn.is_some()
-                || expected_defaults.is_some()
-                || current_defaults.is_some()
-                || unknown_alias.is_some()
-                || selected_defaults.is_some()
-                || last_position.is_some()
-            {
-                return Err(SubmitInputCorruption::Inconsistent(
-                    "safe-point-unavailable result fields",
-                )
-                .into());
-            }
-            Ok(
-                SubmitInputReconstitutionInput::rejected_safe_point_unavailable_while_stopping(
-                    command,
-                    stored_actor,
-                    result_session,
-                    turn_id_from_uuid(actual_turn.ok_or(SubmitInputCorruption::Missing(
-                        "result_actual_active_turn_id",
-                    ))?),
+                    active_turn_origin
+                        .ok_or(SubmitInputCorruption::Missing("actual turn origin"))?,
                 ),
             )
         }
@@ -2292,7 +2279,7 @@ fn decode_rejected(
                     .ok_or(SubmitInputCorruption::Missing(
                         "result_current_defaults_version",
                     ))?,
-                    None,
+                    active_turn_origin,
                 ),
             )
         }
@@ -2339,7 +2326,7 @@ fn decode_rejected(
                     defaults_session,
                     defaults_version,
                     defaults,
-                    None,
+                    active_turn_origin,
                 ),
             )
         }
@@ -2363,7 +2350,7 @@ fn decode_rejected(
                     result_session,
                     decode_optional_position(last_position, "result_last_position")?
                         .ok_or(SubmitInputCorruption::Missing("result_last_position"))?,
-                    None,
+                    active_turn_origin,
                 ),
             )
         }

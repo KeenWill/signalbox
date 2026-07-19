@@ -3641,13 +3641,8 @@ async fn occupied_slot_mixed_acceptances_serialize_positions_and_effects()
 
 /// INV-002 / INV-005 / INV-008 / INV-012 / INV-016: occupied-slot result
 /// shapes and correlations are database-enforced, pending steering keeps its
-/// source active and cannot become semantic origin, the stopping rejection's
-/// admitted representation decodes exactly, and checked replay fails closed
-/// on a deliberately constraint-bypassed pending-steering row.
-///
-/// Stop-requested scheduling storage is outside this slice. The
-/// safe-point-unavailable row below is therefore a representation-only
-/// fixture; production first handling never synthesizes that observation.
+/// source active and cannot become semantic origin, and its immutable receipt
+/// survives a later current-disposition change.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn occupied_slot_schema_constraints_and_checked_decode_fail_closed()
@@ -3688,13 +3683,16 @@ async fn occupied_slot_schema_constraints_and_checked_decode_fail_closed()
             expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xa61)),
         },
     );
-    repository
+    let SubmitInputHandlingOutcome::Recorded(safe_result) = repository
         .handle(
             safe_source.clone(),
             AcceptedInputId::from_uuid(Uuid::from_u128(0x962)),
             None,
         )
-        .await?;
+        .await?
+    else {
+        panic!("safe-point input must be recorded");
+    };
 
     let semantic_pending_error = sqlx::query(
         "INSERT INTO semantic_transcript_entry
@@ -3937,84 +3935,6 @@ async fn occupied_slot_schema_constraints_and_checked_decode_fail_closed()
         Some("23503".into())
     );
 
-    let unavailable = input_with_delivery(
-        0x465,
-        0x861,
-        "safe-point representation",
-        DeliveryRequest::NextSafePoint {
-            expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xa61)),
-        },
-    );
-    let mut representation = pool.begin().await?;
-    sqlx::query(
-        "INSERT INTO durable_command
-            (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'submit_input', 1, transaction_timestamp())",
-    )
-    .bind(Uuid::from_u128(0x465))
-    .execute(&mut *representation)
-    .await?;
-    sqlx::query(
-        "INSERT INTO submit_input_command
-            (command_id, command_kind, storage_version, session_id,
-             actor_kind, actor_turn_id, actor_tool_request_id,
-             content_kind, content_text, delivery_kind,
-             expected_active_turn_id, expected_defaults_version,
-             model_override_kind, replacement_model_kind,
-             replacement_direct_model_selection_id, replacement_model_alias_id,
-             result_kind, rejection_kind, result_session_id,
-             result_accepted_input_id, result_turn_id,
-             result_actual_active_turn_id, result_expected_active_turn_id,
-             result_expected_defaults_version, result_current_defaults_version,
-             result_unknown_alias_id, result_selected_defaults_version,
-             result_last_position)
-         SELECT
-             $1, command_kind, storage_version, session_id,
-             actor_kind, actor_turn_id, actor_tool_request_id,
-             content_kind, content_text, delivery_kind,
-             expected_active_turn_id, expected_defaults_version,
-             model_override_kind, replacement_model_kind,
-             replacement_direct_model_selection_id, replacement_model_alias_id,
-             'rejected', 'safe_point_unavailable_while_stopping', session_id,
-             NULL, NULL, $2, NULL, NULL, NULL, NULL, NULL, NULL
-           FROM submit_input_command
-          WHERE command_id = $3",
-    )
-    .bind(Uuid::from_u128(0x465))
-    .bind(Uuid::from_u128(0xa61))
-    .bind(Uuid::from_u128(0x463))
-    .execute(&mut *representation)
-    .await?;
-    representation.commit().await?;
-
-    let unavailable_outcome = repository
-        .handle(
-            unavailable.clone(),
-            AcceptedInputId::from_uuid(Uuid::from_u128(0x968)),
-            None,
-        )
-        .await?;
-    assert!(matches!(
-        unavailable_outcome,
-        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
-            SubmitInputRejectedResult::SafePointUnavailableWhileStopping {
-                session,
-                active_turn,
-            }
-        )) if session == SessionId::from_uuid(Uuid::from_u128(0x861))
-            && active_turn == TurnId::from_uuid(Uuid::from_u128(0xa61))
-    ));
-    assert_eq!(
-        repository
-            .handle(
-                unavailable,
-                AcceptedInputId::from_uuid(Uuid::from_u128(0x967)),
-                None,
-            )
-            .await?,
-        unavailable_outcome
-    );
-
     sqlx::query(
         "ALTER TABLE accepted_input
             DISABLE TRIGGER accepted_input_is_append_only",
@@ -4035,17 +3955,11 @@ async fn occupied_slot_schema_constraints_and_checked_decode_fail_closed()
     .bind(Uuid::from_u128(0x962))
     .execute(&pool)
     .await?;
-    let corruption = repository
+    let replayed = repository
         .load(safe_source.command_id())
-        .await
-        .expect_err("checked pending-steering decode must reject a malformed disposition");
-    assert!(matches!(
-        corruption,
-        SubmitInputRepositoryError::Corruption(SubmitInputCorruption::Unsupported {
-            field: "disposition_kind",
-            ..
-        })
-    ));
+        .await?
+        .expect("mutable disposition cannot erase the immutable receipt");
+    assert_eq!(replayed.result(), &safe_result);
 
     pool.close().await;
     drop(container);
