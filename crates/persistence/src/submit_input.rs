@@ -1,6 +1,6 @@
 //! Atomic PostgreSQL persistence and replay for durable input acceptance.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
@@ -375,7 +375,8 @@ async fn require_recorded_batch(
                 .ok_or(SubmitInputCorruption::Inconsistent(
                     "unexpected batched command identity",
                 ))?;
-        let reconstructed = decode_complete(row, command_id, None)?;
+        let related_turn_origin = load_related_turn_origin(connection, &row).await?;
+        let reconstructed = decode_complete(row, command_id, related_turn_origin)?;
         if recorded.insert(command_id, reconstructed).is_some() {
             return Err(
                 SubmitInputCorruption::Inconsistent("duplicate batched command row").into(),
@@ -1582,74 +1583,127 @@ async fn load_from_connection(
     if !rows.is_empty() {
         return Err(SubmitInputCorruption::Inconsistent("duplicate complete command rows").into());
     }
-    let source_turn_origin = load_pending_source_turn_origin(connection, &row).await?;
-    decode_complete(row, command_id, source_turn_origin).map(Some)
+    let related_turn_origin = load_related_turn_origin(connection, &row).await?;
+    decode_complete(row, command_id, related_turn_origin).map(Some)
 }
 
-async fn load_pending_source_turn_origin(
+async fn load_related_turn_origin(
     connection: &mut PgConnection,
     row: &PgRow,
 ) -> Result<Option<ReconstitutedSubmitInput>, SubmitInputRepositoryError> {
     let result_kind: Option<String> = row.try_get("result_kind")?;
-    let result_turn: Option<Uuid> = row.try_get("result_turn_id")?;
-    let source_turn: Option<Uuid> = row.try_get("result_actual_active_turn_id")?;
-    if result_kind.as_deref() != Some(APPLIED) || result_turn.is_some() || source_turn.is_none() {
+    let delivery_kind: Option<String> = row.try_get("command_delivery_kind")?;
+    if result_kind.as_deref() != Some(APPLIED)
+        || !matches!(
+            delivery_kind.as_deref(),
+            Some("after_current_turn" | "next_safe_point")
+        )
+    {
         return Ok(None);
     }
 
-    let source_turn = source_turn.expect("checked present source turn");
     let source_session: Uuid = required(row, "result_session_id")?;
-    let source_command_uuid: Uuid = sqlx::query_scalar(
-        "SELECT accepted.accepting_command_id
-           FROM turn_lifecycle AS turn
-           JOIN queued_input_origin AS queued
-             ON queued.turn_id = turn.turn_id
-            AND queued.session_id = turn.session_id
-            AND queued.accepted_input_id = turn.origin_accepted_input_id
-           JOIN accepted_input AS accepted
-             ON accepted.accepted_input_id = queued.accepted_input_id
-            AND accepted.session_id = turn.session_id
-            AND accepted.origin_turn_id = turn.turn_id
-            AND accepted.disposition_kind = 'origin_of'
-          WHERE turn.turn_id = $1
-            AND turn.session_id = $2",
-    )
-    .bind(source_turn)
-    .bind(source_session)
-    .fetch_optional(&mut *connection)
-    .await?
-    .ok_or(SubmitInputCorruption::Missing(
-        "pending steering source turn origin",
-    ))?;
-    let source_command = durable_command_id_from_uuid(source_command_uuid)
-        .map_err(|_| SubmitInputCorruption::Inconsistent("source command identity"))?;
-    let mut source_rows = load_complete_rows(connection, &[source_command_uuid]).await?;
-    let source_row = source_rows
-        .pop()
-        .ok_or(SubmitInputCorruption::Missing("source turn origin command"))?;
-    if !source_rows.is_empty() {
-        return Err(SubmitInputCorruption::Inconsistent("duplicate source command rows").into());
+    let source_turn: Uuid = required(row, "command_expected_active_turn_id")?;
+    load_turn_origin_chain(connection, source_session, source_turn)
+        .await
+        .map(Some)
+}
+
+async fn load_turn_origin_chain(
+    connection: &mut PgConnection,
+    source_session: Uuid,
+    source_turn: Uuid,
+) -> Result<ReconstitutedSubmitInput, SubmitInputRepositoryError> {
+    let mut next_turn = Some(source_turn);
+    let mut seen_turns = BTreeSet::new();
+    let mut seen_commands = BTreeSet::new();
+    let mut rows = Vec::new();
+
+    while let Some(turn) = next_turn {
+        if !seen_turns.insert(turn) {
+            return Err(
+                SubmitInputCorruption::Inconsistent("turn origin predecessor cycle").into(),
+            );
+        }
+        let command_uuid: Uuid = sqlx::query_scalar(
+            "SELECT accepted.accepting_command_id
+               FROM turn_lifecycle AS turn
+               JOIN queued_input_origin AS queued
+                 ON queued.turn_id = turn.turn_id
+                AND queued.session_id = turn.session_id
+                AND queued.accepted_input_id = turn.origin_accepted_input_id
+               JOIN accepted_input AS accepted
+                 ON accepted.accepted_input_id = queued.accepted_input_id
+                AND accepted.session_id = turn.session_id
+                AND accepted.origin_turn_id = turn.turn_id
+                AND accepted.disposition_kind = 'origin_of'
+              WHERE turn.turn_id = $1
+                AND turn.session_id = $2",
+        )
+        .bind(turn)
+        .bind(source_session)
+        .fetch_optional(&mut *connection)
+        .await?
+        .ok_or(SubmitInputCorruption::Missing("related turn origin"))?;
+        if !seen_commands.insert(command_uuid) {
+            return Err(SubmitInputCorruption::Inconsistent("turn origin command cycle").into());
+        }
+
+        let command = durable_command_id_from_uuid(command_uuid)
+            .map_err(|_| SubmitInputCorruption::Inconsistent("turn origin command identity"))?;
+        let mut complete_rows = load_complete_rows(connection, &[command_uuid]).await?;
+        let row = complete_rows
+            .pop()
+            .ok_or(SubmitInputCorruption::Missing("turn origin command"))?;
+        if !complete_rows.is_empty() {
+            return Err(
+                SubmitInputCorruption::Inconsistent("duplicate turn origin command rows").into(),
+            );
+        }
+        let result_kind: String = required(&row, "result_kind")?;
+        let result_turn: Uuid = required(&row, "result_turn_id")?;
+        if result_kind != APPLIED || result_turn != turn {
+            return Err(SubmitInputCorruption::Inconsistent("turn origin command result").into());
+        }
+        let delivery_kind: String = required(&row, "command_delivery_kind")?;
+        next_turn = match delivery_kind.as_str() {
+            "start_when_no_active_turn" => None,
+            "after_current_turn" => Some(required(&row, "command_expected_active_turn_id")?),
+            _ => {
+                return Err(
+                    SubmitInputCorruption::Inconsistent("turn origin command delivery").into(),
+                );
+            }
+        };
+        rows.push((
+            command,
+            row,
+            session_id_from_uuid(source_session),
+            turn_id_from_uuid(turn),
+        ));
     }
-    let source_origin = decode_complete(source_row, source_command, None)?;
-    let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(applied)) =
-        source_origin.result()
-    else {
-        return Err(
-            SubmitInputCorruption::Inconsistent("source command turn-origin result").into(),
-        );
-    };
-    if applied.session() != session_id_from_uuid(source_session)
-        || applied.turn() != turn_id_from_uuid(source_turn)
-    {
-        return Err(SubmitInputCorruption::Inconsistent("source turn origin correlation").into());
+
+    let mut predecessor_origin = None;
+    for (command, row, expected_session, expected_turn) in rows.into_iter().rev() {
+        let origin = decode_complete(row, command, predecessor_origin)?;
+        let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(applied)) =
+            origin.result()
+        else {
+            return Err(SubmitInputCorruption::Inconsistent("turn origin command result").into());
+        };
+        if applied.session() != expected_session || applied.turn() != expected_turn {
+            return Err(SubmitInputCorruption::Inconsistent("turn origin correlation").into());
+        }
+        predecessor_origin = Some(origin);
     }
-    Ok(Some(source_origin))
+
+    predecessor_origin.ok_or_else(|| SubmitInputCorruption::Missing("related turn origin").into())
 }
 
 fn decode_complete(
     row: PgRow,
     command_id: DurableCommandId,
-    source_turn_origin: Option<ReconstitutedSubmitInput>,
+    related_turn_origin: Option<ReconstitutedSubmitInput>,
 ) -> Result<ReconstitutedSubmitInput, SubmitInputRepositoryError> {
     require_spelling(&row, "registry_kind", SUBMIT_INPUT_KIND)?;
     require_version(&row, "registry_version", STORAGE_VERSION)?;
@@ -1735,10 +1789,11 @@ fn decode_complete(
                         result_session,
                         result_accepted,
                         turn_id_from_uuid(result_turn),
+                        related_turn_origin,
                     )?
                 }
                 (None, Some(source_turn)) if queued_effect_count == 0 => {
-                    let source_turn_origin = source_turn_origin.ok_or(
+                    let source_turn_origin = related_turn_origin.ok_or(
                         SubmitInputCorruption::Missing("pending steering source turn origin"),
                     )?;
                     decode_applied_pending_steering(
@@ -1808,6 +1863,7 @@ fn decode_applied_turn_origin(
     result_session: SessionId,
     result_accepted_input: AcceptedInputId,
     result_turn: TurnId,
+    predecessor_origin: Option<ReconstitutedSubmitInput>,
 ) -> Result<SubmitInputReconstitutionInput, SubmitInputRepositoryError> {
     let accepting_command_uuid: Uuid = required(row, "accepting_command_id")?;
     let accepting_command = durable_command_id_from_uuid(accepting_command_uuid)
@@ -1876,7 +1932,7 @@ fn decode_applied_turn_origin(
         result_session,
         result_accepted_input,
         result_turn,
-        None,
+        predecessor_origin,
         accepting_command,
         accepted_input,
         accepted_session,
