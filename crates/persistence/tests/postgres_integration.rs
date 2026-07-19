@@ -141,6 +141,54 @@ async fn insert_frontier(
     Ok(())
 }
 
+async fn activate_prepared_turn(
+    pool: &PgPool,
+    session: Uuid,
+    accepted_input: Uuid,
+    turn: Uuid,
+    semantic_entry: Uuid,
+    starting_frontier: Uuid,
+    attempt: Uuid,
+) -> Result<(), sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    insert_origin_frontier(
+        &mut transaction,
+        session,
+        accepted_input,
+        semantic_entry,
+        starting_frontier,
+        Decimal::ONE,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO turn_attempt
+            (turn_attempt_id, turn_id, session_id, continued_from_attempt_id,
+             state_kind, end_variant, end_disposition)
+         VALUES ($1, $2, $3, NULL, 'prepared', NULL, NULL)",
+    )
+    .bind(attempt)
+    .bind(turn)
+    .bind(session)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET state_kind = 'active',
+                start_lineage_kind = 'first_in_session',
+                starting_frontier_id = $1,
+                active_phase_kind = 'running',
+                current_attempt_id = $2
+          WHERE turn_id = $3
+            AND state_kind = 'queued'",
+    )
+    .bind(starting_frontier)
+    .bind(attempt)
+    .bind(turn)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await
+}
+
 fn prepared(
     command: u128,
     session: u128,
@@ -368,7 +416,8 @@ async fn embedded_migrator_connects_and_is_idempotent() -> Result<(), Box<dyn Er
 
 /// INV-007 / INV-009: migration 004 gives every preexisting session its
 /// scheduler serialization row and every accepted queued origin one queued
-/// lifecycle row without inventing start, frontier, semantic, or attempt facts.
+/// lifecycle row without inventing start, frontier, semantic, or attempt
+/// facts; migration 005 preserves that exact legacy receipt and correlation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv007_inv009_turn_storage_migration_backfills_existing_queued_work()
@@ -480,21 +529,26 @@ async fn inv007_inv009_turn_storage_migration_backfills_existing_queued_work()
 
     migrate(&pool).await?;
 
-    let backfilled: (i64, String, i64, i64, i64) = sqlx::query_as(
+    let backfilled: (i64, String, i64, i64, i64, bool) = sqlx::query_as(
         "SELECT
             (SELECT count(*) FROM session_scheduler WHERE session_id = $1),
             turn.state_kind,
             (SELECT count(*) FROM semantic_transcript_entry),
             (SELECT count(*) FROM context_frontier),
-            (SELECT count(*) FROM turn_attempt)
+            (SELECT count(*) FROM turn_attempt),
+            typed.result_actual_active_turn_id IS NULL
          FROM turn_lifecycle AS turn
+         JOIN accepted_input AS accepted
+           ON accepted.accepted_input_id = turn.origin_accepted_input_id
+         JOIN submit_input_command AS typed
+           ON typed.command_id = accepted.accepting_command_id
          WHERE turn.turn_id = $2",
     )
     .bind(Uuid::from_u128(0x70000000000070008000000000000401))
     .bind(Uuid::from_u128(0xa0000000000070008000000000000401))
     .fetch_one(&pool)
     .await?;
-    assert_eq!(backfilled, (1, "queued".to_owned(), 0, 0, 0));
+    assert_eq!(backfilled, (1, "queued".to_owned(), 0, 0, 0, true));
 
     pool.close().await;
     drop(container);
@@ -2430,7 +2484,7 @@ async fn inv002_inv007_inv008_inv012_submit_schema_is_closed_and_normalized()
             last_position,
         )
         .await
-        .expect_err("a rejection with missing required evidence must not commit");
+        .expect_err(rejection_kind);
         assert_eq!(
             error.as_database_error().and_then(|error| error.code()),
             Some("23514".into())
@@ -3217,6 +3271,896 @@ async fn s01_inv006_inv009_inv015_turn_storage_enforces_lifecycle_consistency()
             .and_then(|error| error.constraint()),
         Some("turn_lifecycle_inserted_queued")
     );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S01 / S03 / S08 / S09 / INV-007 / INV-008 / INV-009 / INV-012:
+/// occupied-slot After and NextSafePoint handling commits the exact distinct
+/// effects, and checked replay survives a pool/repository restart.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn occupied_slot_after_and_safe_point_apply_replay_and_restart() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0x431, 0x831, direct(0xc31)))
+        .await?;
+    let repository = SubmitInputRepository::new(pool.clone());
+    repository
+        .handle(
+            start_input(
+                0x432,
+                0x831,
+                "active origin",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x931)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xa31))),
+        )
+        .await?;
+    activate_prepared_turn(
+        &pool,
+        Uuid::from_u128(0x831),
+        Uuid::from_u128(0x931),
+        Uuid::from_u128(0xa31),
+        Uuid::from_u128(0xd31),
+        Uuid::from_u128(0xe31),
+        Uuid::from_u128(0xb31),
+    )
+    .await?;
+
+    let after = input_with_delivery(
+        0x433,
+        0x831,
+        "after active",
+        DeliveryRequest::AfterCurrentTurn {
+            expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xa31)),
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    );
+    let after_outcome = repository
+        .handle(
+            after.clone(),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x932)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xa32))),
+        )
+        .await?;
+    let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::TurnOrigin(after_applied),
+    )) = &after_outcome
+    else {
+        panic!("matching AfterCurrentTurn must create queued origin work");
+    };
+    assert_eq!(after_applied.acceptance_position().as_u64(), 2);
+
+    let safe_point = input_with_delivery(
+        0x434,
+        0x831,
+        "steer active",
+        DeliveryRequest::NextSafePoint {
+            expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xa31)),
+        },
+    );
+    let safe_point_outcome = repository
+        .handle(
+            safe_point.clone(),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x933)),
+            None,
+        )
+        .await?;
+    let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::PendingSteering(steering),
+    )) = &safe_point_outcome
+    else {
+        panic!("matching NextSafePoint must create pending steering");
+    };
+    assert_eq!(steering.acceptance_position().as_u64(), 3);
+    assert_eq!(
+        steering.binding().source_turn(),
+        TurnId::from_uuid(Uuid::from_u128(0xa31))
+    );
+
+    assert_eq!(
+        repository
+            .handle(
+                after.clone(),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x9ff)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xaff))),
+            )
+            .await?,
+        after_outcome
+    );
+    assert_eq!(
+        repository
+            .handle(
+                safe_point.clone(),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x9fe)),
+                None,
+            )
+            .await?,
+        safe_point_outcome
+    );
+
+    let mut application_service = SubmitInputService::new(
+        FixedSubmitInputIds::new(
+            [
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x9fb)),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x9fa)),
+            ],
+            [TurnId::from_uuid(Uuid::from_u128(0xafb))],
+        ),
+        repository.clone(),
+    );
+    let after_request = SubmitInputRequest::try_new(
+        after.command_id(),
+        after.session(),
+        after.content().clone(),
+        after.delivery(),
+    )?;
+    let safe_point_request = SubmitInputRequest::try_new(
+        safe_point.command_id(),
+        safe_point.session(),
+        safe_point.content().clone(),
+        safe_point.delivery(),
+    )?;
+    assert_eq!(
+        application_service.execute(after_request).await?,
+        SubmitInputOutcome::Recorded(match &after_outcome {
+            SubmitInputHandlingOutcome::Recorded(result) => result.clone(),
+            SubmitInputHandlingOutcome::ConflictingReuse { .. } => {
+                unreachable!("the exact occupied-slot command was recorded")
+            }
+        })
+    );
+    assert_eq!(
+        application_service.execute(safe_point_request).await?,
+        SubmitInputOutcome::Recorded(match &safe_point_outcome {
+            SubmitInputHandlingOutcome::Recorded(result) => result.clone(),
+            SubmitInputHandlingOutcome::ConflictingReuse { .. } => {
+                unreachable!("the exact occupied-slot command was recorded")
+            }
+        })
+    );
+
+    let effect_shape: (i64, i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*)
+               FROM accepted_input
+              WHERE accepted_input_id = $1
+                AND delivery_kind = 'after_current_turn'
+                AND disposition_kind = 'origin_of'
+                AND origin_turn_id = $2
+                AND expected_defaults_version = 1),
+            (SELECT count(*) FROM queued_input_origin WHERE accepted_input_id = $1),
+            (SELECT count(*) FROM turn_lifecycle WHERE origin_accepted_input_id = $1),
+            (SELECT count(*)
+               FROM accepted_input
+              WHERE accepted_input_id = $3
+                AND delivery_kind = 'next_safe_point'
+                AND disposition_kind = 'pending_steering'
+                AND expected_active_turn_id = $4
+                AND expected_defaults_version IS NULL
+                AND model_override_kind IS NULL
+                AND replacement_model_kind IS NULL
+                AND replacement_direct_model_selection_id IS NULL
+                AND replacement_model_alias_id IS NULL
+                AND origin_turn_id IS NULL),
+            (SELECT count(*) FROM queued_input_origin WHERE accepted_input_id = $3),
+            (SELECT count(*) FROM turn_lifecycle WHERE origin_accepted_input_id = $3),
+            (SELECT count(*)
+               FROM information_schema.columns
+              WHERE table_schema = current_schema()
+                AND table_name = 'accepted_input'
+                AND column_name = 'steering_source_turn_id'),
+            (SELECT count(*)
+               FROM submit_input_command
+              WHERE command_id = $5
+                AND result_actual_active_turn_id = $4)",
+    )
+    .bind(Uuid::from_u128(0x932))
+    .bind(Uuid::from_u128(0xa32))
+    .bind(Uuid::from_u128(0x933))
+    .bind(Uuid::from_u128(0xa31))
+    .bind(Uuid::from_u128(0x434))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(effect_shape, (1, 1, 1, 1, 0, 0, 0, 1));
+
+    drop(repository);
+    pool.close().await;
+    let restarted_pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect_with(local_test_connection_options(&database_url)?)
+        .await?;
+    let restarted = SubmitInputRepository::new(restarted_pool.clone());
+    assert_eq!(
+        restarted
+            .handle(
+                after,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x9fd)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xafd))),
+            )
+            .await?,
+        after_outcome
+    );
+    assert_eq!(
+        restarted
+            .handle(
+                safe_point,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x9fc)),
+                None,
+            )
+            .await?,
+        safe_point_outcome
+    );
+
+    restarted_pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-007 / INV-008 / INV-012: the session-before-scheduler lock order
+/// serializes mixed occupied-slot acceptances into one gap-free order while
+/// preserving each delivery's distinct atomic effect shape.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn occupied_slot_mixed_acceptances_serialize_positions_and_effects()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0x451, 0x851, direct(0xc51)))
+        .await?;
+    let repository = SubmitInputRepository::new(pool.clone());
+    repository
+        .handle(
+            start_input(
+                0x452,
+                0x851,
+                "active origin",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x951)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xa51))),
+        )
+        .await?;
+    activate_prepared_turn(
+        &pool,
+        Uuid::from_u128(0x851),
+        Uuid::from_u128(0x951),
+        Uuid::from_u128(0xa51),
+        Uuid::from_u128(0xd51),
+        Uuid::from_u128(0xe51),
+        Uuid::from_u128(0xb51),
+    )
+    .await?;
+
+    let mut tasks = Vec::new();
+    for offset in 0..6_u128 {
+        let repository = repository.clone();
+        tasks.push(tokio::spawn(async move {
+            let delivery = if offset % 2 == 0 {
+                DeliveryRequest::AfterCurrentTurn {
+                    expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xa51)),
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                }
+            } else {
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xa51)),
+                }
+            };
+            repository
+                .handle(
+                    input_with_delivery(
+                        0x453 + offset,
+                        0x851,
+                        &format!("mixed occupied {offset}"),
+                        delivery,
+                    ),
+                    AcceptedInputId::from_uuid(Uuid::from_u128(0x952 + offset)),
+                    (offset % 2 == 0).then(|| TurnId::from_uuid(Uuid::from_u128(0xa52 + offset))),
+                )
+                .await
+        }));
+    }
+
+    let mut positions = Vec::new();
+    let mut turn_origins = 0_u64;
+    let mut pending_steering = 0_u64;
+    for task in tasks {
+        let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(applied)) =
+            task.await??
+        else {
+            panic!("each mixed occupied-slot submission must apply");
+        };
+        positions.push(applied.acceptance_position().as_u64());
+        match applied {
+            SubmitInputAppliedResult::TurnOrigin(_) => turn_origins += 1,
+            SubmitInputAppliedResult::PendingSteering(_) => pending_steering += 1,
+        }
+    }
+    positions.sort_unstable();
+    assert_eq!(positions, vec![2, 3, 4, 5, 6, 7]);
+    assert_eq!((turn_origins, pending_steering), (3, 3));
+
+    let effects: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            count(*) FILTER (WHERE delivery_kind = 'after_current_turn'),
+            count(*) FILTER (WHERE delivery_kind = 'next_safe_point'),
+            (SELECT count(*)
+               FROM queued_input_origin
+              WHERE session_id = $1
+                AND acceptance_position > 1),
+            (SELECT count(*)
+               FROM accepted_input
+              WHERE session_id = $1
+                AND disposition_kind = 'pending_steering'
+                AND origin_turn_id IS NULL
+                AND expected_defaults_version IS NULL)
+          FROM accepted_input
+         WHERE session_id = $1
+           AND acceptance_position > 1",
+    )
+    .bind(Uuid::from_u128(0x851))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(effects, (3, 3, 3, 3));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-002 / INV-008 / INV-012: occupied-slot result shapes and correlations
+/// are database-enforced, the stopping rejection's admitted representation
+/// decodes exactly, and checked replay fails closed on a deliberately
+/// constraint-bypassed pending-steering row.
+///
+/// Stop-requested scheduling storage is outside this slice. The
+/// safe-point-unavailable row below is therefore a representation-only
+/// fixture; production first handling never synthesizes that observation.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn occupied_slot_schema_constraints_and_checked_decode_fail_closed()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0x461, 0x861, direct(0xc61)))
+        .await?;
+    let repository = SubmitInputRepository::new(pool.clone());
+    repository
+        .handle(
+            start_input(
+                0x462,
+                0x861,
+                "active origin",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x961)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xa61))),
+        )
+        .await?;
+    activate_prepared_turn(
+        &pool,
+        Uuid::from_u128(0x861),
+        Uuid::from_u128(0x961),
+        Uuid::from_u128(0xa61),
+        Uuid::from_u128(0xd61),
+        Uuid::from_u128(0xe61),
+        Uuid::from_u128(0xb61),
+    )
+    .await?;
+    let safe_source = input_with_delivery(
+        0x463,
+        0x861,
+        "safe-point representation",
+        DeliveryRequest::NextSafePoint {
+            expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xa61)),
+        },
+    );
+    repository
+        .handle(
+            safe_source.clone(),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x962)),
+            None,
+        )
+        .await?;
+    repository
+        .handle(
+            input_with_delivery(
+                0x464,
+                0x861,
+                "alternate lifecycle",
+                DeliveryRequest::AfterCurrentTurn {
+                    expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xa61)),
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x963)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xa62))),
+        )
+        .await?;
+
+    let new_constraints: Vec<String> = sqlx::query_scalar(
+        "SELECT conname
+           FROM pg_constraint
+          WHERE conname IN (
+                'accepted_input_pending_result_key',
+                'accepted_input_expected_active_turn_fk',
+                'accepted_input_general_command_result_fk',
+                'submit_input_command_actual_active_turn_fk',
+                'submit_input_command_pending_effect_fk',
+                'submit_input_command_general_applied_effect_fk'
+          )
+          ORDER BY conname",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(new_constraints.len(), 6);
+
+    let forbidden_configuration = sqlx::query(
+        "INSERT INTO accepted_input
+            (accepted_input_id, accepting_command_id, session_id,
+             content_kind, content_text, delivery_kind,
+             expected_active_turn_id, expected_defaults_version,
+             model_override_kind, replacement_model_kind,
+             replacement_direct_model_selection_id, replacement_model_alias_id,
+             acceptance_position, disposition_kind, origin_turn_id)
+         VALUES
+            ($1, $2, $3, 'text', 'forbidden configuration',
+             'next_safe_point', $4, 1, 'use_session_default',
+             NULL, NULL, NULL, 4, 'pending_steering', NULL)",
+    )
+    .bind(Uuid::from_u128(0x969))
+    .bind(Uuid::from_u128(0x469))
+    .bind(Uuid::from_u128(0x861))
+    .bind(Uuid::from_u128(0xa61))
+    .execute(&pool)
+    .await
+    .expect_err("pending steering cannot persist origin configuration");
+    assert_eq!(
+        forbidden_configuration
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into())
+    );
+
+    let extra_queue = sqlx::query(
+        "INSERT INTO queued_input_origin
+            (turn_id, accepted_input_id, session_id, acceptance_position,
+             priority_kind, defaults_version,
+             requested_model_kind, requested_direct_model_selection_id,
+             requested_model_alias_id, frozen_model_kind,
+             frozen_direct_model_selection_id, frozen_model_alias_id,
+             frozen_alias_selected_direct_id, model_parameters,
+             known_provider_failure_retry, model_fallback)
+         VALUES
+            ($1, $2, $3, 2, 'ordinary', 1,
+             'direct', $4, NULL, 'direct', $4, NULL, NULL,
+             'provider_defaults', 'disabled', 'disabled')",
+    )
+    .bind(Uuid::from_u128(0xf61))
+    .bind(Uuid::from_u128(0x962))
+    .bind(Uuid::from_u128(0x861))
+    .bind(Uuid::from_u128(0xc61))
+    .execute(&pool)
+    .await
+    .expect_err("pending steering cannot acquire a queued turn");
+    assert_eq!(
+        extra_queue
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23503".into())
+    );
+
+    let mut cross_wired = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'submit_input', 1, transaction_timestamp())",
+    )
+    .bind(Uuid::from_u128(0x466))
+    .execute(&mut *cross_wired)
+    .await?;
+    sqlx::query(
+        "INSERT INTO submit_input_command
+            (command_id, command_kind, storage_version, session_id,
+             actor_kind, actor_turn_id, actor_tool_request_id,
+             content_kind, content_text, delivery_kind,
+             expected_active_turn_id, expected_defaults_version,
+             model_override_kind, replacement_model_kind,
+             replacement_direct_model_selection_id, replacement_model_alias_id,
+             result_kind, rejection_kind, result_session_id,
+             result_accepted_input_id, result_turn_id,
+             result_actual_active_turn_id, result_expected_active_turn_id,
+             result_expected_defaults_version, result_current_defaults_version,
+             result_unknown_alias_id, result_selected_defaults_version,
+             result_last_position)
+         VALUES
+            ($1, 'submit_input', 1, $2,
+             'owner', NULL, NULL, 'text', 'cross-wired steering',
+             'next_safe_point', $3, NULL, NULL, NULL, NULL, NULL,
+             'applied', NULL, $2, $4, NULL, $3,
+             NULL, NULL, NULL, NULL, NULL, NULL)",
+    )
+    .bind(Uuid::from_u128(0x466))
+    .bind(Uuid::from_u128(0x861))
+    .bind(Uuid::from_u128(0xa62))
+    .bind(Uuid::from_u128(0x966))
+    .execute(&mut *cross_wired)
+    .await?;
+    sqlx::query(
+        "INSERT INTO accepted_input
+            (accepted_input_id, accepting_command_id, session_id,
+             content_kind, content_text, delivery_kind,
+             expected_active_turn_id, expected_defaults_version,
+             model_override_kind, replacement_model_kind,
+             replacement_direct_model_selection_id, replacement_model_alias_id,
+             acceptance_position, disposition_kind, origin_turn_id)
+         VALUES
+            ($1, $2, $3, 'text', 'cross-wired steering',
+             'next_safe_point', $4, NULL, NULL, NULL, NULL, NULL,
+             4, 'pending_steering', NULL)",
+    )
+    .bind(Uuid::from_u128(0x966))
+    .bind(Uuid::from_u128(0x466))
+    .bind(Uuid::from_u128(0x861))
+    .bind(Uuid::from_u128(0xa61))
+    .execute(&mut *cross_wired)
+    .await?;
+    let cross_wired_error = cross_wired
+        .commit()
+        .await
+        .expect_err("command and pending acceptance must bind the same source turn");
+    assert_eq!(
+        cross_wired_error
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23503".into())
+    );
+
+    let unavailable = input_with_delivery(
+        0x465,
+        0x861,
+        "safe-point representation",
+        DeliveryRequest::NextSafePoint {
+            expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xa61)),
+        },
+    );
+    let mut representation = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'submit_input', 1, transaction_timestamp())",
+    )
+    .bind(Uuid::from_u128(0x465))
+    .execute(&mut *representation)
+    .await?;
+    sqlx::query(
+        "INSERT INTO submit_input_command
+            (command_id, command_kind, storage_version, session_id,
+             actor_kind, actor_turn_id, actor_tool_request_id,
+             content_kind, content_text, delivery_kind,
+             expected_active_turn_id, expected_defaults_version,
+             model_override_kind, replacement_model_kind,
+             replacement_direct_model_selection_id, replacement_model_alias_id,
+             result_kind, rejection_kind, result_session_id,
+             result_accepted_input_id, result_turn_id,
+             result_actual_active_turn_id, result_expected_active_turn_id,
+             result_expected_defaults_version, result_current_defaults_version,
+             result_unknown_alias_id, result_selected_defaults_version,
+             result_last_position)
+         SELECT
+             $1, command_kind, storage_version, session_id,
+             actor_kind, actor_turn_id, actor_tool_request_id,
+             content_kind, content_text, delivery_kind,
+             expected_active_turn_id, expected_defaults_version,
+             model_override_kind, replacement_model_kind,
+             replacement_direct_model_selection_id, replacement_model_alias_id,
+             'rejected', 'safe_point_unavailable_while_stopping', session_id,
+             NULL, NULL, $2, NULL, NULL, NULL, NULL, NULL, NULL
+           FROM submit_input_command
+          WHERE command_id = $3",
+    )
+    .bind(Uuid::from_u128(0x465))
+    .bind(Uuid::from_u128(0xa61))
+    .bind(Uuid::from_u128(0x463))
+    .execute(&mut *representation)
+    .await?;
+    representation.commit().await?;
+
+    let unavailable_outcome = repository
+        .handle(
+            unavailable.clone(),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x968)),
+            None,
+        )
+        .await?;
+    assert!(matches!(
+        unavailable_outcome,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::SafePointUnavailableWhileStopping {
+                session,
+                active_turn,
+            }
+        )) if session == SessionId::from_uuid(Uuid::from_u128(0x861))
+            && active_turn == TurnId::from_uuid(Uuid::from_u128(0xa61))
+    ));
+    assert_eq!(
+        repository
+            .handle(
+                unavailable,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x967)),
+                None,
+            )
+            .await?,
+        unavailable_outcome
+    );
+
+    sqlx::query(
+        "ALTER TABLE accepted_input
+            DISABLE TRIGGER accepted_input_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE accepted_input
+            DROP CONSTRAINT accepted_input_delivery_shape",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE accepted_input
+            SET disposition_kind = 'origin_of'
+          WHERE accepted_input_id = $1",
+    )
+    .bind(Uuid::from_u128(0x962))
+    .execute(&pool)
+    .await?;
+    let corruption = repository
+        .load(safe_source.command_id())
+        .await
+        .expect_err("checked pending-steering decode must reject a malformed disposition");
+    assert!(matches!(
+        corruption,
+        SubmitInputRepositoryError::Corruption(SubmitInputCorruption::Unsupported {
+            field: "disposition_kind",
+            ..
+        })
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S01 / S03 / S08 / INV-008 / INV-012: occupied-slot rejection evidence is
+/// recorded exactly, while the not-yet-supported matching interrupt path
+/// rolls back its command claim and consumes no acceptance position.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn occupied_slot_rejections_and_matching_interrupt_rollback_are_exact()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0x441, 0x841, direct(0xc41)))
+        .await?;
+    let repository = SubmitInputRepository::new(pool.clone());
+    repository
+        .handle(
+            start_input(
+                0x442,
+                0x841,
+                "active origin",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x941)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xa41))),
+        )
+        .await?;
+    activate_prepared_turn(
+        &pool,
+        Uuid::from_u128(0x841),
+        Uuid::from_u128(0x941),
+        Uuid::from_u128(0xa41),
+        Uuid::from_u128(0xd41),
+        Uuid::from_u128(0xe41),
+        Uuid::from_u128(0xb41),
+    )
+    .await?;
+
+    let active_start = start_input(
+        0x443,
+        0x841,
+        "cannot start",
+        1,
+        ModelSelectionOverride::UseSessionDefault,
+    );
+    let active_start_outcome = repository
+        .handle(
+            active_start.clone(),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x942)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xa42))),
+        )
+        .await?;
+    assert!(matches!(
+        active_start_outcome,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::ActiveTurnPresent {
+                session,
+                active_turn,
+            }
+        )) if session == SessionId::from_uuid(Uuid::from_u128(0x841))
+            && active_turn == TurnId::from_uuid(Uuid::from_u128(0xa41))
+    ));
+
+    let stale_deliveries = [
+        DeliveryRequest::AfterCurrentTurn {
+            expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xaff)),
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+        DeliveryRequest::NextSafePoint {
+            expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xaff)),
+        },
+        DeliveryRequest::Interrupt {
+            expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xaff)),
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    ];
+    let mut stale_records = Vec::new();
+    for (offset, delivery) in stale_deliveries.into_iter().enumerate() {
+        let command = input_with_delivery(0x444 + offset as u128, 0x841, "stale active", delivery);
+        let turn = if matches!(command.delivery(), DeliveryRequest::NextSafePoint { .. }) {
+            None
+        } else {
+            Some(TurnId::from_uuid(Uuid::from_u128(0xa43 + offset as u128)))
+        };
+        let outcome = repository
+            .handle(
+                command.clone(),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x943 + offset as u128)),
+                turn,
+            )
+            .await?;
+        assert!(matches!(
+            outcome,
+            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+                SubmitInputRejectedResult::ActiveTurnMismatch {
+                    expected_active_turn,
+                    actual_active_turn,
+                    ..
+                }
+            )) if expected_active_turn == TurnId::from_uuid(Uuid::from_u128(0xaff))
+                && actual_active_turn == TurnId::from_uuid(Uuid::from_u128(0xa41))
+        ));
+        stale_records.push((command, outcome));
+    }
+
+    let matching_interrupt = input_with_delivery(
+        0x447,
+        0x841,
+        "matching interrupt",
+        DeliveryRequest::Interrupt {
+            expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xa41)),
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    );
+    let error = repository
+        .handle(
+            matching_interrupt,
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x946)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xa46))),
+        )
+        .await
+        .expect_err("matching interrupt application is explicitly unavailable");
+    assert!(matches!(
+        error,
+        SubmitInputRepositoryError::InterruptApplicationUnavailable {
+            command_id,
+            active_turn,
+        } if command_id == DurableCommandId::from_uuid(Uuid::from_u128(0x447))
+            && active_turn == TurnId::from_uuid(Uuid::from_u128(0xa41))
+    ));
+    let unclaimed: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM durable_command WHERE command_id = $1),
+            (SELECT count(*) FROM submit_input_command WHERE command_id = $1),
+            (SELECT count(*) FROM accepted_input WHERE accepting_command_id = $1),
+            (SELECT count(*)
+               FROM turn_lifecycle
+              WHERE origin_accepted_input_id = $2)",
+    )
+    .bind(Uuid::from_u128(0x447))
+    .bind(Uuid::from_u128(0x946))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(unclaimed, (0, 0, 0, 0));
+
+    let next = input_with_delivery(
+        0x448,
+        0x841,
+        "position after interrupt rollback",
+        DeliveryRequest::NextSafePoint {
+            expected_active_turn: TurnId::from_uuid(Uuid::from_u128(0xa41)),
+        },
+    );
+    let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::PendingSteering(next),
+    )) = repository
+        .handle(
+            next,
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x947)),
+            None,
+        )
+        .await?
+    else {
+        panic!("a matching safe-point request must apply after interrupt rollback");
+    };
+    assert_eq!(next.acceptance_position().as_u64(), 2);
+
+    let evidence: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            count(*) FILTER (
+                WHERE rejection_kind = 'active_turn_present'
+                  AND result_actual_active_turn_id = $1
+            ),
+            count(*) FILTER (
+                WHERE rejection_kind = 'active_turn_mismatch'
+                  AND result_expected_active_turn_id = $2
+                  AND result_actual_active_turn_id = $1
+            ),
+            count(*) FILTER (
+                WHERE rejection_kind IN (
+                    'active_turn_present',
+                    'active_turn_mismatch'
+                )
+                  AND result_accepted_input_id IS NULL
+                  AND result_turn_id IS NULL
+            )
+          FROM submit_input_command
+         WHERE command_id BETWEEN $3 AND $4",
+    )
+    .bind(Uuid::from_u128(0xa41))
+    .bind(Uuid::from_u128(0xaff))
+    .bind(Uuid::from_u128(0x443))
+    .bind(Uuid::from_u128(0x446))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(evidence, (1, 3, 4));
+
+    assert_eq!(
+        repository
+            .handle(
+                active_start,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x9ff)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xaff))),
+            )
+            .await?,
+        active_start_outcome
+    );
+    for (command, expected) in stale_records {
+        let turn = if matches!(command.delivery(), DeliveryRequest::NextSafePoint { .. }) {
+            None
+        } else {
+            Some(TurnId::from_uuid(Uuid::from_u128(0xafe)))
+        };
+        assert_eq!(
+            repository
+                .handle(
+                    command,
+                    AcceptedInputId::from_uuid(Uuid::from_u128(0x9fe)),
+                    turn,
+                )
+                .await?,
+            expected
+        );
+    }
 
     pool.close().await;
     drop(container);

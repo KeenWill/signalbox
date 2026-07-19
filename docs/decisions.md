@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-19 — Atomic Postgres occupied-slot input handling
+
+**Context.** The domain now admits checked occupied-slot preparation and replay, while PostgreSQL stores only vacant-slot receipts. First handling must use the same complete scheduling projection as restart and must not persist results whose owner evidence is not representable.
+
+**Decision.** Under the existing command claim, lock the session, scheduler, and defaults pointer in that order; load the complete evidence-free scheduling projection and active-origin-anchored session acceptance tail; then select vacant- or occupied-slot preparation. Extend normalized receipts with actual-active-turn evidence. Store after-current origins and configuration-free pending steering with deferred exact command, source-origin, and lifecycle correlations, plus only the occupied-state rejections whose canonical origin replay is constructible. Matching interrupt remains an explicit nonclaiming repository outcome, and safe-point-stopping storage remains closed until complete `StopRequested` owner evidence exists.
+
+**Rejected alternatives.** Inferring active state from one lifecycle row bypasses the domain aggregate. A second steering-source column duplicates the delivery source. Nullable queue or configuration fields on steering admit impossible effects. Storing a stopping discriminator without its proof-bearing owner projection makes the stored conclusion its own authority.
+
+**Affects.** `crates/persistence/migrations/202607180005_occupied_slot_submit_input.sql`, `crates/persistence/src/submit_input.rs`, and PostgreSQL enforcement for INV-002, INV-007, INV-008, INV-009, INV-012, INV-016, and INV-028. It adds no dependency, interrupt transition, `StopRequested` producer, steering consumption, or protocol behavior.
+
 ## 2026-07-19 — Checked rejected SubmitInput receipt replay
 
 **Context.** ADR-0034 requires equal replay to return the originally recorded terminal result, while ADR-0035 requires domain-owned validation of complete purpose-specific facts. Rejections produced against an occupied slot name the authoritative active turn directly or depend on the command's expected active turn; accepting only bare result fields would let replay pair them with another session or another turn.
