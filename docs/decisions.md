@@ -4,7 +4,7 @@ An append-only, dated record of decisions below foundation weight, newest first.
 
 ## 2026-07-19 — Owner-ratified matching-interrupt milestone deferral
 
-**Context.** Choosing the milestone outcome for a matching `Interrupt` required owner judgment because the current slices cannot construct ADR-0027's cancellation, immediate-successor, and applied-proof authority. That choice was an owner gate and should have blocked the autonomous run under [goal-mode.md](goal-mode.md), rather than being made within it.
+**Context.** Choosing the milestone outcome for a matching `Interrupt` required owner judgment because the current slices cannot construct ADR-0027's cancellation, immediate-successor, and applied-proof authority. That choice was an owner gate and should have blocked and been reported on the affected matching-interrupt track under [goal-mode.md](goal-mode.md), while other unblocked work continued, rather than being made within that track.
 
 **Decision.** The owner ratifies the current nonclaiming preparation failure for this milestone. The existing “Authoritative occupied-slot SubmitInput preparation” entry below remains the single statement of record for that behavior and for the required scope of the first `StopRequested` storage slice. Future autonomous runs report an equivalent owner gate instead of deciding it.
 
