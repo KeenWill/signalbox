@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-18 — expect-test dev-dependency for snapshot assertions
+
+**Context.** The [testing style guide](testing-style.md) fixes forward-looking snapshot norms — expect tests for shape-is-the-assertion values, supplementing invariant-linked asserts, curated tables — but no snapshot machinery existed. Matrix-outcome and derived-order tests spelled their shapes only through per-case `assert_eq!` chains that hide the whole at a glance.
+
+**Decision.** Add [`expect-test`](https://github.com/rust-analyzer/expect-test) 1.5 as a `signalbox-domain` dev-dependency — a small, focused inline-snapshot crate with one transitive dependency (`dissimilar`), no build-time or runtime cost outside tests, and in-place `UPDATE_EXPECT=1` re-blessing — with owner approval per the dependency rules. A crate-private `table` helper in the domain crate's `test_support` module renders pipe-separated, left-aligned, right-trimmed tables so snapshot stability is owned in-repo, unit-tested per the guide. Exemplar conversions in `queue_order.rs` and `replace_session_defaults.rs` demonstrate the guide's full style — one-knob fixtures, assert-against-fixture, snapshots supplementing the invariant-cited asserts — without renaming any test.
+
+**Rejected alternatives.** `insta`: heavier and serde-oriented, and its review TUI is unneeded now; revisit if future corpus or LLM-integration tests outgrow inline snapshots. A third-party table crate: snapshot stability would then depend on that crate's formatting churn, and the needed renderer is ~40 lines.
+
+**Affects.** `crates/domain/Cargo.toml`, the `test_support` module in `crates/domain/src/lib.rs`, and exemplar tests in `crates/domain/src/queue_order.rs` and `crates/domain/src/replace_session_defaults.rs`; enforcement links in `docs/invariants.md` are unchanged because every cited test keeps its decisive asserts.
+
 ## 2026-07-18 — Repository-owned testing style guide
 
 **Context.** The [testing section of CONTRIBUTING.md](../CONTRIBUTING.md#testing) owns what to test — layers, determinism, merge gates — but nothing owned how tests are written: fixture shape, what an assertion may reference, or snapshot discipline. Each pull request re-derived those choices, reviews re-litigated them per test, and multi-positional-integer fixture helpers and re-encoded magic seeds were accumulating in domain test modules.
