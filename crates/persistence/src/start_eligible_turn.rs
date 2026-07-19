@@ -451,6 +451,9 @@ fn map_scheduling_error(error: SubmitInputRepositoryError) -> StartEligibleTurnR
         SubmitInputRepositoryError::DifferentCommandKind { .. } => {
             StartEligibleTurnCorruption::Inconsistent("origin command kind").into()
         }
+        SubmitInputRepositoryError::AcceptedInputIdentityCollision { .. } => {
+            StartEligibleTurnCorruption::Inconsistent("origin accepted-input identity").into()
+        }
         SubmitInputRepositoryError::InterruptApplicationUnavailable { .. } => {
             StartEligibleTurnCorruption::Inconsistent("origin command application").into()
         }
