@@ -362,6 +362,15 @@ impl SubmitInput {
                 })
             }
             DeliveryRequest::AfterCurrentTurn { configuration, .. } => {
+                let Some(turn) = turn else {
+                    unreachable!("turn-candidate correlation was validated above");
+                };
+                if turn == actual_active_turn {
+                    return Err(SubmitInputPreparationError {
+                        command: Box::new(self),
+                        failure: SubmitInputPreparationFailure::TurnCandidateMismatch,
+                    });
+                }
                 if let Err(failure) =
                     validate_occupied_acceptance_tail(active_turn, previous_position)
                 {
@@ -370,9 +379,6 @@ impl SubmitInput {
                         failure,
                     });
                 }
-                let Some(turn) = turn else {
-                    unreachable!("turn-candidate correlation was validated above");
-                };
                 let checked = match session.current_configuration_defaults().derive_request(
                     configuration.expected_session_defaults_version(),
                     configuration.model(),
@@ -2616,8 +2622,8 @@ mod tests {
         }
     }
 
-    /// INV-002 / INV-012: every occupied-slot correlation failure retains the
-    /// unchanged command and constructs no terminal result.
+    /// S09 / INV-002 / INV-012: every occupied-slot correlation failure
+    /// retains the unchanged command and constructs no terminal result.
     #[test]
     fn occupied_slot_preparation_rejects_cross_wired_projection_and_candidates() {
         let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
@@ -2673,6 +2679,22 @@ mod tests {
             .expect_err("after-current input requires a minted turn candidate");
         assert_eq!(
             missing_turn.failure(),
+            SubmitInputPreparationFailure::TurnCandidateMismatch
+        );
+
+        let reused_active_turn = command
+            .clone()
+            .prepare_with_active_turn(
+                &current,
+                &active_turn(&current),
+                accepted_input_id(3),
+                Some(turn_id(7)),
+                Some(SessionInputPosition::first()),
+                |_| None,
+            )
+            .expect_err("after-current work cannot reuse its active predecessor");
+        assert_eq!(
+            reused_active_turn.failure(),
             SubmitInputPreparationFailure::TurnCandidateMismatch
         );
 
