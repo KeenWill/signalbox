@@ -266,8 +266,8 @@ def main() -> int:
 
     totals: dict[str, int] = {}
     for crate, count, extra in re.findall(
-        r"^\| \*\*signalbox-(domain|application) total\*\* \|"
-        r" \*\*(\d+)(?: \(\+(\d+) free fn\))?\*\* \|",
+        r"^\| \*\*signalbox-(domain|application) total\*\*\s*\|"
+        r" \*\*(\d+)(?: \(\+(\d+) free fn\))?\*\*\s*\|",
         spine_text,
         re.MULTILINE,
     ):
