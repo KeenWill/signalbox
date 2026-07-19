@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-19 — Adaptive review-fix waves and reply-at-push triage
+
+**Context.** The finished-pull-request rules capped review-fix waves at a fixed two, and the cap was repeatedly overridden in practice. A wave's value tracks the prior wave's hit rate and the content under review — hand-written parser code stayed substantive for five waves, while style-guide reviews went self-referential by wave three — and deferring reviewer replies to a later batch decoupled fix commits from their rationale.
+
+**Decision.** Review-fix waves continue while the latest wave produced at least one accepted finding; after a wave in which every finding was declined or trivial, stop — the pull request is finished and awaits owner merge. Five waves on one pull request is the escalation backstop regardless of hit rate, reported to the owner with the wave history in one line. Every reviewer comment receives its in-thread reply — fixing commit named or reason stated — when that wave's fix commit is pushed, and a decline counts toward a quiet wave only when its reason is stated in-thread. Milestone check-in requests report each pull request's one-line wave history.
+
+**Rejected alternatives.** Raising the fixed cap: the same arbitrariness, wrong for both extremes. Unbounded continuation: no churn bound. Agent-judged "review quality" thresholds: self-serving without the accepted-finding anchor.
+
+**Affects.** The finished-pull-request rules in [AGENTS.md](../AGENTS.md), check-in reporting in [goal-mode.md](goal-mode.md), and every future review loop. It changes no code, ADR, or validation rule.
+
 ## 2026-07-18 — Separate queued-origin facts from guarded turn lifecycle storage
 
 **Context.** The durable-input slice already stores immutable origin order and frozen configuration in append-only `queued_input_origin`, while ADR-0004, ADR-0010, ADR-0022, ADR-0030, and ADR-0036 require later eligibility to serialize per session and atomically bind lifecycle, semantic, frontier, and attempt facts. The storage foundation needs database enforcement and migration-safe backfill before the authoritative aggregate transition exists, without making raw SQL or a repository method an eligibility producer.
