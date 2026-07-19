@@ -37,18 +37,34 @@
 //!   variant named `Some` would unwrap too; that collision is accepted as
 //!   implausible.) Missing fields render empty.
 //! - When dotted descendant columns exist for a prefix, a bare prefix
-//!   column whose cells are all empty or `None` is suppressed as
-//!   redundant, so rows mixing `None` with `Some(Inner { .. })` render
-//!   descendants only. The asymmetry is deliberate: `None` stays literal
-//!   in a flat column but reads as an empty run of descendant cells under
-//!   a flattened prefix.
+//!   column is suppressed as redundant only when every cell in it is
+//!   structurally absent — the row does not carry the field, or the field
+//!   is a unit `None` leaf — so rows mixing `None` with
+//!   `Some(Inner { .. })` render descendants only. Suppression consults
+//!   provenance carried from the parse tree, never rendered text: an
+//!   observed `""` or the literal string `"None"` is a value and keeps
+//!   its column. The asymmetry is deliberate: `None` stays literal in a
+//!   flat column but reads as an empty run of descendant cells under a
+//!   flattened prefix.
 //! - Cells follow one escaping story: string and char cells drop only
 //!   their surrounding quotes and keep every derived-`Debug` escape
 //!   sequence in the body verbatim, so a real newline (rendered `\n`) and
-//!   a literal backslash-n (rendered `\\n`) stay distinct; raw control
-//!   characters — reachable only through custom `Debug` output — are
-//!   escaped `escape_debug`-style, so one logical row is always one
-//!   physical line.
+//!   a literal backslash-n (rendered `\\n`) stay distinct. Quotes drop
+//!   only when a body remains: an observed empty string renders
+//!   quotes-kept as `""`, never as an empty cell a missing field could be
+//!   confused with. Raw control characters — reachable only through
+//!   custom `Debug` output — are escaped `escape_debug`-style, so one
+//!   logical row is always one physical line.
+//! - Braced map `Debug` output (`{1: "a"}`) parses entry by entry, and
+//!   set output (`{"a", "b"}` — entries without `: `) likewise; a braced
+//!   region following neither grammar degrades to one verbatim atom.
+//!   Entries render in sorted-by-rendered-text order — maps by key text
+//!   (value text tie-breaking), sets by entry text — not iteration
+//!   order: a deliberate normalization so `HashMap`- and
+//!   `HashSet`-bearing rows render byte-identically across processes.
+//!   `BTreeMap` output with single-token keys typically renders
+//!   unchanged, but textual order is not `Ord` order: key `10` sorts
+//!   before key `2`.
 //! - Unit and tuple enum variants render compactly (`Variant`,
 //!   `Variant(payload)`). A struct variant is indistinguishable from a
 //!   nested struct in the derived-`Debug` grammar, so its payload flattens
@@ -143,7 +159,7 @@ pub fn transposed<T: Debug>(value: &T) -> String {
     let parsed = parse::parse(&format!("{value:?}"));
     let rows: Vec<Vec<String>> = render::row_cells(&parsed, render::DEFAULT_MAX_DEPTH)
         .into_iter()
-        .map(|(field, cell)| vec![field, cell])
+        .map(|(field, cell)| vec![field, cell.text])
         .collect();
     render::render(&["field".to_string(), "value".to_string()], &rows)
 }
@@ -187,7 +203,7 @@ impl Table {
 
 impl Display for Table {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let per_row: Vec<Vec<(String, String)>> = self
+        let per_row: Vec<Vec<(String, render::RenderedCell)>> = self
             .rows
             .iter()
             .map(|row| render::row_cells(row, self.max_depth))
@@ -202,7 +218,10 @@ impl Display for Table {
             }
         }
 
-        let rows: Vec<Vec<String>> = per_row
+        // The dense grid keeps each cell's provenance — missing field,
+        // unit `None`, or observed value — so suppression below decides
+        // structurally, never from rendered text.
+        let rows: Vec<Vec<render::RenderedCell>> = per_row
             .iter()
             .map(|cells| {
                 headers
@@ -212,7 +231,7 @@ impl Display for Table {
                             .iter()
                             .find(|(column, _)| column == header)
                             .map(|(_, cell)| cell.clone())
-                            .unwrap_or_default()
+                            .unwrap_or_else(render::RenderedCell::missing)
                     })
                     .collect()
             })

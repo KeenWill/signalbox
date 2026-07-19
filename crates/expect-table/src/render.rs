@@ -33,6 +33,28 @@ fn compact(value: &Value) -> String {
         Value::Str(body) => format!("\"{body}\""),
         Value::Char(body) => format!("'{body}'"),
         Value::List(items) => format!("[{}]", compact_items(items)),
+        // Map and set entries render in sorted-by-rendered-text order —
+        // maps by key text (value text tie-breaking), sets by entry text
+        // — never iteration order, so a `HashMap` or `HashSet` cell is
+        // byte-identical across processes: the deliberate normalization
+        // the crate docs' determinism contract states.
+        Value::Map(entries) => {
+            let mut rendered: Vec<(String, String)> = entries
+                .iter()
+                .map(|(key, value)| (compact(key), compact(value)))
+                .collect();
+            rendered.sort();
+            let entries: Vec<String> = rendered
+                .into_iter()
+                .map(|(key, value)| format!("{key}: {value}"))
+                .collect();
+            format!("{{{}}}", entries.join(", "))
+        }
+        Value::Set(entries) => {
+            let mut rendered: Vec<String> = entries.iter().map(compact).collect();
+            rendered.sort();
+            format!("{{{}}}", rendered.join(", "))
+        }
         // Derived `Debug` marks a singleton tuple with a trailing comma
         // (`(1,)`); the compact form keeps it. Named one-element tuples
         // (`Wrapped(9)`) carry no trailing comma in the grammar.
@@ -71,9 +93,14 @@ fn compact_items(items: &[Value]) -> String {
 /// as the literal text `None`, string and char literals drop only their
 /// surrounding quotes — every escape sequence in the body stays exactly as
 /// derived `Debug` emitted it, so `"a\nb"` and `"a\\nb"` render distinctly —
-/// and raw control characters escape so a cell is always one physical line.
+/// an observed empty string keeps its quotes and renders `""`, and raw
+/// control characters escape so a cell is always one physical line.
 pub(crate) fn cell(value: &Value) -> String {
     let text = match through_some(value) {
+        // Quotes drop only when a body remains: an observed `""` keeps
+        // them, so it can never be confused with the truly empty cell of
+        // a field the row does not carry.
+        Value::Str(body) if body.is_empty() => "\"\"".to_string(),
         Value::Str(body) | Value::Char(body) => body.clone(),
         other => compact(other),
     };
@@ -97,19 +124,67 @@ fn escape_control(text: &str) -> String {
     escaped
 }
 
+/// Why a dense-grid cell holds what it holds, carried from the parse tree
+/// into rendering so prefix-column suppression classifies structure and
+/// never rendered text: an observed `""` (rendered `""`) or the literal
+/// string `"None"` (rendered `None`) is a value, indistinguishable from
+/// absence by text alone.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Provenance {
+    /// The row does not carry this column's field at all.
+    Missing,
+    /// The field is a unit `None` leaf — `Option::None`, or a domain unit
+    /// variant named `None`, indistinguishable in the grammar (crate
+    /// docs); it renders as the literal text `None` but counts as absent
+    /// for prefix-column suppression.
+    UnitNone,
+    /// Any observed value, including an empty string.
+    Observed,
+}
+
+/// One rendered cell paired with the provenance suppression consults.
+#[derive(Clone)]
+pub(crate) struct RenderedCell {
+    pub(crate) text: String,
+    pub(crate) provenance: Provenance,
+}
+
+impl RenderedCell {
+    /// The empty cell of a field this row does not carry.
+    pub(crate) fn missing() -> Self {
+        Self {
+            text: String::new(),
+            provenance: Provenance::Missing,
+        }
+    }
+}
+
+/// Renders one leaf with its provenance: a unit `None` atom is
+/// [`Provenance::UnitNone`]; everything else observed.
+fn rendered_cell(value: &Value) -> RenderedCell {
+    let provenance = match through_some(value) {
+        Value::Atom(text) if text == "None" => Provenance::UnitNone,
+        _ => Provenance::Observed,
+    };
+    RenderedCell {
+        text: cell(value),
+        provenance,
+    }
+}
+
 /// Flattens one parsed row into `(column, cell)` pairs: struct fields become
 /// dotted columns down to `max_depth` segments; any other value is one
 /// [`VALUE_COLUMN`] cell. A non-exhaustive row (or flattened prefix) still
 /// infers its shown fields; the `..` marker names no field and contributes
 /// no column — only compact cells keep it.
-pub(crate) fn row_cells(value: &Value, max_depth: usize) -> Vec<(String, String)> {
+pub(crate) fn row_cells(value: &Value, max_depth: usize) -> Vec<(String, RenderedCell)> {
     match through_some(value) {
         Value::Struct { fields, .. } => {
             let mut cells = Vec::new();
             flatten_fields(fields, "", max_depth.max(1), &mut cells);
             cells
         }
-        other => vec![(VALUE_COLUMN.to_string(), cell(other))],
+        other => vec![(VALUE_COLUMN.to_string(), rendered_cell(other))],
     }
 }
 
@@ -117,7 +192,7 @@ fn flatten_fields(
     fields: &[(String, Value)],
     prefix: &str,
     remaining_depth: usize,
-    cells: &mut Vec<(String, String)>,
+    cells: &mut Vec<(String, RenderedCell)>,
 ) {
     for (name, value) in fields {
         let column = if prefix.is_empty() {
@@ -129,24 +204,27 @@ fn flatten_fields(
             Value::Struct { fields: inner, .. } if remaining_depth > 1 => {
                 flatten_fields(inner, &column, remaining_depth - 1, cells);
             }
-            _ => cells.push((column, cell(value))),
+            _ => cells.push((column, rendered_cell(value))),
         }
     }
 }
 
 /// Drops each bare prefix column that is redundant with its dotted
 /// descendants: when some `prefix.child` column exists and every cell of
-/// the bare `prefix` column is empty or the literal `None`, the bare column
-/// shows nothing its descendants do not already show — rows mixing `None`
-/// with `Some(Inner { .. })` would otherwise carry both an all-but-empty
-/// `nested` column and `nested.x` descendants. A bare column holding any
-/// other value (a unit variant, a tuple payload, a compact struct from a
-/// differently shaped row) stays. Under a suppressed prefix a `None` row
-/// reads as an empty run of descendant cells; in a flat column `None` stays
-/// literal — the asymmetry the crate docs state.
+/// the bare `prefix` column is structurally absent — [`Provenance::Missing`]
+/// or [`Provenance::UnitNone`], never [`Provenance::Observed`] — the bare
+/// column shows nothing its descendants do not already show; rows mixing
+/// `None` with `Some(Inner { .. })` would otherwise carry both an
+/// all-but-empty `nested` column and `nested.x` descendants. Any observed
+/// value keeps the column: a unit variant, a compact struct from a
+/// differently shaped row, an empty string (rendered `""`), or the literal
+/// string `"None"` — provenance, not rendered text, decides. Under a
+/// suppressed prefix a `None` row reads as an empty run of descendant
+/// cells; in a flat column `None` stays literal — the asymmetry the crate
+/// docs state. Returns bare rendered text, provenance's one consumer.
 pub(crate) fn suppress_redundant_prefix_columns(
     headers: Vec<String>,
-    rows: Vec<Vec<String>>,
+    rows: Vec<Vec<RenderedCell>>,
 ) -> (Vec<String>, Vec<Vec<String>>) {
     let redundant: Vec<bool> = headers
         .iter()
@@ -156,22 +234,25 @@ pub(crate) fn suppress_redundant_prefix_columns(
             headers.iter().any(|other| other.starts_with(&dotted))
                 && rows
                     .iter()
-                    .all(|row| row[column].is_empty() || row[column] == "None")
+                    .all(|row| row[column].provenance != Provenance::Observed)
         })
         .collect();
-    if !redundant.contains(&true) {
-        return (headers, rows);
-    }
-    let keep = |cells: Vec<String>| -> Vec<String> {
-        cells
-            .into_iter()
-            .zip(&redundant)
-            .filter(|(_, redundant)| !**redundant)
-            .map(|(cell, _)| cell)
-            .collect()
-    };
-    let headers = keep(headers);
-    let rows = rows.into_iter().map(keep).collect();
+    let headers = headers
+        .into_iter()
+        .zip(&redundant)
+        .filter(|(_, redundant)| !**redundant)
+        .map(|(header, _)| header)
+        .collect();
+    let rows = rows
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .zip(&redundant)
+                .filter(|(_, redundant)| !**redundant)
+                .map(|(cell, _)| cell.text)
+                .collect()
+        })
+        .collect();
     (headers, rows)
 }
 

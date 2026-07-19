@@ -8,6 +8,12 @@
 //! string/char literals with escapes), so a custom `Debug` impl renders
 //! verbatim — interior commas included — instead of derailing its neighbors.
 //!
+//! Bare-braced regions are collection `Debug` output: `{k: v, …}` parses
+//! as a map and `{a, …}` as a set (its entries carry no `: `); a braced
+//! region following neither grammar degrades verbatim like any other
+//! unrecognized region. Entries keep parse order in the tree — rendering
+//! owns the sorted-entry normalization the crate docs state.
+//!
 //! A depth-zero comma is context-sensitive. In a struct body it ends the
 //! current element only when what follows looks like the field grammar —
 //! `identifier:` (not `::`, which is a path), the `..` non-exhaustive
@@ -41,6 +47,16 @@ pub(crate) enum Value {
     },
     /// `[a, b]`.
     List(Vec<Value>),
+    /// `{key: value, …}` — map `Debug` output (`BTreeMap`, `HashMap`).
+    /// Entries hold parse order here; rendering sorts them by rendered
+    /// key text so `HashMap` iteration order never reaches a snapshot
+    /// (the crate docs' determinism contract). An empty `{}` is
+    /// indistinguishable from an empty set and parses as an empty map.
+    Map(Vec<(Value, Value)>),
+    /// `{a, …}` — set `Debug` output (`BTreeSet`, `HashSet`), told from
+    /// a map by its entries carrying no `: `. Rendering sorts entries by
+    /// their rendered text.
+    Set(Vec<Value>),
     /// `"…"` — the escaped interior of a string literal, quotes stripped.
     Str(String),
     /// `'…'` — the escaped interior of a char literal, quotes stripped.
@@ -73,6 +89,9 @@ enum Context {
     /// Inside `( … )` or `[ … ]`, or at the top level: a depth-zero
     /// comma always separates items.
     ItemList,
+    /// A map key inside `{ … }`: as [`Context::ItemList`], except a
+    /// depth-zero `:` (never the `::` of a path) also ends the element.
+    MapKey,
 }
 
 struct Parser<'text> {
@@ -116,13 +135,19 @@ impl Parser<'_> {
         match self.peek() {
             None => Value::Atom(String::new()),
             Some('"') => self.string_literal(),
-            Some('\'') => self.char_literal(),
+            // A lifetime apostrophe (`'_`, `'a`) falls through to the
+            // degraded-atom arm and stays plain token text.
+            Some('\'') if self.apostrophe_opens_char_literal() => self.char_literal(),
             Some('(') => match self.items(')') {
                 Some(items) => Value::Tuple { name: None, items },
                 None => self.degrade(start, context),
             },
             Some('[') => match self.items(']') {
                 Some(items) => Value::List(items),
+                None => self.degrade(start, context),
+            },
+            Some('{') => match self.braced_collection() {
+                Some(value) => value,
                 None => self.degrade(start, context),
             },
             Some(next) if next.is_alphabetic() || next == '_' => self.named(start, context),
@@ -244,6 +269,101 @@ impl Parser<'_> {
         }
     }
 
+    /// A bare-braced region at value position: map (`{k: v, …}`) or set
+    /// (`{a, …}`) `Debug` output, the only derived-`Debug` forms opening
+    /// with an unnamed `{`. Returns `None` when the region follows
+    /// neither grammar — a custom `Debug` leaf printing braces — and the
+    /// caller degrades it verbatim.
+    fn braced_collection(&mut self) -> Option<Value> {
+        let start = self.pos;
+        if let Some(entries) = self.map_entries() {
+            return Some(Value::Map(entries));
+        }
+        self.pos = start;
+        self.set_entries().map(Value::Set)
+    }
+
+    /// `key: value` entries after a map's `{`. Returns `None` when the
+    /// region is not map-shaped; empty braces parse as an empty map.
+    fn map_entries(&mut self) -> Option<Vec<(Value, Value)>> {
+        self.bump(); // '{'
+        let mut entries = Vec::new();
+        self.skip_whitespace();
+        if self.eat('}') {
+            return Some(entries);
+        }
+        loop {
+            let key = self.map_key()?;
+            self.bump(); // the ':' `map_key` stopped on
+            let value = self.element(Context::ItemList);
+            if value == Value::Atom(String::new()) {
+                return None;
+            }
+            entries.push((key, value));
+            self.skip_whitespace();
+            if self.eat(',') {
+                continue;
+            }
+            if self.eat('}') {
+                return Some(entries);
+            }
+            return None;
+        }
+    }
+
+    /// One map key: a value ending at a depth-zero `:` (never the `::`
+    /// of a path, which belongs to a degraded leaf). Returns `None` —
+    /// the region was not a map after all — when no such boundary
+    /// follows, leaving the scanner wherever the caller resets it.
+    fn map_key(&mut self) -> Option<Value> {
+        self.skip_whitespace();
+        let start = self.pos;
+        let mut key = self.value(Context::MapKey);
+        self.skip_whitespace();
+        if !self.scanner_on_entry_colon() {
+            key = self.degrade(start, Context::MapKey);
+            self.skip_whitespace();
+            if !self.scanner_on_entry_colon() {
+                return None;
+            }
+        }
+        (key != Value::Atom(String::new())).then_some(key)
+    }
+
+    /// Whether the scanner sits on a map entry's `:` — one colon, not a
+    /// `::` path separator.
+    fn scanner_on_entry_colon(&self) -> bool {
+        self.rest().starts_with(':') && !self.rest().starts_with("::")
+    }
+
+    /// Comma-separated entries after a set's `{`. Returns `None` when
+    /// the region does not close as a set; an entry degrading to nothing
+    /// — consecutive commas from a hostile leaf, say — also rejects the
+    /// region, so it stays one verbatim atom rather than losing text.
+    fn set_entries(&mut self) -> Option<Vec<Value>> {
+        self.bump(); // '{'
+        let mut entries = Vec::new();
+        self.skip_whitespace();
+        if self.eat('}') {
+            return Some(entries);
+        }
+        loop {
+            let entry = self.element(Context::ItemList);
+            if entry == Value::Atom(String::new()) {
+                return None;
+            }
+            entries.push(entry);
+            self.skip_whitespace();
+            if self.eat(',') {
+                continue;
+            }
+            if self.eat('}') {
+                return Some(entries);
+            }
+            return None;
+        }
+    }
+
     /// One element of a field, tuple, or list: a value that must end at a
     /// separator or closer. When it does not — a custom `Debug` impl printed
     /// something the grammar does not cover — the whole element degrades to
@@ -286,6 +406,26 @@ impl Parser<'_> {
             .unwrap_or(after_comma.len());
         let after_ident = after_comma[ident_end..].trim_start();
         after_ident.starts_with(':') && !after_ident.starts_with("::")
+    }
+
+    /// With the scanner on a `'`, decides whether it opens a genuine char
+    /// literal: one character or one `\`-escape followed by the closing
+    /// `'`. A lifetime — `'_`, `'a`, `'static`, as lifetime-bearing type
+    /// names such as `fn(&'_ str) -> &'_ str` contain — has no closing
+    /// apostrophe there and lexes as plain token text instead, so it
+    /// cannot consume across delimiters and unbalance the scan.
+    fn apostrophe_opens_char_literal(&self) -> bool {
+        let mut chars = self.rest().chars();
+        chars.next(); // the apostrophe itself
+        match chars.next() {
+            // `'\n'`, `'\''`, `'\u{7f}'`: a backslash directly after the
+            // opening quote only ever comes from a char literal's escape.
+            Some('\\') => true,
+            // `'x'` closes directly after one character; a lifetime
+            // (`'a `, `'_>`) does not.
+            Some(_) => chars.next() == Some('\''),
+            None => false,
+        }
     }
 
     /// `"…"` with `\`-escapes; an unterminated literal takes the rest.
@@ -334,7 +474,10 @@ impl Parser<'_> {
     /// ([`Parser::comma_separates_struct_fields`]); otherwise the comma
     /// belongs to the atom and the scan continues. String and char
     /// literals are skipped escape-aware so their delimiters and commas
-    /// cannot unbalance the scan.
+    /// cannot unbalance the scan; a lifetime apostrophe
+    /// ([`Parser::apostrophe_opens_char_literal`]) is plain token text,
+    /// so `fn(&'_ str) -> &'_ str` cannot swallow its `)` into a bogus
+    /// char literal.
     ///
     /// Angle brackets balance best-effort so type names like
     /// `PhantomData<(u32, u32)>` or `PhantomData<Result<u32, u32>>` stay one
@@ -359,7 +502,9 @@ impl Parser<'_> {
                     self.bump();
                     self.literal_body('"');
                 }
-                '\'' => {
+                // A lifetime apostrophe (`'_`, `'a`) is plain token text;
+                // only a genuine char literal skips escape-aware.
+                '\'' if self.apostrophe_opens_char_literal() => {
                     self.bump();
                     self.literal_body('\'');
                 }
@@ -383,12 +528,22 @@ impl Parser<'_> {
                     angle_depth -= 1;
                     self.bump();
                 }
+                // A map key ends at a depth-zero entry colon; the `::` of
+                // a degraded path leaf stays in the atom.
+                ':' if depth == 0 && context == Context::MapKey => {
+                    if self.rest().starts_with("::") {
+                        self.pos += 2;
+                    } else {
+                        return;
+                    }
+                }
                 ',' if depth == 0 => {
                     let separates = match context {
-                        // No field-boundary signal exists in item lists,
-                        // so only the angle-depth hint disambiguates: a
-                        // depth-zero comma outside `<…>` separates items.
-                        Context::ItemList => angle_depth == 0,
+                        // No field-boundary signal exists in item lists
+                        // (or map keys), so only the angle-depth hint
+                        // disambiguates: a depth-zero comma outside `<…>`
+                        // separates items.
+                        Context::ItemList | Context::MapKey => angle_depth == 0,
                         // A recognized field boundary is a hard boundary
                         // and wins over the angle-depth hint, even under
                         // an unclosed `<` from a custom leaf (`a<b`).
@@ -414,7 +569,7 @@ impl Parser<'_> {
     reason = "grammar fixtures are read only through their Debug derives"
 )]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::marker::PhantomData;
 
     use super::{Value, parse};
@@ -628,10 +783,45 @@ mod tests {
     }
 
     #[test]
-    fn map_debug_output_degrades_to_one_atomic_leaf() {
+    fn map_debug_output_parses_entry_by_entry() {
         let map = BTreeMap::from([(1, "one"), (2, "two")]);
 
-        assert_eq!(parse(&format!("{map:?}")), atom("{1: \"one\", 2: \"two\"}"));
+        assert_eq!(
+            parse(&format!("{map:?}")),
+            Value::Map(vec![
+                (atom("1"), Value::Str("one".to_string())),
+                (atom("2"), Value::Str("two".to_string())),
+            ])
+        );
+    }
+
+    #[test]
+    fn set_debug_output_parses_entry_by_entry() {
+        let set = BTreeSet::from(["a", "b"]);
+
+        assert_eq!(
+            parse(&format!("{set:?}")),
+            Value::Set(vec![
+                Value::Str("a".to_string()),
+                Value::Str("b".to_string()),
+            ])
+        );
+    }
+
+    struct HostileBraces;
+
+    impl std::fmt::Debug for HostileBraces {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "{{ not, a: map")
+        }
+    }
+
+    /// A braced region following neither the map nor the set grammar —
+    /// here an unclosed one from a custom `Debug` leaf — stays one
+    /// verbatim atom: collection parsing never turns degradation lossy.
+    #[test]
+    fn braced_region_matching_neither_map_nor_set_degrades_verbatim() {
+        assert_eq!(parse(&format!("{HostileBraces:?}")), atom("{ not, a: map"));
     }
 
     struct Prose;
@@ -796,6 +986,36 @@ mod tests {
         assert_eq!(
             parse(&format!("{:?}", FullyRedacted)),
             atom("Secret { .. }")
+        );
+    }
+
+    #[derive(Debug)]
+    struct HoldsLifetimes {
+        check: PhantomData<for<'a> fn(&'a str) -> &'a str>,
+        count: u8,
+    }
+
+    /// Lifetimes in degraded type names (`fn(&'_ str)`) lex as plain
+    /// token text: an apostrophe not closed immediately after one
+    /// character or escape is no char-literal opener, so it cannot
+    /// consume across delimiters and collapse the struct to one atom.
+    #[test]
+    fn lifetime_bearing_leaf_degrades_alone_not_its_struct() {
+        let holds = HoldsLifetimes {
+            check: PhantomData,
+            count: 4,
+        };
+
+        assert_eq!(
+            parse(&format!("{holds:?}")),
+            Value::Struct {
+                name: "HoldsLifetimes".to_string(),
+                non_exhaustive: false,
+                fields: vec![
+                    field("check", atom("PhantomData<fn(&'_ str) -> &'_ str>")),
+                    field("count", atom("4")),
+                ],
+            }
         );
     }
 

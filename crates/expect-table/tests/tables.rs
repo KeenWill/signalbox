@@ -267,6 +267,67 @@ fn redundant_none_prefix_column_is_suppressed_when_descendants_exist() {
     ]));
 }
 
+/// A heterogeneous column mixing a flattened nested struct with observed
+/// strings is real data in both shapes: suppression consults provenance
+/// carried from the parse tree — missing field, unit `None`, or observed
+/// value — never rendered text, so the bare `payload` column survives.
+/// An observed empty string renders quotes-kept as `""` and the literal
+/// string `"None"` renders as its body; neither is mistaken for absence
+/// and silently dropped.
+#[test]
+fn observed_string_values_survive_prefix_suppression() {
+    #[derive(Debug)]
+    struct Inner {
+        x: u32,
+        y: u32,
+    }
+
+    #[derive(Debug)]
+    enum Row {
+        Nested { payload: Inner },
+        Text { payload: &'static str },
+    }
+
+    expect![[r#"
+        ┌───────────┬───────────┬─────────┐
+        │ payload.x │ payload.y │ payload │
+        ├───────────┼───────────┼─────────┤
+        │         7 │        11 │         │
+        │           │           │ ""      │
+        │           │           │ None    │
+        └───────────┴───────────┴─────────┘
+    "#]]
+    .assert_eq(&table([
+        Row::Nested {
+            payload: Inner { x: 7, y: 11 },
+        },
+        Row::Text { payload: "" },
+        Row::Text { payload: "None" },
+    ]));
+}
+
+/// An observed empty string keeps its quotes — `""` — in any cell, so it
+/// can never be confused with the truly empty cell of a field the row
+/// does not carry: both appear side by side here and stay distinct.
+#[test]
+fn empty_string_renders_as_kept_quotes_distinct_from_missing_cells() {
+    #[derive(Debug)]
+    enum Row {
+        Text { label: &'static str },
+        Bare { count: u8 },
+    }
+
+    expect![[r#"
+        ┌───────┬───────┐
+        │ label │ count │
+        ├───────┼───────┤
+        │ ""    │       │
+        │       │     2 │
+        └───────┴───────┘
+    "#]]
+    .assert_eq(&table([Row::Text { label: "" }, Row::Bare { count: 2 }]));
+}
+
 /// A custom `Debug` impl the grammar does not cover degrades to one
 /// verbatim atomic cell without disturbing sibling fields.
 #[test]
@@ -352,6 +413,31 @@ fn custom_debug_leaf_with_unbracketed_comma_keeps_sibling_columns() {
         before: 1,
         pair: Pair,
         after: 2,
+    }]));
+}
+
+/// A degraded leaf whose type name carries lifetimes (`fn(&'_ str)`)
+/// keeps its sibling columns: a lifetime apostrophe is plain token
+/// text, not a char-literal opener that would consume across
+/// delimiters and collapse the whole row to one `value` cell.
+#[test]
+fn lifetime_bearing_leaf_keeps_sibling_columns() {
+    #[derive(Debug)]
+    struct Holds {
+        check: PhantomData<for<'a> fn(&'a str) -> &'a str>,
+        count: u8,
+    }
+
+    expect![[r#"
+        ┌─────────────────────────────────────┬───────┐
+        │ check                               │ count │
+        ├─────────────────────────────────────┼───────┤
+        │ PhantomData<fn(&'_ str) -> &'_ str> │     4 │
+        └─────────────────────────────────────┴───────┘
+    "#]]
+    .assert_eq(&table([Holds {
+        check: PhantomData,
+        count: 4,
     }]));
 }
 
@@ -632,6 +718,101 @@ fn struct_variant_payloads_flatten_like_nested_structs() {
             shape: Shape::Sized { width: 7 },
         },
     ]));
+}
+
+/// Two `HashMap`s holding the same entries, built in opposite insertion
+/// orders, render byte-identically: map entries render in
+/// sorted-by-rendered-key order, never iteration order, so randomized
+/// `HashMap` ordering cannot reach a snapshot (the crate's determinism
+/// contract).
+#[test]
+fn hash_maps_with_identical_entries_render_byte_identically() {
+    use std::collections::HashMap;
+
+    #[derive(Debug)]
+    struct Holds {
+        map: HashMap<u32, &'static str>,
+        count: u8,
+    }
+
+    let entries = [
+        (1, "one"),
+        (2, "two"),
+        (3, "three"),
+        (4, "four"),
+        (5, "five"),
+    ];
+    let forward: HashMap<u32, &'static str> = entries.into_iter().collect();
+    let reverse: HashMap<u32, &'static str> = entries.into_iter().rev().collect();
+
+    let rendered = table([Holds {
+        map: forward,
+        count: 4,
+    }]);
+    expect![[r#"
+        ┌────────────────────────────────────────────────────────┬───────┐
+        │ map                                                    │ count │
+        ├────────────────────────────────────────────────────────┼───────┤
+        │ {1: "one", 2: "two", 3: "three", 4: "four", 5: "five"} │     4 │
+        └────────────────────────────────────────────────────────┴───────┘
+    "#]]
+    .assert_eq(&rendered);
+    assert_eq!(
+        table([Holds {
+            map: reverse,
+            count: 4,
+        }]),
+        rendered
+    );
+}
+
+/// A `BTreeMap` — already deterministically ordered — renders its
+/// entries unchanged: single-token keys sort the same textually as its
+/// `Debug` output already orders them.
+#[test]
+fn btree_map_cells_render_their_debug_entries_unchanged() {
+    use std::collections::BTreeMap;
+
+    #[derive(Debug)]
+    struct Holds {
+        map: BTreeMap<u32, &'static str>,
+        count: u8,
+    }
+
+    let map = BTreeMap::from([(1, "one"), (2, "two")]);
+    assert_eq!(format!("{map:?}"), r#"{1: "one", 2: "two"}"#);
+    expect![[r#"
+        ┌──────────────────────┬───────┐
+        │ map                  │ count │
+        ├──────────────────────┼───────┤
+        │ {1: "one", 2: "two"} │     4 │
+        └──────────────────────┴───────┘
+    "#]]
+    .assert_eq(&table([Holds { map, count: 4 }]));
+}
+
+/// `HashSet` entries — braced `Debug` output without `: ` — render
+/// sorted by entry text, so set-bearing rows are as byte-stable as
+/// map-bearing ones.
+#[test]
+fn hash_set_cells_render_in_sorted_entry_order() {
+    use std::collections::HashSet;
+
+    #[derive(Debug)]
+    struct Holds {
+        set: HashSet<&'static str>,
+        count: u8,
+    }
+
+    let set: HashSet<&'static str> = ["borrow", "apply", "commit"].into_iter().collect();
+    expect![[r#"
+        ┌───────────────────────────────┬───────┐
+        │ set                           │ count │
+        ├───────────────────────────────┼───────┤
+        │ {"apply", "borrow", "commit"} │     4 │
+        └───────────────────────────────┴───────┘
+    "#]]
+    .assert_eq(&table([Holds { set, count: 4 }]));
 }
 
 /// Rows that are not structs carry no field names and render in a single
