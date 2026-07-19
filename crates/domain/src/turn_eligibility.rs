@@ -1318,6 +1318,7 @@ fn reconstitute_inner(
         active,
         input.active_acceptance_tail.as_ref(),
         &records_by_turn,
+        &accepted_input_turns,
     )?;
 
     Ok(AcceptedInputSchedulingProjection {
@@ -1335,6 +1336,7 @@ fn reconstitute_active_acceptance_tail(
     active: Option<TurnId>,
     candidate: Option<&SessionAcceptanceTailReconstitutionInput>,
     records_by_turn: &BTreeMap<TurnId, &AcceptedInputTurnSchedulingRecord>,
+    accepted_input_turns: &BTreeMap<AcceptedInputId, TurnId>,
 ) -> Result<Option<SessionAcceptanceTail>, AcceptedInputSchedulingReconstitutionFailure> {
     let (active, candidate) = match (active, candidate) {
         (None, None) => return Ok(None),
@@ -1420,17 +1422,28 @@ fn reconstitute_active_acceptance_tail(
                 records_by_turn.get(origin).is_some_and(|record| {
                     record.accepted_input.id() == accepted_input
                         && record.order.acceptance_position() == entry.position
-                        && !matches!(entry.delivery, DeliveryRequest::NextSafePoint { .. })
+                        && if index == 0 {
+                            !matches!(entry.delivery, DeliveryRequest::NextSafePoint { .. })
+                        } else {
+                            matches!(
+                                entry.delivery,
+                                DeliveryRequest::AfterCurrentTurn {
+                                    expected_active_turn,
+                                    ..
+                                } if expected_active_turn == active
+                            )
+                        }
                 })
             }
             AcceptedInputDisposition::PendingSteering { binding } => {
-                matches!(
-                    entry.delivery,
-                    DeliveryRequest::NextSafePoint {
-                        expected_active_turn,
-                    } if expected_active_turn == binding.source_turn()
-                        && expected_active_turn == active
-                )
+                !accepted_input_turns.contains_key(&accepted_input)
+                    && matches!(
+                        entry.delivery,
+                        DeliveryRequest::NextSafePoint {
+                            expected_active_turn,
+                        } if expected_active_turn == binding.source_turn()
+                            && expected_active_turn == active
+                    )
             }
             AcceptedInputDisposition::ConsumedAsSteering { .. }
             | AcceptedInputDisposition::ReclassifiedAsTurnOrigin { .. } => false,
@@ -1886,6 +1899,35 @@ mod tests {
         )
     }
 
+    fn active_input_with_post_anchor_origin(
+        session: &Session,
+        delivery: DeliveryRequest,
+    ) -> AcceptedInputSchedulingReconstitutionInput {
+        let mut tail =
+            active_tail(session, 10, 20, 1).expect("the helper constructs an active tail");
+        tail.observed_last_position =
+            SessionInputPosition::try_from_u64(2).expect("positive test position");
+        tail.entries
+            .push(SessionAcceptanceTailEntryReconstitutionInput::new(
+                session.id(),
+                AcceptedInputLifecycle::new(
+                    accepted_input_id(21),
+                    AcceptedInputDisposition::OriginOf(turn_id(11)),
+                ),
+                SessionInputPosition::try_from_u64(2).expect("positive test position"),
+                delivery,
+            ));
+        let mut input = active_input(session, Some(tail));
+        input.turns.push(record(
+            session,
+            11,
+            21,
+            2,
+            AcceptedInputTurnSchedulingRecordState::Queued,
+        ));
+        input
+    }
+
     /// S01 / INV-009 / INV-015: ancestry-free first eligibility fixes the
     /// origin-only frontier and enters Running with one Prepared attempt in
     /// the same sealed candidate.
@@ -2261,6 +2303,110 @@ mod tests {
             .expect_err("an origin disposition must retain its exact immutable position");
         assert_eq!(
             cross_wired.failure(),
+            &AcceptedInputSchedulingReconstitutionFailure::AcceptanceTailDispositionMismatch {
+                accepted_input: accepted_input_id(21),
+            }
+        );
+    }
+
+    /// S03 / S09 / INV-009 / INV-016 / ADR-0041: every post-anchor origin
+    /// was accepted after the exact active owner rather than through a vacant
+    /// start or against another predecessor.
+    #[test]
+    fn active_reconstitution_rejects_non_owning_post_anchor_origin_delivery() {
+        let session = current_session();
+        let vacant_start = active_input_with_post_anchor_origin(
+            &session,
+            DeliveryRequest::StartWhenNoActiveTurn {
+                configuration: PerInputConfigurationChoices::new(
+                    SessionConfigurationDefaultsVersion::first(),
+                    ModelSelectionOverride::UseSessionDefault,
+                ),
+            },
+        )
+        .reconstitute()
+        .expect_err("a post-anchor origin cannot claim a vacant-slot start");
+        assert_eq!(
+            vacant_start.failure(),
+            &AcceptedInputSchedulingReconstitutionFailure::AcceptanceTailDispositionMismatch {
+                accepted_input: accepted_input_id(21),
+            }
+        );
+
+        let another_predecessor = active_input_with_post_anchor_origin(
+            &session,
+            DeliveryRequest::AfterCurrentTurn {
+                expected_active_turn: turn_id(99),
+                configuration: PerInputConfigurationChoices::new(
+                    SessionConfigurationDefaultsVersion::first(),
+                    ModelSelectionOverride::UseSessionDefault,
+                ),
+            },
+        )
+        .reconstitute()
+        .expect_err("a post-anchor origin must name the exact active predecessor");
+        assert_eq!(
+            another_predecessor.failure(),
+            &AcceptedInputSchedulingReconstitutionFailure::AcceptanceTailDispositionMismatch {
+                accepted_input: accepted_input_id(21),
+            }
+        );
+
+        active_input_with_post_anchor_origin(
+            &session,
+            DeliveryRequest::AfterCurrentTurn {
+                expected_active_turn: turn_id(10),
+                configuration: PerInputConfigurationChoices::new(
+                    SessionConfigurationDefaultsVersion::first(),
+                    ModelSelectionOverride::UseSessionDefault,
+                ),
+            },
+        )
+        .reconstitute()
+        .expect("the exact active predecessor admits the queued origin");
+    }
+
+    /// S03 / S08 / INV-009 / INV-016 / ADR-0041: one accepted input cannot
+    /// be both pending steering and a turn origin in the scheduling inventory.
+    #[test]
+    fn active_reconstitution_rejects_pending_identity_that_is_also_an_origin() {
+        let session = current_session();
+        let mut tail =
+            active_tail(&session, 10, 20, 1).expect("the helper constructs an active tail");
+        tail.observed_last_position =
+            SessionInputPosition::try_from_u64(2).expect("positive test position");
+        tail.entries
+            .push(SessionAcceptanceTailEntryReconstitutionInput::new(
+                session.id(),
+                AcceptedInputLifecycle::new(
+                    accepted_input_id(21),
+                    AcceptedInputDisposition::PendingSteering {
+                        binding: crate::SteeringBinding::new(turn_id(10)),
+                    },
+                ),
+                SessionInputPosition::try_from_u64(2).expect("positive test position"),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: turn_id(10),
+                },
+            ));
+
+        active_input(&session, Some(tail.clone()))
+            .reconstitute()
+            .expect("pending steering remains distinct from every origin");
+
+        let mut aliased = active_input(&session, Some(tail));
+        aliased.turns.push(record(
+            &session,
+            11,
+            21,
+            2,
+            AcceptedInputTurnSchedulingRecordState::Queued,
+        ));
+        let aliased = aliased
+            .reconstitute()
+            .expect_err("pending steering cannot reuse a turn-origin identity");
+        assert_eq!(
+            aliased.failure(),
             &AcceptedInputSchedulingReconstitutionFailure::AcceptanceTailDispositionMismatch {
                 accepted_input: accepted_input_id(21),
             }
