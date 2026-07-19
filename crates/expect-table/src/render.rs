@@ -33,6 +33,12 @@ fn compact(value: &Value) -> String {
         Value::Str(body) => format!("\"{body}\""),
         Value::Char(body) => format!("'{body}'"),
         Value::List(items) => format!("[{}]", compact_items(items)),
+        // Derived `Debug` marks a singleton tuple with a trailing comma
+        // (`(1,)`); the compact form keeps it. Named one-element tuples
+        // (`Wrapped(9)`) carry no trailing comma in the grammar.
+        Value::Tuple { name: None, items } if items.len() == 1 => {
+            format!("({},)", compact(&items[0]))
+        }
         Value::Tuple { name: None, items } => format!("({})", compact_items(items)),
         Value::Tuple {
             name: Some(name),

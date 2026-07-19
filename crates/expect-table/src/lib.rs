@@ -9,6 +9,16 @@
 //! unrecognized region, such as a custom `Debug` impl's output, degrades to
 //! one verbatim atomic cell).
 //!
+//! Degradation is best-effort and asymmetric about bare commas. In a
+//! struct body a custom `Debug` leaf that prints an unbracketed comma
+//! (`x, y`) stays one cell and keeps its sibling columns, because a real
+//! field boundary — `identifier:` (never `::`) or the closing brace — is
+//! recognizable ahead of the comma. Inside tuples and lists no such
+//! signal exists, so every depth-zero comma separates items and a
+//! comma-printing custom leaf splits there; a hostile leaf whose text
+//! itself mimics the field grammar (`foo, bar: baz`) may likewise split
+//! inside a struct.
+//!
 //! Rendering rules:
 //!
 //! - Columns are struct fields, unioned across rows in first-appearance

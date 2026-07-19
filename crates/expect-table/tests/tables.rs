@@ -320,6 +320,76 @@ fn degraded_atom_with_interior_commas_leaves_siblings_intact() {
     }]));
 }
 
+/// A custom `Debug` leaf nested in a struct field may print a bare,
+/// unbracketed comma (`x, y`); the comma belongs to the leaf — what
+/// follows it is not the `field:` grammar — so the leaf degrades alone
+/// and every sibling column survives.
+#[test]
+fn custom_debug_leaf_with_unbracketed_comma_keeps_sibling_columns() {
+    struct Pair;
+
+    impl std::fmt::Debug for Pair {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "x, y")
+        }
+    }
+
+    #[derive(Debug)]
+    struct Holds {
+        before: u8,
+        pair: Pair,
+        after: u8,
+    }
+
+    expect![[r#"
+        ┌────────┬──────┬───────┐
+        │ before │ pair │ after │
+        ├────────┼──────┼───────┤
+        │      1 │ x, y │     2 │
+        └────────┴──────┴───────┘
+    "#]]
+    .assert_eq(&table([Holds {
+        before: 1,
+        pair: Pair,
+        after: 2,
+    }]));
+}
+
+/// A hostile custom `Debug` leaf whose text mimics the field grammar —
+/// `foo, bar: baz` — splits at the comma, because inside a struct body a
+/// comma followed by `identifier:` is indistinguishable from a real field
+/// boundary. This snapshot pins the observed best-effort degradation; it
+/// is not a promise. What the crate does promise is that the enclosing
+/// struct keeps its genuine sibling columns (`count` survives).
+#[test]
+fn hostile_leaf_mimicking_a_field_boundary_splits_best_effort() {
+    struct Hostile;
+
+    impl std::fmt::Debug for Hostile {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "foo, bar: baz")
+        }
+    }
+
+    #[derive(Debug)]
+    struct Holds {
+        leaf: Hostile,
+        count: u8,
+    }
+
+    expect![[r#"
+        ┌──────┬─────┬───────┐
+        │ leaf │ bar │ count │
+        ├──────┼─────┼───────┤
+        │ foo  │ baz │     4 │
+        └──────┴─────┴───────┘
+    "#]]
+    .assert_eq(&table([Holds {
+        leaf: Hostile,
+        count: 4,
+    }]));
+}
+
 /// A custom `Debug` impl emitting a raw newline cannot split a table row:
 /// control characters escape at cell rendering (`escape_debug`-style), so
 /// one logical row is always one physical, correctly padded line.
@@ -406,6 +476,37 @@ fn unit_and_tuple_variant_cells_render_compactly() {
             shape: Shape::Pair(3, 5),
         },
     ]));
+}
+
+/// Derived `Debug` writes a singleton tuple with a trailing comma —
+/// `(1,)` — and the cell keeps that form: the trailing comma is the
+/// grammar's own mark of a one-element tuple, not an empty extra item. A
+/// one-element tuple struct has no trailing comma in the grammar and
+/// renders without one.
+#[test]
+fn singleton_tuple_cells_keep_the_trailing_comma_form() {
+    #[derive(Debug)]
+    struct Wrapped(u32);
+
+    #[derive(Debug)]
+    struct Holds {
+        single: (u32,),
+        wrapped: Wrapped,
+        count: u8,
+    }
+
+    expect![[r#"
+        ┌────────┬────────────┬───────┐
+        │ single │ wrapped    │ count │
+        ├────────┼────────────┼───────┤
+        │ (1,)   │ Wrapped(9) │     4 │
+        └────────┴────────────┴───────┘
+    "#]]
+    .assert_eq(&table([Holds {
+        single: (1,),
+        wrapped: Wrapped(9),
+        count: 4,
+    }]));
 }
 
 /// A struct enum variant is indistinguishable from a nested struct in the
