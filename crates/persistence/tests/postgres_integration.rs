@@ -3615,10 +3615,11 @@ async fn occupied_slot_mixed_acceptances_serialize_positions_and_effects()
     Ok(())
 }
 
-/// INV-002 / INV-008 / INV-012: occupied-slot result shapes and correlations
-/// are database-enforced, the stopping rejection's admitted representation
-/// decodes exactly, and checked replay fails closed on a deliberately
-/// constraint-bypassed pending-steering row.
+/// INV-002 / INV-005 / INV-008 / INV-012 / INV-016: occupied-slot result
+/// shapes and correlations are database-enforced, pending steering keeps its
+/// source active and cannot become semantic origin, the stopping rejection's
+/// admitted representation decodes exactly, and checked replay fails closed
+/// on a deliberately constraint-bypassed pending-steering row.
 ///
 /// Stop-requested scheduling storage is outside this slice. The
 /// safe-point-unavailable row below is therefore a representation-only
@@ -3670,6 +3671,94 @@ async fn occupied_slot_schema_constraints_and_checked_decode_fail_closed()
             None,
         )
         .await?;
+
+    let semantic_pending_error = sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             origin_accepted_input_id, failed_turn_id)
+         VALUES ($1, $2, 'origin_accepted_input', $3, NULL)",
+    )
+    .bind(Uuid::from_u128(0x861))
+    .bind(Uuid::from_u128(0xd62))
+    .bind(Uuid::from_u128(0x962))
+    .execute(&pool)
+    .await
+    .expect_err("pending steering cannot establish a semantic turn origin");
+    let semantic_pending_database_error = semantic_pending_error
+        .as_database_error()
+        .expect("deferred semantic-origin validation must return a database error");
+    assert_eq!(semantic_pending_database_error.code(), Some("23514".into()));
+    assert_eq!(
+        semantic_pending_database_error.constraint(),
+        Some("semantic_transcript_entry_origin_disposition")
+    );
+
+    let mut terminalize_source = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             origin_accepted_input_id, failed_turn_id)
+         VALUES ($1, $2, 'turn_failed', NULL, $3)",
+    )
+    .bind(Uuid::from_u128(0x861))
+    .bind(Uuid::from_u128(0xd63))
+    .bind(Uuid::from_u128(0xa61))
+    .execute(&mut *terminalize_source)
+    .await?;
+    insert_frontier(
+        &mut terminalize_source,
+        Uuid::from_u128(0x861),
+        Uuid::from_u128(0xe63),
+        Decimal::from(2_u64),
+        &[
+            (Decimal::ONE, Uuid::from_u128(0x861), Uuid::from_u128(0xd61)),
+            (
+                Decimal::from(2_u64),
+                Uuid::from_u128(0x861),
+                Uuid::from_u128(0xd63),
+            ),
+        ],
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended',
+                end_variant = 'without_stop',
+                end_disposition = 'known_failure'
+          WHERE turn_attempt_id = $1",
+    )
+    .bind(Uuid::from_u128(0xb61))
+    .execute(&mut *terminalize_source)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET state_kind = 'terminal',
+                active_phase_kind = NULL,
+                current_attempt_id = NULL,
+                terminal_frontier_id = $1,
+                terminal_disposition_kind = 'failed'
+          WHERE turn_id = $2",
+    )
+    .bind(Uuid::from_u128(0xe63))
+    .bind(Uuid::from_u128(0xa61))
+    .execute(&mut *terminalize_source)
+    .await?;
+    let terminalize_source_error = terminalize_source
+        .commit()
+        .await
+        .expect_err("pending steering must keep its source turn active");
+    let terminalize_source_database_error = terminalize_source_error
+        .as_database_error()
+        .expect("deferred pending-source validation must return a database error");
+    assert_eq!(
+        terminalize_source_database_error.code(),
+        Some("23514".into())
+    );
+    assert_eq!(
+        terminalize_source_database_error.constraint(),
+        Some("turn_lifecycle_pending_steering_closed")
+    );
+
     repository
         .handle(
             input_with_delivery(

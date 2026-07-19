@@ -1,5 +1,6 @@
 //! Atomic PostgreSQL persistence and replay for durable input acceptance.
 
+use std::collections::BTreeMap;
 use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
@@ -8,12 +9,12 @@ use signalbox_domain::{
     AcceptedInputDisposition, AcceptedInputId, AcceptedInputLifecycle, AcceptedInputQueueOrder,
     AcceptedInputSchedulingProjection, AcceptedInputSchedulingReconstitutionFailure,
     AcceptedInputSchedulingReconstitutionInput, AcceptedInputStartingLineage,
-    AcceptedInputTurnSchedulingRecord, AcceptedInputTurnSchedulingRecordState, Actor,
-    ContextFrontierId, CurrentTurnAttemptState, DeliveryRequest, DirectModelSelection,
-    DurableCommandId, FrozenAliasDefinition, FrozenModelSelection,
-    InitialSemanticTranscriptEntryPayload, ModelAlias, ModelSelectionOverride,
-    ModelSelectionRequest, NonEmptyUnicodeTextFailure, PerInputConfigurationChoices,
-    PreparedSubmitInput, PreparedTurnAttemptReconstitutionInput, ReconstitutedSubmitInput,
+    AcceptedInputTurnSchedulingRecord, AcceptedInputTurnSchedulingRecordState,
+    ActiveTurnSchedulingReconstitutionInput, Actor, ContextFrontierId, CurrentTurnAttemptState,
+    DeliveryRequest, DirectModelSelection, DurableCommandId, FrozenAliasDefinition,
+    FrozenModelSelection, InitialSemanticTranscriptEntryPayload, ModelAlias,
+    ModelSelectionOverride, ModelSelectionRequest, NonEmptyUnicodeTextFailure,
+    PerInputConfigurationChoices, PreparedSubmitInput, ReconstitutedSubmitInput,
     ResolvedContextFrontierReconstitutionInput, SemanticTranscriptEntryId,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session,
     SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
@@ -353,6 +354,40 @@ async fn require_recorded(
         .ok_or_else(|| SubmitInputCorruption::Inconsistent("registry entry disappeared").into())
 }
 
+async fn require_recorded_batch(
+    connection: &mut PgConnection,
+    command_ids: &[DurableCommandId],
+) -> Result<BTreeMap<DurableCommandId, ReconstitutedSubmitInput>, SubmitInputRepositoryError> {
+    let requested = command_ids
+        .iter()
+        .copied()
+        .map(|command_id| (durable_command_id_to_uuid(command_id), command_id))
+        .collect::<BTreeMap<_, _>>();
+    let requested_uuids = requested.keys().copied().collect::<Vec<_>>();
+    let rows = load_complete_rows(connection, &requested_uuids).await?;
+    let mut recorded = BTreeMap::new();
+    for row in rows {
+        let command_uuid: Uuid = required(&row, "registry_command_id")?;
+        let command_id =
+            requested
+                .get(&command_uuid)
+                .copied()
+                .ok_or(SubmitInputCorruption::Inconsistent(
+                    "unexpected batched command identity",
+                ))?;
+        let reconstructed = decode_complete(row, command_id, None)?;
+        if recorded.insert(command_id, reconstructed).is_some() {
+            return Err(
+                SubmitInputCorruption::Inconsistent("duplicate batched command row").into(),
+            );
+        }
+    }
+    if recorded.len() != requested.len() {
+        return Err(SubmitInputCorruption::Missing("batched origin command").into());
+    }
+    Ok(recorded)
+}
+
 fn existing_outcome(
     command: &SubmitInput,
     recorded: ReconstitutedSubmitInput,
@@ -494,6 +529,9 @@ async fn prepare_against_locked_state(
         SubmitInputPreparationFailure::ActiveTurnProjectionIsNotActive { .. } => {
             SubmitInputCorruption::Inconsistent("selected active turn state").into()
         }
+        SubmitInputPreparationFailure::AcceptanceTailPrecedesActiveOrigin { .. } => {
+            SubmitInputCorruption::Inconsistent("occupied acceptance tail").into()
+        }
         SubmitInputPreparationFailure::InterruptApplicationUnavailable => {
             SubmitInputRepositoryError::InterruptApplicationUnavailable {
                 command_id: error.command().command_id(),
@@ -569,9 +607,18 @@ async fn load_scheduling_projection(
     .bind(session_id_to_uuid(session_id))
     .fetch_all(&mut *connection)
     .await?;
+    let mut accepting_commands = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let command_uuid: Uuid = required(row, "accepting_command_id")?;
+        accepting_commands.push(
+            durable_command_id_from_uuid(command_uuid)
+                .map_err(|_| SubmitInputCorruption::Inconsistent("accepting command identity"))?,
+        );
+    }
+    let recorded_commands = require_recorded_batch(connection, &accepting_commands).await?;
 
     let mut turns = Vec::with_capacity(rows.len());
-    for row in rows {
+    for (row, accepting_command) in rows.into_iter().zip(accepting_commands) {
         let queued_turn = turn_id_from_uuid(required(&row, "queued_turn_id")?);
         let queued_accepted =
             accepted_input_id_from_uuid(required(&row, "queued_accepted_input_id")?);
@@ -579,9 +626,6 @@ async fn load_scheduling_projection(
         let queued_position = decode_position(&row, "queued_position")?;
         require_spelling(&row, "priority_kind", "ordinary")?;
 
-        let accepting_command_uuid: Uuid = required(&row, "accepting_command_id")?;
-        let accepting_command = durable_command_id_from_uuid(accepting_command_uuid)
-            .map_err(|_| SubmitInputCorruption::Inconsistent("accepting command identity"))?;
         let accepted_input = accepted_input_id_from_uuid(required(&row, "accepted_input_id")?);
         let accepted_session = session_id_from_uuid(required(&row, "accepted_session_id")?);
         require_spelling(&row, "disposition_kind", "origin_of")?;
@@ -599,7 +643,9 @@ async fn load_scheduling_projection(
             .into());
         }
 
-        let recorded = require_recorded(connection, accepting_command).await?;
+        let recorded = recorded_commands
+            .get(&accepting_command)
+            .ok_or(SubmitInputCorruption::Missing("batched origin receipt"))?;
         let origin_configuration = match recorded.result() {
             SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(applied))
                 if applied.accepted_input() == accepted_input
@@ -664,24 +710,34 @@ async fn load_scheduling_projection(
                     || attempt_turn != lifecycle_turn
                     || attempt_session != lifecycle_session
                     || continued_from.is_some()
-                    || attempt_state != "prepared"
                     || end_variant.is_some()
                     || end_disposition.is_some()
                 {
                     return Err(
-                        SubmitInputCorruption::Inconsistent("prepared active attempt").into(),
+                        SubmitInputCorruption::Inconsistent("active current attempt").into(),
                     );
                 }
+                let current_attempt_state = match attempt_state.as_str() {
+                    "prepared" => CurrentTurnAttemptState::Prepared,
+                    "running" => CurrentTurnAttemptState::Running,
+                    value => {
+                        return Err(SubmitInputCorruption::Unsupported {
+                            field: "active attempt state_kind",
+                            value: value.to_owned(),
+                        }
+                        .into());
+                    }
+                };
                 AcceptedInputTurnSchedulingRecordState::Active {
                     starting_lineage: decode_starting_lineage(lineage_kind, predecessor)?,
                     starting_frontier: ContextFrontierId::from_uuid(
                         starting_frontier
                             .ok_or(SubmitInputCorruption::Missing("starting_frontier_id"))?,
                     ),
-                    current_attempt: PreparedTurnAttemptReconstitutionInput::new(
+                    phase: ActiveTurnSchedulingReconstitutionInput::running(
                         lifecycle_turn,
                         attempt_id,
-                        CurrentTurnAttemptState::Prepared,
+                        current_attempt_state,
                     ),
                 }
             }
@@ -791,21 +847,38 @@ async fn load_scheduling_projection(
     .bind(session_id_to_uuid(session_id))
     .fetch_all(&mut *connection)
     .await?;
+    let member_rows = sqlx::query(
+        "SELECT
+            context_frontier_id,
+            member_position,
+            source_session_id,
+            semantic_entry_id
+           FROM context_frontier_member
+          WHERE owning_session_id = $1
+          ORDER BY context_frontier_id, member_position",
+    )
+    .bind(session_id_to_uuid(session_id))
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut members_by_frontier =
+        BTreeMap::<Uuid, Vec<(Decimal, SessionId, SemanticTranscriptEntryId)>>::new();
+    for member_row in member_rows {
+        members_by_frontier
+            .entry(required(&member_row, "context_frontier_id")?)
+            .or_default()
+            .push((
+                required(&member_row, "member_position")?,
+                session_id_from_uuid(required(&member_row, "source_session_id")?),
+                SemanticTranscriptEntryId::from_uuid(required(&member_row, "semantic_entry_id")?),
+            ));
+    }
     let mut snapshots = Vec::with_capacity(frontier_rows.len());
     for frontier_row in frontier_rows {
         let frontier_uuid: Uuid = required(&frontier_row, "context_frontier_id")?;
         let declared_count: Decimal = required(&frontier_row, "member_count")?;
-        let member_rows = sqlx::query(
-            "SELECT member_position, source_session_id, semantic_entry_id
-               FROM context_frontier_member
-              WHERE owning_session_id = $1
-                AND context_frontier_id = $2
-              ORDER BY member_position",
-        )
-        .bind(session_id_to_uuid(session_id))
-        .bind(frontier_uuid)
-        .fetch_all(&mut *connection)
-        .await?;
+        let member_rows = members_by_frontier
+            .remove(&frontier_uuid)
+            .unwrap_or_default();
         let actual_count = u64::try_from(member_rows.len())
             .expect("PostgreSQL result cardinality fits the u64 schema bound");
         if declared_count != Decimal::from(actual_count) {
@@ -815,8 +888,9 @@ async fn load_scheduling_projection(
             .into());
         }
         let mut members = Vec::with_capacity(member_rows.len());
-        for (index, member_row) in member_rows.into_iter().enumerate() {
-            let position: Decimal = required(&member_row, "member_position")?;
+        for (index, (position, source_session, semantic_entry)) in
+            member_rows.into_iter().enumerate()
+        {
             let expected_position = u64::try_from(index + 1)
                 .expect("PostgreSQL result cardinality fits the u64 schema bound");
             if position != Decimal::from(expected_position) {
@@ -826,8 +900,8 @@ async fn load_scheduling_projection(
                 .into());
             }
             members.push(SemanticTranscriptEntryRef::from_source(
-                session_id_from_uuid(required(&member_row, "source_session_id")?),
-                SemanticTranscriptEntryId::from_uuid(required(&member_row, "semantic_entry_id")?),
+                source_session,
+                semantic_entry,
             ));
         }
         snapshots.push(ResolvedContextFrontierReconstitutionInput::new(
@@ -835,6 +909,11 @@ async fn load_scheduling_projection(
             ContextFrontierId::from_uuid(frontier_uuid),
             members,
         ));
+    }
+    if !members_by_frontier.is_empty() {
+        return Err(
+            SubmitInputCorruption::Inconsistent("context frontier member without header").into(),
+        );
     }
 
     AcceptedInputSchedulingReconstitutionInput::new(session, turns, semantic_entries, snapshots)
@@ -1384,12 +1463,13 @@ fn configured_defaults_version(
     }
 }
 
-async fn load_from_connection(
+async fn load_complete_rows(
     connection: &mut PgConnection,
-    command_id: DurableCommandId,
-) -> Result<Option<ReconstitutedSubmitInput>, SubmitInputRepositoryError> {
-    let row = sqlx::query(
+    command_ids: &[Uuid],
+) -> Result<Vec<PgRow>, SubmitInputRepositoryError> {
+    let rows = sqlx::query(
         "SELECT
+            registry.command_id AS registry_command_id,
             registry.command_kind AS registry_kind,
             registry.storage_version AS registry_version,
             typed.command_id AS typed_command_id,
@@ -1481,18 +1561,95 @@ async fn load_from_connection(
                 queued.defaults_version,
                 typed.result_selected_defaults_version
               )
-         WHERE registry.command_id = $1",
+         WHERE registry.command_id = ANY($1)",
     )
-    .bind(durable_command_id_to_uuid(command_id))
-    .fetch_optional(&mut *connection)
+    .bind(command_ids)
+    .fetch_all(&mut *connection)
     .await?;
 
-    row.map(|row| decode_complete(row, command_id)).transpose()
+    Ok(rows)
+}
+
+async fn load_from_connection(
+    connection: &mut PgConnection,
+    command_id: DurableCommandId,
+) -> Result<Option<ReconstitutedSubmitInput>, SubmitInputRepositoryError> {
+    let command_uuid = durable_command_id_to_uuid(command_id);
+    let mut rows = load_complete_rows(connection, &[command_uuid]).await?;
+    let Some(row) = rows.pop() else {
+        return Ok(None);
+    };
+    if !rows.is_empty() {
+        return Err(SubmitInputCorruption::Inconsistent("duplicate complete command rows").into());
+    }
+    let source_turn_origin = load_pending_source_turn_origin(connection, &row).await?;
+    decode_complete(row, command_id, source_turn_origin).map(Some)
+}
+
+async fn load_pending_source_turn_origin(
+    connection: &mut PgConnection,
+    row: &PgRow,
+) -> Result<Option<ReconstitutedSubmitInput>, SubmitInputRepositoryError> {
+    let result_kind: Option<String> = row.try_get("result_kind")?;
+    let result_turn: Option<Uuid> = row.try_get("result_turn_id")?;
+    let source_turn: Option<Uuid> = row.try_get("result_actual_active_turn_id")?;
+    if result_kind.as_deref() != Some(APPLIED) || result_turn.is_some() || source_turn.is_none() {
+        return Ok(None);
+    }
+
+    let source_turn = source_turn.expect("checked present source turn");
+    let source_session: Uuid = required(row, "result_session_id")?;
+    let source_command_uuid: Uuid = sqlx::query_scalar(
+        "SELECT accepted.accepting_command_id
+           FROM turn_lifecycle AS turn
+           JOIN queued_input_origin AS queued
+             ON queued.turn_id = turn.turn_id
+            AND queued.session_id = turn.session_id
+            AND queued.accepted_input_id = turn.origin_accepted_input_id
+           JOIN accepted_input AS accepted
+             ON accepted.accepted_input_id = queued.accepted_input_id
+            AND accepted.session_id = turn.session_id
+            AND accepted.origin_turn_id = turn.turn_id
+            AND accepted.disposition_kind = 'origin_of'
+          WHERE turn.turn_id = $1
+            AND turn.session_id = $2",
+    )
+    .bind(source_turn)
+    .bind(source_session)
+    .fetch_optional(&mut *connection)
+    .await?
+    .ok_or(SubmitInputCorruption::Missing(
+        "pending steering source turn origin",
+    ))?;
+    let source_command = durable_command_id_from_uuid(source_command_uuid)
+        .map_err(|_| SubmitInputCorruption::Inconsistent("source command identity"))?;
+    let mut source_rows = load_complete_rows(connection, &[source_command_uuid]).await?;
+    let source_row = source_rows
+        .pop()
+        .ok_or(SubmitInputCorruption::Missing("source turn origin command"))?;
+    if !source_rows.is_empty() {
+        return Err(SubmitInputCorruption::Inconsistent("duplicate source command rows").into());
+    }
+    let source_origin = decode_complete(source_row, source_command, None)?;
+    let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(applied)) =
+        source_origin.result()
+    else {
+        return Err(
+            SubmitInputCorruption::Inconsistent("source command turn-origin result").into(),
+        );
+    };
+    if applied.session() != session_id_from_uuid(source_session)
+        || applied.turn() != turn_id_from_uuid(source_turn)
+    {
+        return Err(SubmitInputCorruption::Inconsistent("source turn origin correlation").into());
+    }
+    Ok(Some(source_origin))
 }
 
 fn decode_complete(
     row: PgRow,
     command_id: DurableCommandId,
+    source_turn_origin: Option<ReconstitutedSubmitInput>,
 ) -> Result<ReconstitutedSubmitInput, SubmitInputRepositoryError> {
     require_spelling(&row, "registry_kind", SUBMIT_INPUT_KIND)?;
     require_version(&row, "registry_version", STORAGE_VERSION)?;
@@ -1581,6 +1738,9 @@ fn decode_complete(
                     )?
                 }
                 (None, Some(source_turn)) if queued_effect_count == 0 => {
+                    let source_turn_origin = source_turn_origin.ok_or(
+                        SubmitInputCorruption::Missing("pending steering source turn origin"),
+                    )?;
                     decode_applied_pending_steering(
                         &row,
                         command,
@@ -1588,6 +1748,7 @@ fn decode_complete(
                         result_session,
                         result_accepted,
                         turn_id_from_uuid(source_turn),
+                        source_turn_origin,
                     )?
                 }
                 _ => {
@@ -1741,6 +1902,7 @@ fn decode_applied_pending_steering(
     result_session: SessionId,
     result_accepted_input: AcceptedInputId,
     result_source_turn: TurnId,
+    source_turn_origin: ReconstitutedSubmitInput,
 ) -> Result<SubmitInputReconstitutionInput, SubmitInputRepositoryError> {
     let accepting_command_uuid: Uuid = required(row, "accepting_command_id")?;
     let accepting_command = durable_command_id_from_uuid(accepting_command_uuid)
@@ -1775,6 +1937,7 @@ fn decode_applied_pending_steering(
         result_session,
         result_accepted_input,
         result_source_turn,
+        source_turn_origin,
         accepting_command,
         accepted_input,
         accepted_session,
