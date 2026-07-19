@@ -690,18 +690,12 @@ mod tests {
         .expect("test session projection is complete")
     }
 
-    fn command(
-        id: u128,
-        target: crate::SessionId,
-        expected: u64,
-        replacement: u128,
-    ) -> ReplaceSessionDefaults {
-        ReplaceSessionDefaults::new(
-            command_id(id),
-            target,
-            version(expected),
-            defaults(replacement),
-        )
+    /// The canonical replacement command for `target`, expecting the given
+    /// current version; the command identity and replacement defaults are
+    /// canonical, and tests that care about them assert through the command's
+    /// own accessors.
+    fn command_expecting(target: crate::SessionId, expected: u64) -> ReplaceSessionDefaults {
+        ReplaceSessionDefaults::new(command_id(1), target, version(expected), defaults(2))
     }
 
     /// The complete stored facts backing one applied replacement, mirroring
@@ -757,12 +751,20 @@ mod tests {
     #[test]
     fn s01_inv012_comparison_payload_is_structural() {
         let target = session_id(1);
-        let baseline = command(1, target, 1, 2);
+        let baseline = ReplaceSessionDefaults::new(command_id(1), target, version(1), defaults(2));
+        let different_command_id =
+            ReplaceSessionDefaults::new(command_id(2), target, version(1), defaults(2));
+        let different_target =
+            ReplaceSessionDefaults::new(command_id(1), session_id(2), version(1), defaults(2));
+        let different_expected_version =
+            ReplaceSessionDefaults::new(command_id(1), target, version(2), defaults(2));
+        let different_replacement =
+            ReplaceSessionDefaults::new(command_id(1), target, version(1), defaults(3));
 
-        assert_eq!(baseline, command(2, target, 1, 2));
-        assert_ne!(baseline, command(1, session_id(2), 1, 2));
-        assert_ne!(baseline, command(1, target, 2, 2));
-        assert_ne!(baseline, command(1, target, 1, 3));
+        assert_eq!(baseline, different_command_id);
+        assert_ne!(baseline, different_target);
+        assert_ne!(baseline, different_expected_version);
+        assert_ne!(baseline, different_replacement);
     }
 
     /// S01 / INV-008: matching current state installs one complete immutable
@@ -771,7 +773,8 @@ mod tests {
     fn s01_inv008_matching_version_prepares_complete_successor() {
         let target = session_id(1);
         let current = session(target, 1);
-        let prepared = command(1, target, 1, 2)
+        let replacement = command_expecting(target, 1);
+        let prepared = replacement
             .prepare_against(&current)
             .expect("the supplied session matches");
 
@@ -780,7 +783,7 @@ mod tests {
         };
         assert_eq!(applied.session(), target);
         assert_eq!(applied.installed().version(), version(2));
-        assert_eq!(applied.installed().defaults(), &defaults(2));
+        assert_eq!(applied.installed().defaults(), &replacement.replacement());
         assert_eq!(
             current.current_configuration_defaults().version(),
             version(1)
@@ -792,7 +795,7 @@ mod tests {
     #[test]
     fn s01_inv008_inv012_stale_version_prepares_authoritative_rejection() {
         let target = session_id(1);
-        let prepared = command(1, target, 1, 2)
+        let prepared = command_expecting(target, 1)
             .prepare_against(&session(target, 2))
             .expect("the supplied session matches");
 
@@ -812,7 +815,7 @@ mod tests {
     #[test]
     fn s01_inv012_missing_exhausted_and_cross_wired_are_distinct() {
         let target = session_id(1);
-        let missing = command(1, target, 1, 2).prepare_session_not_found();
+        let missing = command_expecting(target, 1).prepare_session_not_found();
         assert!(matches!(
             missing.result(),
             ReplaceSessionDefaultsResult::Rejected(
@@ -834,7 +837,7 @@ mod tests {
             )
         ));
 
-        let error = command(3, target, 1, 2)
+        let error = command_expecting(target, 1)
             .prepare_against(&session(session_id(2), 1))
             .expect_err("another session is an adapter correlation failure");
         assert_eq!(error.command().session(), target);
@@ -846,17 +849,9 @@ mod tests {
     #[test]
     fn s01_inv002_inv008_inv012_applied_reconstitution_checks_complete_effects() {
         let target = session_id(1);
-        let command = command(1, target, 1, 2);
-        let input = ReplaceSessionDefaultsReconstitutionInput::applied(
-            command,
-            target,
-            version(2),
-            target,
-            version(2),
-            defaults(2),
-        );
-        let reconstructed = input
-            .reconstitute()
+        let command = command_expecting(target, 1);
+        let reconstructed = AppliedFacts::matching(&command)
+            .reconstitute(command)
             .expect("matching complete facts reconstruct");
 
         assert_eq!(reconstructed.command(), &command);
@@ -865,7 +860,7 @@ mod tests {
         };
         assert_eq!(applied.session(), target);
         assert_eq!(applied.installed().version(), version(2));
-        assert_eq!(applied.installed().defaults(), &defaults(2));
+        assert_eq!(applied.installed().defaults(), &command.replacement());
     }
 
     /// S01 / INV-008 / INV-012: equal replay of an earlier applied command
@@ -874,7 +869,7 @@ mod tests {
     #[test]
     fn s01_inv008_inv012_historical_applied_receipt_ignores_later_current_pointer() {
         let target = session_id(1);
-        let historical_command = command(1, target, 1, 2);
+        let historical_command = command_expecting(target, 1);
         let current_after_later_replacement = session(target, 3);
         assert_eq!(
             current_after_later_replacement
@@ -883,16 +878,9 @@ mod tests {
             version(3)
         );
 
-        let historical_receipt = ReplaceSessionDefaultsReconstitutionInput::applied(
-            historical_command,
-            target,
-            version(2),
-            target,
-            version(2),
-            defaults(2),
-        )
-        .reconstitute()
-        .expect("later pointer movement cannot invalidate immutable history");
+        let historical_receipt = AppliedFacts::matching(&historical_command)
+            .reconstitute(historical_command)
+            .expect("later pointer movement cannot invalidate immutable history");
 
         let ReplaceSessionDefaultsResult::Applied(applied) = historical_receipt.result() else {
             panic!("historical applied facts must reconstruct their recorded result");
@@ -906,7 +894,7 @@ mod tests {
     fn s01_inv002_inv012_applied_reconstitution_fails_closed() {
         let target = session_id(1);
         let another_session = session_id(2);
-        let command = command(1, target, 1, 2);
+        let command = command_expecting(target, 1);
         let matching = AppliedFacts::matching(&command);
 
         let cross_wired_result = AppliedFacts {
@@ -1024,7 +1012,7 @@ mod tests {
     #[test]
     fn s01_inv002_inv012_rejected_reconstitution_is_checked() {
         let target = session_id(1);
-        let command = command(1, target, 1, 2);
+        let command = command_expecting(target, 1);
 
         let mismatch =
             ReplaceSessionDefaultsReconstitutionInput::rejected_current_version_mismatch(

@@ -233,34 +233,44 @@ mod tests {
         )
     }
 
+    /// The one open tool request retained by [`prepared_facts`].
+    fn open_request() -> OwnedLogicalDependencyRef {
+        OwnedLogicalDependencyRef::ToolRequest(tool_request_id(1))
+    }
+
+    /// The one open approval dependency retained by [`prepared_facts`].
+    fn open_approval() -> OwnedLogicalDependencyRef {
+        OwnedLogicalDependencyRef::Approval(tool_request_id(2))
+    }
+
+    /// The one already-closed dependency retained by [`prepared_facts`].
+    fn closed_request() -> OwnedLogicalDependencyRef {
+        OwnedLogicalDependencyRef::ToolRequest(tool_request_id(3))
+    }
+
     fn prepared_facts(
         extra_operations: impl IntoIterator<Item = (IssuedOperationRef, IssuedOperationClosure)>,
     ) -> PostEvidenceFatalMismatchFacts {
+        let invalidated_call = model_call_id(1);
         let mut operations = BTreeMap::from([(
-            IssuedOperationRef::ModelCall(model_call_id(1)),
+            IssuedOperationRef::ModelCall(invalidated_call),
             IssuedOperationClosure::ClassifiedNonAmbiguous,
         )]);
         operations.extend(extra_operations);
         CompleteFatalMismatchProjection::new(
             CurrentTurnAttempt::prepared(turn_attempt_id(1)),
             BTreeMap::from([
+                (open_request(), LogicalDependencyClosure::Open),
+                (open_approval(), LogicalDependencyClosure::Open),
                 (
-                    OwnedLogicalDependencyRef::ToolRequest(tool_request_id(1)),
-                    LogicalDependencyClosure::Open,
-                ),
-                (
-                    OwnedLogicalDependencyRef::Approval(tool_request_id(2)),
-                    LogicalDependencyClosure::Open,
-                ),
-                (
-                    OwnedLogicalDependencyRef::ToolRequest(tool_request_id(3)),
+                    closed_request(),
                     LogicalDependencyClosure::TerminallyNonDispatchable,
                 ),
             ]),
             operations,
         )
         .apply(AppliedProviderTargetMismatch::test_completed_invalidation(
-            model_call_id(1),
+            invalidated_call,
         ))
         .expect("prepared completed-call invalidation derives sealed facts")
     }
@@ -299,10 +309,7 @@ mod tests {
                 .candidate()
                 .required_logical_closures()
                 .collect::<BTreeSet<_>>(),
-            BTreeSet::from([
-                OwnedLogicalDependencyRef::ToolRequest(tool_request_id(1)),
-                OwnedLogicalDependencyRef::Approval(tool_request_id(2)),
-            ])
+            BTreeSet::from([open_request(), open_approval()])
         );
         assert_eq!(
             binding.candidate().turn_disposition(),
@@ -324,36 +331,36 @@ mod tests {
     /// the atomic-only path with exact facts and source phase unchanged.
     #[test]
     fn s21_inv006_inv014_incomplete_prepared_physical_closure_rejects_unchanged() {
-        let cases = [
-            prepared_facts([(
-                IssuedOperationRef::ToolAttempt(tool_attempt_id(1)),
-                IssuedOperationClosure::Unclassified,
-            )]),
-            prepared_facts([(
-                IssuedOperationRef::ToolAttempt(tool_attempt_id(1)),
-                IssuedOperationClosure::PhysicallyAmbiguous {
-                    turn_treatment: AmbiguousOperationTurnTreatment::Blocking,
-                },
-            )]),
-        ];
-        for facts in cases {
-            let unchanged_facts = facts.clone();
-            let source_phase = ActiveTurnPhase::Running {
-                current_attempt: CurrentTurnAttempt::prepared(turn_attempt_id(1)),
-            };
-            let unchanged_source = source_phase.clone();
-            let error = facts
-                .bind_prepared_atomic_candidate(source_phase)
-                .expect_err("Prepared has no stop or reconciliation branch");
-            assert_eq!(
-                error.into_parts(),
-                (
-                    unchanged_facts,
-                    unchanged_source,
-                    PreparedFatalMismatchBindingRejection::PhysicalClosureIsIncomplete,
-                )
-            );
-        }
+        assert_incomplete_physical_closure_rejects_unchanged(IssuedOperationClosure::Unclassified);
+        assert_incomplete_physical_closure_rejects_unchanged(
+            IssuedOperationClosure::PhysicallyAmbiguous {
+                turn_treatment: AmbiguousOperationTurnTreatment::Blocking,
+            },
+        );
+    }
+
+    #[track_caller]
+    fn assert_incomplete_physical_closure_rejects_unchanged(open_closure: IssuedOperationClosure) {
+        let facts = prepared_facts([(
+            IssuedOperationRef::ToolAttempt(tool_attempt_id(1)),
+            open_closure,
+        )]);
+        let unchanged_facts = facts.clone();
+        let source_phase = ActiveTurnPhase::Running {
+            current_attempt: CurrentTurnAttempt::prepared(turn_attempt_id(1)),
+        };
+        let unchanged_source = source_phase.clone();
+        let error = facts
+            .bind_prepared_atomic_candidate(source_phase)
+            .expect_err("Prepared has no stop or reconciliation branch");
+        assert_eq!(
+            error.into_parts(),
+            (
+                unchanged_facts,
+                unchanged_source,
+                PreparedFatalMismatchBindingRejection::PhysicalClosureIsIncomplete,
+            )
+        );
     }
 
     /// INV-006: phase shape, exact attempt correlation, and Prepared state all
@@ -389,71 +396,74 @@ mod tests {
             ))
             .expect("completed-call invalidation derives sealed facts")
         };
-        let cases = vec![
-            (
-                prepared_facts([]),
-                ActiveTurnPhase::AwaitingApproval {
-                    request: tool_request_id(1),
-                },
-                PreparedFatalMismatchBindingRejection::SourcePhaseIsNotRunning,
-            ),
-            (
-                prepared_facts([]),
-                ActiveTurnPhase::AwaitingRecoveryDecision {
-                    ambiguous_operations: NonEmptyIssuedOperationRefs::try_from_operations([
-                        IssuedOperationRef::ToolAttempt(tool_attempt_id(1)),
-                    ])
-                    .expect("one operation is nonempty"),
-                },
-                PreparedFatalMismatchBindingRejection::SourcePhaseIsNotRunning,
-            ),
-            (
-                prepared_facts([]),
-                ActiveTurnPhase::Running {
-                    current_attempt: CurrentTurnAttempt::prepared(turn_attempt_id(2)),
-                },
-                PreparedFatalMismatchBindingRejection::SourceAttemptMismatch,
-            ),
-            (
-                prepared_facts([]),
-                ActiveTurnPhase::Running {
-                    current_attempt: running.clone(),
-                },
-                PreparedFatalMismatchBindingRejection::SourceAttemptMismatch,
-            ),
-            (
-                facts_for(running.clone()),
-                ActiveTurnPhase::Running {
-                    current_attempt: running,
-                },
-                PreparedFatalMismatchBindingRejection::SourceAttemptIsNotPrepared,
-            ),
-            (
-                facts_for(cancellation_stopped.clone()),
-                ActiveTurnPhase::Running {
-                    current_attempt: cancellation_stopped,
-                },
-                PreparedFatalMismatchBindingRejection::SourceAttemptIsNotPrepared,
-            ),
-            (
-                facts_for(fatal_stopped.clone()),
-                ActiveTurnPhase::Running {
-                    current_attempt: fatal_stopped,
-                },
-                PreparedFatalMismatchBindingRejection::SourceAttemptIsNotPrepared,
-            ),
-        ];
+        assert_prepared_binding_rejects(
+            prepared_facts([]),
+            ActiveTurnPhase::AwaitingApproval {
+                request: tool_request_id(1),
+            },
+            PreparedFatalMismatchBindingRejection::SourcePhaseIsNotRunning,
+        );
+        assert_prepared_binding_rejects(
+            prepared_facts([]),
+            ActiveTurnPhase::AwaitingRecoveryDecision {
+                ambiguous_operations: NonEmptyIssuedOperationRefs::try_from_operations([
+                    IssuedOperationRef::ToolAttempt(tool_attempt_id(1)),
+                ])
+                .expect("one operation is nonempty"),
+            },
+            PreparedFatalMismatchBindingRejection::SourcePhaseIsNotRunning,
+        );
+        assert_prepared_binding_rejects(
+            prepared_facts([]),
+            ActiveTurnPhase::Running {
+                current_attempt: CurrentTurnAttempt::prepared(turn_attempt_id(2)),
+            },
+            PreparedFatalMismatchBindingRejection::SourceAttemptMismatch,
+        );
+        assert_prepared_binding_rejects(
+            prepared_facts([]),
+            ActiveTurnPhase::Running {
+                current_attempt: running.clone(),
+            },
+            PreparedFatalMismatchBindingRejection::SourceAttemptMismatch,
+        );
+        assert_prepared_binding_rejects(
+            facts_for(running.clone()),
+            ActiveTurnPhase::Running {
+                current_attempt: running,
+            },
+            PreparedFatalMismatchBindingRejection::SourceAttemptIsNotPrepared,
+        );
+        assert_prepared_binding_rejects(
+            facts_for(cancellation_stopped.clone()),
+            ActiveTurnPhase::Running {
+                current_attempt: cancellation_stopped,
+            },
+            PreparedFatalMismatchBindingRejection::SourceAttemptIsNotPrepared,
+        );
+        assert_prepared_binding_rejects(
+            facts_for(fatal_stopped.clone()),
+            ActiveTurnPhase::Running {
+                current_attempt: fatal_stopped,
+            },
+            PreparedFatalMismatchBindingRejection::SourceAttemptIsNotPrepared,
+        );
+    }
 
-        for (facts, source, rejection) in cases {
-            let unchanged_facts = facts.clone();
-            let unchanged_source = source.clone();
-            let error = facts
-                .bind_prepared_atomic_candidate(source)
-                .expect_err("invalid prepared-binding source rejects");
-            assert_eq!(
-                error.into_parts(),
-                (unchanged_facts, unchanged_source, rejection)
-            );
-        }
+    #[track_caller]
+    fn assert_prepared_binding_rejects(
+        facts: PostEvidenceFatalMismatchFacts,
+        source: ActiveTurnPhase,
+        rejection: PreparedFatalMismatchBindingRejection,
+    ) {
+        let unchanged_facts = facts.clone();
+        let unchanged_source = source.clone();
+        let error = facts
+            .bind_prepared_atomic_candidate(source)
+            .expect_err("invalid prepared-binding source rejects");
+        assert_eq!(
+            error.into_parts(),
+            (unchanged_facts, unchanged_source, rejection)
+        );
     }
 }

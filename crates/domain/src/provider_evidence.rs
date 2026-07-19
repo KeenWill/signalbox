@@ -782,6 +782,11 @@ mod tests {
     };
 
     const TARGET_IDENTITY: u128 = 7;
+    /// The one call most tests record evidence for; helpers that omit a call
+    /// seed act on this call.
+    const SUBJECT_CALL: u128 = 2;
+    /// The canonical reported identity that mismatches [`TARGET_IDENTITY`].
+    const MISMATCHING_IDENTITY: u128 = 8;
 
     fn pinned_target() -> PinnedProviderTarget {
         PinnedProviderTarget::pinned(
@@ -846,8 +851,22 @@ mod tests {
             .evidence()
     }
 
-    fn recorded_mismatch(id: u128, call: u128, reported: u128) -> ProviderTargetEvidence {
-        record_against(target(), id, call, mismatch(reported))
+    /// Mismatch evidence recorded for the subject call, reporting the
+    /// canonical mismatching identity.
+    fn recorded_mismatch(evidence: u128) -> ProviderTargetEvidence {
+        recorded_mismatch_for_call(evidence, SUBJECT_CALL)
+    }
+
+    /// Mismatch evidence recorded for the identified call instead of the
+    /// subject call.
+    fn recorded_mismatch_for_call(evidence: u128, call: u128) -> ProviderTargetEvidence {
+        record_against(target(), evidence, call, mismatch(MISMATCHING_IDENTITY))
+    }
+
+    /// Mismatch evidence for the subject call reporting the identified
+    /// non-target identity instead of the canonical one.
+    fn recorded_mismatch_reporting(evidence: u128, reported: u128) -> ProviderTargetEvidence {
+        record_against(target(), evidence, SUBJECT_CALL, mismatch(reported))
     }
 
     /// S21 / INV-014: identifier lookup precedes any other validation; a
@@ -873,25 +892,29 @@ mod tests {
             Ok(ProviderTargetEvidenceRecording::Replayed(evidence))
         );
 
-        for (call, observation) in [
-            (3, mismatch(8)),
-            (
-                2,
-                ProviderTargetObservation::MatchesResolvedTarget {
-                    reported: provider_model_identity(TARGET_IDENTITY),
-                },
-            ),
-        ] {
-            let error = log
-                .record(evidence_id(1), canonical(call, target()), observation)
-                .unwrap_err();
-            let ProviderTargetEvidenceRecordingError::IdentifierReuse(reuse) = error else {
-                panic!("identifier reuse must be rejected as reuse");
-            };
-            assert_eq!(reuse.existing(), evidence);
-            assert_eq!(reuse.requested_call(), model_call_id(call));
-            assert_eq!(reuse.requested_observation(), observation);
-        }
+        let other_call = log
+            .record(evidence_id(1), canonical(3, target()), mismatch(8))
+            .unwrap_err();
+        let ProviderTargetEvidenceRecordingError::IdentifierReuse(reuse) = other_call else {
+            panic!("identifier reuse must be rejected as reuse");
+        };
+        assert_eq!(reuse.existing(), evidence);
+        assert_eq!(reuse.requested_call(), model_call_id(3));
+        assert_eq!(reuse.requested_observation(), mismatch(8));
+
+        let other_payload = ProviderTargetObservation::MatchesResolvedTarget {
+            reported: provider_model_identity(TARGET_IDENTITY),
+        };
+        let other_payload_error = log
+            .record(evidence_id(1), canonical(2, target()), other_payload)
+            .unwrap_err();
+        let ProviderTargetEvidenceRecordingError::IdentifierReuse(reuse) = other_payload_error
+        else {
+            panic!("identifier reuse must be rejected as reuse");
+        };
+        assert_eq!(reuse.existing(), evidence);
+        assert_eq!(reuse.requested_call(), model_call_id(2));
+        assert_eq!(reuse.requested_observation(), other_payload);
         assert_eq!(log.lookup(evidence_id(1)), Some(&evidence));
     }
 
@@ -901,23 +924,40 @@ mod tests {
     #[test]
     fn recording_rejects_observations_that_contradict_the_target() {
         let mut log = ProviderTargetEvidenceLog::new();
-        for observation in [
-            mismatch(TARGET_IDENTITY),
-            ProviderTargetObservation::MatchesResolvedTarget {
-                reported: provider_model_identity(8),
-            },
-        ] {
-            assert_eq!(
-                log.record(evidence_id(1), canonical(2, target()), observation),
-                Err(
-                    ProviderTargetEvidenceRecordingError::ObservationContradictsTarget {
-                        target: target(),
-                        observation,
-                    }
-                )
-            );
-            assert_eq!(log.lookup(evidence_id(1)), None);
-        }
+
+        let mismatch_reporting_the_target = mismatch(TARGET_IDENTITY);
+        assert_eq!(
+            log.record(
+                evidence_id(1),
+                canonical(2, target()),
+                mismatch_reporting_the_target
+            ),
+            Err(
+                ProviderTargetEvidenceRecordingError::ObservationContradictsTarget {
+                    target: target(),
+                    observation: mismatch_reporting_the_target,
+                }
+            )
+        );
+        assert_eq!(log.lookup(evidence_id(1)), None);
+
+        let match_reporting_another_identity = ProviderTargetObservation::MatchesResolvedTarget {
+            reported: provider_model_identity(8),
+        };
+        assert_eq!(
+            log.record(
+                evidence_id(1),
+                canonical(2, target()),
+                match_reporting_another_identity
+            ),
+            Err(
+                ProviderTargetEvidenceRecordingError::ObservationContradictsTarget {
+                    target: target(),
+                    observation: match_reporting_another_identity,
+                }
+            )
+        );
+        assert_eq!(log.lookup(evidence_id(1)), None);
     }
 
     /// S21 / INV-014: a correlated mismatch on an issued nonterminal call
@@ -926,8 +966,8 @@ mod tests {
     /// are rejected.
     #[test]
     fn nonterminal_mismatch_producer_validates_the_canonical_call() {
-        let call = current_call(2);
-        let fact = recorded_mismatch(1, 2, 8)
+        let call = current_call(SUBJECT_CALL);
+        let fact = recorded_mismatch(1)
             .nonterminal_call_mismatch_fact(&call)
             .expect("correlated mismatch produces the fatal fact");
         assert_eq!(
@@ -936,33 +976,36 @@ mod tests {
                 evidence: evidence_id(1)
             }
         );
-        assert_eq!(fact.affected_call(), model_call_id(2));
+        assert_eq!(fact.affected_call(), call.id());
         assert_eq!(
             fact.effect(),
             ProviderTargetMismatchEffectView::ClassifyNonterminalKnownFailed
         );
 
-        let unsent =
-            CurrentModelCall::prepared(model_call_id(2), pinned_target(), &frontier_snapshot());
+        let unsent = CurrentModelCall::prepared(
+            model_call_id(SUBJECT_CALL),
+            pinned_target(),
+            &frontier_snapshot(),
+        );
         assert_eq!(unsent.state(), CurrentModelCallState::Prepared);
         assert_eq!(
-            recorded_mismatch(1, 2, 8).nonterminal_call_mismatch_fact(&unsent),
+            recorded_mismatch(1).nonterminal_call_mismatch_fact(&unsent),
             Err(ProviderTargetMismatchCorrelationError::CallIsUnsent)
         );
 
         assert_eq!(
-            recorded_mismatch(1, 3, 8).nonterminal_call_mismatch_fact(&call),
+            recorded_mismatch_for_call(1, 3).nonterminal_call_mismatch_fact(&call),
             Err(
                 ProviderTargetMismatchCorrelationError::EvidenceForDifferentCall {
                     evidence_call: model_call_id(3),
-                    call: model_call_id(2),
+                    call: call.id(),
                 }
             )
         );
         let matches = record_against(
             target(),
             1,
-            2,
+            SUBJECT_CALL,
             ProviderTargetObservation::MatchesResolvedTarget {
                 reported: provider_model_identity(TARGET_IDENTITY),
             },
@@ -980,7 +1023,7 @@ mod tests {
         let cross_wired = record_against(
             ResolvedProviderTarget::naming(provider_model_identity(9)),
             1,
-            2,
+            SUBJECT_CALL,
             mismatch(TARGET_IDENTITY),
         );
         assert_eq!(
@@ -998,8 +1041,8 @@ mod tests {
     /// fact only for an `Ambiguous` call.
     #[test]
     fn ambiguity_resolution_producer_requires_a_terminal_ambiguous_call() {
-        let ambiguous = ended_call(2, ModelCallDisposition::Ambiguous);
-        let fact = recorded_mismatch(1, 2, 8)
+        let ambiguous = ended_call(SUBJECT_CALL, ModelCallDisposition::Ambiguous);
+        let fact = recorded_mismatch(1)
             .terminal_ambiguity_resolution_fact(&ambiguous)
             .expect("correlated mismatch resolves terminal ambiguity");
         assert_eq!(
@@ -1008,25 +1051,26 @@ mod tests {
                 evidence: evidence_id(1)
             }
         );
-        assert_eq!(fact.affected_call(), model_call_id(2));
+        assert_eq!(fact.affected_call(), ambiguous.id());
         assert_eq!(
             fact.effect(),
             ProviderTargetMismatchEffectView::ResolveTerminalAmbiguity
         );
         assert_eq!(ambiguous.disposition(), ModelCallDisposition::Ambiguous);
 
-        for disposition in [
-            ModelCallDisposition::Completed,
-            ModelCallDisposition::KnownFailed,
-            ModelCallDisposition::Refused,
-            ModelCallDisposition::Cancelled,
-        ] {
-            assert_eq!(
-                recorded_mismatch(1, 2, 8)
-                    .terminal_ambiguity_resolution_fact(&ended_call(2, disposition)),
-                Err(ProviderTargetMismatchCorrelationError::CallIsNotAmbiguous { disposition })
-            );
-        }
+        assert_non_ambiguous_disposition_rejects_resolution(ModelCallDisposition::Completed);
+        assert_non_ambiguous_disposition_rejects_resolution(ModelCallDisposition::KnownFailed);
+        assert_non_ambiguous_disposition_rejects_resolution(ModelCallDisposition::Refused);
+        assert_non_ambiguous_disposition_rejects_resolution(ModelCallDisposition::Cancelled);
+    }
+
+    #[track_caller]
+    fn assert_non_ambiguous_disposition_rejects_resolution(disposition: ModelCallDisposition) {
+        assert_eq!(
+            recorded_mismatch(1)
+                .terminal_ambiguity_resolution_fact(&ended_call(SUBJECT_CALL, disposition)),
+            Err(ProviderTargetMismatchCorrelationError::CallIsNotAmbiguous { disposition })
+        );
     }
 
     /// S21 / INV-014: the completed-call invalidation is unique by
@@ -1035,25 +1079,25 @@ mod tests {
     /// or replace it.
     #[test]
     fn invalidation_is_unique_by_invalidated_call() {
-        let completed = ended_call(2, ModelCallDisposition::Completed);
-        let evidence = recorded_mismatch(1, 2, 8);
+        let completed = ended_call(SUBJECT_CALL, ModelCallDisposition::Completed);
+        let evidence = recorded_mismatch(1);
 
         let admitted =
             ProviderTargetMismatchInvalidation::admit(None, &completed, &evidence).unwrap();
         let AdmittedProviderTargetMismatchInvalidation::First(invalidation) = admitted else {
             panic!("the first valid mismatch must fix the value");
         };
-        assert_eq!(invalidation.invalidated_call(), model_call_id(2));
-        assert_eq!(invalidation.first_mismatch_evidence(), evidence_id(1));
+        assert_eq!(invalidation.invalidated_call(), completed.id());
+        assert_eq!(invalidation.first_mismatch_evidence(), evidence.id());
         assert_eq!(
             invalidation.fatal_mismatch_fact().failure().kind(),
             ProviderTargetMismatchFailureKind::TerminalCallInvalidation {
-                invalidated_call: model_call_id(2)
+                invalidated_call: completed.id()
             }
         );
         assert_eq!(
             invalidation.fatal_mismatch_fact().affected_call(),
-            model_call_id(2)
+            completed.id()
         );
         assert_eq!(
             invalidation.fatal_mismatch_fact().effect(),
@@ -1067,13 +1111,13 @@ mod tests {
             ))
         );
 
-        let later = recorded_mismatch(4, 2, 9);
+        let later = recorded_mismatch_reporting(4, 9);
         assert_eq!(
             ProviderTargetMismatchInvalidation::admit(Some(&invalidation), &completed, &later),
             Err(
                 ProviderTargetMismatchInvalidationError::LaterObservationCannotReplace {
                     existing: invalidation,
-                    later_evidence: evidence_id(4),
+                    later_evidence: later.id(),
                 }
             )
         );
@@ -1083,12 +1127,12 @@ mod tests {
             ProviderTargetMismatchInvalidation::admit(
                 Some(&invalidation),
                 &other_completed,
-                &recorded_mismatch(6, 5, 8),
+                &recorded_mismatch_for_call(6, 5),
             ),
             Err(
                 ProviderTargetMismatchInvalidationError::ExistingInvalidationForDifferentCall {
                     existing: invalidation,
-                    call: model_call_id(5),
+                    call: other_completed.id(),
                 }
             )
         );
@@ -1098,34 +1142,22 @@ mod tests {
     /// and correlated mismatch before uniqueness is even considered.
     #[test]
     fn invalidation_rejects_uncompleted_calls_and_uncorrelated_evidence() {
-        let evidence = recorded_mismatch(1, 2, 8);
-        for disposition in [
-            ModelCallDisposition::KnownFailed,
-            ModelCallDisposition::Refused,
-            ModelCallDisposition::Cancelled,
-            ModelCallDisposition::Ambiguous,
-        ] {
-            assert_eq!(
-                ProviderTargetMismatchInvalidation::admit(
-                    None,
-                    &ended_call(2, disposition),
-                    &evidence
-                ),
-                Err(ProviderTargetMismatchInvalidationError::CallNotCompleted { disposition })
-            );
-        }
+        assert_uncompleted_disposition_rejects_invalidation(ModelCallDisposition::KnownFailed);
+        assert_uncompleted_disposition_rejects_invalidation(ModelCallDisposition::Refused);
+        assert_uncompleted_disposition_rejects_invalidation(ModelCallDisposition::Cancelled);
+        assert_uncompleted_disposition_rejects_invalidation(ModelCallDisposition::Ambiguous);
 
-        let completed = ended_call(2, ModelCallDisposition::Completed);
+        let completed = ended_call(SUBJECT_CALL, ModelCallDisposition::Completed);
         assert_eq!(
             ProviderTargetMismatchInvalidation::admit(
                 None,
                 &completed,
-                &recorded_mismatch(1, 3, 8)
+                &recorded_mismatch_for_call(1, 3)
             ),
             Err(ProviderTargetMismatchInvalidationError::Correlation(
                 ProviderTargetMismatchCorrelationError::EvidenceForDifferentCall {
                     evidence_call: model_call_id(3),
-                    call: model_call_id(2),
+                    call: completed.id(),
                 }
             ))
         );
@@ -1134,7 +1166,7 @@ mod tests {
         let cross_wired = record_against(
             ResolvedProviderTarget::naming(provider_model_identity(9)),
             1,
-            2,
+            SUBJECT_CALL,
             mismatch(TARGET_IDENTITY),
         );
         assert_eq!(
@@ -1144,6 +1176,18 @@ mod tests {
                     reported: provider_model_identity(TARGET_IDENTITY),
                 }
             ))
+        );
+    }
+
+    #[track_caller]
+    fn assert_uncompleted_disposition_rejects_invalidation(disposition: ModelCallDisposition) {
+        assert_eq!(
+            ProviderTargetMismatchInvalidation::admit(
+                None,
+                &ended_call(SUBJECT_CALL, disposition),
+                &recorded_mismatch(1)
+            ),
+            Err(ProviderTargetMismatchInvalidationError::CallNotCompleted { disposition })
         );
     }
 
@@ -1199,19 +1243,19 @@ mod tests {
     /// value.
     #[test]
     fn invalidation_log_enforces_uniqueness_without_caller_tracking() {
-        let completed = ended_call(2, ModelCallDisposition::Completed);
-        let evidence = recorded_mismatch(1, 2, 8);
+        let completed = ended_call(SUBJECT_CALL, ModelCallDisposition::Completed);
+        let evidence = recorded_mismatch(1);
 
         let mut log = ProviderTargetMismatchInvalidationLog::new();
-        assert_eq!(log.lookup(model_call_id(2)), None);
+        assert_eq!(log.lookup(completed.id()), None);
 
         let admitted = log.admit(&completed, &evidence).unwrap();
         let AdmittedProviderTargetMismatchInvalidation::First(invalidation) = admitted else {
             panic!("the first valid mismatch must fix the value");
         };
-        assert_eq!(invalidation.invalidated_call(), model_call_id(2));
-        assert_eq!(invalidation.first_mismatch_evidence(), evidence_id(1));
-        assert_eq!(log.lookup(model_call_id(2)), Some(&invalidation));
+        assert_eq!(invalidation.invalidated_call(), completed.id());
+        assert_eq!(invalidation.first_mismatch_evidence(), evidence.id());
+        assert_eq!(log.lookup(completed.id()), Some(&invalidation));
 
         assert_eq!(
             log.admit(&completed, &evidence),
@@ -1220,26 +1264,29 @@ mod tests {
             ))
         );
 
-        let later = recorded_mismatch(4, 2, 9);
+        let later = recorded_mismatch_reporting(4, 9);
         assert_eq!(
             log.admit(&completed, &later),
             Err(
                 ProviderTargetMismatchInvalidationError::LaterObservationCannotReplace {
                     existing: invalidation,
-                    later_evidence: evidence_id(4),
+                    later_evidence: later.id(),
                 }
             )
         );
-        assert_eq!(log.lookup(model_call_id(2)), Some(&invalidation));
+        assert_eq!(log.lookup(completed.id()), Some(&invalidation));
 
         let other_completed = ended_call(5, ModelCallDisposition::Completed);
         let other = log
-            .admit(&other_completed, &recorded_mismatch(6, 5, 8))
+            .admit(&other_completed, &recorded_mismatch_for_call(6, 5))
             .unwrap();
         assert_eq!(
             other,
             AdmittedProviderTargetMismatchInvalidation::First(other.invalidation())
         );
-        assert_eq!(other.invalidation().invalidated_call(), model_call_id(5));
+        assert_eq!(
+            other.invalidation().invalidated_call(),
+            other_completed.id()
+        );
     }
 }

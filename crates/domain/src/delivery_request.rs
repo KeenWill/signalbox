@@ -125,7 +125,9 @@ mod tests {
     /// version-bound configuration choice for its new logical work.
     #[test]
     fn s01_inv008_inv028_start_request_carries_version_bound_choices() {
-        let configuration = choices();
+        let expected_version = first_version();
+        let model = ModelSelectionOverride::UseSessionDefault;
+        let configuration = PerInputConfigurationChoices::new(expected_version, model);
         let request = DeliveryRequest::StartWhenNoActiveTurn { configuration };
 
         let DeliveryRequest::StartWhenNoActiveTurn {
@@ -137,12 +139,9 @@ mod tests {
         assert_eq!(carried_configuration, configuration);
         assert_eq!(
             configuration.expected_session_defaults_version(),
-            first_version()
+            expected_version
         );
-        assert_eq!(
-            configuration.model(),
-            ModelSelectionOverride::UseSessionDefault
-        );
+        assert_eq!(configuration.model(), model);
     }
 
     /// S07 / INV-008 / INV-028: interrupt payloads bind both the exact active
@@ -223,83 +222,86 @@ mod tests {
             first_version(),
             ModelSelectionOverride::ReplaceWith(ModelSelectionRequest::Direct(direct(3))),
         );
-        let requests = [
-            DeliveryRequest::StartWhenNoActiveTurn { configuration },
-            DeliveryRequest::Interrupt {
-                expected_active_turn: turn_id(1),
-                configuration,
-            },
-            DeliveryRequest::NextSafePoint {
-                expected_active_turn: turn_id(1),
-            },
-            DeliveryRequest::AfterCurrentTurn {
-                expected_active_turn: turn_id(1),
-                configuration,
-            },
-        ];
+        let start = DeliveryRequest::StartWhenNoActiveTurn { configuration };
+        let interrupt = DeliveryRequest::Interrupt {
+            expected_active_turn: turn_id(1),
+            configuration,
+        };
+        let next_safe_point = DeliveryRequest::NextSafePoint {
+            expected_active_turn: turn_id(1),
+        };
+        let after_current = DeliveryRequest::AfterCurrentTurn {
+            expected_active_turn: turn_id(1),
+            configuration,
+        };
 
-        for (index, request) in requests.iter().enumerate() {
-            for distinct in &requests[index + 1..] {
-                assert_ne!(request, distinct);
-            }
-        }
+        assert_ne!(start, interrupt);
+        assert_ne!(start, next_safe_point);
+        assert_ne!(start, after_current);
+        assert_ne!(interrupt, next_safe_point);
+        assert_ne!(interrupt, after_current);
+        assert_ne!(next_safe_point, after_current);
 
         assert_ne!(
-            DeliveryRequest::Interrupt {
-                expected_active_turn: turn_id(1),
-                configuration,
-            },
+            interrupt,
             DeliveryRequest::Interrupt {
                 expected_active_turn: turn_id(2),
                 configuration,
             }
         );
         assert_ne!(
-            DeliveryRequest::NextSafePoint {
-                expected_active_turn: turn_id(1),
-            },
+            next_safe_point,
             DeliveryRequest::NextSafePoint {
                 expected_active_turn: turn_id(2),
             }
         );
         assert_ne!(
-            DeliveryRequest::AfterCurrentTurn {
-                expected_active_turn: turn_id(1),
-                configuration,
-            },
+            after_current,
             DeliveryRequest::AfterCurrentTurn {
                 expected_active_turn: turn_id(2),
                 configuration,
             }
         );
 
-        for distinct_configuration in [later_configuration, explicit_configuration] {
-            assert_ne!(
-                DeliveryRequest::StartWhenNoActiveTurn { configuration },
-                DeliveryRequest::StartWhenNoActiveTurn {
-                    configuration: distinct_configuration,
-                }
-            );
-            assert_ne!(
-                DeliveryRequest::Interrupt {
-                    expected_active_turn: turn_id(1),
-                    configuration,
-                },
-                DeliveryRequest::Interrupt {
-                    expected_active_turn: turn_id(1),
-                    configuration: distinct_configuration,
-                }
-            );
-            assert_ne!(
-                DeliveryRequest::AfterCurrentTurn {
-                    expected_active_turn: turn_id(1),
-                    configuration,
-                },
-                DeliveryRequest::AfterCurrentTurn {
-                    expected_active_turn: turn_id(1),
-                    configuration: distinct_configuration,
-                }
-            );
-        }
+        assert_ne!(
+            start,
+            DeliveryRequest::StartWhenNoActiveTurn {
+                configuration: later_configuration,
+            }
+        );
+        assert_ne!(
+            start,
+            DeliveryRequest::StartWhenNoActiveTurn {
+                configuration: explicit_configuration,
+            }
+        );
+        assert_ne!(
+            interrupt,
+            DeliveryRequest::Interrupt {
+                expected_active_turn: turn_id(1),
+                configuration: later_configuration,
+            }
+        );
+        assert_ne!(
+            interrupt,
+            DeliveryRequest::Interrupt {
+                expected_active_turn: turn_id(1),
+                configuration: explicit_configuration,
+            }
+        );
+        assert_ne!(
+            after_current,
+            DeliveryRequest::AfterCurrentTurn {
+                expected_active_turn: turn_id(1),
+                configuration: later_configuration,
+            }
+        );
+        assert_ne!(
+            after_current,
+            DeliveryRequest::AfterCurrentTurn {
+                expected_active_turn: turn_id(1),
+                configuration: explicit_configuration,
+            }
+        );
     }
 }

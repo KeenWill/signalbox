@@ -406,9 +406,12 @@ mod tests {
         )
     }
 
-    fn marker(reason: ReconciliationReason) -> ReconciliationMarker {
+    fn marker(
+        ambiguous_operations: NonEmptyIssuedOperationRefs,
+        reason: ReconciliationReason,
+    ) -> ReconciliationMarker {
         ReconciliationMarker {
-            ambiguous_operations: operations(&[1, 2]),
+            ambiguous_operations,
             reason,
         }
     }
@@ -471,8 +474,9 @@ mod tests {
     /// algebra independently of frontier construction authority.
     #[test]
     fn starting_lineage_distinguishes_first_and_exact_predecessor() {
+        let predecessor = turn_id(1);
         let after = AcceptedInputStartingLineage::After {
-            immediate_predecessor: turn_id(1),
+            immediate_predecessor: predecessor,
         };
 
         assert_ne!(AcceptedInputStartingLineage::FirstInSession, after);
@@ -486,7 +490,7 @@ mod tests {
             after,
             AcceptedInputStartingLineage::After {
                 immediate_predecessor
-            } if immediate_predecessor == turn_id(1)
+            } if immediate_predecessor == predecessor
         ));
     }
 
@@ -504,9 +508,10 @@ mod tests {
             )],
         )
         .expect("test snapshot entries are ordered and distinct");
+        let predecessor = turn_id(1);
         let start = AcceptedInputTurnStart {
             lineage: AcceptedInputStartingLineage::After {
-                immediate_predecessor: turn_id(1),
+                immediate_predecessor: predecessor,
             },
             frontier: snapshot.frontier(),
         };
@@ -515,7 +520,7 @@ mod tests {
             start.lineage(),
             AcceptedInputStartingLineage::After {
                 immediate_predecessor
-            } if immediate_predecessor == turn_id(1)
+            } if immediate_predecessor == predecessor
         ));
         assert_eq!(start.frontier(), snapshot.frontier());
     }
@@ -524,32 +529,35 @@ mod tests {
     /// retains the slot and structurally carries exactly its required subject.
     #[test]
     fn active_phases_retain_slot_with_exact_subjects() {
-        let phases = [
-            ActiveTurnPhase::Running {
-                current_attempt: CurrentTurnAttempt::prepared(turn_attempt_id(1)),
-            },
-            ActiveTurnPhase::AwaitingApproval {
-                request: tool_request_id(1),
-            },
-            ActiveTurnPhase::AwaitingRecoveryDecision {
-                ambiguous_operations: operations(&[1]),
-            },
-        ];
+        let attempt_id = turn_attempt_id(1);
+        let request_id = tool_request_id(1);
+        let ambiguous = operations(&[1]);
+        let running = ActiveTurnPhase::Running {
+            current_attempt: CurrentTurnAttempt::prepared(attempt_id),
+        };
+        let awaiting_approval = ActiveTurnPhase::AwaitingApproval {
+            request: request_id,
+        };
+        let awaiting_recovery = ActiveTurnPhase::AwaitingRecoveryDecision {
+            ambiguous_operations: ambiguous.clone(),
+        };
 
-        assert!(phases.iter().all(ActiveTurnPhase::retains_progressing_slot));
+        assert!(running.retains_progressing_slot());
+        assert!(awaiting_approval.retains_progressing_slot());
+        assert!(awaiting_recovery.retains_progressing_slot());
         assert!(matches!(
-            &phases[0],
+            &running,
             ActiveTurnPhase::Running { current_attempt }
-                if current_attempt.id() == turn_attempt_id(1)
+                if current_attempt.id() == attempt_id
         ));
         assert!(matches!(
-            &phases[1],
-            ActiveTurnPhase::AwaitingApproval { request } if *request == tool_request_id(1)
+            &awaiting_approval,
+            ActiveTurnPhase::AwaitingApproval { request } if *request == request_id
         ));
         assert!(matches!(
-            &phases[2],
+            &awaiting_recovery,
             ActiveTurnPhase::AwaitingRecoveryDecision { ambiguous_operations }
-                if ambiguous_operations == &operations(&[1])
+                if ambiguous_operations == &ambiguous
         ));
     }
 
@@ -557,52 +565,56 @@ mod tests {
     /// reason retains the exact canonical ambiguity set and typed authority.
     #[test]
     fn reconciliation_markers_preserve_exact_sets_and_reasons() {
-        let reasons = [
-            ReconciliationReason::OwnerChoseReconciliation {
-                decision: owner_stop(1),
-            },
+        assert_marker_preserves_set_and_reason(ReconciliationReason::OwnerChoseReconciliation {
+            decision: owner_stop(1),
+        });
+        assert_marker_preserves_set_and_reason(
             ReconciliationReason::InterruptRequiresReconciliation {
                 interrupt: interrupt(1),
             },
+        );
+        assert_marker_preserves_set_and_reason(
             ReconciliationReason::FatalMismatchRequiresReconciliation {
                 causes: fatal_causes(),
             },
-        ];
+        );
+    }
 
-        for reason in reasons {
-            let expected = reason.clone();
-            let marker = marker(reason);
-            assert_eq!(marker.ambiguous_operations(), &operations(&[1, 2]));
-            assert_eq!(marker.reason(), &expected);
-        }
+    #[track_caller]
+    fn assert_marker_preserves_set_and_reason(reason: ReconciliationReason) {
+        let ambiguous_operations = operations(&[1, 2]);
+        let marker = marker(ambiguous_operations.clone(), reason.clone());
+
+        assert_eq!(marker.ambiguous_operations(), &ambiguous_operations);
+        assert_eq!(marker.reason(), &reason);
     }
 
     /// S07 / INV-006 / INV-029: cancellation and reconciliation terminal
     /// values retain their exact proof-bearing payloads.
     #[test]
     fn terminal_dispositions_preserve_exact_payloads() {
-        for disposition in [
+        assert!(matches!(
             TurnDisposition::Completed,
-            TurnDisposition::Refused,
-            TurnDisposition::Failed,
-        ] {
-            assert!(matches!(
-                disposition,
-                TurnDisposition::Completed | TurnDisposition::Refused | TurnDisposition::Failed
-            ));
-        }
+            TurnDisposition::Completed
+        ));
+        assert!(matches!(TurnDisposition::Refused, TurnDisposition::Refused));
+        assert!(matches!(TurnDisposition::Failed, TurnDisposition::Failed));
 
+        let expected_cause = interrupt(1);
         let cancelled = TurnDisposition::Cancelled {
-            cause: interrupt(1),
+            cause: expected_cause,
         };
         assert!(matches!(
             cancelled,
-            TurnDisposition::Cancelled { cause } if cause == interrupt(1)
+            TurnDisposition::Cancelled { cause } if cause == expected_cause
         ));
 
-        let expected = marker(ReconciliationReason::InterruptRequiresReconciliation {
-            interrupt: interrupt(1),
-        });
+        let expected = marker(
+            operations(&[1, 2]),
+            ReconciliationReason::InterruptRequiresReconciliation {
+                interrupt: interrupt(1),
+            },
+        );
         let reconciliation = TurnDisposition::ReconciliationRequired {
             marker: expected.clone(),
         };
@@ -616,8 +628,14 @@ mod tests {
     /// command and turn while raw identities cannot construct it publicly.
     #[test]
     fn owner_stop_proof_preserves_exact_identity() {
-        let proof = owner_stop(1);
-        assert_eq!(proof.decision_command(), command_id(1));
-        assert_eq!(proof.turn(), turn_id(100));
+        let decision_command = command_id(1);
+        let turn = turn_id(100);
+        let proof = AppliedStopForReconciliationProof {
+            decision_command,
+            turn,
+        };
+
+        assert_eq!(proof.decision_command(), decision_command);
+        assert_eq!(proof.turn(), turn);
     }
 }

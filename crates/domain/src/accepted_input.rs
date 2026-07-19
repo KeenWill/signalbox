@@ -360,85 +360,105 @@ mod tests {
     /// states, and a rejection leaves the current state unchanged.
     #[test]
     fn lifecycle_consumption_rejections_return_the_unchanged_identity_and_disposition() {
-        for disposition in non_pending_dispositions() {
-            let lifecycle = AcceptedInputLifecycle::new(accepted_input_id(1), disposition);
-            let error = AcceptedInputLifecycleTransitionError::CannotConsumeAsSteering {
-                lifecycle: lifecycle.clone(),
-            };
-
-            assert_eq!(
-                lifecycle.clone().consume_as_steering(model_call_id(4)),
-                Err(error.clone())
-            );
-            assert_eq!(error.lifecycle(), &lifecycle);
-            assert_eq!(error.into_lifecycle(), lifecycle);
-        }
+        assert_lifecycle_consumption_rejects_unchanged(origin_disposition());
+        assert_lifecycle_consumption_rejects_unchanged(consumed_disposition());
+        assert_lifecycle_consumption_rejects_unchanged(reclassified_disposition());
     }
 
     /// INV-006: a transition is valid only from explicitly permitted prior
     /// states, and a rejection leaves the current state unchanged.
     #[test]
     fn lifecycle_reclassification_rejections_return_the_unchanged_identity_and_disposition() {
-        for disposition in non_pending_dispositions() {
-            let lifecycle = AcceptedInputLifecycle::new(accepted_input_id(1), disposition);
-            let error = AcceptedInputLifecycleTransitionError::CannotReclassifyAsTurnOrigin {
-                lifecycle: lifecycle.clone(),
-            };
-
-            assert_eq!(
-                lifecycle.clone().reclassify_as_turn_origin(
-                    turn_id(4),
-                    SteeringReclassificationReason::NoSafePointBeforeTerminal,
-                ),
-                Err(error.clone())
-            );
-            assert_eq!(error.lifecycle(), &lifecycle);
-            assert_eq!(error.into_lifecycle(), lifecycle);
-        }
+        assert_lifecycle_reclassification_rejects_unchanged(origin_disposition());
+        assert_lifecycle_reclassification_rejects_unchanged(consumed_disposition());
+        assert_lifecycle_reclassification_rejects_unchanged(reclassified_disposition());
     }
 
     /// INV-006: a transition is valid only from explicitly permitted prior
     /// states.
     #[test]
     fn internal_consumption_rejects_every_non_pending_disposition_with_the_current_value() {
-        for current in non_pending_dispositions() {
-            assert_eq!(
-                current.clone().consume_as_steering(model_call_id(4)),
-                Err(AcceptedInputDispositionTransitionError::CannotConsumeAsSteering { current })
-            );
-        }
+        assert_internal_consumption_rejects_with_current(origin_disposition());
+        assert_internal_consumption_rejects_with_current(consumed_disposition());
+        assert_internal_consumption_rejects_with_current(reclassified_disposition());
     }
 
     /// INV-006: a transition is valid only from explicitly permitted prior
     /// states.
     #[test]
     fn internal_reclassification_rejects_every_non_pending_disposition_with_the_current_value() {
-        for current in non_pending_dispositions() {
-            assert_eq!(
-                current.clone().reclassify_as_turn_origin(
-                    turn_id(4),
-                    SteeringReclassificationReason::NoSafePointBeforeTerminal,
-                ),
-                Err(
-                    AcceptedInputDispositionTransitionError::CannotReclassifyAsTurnOrigin {
-                        current,
-                    }
-                )
-            );
+        assert_internal_reclassification_rejects_with_current(origin_disposition());
+        assert_internal_reclassification_rejects_with_current(consumed_disposition());
+        assert_internal_reclassification_rejects_with_current(reclassified_disposition());
+    }
+
+    fn origin_disposition() -> AcceptedInputDisposition {
+        AcceptedInputDisposition::OriginOf(turn_id(1))
+    }
+
+    fn consumed_disposition() -> AcceptedInputDisposition {
+        AcceptedInputDisposition::ConsumedAsSteering {
+            call: model_call_id(2),
         }
     }
 
-    fn non_pending_dispositions() -> [AcceptedInputDisposition; 3] {
-        [
-            AcceptedInputDisposition::OriginOf(turn_id(1)),
-            AcceptedInputDisposition::ConsumedAsSteering {
-                call: model_call_id(2),
-            },
-            AcceptedInputDisposition::ReclassifiedAsTurnOrigin {
-                turn: turn_id(3),
-                reason: SteeringReclassificationReason::NoSafePointBeforeTerminal,
-            },
-        ]
+    fn reclassified_disposition() -> AcceptedInputDisposition {
+        AcceptedInputDisposition::ReclassifiedAsTurnOrigin {
+            turn: turn_id(3),
+            reason: SteeringReclassificationReason::NoSafePointBeforeTerminal,
+        }
+    }
+
+    #[track_caller]
+    fn assert_lifecycle_consumption_rejects_unchanged(disposition: AcceptedInputDisposition) {
+        let lifecycle = AcceptedInputLifecycle::new(accepted_input_id(1), disposition);
+        let error = AcceptedInputLifecycleTransitionError::CannotConsumeAsSteering {
+            lifecycle: lifecycle.clone(),
+        };
+
+        assert_eq!(
+            lifecycle.clone().consume_as_steering(model_call_id(4)),
+            Err(error.clone())
+        );
+        assert_eq!(error.lifecycle(), &lifecycle);
+        assert_eq!(error.into_lifecycle(), lifecycle);
+    }
+
+    #[track_caller]
+    fn assert_lifecycle_reclassification_rejects_unchanged(disposition: AcceptedInputDisposition) {
+        let lifecycle = AcceptedInputLifecycle::new(accepted_input_id(1), disposition);
+        let error = AcceptedInputLifecycleTransitionError::CannotReclassifyAsTurnOrigin {
+            lifecycle: lifecycle.clone(),
+        };
+
+        assert_eq!(
+            lifecycle.clone().reclassify_as_turn_origin(
+                turn_id(4),
+                SteeringReclassificationReason::NoSafePointBeforeTerminal,
+            ),
+            Err(error.clone())
+        );
+        assert_eq!(error.lifecycle(), &lifecycle);
+        assert_eq!(error.into_lifecycle(), lifecycle);
+    }
+
+    #[track_caller]
+    fn assert_internal_consumption_rejects_with_current(current: AcceptedInputDisposition) {
+        assert_eq!(
+            current.clone().consume_as_steering(model_call_id(4)),
+            Err(AcceptedInputDispositionTransitionError::CannotConsumeAsSteering { current })
+        );
+    }
+
+    #[track_caller]
+    fn assert_internal_reclassification_rejects_with_current(current: AcceptedInputDisposition) {
+        assert_eq!(
+            current.clone().reclassify_as_turn_origin(
+                turn_id(4),
+                SteeringReclassificationReason::NoSafePointBeforeTerminal,
+            ),
+            Err(AcceptedInputDispositionTransitionError::CannotReclassifyAsTurnOrigin { current })
+        );
     }
 
     fn pending_steering(source_turn: u128) -> AcceptedInputDisposition {

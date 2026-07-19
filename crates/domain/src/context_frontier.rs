@@ -443,20 +443,23 @@ mod tests {
     use super::*;
     use crate::test_support::{context_frontier_id, semantic_transcript_entry_id, session_id};
 
-    fn entry(source_session: u128, entry: u128) -> SemanticTranscriptEntryRef {
-        SemanticTranscriptEntryRef::from_source(
-            session_id(source_session),
-            semantic_transcript_entry_id(entry),
-        )
+    /// One semantic entry created in the canonical source session for tests
+    /// that do not care about cross-session sources.
+    fn entry(entry: u128) -> SemanticTranscriptEntryRef {
+        entry_from(session_id(1), entry)
+    }
+
+    fn entry_from(source_session: SessionId, entry: u128) -> SemanticTranscriptEntryRef {
+        SemanticTranscriptEntryRef::from_source(source_session, semantic_transcript_entry_id(entry))
     }
 
     fn snapshot(
-        owning_session: u128,
+        owning_session: SessionId,
         snapshot: u128,
         ordered_entries: impl IntoIterator<Item = SemanticTranscriptEntryRef>,
     ) -> ResolvedContextFrontierSnapshot {
         ResolvedContextFrontierSnapshot::try_from_candidate(
-            session_id(owning_session),
+            owning_session,
             context_frontier_id(snapshot),
             ordered_entries.into_iter().collect(),
         )
@@ -471,15 +474,16 @@ mod tests {
         let entry_id = semantic_transcript_entry_id(1);
         assert_eq!(frontier_id.as_uuid(), entry_id.as_uuid());
 
-        let first = snapshot(1, 1, []);
-        let same = snapshot(1, 1, []);
-        let different_owner = snapshot(2, 1, []);
-        let different_snapshot = snapshot(1, 2, []);
+        let owner = session_id(1);
+        let first = snapshot(owner, 1, []);
+        let same = snapshot(owner, 1, []);
+        let different_owner = snapshot(session_id(2), 1, []);
+        let different_snapshot = snapshot(owner, 2, []);
 
         assert_eq!(first.frontier(), same.frontier());
         assert_ne!(first.frontier(), different_owner.frontier());
         assert_ne!(first.frontier(), different_snapshot.frontier());
-        assert_eq!(first.frontier().owning_session(), session_id(1));
+        assert_eq!(first.frontier().owning_session(), owner);
         assert_eq!(first.frontier().snapshot(), frontier_id);
     }
 
@@ -488,10 +492,11 @@ mod tests {
     /// equal-content snapshots are legal.
     #[test]
     fn inv015_identity_and_semantic_content_equality_are_explicitly_distinct() {
-        let entries = [entry(1, 1), entry(1, 2)];
-        let first = snapshot(1, 1, entries);
-        let independent = snapshot(1, 2, entries);
-        let reordered = snapshot(1, 3, [entries[1], entries[0]]);
+        let owner = session_id(1);
+        let entries = [entry(1), entry(2)];
+        let first = snapshot(owner, 1, entries);
+        let independent = snapshot(owner, 2, entries);
+        let reordered = snapshot(owner, 3, [entries[1], entries[0]]);
 
         assert_ne!(first.frontier(), independent.frontier());
         assert_ne!(first, independent);
@@ -509,8 +514,9 @@ mod tests {
     /// distinct semantic references.
     #[test]
     fn inv015_inv030_resolved_contents_are_ordered_and_exactly_distinct() {
-        let first = entry(1, 1);
-        let same_entry_other_source = entry(2, 1);
+        let first_source = session_id(1);
+        let first = entry_from(first_source, 1);
+        let same_entry_other_source = entry_from(session_id(2), 1);
         let ordered_entries = vec![first, same_entry_other_source, first];
 
         let error = ResolvedContextFrontierSnapshot::try_from_candidate(
@@ -537,10 +543,10 @@ mod tests {
             )
         );
 
-        let valid = snapshot(3, 1, [first, same_entry_other_source]);
+        let valid = snapshot(session_id(3), 1, [first, same_entry_other_source]);
         assert_eq!(valid.entry_count(), 2);
         assert_ne!(first, same_entry_other_source);
-        assert_eq!(first.source_session(), session_id(1));
+        assert_eq!(first.source_session(), first_source);
         assert_eq!(first.entry(), semantic_transcript_entry_id(1));
     }
 
@@ -548,9 +554,10 @@ mod tests {
     /// prefix in order and only appends exact new semantic entries.
     #[test]
     fn s09_inv015_derivation_is_prefix_preserving_and_append_only() {
-        let source_entries = [entry(1, 1), entry(1, 2)];
-        let appended_entries = vec![entry(1, 3), entry(1, 4)];
-        let source = snapshot(1, 1, source_entries);
+        let owner = session_id(1);
+        let source_entries = [entry(1), entry(2)];
+        let appended_entries = vec![entry(3), entry(4)];
+        let source = snapshot(owner, 1, source_entries);
         let derived = source
             .derive_appending_candidate(context_frontier_id(2), appended_entries.clone())
             .expect("distinct entries and a fresh identity derive a candidate");
@@ -565,11 +572,12 @@ mod tests {
         );
         assert!(source.is_semantic_prefix_of(&derived));
         assert!(!derived.is_semantic_prefix_of(&source));
-        assert_eq!(derived.frontier().owning_session(), session_id(1));
+        assert_eq!(derived.frontier().owning_session(), owner);
         assert_eq!(derived.frontier().snapshot(), context_frontier_id(2));
 
+        let no_new_entries = vec![];
         let equal_content = source
-            .derive_appending_candidate(context_frontier_id(3), vec![])
+            .derive_appending_candidate(context_frontier_id(3), no_new_entries)
             .expect("a separately identified equal-content snapshot is legal");
         assert_ne!(source.frontier(), equal_content.frontier());
         assert!(source.same_semantic_content(&equal_content));
@@ -580,44 +588,52 @@ mod tests {
     /// same append batch; every rejected append input is returned unchanged.
     #[test]
     fn inv015_invalid_derivations_preserve_source_and_inputs() {
-        let source = snapshot(1, 1, [entry(1, 1)]);
-        let unchanged_source = source.clone();
-        let cases = [
-            (
-                context_frontier_id(1),
-                vec![entry(1, 2)],
-                ContextFrontierSnapshotDerivationRejection::ReusedSourceSnapshotIdentity,
-            ),
-            (
-                context_frontier_id(2),
-                vec![entry(1, 1)],
-                ContextFrontierSnapshotDerivationRejection::DuplicateEntry { entry: entry(1, 1) },
-            ),
-            (
-                context_frontier_id(3),
-                vec![entry(1, 2), entry(1, 2)],
-                ContextFrontierSnapshotDerivationRejection::DuplicateEntry { entry: entry(1, 2) },
-            ),
-        ];
+        let source = snapshot(session_id(1), 1, [entry(1)]);
 
-        for (next_snapshot, appended_entries, expected_rejection) in cases {
-            let unchanged_appended_entries = appended_entries.clone();
-            let error = source
-                .derive_appending_candidate(next_snapshot, appended_entries)
-                .expect_err("invalid append derivation must reject");
-            assert_eq!(source, unchanged_source);
-            assert_eq!(error.next_snapshot(), next_snapshot);
-            assert_eq!(error.appended_entries(), unchanged_appended_entries);
-            assert_eq!(error.rejection(), expected_rejection);
-            assert_eq!(
-                error.into_parts(),
-                (
-                    next_snapshot,
-                    unchanged_appended_entries,
-                    expected_rejection
-                )
-            );
-        }
+        assert_derivation_rejects_unchanged(
+            &source,
+            context_frontier_id(1),
+            vec![entry(2)],
+            ContextFrontierSnapshotDerivationRejection::ReusedSourceSnapshotIdentity,
+        );
+        assert_derivation_rejects_unchanged(
+            &source,
+            context_frontier_id(2),
+            vec![entry(1)],
+            ContextFrontierSnapshotDerivationRejection::DuplicateEntry { entry: entry(1) },
+        );
+        assert_derivation_rejects_unchanged(
+            &source,
+            context_frontier_id(3),
+            vec![entry(2), entry(2)],
+            ContextFrontierSnapshotDerivationRejection::DuplicateEntry { entry: entry(2) },
+        );
+    }
+
+    #[track_caller]
+    fn assert_derivation_rejects_unchanged(
+        source: &ResolvedContextFrontierSnapshot,
+        next_snapshot: ContextFrontierId,
+        appended_entries: Vec<SemanticTranscriptEntryRef>,
+        expected_rejection: ContextFrontierSnapshotDerivationRejection,
+    ) {
+        let unchanged_source = source.clone();
+        let unchanged_appended_entries = appended_entries.clone();
+        let error = source
+            .derive_appending_candidate(next_snapshot, appended_entries)
+            .expect_err("invalid append derivation must reject");
+        assert_eq!(source, &unchanged_source);
+        assert_eq!(error.next_snapshot(), next_snapshot);
+        assert_eq!(error.appended_entries(), unchanged_appended_entries);
+        assert_eq!(error.rejection(), expected_rejection);
+        assert_eq!(
+            error.into_parts(),
+            (
+                next_snapshot,
+                unchanged_appended_entries,
+                expected_rejection
+            )
+        );
     }
 
     /// S17 / INV-030: a new consuming session owns its own frontier while
@@ -625,16 +641,18 @@ mod tests {
     /// before appending its own origin entry.
     #[test]
     fn s17_inv030_inherited_entry_references_are_preserved_without_reminting() {
-        let inherited = [entry(1, 1), entry(1, 2)];
-        let origin = entry(2, 3);
-        let fork = snapshot(2, 1, inherited.into_iter().chain([origin]));
+        let source_session = session_id(1);
+        let consuming_session = session_id(2);
+        let inherited = [entry_from(source_session, 1), entry_from(source_session, 2)];
+        let origin = entry_from(consuming_session, 3);
+        let fork = snapshot(consuming_session, 1, inherited.into_iter().chain([origin]));
 
-        assert_eq!(fork.frontier().owning_session(), session_id(2));
+        assert_eq!(fork.frontier().owning_session(), consuming_session);
         assert_eq!(
             fork.ordered_entries().collect::<Vec<_>>(),
             vec![inherited[0], inherited[1], origin]
         );
         assert_eq!(fork.ordered_entries().next(), Some(inherited[0]));
-        assert_eq!(origin.source_session(), session_id(2));
+        assert_eq!(origin.source_session(), consuming_session);
     }
 }
