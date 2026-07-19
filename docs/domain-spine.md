@@ -950,6 +950,7 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
     QueueSessionMismatch { turn: TurnId },
     QueueTurnMismatch { turn: TurnId },
     AcceptedInputOriginMismatch { turn: TurnId },
+    OriginDeliveryMismatch { turn: TurnId },
     DuplicateAcceptedInput { accepted_input: AcceptedInputId },
     InvalidQueueOrder { error: AcceptedInputQueueOrderError },
     SemanticEntrySourceSessionMismatch { entry: SemanticTranscriptEntryId },
