@@ -84,13 +84,43 @@ transition, or persistence behavior.
 
 ## 2026-07-19 — Atomic Postgres occupied-slot input handling
 
-**Context.** The domain now admits checked occupied-slot preparation and replay, while PostgreSQL stores only vacant-slot receipts. First handling must use the same complete scheduling projection as restart and must not persist results whose owner evidence is not representable.
+**Context.** The domain now admits checked occupied-slot preparation and replay,
+while PostgreSQL stores only vacant-slot receipts. First handling must use the
+same complete scheduling projection as restart and must not persist results
+whose owner evidence is not representable.
 
-**Decision.** Under the existing command claim, lock the session, scheduler, and defaults pointer in that order; load the complete evidence-free scheduling projection and active-origin-anchored session acceptance tail; then select vacant- or occupied-slot preparation. Load complete origin graphs and only lifecycle-referenced frontier memberships with fixed-count set queries before checked reconstruction. Extend normalized receipts with actual-active-turn evidence. Store after-current origins and configuration-free pending steering with deferred exact command, source-origin, and lifecycle correlations; the source must remain active, terminalization is rejected until steering closes, and the acceptance-side check locks the source lifecycle so both operations serialize. Semantic origin entries cannot reference pending steering. Reconstruct checked canonical source and predecessor origins from their receipts, current lifecycle, and immutable queue facts. Store only occupied-state rejections whose canonical origin replay is constructible. Matching interrupt remains an explicit nonclaiming repository outcome, and safe-point-stopping storage remains closed until complete `StopRequested` owner evidence exists.
+**Decision.** Under the existing command claim, lock the session, scheduler, and
+defaults pointer in that order; load the complete evidence-free scheduling
+projection and active-origin-anchored session acceptance tail; then select
+vacant- or occupied-slot preparation. Load complete origin graphs and only
+lifecycle-referenced frontier memberships with fixed-count set queries before
+checked reconstruction. Extend normalized receipts with actual-active-turn
+evidence. Store after-current origins and configuration-free pending steering
+with deferred exact command, source-origin, and lifecycle correlations; the
+source must remain active, terminalization is rejected until steering closes,
+and the acceptance-side check locks the source lifecycle so both operations
+serialize. Semantic origin entries cannot reference pending steering.
+Reconstruct checked canonical source and predecessor origins from their
+receipts, current lifecycle, and immutable queue facts. Store only
+occupied-state rejections whose canonical origin replay is constructible.
+Matching interrupt remains an explicit nonclaiming repository outcome, and
+safe-point-stopping storage remains closed until complete `StopRequested` owner
+evidence exists.
 
-**Rejected alternatives.** Inferring active state from one lifecycle row bypasses the domain aggregate. Per-turn receipt and frontier queries scale with stored history. A second steering-source column duplicates the delivery source. Nullable queue or configuration fields on steering admit impossible effects. Letting pending steering outlive its active source makes it unconsumable. Storing a stopping discriminator without its proof-bearing owner projection makes the stored conclusion its own authority.
+**Rejected alternatives.** Inferring active state from one lifecycle row
+bypasses the domain aggregate. Per-turn receipt and frontier queries scale with
+stored history. A second steering-source column duplicates the delivery source.
+Nullable queue or configuration fields on steering admit impossible effects.
+Letting pending steering outlive its active source makes it unconsumable.
+Storing a stopping discriminator without its proof-bearing owner projection
+makes the stored conclusion its own authority.
 
-**Affects.** `crates/persistence/migrations/202607180005_occupied_slot_submit_input.sql`, `crates/persistence/src/submit_input.rs`, and PostgreSQL enforcement for INV-002, INV-005, INV-007, INV-008, INV-009, INV-012, INV-015, INV-016, and INV-028. It adds no dependency, interrupt transition, `StopRequested` producer, steering consumption, reclassification storage, or protocol behavior.
+**Affects.**
+`crates/persistence/migrations/202607180005_occupied_slot_submit_input.sql`,
+`crates/persistence/src/submit_input.rs`, and PostgreSQL enforcement for
+INV-002, INV-005, INV-007, INV-008, INV-009, INV-012, INV-015, INV-016, and
+INV-028. It adds no dependency, interrupt transition, `StopRequested` producer,
+steering consumption, reclassification storage, or protocol behavior.
 
 ## 2026-07-19 — Dependency caching for the Rust CI jobs
 
