@@ -1,7 +1,6 @@
 # ADR-0034: Durable-command storage and equality
 
-- Date: 2026-07-17
-  human reviewer assigned
+- Date: 2026-07-17 human reviewer assigned
 - Supersedes: none
 - Superseded by: none
 - Depends on: [ADR-0001](0001-domain-terminology-and-identity.md),
@@ -21,11 +20,11 @@
 
 ADR-0001 and ADR-0027 already fix the idempotency semantics. Purpose-specific
 boundary construction produces a discriminated typed command without consulting
-mutable aggregate state. Lookup by owner-global `DurableCommandId` occurs
-before current-state validation. The first committed handling stores the
-comparison payload and one terminal applied-or-rejected result atomically with
-the command's effects. Equal replay returns that result; any different kind,
-target, or caller-supplied semantic field is conflicting reuse.
+mutable aggregate state. Lookup by owner-global `DurableCommandId` occurs before
+current-state validation. The first committed handling stores the comparison
+payload and one terminal applied-or-rejected result atomically with the
+command's effects. Equal replay returns that result; any different kind, target,
+or caller-supplied semantic field is conflicting reuse.
 
 ADR-0022 selects one owner-global `durable_command` registry and normalized
 Postgres records, but leaves the canonical versioned payload encoding open. Its
@@ -52,30 +51,30 @@ kind, session, or client receives a separate command-ID namespace.
 Each admitted command kind has one purpose-specific, normalized subordinate
 record family keyed one-to-one by `command_id`. That family stores:
 
-- every caller-supplied semantic field in the canonical typed payload except
-  the command ID;
+- every caller-supplied semantic field in the canonical typed payload except the
+  command ID;
 - one terminal result discriminator, `applied` or `rejected`;
 - every typed result field required to reconstruct the recorded result; and
 - a representation version scoped to that command kind when payload and result
   evolution require independent decoding.
 
-Scalar domain values use typed columns with `CHECK` constraints and foreign
-keys where the relationship is part of the accepted command. Repeated,
-ordered, or set-valued fields use purpose-specific child relations whose
-mapping reconstructs the matching domain collection semantics. Server-derived
-state that is not part of the caller comparison payload may appear only in the
-typed result or the command's atomic domain-effect records.
+Scalar domain values use typed columns with `CHECK` constraints and foreign keys
+where the relationship is part of the accepted command. Repeated, ordered, or
+set-valued fields use purpose-specific child relations whose mapping
+reconstructs the matching domain collection semantics. Server-derived state that
+is not part of the caller comparison payload may appear only in the typed result
+or the command's atomic domain-effect records.
 
 The registry row, exactly one matching typed subordinate record, the terminal
 result, and every applied domain effect commit in the same transaction.
 Transactions expose no claimed registry row whose typed payload or result is
 missing. The persistence mapping treats a missing, duplicate, mismatched-kind,
-or undecodable subordinate record as storage corruption, never as a new
-command or an unclaimed identifier.
+or undecodable subordinate record as storage corruption, never as a new command
+or an unclaimed identifier.
 
 This decision fixes the representation pattern, not final table or column names
-and not speculative tables for commands that are not yet admitted by an
-accepted decision.
+and not speculative tables for commands that are not yet admitted by an accepted
+decision.
 
 ### Canonical construction and replay equality
 
@@ -88,10 +87,10 @@ For a received command, the owning boundary:
    without reading mutable aggregate state;
 2. removes `DurableCommandId` from the comparison value;
 3. looks up the owner-global registry;
-4. if claimed, loads the matching versioned subordinate records and
-   reconstructs their typed domain payload and terminal result; and
-5. compares the reconstructed payload with the received payload using
-   structural domain equality.
+4. if claimed, loads the matching versioned subordinate records and reconstructs
+   their typed domain payload and terminal result; and
+5. compares the reconstructed payload with the received payload using structural
+   domain equality.
 
 The command-kind discriminator, session or other target reference, and every
 caller-supplied semantic field participate in equality. Domain distinctions
@@ -101,19 +100,19 @@ equivalent. For example, `UseSessionDefault` does not equal
 because one current command happens to contain the same members.
 
 Equal replay returns the recorded typed result before any current-state
-validation or server-derived recomputation. Unequal replay is conflicting
-reuse. A record that cannot be decoded into its exact known domain variant
-fails explicitly as storage corruption; it is never compared as raw columns or
+validation or server-derived recomputation. Unequal replay is conflicting reuse.
+A record that cannot be decoded into its exact known domain variant fails
+explicitly as storage corruption; it is never compared as raw columns or
 silently coerced to a newer meaning.
 
 ### Typed terminal results
 
-Applied results record the semantic identities and correlations that the
-command created or changed and that callers or later proof validation need.
+Applied results record the semantic identities and correlations that the command
+created or changed and that callers or later proof validation need.
 Authoritative rejections use a closed, command-specific rejection discriminator
 and typed fields rather than an error string. Operational diagnostics may be
-stored separately, but they do not determine replay equality, result meaning,
-or proof authority.
+stored separately, but they do not determine replay equality, result meaning, or
+proof authority.
 
 Purpose-specific proof reconstitution remains domain-owned, as decided by
 [ADR-0035](0035-domain-owned-persistence-reconstitution.md). These records must
@@ -124,15 +123,15 @@ expose raw proof constructors to persistence code.
 ### Representation evolution
 
 Adding a durable command kind requires its own explicit domain payload and
-result algebra, normalized record family, fallible mappings, structural
-equality tests, and migration. A generic property map or catch-all command row
-cannot admit it.
+result algebra, normalized record family, fallible mappings, structural equality
+tests, and migration. A generic property map or catch-all command row cannot
+admit it.
 
 A representation change uses a forward migration or a new kind-scoped storage
 version. Every retained version must decode to the same domain value it meant
-when committed. Replay equality occurs after decoding, so a storage migration
-or equivalent spelling cannot turn an equal command into conflicting reuse.
-Unknown versions fail explicitly. Storage versions are not protocol versions.
+when committed. Replay equality occurs after decoding, so a storage migration or
+equivalent spelling cannot turn an equal command into conflicting reuse. Unknown
+versions fail explicitly. Storage versions are not protocol versions.
 
 ### No universal serialized authority
 
@@ -169,9 +168,9 @@ Store one canonical, versioned JSONB payload and result on every registry row.
 That minimizes tables, makes command addition migration-light, and is easy to
 inspect. It is rejected because canonical JSON rules would become a second
 semantic model beside the domain types, database constraints would not express
-the accepted variants and relationships, and serializer or normalization
-changes could alter replay behavior. The selected typed records require more
-migrations but keep each command's semantics reviewable and constraint-aware.
+the accepted variants and relationships, and serializer or normalization changes
+could alter replay behavior. The selected typed records require more migrations
+but keep each command's semantics reviewable and constraint-aware.
 
 ## Rejected alternatives
 
@@ -202,24 +201,24 @@ owner-globally.
 
 The persistence adapter needs corruption errors distinct from domain rejection
 and infrastructure failure. Operators cannot repair an undecodable claimed
-command by treating it as unseen; correction requires repairing or migrating
-the durable record.
+command by treating it as unseen; correction requires repairing or migrating the
+durable record.
 
 ## Scenario walkthroughs
 
 - **S01:** `CreateSession` and `SubmitInput` each claim the same owner-global
   registry but use their own typed payload/result records. Replaying an equal
   constructed value returns the recorded session or accepted-input result.
-  Changing ancestry, defaults, session, delivery variant, or any caller field
-  is conflicting reuse even if a serializer could produce similar bytes.
+  Changing ancestry, defaults, session, delivery variant, or any caller field is
+  conflicting reuse even if a serializer could produce similar bytes.
 - **S03:** Restart reconstructs a queued turn from its lifecycle records and
   reconstructs the command receipt separately. Replaying the acceptance command
   returns its stored result without deriving eligibility or rereading current
   defaults.
 - **S04:** A `ResolveAmbiguity` command stores its exact expected operation set
   in a purpose-specific relation. Replay compares the reconstructed canonical
-  set and returns the recorded decision; it does not compare JSON array order
-  or current wait membership.
+  set and returns the recorded decision; it does not compare JSON array order or
+  current wait membership.
 
 ## Open questions
 
