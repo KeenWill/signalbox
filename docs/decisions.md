@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-18 — Application-owned eligible-turn activation orchestration
+
+**Context.** The domain now owns a complete scheduling projection and one sealed earliest-queued activation candidate, while ADR-0033 assigns the origin-entry, starting-snapshot, and initial-attempt identities to application orchestration. Eligibility remains derived from authoritative durable state and ADR-0010 makes wake-ups nonauthoritative hints, so the application cannot preload a projection or accept a caller-selected turn.
+
+**Decision.** Expose one application generator port for exactly those three UUIDv7 candidate identities and one atomic transaction port taking only `SessionId` plus `AcceptedInputTurnActivationIdentities`. The closed transaction result is either `NoEligibleTurn` for a false or stale hint or the committed `ActivatedAcceptedInputTurn` view. The service mints each identity once, calls the transaction once, and returns its result or failure unchanged. Projection loading, earliest-turn selection, domain preparation, durable identity collision handling, and atomic commit remain inside the transaction implementation; sweeps, wake-up delivery, startup recovery, runtime dispatch, and automatic retry remain outside this use case.
+
+**Rejected alternatives.** Taking a target `TurnId` would let application or work-source policy skip earlier queued work. Loading or preparing before the port would separate eligibility from its authoritative serialization boundary. Passing three raw identities instead of the domain grouping would repeat a correlation already owned by the domain. Returning the sealed prepared candidate would expose an uncommitted value as the application result. Retrying transaction failures or driving a scheduler loop inside the service would hide commit ambiguity and combine distinct ADR-0010 ports.
+
+**Affects.** `crates/application/src/start_eligible_turn.rs`, application exports and spine, and application enforcement links for INV-002 and INV-009. It adds no persistence adapter, schema, domain semantics, work-source port, sweep, startup hook, recovery behavior, runtime dispatch, dependency, or eligible-failure transition.
+
 ## 2026-07-18 — expect-test dev-dependency for snapshot assertions
 
 **Context.** The [testing style guide](testing-style.md) fixes forward-looking snapshot norms — expect tests for shape-is-the-assertion values, supplementing invariant-linked asserts, curated tables — but no snapshot machinery existed. Matrix-outcome and derived-order tests spelled their shapes only through per-case `assert_eq!` chains that hide the whole at a glance.
