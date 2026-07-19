@@ -22,8 +22,9 @@ What it is being built to do:
 
 The [vision](docs/vision.md) and [target model](docs/target-model.md) describe
 the purpose, deployment shape, and destination in full; the target model
-governs these capabilities in detail, and several (fork selection, delegation)
-remain [open decisions](docs/open-questions.md).
+details these capabilities directionally — accepted records decide them — and
+several (fork selection, delegation) remain
+[open decisions](docs/open-questions.md).
 
 > **Status:** design and foundation phase, not yet a usable product. The
 > domain and persistence core exists behind accepted decisions; provider
