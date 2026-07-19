@@ -889,29 +889,76 @@ mod tests {
     /// the restricted unsent and startup terminal branches from ADR-0004.
     #[test]
     fn prepared_terminal_matrix_is_complete() {
-        // Decisive accepting edges stay as targeted asserts
-        // (`docs/testing-style.md`, rule 10); the snapshot covers the grid.
-        assert!(
-            prepared()
-                .end_without_stop(UnstoppedAttemptDisposition::KnownFailure)
-                .is_ok()
-        );
-        assert!(
-            prepared()
-                .end_without_stop(UnstoppedAttemptDisposition::Lost)
-                .is_ok()
-        );
-        assert!(
-            prepared()
-                .end_after_cancellation(proof(1), CancellationStopDisposition::Cancelled)
-                .is_ok()
-        );
-
         let causes_without_interrupt =
             FatalMismatchStopCauses::new(failure(1), AppliedInterruptState::NoAppliedInterrupt);
         let causes_with_interrupt = FatalMismatchStopCauses::new(
             failure(1),
             AppliedInterruptState::Applied { proof: proof(1) },
+        );
+        assert_without_stop_rejects(prepared(), UnstoppedAttemptDisposition::TurnCompleted);
+        assert_without_stop_rejects(prepared(), UnstoppedAttemptDisposition::TurnRefused);
+        assert_without_stop_rejects(
+            prepared(),
+            UnstoppedAttemptDisposition::YieldedToDurableWait,
+        );
+        assert_without_stop_ends_for(prepared(), UnstoppedAttemptDisposition::KnownFailure);
+        assert_without_stop_ends_for(prepared(), UnstoppedAttemptDisposition::Lost);
+        assert_without_stop_rejects(prepared(), UnstoppedAttemptDisposition::Ambiguous);
+        assert_after_cancellation_rejects(
+            prepared(),
+            proof(1),
+            CancellationStopDisposition::TurnCompleted,
+        );
+        assert_after_cancellation_rejects(
+            prepared(),
+            proof(1),
+            CancellationStopDisposition::TurnRefused,
+        );
+        assert_after_cancellation_rejects(
+            prepared(),
+            proof(1),
+            CancellationStopDisposition::KnownFailure,
+        );
+        assert_after_cancellation_rejects(prepared(), proof(1), CancellationStopDisposition::Lost);
+        assert_after_cancellation_ends_for(
+            prepared(),
+            proof(1),
+            CancellationStopDisposition::Cancelled,
+        );
+        assert_after_cancellation_rejects(
+            prepared(),
+            proof(1),
+            CancellationStopDisposition::Ambiguous,
+        );
+        assert_after_fatal_ends_for(
+            prepared(),
+            causes_without_interrupt.clone(),
+            FatalMismatchStopDisposition::KnownFailure,
+        );
+        assert_after_fatal_ends_for(
+            prepared(),
+            causes_without_interrupt.clone(),
+            FatalMismatchStopDisposition::Lost,
+        );
+        assert_after_fatal_rejects(
+            prepared(),
+            causes_without_interrupt.clone(),
+            FatalMismatchStopDisposition::Ambiguous,
+        );
+        assert_after_fatal_rejects(
+            prepared(),
+            causes_with_interrupt.clone(),
+            FatalMismatchStopDisposition::KnownFailure,
+        );
+        assert_after_fatal_rejects(
+            prepared(),
+            causes_with_interrupt.clone(),
+            FatalMismatchStopDisposition::Lost,
+        );
+        assert_after_fatal_rejects(
+            prepared(),
+            causes_with_interrupt.clone(),
+            FatalMismatchStopDisposition::Ambiguous,
         );
         let rows = [
             without_stop_rows(&prepared),
@@ -966,6 +1013,44 @@ mod tests {
             failure(1),
             AppliedInterruptState::Applied { proof: proof(1) },
         );
+
+        assert_without_stop_ends(UnstoppedAttemptDisposition::TurnCompleted);
+        assert_without_stop_ends(UnstoppedAttemptDisposition::TurnRefused);
+        assert_without_stop_ends(UnstoppedAttemptDisposition::YieldedToDurableWait);
+        assert_without_stop_ends(UnstoppedAttemptDisposition::KnownFailure);
+        assert_without_stop_ends(UnstoppedAttemptDisposition::Lost);
+        assert_without_stop_ends(UnstoppedAttemptDisposition::Ambiguous);
+        assert_after_cancellation_ends(CancellationStopDisposition::TurnCompleted);
+        assert_after_cancellation_ends(CancellationStopDisposition::TurnRefused);
+        assert_after_cancellation_ends(CancellationStopDisposition::KnownFailure);
+        assert_after_cancellation_ends(CancellationStopDisposition::Lost);
+        assert_after_cancellation_ends(CancellationStopDisposition::Cancelled);
+        assert_after_cancellation_ends(CancellationStopDisposition::Ambiguous);
+        assert_after_fatal_ends(
+            causes_without_interrupt.clone(),
+            FatalMismatchStopDisposition::KnownFailure,
+        );
+        assert_after_fatal_ends(
+            causes_without_interrupt.clone(),
+            FatalMismatchStopDisposition::Lost,
+        );
+        assert_after_fatal_ends(
+            causes_without_interrupt.clone(),
+            FatalMismatchStopDisposition::Ambiguous,
+        );
+        assert_after_fatal_ends(
+            causes_with_interrupt.clone(),
+            FatalMismatchStopDisposition::KnownFailure,
+        );
+        assert_after_fatal_ends(
+            causes_with_interrupt.clone(),
+            FatalMismatchStopDisposition::Lost,
+        );
+        assert_after_fatal_ends(
+            causes_with_interrupt.clone(),
+            FatalMismatchStopDisposition::Ambiguous,
+        );
+
         let rows = [
             without_stop_rows(&running),
             after_cancellation_rows(&running, "after cancellation", proof(1)),
@@ -1009,26 +1094,214 @@ mod tests {
         .assert_eq(&table(&rows));
     }
 
+    #[track_caller]
+    fn assert_without_stop_ends(disposition: UnstoppedAttemptDisposition) {
+        assert!(
+            running().end_without_stop(disposition).is_ok(),
+            "Running must accept the stated unstopped terminal disposition"
+        );
+    }
+
+    #[track_caller]
+    fn assert_after_cancellation_ends(disposition: CancellationStopDisposition) {
+        assert!(
+            running()
+                .end_after_cancellation(proof(1), disposition)
+                .is_ok(),
+            "Running must accept the stated cancellation terminal disposition"
+        );
+    }
+
+    #[track_caller]
+    fn assert_after_fatal_ends(
+        causes: FatalMismatchStopCauses,
+        disposition: FatalMismatchStopDisposition,
+    ) {
+        assert!(
+            running()
+                .end_after_fatal_mismatch(causes, disposition)
+                .is_ok(),
+            "Running must accept the stated fatal-mismatch terminal disposition"
+        );
+    }
+
+    #[track_caller]
+    fn assert_without_stop_ends_for(
+        current: CurrentTurnAttempt,
+        disposition: UnstoppedAttemptDisposition,
+    ) {
+        assert!(
+            current.end_without_stop(disposition).is_ok(),
+            "the stated current attempt must accept the stated unstopped disposition"
+        );
+    }
+
+    #[track_caller]
+    fn assert_without_stop_rejects(
+        current: CurrentTurnAttempt,
+        disposition: UnstoppedAttemptDisposition,
+    ) {
+        assert!(
+            current.end_without_stop(disposition).is_err(),
+            "the stated current attempt must reject the stated unstopped disposition"
+        );
+    }
+
+    #[track_caller]
+    fn assert_after_cancellation_ends_for(
+        current: CurrentTurnAttempt,
+        cause: AppliedInterruptProof,
+        disposition: CancellationStopDisposition,
+    ) {
+        assert!(
+            current.end_after_cancellation(cause, disposition).is_ok(),
+            "the stated current attempt and proof must accept the stated cancellation disposition"
+        );
+    }
+
+    #[track_caller]
+    fn assert_after_cancellation_rejects(
+        current: CurrentTurnAttempt,
+        cause: AppliedInterruptProof,
+        disposition: CancellationStopDisposition,
+    ) {
+        assert!(
+            current.end_after_cancellation(cause, disposition).is_err(),
+            "the stated current attempt and proof must reject the stated cancellation disposition"
+        );
+    }
+
+    #[track_caller]
+    fn assert_after_fatal_ends_for(
+        current: CurrentTurnAttempt,
+        causes: FatalMismatchStopCauses,
+        disposition: FatalMismatchStopDisposition,
+    ) {
+        assert!(
+            current
+                .end_after_fatal_mismatch(causes, disposition)
+                .is_ok(),
+            "the stated current attempt and causes must accept the stated fatal disposition"
+        );
+    }
+
+    #[track_caller]
+    fn assert_after_fatal_rejects(
+        current: CurrentTurnAttempt,
+        causes: FatalMismatchStopCauses,
+        disposition: FatalMismatchStopDisposition,
+    ) {
+        assert!(
+            current
+                .end_after_fatal_mismatch(causes, disposition)
+                .is_err(),
+            "the stated current attempt and causes must reject the stated fatal disposition"
+        );
+    }
+
     /// S04 / S07 / S23 / INV-006 / INV-029 / INV-034: CancellationOnly ends
     /// only as AfterCancellation with its exact proof and any honest result.
     #[test]
     fn cancellation_stopped_terminal_matrix_is_complete() {
-        // Decisive edges (`docs/testing-style.md`, rule 10): the exact proof
-        // ends, a different proof cannot.
-        assert!(
-            cancellation_stopped()
-                .end_after_cancellation(proof(1), CancellationStopDisposition::Cancelled)
-                .is_ok()
-        );
-        assert!(
-            cancellation_stopped()
-                .end_after_cancellation(proof(2), CancellationStopDisposition::Cancelled)
-                .is_err()
-        );
-
         let matching_fatal = FatalMismatchStopCauses::new(
             failure(1),
             AppliedInterruptState::Applied { proof: proof(1) },
+        );
+        assert_after_cancellation_ends_for(
+            cancellation_stopped(),
+            proof(1),
+            CancellationStopDisposition::TurnCompleted,
+        );
+        assert_after_cancellation_ends_for(
+            cancellation_stopped(),
+            proof(1),
+            CancellationStopDisposition::TurnRefused,
+        );
+        assert_after_cancellation_ends_for(
+            cancellation_stopped(),
+            proof(1),
+            CancellationStopDisposition::KnownFailure,
+        );
+        assert_after_cancellation_ends_for(
+            cancellation_stopped(),
+            proof(1),
+            CancellationStopDisposition::Lost,
+        );
+        assert_after_cancellation_ends_for(
+            cancellation_stopped(),
+            proof(1),
+            CancellationStopDisposition::Cancelled,
+        );
+        assert_after_cancellation_ends_for(
+            cancellation_stopped(),
+            proof(1),
+            CancellationStopDisposition::Ambiguous,
+        );
+        assert_after_cancellation_rejects(
+            cancellation_stopped(),
+            proof(2),
+            CancellationStopDisposition::TurnCompleted,
+        );
+        assert_after_cancellation_rejects(
+            cancellation_stopped(),
+            proof(2),
+            CancellationStopDisposition::TurnRefused,
+        );
+        assert_after_cancellation_rejects(
+            cancellation_stopped(),
+            proof(2),
+            CancellationStopDisposition::KnownFailure,
+        );
+        assert_after_cancellation_rejects(
+            cancellation_stopped(),
+            proof(2),
+            CancellationStopDisposition::Lost,
+        );
+        assert_after_cancellation_rejects(
+            cancellation_stopped(),
+            proof(2),
+            CancellationStopDisposition::Cancelled,
+        );
+        assert_after_cancellation_rejects(
+            cancellation_stopped(),
+            proof(2),
+            CancellationStopDisposition::Ambiguous,
+        );
+        assert_without_stop_rejects(
+            cancellation_stopped(),
+            UnstoppedAttemptDisposition::TurnCompleted,
+        );
+        assert_without_stop_rejects(
+            cancellation_stopped(),
+            UnstoppedAttemptDisposition::TurnRefused,
+        );
+        assert_without_stop_rejects(
+            cancellation_stopped(),
+            UnstoppedAttemptDisposition::YieldedToDurableWait,
+        );
+        assert_without_stop_rejects(
+            cancellation_stopped(),
+            UnstoppedAttemptDisposition::KnownFailure,
+        );
+        assert_without_stop_rejects(cancellation_stopped(), UnstoppedAttemptDisposition::Lost);
+        assert_without_stop_rejects(
+            cancellation_stopped(),
+            UnstoppedAttemptDisposition::Ambiguous,
+        );
+        assert_after_fatal_rejects(
+            cancellation_stopped(),
+            matching_fatal.clone(),
+            FatalMismatchStopDisposition::KnownFailure,
+        );
+        assert_after_fatal_rejects(
+            cancellation_stopped(),
+            matching_fatal.clone(),
+            FatalMismatchStopDisposition::Lost,
+        );
+        assert_after_fatal_rejects(
+            cancellation_stopped(),
+            matching_fatal.clone(),
+            FatalMismatchStopDisposition::Ambiguous,
         );
         let rows = [
             after_cancellation_rows(
@@ -1097,24 +1370,11 @@ mod tests {
             AppliedInterruptState::Applied { proof: proof(1) },
         );
 
-        // Decisive edges (`docs/testing-style.md`, rule 10): the exact
-        // complete cause value ends; a superset or a different retained
-        // interrupt cannot.
-        assert!(
-            upgraded()
-                .end_after_fatal_mismatch(exact.clone(), FatalMismatchStopDisposition::KnownFailure)
-                .is_ok()
-        );
         let TurnAttemptStopCauses::FatalMismatch(superset) =
             TurnAttemptStopCauses::FatalMismatch(exact.clone()).add_fatal_mismatch(failure(3))
         else {
             panic!("adding a fatal failure must stay fatal");
         };
-        assert!(
-            upgraded()
-                .end_after_fatal_mismatch(superset, FatalMismatchStopDisposition::KnownFailure)
-                .is_err()
-        );
         let TurnAttemptStopCauses::FatalMismatch(different_interrupt) =
             TurnAttemptStopCauses::fatal_mismatch(failure(1))
                 .add_fatal_mismatch(failure(2))
@@ -1123,13 +1383,115 @@ mod tests {
         else {
             panic!("adding an interrupt must stay fatal");
         };
-        assert!(
-            upgraded()
-                .end_after_fatal_mismatch(
-                    different_interrupt,
-                    FatalMismatchStopDisposition::KnownFailure,
-                )
-                .is_err()
+        assert_after_fatal_ends_for(
+            fatal_stopped(),
+            exact_without_interrupt.clone(),
+            FatalMismatchStopDisposition::KnownFailure,
+        );
+        assert_after_fatal_ends_for(
+            fatal_stopped(),
+            exact_without_interrupt.clone(),
+            FatalMismatchStopDisposition::Lost,
+        );
+        assert_after_fatal_ends_for(
+            fatal_stopped(),
+            exact_without_interrupt.clone(),
+            FatalMismatchStopDisposition::Ambiguous,
+        );
+        assert_after_fatal_ends_for(
+            upgraded(),
+            exact.clone(),
+            FatalMismatchStopDisposition::KnownFailure,
+        );
+        assert_after_fatal_ends_for(
+            upgraded(),
+            exact.clone(),
+            FatalMismatchStopDisposition::Lost,
+        );
+        assert_after_fatal_ends_for(
+            upgraded(),
+            exact.clone(),
+            FatalMismatchStopDisposition::Ambiguous,
+        );
+        assert_after_fatal_rejects(
+            upgraded(),
+            subset.clone(),
+            FatalMismatchStopDisposition::KnownFailure,
+        );
+        assert_after_fatal_rejects(
+            upgraded(),
+            subset.clone(),
+            FatalMismatchStopDisposition::Lost,
+        );
+        assert_after_fatal_rejects(
+            upgraded(),
+            subset.clone(),
+            FatalMismatchStopDisposition::Ambiguous,
+        );
+        assert_after_fatal_rejects(
+            upgraded(),
+            superset.clone(),
+            FatalMismatchStopDisposition::KnownFailure,
+        );
+        assert_after_fatal_rejects(
+            upgraded(),
+            superset.clone(),
+            FatalMismatchStopDisposition::Lost,
+        );
+        assert_after_fatal_rejects(
+            upgraded(),
+            superset,
+            FatalMismatchStopDisposition::Ambiguous,
+        );
+        assert_after_fatal_rejects(
+            upgraded(),
+            different_interrupt.clone(),
+            FatalMismatchStopDisposition::KnownFailure,
+        );
+        assert_after_fatal_rejects(
+            upgraded(),
+            different_interrupt.clone(),
+            FatalMismatchStopDisposition::Lost,
+        );
+        assert_after_fatal_rejects(
+            upgraded(),
+            different_interrupt,
+            FatalMismatchStopDisposition::Ambiguous,
+        );
+        assert_without_stop_rejects(upgraded(), UnstoppedAttemptDisposition::TurnCompleted);
+        assert_without_stop_rejects(upgraded(), UnstoppedAttemptDisposition::TurnRefused);
+        assert_without_stop_rejects(
+            upgraded(),
+            UnstoppedAttemptDisposition::YieldedToDurableWait,
+        );
+        assert_without_stop_rejects(upgraded(), UnstoppedAttemptDisposition::KnownFailure);
+        assert_without_stop_rejects(upgraded(), UnstoppedAttemptDisposition::Lost);
+        assert_without_stop_rejects(upgraded(), UnstoppedAttemptDisposition::Ambiguous);
+        assert_after_cancellation_rejects(
+            upgraded(),
+            proof(1),
+            CancellationStopDisposition::TurnCompleted,
+        );
+        assert_after_cancellation_rejects(
+            upgraded(),
+            proof(1),
+            CancellationStopDisposition::TurnRefused,
+        );
+        assert_after_cancellation_rejects(
+            upgraded(),
+            proof(1),
+            CancellationStopDisposition::KnownFailure,
+        );
+        assert_after_cancellation_rejects(upgraded(), proof(1), CancellationStopDisposition::Lost);
+        assert_after_cancellation_rejects(
+            upgraded(),
+            proof(1),
+            CancellationStopDisposition::Cancelled,
+        );
+        assert_after_cancellation_rejects(
+            upgraded(),
+            proof(1),
+            CancellationStopDisposition::Ambiguous,
         );
 
         let rows = [

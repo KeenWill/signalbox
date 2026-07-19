@@ -541,16 +541,6 @@ mod tests {
             .expect("InFlight may request cancellation")
     }
 
-    fn all_dispositions() -> [ModelCallDisposition; 5] {
-        [
-            ModelCallDisposition::Completed,
-            ModelCallDisposition::KnownFailed,
-            ModelCallDisposition::Refused,
-            ModelCallDisposition::Cancelled,
-            ModelCallDisposition::Ambiguous,
-        ]
-    }
-
     #[test]
     fn provider_model_identities_expose_their_uuid_values() {
         let uuid = Uuid::from_u128(1);
@@ -753,20 +743,44 @@ mod tests {
     /// ambiguity stays distinct instead of being coerced to failure.
     #[test]
     fn issued_calls_accept_every_classified_disposition() {
-        assert_accepts_every_classified_disposition(in_flight());
-        assert_accepts_every_classified_disposition(cancellation_requested());
+        assert_accepts_classified_disposition(in_flight(), ModelCallDisposition::Completed);
+        assert_accepts_classified_disposition(in_flight(), ModelCallDisposition::Refused);
+        assert_accepts_classified_disposition(in_flight(), ModelCallDisposition::KnownFailed);
+        assert_accepts_classified_disposition(in_flight(), ModelCallDisposition::Cancelled);
+        assert_accepts_classified_disposition(in_flight(), ModelCallDisposition::Ambiguous);
+        assert_accepts_classified_disposition(
+            cancellation_requested(),
+            ModelCallDisposition::Completed,
+        );
+        assert_accepts_classified_disposition(
+            cancellation_requested(),
+            ModelCallDisposition::Refused,
+        );
+        assert_accepts_classified_disposition(
+            cancellation_requested(),
+            ModelCallDisposition::KnownFailed,
+        );
+        assert_accepts_classified_disposition(
+            cancellation_requested(),
+            ModelCallDisposition::Cancelled,
+        );
+        assert_accepts_classified_disposition(
+            cancellation_requested(),
+            ModelCallDisposition::Ambiguous,
+        );
     }
 
     #[track_caller]
-    fn assert_accepts_every_classified_disposition(current: CurrentModelCall) {
-        for disposition in all_dispositions() {
-            let ended = current
-                .clone()
-                .end_classified(disposition)
-                .expect("issued calls classify every disposition");
-            assert_eq!(ended.disposition(), disposition);
-            assert_eq!(ended.frontier(), current.frontier());
-        }
+    fn assert_accepts_classified_disposition(
+        current: CurrentModelCall,
+        disposition: ModelCallDisposition,
+    ) {
+        let ended = current
+            .clone()
+            .end_classified(disposition)
+            .expect("issued calls classify the stated disposition");
+        assert_eq!(ended.disposition(), disposition);
+        assert_eq!(ended.frontier(), current.frontier());
     }
 
     /// INV-004 / INV-014 / INV-015: terminal history preserves the identity,

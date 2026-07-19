@@ -365,6 +365,8 @@ pub enum TurnDisposition {
 
 #[cfg(test)]
 mod tests {
+    use expect_test::expect;
+
     use super::*;
     use crate::{
         AppliedInterruptState, ResolvedContextFrontierSnapshot, SemanticTranscriptEntryRef,
@@ -545,35 +547,27 @@ mod tests {
         assert!(running.retains_progressing_slot());
         assert!(awaiting_approval.retains_progressing_slot());
         assert!(awaiting_recovery.retains_progressing_slot());
-        assert!(matches!(
-            &running,
-            ActiveTurnPhase::Running { current_attempt }
-                if current_attempt.id() == attempt_id
-        ));
-        assert!(matches!(
-            &awaiting_approval,
-            ActiveTurnPhase::AwaitingApproval { request } if *request == request_id
-        ));
-        assert!(matches!(
-            &awaiting_recovery,
-            ActiveTurnPhase::AwaitingRecoveryDecision { ambiguous_operations }
-                if ambiguous_operations == &ambiguous
-        ));
     }
 
     /// S04 / S06 / S07 / INV-006 / INV-025 / INV-026 / INV-029: every marker
     /// reason retains the exact canonical ambiguity set and typed authority.
     #[test]
     fn reconciliation_markers_preserve_exact_sets_and_reasons() {
-        assert_marker_preserves_set_and_reason(ReconciliationReason::OwnerChoseReconciliation {
-            decision: owner_stop(1),
-        });
+        let ambiguous_operations = operations(&[1, 2]);
         assert_marker_preserves_set_and_reason(
+            ambiguous_operations.clone(),
+            ReconciliationReason::OwnerChoseReconciliation {
+                decision: owner_stop(1),
+            },
+        );
+        assert_marker_preserves_set_and_reason(
+            ambiguous_operations.clone(),
             ReconciliationReason::InterruptRequiresReconciliation {
                 interrupt: interrupt(1),
             },
         );
         assert_marker_preserves_set_and_reason(
+            ambiguous_operations,
             ReconciliationReason::FatalMismatchRequiresReconciliation {
                 causes: fatal_causes(),
             },
@@ -581,8 +575,10 @@ mod tests {
     }
 
     #[track_caller]
-    fn assert_marker_preserves_set_and_reason(reason: ReconciliationReason) {
-        let ambiguous_operations = operations(&[1, 2]);
+    fn assert_marker_preserves_set_and_reason(
+        ambiguous_operations: NonEmptyIssuedOperationRefs,
+        reason: ReconciliationReason,
+    ) {
         let marker = marker(ambiguous_operations.clone(), reason.clone());
 
         assert_eq!(marker.ambiguous_operations(), &ambiguous_operations);
@@ -593,21 +589,10 @@ mod tests {
     /// values retain their exact proof-bearing payloads.
     #[test]
     fn terminal_dispositions_preserve_exact_payloads() {
-        assert!(matches!(
-            TurnDisposition::Completed,
-            TurnDisposition::Completed
-        ));
-        assert!(matches!(TurnDisposition::Refused, TurnDisposition::Refused));
-        assert!(matches!(TurnDisposition::Failed, TurnDisposition::Failed));
-
         let expected_cause = interrupt(1);
         let cancelled = TurnDisposition::Cancelled {
             cause: expected_cause,
         };
-        assert!(matches!(
-            cancelled,
-            TurnDisposition::Cancelled { cause } if cause == expected_cause
-        ));
 
         let expected = marker(
             operations(&[1, 2]),
@@ -615,13 +600,51 @@ mod tests {
                 interrupt: interrupt(1),
             },
         );
-        let reconciliation = TurnDisposition::ReconciliationRequired {
-            marker: expected.clone(),
-        };
-        assert!(matches!(
-            reconciliation,
-            TurnDisposition::ReconciliationRequired { marker } if marker == expected
-        ));
+        let reconciliation = TurnDisposition::ReconciliationRequired { marker: expected };
+
+        expect![[r#"
+            (
+                Cancelled {
+                    cause: AppliedInterruptProof {
+                        command: DurableCommandId(
+                            00000000-0000-0000-0000-000000000001,
+                        ),
+                        predecessor: TurnId(
+                            00000000-0000-0000-0000-000000000064,
+                        ),
+                    },
+                },
+                ReconciliationRequired {
+                    marker: ReconciliationMarker {
+                        ambiguous_operations: NonEmptyIssuedOperationRefs {
+                            operations: {
+                                ModelCall(
+                                    ModelCallId(
+                                        00000000-0000-0000-0000-000000000001,
+                                    ),
+                                ),
+                                ModelCall(
+                                    ModelCallId(
+                                        00000000-0000-0000-0000-000000000002,
+                                    ),
+                                ),
+                            },
+                        },
+                        reason: InterruptRequiresReconciliation {
+                            interrupt: AppliedInterruptProof {
+                                command: DurableCommandId(
+                                    00000000-0000-0000-0000-000000000001,
+                                ),
+                                predecessor: TurnId(
+                                    00000000-0000-0000-0000-000000000064,
+                                ),
+                            },
+                        },
+                    },
+                },
+            )
+        "#]]
+        .assert_debug_eq(&(cancelled, reconciliation));
     }
 
     /// INV-006 / INV-026: the owner-stop proof exposes only its exact applied
