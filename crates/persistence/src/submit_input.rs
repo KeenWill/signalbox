@@ -1196,12 +1196,13 @@ fn decode_applied(
         row.try_get("frozen_alias_selected_direct_id")?,
     )?;
 
-    Ok(SubmitInputReconstitutionInput::applied(
+    Ok(SubmitInputReconstitutionInput::applied_turn_origin(
         command,
         stored_actor,
         result_session,
         result_accepted_input,
         result_turn,
+        None,
         accepting_command,
         accepted_input,
         accepted_session,
