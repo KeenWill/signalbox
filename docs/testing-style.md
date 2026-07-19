@@ -1,6 +1,6 @@
 # Testing style
 
-This document owns test style: how a test body reads, how fixtures are shaped, what an assertion may reference, and how snapshot (expect) tests are used. The [testing section of CONTRIBUTING.md](../CONTRIBUTING.md#testing) owns what to test — the expected layers, determinism requirements, and merge gates — and is not restated here. Naming stays as [AGENTS.md](../AGENTS.md) states it: tests reference the scenario and invariant identifiers they enforce when the connection is meaningful.
+This document owns how tests are written and how a test's value is judged — how a test body reads, how fixtures are shaped, what an assertion may reference, how snapshot (expect) tests are used, and when a test is worth keeping; the [testing section of CONTRIBUTING.md](../CONTRIBUTING.md#testing) owns the testing strategy — the test categories and their coverage obligations — and is not restated here. Naming stays as [AGENTS.md](../AGENTS.md) states it: tests reference the scenario and invariant identifiers they enforce when the connection is meaningful.
 
 The numbered rules are normative for new and modified tests; cite them by number in review. Apply them to existing tests only when already changing those tests for another reason. Every bad→good rewrite below is condensed from a real diff in this repository's domain or application test sweep — identifiers are shortened for the page, not invented.
 
@@ -164,7 +164,7 @@ assert_recorded_result_passes_through(SubmitInputResult::Rejected(
 
 ## Split versus unroll
 
-17. **A loop leaves a test body one of two ways.** Few cases exercising one behavior unroll in place into straight-line calls (rule 2); cases exercising distinct behaviors split into separately named tests — one behavior per test (rule 7). Before renaming or splitting any test, grep [the invariant catalog](invariants.md) for citations: cited names are stable identifiers, preserved as-is or updated in the catalog in the same change.
+17. **A loop leaves a test body one of two ways.** Few cases exercising one behavior unroll in place into straight-line calls (rule 2); cases exercising distinct behaviors split into separately named tests — one behavior per test (rule 7). Before renaming or splitting any test, check the enforcement column of [the invariant catalog](invariants.md): it binds by file and INV-tag, not by test function name, so verify the file's tagged coverage still holds after the change and update the column in the same change if it moves. Keep names stable anyway — reviewers and diffs read them — but the binding reference is the file plus its tags.
 
 From the application sweep, `replace_session_defaults.rs` — two behaviors, so a split, not an unroll:
 
@@ -185,9 +185,9 @@ fn s01_inv008_inv012_recorded_rejected_result_passes_through() { /* … */ }
 
 ## What not to test
 
-19. **Delete tests that cannot fail meaningfully.** A test that restates field storage (construct, then read every getter back), a tautological `matches!` over the code's own values, or a change-detector snapshot of incidental structure adds false-alarm cost without catching bugs. Judge every candidate as rule 8 judges it: if no real bug makes it fail and a behavior-preserving refactor might, it is a cost, not a safety net.
+19. **Delete tests that cannot fail meaningfully.** A test that restates single-field storage, a tautological `matches!` over the code's own values, or a change-detector snapshot of incidental structure adds false-alarm cost without catching bugs. An accessor-wiring test on a multi-field type is different: constructing with distinct values and reading every getter back catches a getter cross-wired to the wrong field — a real bug that compiles — and is legitimate. Judge every candidate as rule 8 judges it: if no real bug makes it fail and a behavior-preserving refactor might, it is a cost, not a safety net.
 
-From the domain sweep, `turn_attempt.rs`:
+From the domain sweep, `turn_attempt.rs` — this rule deletes the tautological assert; the snapshot standing in its place is a rule 12 curation, reading the retained cause back from the observed value instead of matching it against itself:
 
 ```rust
 // Bad: constructs a value, then matches it against itself.

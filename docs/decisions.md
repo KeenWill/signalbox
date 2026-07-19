@@ -6,7 +6,7 @@ An append-only, dated record of decisions below foundation weight, newest first.
 
 **Context.** The [testing section of CONTRIBUTING.md](../CONTRIBUTING.md#testing) owns what to test — layers, determinism, merge gates — but nothing owned how tests are written: fixture shape, what an assertion may reference, or snapshot discipline. Each pull request re-derived those choices, reviews re-litigated them per test, and multi-positional-integer fixture helpers and re-encoded magic seeds were accumulating in domain test modules.
 
-**Decision.** Test style — fixture and assertion rules plus forward-looking expect-test snapshot norms — is owned by [docs/testing-style.md](testing-style.md) as twelve numbered rules cited by number in review. This entry authorizes that document as the rules' single home and does not restate them. CONTRIBUTING.md keeps owning what to test; the two documents cross-link and restate nothing.
+**Decision.** Test style — fixture and assertion rules plus forward-looking expect-test snapshot norms — is owned by [docs/testing-style.md](testing-style.md) as numbered rules cited by number in review. This entry authorizes that document as the rules' single home and does not restate them. CONTRIBUTING.md keeps owning what to test; the two documents cross-link and restate nothing.
 
 **Rejected alternatives.** Inlining the style rules into CONTRIBUTING.md's testing section: it merges two ownerships into one section, and style rules would be diluted among layer requirements that change on a different cadence. Leaving style to per-agent prompting: rules stated only in prompts are unreviewable, drift between runs, and cannot be cited by number in review.
 
