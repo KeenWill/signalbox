@@ -192,24 +192,25 @@ async fn handle_in_transaction(
     identities: AcceptedInputTurnActivationIdentities,
 ) -> Result<TransactionDecision, StartEligibleTurnRepositoryError> {
     let session_uuid = session_id_to_uuid(requested_session);
-    let scheduler_exists = sqlx::query_scalar::<_, Uuid>(
-        "SELECT session_id
-           FROM session_scheduler
-          WHERE session_id = $1
-          FOR UPDATE",
+    let (session_exists, scheduler_session) = sqlx::query_as::<_, (bool, Option<Uuid>)>(
+        "SELECT
+            EXISTS (
+                SELECT 1
+                  FROM session
+                 WHERE session_id = $1
+            ),
+            (
+                SELECT session_id
+                  FROM session_scheduler
+                 WHERE session_id = $1
+                 FOR UPDATE
+            )",
     )
     .bind(session_uuid)
-    .fetch_optional(&mut *connection)
-    .await?
-    .is_some();
+    .fetch_one(&mut *connection)
+    .await?;
 
-    if !scheduler_exists {
-        let session_exists = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS (SELECT 1 FROM session WHERE session_id = $1)",
-        )
-        .bind(session_uuid)
-        .fetch_one(&mut *connection)
-        .await?;
+    if scheduler_session.is_none() {
         if session_exists {
             return Err(StartEligibleTurnCorruption::Missing("session scheduler row").into());
         }
