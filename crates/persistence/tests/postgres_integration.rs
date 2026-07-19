@@ -2760,6 +2760,75 @@ async fn s01_inv006_inv009_inv015_turn_storage_enforces_lifecycle_consistency()
         )
     );
 
+    let born_active = sqlx::query(
+        "INSERT INTO turn_lifecycle
+            (turn_id, session_id, origin_accepted_input_id, acceptance_position,
+             state_kind, start_lineage_kind, immediate_predecessor_turn_id,
+             starting_frontier_id, terminal_frontier_id, active_phase_kind,
+             current_attempt_id, terminal_disposition_kind)
+         SELECT turn_id, session_id, origin_accepted_input_id, acceptance_position,
+                state_kind, start_lineage_kind, immediate_predecessor_turn_id,
+                starting_frontier_id, terminal_frontier_id, active_phase_kind,
+                current_attempt_id, terminal_disposition_kind
+           FROM turn_lifecycle
+          WHERE turn_id = $1",
+    )
+    .bind(first_turn)
+    .execute(&pool)
+    .await
+    .expect_err("even a complete active shape must first be inserted as queued");
+    assert_eq!(
+        born_active
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into())
+    );
+    assert_eq!(
+        born_active
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("turn_lifecycle_inserted_queued")
+    );
+
+    for (attempt_id, state_kind, end_variant, end_disposition) in [
+        (Uuid::from_u128(0xb05), "running", None, None),
+        (
+            Uuid::from_u128(0xb06),
+            "ended",
+            Some("without_stop"),
+            Some("known_failure"),
+        ),
+    ] {
+        let born_nonprepared = sqlx::query(
+            "INSERT INTO turn_attempt
+                (turn_attempt_id, turn_id, session_id, continued_from_attempt_id,
+                 state_kind, end_variant, end_disposition)
+             VALUES ($1, $2, $3, NULL, $4, $5, $6)",
+        )
+        .bind(attempt_id)
+        .bind(Uuid::from_u128(0xa02))
+        .bind(session)
+        .bind(state_kind)
+        .bind(end_variant)
+        .bind(end_disposition)
+        .execute(&pool)
+        .await
+        .expect_err("every attempt must first be inserted as prepared");
+        assert_eq!(
+            born_nonprepared
+                .as_database_error()
+                .and_then(|error| error.code()),
+            Some("23514".into())
+        );
+        assert_eq!(
+            born_nonprepared
+                .as_database_error()
+                .and_then(|error| error.constraint()),
+            Some("turn_attempt_inserted_prepared"),
+            "unexpected insert guard for born-{state_kind} attempt"
+        );
+    }
+
     let mut second_activation = pool.begin().await?;
     insert_origin_frontier(
         &mut second_activation,
@@ -3072,6 +3141,36 @@ async fn s01_inv006_inv009_inv015_turn_storage_enforces_lifecycle_consistency()
             .as_database_error()
             .and_then(|error| error.code()),
         Some("23514".into())
+    );
+
+    let born_terminal = sqlx::query(
+        "INSERT INTO turn_lifecycle
+            (turn_id, session_id, origin_accepted_input_id, acceptance_position,
+             state_kind, start_lineage_kind, immediate_predecessor_turn_id,
+             starting_frontier_id, terminal_frontier_id, active_phase_kind,
+             current_attempt_id, terminal_disposition_kind)
+         SELECT turn_id, session_id, origin_accepted_input_id, acceptance_position,
+                state_kind, start_lineage_kind, immediate_predecessor_turn_id,
+                starting_frontier_id, terminal_frontier_id, active_phase_kind,
+                current_attempt_id, terminal_disposition_kind
+           FROM turn_lifecycle
+          WHERE turn_id = $1",
+    )
+    .bind(first_turn)
+    .execute(&pool)
+    .await
+    .expect_err("even a complete terminal shape must first be inserted as queued");
+    assert_eq!(
+        born_terminal
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into())
+    );
+    assert_eq!(
+        born_terminal
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("turn_lifecycle_inserted_queued")
     );
 
     pool.close().await;

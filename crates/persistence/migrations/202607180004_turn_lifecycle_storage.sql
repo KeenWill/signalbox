@@ -433,6 +433,17 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.state_kind <> 'queued' THEN
+            RAISE EXCEPTION 'turn lifecycle must be inserted as queued'
+                USING
+                    ERRCODE = '23514',
+                    CONSTRAINT = 'turn_lifecycle_inserted_queued';
+        END IF;
+
+        RETURN NEW;
+    END IF;
+
     IF TG_OP = 'DELETE' THEN
         RAISE EXCEPTION 'turn_lifecycle is not deletable'
             USING ERRCODE = '23514';
@@ -487,7 +498,7 @@ END;
 $$;
 
 CREATE TRIGGER turn_lifecycle_changes_are_guarded
-BEFORE UPDATE OR DELETE ON turn_lifecycle
+BEFORE INSERT OR UPDATE OR DELETE ON turn_lifecycle
 FOR EACH ROW
 EXECUTE FUNCTION reject_turn_lifecycle_invalid_change();
 
@@ -508,6 +519,13 @@ BEGIN
         IF owning_turn_state = 'terminal' THEN
             RAISE EXCEPTION 'a terminal turn cannot acquire another attempt'
                 USING ERRCODE = '23514';
+        END IF;
+
+        IF NEW.state_kind <> 'prepared' THEN
+            RAISE EXCEPTION 'turn attempt must be inserted as prepared'
+                USING
+                    ERRCODE = '23514',
+                    CONSTRAINT = 'turn_attempt_inserted_prepared';
         END IF;
 
         RETURN NEW;
