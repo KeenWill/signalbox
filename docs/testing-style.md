@@ -108,7 +108,7 @@ Snapshot assertions use [`expect-test`](https://github.com/rust-analyzer/expect-
 
 11. **Never bless a diff you haven't read.** Review a snapshot update with the same care as a code change; the snapshot diff is the review surface.
 
-12. **Curate snapshots for the reader.** Deterministic ordering, relevant fields only, rendered from the observed value under test. A snapshot of everything asserts nothing and degenerates into a [change-detector test](https://testing.googleblog.com/2015/01/testing-on-toilet-change-detector-tests.html). Table-shaped output in domain unit tests uses the `table` helper in that crate's `test_support` module (arriving with the expect-test adoption): pipe-separated, left-aligned, right-trimmed lines that stay byte-stable under re-blessing. Another test crate's first table-shaped snapshot lifts that helper into test support it can import instead of hand-rolling a variant. Prior art for tables in expect tests: [expectable](https://github.com/janestreet/expectable).
+12. **Curate snapshots for the reader.** Deterministic ordering, relevant fields only, rendered from the observed value under test. A snapshot of everything asserts nothing and degenerates into a [change-detector test](https://testing.googleblog.com/2015/01/testing-on-toilet-change-detector-tests.html). Table-shaped output uses the workspace's `signalbox-expect-table` dev-dependency (`crates/expect-table`), which renders any `Debug` rows as one box-drawn table with deterministic, right-trimmed lines that stay byte-stable under re-blessing; test crates import it instead of hand-rolling a variant. Prior art for tables in expect tests: [expectable](https://github.com/janestreet/expectable).
 
 Rules 2, 9, and 10 — a matrix whose expectation mirrors the code becomes per-edge targeted asserts in a row helper plus an expect table as their supplement (domain sweep, `turn_attempt.rs`):
 
@@ -281,4 +281,4 @@ expect![[r#"
 .assert_eq(&derived_order_table(&[first, second, interrupt]));
 ```
 
-The rendering helper draws only the fields the derivation depends on, in derived order, through the shared `table` helper; the snapshot is read, not regenerated blind, when it changes.
+The rendering helper draws only the fields the derivation depends on, in derived order, through the shared `signalbox-expect-table` renderer; the snapshot is read, not regenerated blind, when it changes.
