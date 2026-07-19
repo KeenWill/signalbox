@@ -193,7 +193,7 @@ mod tests {
         ))
     }
 
-    fn current_session(id: SessionId, current: u64) -> Session {
+    fn current_session(id: SessionId, current: SessionConfigurationDefaultsVersion) -> Session {
         SessionReconstitutionInput::new(
             id,
             id,
@@ -202,21 +202,40 @@ mod tests {
                 TranscriptAncestry::None,
             ),
             id,
-            version(current),
+            current,
             id,
-            version(current),
+            current,
             defaults(1),
         )
         .reconstitute()
         .expect("test facts form one complete current session")
     }
 
-    fn result_for(
-        command: DomainReplaceSessionDefaults,
-        current: u64,
-    ) -> ReplaceSessionDefaultsResult {
+    /// The recorded applied result the authoritative transaction would return
+    /// when the session's current version equals the command's expectation,
+    /// for scripting a fake transaction's response.
+    fn recorded_applied(command: DomainReplaceSessionDefaults) -> ReplaceSessionDefaultsResult {
         command
-            .prepare_against(&current_session(command.session(), current))
+            .prepare_against(&current_session(
+                command.session(),
+                command.expected_current_version(),
+            ))
+            .expect("test command and session identities match")
+            .result()
+    }
+
+    /// The recorded rejection the authoritative transaction would return when
+    /// the session's current version has already moved past the command's
+    /// expectation to its checked successor.
+    fn recorded_stale_rejection(
+        command: DomainReplaceSessionDefaults,
+    ) -> ReplaceSessionDefaultsResult {
+        let moved_past = command
+            .expected_current_version()
+            .checked_next()
+            .expect("test expected versions have a successor");
+        command
+            .prepare_against(&current_session(command.session(), moved_past))
             .expect("test command and session identities match")
             .result()
     }
@@ -253,6 +272,11 @@ mod tests {
                 observed: Vec::new(),
             }
         }
+
+        /// Deliberately scripted with no responses: any handling call panics.
+        fn expecting_no_calls() -> Self {
+            Self::returning([])
+        }
     }
 
     impl ReplaceSessionDefaultsTransaction for FakeTransaction {
@@ -277,22 +301,27 @@ mod tests {
     #[test]
     fn s01_inv001_inv012_sentinel_rejection_calls_no_transaction() {
         let target = session_id(1);
-        for (raw, expected) in [
-            (Uuid::nil(), InvalidDurableCommandId::Nil),
-            (Uuid::max(), InvalidDurableCommandId::Max),
-        ] {
-            assert_eq!(
-                ReplaceSessionDefaultsRequest::try_new(
-                    DurableCommandId::from_uuid(raw),
-                    target,
-                    version(1),
-                    defaults(2),
-                ),
-                Err(expected)
-            );
-        }
 
-        let service = ReplaceSessionDefaultsService::new(FakeTransaction::returning([]));
+        assert_eq!(
+            ReplaceSessionDefaultsRequest::try_new(
+                DurableCommandId::from_uuid(Uuid::nil()),
+                target,
+                version(1),
+                defaults(2),
+            ),
+            Err(InvalidDurableCommandId::Nil)
+        );
+        assert_eq!(
+            ReplaceSessionDefaultsRequest::try_new(
+                DurableCommandId::from_uuid(Uuid::max()),
+                target,
+                version(1),
+                defaults(2),
+            ),
+            Err(InvalidDurableCommandId::Max)
+        );
+
+        let service = ReplaceSessionDefaultsService::new(FakeTransaction::expecting_no_calls());
         assert!(service.into_transaction().observed.is_empty());
     }
 
@@ -307,15 +336,12 @@ mod tests {
             defaults(4),
         )
         .expect("ordinary command identity is admitted");
-        let recorded = result_for(
-            DomainReplaceSessionDefaults::new(
-                request.command_id(),
-                request.session(),
-                request.expected_current_version(),
-                request.replacement(),
-            ),
-            3,
-        );
+        let recorded = recorded_applied(DomainReplaceSessionDefaults::new(
+            request.command_id(),
+            request.session(),
+            request.expected_current_version(),
+            request.replacement(),
+        ));
         let expected_outcome = ReplaceSessionDefaultsOutcome::Recorded(recorded);
         let mut service =
             ReplaceSessionDefaultsService::new(FakeTransaction::returning([Ok(expected_outcome)]));
@@ -336,43 +362,69 @@ mod tests {
         assert_eq!(observed.replacement(), request.replacement());
     }
 
-    /// S01 / INV-008 / INV-012: recorded applied and authoritative-rejected
-    /// replay results pass through without recomputation or reshaping.
+    /// S01 / INV-008 / INV-012: a recorded applied replay result passes
+    /// through without recomputation or reshaping.
     #[test]
-    fn s01_inv008_inv012_recorded_applied_and_rejected_results_pass_through() {
-        let target = session_id(1);
-        let applied_command =
-            DomainReplaceSessionDefaults::new(command_id(1), target, version(1), defaults(2));
-        let rejected_command =
-            DomainReplaceSessionDefaults::new(command_id(2), target, version(1), defaults(3));
-        let applied = result_for(applied_command, 1);
-        let rejected = result_for(rejected_command, 2);
+    fn s01_inv008_inv012_recorded_applied_result_passes_through() {
+        let command = DomainReplaceSessionDefaults::new(
+            command_id(1),
+            session_id(1),
+            version(1),
+            defaults(2),
+        );
+        let applied = recorded_applied(command);
         assert!(matches!(applied, ReplaceSessionDefaultsResult::Applied(_)));
+        let request = ReplaceSessionDefaultsRequest::try_new(
+            command.command_id(),
+            command.session(),
+            command.expected_current_version(),
+            command.replacement(),
+        )
+        .expect("ordinary command identity is admitted");
+        let expected = ReplaceSessionDefaultsOutcome::Recorded(applied);
+        let mut service =
+            ReplaceSessionDefaultsService::new(FakeTransaction::returning([Ok(expected)]));
+
+        let actual =
+            run_ready(service.execute(request)).expect("recorded replay result is returned");
+
+        assert_eq!(actual, expected);
+        assert_eq!(service.into_transaction().observed, [command]);
+    }
+
+    /// S01 / INV-008 / INV-012: a recorded authoritative-rejected replay
+    /// result passes through without recomputation or reshaping.
+    #[test]
+    fn s01_inv008_inv012_recorded_rejected_result_passes_through() {
+        let command = DomainReplaceSessionDefaults::new(
+            command_id(2),
+            session_id(1),
+            version(1),
+            defaults(3),
+        );
+        let rejected = recorded_stale_rejection(command);
         assert!(matches!(
             rejected,
             ReplaceSessionDefaultsResult::Rejected(
                 ReplaceSessionDefaultsRejectedResult::CurrentVersionMismatch(_)
             )
         ));
+        let request = ReplaceSessionDefaultsRequest::try_new(
+            command.command_id(),
+            command.session(),
+            command.expected_current_version(),
+            command.replacement(),
+        )
+        .expect("ordinary command identity is admitted");
+        let expected = ReplaceSessionDefaultsOutcome::Recorded(rejected);
+        let mut service =
+            ReplaceSessionDefaultsService::new(FakeTransaction::returning([Ok(expected)]));
 
-        for (command, recorded) in [(applied_command, applied), (rejected_command, rejected)] {
-            let request = ReplaceSessionDefaultsRequest::try_new(
-                command.command_id(),
-                command.session(),
-                command.expected_current_version(),
-                command.replacement(),
-            )
-            .expect("ordinary command identity is admitted");
-            let expected = ReplaceSessionDefaultsOutcome::Recorded(recorded);
-            let mut service =
-                ReplaceSessionDefaultsService::new(FakeTransaction::returning([Ok(expected)]));
+        let actual =
+            run_ready(service.execute(request)).expect("recorded replay result is returned");
 
-            let actual =
-                run_ready(service.execute(request)).expect("recorded replay result is returned");
-
-            assert_eq!(actual, expected);
-            assert_eq!(service.into_transaction().observed, [command]);
-        }
+        assert_eq!(actual, expected);
+        assert_eq!(service.into_transaction().observed, [command]);
     }
 
     /// S01 / INV-012: conflicting owner-global reuse is returned unchanged and
