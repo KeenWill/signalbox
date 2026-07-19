@@ -1,6 +1,6 @@
 # Testing style
 
-This document owns how tests are written and how a test's value is judged — how a test body reads, how fixtures are shaped, what an assertion may reference, how snapshot (expect) tests are used, and when a test is worth keeping; the [testing section of CONTRIBUTING.md](../CONTRIBUTING.md#testing) owns the testing strategy — the test categories and their coverage obligations — and is not restated here. Naming stays as [AGENTS.md](../AGENTS.md) states it: tests reference the scenario and invariant identifiers they enforce when the connection is meaningful.
+This document owns how tests are written and how a test's value is judged — how a test body reads, how fixtures are shaped, what an assertion may reference, how snapshot (expect) tests are used, and when a test is worth keeping; the [testing section of CONTRIBUTING.md](../CONTRIBUTING.md#testing) owns the testing strategy — the test categories and their coverage obligations — and is not restated here. Test naming follows the rule stated in [AGENTS.md](../AGENTS.md).
 
 The numbered rules are normative for new and modified tests; cite them by number in review. Apply them to existing tests only when already changing those tests for another reason. Every bad→good rewrite below is condensed from a real diff in this repository's domain or application test sweep — identifiers are shortened for the page, not invented.
 
@@ -18,9 +18,9 @@ The numbered rules are normative for new and modified tests; cite them by number
 
 6. **Assert against the fixture, not re-derived constants.** Write `assert_eq!(chosen.origin(), earlier.accepted_input_id())`, never `accepted_input_id(20)` re-encoding a magic seed from the setup. Fixture-based assertions follow the setup when it changes; re-encoded constants silently diverge from it.
 
-7. **One behavior per test, named for the behavior.** The repository's `sNN_invNNN_...` naming convention already does this; keep it. A test that needs "and" in its description is two tests.
+7. **One behavior per test, named for the behavior.** The repository's `sNN_invNNN_...` naming convention already does this; keep it. A test that needs "and" in its description is two tests — unless the requirement itself is atomic (rule 17's exception).
 
-8. **Judge every test as a classifier.** For each test, name the real bug it would catch and the false alarm it could raise. The ideal test fails only when a requirement changes; a test that fails on behavior-preserving refactors is a cost, not a safety net. ([Test suites as classifiers](https://blog.nelhage.com/post/test-suites-as-classifiers/))
+8. **Judge every test as a classifier.** For each test, name the real bug it would catch and the false alarm it could raise. The ideal test fails only when observed behavior violates its requirement, and changes only when the requirement itself changes; a test that fails on behavior-preserving refactors is a cost, not a safety net. ([Test suites as classifiers](https://blog.nelhage.com/post/test-suites-as-classifiers/))
 
 ### Rewrites from the test sweeps
 
@@ -118,13 +118,18 @@ for d in all_cancellation_dispositions() {
     assert_eq!(prepared().end_after_cancellation(proof(1), d).is_ok(), d == Cancelled);
 }
 
-// Good: the decisive accepting edge stays targeted; the grid is displayed.
+// Good: the decisive accepting edge stays targeted; the grid keeps
+// every disposition the loop covered.
 assert!(prepared().end_after_cancellation(proof(1), Cancelled).is_ok());
 expect![[r#"
-    attempted end                               | outcome
-    ------------------------------------------- | --------
-    after cancellation (exact proof): Cancelled | ends
-    after cancellation (exact proof): Ambiguous | rejected
+    attempted end                                   | outcome
+    ----------------------------------------------- | --------
+    after cancellation (exact proof): TurnCompleted | rejected
+    after cancellation (exact proof): TurnRefused   | rejected
+    after cancellation (exact proof): KnownFailure  | rejected
+    after cancellation (exact proof): Lost          | rejected
+    after cancellation (exact proof): Cancelled     | ends
+    after cancellation (exact proof): Ambiguous     | rejected
 "#]]
 .assert_eq(&table(&["attempted end", "outcome"], &rows));
 ```
@@ -164,7 +169,7 @@ assert_recorded_result_passes_through(SubmitInputResult::Rejected(
 
 ## Split versus unroll
 
-17. **A loop leaves a test body one of two ways.** Few cases exercising one behavior unroll in place into straight-line calls (rule 2); cases exercising distinct behaviors split into separately named tests — one behavior per test (rule 7). Before renaming or splitting any test, check the enforcement column of [the invariant catalog](invariants.md): it binds by file and INV-tag, not by test function name, so verify the file's tagged coverage still holds after the change and update the column in the same change if it moves. Keep names stable anyway — reviewers and diffs read them — but the binding reference is the file plus its tags.
+17. **A loop leaves a test body one of two ways.** Few cases exercising one behavior unroll in place into straight-line calls (rule 2); cases exercising distinct behaviors split into separately named tests — one behavior per test (rule 7). The exception is a requirement that is itself atomic: when one contract conjoins correlated guarantees — a restart test asserting both the final state and the absence of forbidden effects, a persistence race proving both at-most-once advancement and no overwrite — that conjunction is one behavior and stays in one test even though its description contains "and". Splitting such guarantees across separate executions lets each half pass under a different interleaving while no test can detect a violation of the combined contract. Before renaming or splitting any test, check the enforcement column of [the invariant catalog](invariants.md): it binds by file and INV-tag, not by test function name, so verify the file's tagged coverage still holds after the change and update the column in the same change if it moves. Keep names stable anyway — reviewers and diffs read them — but the binding reference is the file plus its tags.
 
 From the application sweep, `replace_session_defaults.rs` — two behaviors, so a split, not an unroll:
 
