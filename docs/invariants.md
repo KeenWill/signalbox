@@ -2,7 +2,7 @@
 
 This catalog indexes constraints the design must make enforceable. For an invariant accepted by an ADR, the ADR is the normative statement and the row here is a summary plus an enforcement index; for the rest, the row itself is the statement of record. "Accepted" records current direction; "Provisional" means the constraint or its exact boundary needs a decision. Each invariant has a primary classification; actual enforcement may use several layers, and the enforcement column accumulates links to the tests, types, and constraints that enforce the invariant as slices are implemented.
 
-Cross-cutting reconstitution refinement: [ADR-0041](decisions/0041-evidence-bearing-reconstitution.md) is the evidence-bearing active-turn statement of record indexed by INV-001, INV-002, INV-006, INV-007, INV-009, INV-010, INV-016, INV-025, INV-029, and INV-034.
+Cross-cutting reconstitution refinement: [ADR-0041](decisions/0041-evidence-bearing-reconstitution.md) is the evidence-bearing active-turn statement of record indexed by INV-001, INV-002, INV-006, INV-007, INV-009, INV-010, INV-016, INV-019, INV-025, INV-026, INV-029, and INV-034.
 
 ## Domain and identity
 

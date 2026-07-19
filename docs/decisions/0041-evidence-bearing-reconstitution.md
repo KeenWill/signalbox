@@ -64,7 +64,8 @@ The validated result remains a canonical owner aggregate, not a collection of fr
 - INV-006 and INV-009: an active phase is returned only when the owning turn's exact attempt, dependency, operation, and wait facts establish that one closed phase shape and its exact payload.
 - INV-007 and INV-016: the validated session acceptance tail prevents acknowledged input or pending steering from disappearing through a target- or disposition-filtered load.
 - INV-010: an approval or recovery wait survives restart only as the exact subject derived from its complete owning-turn facts.
-- INV-025: recovery preserves every physically ambiguous operation and derives the exact nonempty blocking remainder rather than trusting stored membership.
+- INV-019: an approval wait is correlated with the exact normalized tool request and material execution constraints bound by the approval.
+- INV-025 and INV-026: recovery preserves every physically ambiguous operation, includes accepted duplicate-risk evidence, and derives the exact nonempty blocking remainder rather than trusting stored membership.
 - INV-029: applied interrupt authority, stop retention, pending-steering reclassification, and slot release are evaluated from one correlated owner projection.
 - INV-034: startup derives complete stop causes and recovery classification from the abandoned attempt's owner facts; reconstitution cannot manufacture a weaker restart-only phase.
 
