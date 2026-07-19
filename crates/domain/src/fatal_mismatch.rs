@@ -318,12 +318,14 @@ impl FatalMismatchProjectionError {
 
 #[cfg(test)]
 mod tests {
+    use expect_test::expect;
+
     use super::*;
     use crate::{
         AppliedInterruptProof, ProviderTargetMismatchFailureRef,
         applied_interrupt::test_applied_interrupt_proof,
         test_support::{
-            command_id, model_call_id, provider_target_evidence_id, tool_attempt_id,
+            command_id, model_call_id, provider_target_evidence_id, table, tool_attempt_id,
             tool_request_id, turn_attempt_id, turn_id,
         },
     };
@@ -356,10 +358,13 @@ mod tests {
         )
     }
 
-    fn nonterminal_fact(call: u128, evidence: u128) -> AppliedProviderTargetMismatch {
+    fn nonterminal_fact(
+        affected_call: ModelCallId,
+        evidence: u128,
+    ) -> AppliedProviderTargetMismatch {
         AppliedProviderTargetMismatch::test_nonterminal(
             provider_target_evidence_id(evidence),
-            model_call_id(call),
+            affected_call,
         )
     }
 
@@ -374,6 +379,7 @@ mod tests {
     /// derived `U` still retains the known blocking ambiguity.
     #[test]
     fn s27_inv006_unfinished_owned_work_derives_exact_blockers() {
+        let owned_call = model_call_id(1);
         let open_request = OwnedLogicalDependencyRef::ToolRequest(tool_request_id(1));
         let unclassified = IssuedOperationRef::ToolAttempt(tool_attempt_id(2));
         let ambiguous = IssuedOperationRef::ToolAttempt(tool_attempt_id(3));
@@ -388,14 +394,14 @@ mod tests {
             ],
             [
                 (
-                    IssuedOperationRef::ModelCall(model_call_id(1)),
+                    IssuedOperationRef::ModelCall(owned_call),
                     IssuedOperationClosure::Unclassified,
                 ),
                 (unclassified, IssuedOperationClosure::Unclassified),
                 (ambiguous, blocking_ambiguity()),
             ],
         )
-        .apply(nonterminal_fact(1, 1))
+        .apply(nonterminal_fact(owned_call, 1))
         .expect("owned call and compatible state accept mismatch");
 
         assert_eq!(
@@ -421,6 +427,7 @@ mod tests {
     /// without being rewritten.
     #[test]
     fn s27_inv006_inv025_inv026_closed_without_blocking_ambiguity_is_exact() {
+        let owned_call = model_call_id(1);
         let resolved = IssuedOperationRef::ToolAttempt(tool_attempt_id(2));
         let accepted = IssuedOperationRef::ToolAttempt(tool_attempt_id(3));
         let facts = projection(
@@ -431,7 +438,7 @@ mod tests {
             )],
             [
                 (
-                    IssuedOperationRef::ModelCall(model_call_id(1)),
+                    IssuedOperationRef::ModelCall(owned_call),
                     IssuedOperationClosure::Unclassified,
                 ),
                 (
@@ -448,14 +455,14 @@ mod tests {
                 ),
             ],
         )
-        .apply(nonterminal_fact(1, 1))
+        .apply(nonterminal_fact(owned_call, 1))
         .expect("closed projection accepts mismatch");
 
         assert_eq!(
             facts
                 .projection
                 .operations
-                .get(&IssuedOperationRef::ModelCall(model_call_id(1))),
+                .get(&IssuedOperationRef::ModelCall(owned_call)),
             Some(&IssuedOperationClosure::ClassifiedNonAmbiguous)
         );
         assert!(facts.unfinished_blockers().is_none());
@@ -466,14 +473,15 @@ mod tests {
     /// closed `{Y}` remainder is derived exactly and canonically.
     #[test]
     fn s27_inv006_inv014_inv025_inv026_closed_remainder_is_exact() {
+        let owned_call = model_call_id(1);
         let y = IssuedOperationRef::ToolAttempt(tool_attempt_id(2));
-        let fact = nonterminal_fact(1, 1);
+        let fact = nonterminal_fact(owned_call, 1);
         let facts = projection(
             running_attempt(),
             [],
             [
                 (
-                    IssuedOperationRef::ModelCall(model_call_id(1)),
+                    IssuedOperationRef::ModelCall(owned_call),
                     IssuedOperationClosure::Unclassified,
                 ),
                 (y, blocking_ambiguity()),
@@ -500,29 +508,26 @@ mod tests {
     /// union.
     #[test]
     fn s07_s27_inv014_inv029_complete_f_unions_causes_and_interrupt() {
-        let prior = failure(1);
-        let new = failure(2);
+        let owned_call = model_call_id(1);
+        let new_fact = nonterminal_fact(owned_call, 2);
         let cancellation_only = projection(
             running_attempt()
                 .request_cancellation(interrupt(1))
                 .expect("running attempt accepts interrupt"),
             [],
             [(
-                IssuedOperationRef::ModelCall(model_call_id(1)),
+                IssuedOperationRef::ModelCall(owned_call),
                 IssuedOperationClosure::Unclassified,
             )],
         )
-        .apply(AppliedProviderTargetMismatch::test_nonterminal(
-            provider_target_evidence_id(2),
-            model_call_id(1),
-        ))
+        .apply(new_fact)
         .expect("mismatch upgrades cancellation-only stop");
         assert_eq!(
             cancellation_only
                 .causes()
                 .failures()
                 .collect::<BTreeSet<_>>(),
-            BTreeSet::from([new])
+            BTreeSet::from([new_fact.failure()])
         );
         assert_eq!(
             cancellation_only.causes().interrupt(),
@@ -531,26 +536,25 @@ mod tests {
             }
         );
 
+        let prior = failure(1);
         let stopped = running_attempt()
             .request_cancellation(interrupt(1))
             .expect("running attempt accepts interrupt")
             .request_fatal_mismatch(prior)
             .expect("cancellation stop upgrades to fatal");
+        let stopped_attempt = stopped.id();
         let facts = projection(
             stopped,
             [],
             [(
-                IssuedOperationRef::ModelCall(model_call_id(1)),
+                IssuedOperationRef::ModelCall(owned_call),
                 IssuedOperationClosure::Unclassified,
             )],
         )
-        .apply(AppliedProviderTargetMismatch::test_nonterminal(
-            provider_target_evidence_id(2),
-            model_call_id(1),
-        ))
+        .apply(new_fact)
         .expect("compatible fact extends complete causes");
 
-        assert_eq!(facts.current_attempt().id(), turn_attempt_id(1));
+        assert_eq!(facts.current_attempt().id(), stopped_attempt);
         assert_eq!(
             facts.causes().interrupt(),
             AppliedInterruptState::Applied {
@@ -559,9 +563,11 @@ mod tests {
         );
         assert_eq!(
             facts.causes().failures().collect::<BTreeSet<_>>(),
-            BTreeSet::from([prior, new])
+            BTreeSet::from([prior, new_fact.failure()])
         );
 
+        let replay_fact = nonterminal_fact(owned_call, 1);
+        assert_eq!(replay_fact.failure(), prior);
         let replayed = projection(
             running_attempt()
                 .request_cancellation(interrupt(1))
@@ -570,14 +576,11 @@ mod tests {
                 .expect("cancellation stop upgrades to fatal"),
             [],
             [(
-                IssuedOperationRef::ModelCall(model_call_id(1)),
+                IssuedOperationRef::ModelCall(owned_call),
                 IssuedOperationClosure::Unclassified,
             )],
         )
-        .apply(AppliedProviderTargetMismatch::test_nonterminal(
-            provider_target_evidence_id(1),
-            model_call_id(1),
-        ))
+        .apply(replay_fact)
         .expect("failure-set replay remains idempotent");
         assert_eq!(
             replayed.causes().failures().collect::<BTreeSet<_>>(),
@@ -591,11 +594,12 @@ mod tests {
     /// remains exact while the physical call stays ambiguous.
     #[test]
     fn s21_inv014_inv025_inv026_terminal_resolution_removes_only_resolved_call() {
-        let x = IssuedOperationRef::ModelCall(model_call_id(1));
+        let resolved_call = model_call_id(1);
+        let x = IssuedOperationRef::ModelCall(resolved_call);
         let y = IssuedOperationRef::ToolAttempt(tool_attempt_id(2));
         let fact = AppliedProviderTargetMismatch::test_terminal_ambiguity_resolution(
             provider_target_evidence_id(1),
-            model_call_id(1),
+            resolved_call,
         );
         let facts = projection(
             running_attempt(),
@@ -630,92 +634,193 @@ mod tests {
     fn s21_s27_inv006_inv014_inv025_inv026_effect_state_matrix_is_exhaustive() {
         let call = model_call_id(1);
         let operation = IssuedOperationRef::ModelCall(call);
-        let unclassified = IssuedOperationClosure::Unclassified;
-        let classified = IssuedOperationClosure::ClassifiedNonAmbiguous;
-        let blocking = blocking_ambiguity();
-        let resolved = IssuedOperationClosure::PhysicallyAmbiguous {
-            turn_treatment: AmbiguousOperationTurnTreatment::ResolvedByEvidence,
-        };
-        let accepted = IssuedOperationClosure::PhysicallyAmbiguous {
-            turn_treatment: AmbiguousOperationTurnTreatment::DuplicateRiskAccepted,
-        };
-        let states = [unclassified, classified, blocking, resolved, accepted];
-        let cases = [
-            (
-                nonterminal_fact(1, 1),
-                [Some(classified), None, None, None, None],
-                [None, None, None, None, None],
-            ),
-            (
-                AppliedProviderTargetMismatch::test_terminal_ambiguity_resolution(
-                    provider_target_evidence_id(1),
-                    call,
-                ),
-                [None, None, Some(resolved), Some(resolved), None],
-                [None, None, None, None, None],
-            ),
-            (
-                AppliedProviderTargetMismatch::test_completed_invalidation(call),
-                [None, Some(classified), None, None, None],
-                [None, Some(classified), None, None, None],
-            ),
+        let known_failed = nonterminal_fact(call, 1);
+        let resolution = AppliedProviderTargetMismatch::test_terminal_ambiguity_resolution(
+            provider_target_evidence_id(1),
+            call,
+        );
+        let invalidation = AppliedProviderTargetMismatch::test_completed_invalidation(call);
+
+        // Decisive accepting edges stay as targeted asserts
+        // (`docs/testing-style.md`, rule 10); the snapshot covers the grid.
+        assert!(
+            projection(
+                running_attempt(),
+                [],
+                [(operation, IssuedOperationClosure::Unclassified)]
+            )
+            .apply(known_failed)
+            .is_ok()
+        );
+        assert!(
+            projection(running_attempt(), [], [(operation, blocking_ambiguity())])
+                .apply(resolution)
+                .is_ok()
+        );
+        assert!(
+            projection(
+                CurrentTurnAttempt::prepared(turn_attempt_id(1)),
+                [],
+                [(operation, IssuedOperationClosure::ClassifiedNonAmbiguous)]
+            )
+            .apply(invalidation)
+            .is_ok()
+        );
+
+        expect![[r#"
+            effect                            | attempt  | current                             | outcome
+            --------------------------------- | -------- | ----------------------------------- | --------------------------------------------------
+            classify nonterminal known-failed | running  | unclassified                        | applies -> classified non-ambiguous
+            classify nonterminal known-failed | running  | classified non-ambiguous            | rejected: affected-call state mismatch
+            classify nonterminal known-failed | running  | ambiguous (blocking)                | rejected: affected-call state mismatch
+            classify nonterminal known-failed | running  | ambiguous (resolved by evidence)    | rejected: affected-call state mismatch
+            classify nonterminal known-failed | running  | ambiguous (duplicate risk accepted) | rejected: affected-call state mismatch
+            classify nonterminal known-failed | prepared | unclassified                        | rejected: prepared requires completed invalidation
+            classify nonterminal known-failed | prepared | classified non-ambiguous            | rejected: prepared requires completed invalidation
+            classify nonterminal known-failed | prepared | ambiguous (blocking)                | rejected: prepared requires completed invalidation
+            classify nonterminal known-failed | prepared | ambiguous (resolved by evidence)    | rejected: prepared requires completed invalidation
+            classify nonterminal known-failed | prepared | ambiguous (duplicate risk accepted) | rejected: prepared requires completed invalidation
+            resolve terminal ambiguity        | running  | unclassified                        | rejected: affected-call state mismatch
+            resolve terminal ambiguity        | running  | classified non-ambiguous            | rejected: affected-call state mismatch
+            resolve terminal ambiguity        | running  | ambiguous (blocking)                | applies -> ambiguous (resolved by evidence)
+            resolve terminal ambiguity        | running  | ambiguous (resolved by evidence)    | applies -> ambiguous (resolved by evidence)
+            resolve terminal ambiguity        | running  | ambiguous (duplicate risk accepted) | rejected: affected-call state mismatch
+            resolve terminal ambiguity        | prepared | unclassified                        | rejected: prepared requires completed invalidation
+            resolve terminal ambiguity        | prepared | classified non-ambiguous            | rejected: prepared requires completed invalidation
+            resolve terminal ambiguity        | prepared | ambiguous (blocking)                | rejected: prepared requires completed invalidation
+            resolve terminal ambiguity        | prepared | ambiguous (resolved by evidence)    | rejected: prepared requires completed invalidation
+            resolve terminal ambiguity        | prepared | ambiguous (duplicate risk accepted) | rejected: prepared requires completed invalidation
+            preserve completed invalidation   | running  | unclassified                        | rejected: affected-call state mismatch
+            preserve completed invalidation   | running  | classified non-ambiguous            | applies -> classified non-ambiguous
+            preserve completed invalidation   | running  | ambiguous (blocking)                | rejected: affected-call state mismatch
+            preserve completed invalidation   | running  | ambiguous (resolved by evidence)    | rejected: affected-call state mismatch
+            preserve completed invalidation   | running  | ambiguous (duplicate risk accepted) | rejected: affected-call state mismatch
+            preserve completed invalidation   | prepared | unclassified                        | rejected: affected-call state mismatch
+            preserve completed invalidation   | prepared | classified non-ambiguous            | applies -> classified non-ambiguous
+            preserve completed invalidation   | prepared | ambiguous (blocking)                | rejected: affected-call state mismatch
+            preserve completed invalidation   | prepared | ambiguous (resolved by evidence)    | rejected: affected-call state mismatch
+            preserve completed invalidation   | prepared | ambiguous (duplicate risk accepted) | rejected: affected-call state mismatch
+        "#]]
+        .assert_eq(&effect_state_matrix_table(&[
+            ("classify nonterminal known-failed", known_failed),
+            ("resolve terminal ambiguity", resolution),
+            ("preserve completed invalidation", invalidation),
+        ]));
+    }
+
+    /// Renders one row per effect/attempt/current-state combination
+    /// (`docs/testing-style.md`, rule 12). An accepted application is checked
+    /// to retain the failure and no blocking remainder; a rejection is checked
+    /// to return the projection and fact unchanged and, for a state mismatch,
+    /// to name the exact affected call, effect, and current state.
+    fn effect_state_matrix_table(effects: &[(&str, AppliedProviderTargetMismatch)]) -> String {
+        type MakeAttempt = fn() -> CurrentTurnAttempt;
+        let prepared_attempt: MakeAttempt = || CurrentTurnAttempt::prepared(turn_attempt_id(1));
+        let attempts: [(&str, MakeAttempt); 2] =
+            [("running", running_attempt), ("prepared", prepared_attempt)];
+        let states = [
+            IssuedOperationClosure::Unclassified,
+            IssuedOperationClosure::ClassifiedNonAmbiguous,
+            blocking_ambiguity(),
+            IssuedOperationClosure::PhysicallyAmbiguous {
+                turn_treatment: AmbiguousOperationTurnTreatment::ResolvedByEvidence,
+            },
+            IssuedOperationClosure::PhysicallyAmbiguous {
+                turn_treatment: AmbiguousOperationTurnTreatment::DuplicateRiskAccepted,
+            },
         ];
 
-        for (fact, running_expected, prepared_expected) in cases {
-            for (attempt, expected_states) in [
-                (running_attempt(), running_expected),
-                (
-                    CurrentTurnAttempt::prepared(turn_attempt_id(1)),
-                    prepared_expected,
-                ),
-            ] {
-                let prepared = attempt.state() == &CurrentTurnAttemptState::Prepared;
-                for (current, expected) in states.iter().copied().zip(expected_states) {
-                    let input = projection(attempt.clone(), [], [(operation, current)]);
-                    let unchanged = input.clone();
-                    match expected {
-                        Some(expected) => {
-                            let facts = input.apply(fact).expect("compatible pair must apply");
-                            assert_eq!(
-                                facts.projection.operations.get(&operation),
-                                Some(&expected)
-                            );
-                            assert!(facts.causes().contains(fact.failure()));
-                            assert!(facts.blocking_ambiguities().is_none());
-                        }
-                        None => {
-                            let rejection = if prepared
-                                && fact.effect()
-                                    != ProviderTargetMismatchEffectView::PreserveCompletedInvalidation
-                            {
-                                FatalMismatchProjectionRejection::PreparedRequiresCompletedInvalidation
-                            } else {
-                                FatalMismatchProjectionRejection::AffectedCallStateMismatch {
-                                    call,
-                                    effect: fact.effect(),
-                                    current,
-                                }
-                            };
-                            let error = input
-                                .apply(fact)
-                                .expect_err("incompatible pair must reject");
-                            assert_eq!(error.into_parts(), (unchanged, fact, rejection));
-                        }
+        let mut rows = Vec::new();
+        for (effect_label, fact) in effects {
+            for (attempt_label, make_attempt) in attempts {
+                for current in states {
+                    rows.push(vec![
+                        (*effect_label).to_string(),
+                        attempt_label.to_string(),
+                        closure_label(current),
+                        effect_state_outcome(make_attempt(), *fact, current),
+                    ]);
+                }
+            }
+        }
+
+        table(&["effect", "attempt", "current", "outcome"], &rows)
+    }
+
+    fn effect_state_outcome(
+        attempt: CurrentTurnAttempt,
+        fact: AppliedProviderTargetMismatch,
+        current: IssuedOperationClosure,
+    ) -> String {
+        let operation = IssuedOperationRef::ModelCall(fact.affected_call());
+        let input = projection(attempt, [], [(operation, current)]);
+        let unchanged = input.clone();
+
+        match input.apply(fact) {
+            Ok(facts) => {
+                assert!(facts.causes().contains(fact.failure()));
+                assert!(facts.blocking_ambiguities().is_none());
+                let updated = facts
+                    .projection
+                    .operations
+                    .get(&operation)
+                    .copied()
+                    .expect("the affected call stays owned");
+                format!("applies -> {}", closure_label(updated))
+            }
+            Err(error) => {
+                let (returned_projection, returned_fact, rejection) = error.into_parts();
+                assert_eq!(returned_projection, unchanged);
+                assert_eq!(returned_fact, fact);
+                match rejection {
+                    FatalMismatchProjectionRejection::PreparedRequiresCompletedInvalidation => {
+                        "rejected: prepared requires completed invalidation".to_string()
+                    }
+                    FatalMismatchProjectionRejection::AffectedCallStateMismatch {
+                        call,
+                        effect,
+                        current: rejected_current,
+                    } => {
+                        assert_eq!(call, fact.affected_call());
+                        assert_eq!(effect, fact.effect());
+                        assert_eq!(rejected_current, current);
+                        "rejected: affected-call state mismatch".to_string()
+                    }
+                    FatalMismatchProjectionRejection::AffectedCallIsNotOwned { .. } => {
+                        panic!("the single-operation projection owns the affected call")
                     }
                 }
             }
         }
     }
 
+    fn closure_label(closure: IssuedOperationClosure) -> String {
+        match closure {
+            IssuedOperationClosure::Unclassified => "unclassified",
+            IssuedOperationClosure::ClassifiedNonAmbiguous => "classified non-ambiguous",
+            IssuedOperationClosure::PhysicallyAmbiguous {
+                turn_treatment: AmbiguousOperationTurnTreatment::Blocking,
+            } => "ambiguous (blocking)",
+            IssuedOperationClosure::PhysicallyAmbiguous {
+                turn_treatment: AmbiguousOperationTurnTreatment::ResolvedByEvidence,
+            } => "ambiguous (resolved by evidence)",
+            IssuedOperationClosure::PhysicallyAmbiguous {
+                turn_treatment: AmbiguousOperationTurnTreatment::DuplicateRiskAccepted,
+            } => "ambiguous (duplicate risk accepted)",
+        }
+        .to_string()
+    }
+
     /// INV-006 / INV-014: a missing affected call preserves both inputs.
     #[test]
     fn inv006_inv014_missing_call_rejects_unchanged() {
-        let fact = nonterminal_fact(1, 1);
-        let input = projection(running_attempt(), [], []);
+        let unowned_call = model_call_id(1);
+        let no_operations: [(IssuedOperationRef, IssuedOperationClosure); 0] = [];
+        let fact = nonterminal_fact(unowned_call, 1);
+        let input = projection(running_attempt(), [], no_operations);
         let unchanged = input.clone();
-        let rejection = FatalMismatchProjectionRejection::AffectedCallIsNotOwned {
-            call: model_call_id(1),
-        };
+        let rejection =
+            FatalMismatchProjectionRejection::AffectedCallIsNotOwned { call: unowned_call };
         let error = input
             .apply(fact)
             .expect_err("missing ownership must reject");

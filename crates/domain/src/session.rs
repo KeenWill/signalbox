@@ -896,13 +896,15 @@ const fn test_frontier(value: u128) -> TranscriptFrontier {
 
 #[cfg(test)]
 mod tests {
+    use expect_test::expect;
+
     use super::{
         CreateSession, CreateSessionPreparationFailure, CreateSessionReconstitutionFailure,
         CreateSessionReconstitutionInput, SessionCreationCause, SessionCreationProvenance,
         SessionReconstitutionFailure, SessionReconstitutionInput, TranscriptAncestry,
         test_frontier,
     };
-    use crate::test_support::{command_id, direct, session_id};
+    use crate::test_support::{command_id, direct, session_id, table};
     use crate::{
         ModelSelectionRequest, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
         VersionedSessionConfigurationDefaults,
@@ -1075,80 +1077,147 @@ mod tests {
         assert_eq!(session.creation_provenance(), provenance);
     }
 
+    /// The complete stored facts backing one current-session projection,
+    /// mirroring [`SessionReconstitutionInput::new`] field for field so a
+    /// test perturbs exactly the named facts it cares about
+    /// (`docs/testing-style.md`, rules 4 and 5).
+    #[derive(Clone, Copy)]
+    struct CurrentSessionFacts {
+        requested_session: crate::SessionId,
+        stored_session: crate::SessionId,
+        provenance: SessionCreationProvenance,
+        current_defaults_session: crate::SessionId,
+        current_defaults_version: SessionConfigurationDefaultsVersion,
+        defaults_session: crate::SessionId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+    }
+
+    impl CurrentSessionFacts {
+        /// The canonical matching projection: every stored identity is
+        /// `session` and the pointer selects the first defaults version.
+        fn matching(session: crate::SessionId) -> Self {
+            Self {
+                requested_session: session,
+                stored_session: session,
+                provenance: owner_initiated_empty(),
+                current_defaults_session: session,
+                current_defaults_version: SessionConfigurationDefaultsVersion::first(),
+                defaults_session: session,
+                defaults_version: SessionConfigurationDefaultsVersion::first(),
+                defaults: defaults(3),
+            }
+        }
+
+        fn input(self) -> SessionReconstitutionInput {
+            SessionReconstitutionInput::new(
+                self.requested_session,
+                self.stored_session,
+                self.provenance,
+                self.current_defaults_session,
+                self.current_defaults_version,
+                self.defaults_session,
+                self.defaults_version,
+                self.defaults,
+            )
+        }
+    }
+
+    /// Reconstitutes the facts, asserting the rejection returns the complete
+    /// unchanged typed projection, and returns the failure.
+    #[track_caller]
+    fn current_session_reconstitution_failure(
+        facts: CurrentSessionFacts,
+    ) -> SessionReconstitutionFailure {
+        let input = facts.input();
+        let error = input
+            .reconstitute()
+            .expect_err("cross-wired current-session facts must fail closed");
+        let failure = error.failure();
+        assert_eq!(error.input(), &input);
+        let (returned, returned_failure) = error.into_parts();
+        assert_eq!(returned, input);
+        assert_eq!(returned_failure, failure);
+        failure
+    }
+
     /// S01 / INV-002 / INV-008: every requested/stored identity, pointer
     /// owner, defaults owner, or selected-version mismatch fails closed and
     /// returns the complete unchanged typed projection.
     #[test]
     fn s01_inv002_inv008_current_session_rejects_cross_wired_facts() {
-        let first = SessionConfigurationDefaultsVersion::first();
-        let second = first.checked_next().expect("version two exists");
-        let provenance = owner_initiated_empty();
-        let cases = [
-            (
-                SessionReconstitutionInput::new(
-                    session_id(2),
-                    session_id(1),
-                    provenance,
-                    session_id(1),
-                    first,
-                    session_id(1),
-                    first,
-                    defaults(3),
-                ),
-                SessionReconstitutionFailure::RequestedSessionMismatch,
-            ),
-            (
-                SessionReconstitutionInput::new(
-                    session_id(1),
-                    session_id(1),
-                    provenance,
-                    session_id(2),
-                    first,
-                    session_id(1),
-                    first,
-                    defaults(3),
-                ),
-                SessionReconstitutionFailure::CurrentDefaultsSessionMismatch,
-            ),
-            (
-                SessionReconstitutionInput::new(
-                    session_id(1),
-                    session_id(1),
-                    provenance,
-                    session_id(1),
-                    first,
-                    session_id(2),
-                    first,
-                    defaults(3),
-                ),
-                SessionReconstitutionFailure::DefaultsSessionMismatch,
-            ),
-            (
-                SessionReconstitutionInput::new(
-                    session_id(1),
-                    session_id(1),
-                    provenance,
-                    session_id(1),
-                    second,
-                    session_id(1),
-                    first,
-                    defaults(3),
-                ),
-                SessionReconstitutionFailure::CurrentDefaultsVersionMismatch,
-            ),
-        ];
+        let matching = CurrentSessionFacts::matching(session_id(1));
+        let second_version = SessionConfigurationDefaultsVersion::first()
+            .checked_next()
+            .expect("version two exists");
 
-        for (input, expected_failure) in cases {
-            let error = input
-                .reconstitute()
-                .expect_err("cross-wired current-session facts must fail closed");
+        let requested_other_session = current_session_reconstitution_failure(CurrentSessionFacts {
+            requested_session: session_id(2),
+            ..matching
+        });
+        assert_eq!(
+            requested_other_session,
+            SessionReconstitutionFailure::RequestedSessionMismatch
+        );
 
-            assert_eq!(error.failure(), expected_failure);
-            assert_eq!(error.input(), &input);
-            let (returned, failure) = error.into_parts();
-            assert_eq!(returned, input);
-            assert_eq!(failure, expected_failure);
-        }
+        let pointer_owned_elsewhere = current_session_reconstitution_failure(CurrentSessionFacts {
+            current_defaults_session: session_id(2),
+            ..matching
+        });
+        assert_eq!(
+            pointer_owned_elsewhere,
+            SessionReconstitutionFailure::CurrentDefaultsSessionMismatch
+        );
+
+        let defaults_owned_elsewhere =
+            current_session_reconstitution_failure(CurrentSessionFacts {
+                defaults_session: session_id(2),
+                ..matching
+            });
+        assert_eq!(
+            defaults_owned_elsewhere,
+            SessionReconstitutionFailure::DefaultsSessionMismatch
+        );
+
+        let pointer_and_record_versions_torn =
+            current_session_reconstitution_failure(CurrentSessionFacts {
+                current_defaults_version: second_version,
+                ..matching
+            });
+        assert_eq!(
+            pointer_and_record_versions_torn,
+            SessionReconstitutionFailure::CurrentDefaultsVersionMismatch
+        );
+
+        expect![[r#"
+            perturbed stored fact            | failure
+            -------------------------------- | ------------------------------
+            requested session differs        | RequestedSessionMismatch
+            defaults pointer owned elsewhere | CurrentDefaultsSessionMismatch
+            defaults record owned elsewhere  | DefaultsSessionMismatch
+            pointer and record versions torn | CurrentDefaultsVersionMismatch
+        "#]]
+        .assert_eq(&table(
+            &["perturbed stored fact", "failure"],
+            &[
+                vec![
+                    "requested session differs".to_string(),
+                    format!("{requested_other_session:?}"),
+                ],
+                vec![
+                    "defaults pointer owned elsewhere".to_string(),
+                    format!("{pointer_owned_elsewhere:?}"),
+                ],
+                vec![
+                    "defaults record owned elsewhere".to_string(),
+                    format!("{defaults_owned_elsewhere:?}"),
+                ],
+                vec![
+                    "pointer and record versions torn".to_string(),
+                    format!("{pointer_and_record_versions_torn:?}"),
+                ],
+            ],
+        ));
     }
 
     /// S01 / INV-003: the creation payload couples the durable command
@@ -1340,12 +1409,88 @@ mod tests {
         assert_eq!(reconstituted.applied_result().session(), session_id(3));
     }
 
+    /// The complete stored facts backing one applied creation, mirroring
+    /// [`CreateSessionReconstitutionInput::new`] field for field so a test
+    /// perturbs exactly the named facts it cares about
+    /// (`docs/testing-style.md`, rules 4 and 5).
+    #[derive(Clone, Copy)]
+    struct CreationFacts {
+        command: CreateSession,
+        result_session: crate::SessionId,
+        session: crate::SessionId,
+        provenance: SessionCreationProvenance,
+        defaults_session: crate::SessionId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+    }
+
+    impl CreationFacts {
+        /// The canonical stored facts matching an applied `command`: every
+        /// stored identity is `session`, the stored provenance and defaults
+        /// repeat the command payload, and creation established version one.
+        fn matching(command: CreateSession, session: crate::SessionId) -> Self {
+            Self {
+                command,
+                result_session: session,
+                session,
+                provenance: command.provenance(),
+                defaults_session: session,
+                defaults_version: SessionConfigurationDefaultsVersion::first(),
+                defaults: command.initial_configuration_defaults(),
+            }
+        }
+
+        fn input(self) -> CreateSessionReconstitutionInput {
+            CreateSessionReconstitutionInput::new(
+                self.command,
+                self.result_session,
+                self.session,
+                self.provenance,
+                self.defaults_session,
+                self.defaults_version,
+                self.defaults,
+            )
+        }
+    }
+
+    /// Reconstitutes the facts, asserting the rejection retains the complete
+    /// unchanged typed projection, and returns the failure.
+    #[track_caller]
+    fn creation_reconstitution_failure(facts: CreationFacts) -> CreateSessionReconstitutionFailure {
+        let error = facts
+            .input()
+            .reconstitute()
+            .expect_err("cross-wired durable facts must fail closed");
+        let failure = error.failure();
+        assert_creation_input_is_unchanged(error.input(), &facts);
+        let (returned, returned_failure) = error.into_parts();
+        assert_creation_input_is_unchanged(&returned, &facts);
+        assert_eq!(returned_failure, failure);
+        failure
+    }
+
+    #[track_caller]
+    fn assert_creation_input_is_unchanged(
+        input: &CreateSessionReconstitutionInput,
+        facts: &CreationFacts,
+    ) {
+        assert_eq!(input.command().command_id(), facts.command.command_id());
+        assert_eq!(input.command(), &facts.command);
+        assert_eq!(input.result_session(), facts.result_session);
+        assert_eq!(input.session(), facts.session);
+        assert_eq!(input.provenance(), facts.provenance);
+        assert_eq!(input.defaults_session(), facts.defaults_session);
+        assert_eq!(input.defaults_version(), facts.defaults_version);
+        assert_eq!(input.defaults(), facts.defaults);
+    }
+
     /// S01 / INV-003 / INV-008 / INV-012: every cross-wired session, result,
     /// provenance, or defaults shape fails closed and retains the complete
     /// unchanged typed projection.
     #[test]
     fn s01_inv003_inv008_inv012_reconstitution_rejects_cross_wired_facts() {
         let create = CreateSession::new(command_id(1), owner_initiated_empty(), defaults(2));
+        let matching = CreationFacts::matching(create, session_id(3));
         let second_version = SessionConfigurationDefaultsVersion::first()
             .checked_next()
             .expect("version two exists");
@@ -1356,112 +1501,98 @@ mod tests {
                 source_frontier: test_frontier(11),
             },
         );
+        let fork_create = CreateSession::new(command_id(1), fork, defaults(2));
 
-        let cases = [
-            (
-                CreateSessionReconstitutionInput::new(
-                    create,
-                    session_id(4),
-                    session_id(3),
-                    owner_initiated_empty(),
-                    session_id(3),
-                    SessionConfigurationDefaultsVersion::first(),
-                    defaults(2),
-                ),
-                CreateSessionReconstitutionFailure::SessionResultMismatch,
-            ),
-            (
-                CreateSessionReconstitutionInput::new(
-                    CreateSession::new(command_id(1), fork, defaults(2)),
-                    session_id(3),
-                    session_id(3),
-                    owner_initiated_empty(),
-                    session_id(3),
-                    SessionConfigurationDefaultsVersion::first(),
-                    defaults(2),
-                ),
-                CreateSessionReconstitutionFailure::ProvenanceMismatch,
-            ),
-            (
-                CreateSessionReconstitutionInput::new(
-                    CreateSession::new(command_id(1), fork, defaults(2)),
-                    session_id(3),
-                    session_id(3),
-                    fork,
-                    session_id(3),
-                    SessionConfigurationDefaultsVersion::first(),
-                    defaults(2),
-                ),
-                CreateSessionReconstitutionFailure::TranscriptAncestryUnavailable,
-            ),
-            (
-                CreateSessionReconstitutionInput::new(
-                    create,
-                    session_id(3),
-                    session_id(3),
-                    owner_initiated_empty(),
-                    session_id(9),
-                    SessionConfigurationDefaultsVersion::first(),
-                    defaults(2),
-                ),
-                CreateSessionReconstitutionFailure::DefaultsSessionMismatch,
-            ),
-            (
-                CreateSessionReconstitutionInput::new(
-                    create,
-                    session_id(3),
-                    session_id(3),
-                    owner_initiated_empty(),
-                    session_id(3),
-                    second_version,
-                    defaults(2),
-                ),
-                CreateSessionReconstitutionFailure::DefaultsVersionIsNotFirst,
-            ),
-            (
-                CreateSessionReconstitutionInput::new(
-                    create,
-                    session_id(3),
-                    session_id(3),
-                    owner_initiated_empty(),
-                    session_id(3),
-                    SessionConfigurationDefaultsVersion::first(),
-                    defaults(5),
-                ),
-                CreateSessionReconstitutionFailure::DefaultsMismatch,
-            ),
-        ];
+        let cross_wired_result = creation_reconstitution_failure(CreationFacts {
+            result_session: session_id(4),
+            ..matching
+        });
+        assert_eq!(
+            cross_wired_result,
+            CreateSessionReconstitutionFailure::SessionResultMismatch
+        );
 
-        for (input, expected_failure) in cases {
-            let expected_command_id = input.command().command_id();
-            let expected_result_session = input.result_session();
-            let expected_session = input.session();
-            let expected_provenance = input.provenance();
-            let expected_defaults_session = input.defaults_session();
-            let expected_version = input.defaults_version();
-            let expected_defaults = input.defaults();
+        let replaced_provenance = creation_reconstitution_failure(CreationFacts {
+            provenance: owner_initiated_empty(),
+            ..CreationFacts::matching(fork_create, session_id(3))
+        });
+        assert_eq!(
+            replaced_provenance,
+            CreateSessionReconstitutionFailure::ProvenanceMismatch
+        );
 
-            let error = input
-                .reconstitute()
-                .expect_err("cross-wired durable facts must fail closed");
+        let unvalidated_ancestry =
+            creation_reconstitution_failure(CreationFacts::matching(fork_create, session_id(3)));
+        assert_eq!(
+            unvalidated_ancestry,
+            CreateSessionReconstitutionFailure::TranscriptAncestryUnavailable
+        );
 
-            assert_eq!(error.failure(), expected_failure);
-            assert_eq!(error.input().command().command_id(), expected_command_id);
-            assert_eq!(error.input().result_session(), expected_result_session);
-            assert_eq!(error.input().session(), expected_session);
-            assert_eq!(error.input().provenance(), expected_provenance);
-            assert_eq!(error.input().defaults_session(), expected_defaults_session);
-            assert_eq!(error.input().defaults_version(), expected_version);
-            assert_eq!(error.input().defaults(), expected_defaults);
-            let (returned, failure) = error.into_parts();
-            assert_eq!(returned.command().command_id(), expected_command_id);
-            assert_eq!(returned.result_session(), expected_result_session);
-            assert_eq!(returned.session(), expected_session);
-            assert_eq!(returned.provenance(), expected_provenance);
-            assert_eq!(returned.defaults_session(), expected_defaults_session);
-            assert_eq!(returned.defaults_version(), expected_version);
-            assert_eq!(returned.defaults(), expected_defaults);
-            assert_eq!(failure, expected_failure);
-        }
+        let cross_wired_defaults_owner = creation_reconstitution_failure(CreationFacts {
+            defaults_session: session_id(9),
+            ..matching
+        });
+        assert_eq!(
+            cross_wired_defaults_owner,
+            CreateSessionReconstitutionFailure::DefaultsSessionMismatch
+        );
+
+        let later_defaults_version = creation_reconstitution_failure(CreationFacts {
+            defaults_version: second_version,
+            ..matching
+        });
+        assert_eq!(
+            later_defaults_version,
+            CreateSessionReconstitutionFailure::DefaultsVersionIsNotFirst
+        );
+
+        let replaced_defaults = creation_reconstitution_failure(CreationFacts {
+            defaults: defaults(5),
+            ..matching
+        });
+        assert_eq!(
+            replaced_defaults,
+            CreateSessionReconstitutionFailure::DefaultsMismatch
+        );
+
+        expect![[r#"
+            perturbed stored fact              | failure
+            ---------------------------------- | -----------------------------
+            result session cross-wired         | SessionResultMismatch
+            stored provenance replaced         | ProvenanceMismatch
+            single-source ancestry unvalidated | TranscriptAncestryUnavailable
+            defaults owner cross-wired         | DefaultsSessionMismatch
+            defaults version is not first      | DefaultsVersionIsNotFirst
+            stored defaults differ             | DefaultsMismatch
+        "#]]
+        .assert_eq(&table(
+            &["perturbed stored fact", "failure"],
+            &[
+                vec![
+                    "result session cross-wired".to_string(),
+                    format!("{cross_wired_result:?}"),
+                ],
+                vec![
+                    "stored provenance replaced".to_string(),
+                    format!("{replaced_provenance:?}"),
+                ],
+                vec![
+                    "single-source ancestry unvalidated".to_string(),
+                    format!("{unvalidated_ancestry:?}"),
+                ],
+                vec![
+                    "defaults owner cross-wired".to_string(),
+                    format!("{cross_wired_defaults_owner:?}"),
+                ],
+                vec![
+                    "defaults version is not first".to_string(),
+                    format!("{later_defaults_version:?}"),
+                ],
+                vec![
+                    "stored defaults differ".to_string(),
+                    format!("{replaced_defaults:?}"),
+                ],
+            ],
+        ));
     }
 }

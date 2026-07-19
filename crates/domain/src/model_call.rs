@@ -487,7 +487,7 @@ mod tests {
         semantic_transcript_entry_id, session_id, turn_id,
     };
     use crate::{
-        AppliedInterruptProof, ResolvedContextFrontierSnapshot, SemanticTranscriptEntryRef,
+        AppliedInterruptProof, ResolvedContextFrontierSnapshot, SemanticTranscriptEntryRef, TurnId,
     };
     use uuid::Uuid;
 
@@ -499,8 +499,8 @@ mod tests {
         PinnedProviderTarget::pinned(turn_id(1), target(7))
     }
 
-    fn proof_for(predecessor: u128) -> AppliedInterruptProof {
-        test_applied_interrupt_proof(command_id(9), turn_id(predecessor))
+    fn proof_for(predecessor: TurnId) -> AppliedInterruptProof {
+        test_applied_interrupt_proof(command_id(9), predecessor)
     }
 
     fn semantic_entry(value: u128) -> SemanticTranscriptEntryRef {
@@ -568,14 +568,19 @@ mod tests {
     /// and target, and any target or turn difference is a different fact.
     #[test]
     fn pinned_fact_preserves_the_exact_turn_and_target() {
-        let pinned = pinned_target();
+        let turn = turn_id(1);
+        let exact_target = target(7);
+        let pinned = PinnedProviderTarget::pinned(turn, exact_target);
 
-        assert_eq!(pinned.turn(), turn_id(1));
-        assert_eq!(pinned.target(), target(7));
+        assert_eq!(pinned.turn(), turn);
+        assert_eq!(pinned.target(), exact_target);
         assert_eq!(pinned.target().identity(), provider_model_identity(7));
-        assert_eq!(pinned, PinnedProviderTarget::pinned(turn_id(1), target(7)));
-        assert_ne!(pinned, PinnedProviderTarget::pinned(turn_id(1), target(8)));
-        assert_ne!(pinned, PinnedProviderTarget::pinned(turn_id(2), target(7)));
+        assert_eq!(pinned, PinnedProviderTarget::pinned(turn, exact_target));
+        assert_ne!(pinned, PinnedProviderTarget::pinned(turn, target(8)));
+        assert_ne!(
+            pinned,
+            PinnedProviderTarget::pinned(turn_id(2), exact_target)
+        );
     }
 
     /// S02 / S20 / INV-014 / INV-015: every prepared call records its exact
@@ -592,8 +597,8 @@ mod tests {
 
         assert_eq!(call.id(), model_call_id(3));
         assert_eq!(call.pinned(), &pinned_target());
-        assert_eq!(call.turn(), turn_id(1));
-        assert_eq!(call.target(), target(7));
+        assert_eq!(call.turn(), pinned_target().turn());
+        assert_eq!(call.target(), pinned_target().target());
         assert_eq!(call.frontier(), first_snapshot.frontier());
         assert_eq!(call.state(), CurrentModelCallState::Prepared);
         assert_eq!(later.turn(), call.turn());
@@ -607,19 +612,26 @@ mod tests {
     /// valid only from `Prepared` and preserves the complete call record.
     #[test]
     fn begin_in_flight_accepts_only_prepared_and_preserves_the_record() {
-        let call = in_flight();
+        let snapshot = frontier_snapshot(1);
+        let call = prepared_from_snapshot(3, &snapshot)
+            .begin_in_flight()
+            .expect("Prepared may send");
         assert_eq!(call.id(), model_call_id(3));
         assert_eq!(call.pinned(), &pinned_target());
-        assert_eq!(call.frontier(), frontier_snapshot(1).frontier());
+        assert_eq!(call.frontier(), snapshot.frontier());
         assert_eq!(call.state(), CurrentModelCallState::InFlight);
 
-        for current in [in_flight(), cancellation_requested()] {
-            let error = current.clone().begin_in_flight().unwrap_err();
-            assert_eq!(
-                error.into_parts(),
-                (current, AttemptedModelCallTransition::BeginInFlight)
-            );
-        }
+        assert_begin_in_flight_rejects_unchanged(in_flight());
+        assert_begin_in_flight_rejects_unchanged(cancellation_requested());
+    }
+
+    #[track_caller]
+    fn assert_begin_in_flight_rejects_unchanged(current: CurrentModelCall) {
+        let error = current.clone().begin_in_flight().unwrap_err();
+        assert_eq!(
+            error.into_parts(),
+            (current, AttemptedModelCallTransition::BeginInFlight)
+        );
     }
 
     /// S07 / S21 / INV-006 / INV-015: best-effort cancellation request is
@@ -627,21 +639,30 @@ mod tests {
     /// unsent and already-requested calls are rejected unchanged.
     #[test]
     fn cancellation_request_accepts_only_in_flight_calls() {
-        let requested = cancellation_requested();
+        let snapshot = frontier_snapshot(1);
+        let requested = prepared_from_snapshot(3, &snapshot)
+            .begin_in_flight()
+            .expect("Prepared may send")
+            .request_cancellation()
+            .expect("InFlight may request cancellation");
         assert_eq!(
             requested.state(),
             CurrentModelCallState::CancellationRequested
         );
-        assert_eq!(requested.frontier(), frontier_snapshot(1).frontier());
+        assert_eq!(requested.frontier(), snapshot.frontier());
 
-        for current in [prepared(), cancellation_requested()] {
-            let error = current.clone().request_cancellation().unwrap_err();
-            assert_eq!(error.current(), &current);
-            assert_eq!(
-                error.attempted(),
-                &AttemptedModelCallTransition::RequestCancellation
-            );
-        }
+        assert_cancellation_request_rejects_unchanged(prepared());
+        assert_cancellation_request_rejects_unchanged(cancellation_requested());
+    }
+
+    #[track_caller]
+    fn assert_cancellation_request_rejects_unchanged(current: CurrentModelCall) {
+        let error = current.clone().request_cancellation().unwrap_err();
+        assert_eq!(error.current(), &current);
+        assert_eq!(
+            error.attempted(),
+            &AttemptedModelCallTransition::RequestCancellation
+        );
     }
 
     /// S04 / S21 / INV-006 / INV-014 / INV-029: `Prepared` classifies only
@@ -649,13 +670,31 @@ mod tests {
     /// requires the exact applied interrupt proof for this call's turn.
     #[test]
     fn prepared_terminal_matrix_requires_the_exact_proof_for_cancellation() {
-        for disposition in all_dispositions() {
-            assert_eq!(
-                prepared().end_classified(disposition).is_ok(),
-                disposition == ModelCallDisposition::KnownFailed,
-                "unexpected Prepared classification result for {disposition:?}"
-            );
-        }
+        assert!(
+            prepared()
+                .end_classified(ModelCallDisposition::KnownFailed)
+                .is_ok()
+        );
+        assert!(
+            prepared()
+                .end_classified(ModelCallDisposition::Completed)
+                .is_err()
+        );
+        assert!(
+            prepared()
+                .end_classified(ModelCallDisposition::Refused)
+                .is_err()
+        );
+        assert!(
+            prepared()
+                .end_classified(ModelCallDisposition::Cancelled)
+                .is_err()
+        );
+        assert!(
+            prepared()
+                .end_classified(ModelCallDisposition::Ambiguous)
+                .is_err()
+        );
 
         let known_failed_source = prepared();
         let known_failed_frontier = known_failed_source.frontier();
@@ -679,25 +718,34 @@ mod tests {
             )
         );
 
-        let ended = prepared()
-            .end_cancelled_unsent(proof_for(1))
+        let unsent = prepared();
+        let unsent_frontier = unsent.frontier();
+        let exact_proof = proof_for(unsent.turn());
+        let ended = unsent
+            .end_cancelled_unsent(exact_proof)
             .expect("the exact proof cancels the unsent call");
         assert_eq!(ended.disposition(), ModelCallDisposition::Cancelled);
-        assert_eq!(ended.frontier(), frontier_snapshot(1).frontier());
+        assert_eq!(ended.frontier(), unsent_frontier);
 
-        let error = prepared().end_cancelled_unsent(proof_for(2)).unwrap_err();
+        let wrong_predecessor_proof = proof_for(turn_id(2));
+        let error = prepared()
+            .end_cancelled_unsent(wrong_predecessor_proof)
+            .unwrap_err();
         assert_eq!(
             error.into_parts(),
             (
                 prepared(),
                 AttemptedModelCallTransition::EndCancelledUnsent {
-                    proof: proof_for(2)
+                    proof: wrong_predecessor_proof
                 }
             )
         );
-        for current in [in_flight(), cancellation_requested()] {
-            assert!(current.end_cancelled_unsent(proof_for(1)).is_err());
-        }
+        assert!(in_flight().end_cancelled_unsent(exact_proof).is_err());
+        assert!(
+            cancellation_requested()
+                .end_cancelled_unsent(exact_proof)
+                .is_err()
+        );
     }
 
     /// S02 / S04 / S21 / S23 / INV-006 / INV-015 / INV-025: issued calls
@@ -705,15 +753,19 @@ mod tests {
     /// ambiguity stays distinct instead of being coerced to failure.
     #[test]
     fn issued_calls_accept_every_classified_disposition() {
-        for current in [in_flight(), cancellation_requested()] {
-            for disposition in all_dispositions() {
-                let ended = current
-                    .clone()
-                    .end_classified(disposition)
-                    .expect("issued calls classify every disposition");
-                assert_eq!(ended.disposition(), disposition);
-                assert_eq!(ended.frontier(), current.frontier());
-            }
+        assert_accepts_every_classified_disposition(in_flight());
+        assert_accepts_every_classified_disposition(cancellation_requested());
+    }
+
+    #[track_caller]
+    fn assert_accepts_every_classified_disposition(current: CurrentModelCall) {
+        for disposition in all_dispositions() {
+            let ended = current
+                .clone()
+                .end_classified(disposition)
+                .expect("issued calls classify every disposition");
+            assert_eq!(ended.disposition(), disposition);
+            assert_eq!(ended.frontier(), current.frontier());
         }
     }
 
@@ -722,15 +774,18 @@ mod tests {
     /// consumed.
     #[test]
     fn terminal_history_preserves_identity_target_and_exact_frontier() {
-        let ended: EndedModelCall = in_flight()
+        let snapshot = frontier_snapshot(1);
+        let ended: EndedModelCall = prepared_from_snapshot(3, &snapshot)
+            .begin_in_flight()
+            .expect("Prepared may send")
             .end_classified(ModelCallDisposition::Completed)
             .expect("InFlight may complete");
 
         assert_eq!(ended.id(), model_call_id(3));
         assert_eq!(ended.pinned(), &pinned_target());
-        assert_eq!(ended.turn(), turn_id(1));
-        assert_eq!(ended.target(), target(7));
-        assert_eq!(ended.frontier(), frontier_snapshot(1).frontier());
+        assert_eq!(ended.turn(), pinned_target().turn());
+        assert_eq!(ended.target(), pinned_target().target());
+        assert_eq!(ended.frontier(), snapshot.frontier());
         assert_eq!(ended.disposition(), ModelCallDisposition::Completed);
     }
 }

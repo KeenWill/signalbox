@@ -453,8 +453,8 @@ mod tests {
         AcceptedInputQueueOrder, AcceptedInputQueueOrderError, AcceptedInputQueuePriority,
         AcceptedInputQueueWork, SessionInputPosition, derive_accepted_input_total_order,
     };
-    use crate::TurnId;
     use crate::test_support::{session_id, table, turn_id};
+    use crate::{SessionId, TurnId};
 
     fn positions(count: usize) -> Vec<SessionInputPosition> {
         let mut positions = Vec::with_capacity(count);
@@ -468,22 +468,20 @@ mod tests {
         positions
     }
 
+    /// Ordinary work with free turn and position knobs, for rejection tests
+    /// where the turn/position relation itself is under test
+    /// (`docs/testing-style.md`, rule 4).
     fn ordinary(turn: u128, position: SessionInputPosition) -> AcceptedInputQueueWork {
-        ordinary_in_session(100, turn, position)
-    }
-
-    fn ordinary_in_session(
-        session: u128,
-        turn: u128,
-        position: SessionInputPosition,
-    ) -> AcceptedInputQueueWork {
         AcceptedInputQueueWork::new(
-            session_id(session),
+            session_id(100),
             turn_id(turn),
             AcceptedInputQueueOrder::ordinary(position),
         )
     }
 
+    /// Interrupt work with free turn, position, and predecessor knobs, for
+    /// rejection tests where their relation itself is under test
+    /// (`docs/testing-style.md`, rule 4).
     fn interrupt(
         turn: u128,
         position: SessionInputPosition,
@@ -499,8 +497,14 @@ mod tests {
     /// Ordinary work accepted at the given ordinal; its turn seed derives
     /// from that one knob, decorrelated (`docs/testing-style.md`, rule 4).
     fn accepted_ordinary(acceptance: u64) -> AcceptedInputQueueWork {
+        accepted_ordinary_in_session(session_id(100), acceptance)
+    }
+
+    /// Ordinary work accepted at the given ordinal in the given session, for
+    /// tests where the session association itself is under test.
+    fn accepted_ordinary_in_session(session: SessionId, acceptance: u64) -> AcceptedInputQueueWork {
         AcceptedInputQueueWork::new(
-            session_id(100),
+            session,
             decorrelated_turn(acceptance),
             AcceptedInputQueueOrder::ordinary(nth_position(acceptance)),
         )
@@ -618,9 +622,11 @@ mod tests {
             AcceptedInputQueuePriority::InterruptImmediatelyAfter { predecessor }
         );
 
-        let work = AcceptedInputQueueWork::new(session_id(100), turn_id(3), interrupt_order);
-        assert_eq!(work.session(), session_id(100));
-        assert_eq!(work.turn(), turn_id(3));
+        let session = session_id(100);
+        let turn = turn_id(3);
+        let work = AcceptedInputQueueWork::new(session, turn, interrupt_order);
+        assert_eq!(work.session(), session);
+        assert_eq!(work.turn(), turn);
         assert_eq!(work.order(), interrupt_order);
     }
 
@@ -628,15 +634,13 @@ mod tests {
     /// position, independent of fact iteration order.
     #[test]
     fn s09_inv009_ordinary_work_is_fifo_by_acceptance_position() {
-        let position = positions(3);
+        let first = accepted_ordinary(1);
+        let second = accepted_ordinary(2);
+        let third = accepted_ordinary(3);
 
         assert_eq!(
-            derive_accepted_input_total_order([
-                ordinary(3, position[2]),
-                ordinary(1, position[0]),
-                ordinary(2, position[1]),
-            ]),
-            Ok(vec![turn_id(1), turn_id(2), turn_id(3)])
+            derive_accepted_input_total_order([third, first, second]),
+            Ok(vec![first.turn(), second.turn(), third.turn()])
         );
     }
 
@@ -644,15 +648,13 @@ mod tests {
     /// predecessor and jumps all then-unstarted ordinary work.
     #[test]
     fn s07_inv009_interrupt_precedes_existing_ordinary_work() {
-        let position = positions(3);
+        let first = accepted_ordinary(1);
+        let second = accepted_ordinary(2);
+        let interrupt = accepted_interrupt(3, first);
 
         assert_eq!(
-            derive_accepted_input_total_order([
-                ordinary(1, position[0]),
-                ordinary(2, position[1]),
-                interrupt(3, position[2], 1),
-            ]),
-            Ok(vec![turn_id(1), turn_id(3), turn_id(2)])
+            derive_accepted_input_total_order([first, second, interrupt]),
+            Ok(vec![first.turn(), interrupt.turn(), second.turn()])
         );
     }
 
@@ -720,14 +722,12 @@ mod tests {
     /// permutation of the same durable fact set.
     #[test]
     fn s03_inv009_total_order_is_deterministic_for_all_fact_permutations() {
-        let position = positions(4);
-        let mut facts = vec![
-            ordinary(1, position[0]),
-            ordinary(2, position[1]),
-            interrupt(3, position[2], 1),
-            interrupt(4, position[3], 3),
-        ];
-        let expected = vec![turn_id(1), turn_id(3), turn_id(4), turn_id(2)];
+        let first = accepted_ordinary(1);
+        let second = accepted_ordinary(2);
+        let interrupt = accepted_interrupt(3, first);
+        let nested = accepted_interrupt(4, interrupt);
+        let mut facts = vec![first, second, interrupt, nested];
+        let expected = vec![first.turn(), interrupt.turn(), nested.turn(), second.turn()];
 
         assert_all_permutations_derive(&mut facts, 0, &expected);
     }
@@ -736,12 +736,16 @@ mod tests {
     /// have one deterministic total order.
     #[test]
     fn s03_inv009_empty_and_singleton_fact_sets_have_total_orders() {
-        let position = SessionInputPosition::first();
+        let no_currently_known_work: [AcceptedInputQueueWork; 0] = [];
+        let only = accepted_ordinary(1);
 
-        assert_eq!(derive_accepted_input_total_order([]), Ok(Vec::new()));
         assert_eq!(
-            derive_accepted_input_total_order([ordinary(1, position)]),
-            Ok(vec![turn_id(1)])
+            derive_accepted_input_total_order(no_currently_known_work),
+            Ok(Vec::new())
+        );
+        assert_eq!(
+            derive_accepted_input_total_order([only]),
+            Ok(vec![only.turn()])
         );
     }
 
@@ -749,16 +753,14 @@ mod tests {
     /// sessions instead of comparing their session-local positions.
     #[test]
     fn s03_inv009_mixed_session_fact_sets_are_rejected() {
-        let position = positions(2);
+        let first = accepted_ordinary_in_session(session_id(100), 1);
+        let second = accepted_ordinary_in_session(session_id(200), 2);
 
         assert_eq!(
-            derive_accepted_input_total_order([
-                ordinary_in_session(100, 1, position[0]),
-                ordinary_in_session(200, 2, position[1]),
-            ]),
+            derive_accepted_input_total_order([first, second]),
             Err(AcceptedInputQueueOrderError::MixedSessions {
-                first_session: session_id(100),
-                second_session: session_id(200),
+                first_session: first.session(),
+                second_session: second.session(),
             })
         );
     }
@@ -872,21 +874,24 @@ mod tests {
     /// must already have terminalized for an earlier interrupt target to run.
     #[test]
     fn s07_inv009_reversed_active_target_chronology_is_rejected() {
-        let position = positions(4);
+        let first = accepted_ordinary(1);
+        let second = accepted_ordinary(2);
+        let interrupt_after_second = accepted_interrupt(3, second);
+        let stale_interrupt = accepted_interrupt(4, first);
 
         assert_eq!(
             derive_accepted_input_total_order([
-                ordinary(1, position[0]),
-                ordinary(2, position[1]),
-                interrupt(3, position[2], 2),
-                interrupt(4, position[3], 1),
+                first,
+                second,
+                interrupt_after_second,
+                stale_interrupt,
             ]),
             Err(
                 AcceptedInputQueueOrderError::InterruptPredecessorChronologyReversed {
-                    earlier_interrupt: turn_id(3),
-                    earlier_predecessor: turn_id(2),
-                    later_interrupt: turn_id(4),
-                    later_predecessor: turn_id(1),
+                    earlier_interrupt: interrupt_after_second.turn(),
+                    earlier_predecessor: second.turn(),
+                    later_interrupt: stale_interrupt.turn(),
+                    later_predecessor: first.turn(),
                 }
             )
         );
@@ -896,16 +901,19 @@ mod tests {
     /// those roots become active in durable order.
     #[test]
     fn s07_inv009_independent_interrupt_chains_follow_active_progress() {
-        let position = positions(4);
+        let first = accepted_ordinary(1);
+        let second = accepted_ordinary(2);
+        let first_interrupt = accepted_interrupt(3, first);
+        let second_interrupt = accepted_interrupt(4, second);
 
         assert_eq!(
-            derive_accepted_input_total_order([
-                ordinary(1, position[0]),
-                ordinary(2, position[1]),
-                interrupt(3, position[2], 1),
-                interrupt(4, position[3], 2),
-            ]),
-            Ok(vec![turn_id(1), turn_id(3), turn_id(2), turn_id(4)])
+            derive_accepted_input_total_order([first, second, first_interrupt, second_interrupt]),
+            Ok(vec![
+                first.turn(),
+                first_interrupt.turn(),
+                second.turn(),
+                second_interrupt.turn(),
+            ])
         );
     }
 
