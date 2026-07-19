@@ -3,6 +3,7 @@ members = [
     "apps/hubd",
     "crates/application",
     "crates/domain",
+    "crates/expect-table",
     "crates/persistence",
 ]
 resolver = "3"
