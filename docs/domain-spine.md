@@ -569,9 +569,18 @@ pub enum SubmitInputPreparationFailure {
     InterruptApplicationUnavailable,
 }
 
+pub struct SubmitInputTerminalSourceReconstitutionInput { /* private */ }
+impl SubmitInputTerminalSourceReconstitutionInput {
+    pub fn new(
+        origin: SubmitInputTurnOriginReconstitutionInput,
+        turn: TurnId,
+        disposition: TurnDisposition,
+    ) -> Self;
+}
+
 pub struct SubmitInputTurnOriginReconstitutionInput { /* private */ }
 impl SubmitInputTurnOriginReconstitutionInput {
-    pub const fn new(
+    pub fn new(
         receipt: ReconstitutedSubmitInput,
         lifecycle: AcceptedInputLifecycle,
         queue_accepted_input: AcceptedInputId,
@@ -586,7 +595,7 @@ impl SubmitInputTurnOriginReconstitutionInput {
         queue_session: SessionId,
         queue_turn: TurnId,
         queue_order: AcceptedInputQueueOrder,
-        source_terminal: AcceptedInputTurnSchedulingProjection,
+        source_terminal: SubmitInputTerminalSourceReconstitutionInput,
     ) -> Self;
 }
 
@@ -1813,7 +1822,7 @@ impl<Generator: SubmitInputIdGenerator, Transaction: SubmitInputTransaction>
 | domain: accepted_input | 5 |
 | domain: delivery_request | 2 |
 | domain: user_content | 4 |
-| domain: submit_input | 14 |
+| domain: submit_input | 15 |
 | domain: queue_order | 5 (+1 free fn) |
 | domain: turn_lifecycle | 10 |
 | domain: turn_eligibility | 16 |
@@ -1825,7 +1834,7 @@ impl<Generator: SubmitInputIdGenerator, Transaction: SubmitInputTransaction>
 | domain: applied_interrupt | 2 |
 | domain: fatal_mismatch | 0 |
 | domain: replace_session_defaults | 13 |
-| **signalbox-domain total** | **152 (+1 free fn)** |
+| **signalbox-domain total** | **153 (+1 free fn)** |
 | application: create_session | 8 (incl. 2 traits) |
 | application: load_session | 2 (incl. 1 trait) |
 | application: replace_session_defaults | 4 (incl. 1 trait) |

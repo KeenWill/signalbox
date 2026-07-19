@@ -1,6 +1,6 @@
 //! Atomic PostgreSQL persistence and replay for durable input acceptance.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
@@ -51,6 +51,71 @@ struct StoredTurnOriginLink {
     predecessor: Option<StoredTurnOriginKey>,
     accepted_input: AcceptedInputId,
     queue_order: AcceptedInputQueueOrder,
+}
+
+fn turn_origin_dependency_order(
+    relationships: impl IntoIterator<Item = (StoredTurnOriginKey, Option<StoredTurnOriginKey>)>,
+) -> Option<Vec<StoredTurnOriginKey>> {
+    let mut ready = VecDeque::new();
+    let mut dependents: BTreeMap<StoredTurnOriginKey, Vec<StoredTurnOriginKey>> = BTreeMap::new();
+    let mut relationship_count = 0;
+    for (turn, predecessor) in relationships {
+        relationship_count += 1;
+        if let Some(predecessor) = predecessor {
+            dependents.entry(predecessor).or_default().push(turn);
+        } else {
+            ready.push_back(turn);
+        }
+    }
+
+    let mut ordered = Vec::with_capacity(relationship_count);
+    while let Some(turn) = ready.pop_front() {
+        ordered.push(turn);
+        if let Some(newly_ready) = dependents.remove(&turn) {
+            ready.extend(newly_ready);
+        }
+    }
+    (ordered.len() == relationship_count).then_some(ordered)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn turn_origin_dependency_order_handles_reverse_key_chains() {
+        let session = Uuid::from_u128(1);
+        let chain = (1..=512)
+            .rev()
+            .map(|turn| (session, Uuid::from_u128(turn)))
+            .collect::<Vec<_>>();
+        let relationships = chain
+            .iter()
+            .enumerate()
+            .map(|(index, turn)| (*turn, index.checked_sub(1).map(|prior| chain[prior])))
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(
+            turn_origin_dependency_order(
+                relationships
+                    .iter()
+                    .map(|(turn, predecessor)| (*turn, *predecessor)),
+            ),
+            Some(chain),
+        );
+    }
+
+    #[test]
+    fn turn_origin_dependency_order_rejects_cycles() {
+        let session = Uuid::from_u128(1);
+        let first = (session, Uuid::from_u128(1));
+        let second = (session, Uuid::from_u128(2));
+
+        assert_eq!(
+            turn_origin_dependency_order([(first, Some(second)), (second, Some(first))]),
+            None,
+        );
+    }
 }
 
 /// The committed outcome of handling one canonical input submission.
@@ -1981,17 +2046,13 @@ async fn load_turn_origin_graph(
         return Err(SubmitInputCorruption::Missing("turn origin command").into());
     }
 
+    let decode_order =
+        turn_origin_dependency_order(links.iter().map(|(key, link)| (*key, link.predecessor)))
+            .ok_or(SubmitInputCorruption::Inconsistent(
+                "turn origin predecessor cycle",
+            ))?;
     let mut decoded = BTreeMap::new();
-    while !links.is_empty() {
-        let Some(ready) = links.iter().find_map(|(key, link)| {
-            link.predecessor
-                .is_none_or(|predecessor| decoded.contains_key(&predecessor))
-                .then_some(*key)
-        }) else {
-            return Err(
-                SubmitInputCorruption::Inconsistent("turn origin predecessor cycle").into(),
-            );
-        };
+    for ready in decode_order {
         let link = links
             .remove(&ready)
             .expect("the selected turn origin link remains present");
@@ -2034,6 +2095,7 @@ async fn load_turn_origin_graph(
             ),
         );
     }
+    debug_assert!(links.is_empty());
 
     Ok(decoded)
 }

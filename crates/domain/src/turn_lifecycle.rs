@@ -254,6 +254,17 @@ impl ReconciliationMarker {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn test_reconciliation_marker(
+    ambiguous_operations: NonEmptyIssuedOperationRefs,
+    reason: ReconciliationReason,
+) -> ReconciliationMarker {
+    ReconciliationMarker {
+        ambiguous_operations,
+        reason,
+    }
+}
+
 /// One active phase; every value retains the session's progressing-turn slot.
 ///
 /// Variant fields make a running phase own exactly one current attempt and

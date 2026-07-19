@@ -14,16 +14,18 @@
 //! steering, apply interruption, construct an interrupt proof, transition turn
 //! lifecycle, or perform persistence.
 
-use std::hash::{Hash, Hasher};
+use std::{
+    collections::HashSet,
+    hash::{Hash, Hasher},
+};
 
 use crate::{
     AcceptedInputDisposition, AcceptedInputId, AcceptedInputLifecycle, AcceptedInputQueueOrder,
-    AcceptedInputQueuePriority, AcceptedInputSchedulingProjection,
-    AcceptedInputTurnSchedulingProjection, AcceptedInputTurnSchedulingStatus, Actor,
+    AcceptedInputQueuePriority, AcceptedInputSchedulingProjection, Actor, AppliedInterruptState,
     DeliveryRequest, DurableCommandId, FrozenAliasDefinition, FrozenModelSelection, ModelAlias,
-    ModelSelectionRequest, OriginConfiguration, PerInputConfigurationChoices, Session,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
-    SessionInputPosition, SteeringBinding, TurnId, UserContent,
+    ModelSelectionRequest, OriginConfiguration, PerInputConfigurationChoices, ReconciliationReason,
+    Session, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
+    SessionInputPosition, SteeringBinding, TurnDisposition, TurnId, UserContent,
     VersionedSessionConfigurationDefaults,
 };
 
@@ -785,27 +787,61 @@ impl SubmitInputPreparationError {
 /// active source.
 #[derive(Clone, Debug)]
 pub struct SubmitInputTurnOriginReconstitutionInput {
+    chain: Vec<SubmitInputTurnOriginReconstitutionFacts>,
+}
+
+#[derive(Clone, Debug)]
+struct SubmitInputTurnOriginReconstitutionFacts {
     receipt: ReconstitutedSubmitInput,
     lifecycle: AcceptedInputLifecycle,
     queue_accepted_input: AcceptedInputId,
     queue_session: SessionId,
     queue_turn: TurnId,
     queue_order: AcceptedInputQueueOrder,
-    source: SubmitInputTurnOriginSourceReconstitutionInput,
+    source_terminal: Option<SubmitInputTerminalFacts>,
+}
+
+/// Complete purpose-specific facts proving that a reclassified origin's
+/// source turn is terminal.
+///
+/// The source's canonical origin retains a flat chain so directly created and
+/// previously reclassified turns use the same checked boundary without
+/// recursive validation or destruction. The terminal disposition admits every
+/// ADR-0027 terminal outcome and is correlated with its explicit owning turn
+/// during submission reconstitution.
+#[derive(Clone, Debug)]
+pub struct SubmitInputTerminalSourceReconstitutionInput {
+    origin: SubmitInputTurnOriginReconstitutionInput,
+    turn: TurnId,
+    disposition: TurnDisposition,
 }
 
 #[derive(Clone, Debug)]
-enum SubmitInputTurnOriginSourceReconstitutionInput {
-    Direct,
-    Reclassified {
-        source_terminal: Box<AcceptedInputTurnSchedulingProjection>,
-    },
+struct SubmitInputTerminalFacts {
+    turn: TurnId,
+    disposition: TurnDisposition,
+}
+
+impl SubmitInputTerminalSourceReconstitutionInput {
+    /// Supplies the source turn's canonical origin facts, terminal-record
+    /// owner, and disposition.
+    pub fn new(
+        origin: SubmitInputTurnOriginReconstitutionInput,
+        turn: TurnId,
+        disposition: TurnDisposition,
+    ) -> Self {
+        Self {
+            origin,
+            turn,
+            disposition,
+        }
+    }
 }
 
 impl SubmitInputTurnOriginReconstitutionInput {
     /// Supplies a directly created origin's immutable receipt, current
     /// accepted-input lifecycle, and accepted-input-keyed queue facts.
-    pub const fn new(
+    pub fn new(
         receipt: ReconstitutedSubmitInput,
         lifecycle: AcceptedInputLifecycle,
         queue_accepted_input: AcceptedInputId,
@@ -814,13 +850,15 @@ impl SubmitInputTurnOriginReconstitutionInput {
         queue_order: AcceptedInputQueueOrder,
     ) -> Self {
         Self {
-            receipt,
-            lifecycle,
-            queue_accepted_input,
-            queue_session,
-            queue_turn,
-            queue_order,
-            source: SubmitInputTurnOriginSourceReconstitutionInput::Direct,
+            chain: vec![SubmitInputTurnOriginReconstitutionFacts {
+                receipt,
+                lifecycle,
+                queue_accepted_input,
+                queue_session,
+                queue_turn,
+                queue_order,
+                source_terminal: None,
+            }],
         }
     }
 
@@ -834,19 +872,23 @@ impl SubmitInputTurnOriginReconstitutionInput {
         queue_session: SessionId,
         queue_turn: TurnId,
         queue_order: AcceptedInputQueueOrder,
-        source_terminal: AcceptedInputTurnSchedulingProjection,
+        source_terminal: SubmitInputTerminalSourceReconstitutionInput,
     ) -> Self {
-        Self {
+        let SubmitInputTerminalSourceReconstitutionInput {
+            mut origin,
+            turn,
+            disposition,
+        } = source_terminal;
+        origin.chain.push(SubmitInputTurnOriginReconstitutionFacts {
             receipt,
             lifecycle,
             queue_accepted_input,
             queue_session,
             queue_turn,
             queue_order,
-            source: SubmitInputTurnOriginSourceReconstitutionInput::Reclassified {
-                source_terminal: Box::new(source_terminal),
-            },
-        }
+            source_terminal: Some(SubmitInputTerminalFacts { turn, disposition }),
+        });
+        origin
     }
 }
 
@@ -1764,49 +1806,93 @@ struct ValidatedTurnOrigin<'a> {
 fn validate_turn_origin_reconstitution_input(
     input: &SubmitInputTurnOriginReconstitutionInput,
 ) -> Option<ValidatedTurnOrigin<'_>> {
-    let SubmitInputResult::Applied(applied) = input.receipt.result() else {
-        return None;
-    };
-    let (turn, expected_queue_order) = match (applied, input.lifecycle.disposition(), &input.source)
-    {
-        (
-            SubmitInputAppliedResult::TurnOrigin(origin),
-            AcceptedInputDisposition::OriginOf(turn),
-            SubmitInputTurnOriginSourceReconstitutionInput::Direct,
-        ) if *turn == origin.turn() => (*turn, origin.queue_order()),
-        (
-            SubmitInputAppliedResult::PendingSteering(pending),
-            AcceptedInputDisposition::ReclassifiedAsTurnOrigin { turn, .. },
-            SubmitInputTurnOriginSourceReconstitutionInput::Reclassified { source_terminal },
-        ) if *turn != pending.binding().source_turn()
-            && source_terminal.session() == applied.session()
-            && source_terminal.turn() == pending.binding().source_turn()
-            && source_terminal.accepted_input().id() != applied.accepted_input()
-            && source_terminal.status() == AcceptedInputTurnSchedulingStatus::TerminalFailed =>
+    let mut validated: Option<ValidatedTurnOrigin<'_>> = None;
+    let mut accepted_inputs = HashSet::with_capacity(input.chain.len());
+    let mut command_ids = HashSet::with_capacity(input.chain.len());
+
+    for facts in &input.chain {
+        let SubmitInputResult::Applied(applied) = facts.receipt.result() else {
+            return None;
+        };
+        if !accepted_inputs.insert(applied.accepted_input())
+            || !command_ids.insert(facts.receipt.command().command_id())
         {
-            (
-                *turn,
-                AcceptedInputQueueOrder::ordinary(applied.acceptance_position()),
-            )
+            return None;
         }
-        _ => return None,
-    };
-    if input.lifecycle.id() != applied.accepted_input()
-        || input.queue_accepted_input != applied.accepted_input()
-        || input.queue_session != applied.session()
-        || input.queue_turn != turn
-        || input.queue_order != expected_queue_order
-    {
-        return None;
+        let (turn, expected_queue_order) = match (
+            applied,
+            facts.lifecycle.disposition(),
+            &facts.source_terminal,
+            validated.as_ref(),
+        ) {
+            (
+                SubmitInputAppliedResult::TurnOrigin(origin),
+                AcceptedInputDisposition::OriginOf(turn),
+                None,
+                None,
+            ) if *turn == origin.turn() => (*turn, origin.queue_order()),
+            (
+                SubmitInputAppliedResult::PendingSteering(pending),
+                AcceptedInputDisposition::ReclassifiedAsTurnOrigin { turn, .. },
+                Some(source_terminal),
+                Some(source_origin),
+            ) if *turn != pending.binding().source_turn() => {
+                if source_origin.session != applied.session()
+                    || source_origin.turn != pending.binding().source_turn()
+                    || source_terminal.turn != source_origin.turn
+                    || source_origin.acceptance_position >= applied.acceptance_position()
+                    || !terminal_disposition_matches_turn(
+                        &source_terminal.disposition,
+                        source_origin.turn,
+                    )
+                {
+                    return None;
+                }
+                (
+                    *turn,
+                    AcceptedInputQueueOrder::ordinary(applied.acceptance_position()),
+                )
+            }
+            _ => return None,
+        };
+        if facts.lifecycle.id() != applied.accepted_input()
+            || facts.queue_accepted_input != applied.accepted_input()
+            || facts.queue_session != applied.session()
+            || facts.queue_turn != turn
+            || facts.queue_order != expected_queue_order
+        {
+            return None;
+        }
+
+        validated = Some(ValidatedTurnOrigin {
+            receipt: &facts.receipt,
+            accepted_input: applied.accepted_input(),
+            session: applied.session(),
+            turn,
+            acceptance_position: applied.acceptance_position(),
+        });
     }
 
-    Some(ValidatedTurnOrigin {
-        receipt: &input.receipt,
-        accepted_input: applied.accepted_input(),
-        session: applied.session(),
-        turn,
-        acceptance_position: applied.acceptance_position(),
-    })
+    validated
+}
+
+fn terminal_disposition_matches_turn(disposition: &TurnDisposition, turn: TurnId) -> bool {
+    match disposition {
+        TurnDisposition::Completed | TurnDisposition::Refused | TurnDisposition::Failed => true,
+        TurnDisposition::Cancelled { cause } => cause.predecessor() == turn,
+        TurnDisposition::ReconciliationRequired { marker } => match marker.reason() {
+            ReconciliationReason::OwnerChoseReconciliation { decision } => decision.turn() == turn,
+            ReconciliationReason::InterruptRequiresReconciliation { interrupt } => {
+                interrupt.predecessor() == turn
+            }
+            ReconciliationReason::FatalMismatchRequiresReconciliation { causes } => {
+                match causes.interrupt() {
+                    AppliedInterruptState::NoAppliedInterrupt => true,
+                    AppliedInterruptState::Applied { proof } => proof.predecessor() == turn,
+                }
+            }
+        },
+    }
 }
 
 fn validate_rejection_active_turn_origin(
@@ -2007,24 +2093,29 @@ mod tests {
         ReconstitutedSubmitInput, SubmitInput, SubmitInputAppliedResult,
         SubmitInputPreparationFailure, SubmitInputReconstitutionFailure,
         SubmitInputReconstitutionInput, SubmitInputRejectedResult, SubmitInputResult,
-        SubmitInputTurnOriginReconstitutionInput,
+        SubmitInputTerminalSourceReconstitutionInput, SubmitInputTurnOriginReconstitutionInput,
     };
-    use crate::test_support::{accepted_input_id, alias, command_id, direct, session_id, turn_id};
+    use crate::applied_interrupt::test_applied_interrupt_proof;
+    use crate::test_support::{
+        accepted_input_id, alias, command_id, direct, model_call_id, session_id, turn_id,
+    };
     use crate::test_support::{context_frontier_id, semantic_transcript_entry_id, turn_attempt_id};
+    use crate::turn_lifecycle::test_reconciliation_marker;
     use crate::{
         AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputQueueOrder,
         AcceptedInputSchedulingProjection, AcceptedInputSchedulingReconstitutionInput,
-        AcceptedInputStartingLineage, AcceptedInputTurnSchedulingProjection,
-        AcceptedInputTurnSchedulingRecord, AcceptedInputTurnSchedulingRecordState,
-        ActiveTurnSchedulingReconstitutionInput, Actor, DeliveryRequest, FrozenAliasDefinition,
-        FrozenModelSelection, InitialSemanticTranscriptEntryPayload, ModelSelectionOverride,
-        ModelSelectionRequest, OriginConfiguration, PerInputConfigurationChoices,
+        AcceptedInputStartingLineage, AcceptedInputTurnSchedulingRecord,
+        AcceptedInputTurnSchedulingRecordState, ActiveTurnSchedulingReconstitutionInput, Actor,
+        DeliveryRequest, FrozenAliasDefinition, FrozenModelSelection,
+        InitialSemanticTranscriptEntryPayload, IssuedOperationRef, ModelSelectionOverride,
+        ModelSelectionRequest, NonEmptyIssuedOperationRefs, OriginConfiguration,
+        PerInputConfigurationChoices, ReconciliationReason,
         ResolvedContextFrontierReconstitutionInput, SemanticTranscriptEntryReconstitutionInput,
         SemanticTranscriptEntryRef, Session, SessionAcceptanceTailEntryReconstitutionInput,
         SessionAcceptanceTailReconstitutionInput, SessionConfigurationDefaults,
         SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
         SessionInputPosition, SessionReconstitutionInput, SteeringBinding, TranscriptAncestry,
-        UserContent,
+        TurnDisposition, UserContent,
     };
 
     fn version(value: u64) -> SessionConfigurationDefaultsVersion {
@@ -2223,75 +2314,14 @@ mod tests {
         .expect("test queued scheduling facts are complete")
     }
 
-    fn terminal_source_turn() -> AcceptedInputTurnSchedulingProjection {
-        let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
-        let origin_entry = semantic_transcript_entry_id(0x31);
-        let failure_entry = semantic_transcript_entry_id(0x32);
-        let accepted_input = AcceptedInputLifecycle::new(
-            accepted_input_id(0x71),
-            AcceptedInputDisposition::OriginOf(turn_id(7)),
-        );
-        let projection = AcceptedInputSchedulingReconstitutionInput::new(
-            current.clone(),
-            vec![AcceptedInputTurnSchedulingRecord::new(
-                current.id(),
-                turn_id(7),
-                current.id(),
-                accepted_input,
-                current.id(),
-                turn_id(7),
-                AcceptedInputQueueOrder::ordinary(SessionInputPosition::first()),
-                DeliveryRequest::StartWhenNoActiveTurn {
-                    configuration: choices(1, ModelSelectionOverride::UseSessionDefault),
-                },
-                origin_configuration(&current),
-                AcceptedInputTurnSchedulingRecordState::TerminalFailed {
-                    starting_lineage: AcceptedInputStartingLineage::FirstInSession,
-                    starting_frontier: context_frontier_id(0x41),
-                    terminal_frontier: context_frontier_id(0x42),
-                },
-            )],
-            vec![
-                SemanticTranscriptEntryReconstitutionInput::new(
-                    origin_entry,
-                    current.id(),
-                    InitialSemanticTranscriptEntryPayload::OriginAcceptedInput {
-                        accepted_input: accepted_input_id(0x71),
-                    },
-                ),
-                SemanticTranscriptEntryReconstitutionInput::new(
-                    failure_entry,
-                    current.id(),
-                    InitialSemanticTranscriptEntryPayload::TurnFailed { turn: turn_id(7) },
-                ),
-            ],
-            vec![
-                ResolvedContextFrontierReconstitutionInput::new(
-                    current.id(),
-                    context_frontier_id(0x41),
-                    vec![SemanticTranscriptEntryRef::from_source(
-                        current.id(),
-                        origin_entry,
-                    )],
-                ),
-                ResolvedContextFrontierReconstitutionInput::new(
-                    current.id(),
-                    context_frontier_id(0x42),
-                    vec![
-                        SemanticTranscriptEntryRef::from_source(current.id(), origin_entry),
-                        SemanticTranscriptEntryRef::from_source(current.id(), failure_entry),
-                    ],
-                ),
-            ],
-            None,
+    fn terminal_source_turn_with_disposition(
+        disposition: TurnDisposition,
+    ) -> SubmitInputTerminalSourceReconstitutionInput {
+        SubmitInputTerminalSourceReconstitutionInput::new(
+            source_turn_origin(),
+            turn_id(7),
+            disposition,
         )
-        .reconstitute()
-        .expect("the source terminal projection is complete");
-
-        projection
-            .turn(turn_id(7))
-            .expect("the source projection contains its terminal turn")
-            .clone()
     }
 
     fn hash(value: &SubmitInput) -> u64 {
@@ -2338,6 +2368,82 @@ mod tests {
         facts
     }
 
+    fn terminal_source_facts(
+        input: &mut SubmitInputTurnOriginReconstitutionInput,
+    ) -> &mut super::SubmitInputTerminalFacts {
+        let Some(source_terminal) = &mut turn_origin_facts(input).source_terminal else {
+            panic!("the origin must come from reclassified steering");
+        };
+        source_terminal
+    }
+
+    fn turn_origin_facts(
+        input: &mut SubmitInputTurnOriginReconstitutionInput,
+    ) -> &mut super::SubmitInputTurnOriginReconstitutionFacts {
+        input.chain.last_mut().expect("an origin chain is nonempty")
+    }
+
+    fn replace_source_origin(
+        input: &mut SubmitInputTurnOriginReconstitutionInput,
+        mut source: SubmitInputTurnOriginReconstitutionInput,
+    ) {
+        let current = input.chain.pop().expect("a reclassified origin has a head");
+        source.chain.push(current);
+        input.chain = source.chain;
+    }
+
+    fn append_unchecked_reclassified_origin(
+        mut source: SubmitInputTurnOriginReconstitutionInput,
+        position_value: u64,
+        command_value: u128,
+        accepted_input_value: u128,
+    ) -> SubmitInputTurnOriginReconstitutionInput {
+        let position = SessionInputPosition::try_from_u64(position_value)
+            .expect("the test position is positive");
+        let source_turn = turn_id(u128::from(position_value) + 5);
+        let turn = turn_id(u128::from(position_value) + 6);
+        let command = SubmitInput::new(
+            command_id(command_value),
+            session_id(1),
+            content("chained steering"),
+            DeliveryRequest::NextSafePoint {
+                expected_active_turn: source_turn,
+            },
+        );
+        let accepted_input = accepted_input_id(accepted_input_value);
+        source
+            .chain
+            .push(super::SubmitInputTurnOriginReconstitutionFacts {
+                receipt: ReconstitutedSubmitInput {
+                    command,
+                    result: SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(
+                        super::SubmitInputPendingSteeringAppliedResult {
+                            accepted_input,
+                            session: session_id(1),
+                            acceptance_position: position,
+                            binding: SteeringBinding::new(source_turn),
+                        },
+                    )),
+                },
+                lifecycle: AcceptedInputLifecycle::new(
+                    accepted_input,
+                    AcceptedInputDisposition::ReclassifiedAsTurnOrigin {
+                        turn,
+                        reason: crate::SteeringReclassificationReason::NoSafePointBeforeTerminal,
+                    },
+                ),
+                queue_accepted_input: accepted_input,
+                queue_session: session_id(1),
+                queue_turn: turn,
+                queue_order: AcceptedInputQueueOrder::ordinary(position),
+                source_terminal: Some(super::SubmitInputTerminalFacts {
+                    turn: source_turn,
+                    disposition: TurnDisposition::Completed,
+                }),
+            });
+        source
+    }
+
     fn source_turn_origin() -> SubmitInputTurnOriginReconstitutionInput {
         source_turn_origin_with_identities(0x70, 0x71)
     }
@@ -2345,6 +2451,18 @@ mod tests {
     fn source_turn_origin_with_identities(
         source_command: u128,
         source_accepted_input: u128,
+    ) -> SubmitInputTurnOriginReconstitutionInput {
+        source_turn_origin_with_position(
+            source_command,
+            source_accepted_input,
+            SessionInputPosition::first(),
+        )
+    }
+
+    fn source_turn_origin_with_position(
+        source_command: u128,
+        source_accepted_input: u128,
+        position: SessionInputPosition,
     ) -> SubmitInputTurnOriginReconstitutionInput {
         let command = start_command(source_command, "source", 1);
         let receipt = SubmitInputReconstitutionInput::applied_turn_origin(
@@ -2359,11 +2477,11 @@ mod tests {
             session_id(1),
             content("source"),
             command.delivery(),
-            SessionInputPosition::first(),
+            position,
             AcceptedInputDisposition::OriginOf(turn_id(7)),
             session_id(1),
             turn_id(7),
-            AcceptedInputQueueOrder::ordinary(SessionInputPosition::first()),
+            AcceptedInputQueueOrder::ordinary(position),
             session_id(1),
             version(1),
             defaults(ModelSelectionRequest::Direct(direct(2))),
@@ -2398,6 +2516,12 @@ mod tests {
     }
 
     fn reclassified_turn_origin() -> SubmitInputTurnOriginReconstitutionInput {
+        reclassified_turn_origin_with_disposition(TurnDisposition::Failed)
+    }
+
+    fn reclassified_turn_origin_with_disposition(
+        disposition: TurnDisposition,
+    ) -> SubmitInputTurnOriginReconstitutionInput {
         let position = SessionInputPosition::first()
             .checked_next()
             .expect("the pending input follows its source");
@@ -2443,7 +2567,7 @@ mod tests {
             session_id(1),
             turn_id(8),
             AcceptedInputQueueOrder::ordinary(position),
-            terminal_source_turn(),
+            terminal_source_turn_with_disposition(disposition),
         )
     }
 
@@ -3390,8 +3514,110 @@ mod tests {
         ));
     }
 
+    /// S08 / INV-009 / INV-012: reclassification replay admits every
+    /// terminal disposition and recursively validates a source turn that was
+    /// itself created by steering reclassification.
+    #[test]
+    fn s08_inv009_inv012_reclassification_accepts_all_terminal_sources_and_chains() {
+        let terminal_dispositions = [
+            TurnDisposition::Completed,
+            TurnDisposition::Refused,
+            TurnDisposition::Failed,
+            TurnDisposition::Cancelled {
+                cause: test_applied_interrupt_proof(command_id(0x90), turn_id(7)),
+            },
+            TurnDisposition::ReconciliationRequired {
+                marker: test_reconciliation_marker(
+                    NonEmptyIssuedOperationRefs::try_from_operations([
+                        IssuedOperationRef::ModelCall(model_call_id(0x91)),
+                    ])
+                    .expect("the test ambiguity set is nonempty"),
+                    ReconciliationReason::InterruptRequiresReconciliation {
+                        interrupt: test_applied_interrupt_proof(command_id(0x92), turn_id(7)),
+                    },
+                ),
+            },
+        ];
+        for disposition in terminal_dispositions {
+            SubmitInputReconstitutionInput::rejected_active_turn_present(
+                start_command(0x84, "rejected start", 1),
+                Actor::Owner,
+                session_id(1),
+                turn_id(8),
+                reclassified_turn_origin_with_disposition(disposition),
+            )
+            .reconstitute()
+            .expect("every terminal source disposition authenticates reclassification");
+        }
+
+        let source_origin = reclassified_turn_origin_with_disposition(TurnDisposition::Completed);
+        let position = SessionInputPosition::first()
+            .checked_next()
+            .and_then(SessionInputPosition::checked_next)
+            .expect("the chained steering follows its reclassified source");
+        let command = SubmitInput::new(
+            command_id(0x74),
+            session_id(1),
+            content("second reclassified steering"),
+            DeliveryRequest::NextSafePoint {
+                expected_active_turn: turn_id(8),
+            },
+        );
+        let receipt = SubmitInputReconstitutionInput::applied_pending_steering(
+            command.clone(),
+            Actor::Owner,
+            session_id(1),
+            accepted_input_id(0x75),
+            turn_id(8),
+            source_origin.clone(),
+            command.command_id(),
+            accepted_input_id(0x75),
+            session_id(1),
+            content("second reclassified steering"),
+            command.delivery(),
+            position,
+        )
+        .reconstitute()
+        .expect("the second pending-steering receipt has a canonical reclassified source");
+        let lifecycle = AcceptedInputLifecycle::new(
+            accepted_input_id(0x75),
+            AcceptedInputDisposition::PendingSteering {
+                binding: SteeringBinding::new(turn_id(8)),
+            },
+        )
+        .reclassify_as_turn_origin(
+            turn_id(9),
+            crate::SteeringReclassificationReason::NoSafePointBeforeTerminal,
+        )
+        .expect("the second pending steering can be reclassified");
+        let chained_origin = SubmitInputTurnOriginReconstitutionInput::reclassified(
+            receipt,
+            lifecycle,
+            accepted_input_id(0x75),
+            session_id(1),
+            turn_id(9),
+            AcceptedInputQueueOrder::ordinary(position),
+            SubmitInputTerminalSourceReconstitutionInput::new(
+                source_origin,
+                turn_id(8),
+                TurnDisposition::Refused,
+            ),
+        );
+
+        SubmitInputReconstitutionInput::rejected_active_turn_present(
+            start_command(0x85, "second rejected start", 1),
+            Actor::Owner,
+            session_id(1),
+            turn_id(9),
+            chained_origin,
+        )
+        .reconstitute()
+        .expect("a terminal reclassified source authenticates the next reclassified origin");
+    }
+
     /// S08 / INV-009 / INV-012: a pending receipt becomes canonical origin
-    /// evidence only with its exact reclassified lifecycle and queue facts.
+    /// evidence only with its exact reclassified lifecycle, queue facts, and
+    /// earlier distinct terminal source origin.
     #[test]
     fn s08_inv009_inv012_reclassified_turn_origin_rejects_cross_wired_facts() {
         let assert_invalid = |origin| {
@@ -3411,14 +3637,14 @@ mod tests {
         };
 
         let mut wrong_lifecycle = reclassified_turn_origin();
-        wrong_lifecycle.lifecycle = AcceptedInputLifecycle::new(
+        turn_origin_facts(&mut wrong_lifecycle).lifecycle = AcceptedInputLifecycle::new(
             accepted_input_id(0x73),
             AcceptedInputDisposition::OriginOf(turn_id(8)),
         );
         assert_invalid(wrong_lifecycle);
 
         let mut wrong_input = reclassified_turn_origin();
-        wrong_input.lifecycle = AcceptedInputLifecycle::new(
+        turn_origin_facts(&mut wrong_input).lifecycle = AcceptedInputLifecycle::new(
             accepted_input_id(0x74),
             AcceptedInputDisposition::ReclassifiedAsTurnOrigin {
                 turn: turn_id(8),
@@ -3428,39 +3654,98 @@ mod tests {
         assert_invalid(wrong_input);
 
         let mut wrong_queue_input = reclassified_turn_origin();
-        wrong_queue_input.queue_accepted_input = accepted_input_id(0x74);
+        turn_origin_facts(&mut wrong_queue_input).queue_accepted_input = accepted_input_id(0x74);
         assert_invalid(wrong_queue_input);
 
         let mut wrong_turn = reclassified_turn_origin();
-        wrong_turn.queue_turn = turn_id(9);
+        turn_origin_facts(&mut wrong_turn).queue_turn = turn_id(9);
         assert_invalid(wrong_turn);
 
         let mut source_turn_reuse = reclassified_turn_origin();
-        source_turn_reuse.lifecycle = AcceptedInputLifecycle::new(
+        turn_origin_facts(&mut source_turn_reuse).lifecycle = AcceptedInputLifecycle::new(
             accepted_input_id(0x73),
             AcceptedInputDisposition::ReclassifiedAsTurnOrigin {
                 turn: turn_id(7),
                 reason: crate::SteeringReclassificationReason::NoSafePointBeforeTerminal,
             },
         );
-        source_turn_reuse.queue_turn = turn_id(7);
+        turn_origin_facts(&mut source_turn_reuse).queue_turn = turn_id(7);
         assert_invalid(source_turn_reuse);
 
-        let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
-        let active_source = active_turn(&current)
-            .turn(turn_id(7))
-            .expect("the active projection contains its source turn")
-            .clone();
-        let mut nonterminal_source = reclassified_turn_origin();
-        nonterminal_source.source =
-            super::SubmitInputTurnOriginSourceReconstitutionInput::Reclassified {
-                source_terminal: Box::new(active_source),
-            };
-        assert_invalid(nonterminal_source);
+        let mut wrong_terminal_owner = reclassified_turn_origin();
+        let terminal = terminal_source_facts(&mut wrong_terminal_owner);
+        terminal.turn = turn_id(9);
+        terminal.disposition = TurnDisposition::Completed;
+        assert_invalid(wrong_terminal_owner);
+
+        let mut wrong_terminal_proof = reclassified_turn_origin();
+        terminal_source_facts(&mut wrong_terminal_proof).disposition = TurnDisposition::Cancelled {
+            cause: test_applied_interrupt_proof(command_id(0x90), turn_id(9)),
+        };
+        assert_invalid(wrong_terminal_proof);
+
+        let mut reused_source_command = reclassified_turn_origin();
+        replace_source_origin(
+            &mut reused_source_command,
+            source_turn_origin_with_identities(0x72, 0x71),
+        );
+        assert_invalid(reused_source_command);
+
+        let steering_position = SessionInputPosition::first()
+            .checked_next()
+            .expect("the steering follows its real source");
+        let mut late_source = reclassified_turn_origin();
+        replace_source_origin(
+            &mut late_source,
+            source_turn_origin_with_position(0x70, 0x71, steering_position),
+        );
+        assert_invalid(late_source);
 
         let mut wrong_order = reclassified_turn_origin();
-        wrong_order.queue_order = AcceptedInputQueueOrder::ordinary(SessionInputPosition::first());
+        turn_origin_facts(&mut wrong_order).queue_order =
+            AcceptedInputQueueOrder::ordinary(SessionInputPosition::first());
         assert_invalid(wrong_order);
+    }
+
+    /// S08 / INV-009 / INV-012: validation remains bounded by heap-backed
+    /// input size rather than call-stack depth.
+    #[test]
+    fn s08_inv009_inv012_reclassified_origin_validation_is_iterative() {
+        let mut origin = source_turn_origin();
+        for position in 2..=16_384 {
+            origin = append_unchecked_reclassified_origin(
+                origin,
+                position,
+                0x10_000 + u128::from(position),
+                0x20_000 + u128::from(position),
+            );
+        }
+
+        let validated = super::validate_turn_origin_reconstitution_input(&origin)
+            .expect("a long coherent origin chain validates without recursion");
+        assert_eq!(validated.turn, turn_id(16_390));
+    }
+
+    /// S08 / INV-001 / INV-012: command and accepted-input identities remain
+    /// unique across the complete reclassification chain, not only adjacent
+    /// source/origin pairs.
+    #[test]
+    fn s08_inv001_inv012_reclassified_origin_rejects_ancestor_identity_reuse() {
+        let command_reuse = append_unchecked_reclassified_origin(
+            append_unchecked_reclassified_origin(source_turn_origin(), 2, 0x102, 0x202),
+            3,
+            0x70,
+            0x203,
+        );
+        assert!(super::validate_turn_origin_reconstitution_input(&command_reuse).is_none());
+
+        let accepted_input_reuse = append_unchecked_reclassified_origin(
+            append_unchecked_reclassified_origin(source_turn_origin(), 2, 0x102, 0x202),
+            3,
+            0x103,
+            0x71,
+        );
+        assert!(super::validate_turn_origin_reconstitution_input(&accepted_input_reuse).is_none());
     }
 
     /// S09 / INV-012: after-current replay carries the active predecessor's
