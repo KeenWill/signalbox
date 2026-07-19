@@ -513,6 +513,18 @@ mod tests {
         );
         let (_, transaction) = service.into_parts();
         assert_eq!(transaction.observed.len(), 2);
+        assert_eq!(
+            transaction.observed[0]
+                .command()
+                .initial_configuration_defaults(),
+            first.initial_configuration_defaults()
+        );
+        assert_eq!(
+            transaction.observed[1]
+                .command()
+                .initial_configuration_defaults(),
+            conflicting.initial_configuration_defaults()
+        );
     }
 
     /// S01 / INV-012: application orchestration neither retries transaction
