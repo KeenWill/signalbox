@@ -645,13 +645,10 @@ RETURNS void
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    checked_turn_id uuid;
-    checked_session_id uuid;
     predecessor_id uuid;
-    predecessor_state text;
 BEGIN
-    SELECT turn_id, session_id, continued_from_attempt_id
-      INTO checked_turn_id, checked_session_id, predecessor_id
+    SELECT continued_from_attempt_id
+      INTO predecessor_id
       FROM turn_attempt
      WHERE turn_attempt_id = checked_turn_attempt_id;
 
@@ -659,19 +656,14 @@ BEGIN
         RETURN;
     END IF;
 
-    SELECT state_kind
-      INTO predecessor_state
-      FROM turn_attempt
-     WHERE turn_attempt_id = predecessor_id
-       AND turn_id = checked_turn_id
-       AND session_id = checked_session_id;
-
-    IF predecessor_state IS DISTINCT FROM 'ended' THEN
-        RAISE EXCEPTION
-            'turn attempt % does not continue one ended same-turn predecessor',
-            checked_turn_attempt_id
-            USING ERRCODE = '23514';
-    END IF;
+    -- Continuation requires durable wait/closure facts that this migration
+    -- does not yet represent. Its owning migration must deliberately replace
+    -- this guard before admitting a successor.
+    RAISE EXCEPTION
+        'turn attempt continuation is unavailable until durable wait/closure storage exists'
+        USING
+            ERRCODE = '23514',
+            CONSTRAINT = 'turn_attempt_continuation_unavailable';
 END;
 $$;
 
@@ -694,6 +686,7 @@ DECLARE
     attempt_count bigint;
     live_attempt_count bigint;
     current_live_attempt_count bigint;
+    contradictory_failed_attempt_count bigint;
     origin_entry_count bigint;
     origin_entry_id uuid;
     failure_entry_count bigint;
@@ -744,8 +737,16 @@ BEGIN
         count(*) FILTER (
             WHERE state_kind <> 'ended'
               AND turn_attempt_id = checked_current_attempt
+        ),
+        count(*) FILTER (
+            WHERE state_kind <> 'ended'
+               OR end_disposition NOT IN ('known_failure', 'lost')
         )
-      INTO attempt_count, live_attempt_count, current_live_attempt_count
+      INTO
+        attempt_count,
+        live_attempt_count,
+        current_live_attempt_count,
+        contradictory_failed_attempt_count
       FROM turn_attempt
      WHERE turn_id = checked_turn_id
        AND session_id = checked_session_id;
@@ -914,6 +915,13 @@ BEGIN
         IF live_attempt_count <> 0 OR failure_entry_count <> 1 THEN
             RAISE EXCEPTION
                 'failed terminal turn % requires no live attempt and one failure entry',
+                checked_turn_id
+                USING ERRCODE = '23514';
+        END IF;
+
+        IF contradictory_failed_attempt_count <> 0 THEN
+            RAISE EXCEPTION
+                'failed terminal turn % permits only known_failure or lost ended attempts',
                 checked_turn_id
                 USING ERRCODE = '23514';
         END IF;

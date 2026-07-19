@@ -2652,12 +2652,12 @@ async fn s01_inv005_inv008_inv010_inv012_inv028_submit_apply_replay_conflict_and
     Ok(())
 }
 
-/// S01 / INV-009 / INV-015: one complete future eligibility transaction can
-/// bind the exact origin frontier and prepared attempt, while the database
-/// independently rejects a second active slot or second live attempt.
+/// S01 / INV-006 / INV-009 / INV-015: one complete future eligibility
+/// transaction can bind the exact origin frontier and prepared attempt, while
+/// the database independently rejects contradictory lifecycle histories.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_inv009_inv015_turn_storage_enforces_active_and_attempt_uniqueness()
+async fn s01_inv006_inv009_inv015_turn_storage_enforces_lifecycle_consistency()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone())
@@ -2893,9 +2893,124 @@ async fn s01_inv009_inv015_turn_storage_enforces_active_and_attempt_uniqueness()
         Some("context_frontier_member_entry_once")
     );
 
-    let mut terminalize = pool.begin().await?;
+    let mut unavailable_continuation = pool.begin().await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended',
+                end_variant = 'without_stop',
+                end_disposition = 'known_failure'
+          WHERE turn_attempt_id = $1",
+    )
+    .bind(first_attempt)
+    .execute(&mut *unavailable_continuation)
+    .await?;
+    let successor_attempt = Uuid::from_u128(0xb02);
+    sqlx::query(
+        "INSERT INTO turn_attempt
+            (turn_attempt_id, turn_id, session_id, continued_from_attempt_id,
+             state_kind, end_variant, end_disposition)
+         VALUES ($1, $2, $3, $4, 'prepared', NULL, NULL)",
+    )
+    .bind(successor_attempt)
+    .bind(first_turn)
+    .bind(session)
+    .bind(first_attempt)
+    .execute(&mut *unavailable_continuation)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET current_attempt_id = $1
+          WHERE turn_id = $2",
+    )
+    .bind(successor_attempt)
+    .bind(first_turn)
+    .execute(&mut *unavailable_continuation)
+    .await?;
+    let unavailable_continuation_error = unavailable_continuation
+        .commit()
+        .await
+        .expect_err("even an ended predecessor cannot admit continuation yet");
+    assert_eq!(
+        unavailable_continuation_error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("turn_attempt_continuation_unavailable")
+    );
+
     let failure_entry = Uuid::from_u128(0xd03);
     let terminal_frontier = Uuid::from_u128(0xe03);
+    for contradictory_disposition in [
+        "turn_completed",
+        "turn_refused",
+        "yielded_to_durable_wait",
+        "ambiguous",
+    ] {
+        let mut contradictory_terminal = pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO semantic_transcript_entry
+                (source_session_id, semantic_entry_id, payload_kind,
+                 origin_accepted_input_id, failed_turn_id)
+             VALUES ($1, $2, 'turn_failed', NULL, $3)",
+        )
+        .bind(session)
+        .bind(failure_entry)
+        .bind(first_turn)
+        .execute(&mut *contradictory_terminal)
+        .await?;
+        insert_frontier(
+            &mut contradictory_terminal,
+            session,
+            terminal_frontier,
+            Decimal::from(2_u64),
+            &[
+                (Decimal::ONE, session, first_entry),
+                (Decimal::from(2_u64), session, failure_entry),
+            ],
+        )
+        .await?;
+        sqlx::query(
+            "UPDATE turn_attempt
+                SET state_kind = 'ended',
+                    end_variant = 'without_stop',
+                    end_disposition = $1
+              WHERE turn_attempt_id = $2",
+        )
+        .bind(contradictory_disposition)
+        .bind(first_attempt)
+        .execute(&mut *contradictory_terminal)
+        .await?;
+        sqlx::query(
+            "UPDATE turn_lifecycle
+                SET state_kind = 'terminal',
+                    active_phase_kind = NULL,
+                    current_attempt_id = NULL,
+                    terminal_frontier_id = $1,
+                    terminal_disposition_kind = 'failed'
+              WHERE turn_id = $2",
+        )
+        .bind(terminal_frontier)
+        .bind(first_turn)
+        .execute(&mut *contradictory_terminal)
+        .await?;
+
+        let contradictory_terminal_error = contradictory_terminal
+            .commit()
+            .await
+            .expect_err("a failed turn cannot retain a contradictory ended attempt");
+        let database_error = contradictory_terminal_error
+            .as_database_error()
+            .expect("deferred lifecycle validation must return a database error");
+        assert_eq!(database_error.code(), Some("23514".into()));
+        assert!(
+            database_error
+                .message()
+                .contains("permits only known_failure or lost ended attempts"),
+            "unexpected terminal consistency error for {contradictory_disposition}: {}",
+            database_error.message()
+        );
+    }
+
+    let mut terminalize = pool.begin().await?;
     sqlx::query(
         "INSERT INTO semantic_transcript_entry
             (source_session_id, semantic_entry_id, payload_kind,
