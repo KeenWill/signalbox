@@ -799,7 +799,7 @@ pub enum AcceptedInputTurnSchedulingRecordState {
     Active {
         starting_lineage: AcceptedInputStartingLineage,
         starting_frontier: ContextFrontierId,
-        current_attempt: PreparedTurnAttemptReconstitutionInput,
+        phase: ActiveTurnSchedulingReconstitutionInput,
     },
     TerminalFailed {
         starting_lineage: AcceptedInputStartingLineage,
@@ -808,14 +808,39 @@ pub enum AcceptedInputTurnSchedulingRecordState {
     },
 }
 
-pub struct PreparedTurnAttemptReconstitutionInput { /* private */ }
-impl PreparedTurnAttemptReconstitutionInput {
-    pub const fn new(
+pub struct ActiveTurnSchedulingReconstitutionInput { /* private */ }
+impl ActiveTurnSchedulingReconstitutionInput {
+    pub const fn prepared(
         owning_turn: TurnId,
-        attempt: TurnAttemptId,
-        state: CurrentTurnAttemptState,
+        current_attempt: TurnAttemptId,
     ) -> Self;
-    // accessors: owning_turn(), attempt(), state()
+    pub const fn running(
+        owning_turn: TurnId,
+        current_attempt: TurnAttemptId,
+    ) -> Self;
+    // accessors: owning_turn(), phase()
+}
+
+pub struct SessionAcceptanceTailEntryReconstitutionInput { /* private */ }
+impl SessionAcceptanceTailEntryReconstitutionInput {
+    pub const fn new(
+        session: SessionId,
+        accepted_input: AcceptedInputLifecycle,
+        position: SessionInputPosition,
+        delivery: DeliveryRequest,
+    ) -> Self;
+    // accessors: session(), accepted_input(), position(), delivery()
+}
+
+pub struct SessionAcceptanceTailReconstitutionInput { /* private */ }
+impl SessionAcceptanceTailReconstitutionInput {
+    pub fn new(
+        session: SessionId,
+        anchor: AcceptedInputId,
+        observed_last_position: SessionInputPosition,
+        entries: Vec<SessionAcceptanceTailEntryReconstitutionInput>,
+    ) -> Self;
+    // accessors: session(), anchor(), observed_last_position(), entries()
 }
 
 pub struct AcceptedInputTurnSchedulingRecord { /* private */ }
@@ -843,13 +868,15 @@ impl AcceptedInputSchedulingReconstitutionInput {
         turns: Vec<AcceptedInputTurnSchedulingRecord>,
         semantic_entries: Vec<SemanticTranscriptEntryReconstitutionInput>,
         snapshots: Vec<ResolvedContextFrontierReconstitutionInput>,
+        active_acceptance_tail: Option<SessionAcceptanceTailReconstitutionInput>,
     ) -> Self;
     pub fn reconstitute(self)
         -> Result<
             AcceptedInputSchedulingProjection,
             AcceptedInputSchedulingReconstitutionError,
         >;
-    // accessors: session(), turns(), semantic_entries(), snapshots()
+    // accessors: session(), turns(), semantic_entries(), snapshots(),
+    // active_acceptance_tail()
 }
 
 pub enum AcceptedInputSchedulingReconstitutionFailure {
@@ -869,8 +896,30 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
     MissingOriginEntry { turn: TurnId },
     MissingFailureEntry { turn: TurnId },
     CurrentAttemptOwnershipMismatch { turn: TurnId, attempt: TurnAttemptId },
-    UnsupportedCurrentAttemptState { turn: TurnId, attempt: TurnAttemptId },
     DuplicateCurrentAttempt { attempt: TurnAttemptId },
+    MissingActiveAcceptanceTail { turn: TurnId },
+    UnexpectedActiveAcceptanceTail,
+    AcceptanceTailSessionMismatch {
+        expected: SessionId,
+        actual: SessionId,
+    },
+    AcceptanceTailAnchorMismatch {
+        turn: TurnId,
+        expected: AcceptedInputId,
+        actual: AcceptedInputId,
+    },
+    AcceptanceTailEntrySessionMismatch { accepted_input: AcceptedInputId },
+    DuplicateAcceptanceTailEntry { accepted_input: AcceptedInputId },
+    AcceptanceTailPositionMismatch {
+        accepted_input: AcceptedInputId,
+        expected: SessionInputPosition,
+        actual: SessionInputPosition,
+    },
+    AcceptanceTailLastPositionMismatch {
+        expected: SessionInputPosition,
+        actual: Option<SessionInputPosition>,
+    },
+    AcceptanceTailDispositionMismatch { accepted_input: AcceptedInputId },
     SnapshotOwningSessionMismatch { snapshot: ContextFrontierId },
     DuplicateSnapshot { snapshot: ContextFrontierId },
     InvalidSnapshotMembership { snapshot: ContextFrontierId },
@@ -934,7 +983,7 @@ impl AcceptedInputSchedulingProjection {
         self,
         identities: AcceptedInputTurnActivationIdentities,
     ) -> Result<PreparedAcceptedInputTurnActivation, AcceptedInputEligibilityError>;
-    // accessors: session()
+    // accessor: session()
 }
 
 pub struct AcceptedInputTurnActivationIdentities { /* private */ }
@@ -1651,7 +1700,7 @@ impl<Generator: SubmitInputIdGenerator, Transaction: SubmitInputTransaction>
 | domain: submit_input | 11 |
 | domain: queue_order | 5 (+1 free fn) |
 | domain: turn_lifecycle | 10 |
-| domain: turn_eligibility | 14 |
+| domain: turn_eligibility | 16 |
 | domain: turn_attempt | 13 |
 | domain: model_call | 7 |
 | domain: context_frontier | 6 |
@@ -1660,7 +1709,7 @@ impl<Generator: SubmitInputIdGenerator, Transaction: SubmitInputTransaction>
 | domain: applied_interrupt | 2 |
 | domain: fatal_mismatch | 0 |
 | domain: replace_session_defaults | 13 |
-| **signalbox-domain total** | **147 (+1 free fn)** |
+| **signalbox-domain total** | **149 (+1 free fn)** |
 | application: create_session | 8 (incl. 2 traits) |
 | application: load_session | 2 (incl. 1 trait) |
 | application: replace_session_defaults | 4 (incl. 1 trait) |
