@@ -110,7 +110,7 @@ Snapshot assertions use [`expect-test`](https://github.com/rust-analyzer/expect-
 
 12. **Curate snapshots for the reader.** Deterministic ordering, relevant fields only, rendered from the observed value under test. A snapshot of everything asserts nothing and degenerates into a [change-detector test](https://testing.googleblog.com/2015/01/testing-on-toilet-change-detector-tests.html). Table-shaped output in domain unit tests uses the `table` helper in that crate's `test_support` module (arriving with the expect-test adoption): pipe-separated, left-aligned, right-trimmed lines that stay byte-stable under re-blessing. Another test crate's first table-shaped snapshot lifts that helper into test support it can import instead of hand-rolling a variant. Prior art for tables in expect tests: [expectable](https://github.com/janestreet/expectable).
 
-Rules 2, 9, and 10 — a matrix whose expectation mirrors the code becomes a decisive assert plus an expect table (domain sweep, `turn_attempt.rs`):
+Rules 2, 9, and 10 — a matrix whose expectation mirrors the code becomes per-edge targeted asserts in a row helper plus an expect table as their supplement (domain sweep, `turn_attempt.rs`):
 
 ```rust
 // Bad: the expectation recalculates the transition rule under test.
@@ -118,9 +118,15 @@ for d in all_cancellation_dispositions() {
     assert_eq!(prepared().end_after_cancellation(proof(1), d).is_ok(), d == Cancelled);
 }
 
-// Good: the decisive accepting edge stays targeted; the grid keeps
-// every disposition the loop covered.
+// Good: the accepting edge stays targeted, and the row helper keeps a
+// targeted assert on every edge it renders — its classifier requires a
+// rejection to return the attempt unchanged before its row reads
+// "rejected":
+//     Err(error) => { assert_eq!(error.current().id(), source_id); "rejected" }
+// so the table supplements the per-edge asserts (rule 10); it never
+// replaces them.
 assert!(prepared().end_after_cancellation(proof(1), Cancelled).is_ok());
+let rows = after_cancellation_rows(&prepared, "after cancellation (exact proof)", proof(1));
 expect![[r#"
     attempted end                                   | outcome
     ----------------------------------------------- | --------
@@ -169,7 +175,7 @@ assert_recorded_result_passes_through(SubmitInputResult::Rejected(
 
 ## Split versus unroll
 
-17. **A loop leaves a test body one of two ways.** Few cases exercising one behavior unroll in place into straight-line calls (rule 2); cases exercising distinct behaviors split into separately named tests — one behavior per test (rule 7). The exception is a requirement that is itself atomic: when one contract conjoins correlated guarantees — a restart test asserting both the final state and the absence of forbidden effects, a persistence race proving both at-most-once advancement and no overwrite — that conjunction is one behavior and stays in one test even though its description contains "and". Splitting such guarantees across separate executions lets each half pass under a different interleaving while no test can detect a violation of the combined contract. Before renaming or splitting any test, check the enforcement column of [the invariant catalog](invariants.md): it binds by file and INV-tag, not by test function name, so verify the file's tagged coverage still holds after the change and update the column in the same change if it moves. Keep names stable anyway — reviewers and diffs read them — but the binding reference is the file plus its tags.
+17. **A loop leaves a test body one of two ways.** Few cases exercising one behavior unroll in place into straight-line calls (rule 2); cases exercising distinct behaviors split into separately named tests — one behavior per test (rule 7). The exception is a requirement that is itself atomic: when one contract conjoins correlated guarantees — such as the atomic guarantees the [testing strategy](../CONTRIBUTING.md#testing) requires of restart and race tests — that conjunction is one behavior and stays in one test even though its description contains "and". Splitting such guarantees across separate executions lets each half pass under a different interleaving while no test can detect a violation of the combined contract. Before renaming or splitting any test, check the enforcement column of [the invariant catalog](invariants.md): it binds by file and INV-tag, not by test function name, so verify the file's tagged coverage still holds after the change and update the column in the same change if it moves. Keep names stable anyway — reviewers and diffs read them — but the binding reference is the file plus its tags.
 
 From the application sweep, `replace_session_defaults.rs` — two behaviors, so a split, not an unroll:
 
