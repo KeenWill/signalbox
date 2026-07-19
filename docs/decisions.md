@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-19 — Adaptive review-fix waves and reply-at-push triage
+
+**Context.** The finished-pull-request rules capped review-fix waves at a fixed two, and the cap was repeatedly overridden in practice. A wave's value tracks the prior wave's hit rate and the content under review — hand-written parser code stayed substantive for five waves, while style-guide reviews went self-referential by wave three — and deferring reviewer replies to a later batch decoupled fix commits from their rationale.
+
+**Decision.** The finished-pull-request rules in [AGENTS.md](../AGENTS.md) now govern review-fix waves by adaptive hit-rate continuation with a five-wave escalation backstop and push-time reply triage, and the goal-mode owner alignment-review request in [goal-mode.md](goal-mode.md) reports each pull request's wave history. Those two documents are the rules' single normative homes; this entry records the ownership and rationale without restating the operative rules.
+
+**Rejected alternatives.** Raising the fixed cap: the same arbitrariness, wrong for both extremes. Unbounded continuation: no churn bound. Agent-judged "review quality" thresholds: self-serving without the accepted-finding anchor.
+
+**Affects.** The finished-pull-request rules in [AGENTS.md](../AGENTS.md), owner alignment-review reporting in [goal-mode.md](goal-mode.md), and every future review loop. It changes no code, ADR, or validation rule.
+
 ## 2026-07-19 — Workspace expect-table crate for Debug-derived snapshot tables
 
 **Context.** [Testing-style](testing-style.md) rules 9–12 send value-shaped claims to expect-test snapshots and require curated, byte-stable tables, but the only renderer was the ad-hoc `table(headers, rows)` helper in the domain crate's `test_support`, which took pre-stringified cells, forced each test module to hand-build `Vec<Vec<String>>` plumbing, and could not be imported by other crates' tests. Rule 12 already anticipated lifting it into shared test support.
@@ -12,15 +22,35 @@ An append-only, dated record of decisions below foundation weight, newest first.
 
 **Affects.** `crates/expect-table` (new workspace member), the domain crate's `[dev-dependencies]` and the snapshots in `queue_order.rs` and `replace_session_defaults.rs`, and rule 12's helper naming in [testing-style.md](testing-style.md). Production dependency graphs, the domain spine (test-only dev-dependency; not spine-covered), and all runtime crates are unaffected.
 
-## 2026-07-19 — Adaptive review-fix waves and reply-at-push triage
+## 2026-07-19 — Exact accepted delivery in scheduling origin records
 
-**Context.** The finished-pull-request rules capped review-fix waves at a fixed two, and the cap was repeatedly overridden in practice. A wave's value tracks the prior wave's hit rate and the content under review — hand-written parser code stayed substantive for five waves, while style-guide reviews went self-referential by wave three — and deferring reviewer replies to a later batch decoupled fix commits from their rationale.
+**Context.** The ADR-0041 scheduling seam correlated an origin tail entry with its turn, acceptance position, delivery kind, historical target, and queue priority, but the record did not repeat the accepted delivery itself. Independently supplied tail facts could therefore change the versioned configuration choice while retaining the same delivery kind and target, while records outside an active tail could bypass delivery/order validation.
 
-**Decision.** The finished-pull-request rules in [AGENTS.md](../AGENTS.md) now govern review-fix waves by adaptive hit-rate continuation with a five-wave escalation backstop and push-time reply triage, and the goal-mode owner alignment-review request in [goal-mode.md](goal-mode.md) reports each pull request's wave history. Those two documents are the rules' single normative homes; this entry records the ownership and rationale without restating the operative rules.
+**Decision.** Carry the exact immutable accepted `DeliveryRequest` in every turn scheduling record and validate every origin's delivery/order and historical-target relationship, whether or not an active tail exists. Correlate every configured delivery's expected defaults version with its frozen provenance and every explicit `ReplaceWith` request with the exact frozen requested model; a historical `UseSessionDefault` request cannot be rederived without its immutable defaults row. An active tail origin must additionally equal that complete delivery value, and its claimed observation must reach every origin position known by the same scheduling read. This preserves the structural distinction between using a session default and explicitly replacing it.
 
-**Rejected alternatives.** Raising the fixed cap: the same arbitrariness, wrong for both extremes. Unbounded continuation: no churn bound. Agent-judged "review quality" thresholds: self-serving without the accepted-finding anchor.
+**Rejected alternatives.** Comparing only the expected defaults version would still miss a changed explicit model-selection override. Rederiving `UseSessionDefault` would require historical defaults outside this purpose-specific input. Trusting the adapter to repeat the accepted delivery would bypass domain-owned correlation.
 
-**Affects.** The finished-pull-request rules in [AGENTS.md](../AGENTS.md), owner alignment-review reporting in [goal-mode.md](goal-mode.md), and every future review loop. It changes no code, ADR, or validation rule.
+**Affects.** `crates/domain/src/turn_eligibility.rs`, its domain-spine constructor, accessor, and failure inventory, one application fixture, and INV-008/INV-009/INV-016 scheduling enforcement. It adds no storage representation, transition, or accepted delivery mode.
+
+## 2026-07-19 — Validated scheduling input construction and historical tail correlation
+
+**Context.** The first ADR-0041 scheduling slice stored a canonical active phase inside its public reconstitution input and compared every later origin delivery with the currently active turn. That exposed a phase before aggregate validation and rejected valid histories accepted during a scheduler gap or against a previously active turn. Identity-only tail checks also left an origin position available to a different pending-steering entry.
+
+**Decision.** Keep prepared and running reconstitution inputs as inert owner, attempt, and state facts; construct the canonical attempt and phase only inside successful aggregate reconstitution. Correlate each tail origin's immutable delivery with its own queue priority and an earlier nonqueued historical target when the delivery names one. Correlate pending steering against both the complete origin identity and position inventories. If the complete tail contains an accepted interrupt against the current active owner, reject the evidence-free phase instead of ignoring the proof-bearing conclusion it requires.
+
+**Rejected alternatives.** Requiring every post-anchor origin to target the current active turn erases valid acceptance history. Checking only delivery discriminants misses priority and predecessor corruption. Exposing a canonical phase from the unvalidated input bypasses its owning seam. Treating an accepted interrupt as compatible with an evidence-free phase lets the stored lifecycle conclusion omit its contradictory evidence.
+
+**Affects.** `crates/domain/src/turn_eligibility.rs`, its domain-spine declarations, and the ADR-0041 enforcement summary in `docs/invariants.md`. It adds no proof constructor, storage representation, wait phase, stop phase, or lifecycle transition.
+
+## 2026-07-19 — Evidence-free active scheduling reconstitution
+
+**Context.** The accepted scheduling projection predates ADR-0041 and admitted only one prepared current attempt, while the refinement requires a validated active-origin-anchored acceptance tail and closes proof-bearing phases until their complete owner facts exist. Implementing that refinement must preserve the decision log's original record rather than retroactively rewriting it.
+
+**Decision.** Extend the scheduling projection with a required session-scoped acceptance tail whenever an active turn exists. Validate its exact origin anchor, gap-free positions through the observed last position, unique identities, and disposition/delivery correlations against the complete turn-origin inventory. Admit only evidence-free prepared and running current-attempt inputs; keep `StopRequested`, approval-wait, and recovery-wait construction closed until purpose-specific complete owner projections exist. ADR-0041 remains the normative statement for the validation pattern.
+
+**Rejected alternatives.** Editing the prior scheduling decision in place would erase history from an append-only log. Accepting arbitrary active phases would let a phase discriminator manufacture evidence-bearing authority. A filtered pending-steering list or uncorrelated origin receipt could omit accepted work or pair it with the wrong slot owner.
+
+**Affects.** `crates/domain/src/turn_eligibility.rs`, its domain-spine declarations, one application fixture, and ADR-0041 enforcement links in `docs/invariants.md`. It adds no persistence loader, proof constructor, wait storage, stop storage, lifecycle transition, or new accepted semantics.
 
 ## 2026-07-18 — Separate queued-origin facts from guarded turn lifecycle storage
 

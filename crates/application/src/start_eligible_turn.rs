@@ -129,8 +129,9 @@ mod tests {
     use signalbox_domain::{
         AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputQueueOrder,
         AcceptedInputSchedulingReconstitutionInput, AcceptedInputTurnSchedulingRecord,
-        AcceptedInputTurnSchedulingRecordState, DirectModelSelection, ModelSelectionOverride,
-        ModelSelectionRequest, OriginConfiguration, Session, SessionConfigurationDefaults,
+        AcceptedInputTurnSchedulingRecordState, DeliveryRequest, DirectModelSelection,
+        ModelSelectionOverride, ModelSelectionRequest, OriginConfiguration,
+        PerInputConfigurationChoices, Session, SessionConfigurationDefaults,
         SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
         SessionReconstitutionInput, TranscriptAncestry, TurnId,
     };
@@ -215,19 +216,30 @@ mod tests {
             session.id(),
             turn,
             AcceptedInputQueueOrder::ordinary(signalbox_domain::SessionInputPosition::first()),
+            DeliveryRequest::StartWhenNoActiveTurn {
+                configuration: PerInputConfigurationChoices::new(
+                    SessionConfigurationDefaultsVersion::first(),
+                    ModelSelectionOverride::UseSessionDefault,
+                ),
+            },
             configuration(&session),
             AcceptedInputTurnSchedulingRecordState::Queued,
         );
-        let candidate =
-            AcceptedInputSchedulingReconstitutionInput::new(session, vec![record], vec![], vec![])
-                .reconstitute()
-                .expect("the test queued projection is complete")
-                .prepare_earliest_queued_activation(AcceptedInputTurnActivationIdentities::new(
-                    origin_entry_id(5),
-                    frontier_id(6),
-                    attempt_id(7),
-                ))
-                .expect("the sole queued turn is eligible");
+        let candidate = AcceptedInputSchedulingReconstitutionInput::new(
+            session,
+            vec![record],
+            vec![],
+            vec![],
+            None,
+        )
+        .reconstitute()
+        .expect("the test queued projection is complete")
+        .prepare_earliest_queued_activation(AcceptedInputTurnActivationIdentities::new(
+            origin_entry_id(5),
+            frontier_id(6),
+            attempt_id(7),
+        ))
+        .expect("the sole queued turn is eligible");
 
         candidate.into_parts().0
     }
