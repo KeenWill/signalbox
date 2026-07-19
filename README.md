@@ -63,6 +63,7 @@ root:
 ```bash
 python3 scripts/check_domain_spine.py
 cargo fmt --all -- --check
+mdformat --check *.md docs/
 cargo check --workspace --all-targets --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-targets --all-features
@@ -70,6 +71,10 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 cargo metadata --no-deps --format-version 1
 git diff --check
 ```
+
+The Markdown check needs `pip install mdformat==0.7.22 mdformat-gfm==0.4.1` (the
+versions CI pins); drop `--check` to rewrap in place. Wrapping rules live in
+`.mdformat.toml`.
 
 ## License
 
