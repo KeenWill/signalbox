@@ -108,7 +108,7 @@ Snapshot assertions use [`expect-test`](https://github.com/rust-analyzer/expect-
 
 11. **Never bless a diff you haven't read.** Review a snapshot update with the same care as a code change; the snapshot diff is the review surface.
 
-12. **Curate snapshots for the reader.** Deterministic ordering, relevant fields only, rendered from the observed value under test. A snapshot of everything asserts nothing and degenerates into a [change-detector test](https://testing.googleblog.com/2015/01/testing-on-toilet-change-detector-tests.html). Table-shaped output in domain unit tests uses the `table` helper in that crate's `test_support` module (arriving with the expect-test adoption): pipe-separated, left-aligned, right-trimmed lines that stay byte-stable under re-blessing. Another test crate's first table-shaped snapshot lifts that helper into test support it can import instead of hand-rolling a variant. Prior art for tables in expect tests: [expectable](https://github.com/janestreet/expectable).
+12. **Curate snapshots for the reader.** Deterministic ordering, relevant fields only, rendered from the observed value under test. A snapshot of everything asserts nothing and degenerates into a [change-detector test](https://testing.googleblog.com/2015/01/testing-on-toilet-change-detector-tests.html). Table-shaped output uses the workspace's `signalbox-expect-table` dev-dependency (`crates/expect-table`), which renders any `Debug` rows as one box-drawn table with deterministic, right-trimmed lines that stay byte-stable under re-blessing; test crates import it instead of hand-rolling a variant. Prior art for tables in expect tests: [expectable](https://github.com/janestreet/expectable).
 
 Rules 2, 9, and 10 — a matrix whose expectation mirrors the code becomes per-edge targeted asserts in a row helper plus an expect table as their supplement (domain sweep, `turn_attempt.rs`):
 
@@ -124,20 +124,23 @@ for d in all_cancellation_dispositions() {
 // "rejected":
 //     Err(error) => { assert_eq!(error.current().id(), source_id); "rejected" }
 // so the table supplements the per-edge asserts (rule 10); it never
-// replaces them.
+// replaces them. The helper emits one `#[derive(Debug)]` row struct per
+// edge; the struct's field names are the rendered column headers.
 assert!(prepared().end_after_cancellation(proof(1), Cancelled).is_ok());
-let rows = after_cancellation_rows(&prepared, "after cancellation (exact proof)", proof(1));
+let rows = after_cancellation_rows(&prepared, proof(1));
 expect![[r#"
-    attempted end                                   | outcome
-    ----------------------------------------------- | --------
-    after cancellation (exact proof): TurnCompleted | rejected
-    after cancellation (exact proof): TurnRefused   | rejected
-    after cancellation (exact proof): KnownFailure  | rejected
-    after cancellation (exact proof): Lost          | rejected
-    after cancellation (exact proof): Cancelled     | ends
-    after cancellation (exact proof): Ambiguous     | rejected
+    ┌───────────────┬──────────┐
+    │ attempted_end │ outcome  │
+    ├───────────────┼──────────┤
+    │ TurnCompleted │ rejected │
+    │ TurnRefused   │ rejected │
+    │ KnownFailure  │ rejected │
+    │ Lost          │ rejected │
+    │ Cancelled     │ ends     │
+    │ Ambiguous     │ rejected │
+    └───────────────┴──────────┘
 "#]]
-.assert_eq(&table(&["attempted end", "outcome"], &rows));
+.assert_eq(&table(rows));
 ```
 
 ## Laws versus values
@@ -207,14 +210,18 @@ assert!(matches!(end, AttemptEnd::WithoutStop { disposition: actual }
     if actual == disposition));
 
 // Good: the retained cause is read back from the observed value and
-// displayed where a reviewer can see it (rule 12).
+// displayed where a reviewer can see it (rule 12). The helper emits one
+// #[derive(Debug)] row struct per end — field names are the column
+// headers — rendered through the shared crate (rule 12).
 expect![[r#"
-    family             | disposition | retained cause
-    ------------------ | ----------- | -------------------
-    without stop       | Lost        | -
-    after cancellation | Cancelled   | interrupt command 1
+    ┌────────────────────┬─────────────┬─────────────────────┐
+    │ family             │ disposition │ retained_cause      │
+    ├────────────────────┼─────────────┼─────────────────────┤
+    │ without stop       │ Lost        │ -                   │
+    │ after cancellation │ Cancelled   │ interrupt command 1 │
+    └────────────────────┴─────────────┴─────────────────────┘
 "#]]
-.assert_eq(&attempt_end_family_table(&ends));
+.assert_eq(&table(attempt_end_family_rows(&ends)));
 ```
 
 ## Failure messages
@@ -272,13 +279,15 @@ Because this test is linked from an invariant enforcement column, the exact asse
 
 ```rust
 expect![[r#"
-    derived | accepted | priority
-    ------- | -------- | --------
-    1       | 1        | ordinary
-    2       | 3        | interrupt immediately after input 1
-    3       | 2        | ordinary
+    ┌─────────┬──────────┬─────────────────────────────────────┐
+    │ derived │ accepted │ priority                            │
+    ├─────────┼──────────┼─────────────────────────────────────┤
+    │       1 │        1 │ ordinary                            │
+    │       2 │        3 │ interrupt immediately after input 1 │
+    │       3 │        2 │ ordinary                            │
+    └─────────┴──────────┴─────────────────────────────────────┘
 "#]]
 .assert_eq(&derived_order_table(&[first, second, interrupt]));
 ```
 
-The rendering helper draws only the fields the derivation depends on, in derived order, through the shared `table` helper; the snapshot is read, not regenerated blind, when it changes.
+The rendering helper draws only the fields the derivation depends on, in derived order, through the shared `signalbox-expect-table` renderer; the snapshot is read, not regenerated blind, when it changes.

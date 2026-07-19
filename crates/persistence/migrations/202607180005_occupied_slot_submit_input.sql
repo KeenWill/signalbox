@@ -250,6 +250,13 @@ ALTER TABLE accepted_input
     ON DELETE RESTRICT
     DEFERRABLE INITIALLY DEFERRED;
 
+CREATE INDEX accepted_input_pending_by_source_turn
+    ON accepted_input (session_id, expected_active_turn_id)
+    WHERE disposition_kind = 'pending_steering';
+
+CREATE INDEX queued_input_origin_by_session_position
+    ON queued_input_origin (session_id, acceptance_position);
+
 ALTER TABLE submit_input_command
     ADD CONSTRAINT submit_input_command_pending_correlation_key
     UNIQUE (

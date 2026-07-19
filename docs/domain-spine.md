@@ -529,10 +529,6 @@ pub enum SubmitInputRejectedResult {
         expected_active_turn: TurnId,
         actual_active_turn: TurnId,
     },
-    SafePointUnavailableWhileStopping {
-        session: SessionId,
-        active_turn: TurnId,
-    },
     SessionDefaultsVersionMismatch {
         session: SessionId,
         expected: SessionConfigurationDefaultsVersion,
@@ -573,6 +569,17 @@ pub enum SubmitInputPreparationFailure {
     InterruptApplicationUnavailable,
 }
 
+pub struct SubmitInputTurnOriginReconstitutionInput { /* private */ }
+impl SubmitInputTurnOriginReconstitutionInput {
+    pub const fn new(
+        receipt: ReconstitutedSubmitInput,
+        lifecycle: AcceptedInputLifecycle,
+        queue_session: SessionId,
+        queue_turn: TurnId,
+        queue_order: AcceptedInputQueueOrder,
+    ) -> Self;
+}
+
 pub struct SubmitInputReconstitutionInput { /* private */ }
 impl SubmitInputReconstitutionInput {
     pub fn applied_turn_origin(
@@ -581,7 +588,7 @@ impl SubmitInputReconstitutionInput {
         result_session: SessionId,
         result_accepted_input: AcceptedInputId,
         result_turn: TurnId,
-        predecessor_origin: Option<ReconstitutedSubmitInput>,
+        predecessor_origin: Option<SubmitInputTurnOriginReconstitutionInput>,
         accepted_command: DurableCommandId,
         accepted_input: AcceptedInputId,
         accepted_session: SessionId,
@@ -604,7 +611,7 @@ impl SubmitInputReconstitutionInput {
         result_session: SessionId,
         result_accepted_input: AcceptedInputId,
         result_source_turn: TurnId,
-        source_turn_origin: ReconstitutedSubmitInput,
+        source_turn_origin: SubmitInputTurnOriginReconstitutionInput,
         accepted_command: DurableCommandId,
         accepted_input: AcceptedInputId,
         accepted_session: SessionId,
@@ -628,7 +635,7 @@ impl SubmitInputReconstitutionInput {
         stored_actor: Actor,
         result_session: SessionId,
         result_active_turn: TurnId,
-        active_turn_origin: ReconstitutedSubmitInput,
+        active_turn_origin: SubmitInputTurnOriginReconstitutionInput,
     ) -> Self;
     pub const fn rejected_active_turn_mismatch(
         command: SubmitInput,
@@ -636,7 +643,7 @@ impl SubmitInputReconstitutionInput {
         result_session: SessionId,
         result_expected_active_turn: TurnId,
         result_actual_active_turn: TurnId,
-        actual_turn_origin: ReconstitutedSubmitInput,
+        actual_turn_origin: SubmitInputTurnOriginReconstitutionInput,
     ) -> Self;
     pub const fn rejected_defaults_version_mismatch(
         command: SubmitInput,
@@ -644,7 +651,7 @@ impl SubmitInputReconstitutionInput {
         result_session: SessionId,
         result_expected: SessionConfigurationDefaultsVersion,
         result_current: SessionConfigurationDefaultsVersion,
-        active_turn_origin: Option<ReconstitutedSubmitInput>,
+        active_turn_origin: Option<SubmitInputTurnOriginReconstitutionInput>,
     ) -> Self;
     pub const fn rejected_unknown_model_alias(
         command: SubmitInput,
@@ -654,14 +661,14 @@ impl SubmitInputReconstitutionInput {
         defaults_session: SessionId,
         defaults_version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,
-        active_turn_origin: Option<ReconstitutedSubmitInput>,
+        active_turn_origin: Option<SubmitInputTurnOriginReconstitutionInput>,
     ) -> Self;
     pub const fn rejected_acceptance_position_exhausted(
         command: SubmitInput,
         stored_actor: Actor,
         result_session: SessionId,
         result_last_position: SessionInputPosition,
-        active_turn_origin: Option<ReconstitutedSubmitInput>,
+        active_turn_origin: Option<SubmitInputTurnOriginReconstitutionInput>,
     ) -> Self;
     // no SafePointUnavailableWhileStopping replay constructor until its exact
     // owner-correlated StopRequested evidence projection exists
@@ -911,7 +918,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
         owning_turn: TurnId,
         current_attempt: TurnAttemptId,
     ) -> Self;
-    // accessors: owning_turn(), phase()
+    // accessor: owning_turn()
 }
 
 pub struct SessionAcceptanceTailEntryReconstitutionInput { /* private */ }
@@ -946,12 +953,13 @@ impl AcceptedInputTurnSchedulingRecord {
         queue_session: SessionId,
         queue_turn: TurnId,
         order: AcceptedInputQueueOrder,
+        origin_delivery: DeliveryRequest,
         origin_configuration: OriginConfiguration,
         state: AcceptedInputTurnSchedulingRecordState,
     ) -> Self;
     // accessors: stored_session(), turn(), accepted_input_session(),
     // accepted_input(), queue_session(), queue_turn(), order(),
-    // origin_configuration(), state()
+    // origin_delivery(), origin_configuration(), state()
 }
 
 pub struct AcceptedInputSchedulingReconstitutionInput { /* private */ }
@@ -979,6 +987,7 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
     QueueSessionMismatch { turn: TurnId },
     QueueTurnMismatch { turn: TurnId },
     AcceptedInputOriginMismatch { turn: TurnId },
+    OriginDeliveryMismatch { turn: TurnId },
     DuplicateAcceptedInput { accepted_input: AcceptedInputId },
     InvalidQueueOrder { error: AcceptedInputQueueOrderError },
     SemanticEntrySourceSessionMismatch { entry: SemanticTranscriptEntryId },
@@ -990,6 +999,10 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
     MissingFailureEntry { turn: TurnId },
     CurrentAttemptOwnershipMismatch { turn: TurnId, attempt: TurnAttemptId },
     DuplicateCurrentAttempt { attempt: TurnAttemptId },
+    ActivePhaseEvidenceMismatch {
+        turn: TurnId,
+        accepted_input: AcceptedInputId,
+    },
     MissingActiveAcceptanceTail { turn: TurnId },
     UnexpectedActiveAcceptanceTail,
     AcceptanceTailSessionMismatch {
@@ -1790,7 +1803,7 @@ impl<Generator: SubmitInputIdGenerator, Transaction: SubmitInputTransaction>
 | domain: accepted_input | 5 |
 | domain: delivery_request | 2 |
 | domain: user_content | 4 |
-| domain: submit_input | 13 |
+| domain: submit_input | 14 |
 | domain: queue_order | 5 (+1 free fn) |
 | domain: turn_lifecycle | 10 |
 | domain: turn_eligibility | 16 |
@@ -1802,7 +1815,7 @@ impl<Generator: SubmitInputIdGenerator, Transaction: SubmitInputTransaction>
 | domain: applied_interrupt | 2 |
 | domain: fatal_mismatch | 0 |
 | domain: replace_session_defaults | 13 |
-| **signalbox-domain total** | **151 (+1 free fn)** |
+| **signalbox-domain total** | **152 (+1 free fn)** |
 | application: create_session | 8 (incl. 2 traits) |
 | application: load_session | 2 (incl. 1 trait) |
 | application: replace_session_defaults | 4 (incl. 1 trait) |
