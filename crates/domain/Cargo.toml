@@ -12,3 +12,6 @@ uuid = { version = "1.24.0", default-features = false }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+expect-test = "1.5.1"

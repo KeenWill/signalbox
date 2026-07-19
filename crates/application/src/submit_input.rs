@@ -255,11 +255,15 @@ mod tests {
         }
     }
 
-    fn request(command: u128, text: &str) -> SubmitInputRequest {
+    /// A validated request whose one knob is the command-identity seed
+    /// (`docs/testing-style.md`, rule 4); it targets the canonical session
+    /// with canonical "hello" content and the version-one
+    /// start-when-no-active-turn delivery.
+    fn request(command: u128) -> SubmitInputRequest {
         SubmitInputRequest::try_new(
             command_id(command),
             session_id(2),
-            content(text),
+            content("hello"),
             delivery(1),
         )
         .expect("ordinary command identity is admitted")
@@ -320,6 +324,10 @@ mod tests {
         }
     }
 
+    /// Deliberately supplies no turn candidates to a [`FakeIds`] script: a
+    /// delivery mode that must not mint a turn panics if it tries.
+    const NO_TURN_CANDIDATES: [TurnId; 0] = [];
+
     #[derive(Debug)]
     struct FakeIds {
         accepted_inputs: VecDeque<AcceptedInputId>,
@@ -339,6 +347,11 @@ mod tests {
                 accepted_input_calls: 0,
                 turn_calls: 0,
             }
+        }
+
+        /// Deliberately scripted with no candidates: any mint call panics.
+        fn expecting_no_calls() -> Self {
+            Self::new([], [])
         }
     }
 
@@ -378,6 +391,11 @@ mod tests {
                 observed: Vec::new(),
             }
         }
+
+        /// Deliberately scripted with no responses: any handling call panics.
+        fn expecting_no_calls() -> Self {
+            Self::returning([])
+        }
     }
 
     impl SubmitInputTransaction for FakeTransaction {
@@ -402,22 +420,29 @@ mod tests {
     /// canonical command construction or any application effect.
     #[test]
     fn s01_inv001_inv012_request_rejects_reserved_command_identifiers() {
-        for (raw, expected) in [
-            (Uuid::nil(), InvalidDurableCommandId::Nil),
-            (Uuid::max(), InvalidDurableCommandId::Max),
-        ] {
-            assert_eq!(
-                SubmitInputRequest::try_new(
-                    DurableCommandId::from_uuid(raw),
-                    session_id(2),
-                    content("hello"),
-                    delivery(1),
-                ),
-                Err(expected)
-            );
-        }
+        assert_eq!(
+            SubmitInputRequest::try_new(
+                DurableCommandId::from_uuid(Uuid::nil()),
+                session_id(2),
+                content("hello"),
+                delivery(1),
+            ),
+            Err(InvalidDurableCommandId::Nil)
+        );
+        assert_eq!(
+            SubmitInputRequest::try_new(
+                DurableCommandId::from_uuid(Uuid::max()),
+                session_id(2),
+                content("hello"),
+                delivery(1),
+            ),
+            Err(InvalidDurableCommandId::Max)
+        );
 
-        let service = SubmitInputService::new(FakeIds::new([], []), FakeTransaction::returning([]));
+        let service = SubmitInputService::new(
+            FakeIds::expecting_no_calls(),
+            FakeTransaction::expecting_no_calls(),
+        );
         let (ids, transaction) = service.into_parts();
         assert_eq!(ids.accepted_input_calls, 0);
         assert_eq!(ids.turn_calls, 0);
@@ -454,7 +479,7 @@ mod tests {
     /// pair to the atomic port.
     #[test]
     fn s01_inv002_inv007_inv008_inv012_inv028_orchestrates_one_owner_command_and_candidate_pair() {
-        let request = request(1, "hello");
+        let request = request(1);
         let accepted_input = accepted_input_id(4);
         let turn = turn_id(5);
         let recorded = applied_result(&request, accepted_input, turn);
@@ -502,7 +527,7 @@ mod tests {
             },
         ));
         let mut service = SubmitInputService::new(
-            FakeIds::new([accepted_input_id(4)], []),
+            FakeIds::new([accepted_input_id(4)], NO_TURN_CANDIDATES),
             FakeTransaction::returning([Ok(expected.clone())]),
         );
 
@@ -516,59 +541,76 @@ mod tests {
         assert_eq!(transaction.observed[0].2, None);
     }
 
-    /// S01 / INV-012: every closed recorded result shape passes through
+    /// Asserts that one recorded terminal result shape passes through the
+    /// canonical request's execution unchanged after exactly one transaction
+    /// call, reporting a failure at the shape's call site.
+    #[track_caller]
+    fn assert_recorded_result_passes_through(result: SubmitInputResult) {
+        let expected = SubmitInputOutcome::Recorded(result);
+        let mut service = SubmitInputService::new(
+            FakeIds::new([accepted_input_id(8)], [turn_id(9)]),
+            FakeTransaction::returning([Ok(expected.clone())]),
+        );
+
+        assert_eq!(
+            run_ready(service.execute(request(1))).expect("recorded terminal result is returned"),
+            expected
+        );
+        assert_eq!(service.into_parts().1.observed.len(), 1);
+    }
+
+    /// S01 / INV-012: a recorded applied result passes through unchanged
+    /// without application preparation or translation.
+    #[test]
+    fn s01_inv012_recorded_applied_result_passes_through() {
+        assert_recorded_result_passes_through(applied_result(
+            &request(1),
+            accepted_input_id(4),
+            turn_id(5),
+        ));
+    }
+
+    /// S01 / INV-012: every closed rejected result shape passes through
     /// unchanged without application preparation or translation.
     #[test]
-    fn s01_inv012_recorded_applied_and_rejected_results_pass_through() {
-        let request = request(1, "hello");
-        let maximum = SessionInputPosition::try_from_u64(u64::MAX).expect("positive maximum");
-        let results = [
-            applied_result(&request, accepted_input_id(4), turn_id(5)),
-            SubmitInputResult::Rejected(SubmitInputRejectedResult::SessionNotFound {
+    fn s01_inv012_recorded_rejected_results_pass_through() {
+        assert_recorded_result_passes_through(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::SessionNotFound {
                 session: session_id(2),
-            }),
-            SubmitInputResult::Rejected(SubmitInputRejectedResult::NoActiveTurn {
+            },
+        ));
+        assert_recorded_result_passes_through(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::NoActiveTurn {
                 session: session_id(2),
                 expected_active_turn: turn_id(6),
-            }),
-            SubmitInputResult::Rejected(
-                SubmitInputRejectedResult::SessionDefaultsVersionMismatch {
-                    session: session_id(2),
-                    expected: version(1),
-                    current: version(2),
-                },
-            ),
-            SubmitInputResult::Rejected(SubmitInputRejectedResult::UnknownModelAlias {
+            },
+        ));
+        assert_recorded_result_passes_through(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::SessionDefaultsVersionMismatch {
+                session: session_id(2),
+                expected: version(1),
+                current: version(2),
+            },
+        ));
+        assert_recorded_result_passes_through(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::UnknownModelAlias {
                 session: session_id(2),
                 alias: ModelAlias::from_uuid(Uuid::from_u128(7)),
-            }),
-            SubmitInputResult::Rejected(SubmitInputRejectedResult::AcceptancePositionExhausted {
+            },
+        ));
+        assert_recorded_result_passes_through(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::AcceptancePositionExhausted {
                 session: session_id(2),
-                last: maximum,
-            }),
-        ];
-
-        for result in results {
-            let expected = SubmitInputOutcome::Recorded(result);
-            let mut service = SubmitInputService::new(
-                FakeIds::new([accepted_input_id(8)], [turn_id(9)]),
-                FakeTransaction::returning([Ok(expected.clone())]),
-            );
-
-            assert_eq!(
-                run_ready(service.execute(request.clone()))
-                    .expect("recorded terminal result is returned"),
-                expected
-            );
-            assert_eq!(service.into_parts().1.observed.len(), 1);
-        }
+                last: SessionInputPosition::try_from_u64(u64::MAX).expect("positive maximum"),
+            },
+        ));
     }
 
     /// S01 / INV-012: equal replay returns original durable identities rather
     /// than either retransmission's fresh candidates.
     #[test]
     fn s01_inv012_equal_replay_returns_the_recorded_result() {
-        let request = request(1, "hello");
+        let request = request(1);
         let winner_input = accepted_input_id(4);
         let winner_turn = turn_id(5);
         let recorded = applied_result(&request, winner_input, winner_turn);
@@ -600,7 +642,7 @@ mod tests {
     /// S01 / INV-012: owner-global conflicting reuse is returned unchanged.
     #[test]
     fn s01_inv012_conflicting_reuse_is_returned_unchanged() {
-        let request = request(1, "hello");
+        let request = request(1);
         let expected = SubmitInputOutcome::ConflictingReuse {
             command_id: request.command_id(),
         };
@@ -625,7 +667,7 @@ mod tests {
             FakeTransaction::returning([Err(FakeTransactionError::Unavailable)]),
         );
 
-        let error = run_ready(service.execute(request(1, "hello")))
+        let error = run_ready(service.execute(request(1)))
             .expect_err("infrastructure failure remains nonterminal");
 
         assert_eq!(error, FakeTransactionError::Unavailable);

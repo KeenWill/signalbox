@@ -445,12 +445,16 @@ fn canonical_pair(first: TurnId, second: TurnId) -> (TurnId, TurnId) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use expect_test::expect;
+
     use super::{
         AcceptedInputQueueOrder, AcceptedInputQueueOrderError, AcceptedInputQueuePriority,
         AcceptedInputQueueWork, SessionInputPosition, derive_accepted_input_total_order,
     };
     use crate::TurnId;
-    use crate::test_support::{session_id, turn_id};
+    use crate::test_support::{session_id, table, turn_id};
 
     fn positions(count: usize) -> Vec<SessionInputPosition> {
         let mut positions = Vec::with_capacity(count);
@@ -490,6 +494,114 @@ mod tests {
             turn_id(turn),
             AcceptedInputQueueOrder::interrupt_immediately_after(position, turn_id(predecessor)),
         )
+    }
+
+    /// Ordinary work accepted at the given ordinal; its turn seed derives
+    /// from that one knob, decorrelated (`docs/testing-style.md`, rule 4).
+    fn accepted_ordinary(acceptance: u64) -> AcceptedInputQueueWork {
+        AcceptedInputQueueWork::new(
+            session_id(100),
+            decorrelated_turn(acceptance),
+            AcceptedInputQueueOrder::ordinary(nth_position(acceptance)),
+        )
+    }
+
+    /// Interrupt work accepted at the given ordinal, immediately after the
+    /// exact predecessor fixture; its turn seed derives from that one knob,
+    /// decorrelated (`docs/testing-style.md`, rule 4).
+    fn accepted_interrupt(
+        acceptance: u64,
+        predecessor: AcceptedInputQueueWork,
+    ) -> AcceptedInputQueueWork {
+        AcceptedInputQueueWork::new(
+            session_id(100),
+            decorrelated_turn(acceptance),
+            AcceptedInputQueueOrder::interrupt_immediately_after(
+                nth_position(acceptance),
+                predecessor.turn(),
+            ),
+        )
+    }
+
+    /// A turn identity seed descending as the acceptance ordinal ascends, so
+    /// identity order and acceptance order disagree by construction and a
+    /// derivation ordering by identity cannot accidentally pass.
+    fn decorrelated_turn(acceptance: u64) -> TurnId {
+        turn_id(u128::from(u64::MAX - acceptance))
+    }
+
+    fn nth_position(ordinal: u64) -> SessionInputPosition {
+        SessionInputPosition::try_from_u64(ordinal).expect("test acceptance ordinals are positive")
+    }
+
+    /// Renders the derived total order for snapshot review: one row per
+    /// derived slot, holding only the acceptance ordinal and priority fact
+    /// the derivation depends on (`docs/testing-style.md`, rule 12).
+    fn derived_order_table(facts: &[AcceptedInputQueueWork]) -> String {
+        let derived = derive_accepted_input_total_order(facts.iter().copied())
+            .expect("snapshot rendering requires a derivable fact set");
+        let order_by_turn: BTreeMap<_, _> = facts
+            .iter()
+            .map(|work| (work.turn(), work.order()))
+            .collect();
+        let rows: Vec<Vec<String>> = derived
+            .iter()
+            .enumerate()
+            .map(|(index, turn)| {
+                let order = order_by_turn[turn];
+                let priority = match order.priority() {
+                    AcceptedInputQueuePriority::Ordinary => "ordinary".to_string(),
+                    AcceptedInputQueuePriority::InterruptImmediatelyAfter { predecessor } => {
+                        format!(
+                            "interrupt immediately after input {}",
+                            order_by_turn[&predecessor].acceptance_position().as_u64()
+                        )
+                    }
+                };
+                vec![
+                    (index + 1).to_string(),
+                    order.acceptance_position().as_u64().to_string(),
+                    priority,
+                ]
+            })
+            .collect();
+
+        table(&["derived", "accepted", "priority"], &rows)
+    }
+
+    /// The rendering helper contains lookup and branching logic, so it gets
+    /// its own tests (`docs/testing-style.md`, rule 2): rows follow the
+    /// derived order under a one-based derived index, not fact iteration
+    /// order.
+    #[test]
+    fn derived_order_table_renders_rows_in_derived_order_not_iteration_order() {
+        let first = accepted_ordinary(1);
+        let second = accepted_ordinary(2);
+
+        assert_eq!(
+            derived_order_table(&[second, first]),
+            "derived | accepted | priority\n\
+             ------- | -------- | --------\n\
+             1       | 1        | ordinary\n\
+             2       | 2        | ordinary\n"
+        );
+    }
+
+    /// The interrupt branch names its predecessor by the predecessor's own
+    /// acceptance position, looked up through the turn map — not by the
+    /// interrupt's position.
+    #[test]
+    fn derived_order_table_names_an_interrupt_predecessor_by_acceptance_position() {
+        let first = accepted_ordinary(1);
+        let interrupt = accepted_interrupt(2, first);
+
+        assert_eq!(
+            derived_order_table(&[first, interrupt]),
+            "derived | accepted | priority\n\
+             ------- | -------- | -----------------------------------\n\
+             1       | 1        | ordinary\n\
+             2       | 2        | interrupt immediately after input 1\n"
+        );
     }
 
     #[test]
@@ -583,34 +695,60 @@ mod tests {
     /// immediate-successor rule.
     #[test]
     fn s07_inv009_nested_interrupts_form_one_successor_chain() {
-        let position = positions(4);
+        let first = accepted_ordinary(1);
+        let second = accepted_ordinary(2);
+        let interrupt = accepted_interrupt(3, first);
+        let nested = accepted_interrupt(4, interrupt);
+        let facts = [nested, second, interrupt, first];
 
         assert_eq!(
-            derive_accepted_input_total_order([
-                interrupt(4, position[3], 3),
-                ordinary(2, position[1]),
-                interrupt(3, position[2], 1),
-                ordinary(1, position[0]),
-            ]),
-            Ok(vec![turn_id(1), turn_id(3), turn_id(4), turn_id(2)])
+            derive_accepted_input_total_order(facts),
+            Ok(vec![
+                first.turn(),
+                interrupt.turn(),
+                nested.turn(),
+                second.turn(),
+            ])
         );
+        expect![[r#"
+            derived | accepted | priority
+            ------- | -------- | -----------------------------------
+            1       | 1        | ordinary
+            2       | 3        | interrupt immediately after input 1
+            3       | 4        | interrupt immediately after input 3
+            4       | 2        | ordinary
+        "#]]
+        .assert_eq(&derived_order_table(&facts));
     }
 
     /// S07 / S08 / S09 / INV-009: after an interrupt successor, ordinary and
     /// reclassified work retain their original acceptance order.
     #[test]
     fn s07_s08_s09_inv009_work_after_interrupt_retains_original_positions() {
-        let position = positions(4);
+        let first = accepted_ordinary(1);
+        let second = accepted_ordinary(2);
+        let interrupt = accepted_interrupt(3, first);
+        let fourth = accepted_ordinary(4);
+        let facts = [fourth, interrupt, second, first];
 
         assert_eq!(
-            derive_accepted_input_total_order([
-                ordinary(4, position[3]),
-                interrupt(3, position[2], 1),
-                ordinary(2, position[1]),
-                ordinary(1, position[0]),
-            ]),
-            Ok(vec![turn_id(1), turn_id(3), turn_id(2), turn_id(4)])
+            derive_accepted_input_total_order(facts),
+            Ok(vec![
+                first.turn(),
+                interrupt.turn(),
+                second.turn(),
+                fourth.turn(),
+            ])
         );
+        expect![[r#"
+            derived | accepted | priority
+            ------- | -------- | -----------------------------------
+            1       | 1        | ordinary
+            2       | 3        | interrupt immediately after input 1
+            3       | 2        | ordinary
+            4       | 4        | ordinary
+        "#]]
+        .assert_eq(&derived_order_table(&facts));
     }
 
     /// S03 / INV-009: restart can derive the same order from every iteration

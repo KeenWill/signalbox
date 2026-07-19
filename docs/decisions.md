@@ -12,6 +12,26 @@ An append-only, dated record of decisions below foundation weight, newest first.
 
 **Affects.** `crates/application/src/start_eligible_turn.rs`, application exports and spine, and application enforcement links for INV-002 and INV-009. It adds no persistence adapter, schema, domain semantics, work-source port, sweep, startup hook, recovery behavior, runtime dispatch, dependency, or eligible-failure transition.
 
+## 2026-07-18 — expect-test dev-dependency for snapshot assertions
+
+**Context.** The [testing style guide](testing-style.md) fixes forward-looking snapshot norms — expect tests for shape-is-the-assertion values, supplementing invariant-linked asserts, curated tables — but no snapshot machinery existed. Matrix-outcome and derived-order tests spelled their shapes only through per-case `assert_eq!` chains that hide the whole at a glance.
+
+**Decision.** Add [`expect-test`](https://github.com/rust-analyzer/expect-test) 1.5 as a `signalbox-domain` dev-dependency — a small, focused inline-snapshot crate with one transitive dependency (`dissimilar`), no build-time or runtime cost outside tests, and in-place `UPDATE_EXPECT=1` re-blessing — with owner approval per the dependency rules. A crate-private `table` helper in the domain crate's `test_support` module renders pipe-separated, left-aligned, right-trimmed tables so snapshot stability is owned in-repo, unit-tested per the guide. Exemplar conversions in `queue_order.rs` and `replace_session_defaults.rs` demonstrate the guide's full style — one-knob fixtures, assert-against-fixture, snapshots supplementing the invariant-cited asserts — without renaming any test.
+
+**Rejected alternatives.** `insta`: heavier and serde-oriented, and its review TUI is unneeded now; revisit if future corpus or LLM-integration tests outgrow inline snapshots. A third-party table crate: snapshot stability would then depend on that crate's formatting churn, and the needed renderer is ~40 lines.
+
+**Affects.** `crates/domain/Cargo.toml`, the `test_support` module in `crates/domain/src/lib.rs`, and exemplar tests in `crates/domain/src/queue_order.rs` and `crates/domain/src/replace_session_defaults.rs`; enforcement links in `docs/invariants.md` are unchanged because every cited test keeps its decisive asserts.
+
+## 2026-07-18 — Repository-owned testing style guide
+
+**Context.** The [testing section of CONTRIBUTING.md](../CONTRIBUTING.md#testing) owns what to test — layers, determinism, merge gates — but nothing owned how tests are written: fixture shape, what an assertion may reference, or snapshot discipline. Each pull request re-derived those choices, reviews re-litigated them per test, and multi-positional-integer fixture helpers and re-encoded magic seeds were accumulating in domain test modules.
+
+**Decision.** Test style — fixture and assertion rules plus forward-looking expect-test snapshot norms — is owned by [docs/testing-style.md](testing-style.md) as numbered rules cited by number in review. This entry authorizes that document as the rules' single home and does not restate them. CONTRIBUTING.md keeps owning what to test; the two documents cross-link and restate nothing.
+
+**Rejected alternatives.** Inlining the style rules into CONTRIBUTING.md's testing section: it merges two ownerships into one section, and style rules would be diluted among layer requirements that change on a different cadence. Leaving style to per-agent prompting: rules stated only in prompts are unreviewable, drift between runs, and cannot be cited by number in review.
+
+**Affects.** `docs/testing-style.md` (created); pointer lines in `AGENTS.md`, `CONTRIBUTING.md`, and `README.md`. The expect-test dev-dependency, the `table` helper, and exemplar conversions land in a stacked follow-up.
+
 ## 2026-07-18 — Closed accepted-input scheduling projection and eligibility candidate
 
 **Context.** ADR-0035 requires restart to reconstruct a purpose-specific complete scheduling projection rather than minting starts, attempts, entries, or snapshots from isolated records. The currently decided semantic-entry set can represent an ancestry-free first turn and continuation after a failed predecessor, but not ancestry prefixes or terminal outcomes whose required semantic markers remain open. No accepted predicate yet selects ADR-0027's static eligible-failure alternative.
