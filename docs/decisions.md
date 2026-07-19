@@ -6,11 +6,11 @@ An append-only, dated record of decisions below foundation weight, newest first.
 
 **Context.** The finished-pull-request rules capped review-fix waves at a fixed two, and the cap was repeatedly overridden in practice. A wave's value tracks the prior wave's hit rate and the content under review — hand-written parser code stayed substantive for five waves, while style-guide reviews went self-referential by wave three — and deferring reviewer replies to a later batch decoupled fix commits from their rationale.
 
-**Decision.** The finished-pull-request rules in [AGENTS.md](../AGENTS.md) now govern review-fix waves by adaptive hit-rate continuation with a five-wave escalation backstop and push-time reply triage, and goal-mode check-in requests in [goal-mode.md](goal-mode.md) report each pull request's wave history. Those two documents are the rules' single normative homes; this entry records the ownership and rationale without restating the operative rules.
+**Decision.** The finished-pull-request rules in [AGENTS.md](../AGENTS.md) now govern review-fix waves by adaptive hit-rate continuation with a five-wave escalation backstop and push-time reply triage, and the goal-mode owner alignment-review request in [goal-mode.md](goal-mode.md) reports each pull request's wave history. Those two documents are the rules' single normative homes; this entry records the ownership and rationale without restating the operative rules.
 
 **Rejected alternatives.** Raising the fixed cap: the same arbitrariness, wrong for both extremes. Unbounded continuation: no churn bound. Agent-judged "review quality" thresholds: self-serving without the accepted-finding anchor.
 
-**Affects.** The finished-pull-request rules in [AGENTS.md](../AGENTS.md), check-in reporting in [goal-mode.md](goal-mode.md), and every future review loop. It changes no code, ADR, or validation rule.
+**Affects.** The finished-pull-request rules in [AGENTS.md](../AGENTS.md), owner alignment-review reporting in [goal-mode.md](goal-mode.md), and every future review loop. It changes no code, ADR, or validation rule.
 
 ## 2026-07-18 — Separate queued-origin facts from guarded turn lifecycle storage
 
