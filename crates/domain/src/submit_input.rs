@@ -2006,6 +2006,12 @@ mod tests {
                 current.id(),
                 turn_id(7),
                 AcceptedInputQueueOrder::ordinary(position),
+                DeliveryRequest::StartWhenNoActiveTurn {
+                    configuration: choices(
+                        current.current_configuration_defaults().version().as_u64(),
+                        ModelSelectionOverride::UseSessionDefault,
+                    ),
+                },
                 origin_configuration(current),
                 AcceptedInputTurnSchedulingRecordState::Active {
                     starting_lineage: AcceptedInputStartingLineage::FirstInSession,
@@ -2066,6 +2072,12 @@ mod tests {
                 current.id(),
                 turn_id(7),
                 AcceptedInputQueueOrder::ordinary(SessionInputPosition::first()),
+                DeliveryRequest::StartWhenNoActiveTurn {
+                    configuration: choices(
+                        current.current_configuration_defaults().version().as_u64(),
+                        ModelSelectionOverride::UseSessionDefault,
+                    ),
+                },
                 origin_configuration(current),
                 AcceptedInputTurnSchedulingRecordState::Queued,
             )],

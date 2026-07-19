@@ -2,6 +2,16 @@
 
 An append-only, dated record of decisions below foundation weight, newest first. Each entry states context, the decision, rejected alternatives, and what it affects, in roughly ten to twenty lines. Foundation-weight changes — altering accepted ADR semantics, moving a boundary between domain, storage, wire, or framework representations, weakening an invariant, or introducing a technology that constrains several components — require a full record under [decisions/](decisions/README.md) instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
+## 2026-07-19 — Exact accepted delivery in scheduling origin records
+
+**Context.** The ADR-0041 scheduling seam correlated an origin tail entry with its turn, acceptance position, delivery kind, historical target, and queue priority, but the record did not repeat the accepted delivery itself. Independently supplied tail facts could therefore change the versioned configuration choice while retaining the same delivery kind and target.
+
+**Decision.** Carry the exact immutable accepted `DeliveryRequest` in every turn scheduling record. An active tail origin must equal that complete delivery value before its target and priority relationship is validated. This preserves the structural distinction between using a session default and explicitly replacing it, without asking the scheduling seam to rederive historical defaults.
+
+**Rejected alternatives.** Comparing only the expected defaults version would still miss a changed model-selection override. Rederiving `UseSessionDefault` would require historical defaults outside this purpose-specific input. Trusting the adapter to repeat the accepted delivery would bypass domain-owned correlation.
+
+**Affects.** `crates/domain/src/turn_eligibility.rs`, its domain-spine constructor and accessor, one application fixture, and INV-008/INV-009/INV-016 scheduling enforcement. It adds no storage representation, transition, or accepted delivery mode.
+
 ## 2026-07-19 — Checked rejected SubmitInput receipt replay
 
 **Context.** ADR-0034 requires equal replay to return the originally recorded terminal result, while ADR-0035 requires domain-owned validation of complete purpose-specific facts. Rejections produced against an occupied slot name the authoritative active turn directly or depend on the command's expected active turn; accepting only bare result fields would let replay pair them with another session or another turn.
