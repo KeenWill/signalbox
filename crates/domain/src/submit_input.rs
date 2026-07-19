@@ -1733,9 +1733,9 @@ fn validate_turn_origin_reconstitution_input(
             AcceptedInputDisposition::OriginOf(turn),
         ) if *turn == origin.turn() => (*turn, origin.queue_order()),
         (
-            SubmitInputAppliedResult::PendingSteering(_),
+            SubmitInputAppliedResult::PendingSteering(pending),
             AcceptedInputDisposition::ReclassifiedAsTurnOrigin { turn, .. },
-        ) => (
+        ) if *turn != pending.binding().source_turn() => (
             *turn,
             AcceptedInputQueueOrder::ordinary(applied.acceptance_position()),
         ),
@@ -3305,6 +3305,17 @@ mod tests {
         let mut wrong_turn = reclassified_turn_origin();
         wrong_turn.queue_turn = turn_id(9);
         assert_invalid(wrong_turn);
+
+        let mut source_turn_reuse = reclassified_turn_origin();
+        source_turn_reuse.lifecycle = AcceptedInputLifecycle::new(
+            accepted_input_id(0x73),
+            AcceptedInputDisposition::ReclassifiedAsTurnOrigin {
+                turn: turn_id(7),
+                reason: crate::SteeringReclassificationReason::NoSafePointBeforeTerminal,
+            },
+        );
+        source_turn_reuse.queue_turn = turn_id(7);
+        assert_invalid(source_turn_reuse);
 
         let mut wrong_order = reclassified_turn_origin();
         wrong_order.queue_order = AcceptedInputQueueOrder::ordinary(SessionInputPosition::first());
