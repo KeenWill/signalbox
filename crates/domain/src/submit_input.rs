@@ -297,20 +297,6 @@ impl SubmitInput {
                 ),
             });
         }
-        if matches!(
-            delivery,
-            DeliveryRequest::NextSafePoint { .. } | DeliveryRequest::AfterCurrentTurn { .. }
-        ) && accepted_input == active_turn.accepted_input().id()
-        {
-            return Err(SubmitInputPreparationError {
-                command: Box::new(self),
-                failure: SubmitInputPreparationFailure::AcceptedInputCandidateReusesActiveOrigin {
-                    active_turn: actual_active_turn,
-                    accepted_input,
-                },
-            });
-        }
-
         match delivery {
             DeliveryRequest::Interrupt { .. } => Err(SubmitInputPreparationError {
                 command: Box::new(self),
@@ -361,6 +347,16 @@ impl SubmitInput {
                         });
                     }
                 };
+                if accepted_input == active_turn.accepted_input().id() {
+                    return Err(SubmitInputPreparationError {
+                        command: Box::new(self),
+                        failure:
+                            SubmitInputPreparationFailure::AcceptedInputCandidateReusesActiveOrigin {
+                                active_turn: actual_active_turn,
+                                accepted_input,
+                            },
+                    });
+                }
                 let binding = SteeringBinding::new(actual_active_turn);
                 Ok(PreparedSubmitInput {
                     command: self,
@@ -439,6 +435,16 @@ impl SubmitInput {
                         });
                     }
                 };
+                if accepted_input == active_turn.accepted_input().id() {
+                    return Err(SubmitInputPreparationError {
+                        command: Box::new(self),
+                        failure:
+                            SubmitInputPreparationFailure::AcceptedInputCandidateReusesActiveOrigin {
+                                active_turn: actual_active_turn,
+                                accepted_input,
+                            },
+                    });
+                }
                 Ok(PreparedSubmitInput {
                     command: self,
                     result: SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(
@@ -2576,7 +2582,7 @@ mod tests {
             .prepare_with_active_turn(
                 &current,
                 &stopping,
-                accepted_input_id(3),
+                stopping.accepted_input().id(),
                 None,
                 None,
                 |_| None,
