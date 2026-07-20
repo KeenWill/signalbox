@@ -888,7 +888,7 @@ impl ReconstitutedSessionCreation {
 }
 
 #[cfg(test)]
-const fn test_frontier(value: u128) -> TranscriptFrontier {
+pub(crate) const fn test_frontier(value: u128) -> TranscriptFrontier {
     TranscriptFrontier {
         boundary: uuid::Uuid::from_u128(value),
     }
