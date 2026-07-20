@@ -38,7 +38,9 @@ foundation records and later accepted refinements are indexed in the
 Clients never need a direct provider or runner connection. Provider calls
 originate in the hub; runner-local tool execution is dispatched over a runner's
 outbound connection. Both placements participate in one hub-coordinated logical
-tool lifecycle.
+tool lifecycle. On the snapshots/events edge, client-visible durable update
+events flow only through the transactional outbox decided by
+[ADR-0040](decisions/0040-transactional-outbox.md).
 
 ## Responsibilities
 
@@ -257,11 +259,14 @@ operational refinements remain open.
   ephemeral-test stack selected by
   [ADR-0032](decisions/0032-postgres-implementation-dependencies.md), the typed
   durable-command representation selected by
-  [ADR-0034](decisions/0034-durable-command-storage-and-equality.md), and the
+  [ADR-0034](decisions/0034-durable-command-storage-and-equality.md), the
   domain-owned reconstitution boundary fixed by
-  [ADR-0035](decisions/0035-domain-owned-persistence-reconstitution.md):
-  cancellation delivery, streaming checkpoint policy, and archival form remain
-  open; the first physical frontier layout is recorded in the
+  [ADR-0035](decisions/0035-domain-owned-persistence-reconstitution.md) as
+  refined by [ADR-0041](decisions/0041-evidence-bearing-reconstitution.md), and
+  the long-lived session aggregate and load boundary fixed by
+  [ADR-0038](decisions/0038-session-aggregate-boundary.md): cancellation
+  delivery, streaming checkpoint policy, and archival form remain open; the
+  first physical frontier layout is recorded in the
   [decision log](decisions.md#2026-07-17--materialize-complete-membership-for-first-context-frontier-storage).
 - Client implementation order and web technology.
 - Deployment decomposition: modular monolith is acceptable; microservices are

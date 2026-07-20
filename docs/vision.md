@@ -72,18 +72,18 @@ message, logical turn, orchestration attempt, model call, tool request, and tool
 attempt have different identities and retry rules. Conflating them makes stale
 writes, duplicate effects, misleading history, and silent loss likely.
 
-The future domain should use explicit identities, state machines, and pure
-transitions where practical. Infrastructure interprets those decisions through
-Postgres, provider, runner, and transport effects. Domain, storage, wire, and
-framework representations remain separate so constraints are not accidentally
-defined by a database row or protocol generator.
+The domain uses explicit identities, state machines, and pure transitions where
+practical. Infrastructure interprets those decisions through Postgres, provider,
+runner, and transport effects. Domain, storage, wire, and framework
+representations remain separate so constraints are not accidentally defined by a
+database row or protocol generator.
 
 ## Why start small
 
-Foundational changes have a large blast radius. The repository begins with
-reviewed vocabulary, scenarios, invariants, and decision scaffolding so later
-vertical slices can be small enough to reason about. Early pull requests should
-prove one coherent behavior without pre-building speculative package structures.
+Foundational changes have a large blast radius. The repository's foundation is
+reviewed vocabulary, scenarios, invariants, and decision scaffolding so vertical
+slices stay small enough to reason about. Pull requests should prove one
+coherent behavior without pre-building speculative package structures.
 
 ## First-version non-goals
 
