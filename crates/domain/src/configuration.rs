@@ -458,8 +458,8 @@ pub enum TurnConfigurationProvenance {
 mod tests {
     use super::{
         ConfigurationRequest, DirectModelSelection, EffectiveConfiguration, FrozenAliasDefinition,
-        FrozenModelSelection, KnownProviderFailureRetry, ModelFallback, ModelParameters,
-        ModelSelectionOverride, ModelSelectionRequest, OriginConfiguration,
+        FrozenModelSelection, KnownProviderFailureRetry, ModelAlias, ModelFallback,
+        ModelParameters, ModelSelectionOverride, ModelSelectionRequest, OriginConfiguration,
         SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
         SessionDefaultsVersionMismatch, TurnConfigurationProvenance,
         VersionCheckedConfigurationRequest, VersionedSessionConfigurationDefaults,
@@ -470,16 +470,18 @@ mod tests {
 
     #[test]
     fn selection_keys_expose_their_uuid_values() {
-        let uuid = Uuid::from_u128(1);
-        let selection = direct(1);
-        let other_selection = direct(2);
-        let model_alias = alias(1);
-        let other_alias = alias(2);
+        let selection_uuid = Uuid::from_u128(1);
+        let other_selection_uuid = Uuid::from_u128(2);
+        let alias_uuid = Uuid::from_u128(3);
+        let other_alias_uuid = Uuid::from_u128(4);
+        let selection = DirectModelSelection::from_uuid(selection_uuid);
+        let other_selection = DirectModelSelection::from_uuid(other_selection_uuid);
+        let model_alias = ModelAlias::from_uuid(alias_uuid);
+        let other_alias = ModelAlias::from_uuid(other_alias_uuid);
 
-        assert_eq!(selection, DirectModelSelection::from_uuid(uuid));
         assert_ne!(selection, other_selection);
-        assert_eq!(selection.as_uuid(), &uuid);
-        assert_eq!(model_alias.into_uuid(), uuid);
+        assert_eq!(selection.as_uuid(), &selection_uuid);
+        assert_eq!(model_alias.into_uuid(), alias_uuid);
         assert_ne!(model_alias, other_alias);
     }
 
@@ -775,7 +777,7 @@ mod tests {
         let current_version = current.version();
         let requested_alias = alias(2);
         let request = ModelSelectionRequest::Alias(requested_alias);
-        let selected = direct(1);
+        let selected = direct(3);
         let definition = FrozenAliasDefinition::selecting(selected);
         let frozen_selection = FrozenModelSelection::FrozenAlias {
             alias: requested_alias,
