@@ -5,7 +5,7 @@
 //! command boundary. Authoritative session loading, position allocation,
 //! preparation, and recording remain inside one atomic transaction port.
 
-use std::future::Future;
+use std::{error::Error, fmt, future::Future};
 
 use signalbox_domain::{
     AcceptedInputId, DeliveryRequest, DurableCommandId, SessionId,
@@ -13,6 +13,33 @@ use signalbox_domain::{
 };
 
 use crate::InvalidDurableCommandId;
+
+/// Why caller input cannot enter canonical `SubmitInput` construction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SubmitInputRequestError {
+    /// The owner-global command identity is a reserved sentinel.
+    InvalidCommandId(InvalidDurableCommandId),
+    /// The accepted-input text exceeds the provisional admission bound.
+    OversizedContent {
+        /// The rejected text's exact UTF-8 length in bytes.
+        utf8_byte_length: usize,
+    },
+}
+
+impl fmt::Display for SubmitInputRequestError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidCommandId(error) => error.fmt(formatter),
+            Self::OversizedContent { utf8_byte_length } => write!(
+                formatter,
+                "accepted-input content is {utf8_byte_length} UTF-8 bytes; the provisional maximum is {}",
+                SubmitInputRequest::MAX_CONTENT_UTF8_BYTES,
+            ),
+        }
+    }
+}
+
+impl Error for SubmitInputRequestError {}
 
 /// The complete admitted application request for durable input submission.
 ///
@@ -29,18 +56,30 @@ pub struct SubmitInputRequest {
 }
 
 impl SubmitInputRequest {
-    /// Validates the command identity before canonical construction.
+    /// The provisional inclusive admission maximum: one mebibyte of UTF-8
+    /// text.
+    pub const MAX_CONTENT_UTF8_BYTES: usize = 1_048_576;
+
+    /// Validates admission policy before canonical command construction.
     pub fn try_new(
         command_id: DurableCommandId,
         session: SessionId,
         content: UserContent,
         delivery: DeliveryRequest,
-    ) -> Result<Self, InvalidDurableCommandId> {
+    ) -> Result<Self, SubmitInputRequestError> {
         if command_id.as_uuid().is_nil() {
-            return Err(InvalidDurableCommandId::Nil);
+            return Err(SubmitInputRequestError::InvalidCommandId(
+                InvalidDurableCommandId::Nil,
+            ));
         }
         if command_id.as_uuid().is_max() {
-            return Err(InvalidDurableCommandId::Max);
+            return Err(SubmitInputRequestError::InvalidCommandId(
+                InvalidDurableCommandId::Max,
+            ));
+        }
+        let utf8_byte_length = content.text().as_str().len();
+        if utf8_byte_length > Self::MAX_CONTENT_UTF8_BYTES {
+            return Err(SubmitInputRequestError::OversizedContent { utf8_byte_length });
         }
 
         Ok(Self {
@@ -209,8 +248,8 @@ mod tests {
     use super::{
         AcceptedInputId, DeliveryRequest, DomainSubmitInput, DurableCommandId,
         InvalidDurableCommandId, SessionId, SubmitInputIdGenerator, SubmitInputOutcome,
-        SubmitInputRequest, SubmitInputResult, SubmitInputService, SubmitInputTransaction, TurnId,
-        UserContent, UuidV7SubmitInputIdGenerator,
+        SubmitInputRequest, SubmitInputRequestError, SubmitInputResult, SubmitInputService,
+        SubmitInputTransaction, TurnId, UserContent, UuidV7SubmitInputIdGenerator,
     };
 
     fn command_id(value: u128) -> DurableCommandId {
@@ -427,7 +466,9 @@ mod tests {
                 content("hello"),
                 delivery(1),
             ),
-            Err(InvalidDurableCommandId::Nil)
+            Err(SubmitInputRequestError::InvalidCommandId(
+                InvalidDurableCommandId::Nil
+            ))
         );
         assert_eq!(
             SubmitInputRequest::try_new(
@@ -436,7 +477,9 @@ mod tests {
                 content("hello"),
                 delivery(1),
             ),
-            Err(InvalidDurableCommandId::Max)
+            Err(SubmitInputRequestError::InvalidCommandId(
+                InvalidDurableCommandId::Max
+            ))
         );
 
         let service = SubmitInputService::new(
@@ -447,6 +490,39 @@ mod tests {
         assert_eq!(ids.accepted_input_calls, 0);
         assert_eq!(ids.turn_calls, 0);
         assert!(transaction.observed.is_empty());
+    }
+
+    /// Decision log 2026-07-20: exact-bound text remains admissible before
+    /// canonical command construction, including a multi-byte terminal scalar.
+    #[test]
+    fn accepted_input_content_at_the_utf8_byte_bound_is_admitted() {
+        let mut exact = "a".repeat(SubmitInputRequest::MAX_CONTENT_UTF8_BYTES - 2);
+        exact.push('\u{e9}');
+
+        let request =
+            SubmitInputRequest::try_new(command_id(1), session_id(2), content(&exact), delivery(1))
+                .expect("text ending exactly at the UTF-8 byte bound is admitted");
+
+        assert_eq!(request.content().text().as_str().len(), 1_048_576);
+    }
+
+    /// Decision log 2026-07-20: oversized text is rejected at the application
+    /// admission boundary without retaining it in the error.
+    #[test]
+    fn oversized_accepted_input_content_is_rejected_before_command_construction() {
+        let oversized = "a".repeat(SubmitInputRequest::MAX_CONTENT_UTF8_BYTES + 1);
+
+        assert_eq!(
+            SubmitInputRequest::try_new(
+                command_id(1),
+                session_id(2),
+                content(&oversized),
+                delivery(1),
+            ),
+            Err(SubmitInputRequestError::OversizedContent {
+                utf8_byte_length: 1_048_577,
+            })
+        );
     }
 
     /// S01 / INV-001 / INV-002: production candidates are fresh UUIDv7

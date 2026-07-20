@@ -14,7 +14,9 @@
 - Refines: ADR-0027's origin-input and explicit-failure semantic-history
   requirements and ADR-0030's semantic-entry boundary
 - Refined by: [ADR-0037](0037-baseline-user-content.md) for the immutable
-  content value referenced by `OriginAcceptedInput`
+  content value referenced by `OriginAcceptedInput` and
+  [ADR-0042](0042-assistant-content-and-completion.md) for assistant text,
+  assistant tool-use references, and completed-turn entries
 - Resolves: semantic-entry payload and commit granularity for
   accepted-input-origin eligibility and eligible failure; later semantic
   variants remain open

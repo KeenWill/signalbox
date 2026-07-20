@@ -61,7 +61,10 @@ links to those tests.
   alias model-selection configuration, provider defaults, and disabled
   retry/fallback; activate it and create a turn attempt; freeze a context
   frontier; resolve and pin the exact model target; only then create a model
-  call; finally commit assistant content and call outcome.
+  call; finally commit the complete ordered assistant-text and logical
+  tool-use-reference sequence with its producing-call provenance and the call
+  outcome. If the aggregate completes, the same transaction ends the attempt and
+  turn and appends the explicit completed-turn marker last.
 - **State transitions:** Turn queued with derived eligibility → active/running
   with exactly one current attempt → terminal/completed only after the call is
   classified and the attempt ends; model call prepared → in flight →
@@ -77,9 +80,9 @@ links to those tests.
   draft becomes final content. A future authorized call must retain steering
   already committed to turn history.
 - **Required invariants:** INV-005, INV-008, INV-014, INV-015, INV-032, INV-035.
-- **Remaining questions:** Provider-specific ambiguity evidence, whether a
-  future known-failure retry command is introduced, streaming checkpoints,
-  browser transport, and assistant-message commit granularity.
+- **Remaining questions:** Whether a future known-failure retry command is
+  introduced, streaming checkpoints, browser transport, rich assistant content,
+  and provider/client rendering.
 
 ## S03 — Hub restarts after accepting queued work
 
@@ -114,8 +117,13 @@ links to those tests.
 - **Durable commands:** Before send, persist model-call identity, exact
   hub-resolved provider/model target, frontier, and in-flight state; after
   restart, an idempotent startup scan records the recovered outcome
-  classification. An owner decision, if needed, is a separate command bound to
-  the exact ambiguous-operation set.
+  classification. Definitive recovered success that terminalizes the turn
+  commits the complete assistant sequence and completed-turn marker under the
+  same atomic boundary as live completion; a partial draft never does. A
+  response that would introduce unfinished tool work remains outside the first
+  slice until its owning decision defines the required recovery transition. An
+  owner decision, if needed, is a separate command bound to the exact
+  ambiguous-operation set.
 - **State transitions:** The startup scan derives the complete evidence and
   stop-cause set before ending the old turn attempt with disposition `Lost` in
   the matching terminal variant. A model call in flight becomes completed, known
@@ -177,7 +185,7 @@ links to those tests.
   accepted-risk marker remains visible.
 - **Required invariants:** INV-004, INV-009, INV-014–INV-018, INV-032, INV-034.
 - **Remaining questions:** Whether provider request identifiers make the outcome
-  knowable and evidence thresholds for each recovered classification.
+  knowable and how any request-status polling participates in recovery.
 
 ## S05 — Runner disconnects during a harmless tool
 
@@ -826,7 +834,7 @@ links to those tests.
   evidence remains audit/reconciliation evidence and cannot authorize new
   effects or rewrite the terminal turn.
 - **Required invariants:** INV-006, INV-009, INV-014, INV-025, INV-026, INV-034.
-- **Remaining questions:** Provider-specific evidence thresholds, exact
+- **Remaining questions:** Provider-target identity evidence and trust, exact
   cancellation delivery and acknowledgement mechanics, and whether direct
   interrupt-only reconciliation is ever added.
 
