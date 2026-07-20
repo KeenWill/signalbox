@@ -1,1 +1,10 @@
 /target/
+
+# Local secrets and encryption materials — never committed.
+.env
+.env.*
+*.agekey
+keys.txt
+# Decrypted sops output; encrypted sources are committed, plaintext is not.
+*.decrypted.*
+*.dec

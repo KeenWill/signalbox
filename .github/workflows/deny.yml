@@ -1,0 +1,25 @@
+name: Supply chain
+
+on:
+  pull_request:
+  schedule:
+    # Weekly sweep so new advisories against unchanged dependencies still
+    # surface between pull requests.
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-deny:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
+        with:
+          tool: cargo-deny@0.20.2
+      - name: Check advisories, licenses, and sources
+        run: cargo deny check advisories licenses sources

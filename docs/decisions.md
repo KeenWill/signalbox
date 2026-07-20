@@ -9,6 +9,71 @@ that constrains several components — require a full record under
 [decisions/](decisions/README.md) instead. Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-20 — Adversarial-audit corrective package
+
+**Context.** A six-agent adversarial audit of the merged stack examined scaling
+limits, panic discipline, lock ordering, dead surface area, and process rigor.
+Its load-bearing finding: the
+[first frontier layout](#2026-07-17--materialize-complete-membership-for-first-context-frontier-storage)
+materializes complete membership per snapshot — order S² member rows across a
+session's life — while the submit path loads the complete scheduling projection,
+content included per submission, inside the session-row lock, so sessions
+degrade at hundreds of turns. The
+[2026-07-19 audit entry](#2026-07-19--post-milestone-2-audit-corrections-and-tracked-obligations)
+tracks a typed-error obligation for three panic sites; ten more non-test
+`expect()`/`unreachable!` sites carry no recorded obligation. The
+session/scheduler lock-ordering protocol lives only in comments in
+`crates/persistence/src/submit_input.rs` and
+`crates/persistence/src/start_eligible_turn.rs`.
+
+**Decision.** Owner-decided dispositions, recorded together:
+
+- *Scaling timing.* Record now; fix after the model-call milestone. The fix
+  pairs an [ADR-0041](decisions/0041-evidence-bearing-reconstitution.md)
+  acceptance-tail bounded scheduling projection with a frontier storage change
+  (prefix sharing or deltas) the 2026-07-17 layout entry already permits under
+  [ADR-0030](decisions/0030-context-frontier-snapshots.md). Accepted cost: that
+  fix reopens model-call storage after the milestone lands.
+- *Panic ledger.* The typed-error obligation extends from the three
+  `prepare_earliest_queued_activation` sites to all thirteen non-test sites:
+  `crates/domain/src/submit_input.rs` 133, 254, 348, and 428;
+  `crates/domain/src/turn_eligibility.rs` 134, 1440, 1844, 1850, and 1856; and
+  `crates/persistence/src/submit_input.rs` 649, 1034, 1046, and 2058. A clippy
+  `expect_used`/`unwrap_used` deny gate is commissioned as an ordinary slice
+  once the conversions land.
+- *Lock protocol.* Commissioned: one lock-acquisition helper in the persistence
+  crate becomes the only path to session and scheduler row locks. Until it
+  lands, the tripwire added to CI in this pull request fails the build if any
+  query locks the session table `FOR UPDATE`.
+- *Application punch list.* Commissioned as ordinary slices: delete the
+  isomorphic persistence `*HandlingOutcome` mirrors of application outcomes;
+  extract the `run_ready` and scripted-fake plumbing duplicated across the five
+  application test modules into shared test support (testing-style rule 3:
+  plumbing irrelevant to the behavior under test); normalize the
+  `CreateSessionError` asymmetry and delete its unreachable `Preparation`
+  variant when the separately proposed classification ADR (slated ADR-0044)
+  lands.
+- *Rigor tier.* Uniform rigor stays; the model-call milestone's time-to-land is
+  the canary that reopens this decision.
+- *Supply chain.* `cargo-deny` (advisories, an exact license allow-list,
+  registry sources) gates pull requests and a weekly schedule via `deny.toml`
+  and `.github/workflows/deny.yml`; `.gitignore` adds local secret and key
+  patterns.
+
+**Rejected alternatives.** Fixing the scaling pair now: it would delay the
+model-call milestone the owner prioritized against a load only sessions with
+hundreds of turns produce. Converting the thirteen panic sites in this package:
+each conversion needs its owning slice's tests, and this package is docs,
+configuration, and CI with zero behavior changes. Enforcing the lock protocol by
+comments and review alone: that is the state the audit found insufficient.
+Tiered rigor now: no measurement yet shows uniform rigor is the constraint.
+
+**Affects.** This entry; new provider-security, scaling, and reconciliation
+entries in [open-questions.md](open-questions.md); `.github/workflows/rust.yml`
+(session-lock tripwire, `validate` timeout); `.github/workflows/deny.yml`,
+`deny.toml`, and `.gitignore` (new supply-chain gate); the commissioned slices
+bind future work. No behavior, schema, API, or accepted semantics change.
+
 ## 2026-07-19 — Destination features recorded as owner-directed direction
 
 **Context.** Milestone selection needed the owner's post-model-call product
