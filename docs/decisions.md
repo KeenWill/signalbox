@@ -9,6 +9,40 @@ that constrains several components — require a full record under
 [decisions/](decisions/README.md) instead. Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-20 — Provisional one-mebibyte accepted-input content bound
+
+**Context.** [ADR-0037](decisions/0037-baseline-user-content.md) defines
+baseline user content with no maximum length, leaves concrete resource-size
+limits to resource governance, and permits a limit that rejects before typed
+construction without rewriting content. Unbounded accepted text let one
+submission consume arbitrary memory and storage before any governance policy
+exists. The owner decided a provisional bound.
+
+**Decision.** `NonEmptyUnicodeText::try_new` rejects text whose UTF-8 encoding
+exceeds 1,048,576 bytes, and migration `202607200001_bounded_user_content.sql`
+adds matching `octet_length` checks to both durable content columns. The bound
+counts bytes, not scalar values, because the durable representation
+(`octet_length` over UTF-8 `text`) and the wire measure bytes. The new
+`Oversized` failure deviates from the retain-the-rejected-input error pattern
+and retains only the byte length: holding an arbitrarily large rejected string
+inside the error value would recreate the hazard the bound prevents, so
+construction checks size before U+0000 and no retained string exceeds the bound.
+This is a provisional owner-decided floor, not the resource-governance policy:
+ADR-0037's resource-governance open question remains open. No deployed row
+exceeds the bound (test databases only), so no formerly replayable command is
+affected; equality, exactness, and non-rewriting are unchanged.
+
+**Rejected alternatives.** Counting Unicode scalar values: admits up to four
+mebibytes of bytes and diverges from the storage check. Enforcing only at an
+outer admission boundary: leaves the domain value and schema unbounded, so every
+entry path would need its own guard. Retaining the oversized string in the
+error: recreates the hazard the bound exists to prevent.
+
+**Affects.** `crates/domain/src/user_content.rs` and its construction callers,
+migration `202607200001_bounded_user_content.sql`, and
+[domain-spine.md](domain-spine.md); no accepted ADR semantics change and no open
+question closes.
+
 ## 2026-07-19 — Destination features recorded as owner-directed direction
 
 **Context.** Milestone selection needed the owner's post-model-call product

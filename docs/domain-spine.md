@@ -427,6 +427,7 @@ pub enum DeliveryRequest {
 ```rust
 pub struct NonEmptyUnicodeText(/* private String */);
 impl NonEmptyUnicodeText {
+    pub const MAX_UTF8_BYTES: usize; // 1_048_576
     pub fn try_new(value: String) -> Result<Self, NonEmptyUnicodeTextError>;
     pub fn into_string(self) -> String;
     // accessors: as_str()
@@ -435,12 +436,13 @@ impl NonEmptyUnicodeText {
 pub enum NonEmptyUnicodeTextFailure {
     Empty,
     ContainsNull,
+    Oversized { utf8_byte_length: usize },
 }
 
 pub struct NonEmptyUnicodeTextError { /* private */ }
 impl NonEmptyUnicodeTextError {
-    pub fn into_parts(self) -> (String, NonEmptyUnicodeTextFailure);
-    // accessors: failure(), value()
+    pub fn into_parts(self) -> (Option<String>, NonEmptyUnicodeTextFailure);
+    // accessors: failure(), retained_value()
 }
 
 pub enum UserContent {
