@@ -56,7 +56,7 @@ marked as targets and detailed only here.
 | **SessionCreationCause / TranscriptAncestry** | Two independent immutable creation facts — why the session exists and where its initial semantic context came from ([ADR-0003](decisions/0003-session-creation-and-transcript-ancestry.md)).                                                                                                                                         |
 | **AcceptedInput**                             | One admitted submission made durable with its explicit delivery treatment and recoverable disposition; the accepted baseline admits only owner-submitted user content ([glossary](glossary.md#accepted-input); [ADR-0027](decisions/0027-input-delivery-lifecycle.md), content [ADR-0037](decisions/0037-baseline-user-content.md)). |
 | **DurableCommandId**                          | The owner-global idempotency identity for durably handled caller commands ([glossary](glossary.md#durable-command-identity); [ADR-0001](decisions/0001-domain-terminology-and-identity.md), storage [ADR-0034](decisions/0034-durable-command-storage-and-equality.md)).                                                             |
-| **SemanticTranscriptEntry**                   | One immutable identified semantic-history fact, distinct from operational, streaming, and presentation state ([ADR-0036](decisions/0036-initial-semantic-transcript-entries.md)); target entry types below.                                                                                                                          |
+| **SemanticTranscriptEntry**                   | One immutable identified semantic-history fact, distinct from operational, streaming, and presentation state ([ADR-0036](decisions/0036-initial-semantic-transcript-entries.md), [ADR-0042](decisions/0042-assistant-content-and-completion.md)); target entry types below.                                                          |
 | **Turn**                                      | One durable logical request for a conversational outcome under one frozen effective configuration ([glossary](glossary.md#turn); [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md)).                                                                                                                                          |
 | **TurnAttempt**                               | One exclusive physical orchestration tenure advancing an active turn ([glossary](glossary.md#turn-attempt); [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md)).                                                                                                                                                               |
 | **ModelCall**                                 | One durable authorization to attempt one provider interaction, carrying its exact pinned target and context frontier ([glossary](glossary.md#model-call); [ADR-0005](decisions/0005-model-call-retry-semantics.md)).                                                                                                                 |
@@ -75,14 +75,15 @@ marked as targets and detailed only here.
 
 ### Target semantic-entry types
 
-[ADR-0036](decisions/0036-initial-semantic-transcript-entries.md) fixes the
-first two entry payloads; the
+[ADR-0036](decisions/0036-initial-semantic-transcript-entries.md) and
+[ADR-0042](decisions/0042-assistant-content-and-completion.md) fix the accepted
+entry payloads; the
 [remaining variants are open](open-questions.md#identity-representation). The
 target entry set additionally includes, each awaiting its owning decision:
 
-- **Assistant content and outcome markers** — committed assistant output plus
-  the completion, refusal, cancellation, reconciliation, accepted-risk, and
-  mismatch markers whose required presence accepted records already fix.
+- **Remaining content and outcome markers** — refusal, cancellation,
+  reconciliation, accepted-risk, mismatch, steering, tool-result, approval, and
+  other semantic facts whose exact entry boundaries remain open.
 - **Supersession** — editing is append-only: a replacement entry plus a typed
   supersession relation, never in-place mutation of committed history.
 - **Compaction summaries** — an explicit semantic marker standing for summarized
@@ -412,7 +413,8 @@ reserved ADR number), **Proposed** (an ADR proposal exists but is not accepted),
 | ModelCall lifecycle and provider evidence                                  | Accepted — [ADR-0005](decisions/0005-model-call-retry-semantics.md); domain values and transitions implemented, no provider adapter                                                                                                                                   |
 | ContextFrontier snapshots                                                  | Implemented — [ADR-0030](decisions/0030-context-frontier-snapshots.md); domain values and Postgres materialized membership                                                                                                                                            |
 | SemanticTranscriptEntry (origin and failed-turn variants)                  | Implemented for origin entries (committed at activation) — [ADR-0036](decisions/0036-initial-semantic-transcript-entries.md); the TurnFailed producer is pending                                                                                                      |
-| Assistant-content, steering, tool, and outcome entry variants              | Target — [open](open-questions.md#identity-representation)                                                                                                                                                                                                            |
+| Assistant-text, tool-use-reference, and completed-turn entries             | Accepted — [ADR-0042](decisions/0042-assistant-content-and-completion.md); implementation pending                                                                                                                                                                     |
+| Remaining steering, tool-result, approval, and outcome entry variants      | Target — [open](open-questions.md#identity-representation)                                                                                                                                                                                                            |
 | Supersession (edit-as-append)                                              | Target                                                                                                                                                                                                                                                                |
 | Compaction summaries                                                       | Target — requires the foundation decision reserved by [ADR-0030](decisions/0030-context-frontier-snapshots.md)                                                                                                                                                        |
 | Visibility annotations                                                     | Target — destructive purge separately reserved ([ADR-0029](open-questions.md#archival-and-retention-reserved-adr-0028-adr-0029))                                                                                                                                      |
@@ -489,7 +491,8 @@ or open is reached by proposing that decision, not by implementing around it.
 3. **A model call against a scripted provider.** Target resolution and pinning,
    prepared-call creation, an in-repo scripted provider adapter, transient draft
    streaming, assistant-content commit, and the idempotent startup scan
-   (INV-034). Blocked in part by the open assistant-content entry variant.
+   (INV-034). Its assistant-content boundary is fixed by
+   [ADR-0042](decisions/0042-assistant-content-and-completion.md).
 4. **A smoke against a real provider.** Exercise the same accepted model-call
    lifecycle through one provider adapter, including resolved and reported
    target evidence. Blocked by ADR-0007's provider-identity normalization and
