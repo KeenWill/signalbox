@@ -99,6 +99,10 @@ enum ShutdownOutcome {
     SignalListenerFailed,
 }
 
+const fn should_close_pool(outcome: &Result<ShutdownOutcome, HubRuntimeError>) -> bool {
+    matches!(outcome, Ok(ShutdownOutcome::Clean) | Err(_))
+}
+
 async fn migrate_scan_then_schedule<Migration, Scan, Schedule, Runtime, Output>(
     migration: Migration,
     scan: Scan,
@@ -231,7 +235,13 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
     )
     .await;
 
-    pool.close().await;
+    // A timed-out scheduler may still hold a connection. Waiting for that
+    // checkout here would silently extend the shutdown window that just
+    // expired. Dropping the pool is safe because startup recovery owns any
+    // abandoned durable work.
+    if should_close_pool(&outcome) {
+        pool.close().await;
+    }
     outcome
 }
 
@@ -301,7 +311,7 @@ mod tests {
 
     use super::{
         HubConfiguration, HubRuntimeError, RuntimePhase, ShutdownOutcome,
-        migrate_scan_then_schedule, run_scheduler_until_shutdown,
+        migrate_scan_then_schedule, run_scheduler_until_shutdown, should_close_pool,
     };
 
     #[tokio::test]
@@ -531,5 +541,17 @@ mod tests {
             runtime.await.expect("the runtime task completes"),
             ShutdownOutcome::SignalListenerFailed
         );
+    }
+
+    #[test]
+    fn adr0044_expired_or_failed_shutdown_skips_unbounded_pool_drain() {
+        assert!(!should_close_pool(&Ok(ShutdownOutcome::GraceWindowExpired)));
+        assert!(!should_close_pool(&Ok(
+            ShutdownOutcome::SignalListenerFailed
+        )));
+        assert!(should_close_pool(&Ok(ShutdownOutcome::Clean)));
+        assert!(should_close_pool(&Err(HubRuntimeError::infrastructure(
+            RuntimePhase::Migration
+        ))));
     }
 }
