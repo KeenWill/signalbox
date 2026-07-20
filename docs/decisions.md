@@ -16,15 +16,17 @@ that constrains several components — require a full record under
 configuration, telemetry, corruption-key, and failure-classification wording.
 
 **Decision.** Record that [ADR-0044](decisions/0044-hub-runtime-foundations.md)
-was amended in place on 2026-07-20. The ADR's amendment history is the sole
-statement of the restored semantics.
+was corrected on 2026-07-20 and that
+[ADR-0046](decisions/0046-durable-command-telemetry-correlation.md) supersedes
+its incomplete caller-command telemetry clause. The linked ADRs are the sole
+statements of the resulting semantics.
 
 **Rejected alternatives.** Restating the corrections here: that would create a
-second normative owner. Superseding ADR-0044 with a new record: the corrections
-restore accepted meaning rather than change a decision.
+second normative owner. Leaving the correlation clause as an in-place
+correction: its key lifecycle changes accepted foundation semantics and needs a
+superseding record.
 
-**Affects.** [ADR-0044](decisions/0044-hub-runtime-foundations.md) only; no
-code, schema, or other accepted semantics.
+**Affects.** The linked ADR history only; no code or schema.
 
 ## 2026-07-20 — First outbox append is scoped to CreateSession
 
