@@ -78,8 +78,11 @@ commissioning this record, and merging the record is the recorded acceptance.
 Explicit non-goals: metrics and OpenTelemetry are deferred, and no log-content
 policy exists beyond ADR-0017's credential redaction plus one rule this record
 adds — full user content never appears in logs. Non-secret opaque aggregate
-identities, lengths, and taxonomy classifications may appear; caller-provided,
-user-associated, and secret-associated identifiers may not.
+correlation keys — session, durable-command, and turn identities — plus lengths
+and taxonomy classifications may appear. These named keys remain allowable when
+caller-supplied or user-associated because they are required to correlate
+durable failures; no other caller-provided or user-associated identifier may
+appear, and secret-associated identifiers may not.
 
 ### One shared operator failure taxonomy
 
@@ -101,21 +104,25 @@ and every adapter error family maps into it:
   `Corruption::Inconsistent` conflations as they touch them.
 
 Domain rejections stay recorded applied-or-rejected results under ADR-0001 and
-ADR-0034 — never errors, never taxonomy members. Diagnostics attach aggregate
-keys at the adapter/runtime boundary, and for corruption events the discipline
-is mandatory: every corruption-classified event names the session identity plus
-the durable command and/or turn identity when the failing operation is scoped to
-one — and never a credential value or user content.
+ADR-0034 — never errors, never taxonomy members. ADR-0035 concurrent staleness
+also stays outside this operator taxonomy: an adapter must consume it by
+reloading and rederiving before mapping a terminal failure. Diagnostics attach
+aggregate keys at the adapter/runtime boundary. Every corruption-classified
+event names the authoritative session, durable-command, and/or turn identities
+known to the failing operation; an owner-global command-registry failure before
+a trustworthy session is known requires the command identity but not a session
+candidate. Diagnostics never include a credential value or user content.
 
 ### Composition-root contract
 
 hubd is the composition root and owns construction:
 
 - **Configuration.** `DATABASE_URL` arrives as deployment configuration supplied
-  to the process environment; its embedded password is deployment-channel
-  material under ADR-0017's sops-age deployment-config clause, never a 1Password
-  runtime credential and never a durable record. Production connections use the
-  persistence crate's verify-full options.
+  to the process environment. This record decides the configuration interface,
+  not the database credential's source or delivery channel: that remains
+  ADR-0032's open credential-management question and is outside ADR-0017's
+  provider/integration credential scope. The value is never a durable record.
+  Production connections use the persistence crate's verify-full options.
 - **Migration at startup.** The baseline resolves ADR-0032's open wiring: the
   hub process itself runs the embedded migrations at startup, before ADR-0004's
   recovery scan, which completes before ADR-0010 permits scheduling. A failed

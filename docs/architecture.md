@@ -211,12 +211,14 @@ owned by the prior process with disposition `Lost`, and classifies every
 interrupted physical operation; the scan is not itself an attempt and issues no
 semantic effects. Live and startup classification share the single outcome
 precedence that [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md) and
-[ADR-0005](decisions/0005-model-call-retry-semantics.md) define normatively.
-Ambiguous external effects are preserved as ambiguous rather than coerced to
-failure. Separate resolving evidence may clear a blocking ambiguity without
-rewriting the physical record, after which unfinished work continues without
-repeating it; continuing past a still-unresolved ambiguity requires an explicit
-owner decision that records accepted duplicate risk.
+[ADR-0005](decisions/0005-model-call-retry-semantics.md) define normatively;
+provider model-call evidence uses
+[ADR-0043](decisions/0043-provider-failure-classification.md). Ambiguous
+external effects are preserved as ambiguous rather than coerced to failure.
+Separate resolving evidence may clear a blocking ambiguity without rewriting the
+physical record, after which unfinished work continues without repeating it;
+continuing past a still-unresolved ambiguity requires an explicit owner decision
+that records accepted duplicate risk.
 
 At most one logical turn actively progresses per session initially; every
 implemented active phase, including approval and recovery waits, retains the

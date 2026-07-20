@@ -371,7 +371,9 @@ spelling. “Provisional” means the name, boundary, or both still need an ADR.
   evidence that the intended effect did not complete, or completed with a
   specific reported failure.
 
-- **Status:** Concept accepted; evidence thresholds provisional.
+- **Status:** Concept accepted; provider model-call evidence thresholds decided
+  by [ADR-0043](decisions/0043-provider-failure-classification.md). Tool
+  thresholds remain effect-specific.
 
 - **Do not confuse with:** A timeout whose external effect is unknown.
 

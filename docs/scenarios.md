@@ -80,9 +80,9 @@ links to those tests.
   draft becomes final content. A future authorized call must retain steering
   already committed to turn history.
 - **Required invariants:** INV-005, INV-008, INV-014, INV-015, INV-032, INV-035.
-- **Remaining questions:** Provider-specific ambiguity evidence, whether a
-  future known-failure retry command is introduced, streaming checkpoints,
-  browser transport, rich assistant content, and provider/client rendering.
+- **Remaining questions:** Whether a future known-failure retry command is
+  introduced, streaming checkpoints, browser transport, rich assistant content,
+  and provider/client rendering.
 
 ## S03 — Hub restarts after accepting queued work
 
@@ -185,7 +185,7 @@ links to those tests.
   accepted-risk marker remains visible.
 - **Required invariants:** INV-004, INV-009, INV-014–INV-018, INV-032, INV-034.
 - **Remaining questions:** Whether provider request identifiers make the outcome
-  knowable and evidence thresholds for each recovered classification.
+  knowable and how any request-status polling participates in recovery.
 
 ## S05 — Runner disconnects during a harmless tool
 
@@ -834,7 +834,7 @@ links to those tests.
   evidence remains audit/reconciliation evidence and cannot authorize new
   effects or rewrite the terminal turn.
 - **Required invariants:** INV-006, INV-009, INV-014, INV-025, INV-026, INV-034.
-- **Remaining questions:** Provider-specific evidence thresholds, exact
+- **Remaining questions:** Provider-target identity evidence and trust, exact
   cancellation delivery and acknowledgement mechanics, and whether direct
   interrupt-only reconciliation is ever added.
 
