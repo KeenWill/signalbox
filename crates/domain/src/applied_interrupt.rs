@@ -421,10 +421,11 @@ mod tests {
         )
     }
 
-    /// A turn identity seed descending as the acceptance ordinal ascends, so
-    /// identity order and acceptance order disagree by construction.
+    /// A turn identity seed decorrelated from acceptance order by rotating the
+    /// low bit into the high bit. The bijection keeps identities distinct
+    /// while consecutive acceptance ordinals do not sort as identities.
     fn decorrelated_turn(acceptance: u64) -> TurnId {
-        turn_id(u128::from(u64::MAX - acceptance))
+        turn_id(u128::from(acceptance.rotate_right(1)))
     }
 
     /// A command seed decorrelated from successor acceptance: it descends
@@ -835,8 +836,8 @@ mod tests {
     #[test]
     fn s07_inv009_inv029_competing_interrupt_successor_is_rejected() {
         let predecessor = accepted_ordinary(1);
-        let existing_successor = accepted_interrupt(3, predecessor);
-        let facts = AppliedFacts::matching(2, predecessor);
+        let existing_successor = accepted_interrupt(2, predecessor);
+        let facts = AppliedFacts::matching(3, predecessor);
 
         assert_eq!(
             correlate(facts.clone(), &[predecessor, existing_successor]),
