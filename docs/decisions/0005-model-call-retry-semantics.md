@@ -7,8 +7,11 @@
 - Superseded by: none
 - Accepted with: ADR-0001, ADR-0003, ADR-0004, and ADR-0027 as one atomic
   foundation set
-- Refined by: [ADR-0031](0031-direct-fatal-terminalization.md) and
-  [ADR-0043](0043-provider-failure-classification.md)
+- Refined by: [ADR-0031](0031-direct-fatal-terminalization.md),
+  [ADR-0042](0042-assistant-content-and-completion.md) for the final
+  assistant-content and completed-turn commit boundary, and
+  [ADR-0043](0043-provider-failure-classification.md) for provider-operation
+  classification evidence
 - Decision questions: target-before-call creation; provider-reported target
   mismatch; no automatic known-failure retry; ambiguous provider-call
   disposition; acceptance-time alias meaning; model or configuration change
@@ -579,8 +582,9 @@ hub-owned call records and policy.
   representation beyond the typed baseline observation; the mismatch disposition
   is decided here.
 - ADR-0006 must decide whether any automatic fallback exists.
-- Streaming checkpoint and final assistant-content commit granularity remain
-  open.
+- Streaming checkpoint policy remains open. ADR-0042 decides final assistant
+  text, logical tool-use-reference, and completed-turn commit granularity; later
+  semantic variants retain their own open commit boundaries.
 
 ## Explicit non-decisions
 

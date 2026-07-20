@@ -6,7 +6,7 @@ use signalbox_application::{
     LoadSessionService, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
     ReplaceSessionDefaultsService, SessionIdGenerator, StartEligibleTurnIdGenerator,
     StartEligibleTurnOutcome, StartEligibleTurnService, SubmitInputIdGenerator, SubmitInputOutcome,
-    SubmitInputRequest, SubmitInputService,
+    SubmitInputRequest, SubmitInputRequestError, SubmitInputService,
 };
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputStartingLineage, ActivatedAcceptedInputTurn, ActiveTurnPhase,
@@ -2743,6 +2743,166 @@ async fn inv002_inv007_inv008_inv012_submit_schema_is_closed_and_normalized()
         error.as_database_error().and_then(|error| error.code()),
         Some("23503".into())
     );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Decision log 2026-07-20: the provisional one-mebibyte accepted-input
+/// content bound is one contract enforced at correlated layers — oversized
+/// text fails application admission before the typed command and never reaches SQL,
+/// exact-bound text commits through the real adapter, and a direct SQL
+/// insert of oversized content is refused by the schema checks.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn content_size_bound_rejects_oversized_text_at_application_and_schema()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+
+    let oversized = UserContent::try_text("a".repeat(1_048_577))
+        .expect("domain text is intentionally unbounded");
+    let error = SubmitInputRequest::try_new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0x320)),
+        SessionId::from_uuid(Uuid::from_u128(0x720)),
+        oversized,
+        DeliveryRequest::StartWhenNoActiveTurn {
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    )
+    .expect_err("text over the provisional bound fails application admission");
+    assert_eq!(
+        error,
+        SubmitInputRequestError::OversizedContent {
+            utf8_byte_length: 1_048_577,
+        }
+    );
+    let claimed: i64 = sqlx::query_scalar("SELECT count(*) FROM durable_command")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(
+        claimed, 0,
+        "content rejected before typed-command construction claims no durable identifier"
+    );
+
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0x321, 0x721, direct(0x821)))
+        .await?;
+    let at_bound = "a".repeat(1_048_576);
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                0x322,
+                0x721,
+                &at_bound,
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x921)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xa21))),
+        )
+        .await?;
+    let stored_lengths: Vec<i32> = sqlx::query_scalar(
+        "SELECT octet_length(content_text) FROM submit_input_command
+         UNION ALL
+         SELECT octet_length(content_text) FROM accepted_input",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        stored_lengths,
+        vec![1_048_576, 1_048_576],
+        "the schema must admit the domain's exact maximum"
+    );
+
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'submit_input', 1, transaction_timestamp())",
+    )
+    .bind(Uuid::from_u128(0x323))
+    .execute(&mut *transaction)
+    .await?;
+    let command_error = sqlx::query(
+        "INSERT INTO submit_input_command
+            (command_id, command_kind, storage_version, session_id,
+             actor_kind, actor_turn_id, actor_tool_request_id,
+             content_kind, content_text, delivery_kind,
+             expected_active_turn_id, expected_defaults_version,
+             model_override_kind, replacement_model_kind,
+             replacement_direct_model_selection_id, replacement_model_alias_id,
+             result_kind, rejection_kind, result_session_id,
+             result_accepted_input_id, result_turn_id,
+             result_expected_active_turn_id, result_expected_defaults_version,
+             result_current_defaults_version, result_unknown_alias_id,
+             result_selected_defaults_version, result_last_position)
+         SELECT
+             $1, command_kind, storage_version, session_id,
+             actor_kind, actor_turn_id, actor_tool_request_id,
+             content_kind, content_text || 'a', delivery_kind,
+             expected_active_turn_id, expected_defaults_version,
+             model_override_kind, replacement_model_kind,
+             replacement_direct_model_selection_id, replacement_model_alias_id,
+             result_kind, rejection_kind, result_session_id,
+             result_accepted_input_id, result_turn_id,
+             result_expected_active_turn_id, result_expected_defaults_version,
+             result_current_defaults_version, result_unknown_alias_id,
+             result_selected_defaults_version, result_last_position
+           FROM submit_input_command
+          WHERE command_id = $2",
+    )
+    .bind(Uuid::from_u128(0x323))
+    .bind(Uuid::from_u128(0x322))
+    .execute(&mut *transaction)
+    .await
+    .expect_err("the schema refuses command content one byte over the bound");
+    let database_error = command_error
+        .as_database_error()
+        .expect("a check violation is a database error");
+    assert_eq!(database_error.code(), Some("23514".into()));
+    assert_eq!(
+        database_error.constraint(),
+        Some("submit_input_command_content_bounded")
+    );
+    transaction.rollback().await?;
+
+    let mut transaction = pool.begin().await?;
+    let accepted_error = sqlx::query(
+        "INSERT INTO accepted_input
+            (accepted_input_id, accepting_command_id, session_id,
+             content_kind, content_text, delivery_kind,
+             expected_active_turn_id, expected_defaults_version,
+             model_override_kind, replacement_model_kind,
+             replacement_direct_model_selection_id, replacement_model_alias_id,
+             acceptance_position, disposition_kind, origin_turn_id)
+         SELECT
+             $1, $2, session_id,
+             content_kind, content_text || 'a', delivery_kind,
+             expected_active_turn_id, expected_defaults_version,
+             model_override_kind, replacement_model_kind,
+             replacement_direct_model_selection_id, replacement_model_alias_id,
+             $3, disposition_kind, $4
+           FROM accepted_input
+          WHERE accepted_input_id = $5",
+    )
+    .bind(Uuid::from_u128(0x922))
+    .bind(Uuid::from_u128(0x323))
+    .bind(Decimal::TWO)
+    .bind(Uuid::from_u128(0xa22))
+    .bind(Uuid::from_u128(0x921))
+    .execute(&mut *transaction)
+    .await
+    .expect_err("the schema refuses accepted content one byte over the bound");
+    let database_error = accepted_error
+        .as_database_error()
+        .expect("a check violation is a database error");
+    assert_eq!(database_error.code(), Some("23514".into()));
+    assert_eq!(
+        database_error.constraint(),
+        Some("accepted_input_content_bounded")
+    );
+    transaction.rollback().await?;
 
     pool.close().await;
     drop(container);

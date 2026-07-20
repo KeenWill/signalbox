@@ -61,7 +61,10 @@ links to those tests.
   alias model-selection configuration, provider defaults, and disabled
   retry/fallback; activate it and create a turn attempt; freeze a context
   frontier; resolve and pin the exact model target; only then create a model
-  call; finally commit assistant content and call outcome.
+  call; finally commit the complete ordered assistant-text and logical
+  tool-use-reference sequence with its producing-call provenance and the call
+  outcome. If the aggregate completes, the same transaction ends the attempt and
+  turn and appends the explicit completed-turn marker last.
 - **State transitions:** Turn queued with derived eligibility → active/running
   with exactly one current attempt → terminal/completed only after the call is
   classified and the attempt ends; model call prepared → in flight →
@@ -78,8 +81,8 @@ links to those tests.
   already committed to turn history.
 - **Required invariants:** INV-005, INV-008, INV-014, INV-015, INV-032, INV-035.
 - **Remaining questions:** Whether a future known-failure retry command is
-  introduced, streaming checkpoints, browser transport, and assistant-message
-  commit granularity.
+  introduced, streaming checkpoints, browser transport, rich assistant content,
+  and provider/client rendering.
 
 ## S03 — Hub restarts after accepting queued work
 
@@ -114,8 +117,13 @@ links to those tests.
 - **Durable commands:** Before send, persist model-call identity, exact
   hub-resolved provider/model target, frontier, and in-flight state; after
   restart, an idempotent startup scan records the recovered outcome
-  classification. An owner decision, if needed, is a separate command bound to
-  the exact ambiguous-operation set.
+  classification. Definitive recovered success that terminalizes the turn
+  commits the complete assistant sequence and completed-turn marker under the
+  same atomic boundary as live completion; a partial draft never does. A
+  response that would introduce unfinished tool work remains outside the first
+  slice until its owning decision defines the required recovery transition. An
+  owner decision, if needed, is a separate command bound to the exact
+  ambiguous-operation set.
 - **State transitions:** The startup scan derives the complete evidence and
   stop-cause set before ending the old turn attempt with disposition `Lost` in
   the matching terminal variant. A model call in flight becomes completed, known
