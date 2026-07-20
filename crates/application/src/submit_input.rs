@@ -631,9 +631,10 @@ mod tests {
     /// candidate because successful acceptance initially creates no turn.
     #[test]
     fn s08_inv002_inv028_next_safe_point_mints_no_turn() {
+        let requested_session = session_id(2);
         let request = SubmitInputRequest::try_new(
             command_id(1),
-            session_id(2),
+            requested_session,
             content("steer"),
             DeliveryRequest::NextSafePoint {
                 expected_active_turn: turn_id(3),
@@ -642,7 +643,7 @@ mod tests {
         .expect("ordinary command identity is admitted");
         let expected = SubmitInputOutcome::Recorded(SubmitInputResult::Rejected(
             SubmitInputRejectedResult::NoActiveTurn {
-                session: session_id(2),
+                session: requested_session,
                 expected_active_turn: turn_id(3),
             },
         ));
@@ -660,7 +661,7 @@ mod tests {
         assert_eq!(ids.accepted_input_calls, 1);
         assert_eq!(ids.turn_calls, 0);
         assert_eq!(transaction.observed[0].2, None);
-        assert_eq!(nudge.observed.into_inner(), vec![session_id(2)]);
+        assert_eq!(nudge.observed.into_inner(), vec![requested_session]);
     }
 
     /// Asserts that one recorded terminal result shape passes through the
