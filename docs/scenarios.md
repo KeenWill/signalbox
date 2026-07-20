@@ -117,10 +117,13 @@ links to those tests.
 - **Durable commands:** Before send, persist model-call identity, exact
   hub-resolved provider/model target, frontier, and in-flight state; after
   restart, an idempotent startup scan records the recovered outcome
-  classification. Definitive recovered success commits the complete assistant
-  sequence and any completed-turn marker under the same atomic boundary as live
-  completion; a partial draft never does. An owner decision, if needed, is a
-  separate command bound to the exact ambiguous-operation set.
+  classification. Definitive recovered success that terminalizes the turn
+  commits the complete assistant sequence and completed-turn marker under the
+  same atomic boundary as live completion; a partial draft never does. A
+  response that would introduce unfinished tool work remains outside the first
+  slice until its owning decision defines the required recovery transition. An
+  owner decision, if needed, is a separate command bound to the exact
+  ambiguous-operation set.
 - **State transitions:** The startup scan derives the complete evidence and
   stop-cause set before ending the old turn attempt with disposition `Lost` in
   the matching terminal variant. A model call in flight becomes completed, known

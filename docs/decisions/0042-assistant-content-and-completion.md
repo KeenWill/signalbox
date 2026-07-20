@@ -143,12 +143,13 @@ one exists; when resolving evidence completes a turn already awaiting a recovery
 decision, it instead validates the already-ended issuing attempt and atomically
 closes that exact wait.
 
-A physically completed model call does not imply a completed turn. A call that
-produces one or more tool-use entries ends physically `Completed`, while the
-turn remains active under its existing lifecycle until every logical dependency
-and physical operation is closed and later orchestration establishes a
-conversational outcome. No `TurnCompleted` marker exists on that path until the
-turn itself completes.
+A physically completed model call does not imply a completed turn. During live
+orchestration with a current attempt, a call that produces one or more tool-use
+entries ends physically `Completed`, while the turn remains active under its
+existing lifecycle until every logical dependency and physical operation is
+closed and later orchestration establishes a conversational outcome. No
+`TurnCompleted` marker exists on that path until the turn itself completes.
+Construction of that tool-use path remains gated by the reserved tool decisions.
 
 The marker carries no model-call identity because it records the aggregate
 outcome, not another provider response. The preceding assistant entries retain
@@ -175,11 +176,24 @@ For an outcome-authoritative successful response, one commit transaction:
    `AssistantToolUse` entries, preserving the semantic order supplied by the
    checked adapter projection and creating or validating any referenced logical
    requests under the boundary above; and
-4. either preserves the supported nonterminal turn lifecycle for unfinished
-   work, or, when every ADR-0004 completion guard holds, ends the current
-   attempt if one exists or closes the exact recovery wait after validating its
-   already-ended attempt, terminalizes the turn as `Completed`, and appends
-   `TurnCompleted` last.
+4. when every ADR-0004 completion guard holds, ends the current attempt if one
+   exists or closes the exact recovery wait after validating its already-ended
+   attempt, terminalizes the turn as `Completed`, and appends `TurnCompleted`
+   last; otherwise, only a live current attempt may retain the supported
+   nonterminal lifecycle for unfinished work under an owning decision that
+   authorizes that work.
+
+A turn in `AwaitingRecoveryDecision`, or one whose startup attempt has already
+ended `Lost`, has no current attempt. A successful response that would leave
+unfinished work therefore cannot use the preservation branch: it would create
+the invalid `Active(Running)`-without-an-attempt state that ADR-0004 prohibits.
+This record does not authorize that transition. Before construction of
+`AssistantToolUse` can make such a recovered response admissible, its reserved
+tool decision must define the same-transaction recovery transition: close the
+exact wait when one exists, validate the already-ended issuing attempt, and
+create the new attempt required for the unfinished work, or explicitly refine
+ADR-0004's startup rule. The first text-only model-call slice admits recovered
+success here only when the atomic response transition terminalizes the turn.
 
 No transaction may commit a prefix of the final assistant sequence, a tool-use
 entry without its canonical logical request, a completed turn without its
@@ -195,9 +209,13 @@ after an uncertain commit reads the canonical result and exact committed entry
 sequence; it cannot append a second sequence or marker. Startup evidence that
 contains a definitive successful response uses the same validation, precedence,
 and all-or-nothing boundary while ending the abandoned attempt under ADR-0004's
-`Lost` rules. If the physical call was already `Ambiguous`, resolving evidence
-never reopens or rewrites it. Evidence that cannot establish a definitive
-response classifies the physical call without promoting a partial draft.
+`Lost` rules only when that transition also terminalizes the turn. A recovered
+response that would introduce unfinished work is not constructible under this
+record alone and promotes no semantic prefix; its owning future decision must
+add the valid recovery transition above. If the physical call was already
+`Ambiguous`, resolving evidence never reopens or rewrites it. Evidence that
+cannot establish a definitive response classifies the physical call without
+promoting a partial draft.
 
 If authority transferred before the result commits, all later material from the
 prior call remains audit or reconciliation evidence and creates no entries from
@@ -300,8 +318,11 @@ derive their messages from the ordered entries and related records.
   response that creates tool work appends no completion marker.
 - **S04:** Restart never promotes a partial draft. Definitive recovered success
   uses the same all-or-nothing sequence commit and outcome precedence while the
-  abandoned attempt ends in the matching `Lost` branch. Later definitive
-  resolving evidence may commit content from an outcome-authoritative call
+  abandoned attempt ends in the matching `Lost` branch when the same transition
+  completes the turn. A response that would introduce unfinished tool work is
+  outside this record's construction authority until its owning decision adds a
+  valid wait-closing and new-attempt transition. Later definitive resolving
+  evidence may complete a turn with content from an outcome-authoritative call
   already classified `Ambiguous`, but that physical disposition remains
   unchanged; unresolved acceptance or response stays ambiguous.
 - **S21:** Each committed content entry names the exact pinned,
@@ -329,7 +350,8 @@ execution, retry, and outcome semantics in their owning records.
   steering, tool-result, approval, and delegation semantic variants and their
   commit boundaries remain open.
 - Tool-request payload, lifecycle, policy, approval, execution, retry, and
-  result semantics remain reserved to ADR-0011 through ADR-0014.
+  result semantics, including recovered-response continuation into a new
+  attempt, remain reserved to ADR-0011 through ADR-0014.
 - Rich assistant content, attachments, resource governance, provider/client
   rendering, prompt projection, and public or wire representation remain open.
 - Streaming checkpoint policy remains separate from final semantic content.
