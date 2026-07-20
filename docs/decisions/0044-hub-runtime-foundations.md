@@ -14,8 +14,9 @@
   mandatory session corruption key is conditional on session-scoped operations;
   (4) [ADR-0035](0035-domain-owned-persistence-reconstitution.md) concurrent
   staleness is explicitly consumed inside adapters, outside the operator
-  taxonomy; (5) cross-kind command reuse is classified consistently as a caller
-  or hub bug, not corruption
+  taxonomy; (5) an incoming command identifier reused for a different kind is
+  classified consistently as a caller or hub bug, while a persisted cross-kind
+  relationship that cannot be reconstituted remains corruption
 - Supersedes: none
 - Superseded by: none
 - Depends on: [ADR-0010](0010-initial-scheduler-mechanics.md),
@@ -139,8 +140,10 @@ operation is session-scoped, plus the durable command and/or turn identity when
 the failing operation is scoped to one — and never a credential value or user
 content. Registry-level and pre-claim corruption events carry the derived
 durable-command correlation token, rather than the raw caller-supplied identity,
-without a session key. A `command_registry` cross-kind finding remains the
-caller-or-hub-bug classification above, not corruption.
+without a session key. Reuse of an incoming command identifier for a different
+kind remains the caller-or-hub-bug classification above. A persisted cross-kind
+relationship discovered while reconstituting accepted state is fail-closed
+corruption under [ADR-0035](0035-domain-owned-persistence-reconstitution.md).
 
 ### Composition-root contract
 
