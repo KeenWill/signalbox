@@ -608,13 +608,28 @@ mod tests {
             cause: expected_cause,
         };
 
-        let expected = marker(
+        let expected_marker = marker(
             operations(&[1, 2]),
             ReconciliationReason::InterruptRequiresReconciliation {
                 interrupt: interrupt(1),
             },
         );
-        let reconciliation = TurnDisposition::ReconciliationRequired { marker: expected };
+        let reconciliation = TurnDisposition::ReconciliationRequired {
+            marker: expected_marker.clone(),
+        };
+
+        assert_eq!(
+            &cancelled,
+            &TurnDisposition::Cancelled {
+                cause: expected_cause,
+            }
+        );
+        assert_eq!(
+            &reconciliation,
+            &TurnDisposition::ReconciliationRequired {
+                marker: expected_marker,
+            }
+        );
 
         expect![[r#"
             (
