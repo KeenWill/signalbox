@@ -133,9 +133,11 @@ accepted records; those numbers remain reserved for their topics.
   response bodies and streamed deltas before they reach parsing and storage.
   Blocks the first provider adapter. (S02, S04, S24)
 - **Provider call timeout budgets.** Connect, read, and total budgets for one
-  provider call, where they are enforced, and how an elapsed budget maps to a
-  known versus ambiguous failure under ADR-0004 and ADR-0005, including the
-  send-boundary rule. Blocks the first provider adapter. (S02, S04, S22)
+  provider call; their clock and deadline sources, enforcement points, grace
+  periods, and cancellation triggers. The timeout classification and
+  send-boundary rule are already fixed by
+  [ADR-0043](decisions/0043-provider-failure-classification.md#timeouts-use-the-boundary-but-budgets-stay-open).
+  Blocks the first provider adapter. (S02, S04, S22)
 - **Provider-response parsing hardening.** Parsing limits and rejection behavior
   for provider responses under the malicious-model-output threat model. Blocks
   the first provider adapter. (S02, S04, S23)
@@ -195,8 +197,12 @@ questions below remain open.
 
 ## Actor attribution (ADR-0039 follow-ups)
 
-- **Non-owner actor admissibility.** This open question remains owned by
-  [ADR-0039](decisions/0039-actor-attribution.md).
+- **Non-owner actor admissibility.** Which command kinds admit non-owner actors
+  and how they are verified remains with the owning delegation (reserved
+  ADR-0002), tool-policy (reserved ADR-0011 through ADR-0014), and identity and
+  authorization decisions (reserved ADR-0015 through ADR-0018), as routed by
+  [ADR-0039](decisions/0039-actor-attribution.md#open-questions). Blocks those
+  command kinds and remote non-owner actors.
 - **Policy actor.** Whether an autonomous policy or scheduler actor joins the
   algebra is deferred by [ADR-0039](decisions/0039-actor-attribution.md). Blocks
   autonomous policy features. (S18, S19)

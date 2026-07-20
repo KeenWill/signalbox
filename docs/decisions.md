@@ -35,10 +35,14 @@ session/scheduler lock-ordering protocol lives only in comments in
   [ADR-0030](decisions/0030-context-frontier-snapshots.md). Accepted cost: that
   fix reopens model-call storage after the milestone lands.
 - *Panic ledger.* The typed-error obligation extends from the three
-  `prepare_earliest_queued_activation` sites to all thirteen non-test sites:
-  `crates/domain/src/submit_input.rs` 133, 254, 348, and 428;
-  `crates/domain/src/turn_eligibility.rs` 134, 1440, 1844, 1850, and 1856; and
-  `crates/persistence/src/submit_input.rs` 649, 1034, 1046, and 2058. A clippy
+  `prepare_earliest_queued_activation` sites to all thirteen non-test sites.
+  Stable enclosing identifiers are `SubmitInput::prepare_when_no_active_turn`
+  (one) and `SubmitInput::prepare_with_active_turn` (three) in domain
+  `submit_input`; `EvidenceFreeCurrentAttempt::canonical_phase` (one),
+  `reconstitute_active_acceptance_tail` (one), and
+  `prepare_earliest_queued_activation` (three) in `turn_eligibility`; and
+  `prepare_against_locked_state` (one), `load_scheduling_projection` (two), and
+  `load_turn_origin_graph` (one) in persistence `submit_input`. A clippy
   `expect_used`/`unwrap_used` deny gate is commissioned as an ordinary slice
   once the conversions land.
 - *Lock protocol.* The persistence crate's small `lock_inventory` module is the

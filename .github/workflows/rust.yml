@@ -38,7 +38,7 @@ jobs:
             crates/persistence/src/lock_inventory.rs | cut -d ' ' -f 1)"
           test "$inventory_hash" = \
             d7745b9fa6388a10d668025ce7f5047d132f9e0206376ccaa01eadb116b28f81
-          unexpected="$(git grep -Il -E 'FOR[[:space:]]+UPDATE' -- \
+          unexpected="$(git grep -Iil -E 'FOR[[:space:]]+UPDATE' -- \
             crates/persistence/src \
             ':!crates/persistence/src/lock_inventory.rs' || true)"
           test -z "$unexpected" || {
