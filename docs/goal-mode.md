@@ -18,7 +18,9 @@ finishing a milestone.
   pull request or stack.
 - Domain machinery for steps that cannot yet execute is frozen: no new public
   items and no semantic changes — in particular the fatal-mismatch and
-  provider-evidence surface until model-call preparation exists. Mechanical
+  provider-evidence surface until model-call preparation exists. A step's freeze
+  lifts when that step becomes the selected milestone (the fatal-mismatch and
+  provider-evidence surface unfreezes with the model-call milestone). Mechanical
   fixes required by CI or accepted review feedback are allowed.
 
 ## Executing

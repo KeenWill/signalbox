@@ -2192,6 +2192,13 @@ fn decode_complete(
                         related_turn_origin,
                     )?
                 }
+                // The reclassification slice must widen this
+                // `queued_effect_count == 0` decode (and the migration-0005
+                // active-source trigger) or replay of the original
+                // `PendingSteering` command fails closed as corruption after
+                // reclassification adds its queued-origin row; tracked in
+                // `docs/decisions.md`, "Post-milestone-2 audit corrections and
+                // tracked obligations" (2026-07-19).
                 (None, Some(source_turn)) if queued_effect_count == 0 => {
                     let source_turn_origin = related_turn_origin.ok_or(
                         SubmitInputCorruption::Missing("pending steering source turn origin"),

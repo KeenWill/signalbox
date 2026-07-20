@@ -1256,9 +1256,10 @@ pub enum CurrentTurnAttemptState {
 }
 
 pub struct CurrentTurnAttempt { /* private */ }
-// sealed: crate-private prepared-entry constructor; all transitions
-// (begin_running, request_cancellation, request_fatal_mismatch, end_*) are
-// crate-private, reserved for the turn aggregate
+// sealed: the crate-private prepared entry and begin_running are produced by
+// the turn_eligibility scheduling seams; the remaining crate-private
+// transitions (request_cancellation, request_fatal_mismatch, end_*) stay
+// reserved for the turn aggregate
 impl CurrentTurnAttempt {
     // accessors: id(), state()
 }
@@ -1351,7 +1352,8 @@ impl ResolvedContextFrontierReconstitutionInput {
 
 pub struct ResolvedContextFrontierSnapshot { /* private */ }
 // sealed: crate-private try_from_candidate and derive_appending_candidate,
-// reserved for later eligibility and call-preparation slices
+// consumed by the turn_eligibility activation seam; the call-preparation
+// slice remains a future consumer
 impl ResolvedContextFrontierSnapshot {
     pub fn entry_count(&self) -> usize;
     pub fn ordered_entries(
