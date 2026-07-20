@@ -1655,16 +1655,24 @@ mod tests {
         let retained = proof(1);
         let requested = proof(2);
         let cancellation_only = TurnAttemptStopCauses::cancellation_only(retained);
-        assert_distinct_second_interrupt_rejected_unchanged(cancellation_only, retained, requested);
+        assert_equal_interrupt_replays_and_distinct_interrupt_is_rejected_unchanged(
+            cancellation_only,
+            retained,
+            requested,
+        );
 
         let fatal_mismatch = TurnAttemptStopCauses::fatal_mismatch(failure(1))
             .add_interrupt(retained)
             .expect("first interrupt may be retained with fatal mismatch causes");
-        assert_distinct_second_interrupt_rejected_unchanged(fatal_mismatch, retained, requested);
+        assert_equal_interrupt_replays_and_distinct_interrupt_is_rejected_unchanged(
+            fatal_mismatch,
+            retained,
+            requested,
+        );
     }
 
     #[track_caller]
-    fn assert_distinct_second_interrupt_rejected_unchanged(
+    fn assert_equal_interrupt_replays_and_distinct_interrupt_is_rejected_unchanged(
         current: TurnAttemptStopCauses,
         retained: AppliedInterruptProof,
         requested: AppliedInterruptProof,
