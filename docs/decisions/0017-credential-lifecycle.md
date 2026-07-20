@@ -249,8 +249,8 @@ frozen semantic meaning, and admitting mutable credential state there would
 smuggle a late-bound operational fact into boundaries ADR-0027 deliberately
 excludes it from. A provider rejecting the credential after send (an
 authentication error mid-request or mid-stream) is ordinary provider outcome
-evidence classified under the open provider-contract thresholds of ADR-0004 and
-ADR-0005; this record adds no classification rule.
+evidence classified by [ADR-0043](0043-provider-failure-classification.md); this
+record adds no classification rule.
 
 **Manager unavailability.** A 1Password or Connect outage pauses sync; the
 operator-synced Secret is a durable cluster object holding the last-synced
