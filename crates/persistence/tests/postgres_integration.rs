@@ -8125,6 +8125,7 @@ async fn s24_inv032_outbox_delivery_prefix_is_stable() -> Result<(), Box<dyn Err
 
 /// S24 / INV-032: an event-producing transaction cannot mark its own
 /// uncommitted event delivered and thereby make restart recovery skip it.
+/// Both append-before-delivery and delivery-before-append orderings are covered.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s24_inv032_outbox_delivery_rejects_event_producing_transaction()
