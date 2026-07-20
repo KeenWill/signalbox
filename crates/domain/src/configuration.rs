@@ -650,13 +650,15 @@ mod tests {
     fn replacement_installs_the_next_complete_version() {
         let initial = defaults(1);
         let replacement = defaults(2);
-        let expected_version = SessionConfigurationDefaultsVersion(2);
+        let established_version = SessionConfigurationDefaultsVersion::first();
+        let replacement_version = SessionConfigurationDefaultsVersion(2);
         let established = VersionedSessionConfigurationDefaults::establish(initial);
         let replaced = established
             .replace(replacement)
             .expect("an unexhausted version counter installs the next version");
 
-        assert_eq!(replaced.version(), expected_version);
+        assert_eq!(established.version(), established_version);
+        assert_eq!(replaced.version(), replacement_version);
         assert_ne!(replaced.version(), established.version());
         assert_eq!(replaced.defaults(), &replacement);
     }
