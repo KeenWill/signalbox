@@ -221,6 +221,10 @@ pub(crate) mod test_support {
         direct -> crate::DirectModelSelection,
         alias -> crate::ModelAlias,
     }
+
+    // An opaque source transcript boundary for ancestry-bearing session
+    // fixtures; the producing slice for real boundaries does not exist yet.
+    pub(crate) use crate::session::test_frontier as transcript_frontier;
 }
 
 #[cfg(test)]
