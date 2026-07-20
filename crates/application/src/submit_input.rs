@@ -9,7 +9,8 @@ use std::{error::Error, fmt, future::Future};
 
 use signalbox_domain::{
     AcceptedInputId, DeliveryRequest, DurableCommandId, SessionId,
-    SubmitInput as DomainSubmitInput, SubmitInputResult, TurnId, UserContent,
+    SubmitInput as DomainSubmitInput, SubmitInputAppliedResult, SubmitInputResult, TurnId,
+    UserContent,
 };
 
 use crate::{
@@ -233,7 +234,12 @@ where
         let accepted_input = self.ids.next_accepted_input_id();
 
         let outcome = self.transaction.handle(command, accepted_input, turn).await;
-        if outcome.is_ok() {
+        if matches!(
+            &outcome,
+            Ok(SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
+                SubmitInputAppliedResult::TurnOrigin(_)
+            )))
+        ) {
             let nudge_outcome = self.nudge.nudge(session);
             if nudge_outcome != EligibilityNudgeOutcome::Enqueued {
                 tracing::warn!(
@@ -271,9 +277,9 @@ mod tests {
 
     use super::{
         AcceptedInputId, DeliveryRequest, DomainSubmitInput, DurableCommandId, EligibilityNudge,
-        EligibilityNudgeOutcome, InvalidDurableCommandId, SessionId, SubmitInputIdGenerator,
-        SubmitInputOutcome, SubmitInputRequest, SubmitInputRequestError, SubmitInputResult,
-        SubmitInputService, SubmitInputTransaction, TurnId, UserContent,
+        EligibilityNudgeOutcome, InvalidDurableCommandId, SessionId, SubmitInputAppliedResult,
+        SubmitInputIdGenerator, SubmitInputOutcome, SubmitInputRequest, SubmitInputRequestError,
+        SubmitInputResult, SubmitInputService, SubmitInputTransaction, TurnId, UserContent,
         UuidV7SubmitInputIdGenerator,
     };
 
@@ -661,7 +667,7 @@ mod tests {
         assert_eq!(ids.accepted_input_calls, 1);
         assert_eq!(ids.turn_calls, 0);
         assert_eq!(transaction.observed[0].2, None);
-        assert_eq!(nudge.observed.into_inner(), vec![requested_session]);
+        assert!(nudge.observed.into_inner().is_empty());
     }
 
     /// Asserts that one recorded terminal result shape passes through the
@@ -669,6 +675,10 @@ mod tests {
     /// call, reporting a failure at the shape's call site.
     #[track_caller]
     fn assert_recorded_result_passes_through(result: SubmitInputResult) {
+        let eligibility_affecting = matches!(
+            &result,
+            SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(_))
+        );
         let expected = SubmitInputOutcome::Recorded(result);
         let mut service = SubmitInputService::new(
             FakeIds::new([accepted_input_id(8)], [turn_id(9)]),
@@ -680,7 +690,16 @@ mod tests {
             run_ready(service.execute(request(1))).expect("recorded terminal result is returned"),
             expected
         );
-        assert_eq!(service.into_parts().1.observed.len(), 1);
+        let (_, transaction, nudge) = service.into_parts();
+        assert_eq!(transaction.observed.len(), 1);
+        assert_eq!(
+            nudge.observed.into_inner(),
+            if eligibility_affecting {
+                vec![session_id(2)]
+            } else {
+                Vec::new()
+            }
+        );
     }
 
     /// S01 / INV-012: a recorded applied result passes through unchanged
@@ -785,7 +804,9 @@ mod tests {
         let actual = run_ready(service.execute(request)).expect("conflict is terminal");
 
         assert_eq!(actual, expected);
-        assert_eq!(service.into_parts().1.observed.len(), 1);
+        let (_, transaction, nudge) = service.into_parts();
+        assert_eq!(transaction.observed.len(), 1);
+        assert!(nudge.observed.into_inner().is_empty());
     }
 
     /// S01 / INV-012: a transaction failure remains nonterminal after exactly

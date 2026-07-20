@@ -10,6 +10,7 @@ use std::{
     fmt,
     future::{Future, ready},
     num::NonZeroUsize,
+    pin::Pin,
     time::Duration,
 };
 
@@ -152,11 +153,25 @@ impl EligibilityNudge for InProcessEligibilityNudge {
     }
 }
 
+type InProgressEligibilitySweep<Sweep> = Pin<
+    Box<
+        dyn Future<
+                Output = (
+                    Sweep,
+                    Result<Vec<SessionId>, <Sweep as EligibilitySweep>::Error>,
+                ),
+            > + Send,
+    >,
+>;
+
 /// Same-process nudges plus a periodic durable reconciliation sweep.
-#[derive(Debug)]
-pub struct InProcessEligibilityWorkSource<Sweep> {
+pub struct InProcessEligibilityWorkSource<Sweep>
+where
+    Sweep: EligibilitySweep,
+{
     nudges: mpsc::Receiver<SessionId>,
-    sweep: Sweep,
+    sweep: Option<Sweep>,
+    sweep_in_progress: Option<InProgressEligibilitySweep<Sweep>>,
     sweep_interval: Interval,
     initial_sweep_due: bool,
     pending_sweep_hints: VecDeque<SessionId>,
@@ -164,7 +179,25 @@ pub struct InProcessEligibilityWorkSource<Sweep> {
     sweep_preferred_over_pending_hint: bool,
 }
 
-impl<Sweep> InProcessEligibilityWorkSource<Sweep> {
+impl<Sweep> fmt::Debug for InProcessEligibilityWorkSource<Sweep>
+where
+    Sweep: EligibilitySweep + fmt::Debug,
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("InProcessEligibilityWorkSource")
+            .field("sweep", &self.sweep)
+            .field("sweep_in_progress", &self.sweep_in_progress.is_some())
+            .field("initial_sweep_due", &self.initial_sweep_due)
+            .field("pending_sweep_hints", &self.pending_sweep_hints)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<Sweep> InProcessEligibilityWorkSource<Sweep>
+where
+    Sweep: EligibilitySweep,
+{
     /// Builds a work source with the one-second baseline sweep interval.
     pub fn new(sweep: Sweep) -> (InProcessEligibilityNudge, Self) {
         Self::with_options(
@@ -203,7 +236,8 @@ impl<Sweep> InProcessEligibilityWorkSource<Sweep> {
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let source = Self {
             nudges,
-            sweep,
+            sweep: Some(sweep),
+            sweep_in_progress: None,
             sweep_interval: interval,
             initial_sweep_due: true,
             pending_sweep_hints: VecDeque::new(),
@@ -243,9 +277,38 @@ impl<Sweep> InProcessEligibilityWorkSource<Sweep> {
     }
 }
 
+impl<Sweep> InProcessEligibilityWorkSource<Sweep>
+where
+    Sweep: EligibilitySweep + Send + 'static,
+{
+    fn start_sweep(&mut self) {
+        let mut sweep = self
+            .sweep
+            .take()
+            .expect("a sweep starts only when none is already in progress");
+        self.sweep_in_progress = Some(Box::pin(async move {
+            let result = sweep.find_sessions().await;
+            (sweep, result)
+        }));
+    }
+
+    fn complete_sweep(
+        &mut self,
+        completion: (Sweep, Result<Vec<SessionId>, Sweep::Error>),
+    ) -> Result<(), Sweep::Error> {
+        let (sweep, result) = completion;
+        self.sweep_in_progress = None;
+        self.sweep = Some(sweep);
+        let hints = result?;
+        self.extend_pending_sweep_hints(hints);
+        self.sweep_preferred_over_pending_hint = false;
+        Ok(())
+    }
+}
+
 impl<Sweep> EligibilityWorkSource for InProcessEligibilityWorkSource<Sweep>
 where
-    Sweep: EligibilitySweep + Send,
+    Sweep: EligibilitySweep + Send + 'static,
 {
     type Error = Sweep::Error;
 
@@ -253,23 +316,31 @@ where
         loop {
             if self.initial_sweep_due {
                 self.initial_sweep_due = false;
-                let hints = self.sweep.find_sessions().await?;
-                self.extend_pending_sweep_hints(hints);
-                self.sweep_preferred_over_pending_hint = false;
-                continue;
+                self.start_sweep();
             }
             if !self.pending_sweep_hints.is_empty() {
                 if !self.sweep_preferred_over_pending_hint {
                     self.sweep_preferred_over_pending_hint = true;
                     return Ok(self.take_interleaved_pending_hint());
                 }
+                if let Some(sweep_in_progress) = self.sweep_in_progress.as_mut() {
+                    let completion = select! {
+                        biased;
+
+                        completion = sweep_in_progress => Some(completion),
+                        () = ready(()) => None,
+                    };
+                    if let Some(completion) = completion {
+                        self.complete_sweep(completion)?;
+                        continue;
+                    }
+                    return Ok(self.take_interleaved_pending_hint());
+                }
                 select! {
                     biased;
 
                     _ = self.sweep_interval.tick() => {
-                        let hints = self.sweep.find_sessions().await?;
-                        self.extend_pending_sweep_hints(hints);
-                        self.sweep_preferred_over_pending_hint = false;
+                        self.start_sweep();
                     }
                     () = ready(()) => {
                         return Ok(self.take_interleaved_pending_hint());
@@ -278,12 +349,21 @@ where
                 continue;
             }
 
+            if let Some(sweep_in_progress) = self.sweep_in_progress.as_mut() {
+                let completion = select! {
+                    biased;
+
+                    completion = sweep_in_progress => completion,
+                    Some(session) = self.nudges.recv() => return Ok(session),
+                };
+                self.complete_sweep(completion)?;
+                continue;
+            }
+
             select! {
                 Some(session) = self.nudges.recv() => return Ok(session),
                 _ = self.sweep_interval.tick() => {
-                    let hints = self.sweep.find_sessions().await?;
-                    self.extend_pending_sweep_hints(hints);
-                    self.sweep_preferred_over_pending_hint = false;
+                    self.start_sweep();
                 }
             }
         }
@@ -565,6 +645,32 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct BlockingSweep {
+        calls: Arc<AtomicUsize>,
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+        hint: SessionId,
+    }
+
+    impl EligibilitySweep for BlockingSweep {
+        type Error = FakeSweepError;
+
+        fn find_sessions(
+            &mut self,
+        ) -> impl Future<Output = Result<Vec<SessionId>, Self::Error>> + Send {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let started = Arc::clone(&self.started);
+            let release = Arc::clone(&self.release);
+            let hint = self.hint;
+            async move {
+                started.notify_one();
+                release.notified().await;
+                Ok(vec![hint])
+            }
+        }
+    }
+
     #[test]
     fn zero_reconciliation_interval_is_rejected() {
         assert_eq!(
@@ -593,6 +699,36 @@ mod tests {
         assert_eq!(nudge.nudge(nudged), EligibilityNudgeOutcome::Enqueued);
         assert_eq!(source.next().await, Ok(nudged));
         assert_eq!(source.next().await, Ok(swept));
+    }
+
+    #[tokio::test]
+    async fn inv007_nudge_proceeds_while_reconciliation_is_in_progress() {
+        let nudged = session(35);
+        let swept = session(36);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let (nudge, mut source) = InProcessEligibilityWorkSource::new(BlockingSweep {
+            calls: Arc::clone(&calls),
+            started: Arc::clone(&started),
+            release: Arc::clone(&release),
+            hint: swept,
+        });
+
+        {
+            let next = source.next();
+            tokio::pin!(next);
+            tokio::select! {
+                () = started.notified() => {}
+                result = &mut next => panic!("blocked reconciliation yielded unexpectedly: {result:?}"),
+            }
+            assert_eq!(nudge.nudge(nudged), EligibilityNudgeOutcome::Enqueued);
+            assert_eq!(next.await, Ok(nudged));
+        }
+
+        release.notify_one();
+        assert_eq!(source.next().await, Ok(swept));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test(start_paused = true)]
@@ -642,13 +778,21 @@ mod tests {
 
         assert_eq!(source.next().await, Ok(second));
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(source.pending_sweep_hints.is_empty());
+        assert!(source.sweep_in_progress.is_some());
+
+        assert_eq!(
+            timeout(Duration::from_secs(6), source.next()).await,
+            Ok(Ok(first))
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(
             source
                 .pending_sweep_hints
                 .iter()
                 .copied()
                 .collect::<Vec<_>>(),
-            vec![first]
+            vec![second]
         );
     }
 

@@ -521,12 +521,17 @@ fn identity_collision(error: &sqlx::Error) -> Option<StartEligibleTurnIdentityCo
 }
 
 fn commit_failure_is_ambiguous(error: &sqlx::Error) -> bool {
-    !matches!(error, sqlx::Error::Database(_))
+    match error {
+        sqlx::Error::Database(database) => {
+            matches!(database.code().as_deref(), Some("08007" | "40003"))
+        }
+        _ => true,
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{error::Error, fmt, io};
+    use std::{borrow::Cow, error::Error, fmt, io};
 
     use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
     use sqlx::error::{DatabaseError, ErrorKind};
@@ -534,19 +539,21 @@ mod tests {
     use super::{StartEligibleTurnRepositoryError, commit_failure_is_ambiguous};
 
     #[derive(Debug)]
-    struct DefiniteCommitRejection;
+    struct ServerCommitFailure {
+        code: &'static str,
+    }
 
-    impl fmt::Display for DefiniteCommitRejection {
+    impl fmt::Display for ServerCommitFailure {
         fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str("deferred constraint rejected commit")
+            formatter.write_str("server reported commit failure")
         }
     }
 
-    impl Error for DefiniteCommitRejection {}
+    impl Error for ServerCommitFailure {}
 
-    impl DatabaseError for DefiniteCommitRejection {
+    impl DatabaseError for ServerCommitFailure {
         fn message(&self) -> &str {
-            "deferred constraint rejected commit"
+            "server reported commit failure"
         }
 
         fn as_error(&self) -> &(dyn Error + Send + Sync + 'static) {
@@ -563,6 +570,10 @@ mod tests {
 
         fn kind(&self) -> ErrorKind {
             ErrorKind::Other
+        }
+
+        fn code(&self) -> Option<Cow<'_, str>> {
+            Some(Cow::Borrowed(self.code))
         }
     }
 
@@ -598,7 +609,7 @@ mod tests {
 
     #[test]
     fn server_rejected_commit_is_not_ambiguous() {
-        let error = sqlx::Error::Database(Box::new(DefiniteCommitRejection));
+        let error = sqlx::Error::Database(Box::new(ServerCommitFailure { code: "23514" }));
         let commit_ambiguous = commit_failure_is_ambiguous(&error);
 
         assert!(!commit_ambiguous);
@@ -609,5 +620,23 @@ mod tests {
                 commit_ambiguous: false
             }
         );
+    }
+
+    #[test]
+    fn server_reported_unknown_commit_outcomes_are_ambiguous() {
+        for code in ["08007", "40003"] {
+            let error = sqlx::Error::Database(Box::new(ServerCommitFailure { code }));
+            let commit_ambiguous = commit_failure_is_ambiguous(&error);
+
+            assert!(commit_ambiguous);
+            let classified =
+                StartEligibleTurnRepositoryError::from_database(error, commit_ambiguous);
+            assert_eq!(
+                classified.operator_failure_class(),
+                OperatorFailureClass::Infrastructure {
+                    commit_ambiguous: true
+                }
+            );
+        }
     }
 }

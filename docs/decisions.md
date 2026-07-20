@@ -21,15 +21,15 @@ runtime loop.
 work source, and scheduler loop in the application crate; implement the first
 sweep adapter with one Postgres query for sessions containing queued work and no
 active turn backed by a partial queued-session index. The loop runs one full
-sweep immediately, consumes nudges between sweeps, delays rather than bursts
-missed ticks, sweeps every second without nudge starvation, and continues after
-visible sweep or eligibility-pass failures classified through ADR-0044's shared
-operator taxonomy. A bounded 1,024-hint channel drops excess hints to
-reconciliation, and at most 16 cloned per-invocation passes run concurrently
-while duplicate in-flight session hints coalesce. One second is the baseline
-lost-wake-up latency; the composition root may supply another validated,
-nonzero, timer-representable duration. Hints remain nonauthoritative and every
-pass revalidates its session.
+sweep immediately, keeps consuming nudges while that query is in progress and
+between sweeps, delays rather than bursts missed ticks, sweeps every second
+without nudge starvation, and continues after visible sweep or eligibility-pass
+failures classified through ADR-0044's shared operator taxonomy. A bounded
+1,024-hint channel drops excess hints to reconciliation, and at most 16 cloned
+per-invocation passes run concurrently while duplicate in-flight session hints
+coalesce. One second is the baseline lost-wake-up latency; the composition root
+may supply another validated, nonzero, timer-representable duration. Hints
+remain nonauthoritative and every pass revalidates its session.
 
 **Rejected alternatives.** Polling without nudges imposes the interval on every
 commit. A nudge-only loop loses liveness at a commit/crash boundary. Retrying a

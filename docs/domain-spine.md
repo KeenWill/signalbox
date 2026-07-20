@@ -1827,9 +1827,12 @@ pub trait EligibilityPass {
 pub struct InProcessEligibilityNudge { /* private */ }
 // Clone; impl EligibilityNudge
 
-pub struct InProcessEligibilityWorkSource<Sweep> { /* private */ }
-// impl EligibilityWorkSource when Sweep: EligibilitySweep + Send
-impl<Sweep> InProcessEligibilityWorkSource<Sweep> {
+pub struct InProcessEligibilityWorkSource<Sweep>
+where
+    Sweep: EligibilitySweep,
+{ /* private */ }
+// impl EligibilityWorkSource when Sweep: EligibilitySweep + Send + 'static
+impl<Sweep: EligibilitySweep> InProcessEligibilityWorkSource<Sweep> {
     pub fn new(sweep: Sweep) -> (InProcessEligibilityNudge, Self);
     pub fn with_interval(
         sweep: Sweep,
