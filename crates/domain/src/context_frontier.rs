@@ -555,9 +555,13 @@ mod tests {
     #[test]
     fn s09_inv015_derivation_is_prefix_preserving_and_append_only() {
         let owner = session_id(1);
-        let source_entries = [entry(1), entry(2)];
-        let appended_entries = vec![entry(3), entry(4)];
-        let expected_derived_entries = [entry(1), entry(2), entry(3), entry(4)];
+        let first = entry(1);
+        let second = entry(2);
+        let appended_first = entry(3);
+        let appended_second = entry(4);
+        let source_entries = [first, second];
+        let appended_entries = vec![appended_first, appended_second];
+        let expected_derived_entries = [first, second, appended_first, appended_second];
         let next_snapshot = context_frontier_id(2);
         let source = snapshot(owner, 1, source_entries);
         let derived = source
