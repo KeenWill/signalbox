@@ -147,16 +147,19 @@ accepted state is fail-closed corruption under
 
 hubd is the composition root and owns construction:
 
-- **Configuration.** `DATABASE_URL` arrives as deployment configuration supplied
-  to the process environment. The delivery channel for database credentials
-  remains open per [ADR-0032](0032-postgres-implementation-dependencies.md),
-  which reserves that decision for a separate future record —
+- **Configuration.** The database connection configuration reaches hubd through
+  deployment configuration, but this record does not require a complete
+  `DATABASE_URL`, a process-environment channel, or any particular split between
+  non-secret connection parameters and credential material. The delivery channel
+  for database credentials remains open per
+  [ADR-0032](0032-postgres-implementation-dependencies.md), which reserves that
+  decision for a separate future record;
   [ADR-0017](0017-credential-lifecycle.md)'s channel split governs provider and
-  integration credentials, not this one — and until that decision lands the hubd
-  slice uses an explicitly provisional deployment-configuration read from the
-  process environment, never a 1Password runtime credential and never a durable
-  record. Production connections use the persistence crate's verify-full
-  options.
+  integration credentials, not this one. The currently commissioned hubd slice
+  may read a complete `DATABASE_URL` from the process environment only as an
+  explicitly provisional implementation choice that the later credential
+  decision may replace or split; it is never a durable record. Production
+  connections use the persistence crate's verify-full options.
 - **Migration at startup.** The baseline resolves ADR-0032's open wiring: the
   hub process itself runs the embedded migrations at startup, before ADR-0004's
   recovery scan, which completes before ADR-0010 permits scheduling. A failed

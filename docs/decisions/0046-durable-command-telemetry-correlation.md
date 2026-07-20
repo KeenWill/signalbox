@@ -15,13 +15,15 @@
 
 ## Context
 
-[ADR-0044](0044-hub-runtime-foundations.md) prohibits raw caller-supplied
-`DurableCommandId` values in telemetry and asked its observability boundary for
-a stable, non-reversible correlation token. That requirement is incomplete.
+[ADR-0044](0044-hub-runtime-foundations.md)'s original telemetry clause permits
+raw durable-command identities as named correlation keys even when callers
+supply them. This record changes and supersedes that permission: a raw
+caller-supplied `DurableCommandId` is prohibited from operational telemetry and
+must be represented by a stable, non-reversible correlation token.
 [ADR-0033](0033-identity-generation-supply-and-encoding.md) accepts every
-non-sentinel UUID from a caller, including predictable values. An unkeyed digest
-can therefore be reversed by enumerating likely UUIDs. A process-random key
-prevents enumeration but loses correlation after restart.
+non-sentinel UUID from a caller, including predictable values, so an unkeyed
+digest can be reversed by enumeration. A process-random key prevents enumeration
+but loses correlation after restart.
 
 The missing choice is foundation-weight: it introduces durable secret material
 at the runtime/observability boundary and decides what stability means during
@@ -122,11 +124,19 @@ changes command identity and replay semantics under
 
 ### Redaction is fail closed
 
-Raw caller-supplied `DurableCommandId` values and their UUID text, bytes,
-integer form, prefixes, suffixes, or unkeyed digests never appear in telemetry,
-panic text, or error formatting. Structured fields use the complete token and a
-name that identifies it as correlation rather than command identity. Free-form
-messages do not interpolate either the raw identifier or key material.
+The ADR-0044 operational telemetry boundary never emits raw caller-supplied
+`DurableCommandId` values, their UUID text or bytes, integer form, prefixes,
+suffixes, or unkeyed digests. Structured telemetry fields use the complete token
+and a name that identifies it as correlation rather than command identity.
+Free-form telemetry messages do not interpolate either the raw identifier or key
+material.
+
+Existing domain, application, or persistence error `Debug` and `Display`
+representations may contain a raw identifier and are therefore sensitive
+internal values, not telemetry-safe renderings. Observability code translates
+the typed error and derives the token from its typed identifier; it does not log
+the formatted error. This record does not redefine general-purpose error or
+panic formatting outside the operational telemetry boundary.
 
 Registry-level and pre-claim events required by
 [ADR-0044](0044-hub-runtime-foundations.md) use the token without inventing a
@@ -186,12 +196,17 @@ nor adds one.
 
 ## Scenario walkthroughs
 
-- **Pre-claim conflicting reuse:** registry lookup classifies the request under
-  [ADR-0044](0044-hub-runtime-foundations.md) and logs `dc1.<key-id>.<digest>`
-  without a session identity or raw caller UUID. Another replica in the same
-  epoch emits the identical token.
-- **Restart recovery:** the deployment supplies the same epoch after an ordinary
-  restart, so recovery and earlier live-operation events correlate.
+- **[S01](../scenarios.md#s01--create-a-new-interactive-session) — pre-claim
+  conflicting reuse:** registry lookup classifies reuse of the claimed command
+  identifier under [ADR-0044](0044-hub-runtime-foundations.md) and logs
+  `dc1.<key-id>.<digest>` without a session identity or raw caller UUID. Another
+  replica in the same epoch emits the identical token. This maps S01's existing
+  conflicting-reuse fixture; it adds no command outcome or lifecycle edge.
+- **[S03](../scenarios.md#s03--hub-restarts-after-accepting-queued-work) —
+  restart recovery:** the deployment supplies the same epoch after an ordinary
+  restart, so recovery and earlier live-operation events correlate. This maps
+  S03's existing recovery fixture without changing its durable or transient
+  state.
 - **Routine rotation:** a rollout activates a fresh epoch. New events use the
   new `key-id`; an authorized investigator with a known command ID may derive
   both epoch tokens offline while the running hub knows only the current key.
