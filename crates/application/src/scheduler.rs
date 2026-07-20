@@ -146,18 +146,26 @@ pub trait EligibilityPass {
     type Error;
 
     /// Revalidates durable state and applies at most one guarded transition.
-    fn run(&mut self, session: SessionId) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    fn run(
+        &mut self,
+        session: SessionId,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static;
 }
 
 impl<Generator, Transaction> EligibilityPass for StartEligibleTurnService<Generator, Transaction>
 where
     Generator: StartEligibleTurnIdGenerator + Send,
-    Transaction: StartEligibleTurnTransaction + Send,
+    Transaction: StartEligibleTurnTransaction + Clone + Send + 'static,
+    Transaction::Error: Send + 'static,
 {
     type Error = Transaction::Error;
 
-    async fn run(&mut self, session: SessionId) -> Result<(), Self::Error> {
-        self.execute(session).await.map(drop)
+    fn run(
+        &mut self,
+        session: SessionId,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let execution = self.execute_with_cloned_transaction(session);
+        async move { execution.await.map(drop) }
     }
 }
 
@@ -345,10 +353,6 @@ where
                 self.initial_sweep_due = false;
                 self.start_sweep();
             }
-            if self.sweep_continuation_due && self.sweep_in_progress.is_none() {
-                self.sweep_continuation_due = false;
-                self.start_sweep();
-            }
             if !self.pending_sweep_hints.is_empty() {
                 if !self.sweep_preferred_over_pending_hint {
                     self.sweep_preferred_over_pending_hint = true;
@@ -378,6 +382,11 @@ where
                     }
                 }
                 continue;
+            }
+
+            if self.sweep_continuation_due && self.sweep_in_progress.is_none() {
+                self.sweep_continuation_due = false;
+                self.start_sweep();
             }
 
             if let Some(sweep_in_progress) = self.sweep_in_progress.as_mut() {
@@ -448,7 +457,7 @@ impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass> {
 impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass>
 where
     WorkSource: EligibilityWorkSource,
-    Pass: EligibilityPass + Clone + Send + 'static,
+    Pass: EligibilityPass + Send,
     WorkSource::Error: ClassifyOperatorFailure,
     Pass::Error: ClassifyOperatorFailure + Send + 'static,
 {
@@ -506,8 +515,7 @@ where
                     () = &mut shutdown => break,
                     () = ready(()) => {
                         if in_flight_sessions.insert(session) {
-                            let mut pass = self.pass.clone();
-                            let task = passes.spawn(async move { pass.run(session).await });
+                            let task = passes.spawn(self.pass.run(session));
                             task_sessions.insert(task.id(), session);
                         } else {
                             pending_reruns.insert(session);
@@ -553,8 +561,7 @@ where
             match hint {
                 Ok(session) => {
                     if in_flight_sessions.insert(session) {
-                        let mut pass = self.pass.clone();
-                        let task = passes.spawn(async move { pass.run(session).await });
+                        let task = passes.spawn(self.pass.run(session));
                         task_sessions.insert(task.id(), session);
                     } else {
                         pending_reruns.insert(session);
@@ -639,7 +646,10 @@ mod tests {
         time::Duration,
     };
 
-    use signalbox_domain::SessionId;
+    use signalbox_domain::{
+        AcceptedInputTurnActivationIdentities, ContextFrontierId, SemanticTranscriptEntryId,
+        SessionId, TurnAttemptId,
+    };
     use tokio::{
         sync::{Notify, oneshot},
         time::timeout,
@@ -652,7 +662,10 @@ mod tests {
         InProcessEligibilityWorkSource, InvalidReconciliationSweepInterval,
         ReconciliationSweepInterval, SchedulerLoop, SchedulerLoopExit,
     };
-    use crate::OperatorFailureClass;
+    use crate::{
+        OperatorFailureClass, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
+        StartEligibleTurnService, StartEligibleTurnTransaction,
+    };
 
     fn session(value: u128) -> SessionId {
         SessionId::from_uuid(Uuid::from_u128(value))
@@ -841,15 +854,27 @@ mod tests {
     async fn inv007_continuation_pages_do_not_wait_for_another_interval() {
         let first = session(43);
         let second = session(44);
+        let third = session(47);
         let (_nudge, mut source) = InProcessEligibilityWorkSource::new(FakeSweep {
             responses: VecDeque::from([
-                Ok(EligibilitySweepBatch::new(vec![first], true)),
-                Ok(EligibilitySweepBatch::new(vec![second], false)),
+                Ok(EligibilitySweepBatch::new(vec![first, second], true)),
+                Ok(EligibilitySweepBatch::new(vec![third], false)),
             ]),
         });
 
         assert_eq!(source.next().await, Ok(first));
         assert_eq!(source.next().await, Ok(second));
+        assert!(source.sweep_in_progress.is_none());
+        assert_eq!(
+            source
+                .sweep
+                .as_ref()
+                .expect("sweep is idle between pages")
+                .responses
+                .len(),
+            1
+        );
+        assert_eq!(source.next().await, Ok(third));
     }
 
     #[tokio::test(start_paused = true)]
@@ -1019,7 +1044,10 @@ mod tests {
     impl EligibilityPass for FakePass {
         type Error = FakeSweepError;
 
-        async fn run(&mut self, session: SessionId) -> Result<(), Self::Error> {
+        fn run(
+            &mut self,
+            session: SessionId,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
             let (response, shutdown) = {
                 let mut state = self.state.lock().expect("fake-pass state is not poisoned");
                 state.observed.push(session);
@@ -1045,7 +1073,7 @@ mod tests {
                     .send(())
                     .expect("scheduler still waits for shutdown");
             }
-            response
+            ready(response)
         }
     }
 
@@ -1082,6 +1110,100 @@ mod tests {
         assert!(observed.contains(&second));
     }
 
+    #[derive(Debug)]
+    struct StatefulActivationIds {
+        next: u128,
+    }
+
+    impl StartEligibleTurnIdGenerator for StatefulActivationIds {
+        fn next_origin_entry_id(&mut self) -> SemanticTranscriptEntryId {
+            let id = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(self.next));
+            self.next += 1;
+            id
+        }
+
+        fn next_starting_frontier_id(&mut self) -> ContextFrontierId {
+            let id = ContextFrontierId::from_uuid(Uuid::from_u128(self.next));
+            self.next += 1;
+            id
+        }
+
+        fn next_initial_attempt_id(&mut self) -> TurnAttemptId {
+            let id = TurnAttemptId::from_uuid(Uuid::from_u128(self.next));
+            self.next += 1;
+            id
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct RecordingActivationTransaction {
+        identities: Arc<Mutex<Vec<AcceptedInputTurnActivationIdentities>>>,
+        shutdown: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    }
+
+    impl StartEligibleTurnTransaction for RecordingActivationTransaction {
+        type Error = FakeSweepError;
+
+        fn handle(
+            &mut self,
+            _session: SessionId,
+            identities: AcceptedInputTurnActivationIdentities,
+        ) -> impl Future<Output = Result<StartEligibleTurnOutcome, Self::Error>> + Send {
+            let mut observed = self
+                .identities
+                .lock()
+                .expect("recorded identities are not poisoned");
+            observed.push(identities);
+            if observed.len() == 2 {
+                self.shutdown
+                    .lock()
+                    .expect("shutdown state is not poisoned")
+                    .take()
+                    .expect("second transaction owns shutdown")
+                    .send(())
+                    .expect("scheduler still waits for shutdown");
+            }
+            ready(Ok(StartEligibleTurnOutcome::NoEligibleTurn))
+        }
+    }
+
+    #[tokio::test]
+    async fn inv001_inv007_stateful_activation_ids_are_not_cloned_per_pass() {
+        let first = session(48);
+        let second = session(49);
+        let (shutdown_sender, shutdown_receiver) = oneshot::channel();
+        let identities = Arc::new(Mutex::new(Vec::new()));
+        let pass = StartEligibleTurnService::new(
+            StatefulActivationIds { next: 1 },
+            RecordingActivationTransaction {
+                identities: Arc::clone(&identities),
+                shutdown: Arc::new(Mutex::new(Some(shutdown_sender))),
+            },
+        );
+        let mut scheduler = SchedulerLoop::new(
+            FakeWorkSource {
+                hints: VecDeque::from([Ok(first), Ok(second)]),
+            },
+            pass,
+        );
+
+        assert_eq!(
+            scheduler
+                .run_until(async {
+                    shutdown_receiver
+                        .await
+                        .expect("second transaction requests shutdown");
+                })
+                .await,
+            SchedulerLoopExit::Shutdown
+        );
+        let identities = identities
+            .lock()
+            .expect("recorded identities are not poisoned");
+        assert_eq!(identities.len(), 2);
+        assert_ne!(identities[0], identities[1]);
+    }
+
     #[derive(Clone, Debug)]
     struct BlockingSessionPass {
         blocked_session: SessionId,
@@ -1093,14 +1215,23 @@ mod tests {
     impl EligibilityPass for BlockingSessionPass {
         type Error = FakeSweepError;
 
-        async fn run(&mut self, session: SessionId) -> Result<(), Self::Error> {
-            if session == self.blocked_session {
-                self.blocked_started.notify_one();
-                self.release_blocked.notified().await;
-            } else {
-                self.unrelated_seen.notify_one();
+        fn run(
+            &mut self,
+            session: SessionId,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+            let blocked_session = self.blocked_session;
+            let blocked_started = Arc::clone(&self.blocked_started);
+            let release_blocked = Arc::clone(&self.release_blocked);
+            let unrelated_seen = Arc::clone(&self.unrelated_seen);
+            async move {
+                if session == blocked_session {
+                    blocked_started.notify_one();
+                    release_blocked.notified().await;
+                } else {
+                    unrelated_seen.notify_one();
+                }
+                Ok(())
             }
-            Ok(())
         }
     }
 
@@ -1184,14 +1315,23 @@ mod tests {
     impl EligibilityPass for CompletionDuringReconciliationPass {
         type Error = FakeSweepError;
 
-        async fn run(&mut self, session: SessionId) -> Result<(), Self::Error> {
-            if session == self.first {
-                self.first_started.notify_one();
-                self.release_first.notified().await;
-            } else {
-                self.second_seen.notify_one();
+        fn run(
+            &mut self,
+            session: SessionId,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+            let first = self.first;
+            let first_started = Arc::clone(&self.first_started);
+            let release_first = Arc::clone(&self.release_first);
+            let second_seen = Arc::clone(&self.second_seen);
+            async move {
+                if session == first {
+                    first_started.notify_one();
+                    release_first.notified().await;
+                } else {
+                    second_seen.notify_one();
+                }
+                Ok(())
             }
-            Ok(())
         }
     }
 
@@ -1260,20 +1400,29 @@ mod tests {
     impl EligibilityPass for RerunPass {
         type Error = FakeSweepError;
 
-        async fn run(&mut self, _session: SessionId) -> Result<(), Self::Error> {
-            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                self.first_started.notify_one();
-                self.release_first.notified().await;
-            } else {
-                self.shutdown
-                    .lock()
-                    .expect("shutdown state is not poisoned")
-                    .take()
-                    .expect("second pass owns shutdown")
-                    .send(())
-                    .expect("scheduler still waits for shutdown");
+        fn run(
+            &mut self,
+            _session: SessionId,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+            let calls = Arc::clone(&self.calls);
+            let first_started = Arc::clone(&self.first_started);
+            let release_first = Arc::clone(&self.release_first);
+            let shutdown = Arc::clone(&self.shutdown);
+            async move {
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    first_started.notify_one();
+                    release_first.notified().await;
+                } else {
+                    shutdown
+                        .lock()
+                        .expect("shutdown state is not poisoned")
+                        .take()
+                        .expect("second pass owns shutdown")
+                        .send(())
+                        .expect("scheduler still waits for shutdown");
+                }
+                Ok(())
             }
-            Ok(())
         }
     }
 
@@ -1347,16 +1496,23 @@ mod tests {
     impl EligibilityPass for PassWaitingForSweep {
         type Error = FakeSweepError;
 
-        async fn run(&mut self, _session: SessionId) -> Result<(), Self::Error> {
-            self.sweep_driven.notified().await;
-            self.shutdown
-                .lock()
-                .expect("shutdown state is not poisoned")
-                .take()
-                .expect("pass owns shutdown")
-                .send(())
-                .expect("scheduler still waits for shutdown");
-            Ok(())
+        fn run(
+            &mut self,
+            _session: SessionId,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+            let sweep_driven = Arc::clone(&self.sweep_driven);
+            let shutdown = Arc::clone(&self.shutdown);
+            async move {
+                sweep_driven.notified().await;
+                shutdown
+                    .lock()
+                    .expect("shutdown state is not poisoned")
+                    .take()
+                    .expect("pass owns shutdown")
+                    .send(())
+                    .expect("scheduler still waits for shutdown");
+                Ok(())
+            }
         }
     }
 
