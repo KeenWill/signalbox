@@ -225,10 +225,10 @@ impl PostgresStartupScanRepository {
 
         match decision {
             Ok(TransactionDecision::Commit(outcome)) => {
-                transaction
-                    .commit()
-                    .await
-                    .map_err(|error| StartupScanRepositoryError::from_database(error, true))?;
+                transaction.commit().await.map_err(|error| {
+                    let commit_ambiguous = commit_failure_is_ambiguous(&error);
+                    StartupScanRepositoryError::from_database(error, commit_ambiguous)
+                })?;
                 Ok(outcome)
             }
             Ok(TransactionDecision::Rollback(outcome)) => {
@@ -533,13 +533,53 @@ fn identity_collision(error: &sqlx::Error) -> Option<StartupScanIdentityCollisio
     }
 }
 
+fn commit_failure_is_ambiguous(error: &sqlx::Error) -> bool {
+    !matches!(error, sqlx::Error::Database(_))
+}
+
 #[cfg(test)]
 mod tests {
+    use std::{error::Error, fmt, io};
+
     use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
     use signalbox_domain::TurnId;
+    use sqlx::error::{DatabaseError, ErrorKind};
     use sqlx::types::Uuid;
 
-    use super::{StartupScanCorruption, StartupScanRepositoryError};
+    use super::{StartupScanCorruption, StartupScanRepositoryError, commit_failure_is_ambiguous};
+
+    #[derive(Debug)]
+    struct DefiniteCommitRejection;
+
+    impl fmt::Display for DefiniteCommitRejection {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("deferred constraint rejected commit")
+        }
+    }
+
+    impl Error for DefiniteCommitRejection {}
+
+    impl DatabaseError for DefiniteCommitRejection {
+        fn message(&self) -> &str {
+            "deferred constraint rejected commit"
+        }
+
+        fn as_error(&self) -> &(dyn Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn as_error_mut(&mut self) -> &mut (dyn Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn into_error(self: Box<Self>) -> Box<dyn Error + Send + Sync + 'static> {
+            self
+        }
+
+        fn kind(&self) -> ErrorKind {
+            ErrorKind::Other
+        }
+    }
 
     #[test]
     fn corruption_retains_the_scoped_durable_turn() {
@@ -567,12 +607,34 @@ mod tests {
     }
 
     #[test]
-    fn commit_database_failure_is_commit_ambiguous() {
-        let error = StartupScanRepositoryError::from_database(sqlx::Error::PoolClosed, true);
+    fn lost_commit_response_is_commit_ambiguous() {
+        let error = sqlx::Error::Io(io::Error::new(
+            io::ErrorKind::ConnectionReset,
+            "commit response was lost",
+        ));
+        let commit_ambiguous = commit_failure_is_ambiguous(&error);
+
+        assert!(commit_ambiguous);
+        let error = StartupScanRepositoryError::from_database(error, commit_ambiguous);
         assert_eq!(
             error.operator_failure_class(),
             OperatorFailureClass::Infrastructure {
                 commit_ambiguous: true
+            }
+        );
+    }
+
+    #[test]
+    fn server_rejected_commit_is_not_ambiguous() {
+        let error = sqlx::Error::Database(Box::new(DefiniteCommitRejection));
+        let commit_ambiguous = commit_failure_is_ambiguous(&error);
+
+        assert!(!commit_ambiguous);
+        let error = StartupScanRepositoryError::from_database(error, commit_ambiguous);
+        assert_eq!(
+            error.operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false
             }
         );
     }
