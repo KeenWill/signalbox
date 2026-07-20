@@ -9,6 +9,38 @@ that constrains several components — require a full record under
 [decisions/](decisions/README.md) instead. Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-20 — Typed model-runtime substrate boundary adopted
+
+**Context.** The model-call milestone needs provider-translation machinery —
+request translation, capability profiles, schema generation, typed structured
+output, tool-call decoding, streaming normalization. A distilled external
+exploration proposed a three-layer shape with SerdesAI as a candidate vendoring
+substrate and a Phase-0 audit running separately. Without a recorded boundary,
+the first provider slice could couple durable orchestration to a provider
+framework's loop, retries, or event types.
+
+**Decision.** Adopt [ADR-0046](decisions/0046-typed-model-runtime-substrate.md):
+provider-neutral typed model-runtime crates live in this repository under
+`crates/`, importable only by the future provider-adapter crate and the hubd
+composition root, with the Cargo-manifest boundary as enforcement; the
+application-side model-execution port stays owned by the model-call
+orchestration ADR process; caller-owned `ModelCallId` correlation, the
+pre-send-only retry boundary, prepared-versus-boundary-crossed evidence, typed
+ADR-0043 classification, and three separate target-identity facts bind every
+integration; vendoring awaits the Phase-0 audit. The
+[target model](target-model.md#an-app-facing-sdk-target) gains the
+not-yet-scheduled app-SDK destination paragraph.
+
+**Rejected alternatives.** Depending on upstream releases: the recorded
+maintenance signals make that cadence unacceptable authority over
+provider-boundary semantics. Forking or hand-rolling now: structural mismatch is
+unmeasured before the first provider slice. Scheduling the app SDK: no
+end-to-end application exists to generalize from.
+
+**Affects.** [ADR-0046](decisions/0046-typed-model-runtime-substrate.md) (new),
+[target-model.md](target-model.md), and future runtime and adapter crate
+placement; no code, schema, dependency, or accepted-record semantics.
+
 ## 2026-07-20 — First outbox append is scoped to CreateSession
 
 **Context.** ADR-0040 makes in-transaction event append a standing obligation

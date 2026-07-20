@@ -399,6 +399,20 @@ update subscription is not an ordinary tool attempt: it needs its own decision
 for registration identity, lifetime, callback delivery, and conversion of later
 events into session input, recorded under [decisions/](decisions/README.md).
 
+### An app-facing SDK (target)
+
+The eventual outermost layer: a typed SDK through which an application declares
+its apps and agents and drives Signalbox sessions — typed app and agent
+declarations with versioned schemas; session, input, streaming, approval,
+forking, and delegation APIs; a local development harness; and replay and
+evaluation workflows over durable history. This destination is deliberately
+**not yet scheduled**: it appears in no [priority order](#priority-order) step,
+and [ADR-0046](decisions/0046-typed-model-runtime-substrate.md) records its
+deferral gate — no SDK decision until at least one end-to-end application exists
+after the real-provider smoke test. Its declaration identity, schema-versioning,
+and workflow semantics each require future foundation decisions recorded under
+[decisions/](decisions/README.md); naming the SDK here authorizes nothing.
+
 ## Concept status map
 
 Statuses: **Implemented** (accepted decision plus code in tree), **Accepted**
