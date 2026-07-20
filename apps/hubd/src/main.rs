@@ -143,7 +143,7 @@ where
     let _ = shutdown_sender.send(());
 
     match timeout(grace_window, &mut scheduler_run).await {
-        Ok(_) if listener_failed => ShutdownOutcome::SignalListenerFailed,
+        _ if listener_failed => ShutdownOutcome::SignalListenerFailed,
         Ok(_) => ShutdownOutcome::Clean,
         Err(_) => ShutdownOutcome::GraceWindowExpired,
     }
@@ -492,6 +492,44 @@ mod tests {
         assert_eq!(
             run_scheduler_until_shutdown(scheduler, ready(false), Duration::from_secs(1)).await,
             ShutdownOutcome::Clean
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn adr0044_signal_listener_failure_precedes_expired_grace_window() {
+        let (entered_sender, entered_receiver) = oneshot::channel();
+        let (shutdown_sender, shutdown_receiver) = oneshot::channel();
+        let session = SessionId::from_uuid(Uuid::from_u128(1));
+        let scheduler = SchedulerLoop::new(
+            OneHintThenPending {
+                hints: VecDeque::from([session]),
+            },
+            BlockingPass {
+                entered: Arc::new(Mutex::new(Some(entered_sender))),
+            },
+        );
+        let runtime = tokio::spawn(run_scheduler_until_shutdown(
+            scheduler,
+            async move {
+                shutdown_receiver
+                    .await
+                    .expect("the listener reports failure");
+                true
+            },
+            Duration::from_secs(5),
+        ));
+
+        entered_receiver
+            .await
+            .expect("the scheduler admitted the first pass");
+        shutdown_sender
+            .send(())
+            .expect("the scheduler still listens for shutdown");
+        tokio::time::advance(Duration::from_secs(5)).await;
+
+        assert_eq!(
+            runtime.await.expect("the runtime task completes"),
+            ShutdownOutcome::SignalListenerFailed
         );
     }
 }
