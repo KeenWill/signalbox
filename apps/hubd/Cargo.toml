@@ -9,6 +9,23 @@ publish.workspace = true
 
 [dependencies]
 signalbox-application = { path = "../../crates/application" }
+signalbox-persistence = { path = "../../crates/persistence" }
+tokio = { version = "1.53.0", default-features = false, features = [
+    "macros",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "time",
+] }
+tracing = { version = "0.1.41", default-features = false }
+tracing-subscriber = { version = "0.3.20", default-features = false, features = [
+    "fmt",
+] }
+
+[dev-dependencies]
+signalbox-domain = { path = "../../crates/domain" }
+tokio = { version = "1.53.0", default-features = false, features = ["test-util"] }
+uuid = { version = "1.24.0", default-features = false, features = ["std"] }
 
 [lints]
 workspace = true
