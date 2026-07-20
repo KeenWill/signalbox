@@ -643,10 +643,15 @@ async fn prepare_against_locked_state(
             SubmitInputCorruption::Inconsistent("selected active scheduling state").into()
         }
         SubmitInputPreparationFailure::InterruptApplicationUnavailable => {
+            #[expect(
+                clippy::expect_used,
+                reason = "temporary ledger site: this failure is produced only from a checked active projection; typed conversion is commissioned by the 2026-07-20 audit"
+            )]
+            let active_turn = active_turn_id
+                .expect("interrupt unavailability requires a checked active projection");
             SubmitInputRepositoryError::InterruptApplicationUnavailable {
                 command_id: error.command().command_id(),
-                active_turn: active_turn_id
-                    .expect("interrupt unavailability requires a checked active projection"),
+                active_turn,
             }
         }
     })
@@ -1030,6 +1035,10 @@ pub(crate) async fn load_scheduling_projection(
         let member_rows = members_by_frontier
             .remove(&frontier_uuid)
             .unwrap_or_default();
+        #[expect(
+            clippy::expect_used,
+            reason = "temporary ledger site: PostgreSQL result cardinality cannot exceed the stored u64 bound on supported targets; typed conversion is commissioned by the 2026-07-20 audit"
+        )]
         let actual_count = u64::try_from(member_rows.len())
             .expect("PostgreSQL result cardinality fits the u64 schema bound");
         if declared_count != Decimal::from(actual_count) {
@@ -1042,6 +1051,10 @@ pub(crate) async fn load_scheduling_projection(
         for (index, (position, source_session, semantic_entry)) in
             member_rows.into_iter().enumerate()
         {
+            #[expect(
+                clippy::expect_used,
+                reason = "temporary ledger site: PostgreSQL result cardinality cannot exceed the stored u64 bound on supported targets; typed conversion is commissioned by the 2026-07-20 audit"
+            )]
             let expected_position = u64::try_from(index + 1)
                 .expect("PostgreSQL result cardinality fits the u64 schema bound");
             if position != Decimal::from(expected_position) {
@@ -2053,6 +2066,10 @@ async fn load_turn_origin_graph(
             ))?;
     let mut decoded = BTreeMap::new();
     for ready in decode_order {
+        #[expect(
+            clippy::expect_used,
+            reason = "temporary ledger site: the dependency-order output is derived from these exact remaining links; typed conversion is commissioned by the 2026-07-20 audit"
+        )]
         let link = links
             .remove(&ready)
             .expect("the selected turn origin link remains present");
