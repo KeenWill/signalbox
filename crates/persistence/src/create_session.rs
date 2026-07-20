@@ -18,6 +18,7 @@ use crate::mapping::{
     PositiveOrdinalMappingError, defaults_version_from_numeric, defaults_version_to_numeric,
     durable_command_id_to_uuid, session_id_from_uuid, session_id_to_uuid,
 };
+use crate::outbox;
 
 const COMMAND_KIND: &str = "create_session";
 const STORAGE_VERSION: i16 = 1;
@@ -358,6 +359,8 @@ async fn insert_prepared(
     .bind(session_id_to_uuid(prepared.applied_result().session()))
     .execute(&mut *connection)
     .await?;
+
+    outbox::append_session_created(connection, session.id()).await?;
 
     Ok(())
 }

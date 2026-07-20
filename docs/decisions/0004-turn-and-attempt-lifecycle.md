@@ -7,7 +7,8 @@
 - Superseded by: none
 - Accepted with: ADR-0001, ADR-0003, ADR-0005, and ADR-0027 as one atomic
   foundation set
-- Refined by: [ADR-0031](0031-direct-fatal-terminalization.md)
+- Refined by: [ADR-0031](0031-direct-fatal-terminalization.md) and
+  [ADR-0043](0043-provider-failure-classification.md)
 - Decision questions: startup scan versus recovery attempt identity;
   manual-regeneration identity boundary and later scope; actively progressing
   state set; aggregate running-attempt and terminalization guards;
@@ -870,11 +871,11 @@ later gain richer typed evidence while preserving terminal attempt facts.
 - Approval expiry and child-result delivery remain in their respective future
   ADRs; ADR-0002 must add any child-wait phase and parent-cancellation
   transitions.
-- The evidence threshold for a physical operation's `KnownFailed` versus
-  `Ambiguous` outcome is effect-specific and remains with provider and tool
-  policies; `Lost` is reserved for the abandoned turn attempt. Once an operation
-  is classified as ambiguous, its turn disposition follows the deterministic
-  rule above.
+- The evidence threshold for a tool operation's `KnownFailed` versus `Ambiguous`
+  outcome remains with tool policy. Provider model-call classification is
+  decided by [ADR-0043](0043-provider-failure-classification.md); `Lost` remains
+  reserved for the abandoned turn attempt. Once an operation is classified as
+  ambiguous, its turn disposition follows the deterministic rule above.
 - Resource limits may constrain how long a turn can retain a slot, but timeout
   disposition requires a later policy.
 - Manual-regeneration command acceptance, queue placement, configuration freeze,
