@@ -38,7 +38,11 @@ one finished and awaiting owner merge:
   at the same time, a replied thread a later fix commit or rebase outdates is
   resolved then, and a final sweep before declaring the pull request finished
   confirms no unresolved outdated thread remains.
-- External reviews are re-requested on the final commit after any rebase.
+- External reviews are re-requested after a change that could alter what a
+  reviewer already approved — code, tests, or claims in the description — not
+  after one that leaves a previously green state effectively unchanged (a
+  rename, comment-only edits, a merge of `main` with no meaningful interaction).
+  Codex runs only on an explicit `@codex review` comment.
 - The description is at most 350 words, states the count of meaningfully changed
   lines (excluding lockfiles), and claims only what the code enforces — a
   contract binding future implementors is described as a contract, not an

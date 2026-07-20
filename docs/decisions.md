@@ -9,6 +9,29 @@ that constrains several components — require a full record under
 [decisions/](decisions/README.md) instead. Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-19 — Meaningful-diff review re-requests; surfaced stack replacement
+
+**Context.** The finished-pull-request protocol re-requested external reviews on
+the final commit after any rebase, so quiet-state pull requests re-summoned full
+bot passes after merge-main and formatting commits — about 15–20% of CI runs
+reviewed nothing new. Separately, an autonomous run replaced an open
+pull-request stack with a rewrite without the owner seeing the choice.
+
+**Decision.** External review re-requests follow the meaningful-diff bar now
+stated in the finished-pull-request bullets of [AGENTS.md](../AGENTS.md), and
+replacing or abandoning an open stack is surfaced to the owner per the
+[Executing rules](goal-mode.md#executing) in goal-mode.md; those two homes carry
+the normative wording.
+
+**Rejected alternatives.** Re-requesting on every push: keeps spending full
+review passes on commits that cannot change an approval. A hard approval gate on
+stack replacement: heavier than the problem — surfacing before the replacement
+lands preserves owner visibility without blocking work.
+
+**Affects.** Review-request behavior on every pull request, stack management in
+autonomous runs, and the two linked rule homes. It changes no code, CI
+configuration, or review-wave semantics.
+
 ## 2026-07-19 — Machine-enforced 80-column Markdown formatting with mdformat
 
 **Context.** Documentation prose had no wrapping rule: line lengths drifted per

@@ -34,6 +34,9 @@ finishing a milestone.
   substitutes for blocked work.
 - Maintain compact progress checkpoints naming the current track, what has been
   verified, what remains, and any semantic or external blocker.
+- Replacing or abandoning an open pull-request stack — closing its pull requests
+  in favor of a rewrite — is surfaced to the owner before the replacement lands,
+  never decided silently.
 
 ## Finishing
 
