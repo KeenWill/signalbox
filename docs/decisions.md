@@ -64,15 +64,18 @@ session/scheduler lock-ordering protocol lives only in comments in
 model-call milestone the owner prioritized against a load only sessions with
 hundreds of turns produce. Converting the thirteen panic sites in this package:
 each conversion needs its owning slice's tests, and this package is docs,
-configuration, and CI with zero behavior changes. Enforcing the lock protocol by
-comments and review alone: that is the state the audit found insufficient.
-Tiered rigor now: no measurement yet shows uniform rigor is the constraint.
+configuration, and CI with zero Rust runtime behavior changes. Enforcing the
+lock protocol by comments and review alone: that is the state the audit found
+insufficient. Tiered rigor now: no measurement yet shows uniform rigor is the
+constraint.
 
 **Affects.** This entry; new provider-security, scaling, and reconciliation
 entries in [open-questions.md](open-questions.md); `.github/workflows/rust.yml`
 (session-lock tripwire, `validate` timeout); `.github/workflows/deny.yml`,
 `deny.toml`, and `.gitignore` (new supply-chain gate); the commissioned slices
-bind future work. No behavior, schema, API, or accepted semantics change.
+bind future work. Rust runtime behavior, schema, API, and accepted semantics do
+not change; the documented tripwire, timeout, and supply-chain gates change CI
+and configuration behavior.
 
 ## 2026-07-19 — Destination features recorded as owner-directed direction
 
