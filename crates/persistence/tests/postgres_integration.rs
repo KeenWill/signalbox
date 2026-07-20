@@ -321,6 +321,24 @@ async fn append_session_created_test_event(
     Ok(sequence)
 }
 
+async fn assert_outbox_truncate_rejected(
+    pool: &PgPool,
+    statement: &'static str,
+) -> Result<(), Box<dyn Error>> {
+    let error = sqlx::query(statement)
+        .execute(pool)
+        .await
+        .expect_err("outbox storage is not removable through truncate");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|database| database.code())
+            .as_deref(),
+        Some("23514")
+    );
+    Ok(())
+}
+
 fn direct(value: u128) -> ModelSelectionRequest {
     ModelSelectionRequest::Direct(signalbox_domain::DirectModelSelection::from_uuid(
         Uuid::from_u128(value),
@@ -8047,9 +8065,10 @@ async fn s24_inv032_outbox_delivery_prefix_is_stable() -> Result<(), Box<dyn Err
     assert_eq!(invisible_events, 0);
     let uncommitted_delivery = sqlx::query(
         "UPDATE outbox_delivery_state
-            SET delivered_through = 1
+            SET delivered_through = $1
           WHERE singleton",
     )
+    .bind(first_sequence)
     .execute(&pool)
     .await
     .expect_err("an uncommitted sequence is not a deliverable prefix");
@@ -8098,6 +8117,24 @@ async fn s24_inv032_outbox_delivery_prefix_is_stable() -> Result<(), Box<dyn Err
     assert_eq!(first_sequence, Decimal::ONE);
     assert_eq!(second_sequence, Decimal::from(2));
     assert_eq!(undelivered_suffix, vec![second_sequence]);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-032: the durable sequence, prefix, header, and typed-record tables cannot
+/// bypass their row-level guards through PostgreSQL's statement-level truncate.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv032_outbox_storage_rejects_truncate() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+
+    assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE outbox_sequence_state CASCADE").await?;
+    assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE outbox_delivery_state CASCADE").await?;
+    assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE outbox_event CASCADE").await?;
+    assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE session_created_outbox_event CASCADE")
+        .await?;
 
     pool.close().await;
     drop(container);

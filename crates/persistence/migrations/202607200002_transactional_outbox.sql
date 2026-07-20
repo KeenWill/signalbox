@@ -240,6 +240,16 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION reject_outbox_table_truncate()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RAISE EXCEPTION '% cannot be truncated', TG_TABLE_NAME
+        USING ERRCODE = '23514';
+END;
+$$;
+
 CREATE TRIGGER outbox_sequence_state_cannot_be_deleted
 BEFORE DELETE ON outbox_sequence_state
 FOR EACH ROW
@@ -259,3 +269,23 @@ CREATE TRIGGER session_created_outbox_event_is_append_only
 BEFORE UPDATE OR DELETE ON session_created_outbox_event
 FOR EACH ROW
 EXECUTE FUNCTION reject_immutable_record_change();
+
+CREATE TRIGGER outbox_sequence_state_cannot_be_truncated
+BEFORE TRUNCATE ON outbox_sequence_state
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_outbox_table_truncate();
+
+CREATE TRIGGER outbox_delivery_state_cannot_be_truncated
+BEFORE TRUNCATE ON outbox_delivery_state
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_outbox_table_truncate();
+
+CREATE TRIGGER outbox_event_cannot_be_truncated
+BEFORE TRUNCATE ON outbox_event
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_outbox_table_truncate();
+
+CREATE TRIGGER session_created_outbox_event_cannot_be_truncated
+BEFORE TRUNCATE ON session_created_outbox_event
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_outbox_table_truncate();
