@@ -645,19 +645,22 @@ mod tests {
 
     #[test]
     fn server_reported_unknown_commit_outcomes_are_ambiguous() {
-        for code in ["08007", "40003"] {
-            let error = sqlx::Error::Database(Box::new(ServerCommitFailure { code }));
-            let commit_ambiguous = commit_failure_is_ambiguous(&error);
+        assert_server_reported_unknown_commit_outcome_is_ambiguous("08007");
+        assert_server_reported_unknown_commit_outcome_is_ambiguous("40003");
+    }
 
-            assert!(commit_ambiguous);
-            let classified =
-                StartEligibleTurnRepositoryError::from_database(error, commit_ambiguous);
-            assert_eq!(
-                classified.operator_failure_class(),
-                OperatorFailureClass::Infrastructure {
-                    commit_ambiguous: true
-                }
-            );
-        }
+    #[track_caller]
+    fn assert_server_reported_unknown_commit_outcome_is_ambiguous(code: &'static str) {
+        let error = sqlx::Error::Database(Box::new(ServerCommitFailure { code }));
+        let commit_ambiguous = commit_failure_is_ambiguous(&error);
+
+        assert!(commit_ambiguous);
+        let classified = StartEligibleTurnRepositoryError::from_database(error, commit_ambiguous);
+        assert_eq!(
+            classified.operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true
+            }
+        );
     }
 }
