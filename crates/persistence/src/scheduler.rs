@@ -10,9 +10,15 @@ use crate::mapping::{session_id_from_uuid, session_id_to_uuid};
 
 const RECONCILIATION_PAGE_SIZE: i64 = 16;
 
-fn next_page_cursor(sessions: &[SessionId]) -> Option<SessionId> {
-    (sessions.len() == RECONCILIATION_PAGE_SIZE as usize)
-        .then(|| *sessions.last().expect("a full page is nonempty"))
+fn next_page_state(rows: &[(SessionId, SessionId)]) -> (Option<SessionId>, Option<SessionId>) {
+    let Some((last_session, scan_through)) = rows.last().copied() else {
+        return (None, None);
+    };
+    if rows.len() == RECONCILIATION_PAGE_SIZE as usize && last_session != scan_through {
+        (Some(last_session), Some(scan_through))
+    } else {
+        (None, None)
+    }
 }
 
 /// Infrastructure failure while reading reconciliation hints.
@@ -54,12 +60,17 @@ impl ClassifyOperatorFailure for PostgresEligibilitySweepError {
 pub struct PostgresEligibilitySweep {
     pool: PgPool,
     after: Option<SessionId>,
+    scan_through: Option<SessionId>,
 }
 
 impl PostgresEligibilitySweep {
     /// Uses the supplied pool for reconciliation queries.
     pub fn new(pool: PgPool) -> Self {
-        Self { pool, after: None }
+        Self {
+            pool,
+            after: None,
+            scan_through: None,
+        }
     }
 
     /// Finds the next bounded page of sessions with queued work and no active
@@ -70,32 +81,49 @@ impl PostgresEligibilitySweep {
     /// lock before applying any transition.
     pub async fn find_sessions(&mut self) -> Result<Vec<SessionId>, PostgresEligibilitySweepError> {
         let after = self.after.map(session_id_to_uuid);
-        let sessions = sqlx::query_scalar::<_, Uuid>(
-            "SELECT queued.session_id
-               FROM turn_lifecycle AS queued
-              WHERE queued.state_kind = 'queued'
-                AND NOT EXISTS (
-                    SELECT 1
-                      FROM turn_lifecycle AS active
-                     WHERE active.session_id = queued.session_id
-                       AND active.state_kind = 'active'
-                )
-                AND ($1::uuid IS NULL OR queued.session_id > $1)
-              GROUP BY queued.session_id
-              ORDER BY queued.session_id
-              LIMIT $2",
+        let scan_through = self.scan_through.map(session_id_to_uuid);
+        let rows = sqlx::query_as::<_, (Uuid, Uuid)>(
+            "WITH candidates AS (
+                SELECT queued.session_id
+                  FROM turn_lifecycle AS queued
+                 WHERE queued.state_kind = 'queued'
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM turn_lifecycle AS active
+                        WHERE active.session_id = queued.session_id
+                          AND active.state_kind = 'active'
+                   )
+                 GROUP BY queued.session_id
+             ), bounded AS (
+                SELECT COALESCE($2::uuid, max(session_id)) AS scan_through
+                  FROM candidates
+             )
+             SELECT candidates.session_id, bounded.scan_through
+               FROM candidates
+               CROSS JOIN bounded
+              WHERE bounded.scan_through IS NOT NULL
+                AND ($1::uuid IS NULL OR candidates.session_id > $1)
+                AND candidates.session_id <= bounded.scan_through
+              ORDER BY candidates.session_id
+              LIMIT $3",
         )
         .bind(after)
+        .bind(scan_through)
         .bind(RECONCILIATION_PAGE_SIZE)
         .fetch_all(&self.pool)
         .await?;
 
-        let sessions = sessions
+        let rows = rows
             .into_iter()
-            .map(session_id_from_uuid)
+            .map(|(session, scan_through)| {
+                (
+                    session_id_from_uuid(session),
+                    session_id_from_uuid(scan_through),
+                )
+            })
             .collect::<Vec<_>>();
-        self.after = next_page_cursor(&sessions);
-        Ok(sessions)
+        (self.after, self.scan_through) = next_page_state(&rows);
+        Ok(rows.into_iter().map(|(session, _)| session).collect())
     }
 }
 
@@ -112,7 +140,7 @@ mod tests {
     use signalbox_domain::SessionId;
     use sqlx::types::Uuid;
 
-    use super::{RECONCILIATION_PAGE_SIZE, next_page_cursor};
+    use super::{RECONCILIATION_PAGE_SIZE, next_page_state};
 
     #[test]
     fn reconciliation_page_size_matches_scheduler_pass_bound() {
@@ -120,12 +148,30 @@ mod tests {
     }
 
     #[test]
-    fn full_pages_advance_and_short_pages_restart_the_scan() {
+    fn pages_advance_only_until_the_fixed_cycle_bound() {
         let sessions = (1..=RECONCILIATION_PAGE_SIZE as u128)
             .map(|value| SessionId::from_uuid(Uuid::from_u128(value)))
             .collect::<Vec<_>>();
+        let beyond_page = SessionId::from_uuid(Uuid::from_u128(17));
+        let continuing = sessions
+            .iter()
+            .copied()
+            .map(|session| (session, beyond_page))
+            .collect::<Vec<_>>();
+        let cycle_end = sessions
+            .iter()
+            .copied()
+            .map(|session| (session, *sessions.last().expect("page is nonempty")))
+            .collect::<Vec<_>>();
 
-        assert_eq!(next_page_cursor(&sessions), sessions.last().copied());
-        assert_eq!(next_page_cursor(&sessions[..sessions.len() - 1]), None);
+        assert_eq!(
+            next_page_state(&continuing),
+            (sessions.last().copied(), Some(beyond_page))
+        );
+        assert_eq!(next_page_state(&cycle_end), (None, None));
+        assert_eq!(
+            next_page_state(&continuing[..continuing.len() - 1]),
+            (None, None)
+        );
     }
 }
