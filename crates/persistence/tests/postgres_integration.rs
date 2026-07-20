@@ -294,6 +294,33 @@ fn prepared(
     .expect("owner-initiated creation without ancestry is preparable")
 }
 
+async fn append_session_created_test_event(
+    connection: &mut PgConnection,
+    session: Uuid,
+) -> Result<Decimal, sqlx::Error> {
+    let sequence = sqlx::query_scalar(
+        "INSERT INTO outbox_event
+            (event_kind, storage_version, session_id)
+         VALUES ('session_created', 1, $1)
+         RETURNING event_sequence",
+    )
+    .bind(session)
+    .fetch_one(&mut *connection)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO session_created_outbox_event
+            (event_sequence, event_kind, storage_version, session_id)
+         VALUES ($1, 'session_created', 1, $2)",
+    )
+    .bind(sequence)
+    .bind(session)
+    .execute(&mut *connection)
+    .await?;
+
+    Ok(sequence)
+}
+
 fn direct(value: u128) -> ModelSelectionRequest {
     ModelSelectionRequest::Direct(signalbox_domain::DirectModelSelection::from_uuid(
         Uuid::from_u128(value),
@@ -7910,6 +7937,167 @@ async fn inv002_inv008_inv012_submit_corruption_and_position_exhaustion_fail_clo
             SubmitInputReconstitutionFailure::AcceptedContentMismatch
         ))
     ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S24 / INV-032: the transactional allocator holds its singleton row through
+/// commit, so a concurrent event cannot obtain the next sequence and commit
+/// ahead of the lower event.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_inv032_outbox_sequences_follow_concurrent_commit_order() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0xe01, 0xe11, direct(0xe21)))
+        .await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0xe02, 0xe12, direct(0xe22)))
+        .await?;
+
+    let mut first_transaction = pool.begin().await?;
+    let first_sequence =
+        append_session_created_test_event(&mut first_transaction, Uuid::from_u128(0xe11)).await?;
+    let second = tokio::spawn({
+        let pool = pool.clone();
+        async move {
+            let mut transaction = pool.begin().await?;
+            let sequence =
+                append_session_created_test_event(&mut transaction, Uuid::from_u128(0xe12)).await?;
+            transaction.commit().await?;
+            Ok::<_, sqlx::Error>(sequence)
+        }
+    });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "the higher-sequence allocator must wait for the lower transaction"
+    );
+
+    first_transaction.commit().await?;
+    let second_sequence = second.await??;
+    assert_eq!(first_sequence, Decimal::ONE);
+    assert_eq!(second_sequence, Decimal::from(2));
+
+    let committed: Vec<(Decimal, Uuid)> = sqlx::query_as(
+        "SELECT event_sequence, session_id
+           FROM outbox_event
+          ORDER BY event_sequence",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        committed,
+        vec![
+            (first_sequence, Uuid::from_u128(0xe11)),
+            (second_sequence, Uuid::from_u128(0xe12)),
+        ]
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S24 / INV-032: delivery cannot advance to an uncommitted allocation, and a
+/// later concurrent allocation remains a suffix after the committed prefix is
+/// marked delivered.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_inv032_outbox_delivery_prefix_is_stable() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0xe03, 0xe13, direct(0xe23)))
+        .await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0xe04, 0xe14, direct(0xe24)))
+        .await?;
+
+    let mut first_transaction = pool.begin().await?;
+    let first_sequence =
+        append_session_created_test_event(&mut first_transaction, Uuid::from_u128(0xe13)).await?;
+    let (allocated_sender, allocated_receiver) = tokio::sync::oneshot::channel();
+    let (commit_sender, commit_receiver) = tokio::sync::oneshot::channel();
+    let second = tokio::spawn({
+        let pool = pool.clone();
+        async move {
+            let mut transaction = pool.begin().await?;
+            let sequence =
+                append_session_created_test_event(&mut transaction, Uuid::from_u128(0xe14)).await?;
+            allocated_sender
+                .send(sequence)
+                .expect("the prefix test receives the second allocation");
+            commit_receiver
+                .await
+                .expect("the prefix test releases the second commit");
+            transaction.commit().await?;
+            Ok::<_, sqlx::Error>(sequence)
+        }
+    });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "the second allocation must wait while the first is uncommitted"
+    );
+
+    let invisible_events: i64 = sqlx::query_scalar("SELECT count(*) FROM outbox_event")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(invisible_events, 0);
+    let uncommitted_delivery = sqlx::query(
+        "UPDATE outbox_delivery_state
+            SET delivered_through = 1
+          WHERE singleton",
+    )
+    .execute(&pool)
+    .await
+    .expect_err("an uncommitted sequence is not a deliverable prefix");
+    assert_eq!(
+        uncommitted_delivery
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23503")
+    );
+
+    first_transaction.commit().await?;
+    let second_sequence = allocated_receiver.await?;
+    let visible_sequences: Vec<Decimal> = sqlx::query_scalar(
+        "SELECT event_sequence
+           FROM outbox_event
+          ORDER BY event_sequence",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(visible_sequences, vec![first_sequence]);
+
+    sqlx::query(
+        "UPDATE outbox_delivery_state
+            SET delivered_through = $1
+          WHERE singleton",
+    )
+    .bind(first_sequence)
+    .execute(&pool)
+    .await?;
+    commit_sender
+        .send(())
+        .expect("the prefix test still awaits the second commit");
+    assert_eq!(second.await??, second_sequence);
+
+    let undelivered_suffix: Vec<Decimal> = sqlx::query_scalar(
+        "SELECT event.event_sequence
+           FROM outbox_event AS event
+           CROSS JOIN outbox_delivery_state AS delivery
+          WHERE delivery.singleton
+            AND event.event_sequence > delivery.delivered_through
+          ORDER BY event.event_sequence",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(first_sequence, Decimal::ONE);
+    assert_eq!(second_sequence, Decimal::from(2));
+    assert_eq!(undelivered_suffix, vec![second_sequence]);
 
     pool.close().await;
     drop(container);
