@@ -499,8 +499,10 @@ or open is reached by proposing that decision, not by implementing around it.
    lifecycle through one provider adapter, including resolved and reported
    target evidence. Failure classification is decided by
    [ADR-0043](decisions/0043-provider-failure-classification.md); the remaining
-   blocker is ADR-0007's provider-identity normalization and provenance
-   decision. This is the gate before destination-feature milestones.
+   blockers are ADR-0007's provider-identity normalization and provenance
+   decision and the outbound-provider security questions in
+   [open-questions.md](open-questions.md#provider-call-security). This is the
+   gate before destination-feature milestones.
 5. **The tool loop with approvals.** ToolRequest and ToolAttempt lifecycles, the
    trusted risk registry, approval consumption, and a first harmless hub-local
    tool. Blocked by reserved ADR-0011 through ADR-0014.

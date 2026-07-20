@@ -127,20 +127,16 @@ accepted records; those numbers remain reserved for their topics.
 
 - **Outbound TLS posture for provider calls.** Certificate-verification
   requirements, trust roots, TLS-version floor, and any proxy allowance for the
-  hub's outbound provider connections are undecided. Blocks the first provider
-  adapter. (S02, S04, S20–S23)
+  hub's outbound provider connections are undecided. Blocks the first outbound
+  provider adapter. (S02, S04, S20–S23)
 - **Provider response-size limits.** Whether and where the hub bounds provider
   response bodies and streamed deltas before they reach parsing and storage.
-  Blocks the first provider adapter. (S02, S04, S24)
-- **Provider call timeout budgets.** Connect, read, and total budgets for one
-  provider call; their clock and deadline sources, enforcement points, grace
-  periods, and cancellation triggers. The timeout classification and
-  send-boundary rule are already fixed by
+  Blocks the first outbound provider adapter. (S02, S04, S24)
+- **Provider call timeout budgets.** See the authoritative open question in
   [ADR-0043](decisions/0043-provider-failure-classification.md#timeouts-use-the-boundary-but-budgets-stay-open).
-  Blocks the first provider adapter. (S02, S04, S22)
 - **Provider-response parsing hardening.** Parsing limits and rejection behavior
   for provider responses under the malicious-model-output threat model. Blocks
-  the first provider adapter. (S02, S04, S23)
+  the first outbound provider adapter. (S02, S04, S23)
 
 ## Scheduling and runners (reserved ADR-0008)
 
@@ -197,15 +193,8 @@ questions below remain open.
 
 ## Actor attribution (ADR-0039 follow-ups)
 
-- **Non-owner actor admissibility.** Which command kinds admit non-owner actors
-  and how they are verified remains with the owning delegation (reserved
-  ADR-0002), tool-policy (reserved ADR-0011 through ADR-0014), and identity and
-  authorization decisions (reserved ADR-0015 through ADR-0018), as routed by
-  [ADR-0039](decisions/0039-actor-attribution.md#open-questions). Blocks those
-  command kinds and remote non-owner actors.
-- **Policy actor.** Whether an autonomous policy or scheduler actor joins the
-  algebra is deferred by [ADR-0039](decisions/0039-actor-attribution.md). Blocks
-  autonomous policy features. (S18, S19)
+- **Actor-admissibility follow-ups.** See the authoritative routing and open
+  questions in [ADR-0039](decisions/0039-actor-attribution.md#open-questions).
 
 ## Protocols and persistence (ADR-0019 through ADR-0023)
 
@@ -233,26 +222,18 @@ questions below remain open.
   for a later semantics-preserving migration. Those remaining questions block
   only their corresponding adapter slices; the generic scaffold and first typed
   command family are not blocked. (S03, S04, S17, S25, S27)
-- **Submit-path scaling: bounded scheduling projection and frontier storage.**
-  The
+- **Submit-path scaling: scheduling projection and frontier storage.** The
   [first frontier layout](decisions.md#2026-07-17--materialize-complete-membership-for-first-context-frontier-storage)
   materializes complete membership per snapshot and the submit path loads the
   complete scheduling projection, content included per submission, inside the
-  session lock, degrading at hundreds of turns per session. The fix — an
-  [ADR-0041](decisions/0041-evidence-bearing-reconstitution.md) acceptance-tail
-  bounded projection plus an ADR-0030-permitted prefix-sharing or delta layout —
-  remains concretely undesigned. The
+  session lock, degrading at hundreds of turns per session. A completeness
+  representation that bounds scheduling reads, plus an ADR-0030-permitted
+  prefix-sharing or delta layout, remains concretely undesigned. The
   [decision log](decisions.md#2026-07-20--adversarial-audit-corrective-package)
   owns its accepted scheduling disposition. (S03, S04, S17)
-- **Update-event retention and pruning.**
-  [ADR-0040](decisions/0040-transactional-outbox.md) defers outbox retention
-  alongside ADR-0019's resumable-history question; the outbox grows until a
-  pruning policy lands. Blocks long-running deployments, not the first
-  live-update slice. (S24)
-- **Multi-process update fan-out.** `LISTEN`/`NOTIFY` adoption timing remains
-  with ADR-0010's multi-process revisit, per
-  [ADR-0040](decisions/0040-transactional-outbox.md). Blocks multi-process
-  deployment. (S24)
+- **Update-event retention, pruning, and multi-process fan-out.** See the
+  authoritative open questions in
+  [ADR-0040](decisions/0040-transactional-outbox.md#open-questions).
 - **Swift client type generation.** Leaning: generated boundary types mapped to
   hand-written client domain types. Deferrable until the Swift client. (S01,
   S24)

@@ -28,10 +28,10 @@ session/scheduler lock-ordering protocol lives only in comments in
 
 **Decision.** Owner-decided dispositions, recorded together:
 
-- *Scaling timing.* Record now; fix after the model-call milestone. The fix
-  pairs an [ADR-0041](decisions/0041-evidence-bearing-reconstitution.md)
-  acceptance-tail bounded scheduling projection with a frontier storage change
-  (prefix sharing or deltas) the 2026-07-17 layout entry already permits under
+- *Scaling timing.* Record now; fix after the model-call milestone. The remedy
+  requires a still-undesigned representation that keeps complete scheduling
+  reads bounded, together with a frontier storage change (prefix sharing or
+  deltas) the 2026-07-17 layout entry already permits under
   [ADR-0030](decisions/0030-context-frontier-snapshots.md). Accepted cost: that
   fix reopens model-call storage after the milestone lands.
 - *Panic ledger.* The typed-error obligation extends from the three
@@ -43,8 +43,9 @@ session/scheduler lock-ordering protocol lives only in comments in
   `prepare_earliest_queued_activation` (three) in `turn_eligibility`; and
   `prepare_against_locked_state` (one), `load_scheduling_projection` (two), and
   `load_turn_origin_graph` (one) in persistence `submit_input`. A clippy
-  `expect_used`/`unwrap_used` deny gate is commissioned as an ordinary slice
-  once the conversions land.
+  `expect_used`/`unwrap_used`/`unreachable` deny gate, covering every panic form
+  in this ledger, is commissioned as an ordinary slice once the conversions
+  land.
 - *Lock protocol.* The persistence crate's small `lock_inventory` module is the
   only production Rust location for explicit strongest-mode row-lock SQL. CI
   verifies its exact reviewed contents by checksum and rejects that clause in
