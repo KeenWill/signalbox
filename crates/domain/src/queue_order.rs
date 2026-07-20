@@ -445,7 +445,7 @@ fn canonical_pair(first: TurnId, second: TurnId) -> (TurnId, TurnId) {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use expect_test::expect;
     use signalbox_expect_table::table;
@@ -986,35 +986,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn permutation_traversal_visits_each_arrangement_once() {
+        let mut sentinels = ["first", "second", "third"];
+        let observed = all_permutations(&mut sentinels);
+
+        assert_eq!(observed.len(), 6);
+        assert_eq!(
+            observed.into_iter().collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                vec!["first", "second", "third"],
+                vec!["first", "third", "second"],
+                vec!["second", "first", "third"],
+                vec!["second", "third", "first"],
+                vec!["third", "first", "second"],
+                vec!["third", "second", "first"],
+            ])
+        );
+    }
+
     #[track_caller]
     fn assert_all_permutations_derive(
         facts: &mut [AcceptedInputQueueWork],
         expected: &[TurnId],
     ) -> usize {
-        assert_permutations_derive_from(facts, 0, expected)
-    }
-
-    #[track_caller]
-    fn assert_permutations_derive_from(
-        facts: &mut [AcceptedInputQueueWork],
-        index: usize,
-        expected: &[TurnId],
-    ) -> usize {
-        if index == facts.len() {
+        let permutations = all_permutations(facts);
+        for facts in &permutations {
             assert_eq!(
                 derive_accepted_input_total_order(facts.iter().copied()),
                 Ok(expected.to_vec())
             );
-            return 1;
         }
-
-        let mut permutations_checked = 0;
-        for swap_index in index..facts.len() {
-            facts.swap(index, swap_index);
-            permutations_checked += assert_permutations_derive_from(facts, index + 1, expected);
-            facts.swap(index, swap_index);
-        }
-        permutations_checked
+        permutations.len()
     }
 
     #[track_caller]
@@ -1022,29 +1025,36 @@ mod tests {
         facts: &mut [AcceptedInputQueueWork],
         expected: &AcceptedInputQueueOrderError,
     ) -> usize {
-        assert_permutations_reject_from(facts, 0, expected)
-    }
-
-    #[track_caller]
-    fn assert_permutations_reject_from(
-        facts: &mut [AcceptedInputQueueWork],
-        index: usize,
-        expected: &AcceptedInputQueueOrderError,
-    ) -> usize {
-        if index == facts.len() {
+        let permutations = all_permutations(facts);
+        for facts in &permutations {
             assert_eq!(
                 derive_accepted_input_total_order(facts.iter().copied()),
                 Err(expected.clone())
             );
-            return 1;
+        }
+        permutations.len()
+    }
+
+    fn all_permutations<T: Clone>(values: &mut [T]) -> Vec<Vec<T>> {
+        let mut permutations = Vec::new();
+        collect_permutations_from(values, 0, &mut permutations);
+        permutations
+    }
+
+    fn collect_permutations_from<T: Clone>(
+        values: &mut [T],
+        index: usize,
+        permutations: &mut Vec<Vec<T>>,
+    ) {
+        if index == values.len() {
+            permutations.push(values.to_vec());
+            return;
         }
 
-        let mut permutations_checked = 0;
-        for swap_index in index..facts.len() {
-            facts.swap(index, swap_index);
-            permutations_checked += assert_permutations_reject_from(facts, index + 1, expected);
-            facts.swap(index, swap_index);
+        for swap_index in index..values.len() {
+            values.swap(index, swap_index);
+            collect_permutations_from(values, index + 1, permutations);
+            values.swap(index, swap_index);
         }
-        permutations_checked
     }
 }
