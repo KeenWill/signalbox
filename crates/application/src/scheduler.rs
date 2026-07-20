@@ -102,9 +102,33 @@ pub trait EligibilitySweep {
     /// Adapter-specific infrastructure failure.
     type Error;
 
-    /// Returns session hints for queued work with no active slot owner.
-    fn find_sessions(&mut self)
-    -> impl Future<Output = Result<Vec<SessionId>, Self::Error>> + Send;
+    /// Returns one bounded batch of session hints for queued work with no
+    /// active slot owner.
+    fn find_sessions(
+        &mut self,
+    ) -> impl Future<Output = Result<EligibilitySweepBatch, Self::Error>> + Send;
+}
+
+/// One bounded reconciliation result and whether its cycle has another page.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EligibilitySweepBatch {
+    sessions: Vec<SessionId>,
+    continuation: bool,
+}
+
+impl EligibilitySweepBatch {
+    /// Builds a reconciliation batch.
+    pub fn new(sessions: Vec<SessionId>, continuation: bool) -> Self {
+        Self {
+            sessions,
+            continuation,
+        }
+    }
+
+    /// Splits the hints from the continuation marker.
+    pub fn into_parts(self) -> (Vec<SessionId>, bool) {
+        (self.sessions, self.continuation)
+    }
 }
 
 /// Supplies nonauthoritative session hints to the scheduler loop.
@@ -158,7 +182,7 @@ type InProgressEligibilitySweep<Sweep> = Pin<
         dyn Future<
                 Output = (
                     Sweep,
-                    Result<Vec<SessionId>, <Sweep as EligibilitySweep>::Error>,
+                    Result<EligibilitySweepBatch, <Sweep as EligibilitySweep>::Error>,
                 ),
             > + Send,
     >,
@@ -177,6 +201,7 @@ where
     pending_sweep_hints: VecDeque<SessionId>,
     nudge_preferred_over_sweep_hint: bool,
     sweep_preferred_over_pending_hint: bool,
+    sweep_continuation_due: bool,
 }
 
 impl<Sweep> fmt::Debug for InProcessEligibilityWorkSource<Sweep>
@@ -243,6 +268,7 @@ where
             pending_sweep_hints: VecDeque::new(),
             nudge_preferred_over_sweep_hint: true,
             sweep_preferred_over_pending_hint: false,
+            sweep_continuation_due: false,
         };
         (nudge, source)
     }
@@ -294,13 +320,14 @@ where
 
     fn complete_sweep(
         &mut self,
-        completion: (Sweep, Result<Vec<SessionId>, Sweep::Error>),
+        completion: (Sweep, Result<EligibilitySweepBatch, Sweep::Error>),
     ) -> Result<(), Sweep::Error> {
         let (sweep, result) = completion;
         self.sweep_in_progress = None;
         self.sweep = Some(sweep);
-        let hints = result?;
+        let (hints, continuation) = result?.into_parts();
         self.extend_pending_sweep_hints(hints);
+        self.sweep_continuation_due = continuation;
         self.sweep_preferred_over_pending_hint = false;
         Ok(())
     }
@@ -316,6 +343,10 @@ where
         loop {
             if self.initial_sweep_due {
                 self.initial_sweep_due = false;
+                self.start_sweep();
+            }
+            if self.sweep_continuation_due && self.sweep_in_progress.is_none() {
+                self.sweep_continuation_due = false;
                 self.start_sweep();
             }
             if !self.pending_sweep_hints.is_empty() {
@@ -434,6 +465,8 @@ where
         let mut passes = JoinSet::new();
         let mut task_sessions = HashMap::new();
         let mut in_flight_sessions = HashSet::new();
+        let mut pending_hints = VecDeque::new();
+        let mut pending_reruns = HashSet::new();
 
         'scheduler: loop {
             if task_sessions.len() == self.max_in_flight_passes {
@@ -442,12 +475,42 @@ where
 
                     () = &mut shutdown => break,
                     completed = passes.join_next_with_id() => {
-                        if let Some(completed) = completed {
-                            observe_pass_completion(
+                        if let Some(completed) = completed
+                            && let Some(session) = observe_pass_completion(
                                 completed,
                                 &mut task_sessions,
                                 &mut in_flight_sessions,
-                            );
+                            )
+                            && pending_reruns.remove(&session)
+                        {
+                            pending_hints.push_back(session);
+                        }
+                    }
+                    hint = self.work_source.next(), if pending_hints.is_empty() => {
+                        match hint {
+                            Ok(session) if in_flight_sessions.contains(&session) => {
+                                pending_reruns.insert(session);
+                            }
+                            Ok(session) => pending_hints.push_back(session),
+                            Err(error) => log_sweep_failure(&error),
+                        }
+                    }
+                }
+                continue;
+            }
+
+            if let Some(session) = pending_hints.pop_front() {
+                select! {
+                    biased;
+
+                    () = &mut shutdown => break,
+                    () = ready(()) => {
+                        if in_flight_sessions.insert(session) {
+                            let mut pass = self.pass.clone();
+                            let task = passes.spawn(async move { pass.run(session).await });
+                            task_sessions.insert(task.id(), session);
+                        } else {
+                            pending_reruns.insert(session);
                         }
                     }
                 }
@@ -468,16 +531,23 @@ where
                     completed = passes.join_next_with_id(),
                         if !task_sessions.is_empty() =>
                     {
-                        if let Some(completed) = completed {
-                            observe_pass_completion(
+                        if let Some(completed) = completed
+                            && let Some(session) = observe_pass_completion(
                                 completed,
                                 &mut task_sessions,
                                 &mut in_flight_sessions,
-                            );
+                            )
+                            && pending_reruns.remove(&session)
+                        {
+                            pending_hints.push_back(session);
+                            break None;
                         }
                     }
-                    hint = &mut next_hint => break hint,
+                    hint = &mut next_hint => break Some(hint),
                 }
+            };
+            let Some(hint) = hint else {
+                continue;
             };
 
             match hint {
@@ -486,16 +556,11 @@ where
                         let mut pass = self.pass.clone();
                         let task = passes.spawn(async move { pass.run(session).await });
                         task_sessions.insert(task.id(), session);
+                    } else {
+                        pending_reruns.insert(session);
                     }
                 }
-                Err(error) => {
-                    let failure_class = error.operator_failure_class();
-                    tracing::error!(
-                        ?failure_class,
-                        "eligibility reconciliation sweep failed; \
-                         the next interval will retry"
-                    );
-                }
+                Err(error) => log_sweep_failure(&error),
             }
         }
 
@@ -510,7 +575,8 @@ fn observe_pass_completion<PassError>(
     completed: Result<(Id, Result<(), PassError>), JoinError>,
     task_sessions: &mut HashMap<Id, SessionId>,
     in_flight_sessions: &mut HashSet<SessionId>,
-) where
+) -> Option<SessionId>
+where
     PassError: ClassifyOperatorFailure,
 {
     let task = match &completed {
@@ -522,7 +588,7 @@ fn observe_pass_completion<PassError>(
             failure_class = ?crate::OperatorFailureClass::CallerOrHubBug,
             "eligibility-pass task completed without its session correlation"
         );
-        return;
+        return None;
     };
     in_flight_sessions.remove(&session);
 
@@ -546,6 +612,18 @@ fn observe_pass_completion<PassError>(
             );
         }
     }
+    Some(session)
+}
+
+fn log_sweep_failure<Error>(error: &Error)
+where
+    Error: ClassifyOperatorFailure,
+{
+    let failure_class = error.operator_failure_class();
+    tracing::error!(
+        ?failure_class,
+        "eligibility reconciliation sweep failed; the next interval will retry"
+    );
 }
 
 #[cfg(test)]
@@ -570,9 +648,9 @@ mod tests {
 
     use super::{
         ClassifyOperatorFailure, EligibilityNudge, EligibilityNudgeOutcome, EligibilityPass,
-        EligibilitySweep, EligibilityWorkSource, InProcessEligibilityWorkSource,
-        InvalidReconciliationSweepInterval, ReconciliationSweepInterval, SchedulerLoop,
-        SchedulerLoopExit,
+        EligibilitySweep, EligibilitySweepBatch, EligibilityWorkSource,
+        InProcessEligibilityWorkSource, InvalidReconciliationSweepInterval,
+        ReconciliationSweepInterval, SchedulerLoop, SchedulerLoopExit,
     };
     use crate::OperatorFailureClass;
 
@@ -595,7 +673,7 @@ mod tests {
 
     #[derive(Debug)]
     struct FakeSweep {
-        responses: VecDeque<Result<Vec<SessionId>, FakeSweepError>>,
+        responses: VecDeque<Result<EligibilitySweepBatch, FakeSweepError>>,
     }
 
     impl FakeSweep {
@@ -603,7 +681,12 @@ mod tests {
             responses: impl IntoIterator<Item = Result<Vec<SessionId>, FakeSweepError>>,
         ) -> Self {
             Self {
-                responses: responses.into_iter().collect(),
+                responses: responses
+                    .into_iter()
+                    .map(|result| {
+                        result.map(|sessions| EligibilitySweepBatch::new(sessions, false))
+                    })
+                    .collect(),
             }
         }
     }
@@ -613,7 +696,7 @@ mod tests {
 
         fn find_sessions(
             &mut self,
-        ) -> impl Future<Output = Result<Vec<SessionId>, Self::Error>> + Send {
+        ) -> impl Future<Output = Result<EligibilitySweepBatch, Self::Error>> + Send {
             ready(
                 self.responses
                     .pop_front()
@@ -634,13 +717,13 @@ mod tests {
 
         fn find_sessions(
             &mut self,
-        ) -> impl Future<Output = Result<Vec<SessionId>, Self::Error>> + Send {
+        ) -> impl Future<Output = Result<EligibilitySweepBatch, Self::Error>> + Send {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let delay = self.delay;
             let hints = self.hints.clone();
             async move {
                 tokio::time::sleep(delay).await;
-                Ok(hints)
+                Ok(EligibilitySweepBatch::new(hints, false))
             }
         }
     }
@@ -658,7 +741,7 @@ mod tests {
 
         fn find_sessions(
             &mut self,
-        ) -> impl Future<Output = Result<Vec<SessionId>, Self::Error>> + Send {
+        ) -> impl Future<Output = Result<EligibilitySweepBatch, Self::Error>> + Send {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let started = Arc::clone(&self.started);
             let release = Arc::clone(&self.release);
@@ -666,7 +749,7 @@ mod tests {
             async move {
                 started.notify_one();
                 release.notified().await;
-                Ok(vec![hint])
+                Ok(EligibilitySweepBatch::new(vec![hint], false))
             }
         }
     }
@@ -752,6 +835,21 @@ mod tests {
         assert_eq!(source.next().await, Ok(first_nudged));
         assert_eq!(source.next().await, Ok(second_swept));
         assert_eq!(source.next().await, Ok(second_nudged));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn inv007_continuation_pages_do_not_wait_for_another_interval() {
+        let first = session(43);
+        let second = session(44);
+        let (_nudge, mut source) = InProcessEligibilityWorkSource::new(FakeSweep {
+            responses: VecDeque::from([
+                Ok(EligibilitySweepBatch::new(vec![first], true)),
+                Ok(EligibilitySweepBatch::new(vec![second], false)),
+            ]),
+        });
+
+        assert_eq!(source.next().await, Ok(first));
+        assert_eq!(source.next().await, Ok(second));
     }
 
     #[tokio::test(start_paused = true)]
@@ -1148,6 +1246,146 @@ mod tests {
         assert_eq!(
             runtime.await.expect("scheduler task completes"),
             SchedulerLoopExit::Shutdown
+        );
+    }
+
+    #[derive(Clone, Debug)]
+    struct RerunPass {
+        calls: Arc<AtomicUsize>,
+        first_started: Arc<Notify>,
+        release_first: Arc<Notify>,
+        shutdown: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    }
+
+    impl EligibilityPass for RerunPass {
+        type Error = FakeSweepError;
+
+        async fn run(&mut self, _session: SessionId) -> Result<(), Self::Error> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.first_started.notify_one();
+                self.release_first.notified().await;
+            } else {
+                self.shutdown
+                    .lock()
+                    .expect("shutdown state is not poisoned")
+                    .take()
+                    .expect("second pass owns shutdown")
+                    .send(())
+                    .expect("scheduler still waits for shutdown");
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn inv007_nudge_during_in_flight_pass_schedules_one_rerun() {
+        let target = session(45);
+        let first_started = Arc::new(Notify::new());
+        let release_first = Arc::new(Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (shutdown_sender, shutdown_receiver) = oneshot::channel();
+        let scheduler = SchedulerLoop::new(
+            FakeWorkSource {
+                hints: VecDeque::from([Ok(target), Ok(target)]),
+            },
+            RerunPass {
+                calls: Arc::clone(&calls),
+                first_started: Arc::clone(&first_started),
+                release_first: Arc::clone(&release_first),
+                shutdown: Arc::new(Mutex::new(Some(shutdown_sender))),
+            },
+        );
+        let runtime = tokio::spawn(async move {
+            let mut scheduler = scheduler;
+            scheduler
+                .run_until(async {
+                    shutdown_receiver
+                        .await
+                        .expect("second pass requests shutdown");
+                })
+                .await
+        });
+
+        first_started.notified().await;
+        tokio::task::yield_now().await;
+        release_first.notify_one();
+
+        assert_eq!(
+            runtime.await.expect("scheduler completes"),
+            SchedulerLoopExit::Shutdown
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[derive(Debug)]
+    struct CapacitySensitiveWorkSource {
+        calls: usize,
+        session: SessionId,
+        sweep_driven: Arc<Notify>,
+    }
+
+    impl EligibilityWorkSource for CapacitySensitiveWorkSource {
+        type Error = FakeSweepError;
+
+        async fn next(&mut self) -> Result<SessionId, Self::Error> {
+            self.calls += 1;
+            if self.calls == 1 {
+                Ok(self.session)
+            } else {
+                self.sweep_driven.notify_one();
+                pending().await
+            }
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct PassWaitingForSweep {
+        sweep_driven: Arc<Notify>,
+        shutdown: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    }
+
+    impl EligibilityPass for PassWaitingForSweep {
+        type Error = FakeSweepError;
+
+        async fn run(&mut self, _session: SessionId) -> Result<(), Self::Error> {
+            self.sweep_driven.notified().await;
+            self.shutdown
+                .lock()
+                .expect("shutdown state is not poisoned")
+                .take()
+                .expect("pass owns shutdown")
+                .send(())
+                .expect("scheduler still waits for shutdown");
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn inv007_work_source_remains_driven_at_pass_capacity() {
+        let sweep_driven = Arc::new(Notify::new());
+        let (shutdown_sender, shutdown_receiver) = oneshot::channel();
+        let mut scheduler = SchedulerLoop::with_max_in_flight(
+            CapacitySensitiveWorkSource {
+                calls: 0,
+                session: session(46),
+                sweep_driven: Arc::clone(&sweep_driven),
+            },
+            PassWaitingForSweep {
+                sweep_driven,
+                shutdown: Arc::new(Mutex::new(Some(shutdown_sender))),
+            },
+            NonZeroUsize::new(1).expect("test capacity is nonzero"),
+        );
+
+        assert_eq!(
+            timeout(
+                Duration::from_secs(1),
+                scheduler.run_until(async {
+                    shutdown_receiver.await.expect("pass requests shutdown");
+                })
+            )
+            .await,
+            Ok(SchedulerLoopExit::Shutdown)
         );
     }
 

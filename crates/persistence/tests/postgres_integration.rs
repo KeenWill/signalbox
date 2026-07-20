@@ -3403,7 +3403,10 @@ async fn s03_inv007_inv009_postgres_sweep_reconstructs_only_candidate_sessions()
     ));
 
     let mut sweep = PostgresEligibilitySweep::new(pool.clone());
-    let candidates = EligibilitySweep::find_sessions(&mut sweep).await?;
+    let (candidates, continuation) = EligibilitySweep::find_sessions(&mut sweep)
+        .await?
+        .into_parts();
+    assert!(!continuation);
     let queued_index_count = sqlx::query_scalar::<_, i64>(
         "SELECT count(*)
            FROM pg_indexes
@@ -6511,12 +6514,12 @@ async fn s03_s04_inv034_restart_scan_recovers_lost_attempt_once_and_unblocks_suc
         committed_counts_before_replay
     );
 
-    assert_eq!(
-        PostgresEligibilitySweep::new(restarted_pool.clone())
-            .find_sessions()
-            .await?,
-        vec![SessionId::from_uuid(session_uuid)]
-    );
+    let (eligible_sessions, continuation) = PostgresEligibilitySweep::new(restarted_pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
+    assert!(!continuation);
+    assert_eq!(eligible_sessions, vec![SessionId::from_uuid(session_uuid)]);
     let activated = activate_earliest_queued_turn(
         &restarted_pool,
         EarliestQueuedTurnActivation {

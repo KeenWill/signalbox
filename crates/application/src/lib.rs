@@ -25,9 +25,9 @@ pub use replace_session_defaults::{
 };
 pub use scheduler::{
     EligibilityNudge, EligibilityNudgeOutcome, EligibilityPass, EligibilitySweep,
-    EligibilityWorkSource, InProcessEligibilityNudge, InProcessEligibilityWorkSource,
-    InvalidReconciliationSweepInterval, ReconciliationSweepInterval, SchedulerLoop,
-    SchedulerLoopExit,
+    EligibilitySweepBatch, EligibilityWorkSource, InProcessEligibilityNudge,
+    InProcessEligibilityWorkSource, InvalidReconciliationSweepInterval,
+    ReconciliationSweepInterval, SchedulerLoop, SchedulerLoopExit,
 };
 pub use start_eligible_turn::{
     StartEligibleTurnIdGenerator, StartEligibleTurnOutcome, StartEligibleTurnService,

@@ -1863,7 +1863,13 @@ pub trait EligibilitySweep {
 
     fn find_sessions(
         &mut self,
-    ) -> impl Future<Output = Result<Vec<SessionId>, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<EligibilitySweepBatch, Self::Error>> + Send;
+}
+
+pub struct EligibilitySweepBatch { /* private */ }
+impl EligibilitySweepBatch {
+    pub fn new(sessions: Vec<SessionId>, continuation: bool) -> Self;
+    pub fn into_parts(self) -> (Vec<SessionId>, bool);
 }
 
 pub trait EligibilityWorkSource {
@@ -2081,8 +2087,8 @@ impl<
 | application: load_session             | 2 (incl. 1 trait)    |
 | application: operator_failure         | 2 (incl. 1 trait)    |
 | application: replace_session_defaults | 4 (incl. 1 trait)    |
-| application: scheduler                | 11 (incl. 4 traits)  |
+| application: scheduler                | 12 (incl. 4 traits)  |
 | application: start_eligible_turn      | 5 (incl. 2 traits)   |
 | application: startup_scan             | 7 (incl. 2 traits)   |
 | application: submit_input             | 7 (incl. 2 traits)   |
-| **signalbox-application total**       | **46**               |
+| **signalbox-application total**       | **47**               |
