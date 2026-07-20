@@ -1763,14 +1763,20 @@ impl<
 ## application: submit_input
 
 ```rust
+pub enum SubmitInputRequestError {
+    InvalidCommandId(InvalidDurableCommandId),
+    OversizedContent { utf8_byte_length: usize },
+}
+
 pub struct SubmitInputRequest { /* private */ }
 impl SubmitInputRequest {
+    pub const MAX_CONTENT_UTF8_BYTES: usize; // 1_048_576
     pub fn try_new(
         command_id: DurableCommandId,
         session: SessionId,
         content: UserContent,
         delivery: DeliveryRequest,
-    ) -> Result<Self, InvalidDurableCommandId>;
+    ) -> Result<Self, SubmitInputRequestError>;
     // accessors: command_id(), session(), content(), delivery()
 }
 
@@ -1840,5 +1846,5 @@ impl<Generator: SubmitInputIdGenerator, Transaction: SubmitInputTransaction>
 | application: load_session             | 2 (incl. 1 trait)    |
 | application: replace_session_defaults | 4 (incl. 1 trait)    |
 | application: start_eligible_turn      | 5 (incl. 2 traits)   |
-| application: submit_input             | 6 (incl. 2 traits)   |
-| **signalbox-application total**       | **25**               |
+| application: submit_input             | 7 (incl. 2 traits)   |
+| **signalbox-application total**       | **26**               |

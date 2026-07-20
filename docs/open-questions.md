@@ -22,11 +22,13 @@ accepted records; those numbers remain reserved for their topics.
 - **Semantic transcript-entry extensions and rendering.**
   [ADR-0036](decisions/0036-initial-semantic-transcript-entries.md) fixes
   origin-accepted-input and failed-turn payloads plus their eligibility and
-  terminal-failure commit boundaries. Assistant content and completion, refusal,
-  cancellation, reconciliation, mismatch, accepted-risk, steering, tool,
-  approval, and delegation variants remain open together with provider/client
-  rendering. Blocks those later semantic-history slices, not the first origin
-  activation slice. (S02–S04, S08, S09, S17)
+  terminal-failure commit boundaries, and
+  [ADR-0042](decisions/0042-assistant-content-and-completion.md) fixes assistant
+  text, logical tool-use references, completed-turn markers, and their final
+  response commit boundary. Refusal, cancellation, reconciliation, mismatch,
+  accepted-risk, steering, tool-result, approval, and delegation variants remain
+  open together with rich assistant content and provider/client rendering.
+  Blocks only those later semantic-history slices. (S02–S04, S08, S09, S17)
 - **Selectable transcript-frontier boundaries.** Which terminal semantic
   boundaries a client may select as a `TranscriptFrontier` remains open;
   ADR-0030 decides only how a validated selection resolves into a new session's
@@ -120,10 +122,6 @@ accepted records; those numbers remain reserved for their topics.
   retries a known or ambiguous provider failure; any later retry command or
   policy, including backoff and resource limits, is a separate decision left
   open by ADR-0005. Blocks retry features. (S02, S04, S22)
-- **Provider ambiguity evidence thresholds.** Which provider evidence classifies
-  an uncertain outcome as known failure versus ambiguous is provider-contract
-  scope left open by ADR-0004 and ADR-0005. Blocks the first provider adapter.
-  (S02, S04)
 
 ## Scheduling and runners (reserved ADR-0008)
 
