@@ -46,6 +46,31 @@ migration `202607200001_bounded_user_content.sql`, and
 [domain-spine.md](domain-spine.md); no accepted ADR semantics change and no open
 question closes.
 
+## 2026-07-20 — Orientation-doc refresh through the ADR-0041 boundary
+
+**Context.** A documentation-truth audit found the orientation documents stopped
+absorbing accepted decisions at the ADR-0038 boundary: the glossary lacked
+entries for the concepts owned by ADR-0036 through ADR-0041, the scenarios
+preamble described a `Covered by:` coverage mechanism the repository does not
+use, the architecture overview omitted ADR-0038/0040/0041 from its decided
+chains, and vision.md retained pre-implementation phrasings about a future
+domain.
+
+**Decision.** Refresh citations and entries only, changing no semantics:
+glossary entries linking each owning record ([glossary.md](glossary.md)),
+citation and preamble corrections in [scenarios.md](scenarios.md), decided-chain
+and outbox pointers in [architecture.md](architecture.md), and two
+meaning-preserving tense fixes in [vision.md](vision.md). Every addition links
+to its owner rather than restating it.
+
+**Rejected alternatives.** A full vision.md rewrite: deferred to the owner, who
+has not commissioned one. Restating decided semantics in the overview documents:
+the one-place rule keeps each normative statement with its owning record.
+
+**Affects.** [glossary.md](glossary.md), [scenarios.md](scenarios.md),
+[architecture.md](architecture.md), and [vision.md](vision.md); no code, schema,
+or accepted semantics.
+
 ## 2026-07-19 — Destination features recorded as owner-directed direction
 
 **Context.** Milestone selection needed the owner's post-model-call product
