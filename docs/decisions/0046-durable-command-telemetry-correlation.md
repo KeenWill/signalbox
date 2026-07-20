@@ -50,14 +50,16 @@ first 16 bytes of:
 HMAC-SHA-256(key, "signalbox/durable-command-telemetry/v1\0" || uuid-bytes)
 ```
 
-`uuid-bytes` is the 16-byte network-order UUID representation fixed by
-[ADR-0033](0033-identity-generation-supply-and-encoding.md). The literal domain
-separator, NUL byte, HMAC algorithm, truncation, and encoding are part of
-version `dc1`; changing any of them requires a new token version.
-Implementations use a reviewed HMAC-SHA-256 implementation, not a
-repository-owned cryptographic primitive. This record adds no dependency by
-itself; a future implementation pull request may select a focused cryptographic
-crate under the repository dependency rules.
+`uuid-bytes` is exactly the RFC 9562 canonical 16-octet UUID sequence: remove
+the four hyphens from the lowercase canonical 8-4-4-4-12 hexadecimal text and,
+from left to right, decode each consecutive hexadecimal pair as one octet. The
+first text pair is octet 0 and the last is octet 15; mixed-endian GUID field
+layouts are prohibited. The literal domain separator, NUL byte, HMAC algorithm,
+truncation, and encoding are part of version `dc1`; changing any of them
+requires a new token version. Implementations use a reviewed HMAC-SHA-256
+implementation, not a repository-owned cryptographic primitive. This record adds
+no dependency by itself; a future implementation pull request may select a
+focused cryptographic crate under the repository dependency rules.
 
 The 128-bit output is a telemetry label only. It is not a domain identity,
 durable-command proof, storage key, protocol field, authorization fact, or
@@ -79,12 +81,15 @@ independently read key and identifier files are prohibited. The serialization
 format is not fixed here, but it must be unambiguous and reject missing,
 duplicate, or trailing fields. Neither value arrives in command-line arguments,
 ordinary configuration files, process environment variables, Postgres, domain
-values, protocol messages, or logs. Only hubd's correlation-token component
-reads the epoch document. Library code receives an opaque token-derivation
-capability, never key bytes. The upstream secret manager and Kubernetes manifest
-shape remain deployment mechanics, preserving
-[ADR-0017](0017-credential-lifecycle.md)'s ownership of its credential classes
-and [ADR-0032](0032-postgres-implementation-dependencies.md)'s open
+values, or protocol messages. The secret key never appears in telemetry. The
+non-secret `key-id` may appear only inside the complete token or in a dedicated
+structured correlation-key-ID field; free-form messages do not interpolate it.
+Only hubd's correlation-token component reads the epoch document. Library code
+receives an opaque token-derivation capability, never key bytes. The upstream
+secret manager and Kubernetes manifest shape remain deployment mechanics,
+preserving [ADR-0017](0017-credential-lifecycle.md)'s ownership of its
+credential classes and
+[ADR-0032](0032-postgres-implementation-dependencies.md)'s open
 database-credential delivery question.
 
 Hubd opens, completely reads, and validates exactly one epoch document during
@@ -136,9 +141,10 @@ or worker startup. An empty, longer-than-32-byte, or otherwise invalid `key-id`
 in that same document is likewise a configuration failure. There is no fallback
 to a raw identifier, unkeyed digest, process-random key, or fixed default key.
 If the already-validated in-memory derivation capability becomes unavailable at
-runtime, the event may retain its fixed taxonomy and safe hub-minted keys but
-omits command correlation; it must not substitute raw or reversible material.
-The failure is itself reported without the command ID or key.
+runtime, the event may retain its fixed taxonomy and only the hub-minted
+aggregate identifiers permitted by [ADR-0044](0044-hub-runtime-foundations.md),
+but omits command correlation; it must not substitute raw or reversible
+material. The failure is itself reported without the command ID or secret key.
 
 ## Invariants
 
@@ -146,8 +152,6 @@ The failure is itself reported without the command ID or key.
   become domain, storage, or wire representations.
 - INV-012: the token neither replaces nor creates owner-global durable-command
   identity or replay authority.
-- INV-035: this separate observability secret is inaccessible to clients and
-  runners, and no key material appears in logs or protocol values.
 
 ## Rejected alternatives
 

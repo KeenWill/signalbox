@@ -8,11 +8,11 @@
   database-credential delivery decision
   [ADR-0032](0032-postgres-implementation-dependencies.md) reserves, and the
   correction restores that accepted open reservation, with the hubd slice's
-  environment read explicitly provisional; (2) hub-minted aggregate identifiers
-  are classified loggable while a caller-supplied command identifier is excluded
-  from telemetry pending a complete correlation-token contract; (3) the
-  mandatory session corruption key is conditional on session-scoped operations;
-  (4) [ADR-0035](0035-domain-owned-persistence-reconstitution.md) concurrent
+  environment read explicitly provisional; (2) the original telemetry clause is
+  preserved below and superseded for caller-supplied command identifiers by
+  [ADR-0046](0046-durable-command-telemetry-correlation.md); (3) the mandatory
+  session corruption key is conditional on session-scoped operations; (4)
+  [ADR-0035](0035-domain-owned-persistence-reconstitution.md) concurrent
   staleness is explicitly consumed inside adapters, outside the operator
   taxonomy; (5) an incoming command identifier reused for a different kind is
   classified consistently as a caller or hub bug, while a persisted cross-kind
@@ -95,15 +95,12 @@ commissioning this record, and merging the record is the recorded acceptance.
 Explicit non-goals: metrics and OpenTelemetry are deferred, and no log-content
 policy exists beyond [ADR-0017](0017-credential-lifecycle.md)'s credential
 redaction plus one rule this record adds — full user content never appears in
-logs. The opaque UUID-backed aggregate identifiers (`SessionId`, `TurnId`, and
-their [ADR-0033](0033-identity-generation-supply-and-encoding.md) siblings) are
-loggable — they are semantically opaque references under ADR-0033, not content —
-but raw `DurableCommandId` values are not: ADR-0033 permits callers to supply
-arbitrary non-sentinel UUIDs. Their telemetry correlation and redaction contract
-is superseded by [ADR-0046](0046-durable-command-telemetry-correlation.md). The
-redaction prohibition targets user content, credential material, free-form
-payload values, and raw caller-supplied identifiers. Lengths and taxonomy
-classifications may likewise appear.
+logs. Non-secret opaque aggregate correlation keys — session, durable-command,
+and turn identities — plus lengths and taxonomy classifications may appear.
+These named keys remain allowable when caller-supplied or user-associated
+because they are required to correlate durable failures; no other
+caller-provided or user-associated identifier may appear, and secret-associated
+identifiers may not.
 
 ### One shared operator failure taxonomy
 
@@ -139,12 +136,11 @@ boundary, and for corruption events the discipline is mandatory: every
 corruption-classified event names the session identity when the failing
 operation is session-scoped, plus the durable command and/or turn identity when
 the failing operation is scoped to one — and never a credential value or user
-content. Registry-level and pre-claim corruption events follow
-[ADR-0046](0046-durable-command-telemetry-correlation.md)'s durable-command
-telemetry-correlation contract, without a session key. Reuse of an incoming
-command identifier for a different kind remains the caller-or-hub-bug
-classification above. A persisted cross-kind relationship discovered while
-reconstituting accepted state is fail-closed corruption under
+content. Registry-level and pre-claim corruption events carry the
+durable-command identity without a session key. Reuse of an incoming command
+identifier for a different kind remains the caller-or-hub-bug classification
+above. A persisted cross-kind relationship discovered while reconstituting
+accepted state is fail-closed corruption under
 [ADR-0035](0035-domain-owned-persistence-reconstitution.md).
 
 ### Composition-root contract
