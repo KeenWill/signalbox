@@ -9,9 +9,9 @@ use signalbox_application::{
     SubmitInputRequest, SubmitInputService,
 };
 use signalbox_domain::{
-    AcceptedInputId, AcceptedInputStartingLineage, ActiveTurnPhase, ContextFrontierId,
-    CreateSession, CurrentTurnAttemptState, DeliveryRequest, DurableCommandId, ModelAlias,
-    ModelSelectionOverride, ModelSelectionRequest, PerInputConfigurationChoices,
+    AcceptedInputId, AcceptedInputStartingLineage, ActivatedAcceptedInputTurn, ActiveTurnPhase,
+    ContextFrontierId, CreateSession, CurrentTurnAttemptState, DeliveryRequest, DurableCommandId,
+    ModelAlias, ModelSelectionOverride, ModelSelectionRequest, PerInputConfigurationChoices,
     PreparedCreateSession, ReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult,
     ReplaceSessionDefaultsResult, SemanticTranscriptEntryId, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
@@ -148,52 +148,41 @@ async fn insert_frontier(
     Ok(())
 }
 
-async fn activate_prepared_turn(
-    pool: &PgPool,
+/// The session and pinned fresh identities for one production activation,
+/// named so each call site states which identity it supplies.
+struct EarliestQueuedTurnActivation {
     session: Uuid,
-    accepted_input: Uuid,
-    turn: Uuid,
-    semantic_entry: Uuid,
+    origin_entry: Uuid,
     starting_frontier: Uuid,
-    attempt: Uuid,
-) -> Result<(), sqlx::Error> {
-    let mut transaction = pool.begin().await?;
-    insert_origin_frontier(
-        &mut transaction,
-        session,
-        accepted_input,
-        semantic_entry,
-        starting_frontier,
-        Decimal::ONE,
-    )
-    .await?;
-    sqlx::query(
-        "INSERT INTO turn_attempt
-            (turn_attempt_id, turn_id, session_id, continued_from_attempt_id,
-             state_kind, end_variant, end_disposition)
-         VALUES ($1, $2, $3, NULL, 'prepared', NULL, NULL)",
-    )
-    .bind(attempt)
-    .bind(turn)
-    .bind(session)
-    .execute(&mut *transaction)
-    .await?;
-    sqlx::query(
-        "UPDATE turn_lifecycle
-            SET state_kind = 'active',
-                start_lineage_kind = 'first_in_session',
-                starting_frontier_id = $1,
-                active_phase_kind = 'running',
-                current_attempt_id = $2
-          WHERE turn_id = $3
-            AND state_kind = 'queued'",
-    )
-    .bind(starting_frontier)
-    .bind(attempt)
-    .bind(turn)
-    .execute(&mut *transaction)
-    .await?;
-    transaction.commit().await
+    initial_attempt: Uuid,
+}
+
+/// Activates the session's earliest queued turn through the production
+/// `StartEligibleTurnService`/`StartEligibleTurnRepository` chain with the
+/// supplied fresh identities and returns the activated turn, so occupied-slot
+/// tests exercise the exact scheduler-locked active shape the production
+/// activation commits and assert its bound origin at their own call sites.
+async fn activate_earliest_queued_turn(
+    pool: &PgPool,
+    activation: EarliestQueuedTurnActivation,
+) -> Result<Box<ActivatedAcceptedInputTurn>, Box<dyn Error>> {
+    let mut service = StartEligibleTurnService::new(
+        FixedStartEligibleTurnIds::new(
+            [SemanticTranscriptEntryId::from_uuid(
+                activation.origin_entry,
+            )],
+            [ContextFrontierId::from_uuid(activation.starting_frontier)],
+            [TurnAttemptId::from_uuid(activation.initial_attempt)],
+        ),
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    let StartEligibleTurnOutcome::Activated(activated) = service
+        .execute(SessionId::from_uuid(activation.session))
+        .await?
+    else {
+        panic!("the earliest queued origin must activate through the production service");
+    };
+    Ok(activated)
 }
 
 async fn run_mixed_occupied_acceptances(
@@ -3119,6 +3108,468 @@ async fn s01_inv009_concurrent_start_eligible_turn_passes_activate_once()
     Ok(())
 }
 
+/// Polls until exactly `expected` backends are lock-blocked behind another
+/// backend, returning whether that count appeared within the polling budget.
+/// The per-test database serves only this test's connections and each racer
+/// is spawned only after the previous blocked count is observed, so spawn
+/// order identifies the racers without matching their SQL text.
+async fn blocked_backends_reached(pool: &PgPool, expected: i64) -> Result<bool, sqlx::Error> {
+    for _ in 0..400 {
+        let observed: i64 = sqlx::query_scalar(
+            "SELECT count(*)
+               FROM pg_stat_activity
+              WHERE cardinality(pg_blocking_pids(pid)) > 0",
+        )
+        .fetch_one(pool)
+        .await?;
+        if observed == expected {
+            return Ok(true);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    Ok(false)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn blocked_backends_poll_reports_zero_for_an_idle_database() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    assert!(
+        blocked_backends_reached(&pool, 0).await?,
+        "an idle database has no lock-blocked backend"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn blocked_backends_poll_detects_one_scheduler_row_waiter() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0x4e1, 0x8e1, direct(0xce1)))
+        .await?;
+    let mut holder = pool.begin().await?;
+    sqlx::query("SELECT session_id FROM session_scheduler WHERE session_id = $1 FOR UPDATE")
+        .bind(Uuid::from_u128(0x8e1))
+        .execute(&mut *holder)
+        .await?;
+    let waiter = tokio::spawn({
+        let pool = pool.clone();
+        async move {
+            sqlx::query("SELECT session_id FROM session_scheduler WHERE session_id = $1 FOR UPDATE")
+                .bind(Uuid::from_u128(0x8e1))
+                .execute(&pool)
+                .await
+        }
+    });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "one queued scheduler-row waiter must be detected"
+    );
+
+    holder.rollback().await?;
+    waiter.await??;
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn blocked_backends_poll_reports_when_expected_count_never_forms()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0x4e2, 0x8e2, direct(0xce2)))
+        .await?;
+    let mut holder = pool.begin().await?;
+    sqlx::query("SELECT session_id FROM session_scheduler WHERE session_id = $1 FOR UPDATE")
+        .bind(Uuid::from_u128(0x8e2))
+        .execute(&mut *holder)
+        .await?;
+    let waiter = tokio::spawn({
+        let pool = pool.clone();
+        async move {
+            sqlx::query("SELECT session_id FROM session_scheduler WHERE session_id = $1 FOR UPDATE")
+                .bind(Uuid::from_u128(0x8e2))
+                .execute(&pool)
+                .await
+        }
+    });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "the fixture must establish its sole blocked waiter"
+    );
+    assert!(
+        !blocked_backends_reached(&pool, 2).await?,
+        "a second waiter never forms, so the poll must exhaust its budget and report false"
+    );
+
+    holder.rollback().await?;
+    waiter.await??;
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn blocked_backends_poll_returns_to_zero_after_release() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0x4e3, 0x8e3, direct(0xce3)))
+        .await?;
+    let mut holder = pool.begin().await?;
+    sqlx::query("SELECT session_id FROM session_scheduler WHERE session_id = $1 FOR UPDATE")
+        .bind(Uuid::from_u128(0x8e3))
+        .execute(&mut *holder)
+        .await?;
+    let waiter = tokio::spawn({
+        let pool = pool.clone();
+        async move {
+            sqlx::query("SELECT session_id FROM session_scheduler WHERE session_id = $1 FOR UPDATE")
+                .bind(Uuid::from_u128(0x8e3))
+                .execute(&pool)
+                .await
+        }
+    });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "the fixture must establish a blocked waiter before releasing it"
+    );
+    holder.rollback().await?;
+    waiter.await??;
+    assert!(
+        blocked_backends_reached(&pool, 0).await?,
+        "the released waiter leaves no blocked backend"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-007 / INV-008 / INV-009 / INV-012: submit orders the session row
+/// (`FOR NO KEY UPDATE`) before the scheduler row (`FOR UPDATE`), while
+/// activation orders the scheduler row first and then requests `FOR KEY
+/// SHARE` on the session row through its inserts' session foreign keys. The
+/// forced overlap — the activation queued on the scheduler row first, the
+/// submission verifiably holding its session-row lock while queued behind it
+/// — completes with typed outcomes on both sides because referential
+/// `KEY SHARE` does not conflict with submit's held session lock; a
+/// session-row `FOR UPDATE` on the submit side would close this reverse
+/// order into a deadlock (Postgres 40P01) surfacing as a `Database` error.
+/// Postgres grants a contended row to its first queued waiter, so the
+/// activation commits first and the unblocked submission records the typed
+/// `ActiveTurnPresent` rejection naming the activated turn while its
+/// candidate identities persist nothing. The sibling test queues the
+/// submission ahead and pins the applied arm.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv007_inv008_inv009_inv012_submit_and_activation_interleave_without_deadlock()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0x4b1, 0x8b1, direct(0xcb1)))
+        .await?;
+    let session = SessionId::from_uuid(Uuid::from_u128(0x8b1));
+    let queued_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x9b1));
+    let queued_turn = TurnId::from_uuid(Uuid::from_u128(0xab1));
+    let racing_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x9b2));
+    let racing_turn = TurnId::from_uuid(Uuid::from_u128(0xab2));
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                0x4b2,
+                0x8b1,
+                "eligible queued origin",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            queued_input,
+            Some(queued_turn),
+        )
+        .await?;
+
+    // Hold the scheduler row so both racers verifiably queue on it before
+    // either proceeds: the activation pass blocks on it first, then the
+    // submission takes its session-row lock and queues behind the activation.
+    let mut scheduler_blocker = pool.begin().await?;
+    sqlx::query("SELECT session_id FROM session_scheduler WHERE session_id = $1 FOR UPDATE")
+        .bind(Uuid::from_u128(0x8b1))
+        .execute(&mut *scheduler_blocker)
+        .await?;
+
+    let activation = tokio::spawn({
+        let mut service = StartEligibleTurnService::new(
+            FixedStartEligibleTurnIds::new(
+                [SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdb1))],
+                [ContextFrontierId::from_uuid(Uuid::from_u128(0xeb1))],
+                [TurnAttemptId::from_uuid(Uuid::from_u128(0xbb1))],
+            ),
+            StartEligibleTurnRepository::new(pool.clone()),
+        );
+        async move { service.execute(session).await }
+    });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "the eligibility pass must block on the held scheduler row"
+    );
+
+    let submission = tokio::spawn({
+        let repository = SubmitInputRepository::new(pool.clone());
+        async move {
+            repository
+                .handle(
+                    start_input(
+                        0x4b3,
+                        0x8b1,
+                        "racing start",
+                        1,
+                        ModelSelectionOverride::UseSessionDefault,
+                    ),
+                    racing_input,
+                    Some(racing_turn),
+                )
+                .await
+        }
+    });
+    assert!(
+        blocked_backends_reached(&pool, 2).await?,
+        "the submission must hold its session row and queue behind the eligibility pass"
+    );
+
+    scheduler_blocker.rollback().await?;
+    let activation_outcome = activation.await?.expect(
+        "the activation side must serialize without deadlocking; a 40P01 surfaces here as a \
+         Database error",
+    );
+    let submission_outcome = submission.await?.expect(
+        "the submission side must serialize without deadlocking; a 40P01 surfaces here as a \
+         Database error",
+    );
+
+    // The first-queued eligibility pass commits the sole queued origin.
+    let StartEligibleTurnOutcome::Activated(activated) = activation_outcome else {
+        panic!("the raced eligibility pass must activate the queued origin");
+    };
+    assert_eq!(activated.turn(), queued_turn);
+    assert_eq!(activated.accepted_input().id(), queued_input);
+
+    let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+        SubmitInputRejectedResult::ActiveTurnPresent {
+            session: rejected_session,
+            active_turn,
+        },
+    )) = &submission_outcome
+    else {
+        panic!("the submission behind the activation must record the slot: {submission_outcome:?}");
+    };
+    assert_eq!(*rejected_session, session);
+    assert_eq!(*active_turn, queued_turn);
+
+    let rejection_effects: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM accepted_input WHERE accepted_input_id = $1),
+            (SELECT count(*) FROM turn_lifecycle WHERE turn_id = $2),
+            (SELECT count(*)
+               FROM submit_input_command
+              WHERE command_id = $3
+                AND rejection_kind = 'active_turn_present'
+                AND result_actual_active_turn_id = $4)",
+    )
+    .bind(racing_input.into_uuid())
+    .bind(racing_turn.into_uuid())
+    .bind(Uuid::from_u128(0x4b3))
+    .bind(queued_turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        rejection_effects,
+        (0, 0, 1),
+        "a rejected raced submission must persist its evidence and nothing else"
+    );
+
+    let invariant_shape: (i64, Uuid, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*)
+               FROM turn_lifecycle
+              WHERE session_id = $1 AND state_kind = 'active'),
+            (SELECT turn_id
+               FROM turn_lifecycle
+              WHERE session_id = $1 AND state_kind = 'active'),
+            (SELECT count(*) FROM accepted_input WHERE session_id = $1),
+            (SELECT max(acceptance_position)::bigint
+               FROM accepted_input
+              WHERE session_id = $1)",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(invariant_shape, (1, queued_turn.into_uuid(), 1, 1));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-007 / INV-008 / INV-009 / INV-012: the opposite scheduler queue order
+/// to the sibling interleave test — the submission holds its session row and
+/// the first place in the scheduler queue while the activation waits behind
+/// it. Postgres grants a contended row to its first queued waiter, so the
+/// serialized submission commits its applied origin at the next gap-free
+/// position together with its queued-work effects, and the eligibility pass
+/// then activates the earliest queued origin over that grown acceptance tail
+/// with exactly one active turn.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv007_inv008_inv009_inv012_submit_queued_ahead_of_activation_interleaves()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0x4d1, 0x8d1, direct(0xcd1)))
+        .await?;
+    let session = SessionId::from_uuid(Uuid::from_u128(0x8d1));
+    let queued_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x9d1));
+    let queued_turn = TurnId::from_uuid(Uuid::from_u128(0xad1));
+    let racing_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x9d2));
+    let racing_turn = TurnId::from_uuid(Uuid::from_u128(0xad2));
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                0x4d2,
+                0x8d1,
+                "eligible queued origin",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            queued_input,
+            Some(queued_turn),
+        )
+        .await?;
+
+    // Hold the scheduler row so both racers verifiably queue on it before
+    // either proceeds: the submission takes its session-row lock and blocks
+    // first, then the activation pass queues behind the submission.
+    let mut scheduler_blocker = pool.begin().await?;
+    sqlx::query("SELECT session_id FROM session_scheduler WHERE session_id = $1 FOR UPDATE")
+        .bind(Uuid::from_u128(0x8d1))
+        .execute(&mut *scheduler_blocker)
+        .await?;
+
+    let submission = tokio::spawn({
+        let repository = SubmitInputRepository::new(pool.clone());
+        async move {
+            repository
+                .handle(
+                    start_input(
+                        0x4d3,
+                        0x8d1,
+                        "racing start",
+                        1,
+                        ModelSelectionOverride::UseSessionDefault,
+                    ),
+                    racing_input,
+                    Some(racing_turn),
+                )
+                .await
+        }
+    });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "the submission must hold its session row and block on the held scheduler row"
+    );
+
+    let activation = tokio::spawn({
+        let mut service = StartEligibleTurnService::new(
+            FixedStartEligibleTurnIds::new(
+                [SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdd1))],
+                [ContextFrontierId::from_uuid(Uuid::from_u128(0xed1))],
+                [TurnAttemptId::from_uuid(Uuid::from_u128(0xbd1))],
+            ),
+            StartEligibleTurnRepository::new(pool.clone()),
+        );
+        async move { service.execute(session).await }
+    });
+    assert!(
+        blocked_backends_reached(&pool, 2).await?,
+        "the eligibility pass must queue behind the blocked submission"
+    );
+
+    scheduler_blocker.rollback().await?;
+    let submission_outcome = submission.await?.expect(
+        "the submission side must serialize without deadlocking; a 40P01 surfaces here as a \
+         Database error",
+    );
+    let activation_outcome = activation.await?.expect(
+        "the activation side must serialize without deadlocking; a 40P01 surfaces here as a \
+         Database error",
+    );
+
+    // Behind the committed submission, the eligibility pass still activates
+    // the earliest queued origin.
+    let StartEligibleTurnOutcome::Activated(activated) = activation_outcome else {
+        panic!("the raced eligibility pass must activate the queued origin");
+    };
+    assert_eq!(activated.turn(), queued_turn);
+    assert_eq!(activated.accepted_input().id(), queued_input);
+
+    let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::TurnOrigin(applied),
+    )) = &submission_outcome
+    else {
+        panic!("the submission ahead of the activation must apply: {submission_outcome:?}");
+    };
+    assert_eq!(applied.accepted_input(), racing_input);
+    assert_eq!(applied.turn(), racing_turn);
+    assert_eq!(applied.acceptance_position().as_u64(), 2);
+
+    let applied_effects: (i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*)
+               FROM accepted_input
+              WHERE accepted_input_id = $1
+                AND acceptance_position = 2
+                AND disposition_kind = 'origin_of'
+                AND origin_turn_id = $2),
+            (SELECT count(*) FROM queued_input_origin WHERE accepted_input_id = $1)",
+    )
+    .bind(racing_input.into_uuid())
+    .bind(racing_turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        applied_effects,
+        (1, 1),
+        "an applied raced submission must persist its acceptance and queued work"
+    );
+
+    let invariant_shape: (i64, Uuid, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*)
+               FROM turn_lifecycle
+              WHERE session_id = $1 AND state_kind = 'active'),
+            (SELECT turn_id
+               FROM turn_lifecycle
+              WHERE session_id = $1 AND state_kind = 'active'),
+            (SELECT count(*) FROM accepted_input WHERE session_id = $1),
+            (SELECT max(acceptance_position)::bigint
+               FROM accepted_input
+              WHERE session_id = $1)",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(invariant_shape, (1, queued_turn.into_uuid(), 2, 2));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S03 / INV-009: nonexistent and empty sessions are false wake-ups that
 /// return `NoEligibleTurn` and create no lifecycle effects.
 #[tokio::test(flavor = "multi_thread")]
@@ -4108,6 +4559,8 @@ async fn occupied_slot_after_and_safe_point_apply_replay_and_restart() -> Result
     CreateSessionRepository::new(pool.clone())
         .handle(prepared(0x431, 0x831, direct(0xc31)))
         .await?;
+    let active_origin_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x931));
+    let active_origin_turn = TurnId::from_uuid(Uuid::from_u128(0xa31));
     let repository = SubmitInputRepository::new(pool.clone());
     repository
         .handle(
@@ -4118,20 +4571,22 @@ async fn occupied_slot_after_and_safe_point_apply_replay_and_restart() -> Result
                 1,
                 ModelSelectionOverride::UseSessionDefault,
             ),
-            AcceptedInputId::from_uuid(Uuid::from_u128(0x931)),
-            Some(TurnId::from_uuid(Uuid::from_u128(0xa31))),
+            active_origin_input,
+            Some(active_origin_turn),
         )
         .await?;
-    activate_prepared_turn(
+    let activated = activate_earliest_queued_turn(
         &pool,
-        Uuid::from_u128(0x831),
-        Uuid::from_u128(0x931),
-        Uuid::from_u128(0xa31),
-        Uuid::from_u128(0xd31),
-        Uuid::from_u128(0xe31),
-        Uuid::from_u128(0xb31),
+        EarliestQueuedTurnActivation {
+            session: Uuid::from_u128(0x831),
+            origin_entry: Uuid::from_u128(0xd31),
+            starting_frontier: Uuid::from_u128(0xe31),
+            initial_attempt: Uuid::from_u128(0xb31),
+        },
     )
     .await?;
+    assert_eq!(activated.accepted_input().id(), active_origin_input);
+    assert_eq!(activated.turn(), active_origin_turn);
     let mut unrelated_frontier = pool.begin().await?;
     insert_frontier(
         &mut unrelated_frontier,
@@ -4356,6 +4811,501 @@ async fn occupied_slot_after_and_safe_point_apply_replay_and_restart() -> Result
     Ok(())
 }
 
+/// S01 / S03 / S08 / INV-008 / INV-009 / INV-012: the composed production
+/// chain — CreateSession service, accepted start submission, and
+/// StartEligibleTurn service activation — produces the occupied slot the
+/// seeded occupied-slot tests assume: a matching After request queues at the
+/// next gap-free position, a matching NextSafePoint binds pending steering to
+/// the activated turn, and a start names the activated turn in its typed
+/// rejection.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn occupied_slot_handling_composes_with_service_activated_first_turn()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = SessionId::from_uuid(Uuid::from_u128(0x8a1));
+    let mut create_service = CreateSessionService::new(
+        FixedSessionIds::new([session]),
+        CreateSessionRepository::new(pool.clone()),
+    );
+    let CreateSessionOutcome::Applied(created) = create_service
+        .execute(CreateSessionRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::from_u128(0x4a1)),
+            SessionConfigurationDefaults::new(direct(0xca1)),
+        )?)
+        .await?
+    else {
+        panic!("owner-initiated composed creation must apply");
+    };
+    assert_eq!(created.session(), session);
+
+    let origin_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x9a1));
+    let origin_turn = TurnId::from_uuid(Uuid::from_u128(0xaa1));
+    let mut submit_service = SubmitInputService::new(
+        FixedSubmitInputIds::new(
+            [
+                origin_input,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x9a2)),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x9a3)),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x9a4)),
+            ],
+            [
+                origin_turn,
+                TurnId::from_uuid(Uuid::from_u128(0xaa2)),
+                TurnId::from_uuid(Uuid::from_u128(0xaa3)),
+            ],
+        ),
+        SubmitInputRepository::new(pool.clone()),
+    );
+    let start = start_input(
+        0x4a2,
+        0x8a1,
+        "composed start",
+        1,
+        ModelSelectionOverride::UseSessionDefault,
+    );
+    let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::TurnOrigin(origin),
+    )) = submit_service
+        .execute(SubmitInputRequest::try_new(
+            start.command_id(),
+            start.session(),
+            start.content().clone(),
+            start.delivery(),
+        )?)
+        .await?
+    else {
+        panic!("the composed no-active-turn start must apply");
+    };
+    assert_eq!(origin.turn(), origin_turn);
+    assert_eq!(origin.acceptance_position().as_u64(), 1);
+
+    let starting_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0xea1));
+    let mut activation_service = StartEligibleTurnService::new(
+        FixedStartEligibleTurnIds::new(
+            [SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xda1))],
+            [starting_frontier],
+            [TurnAttemptId::from_uuid(Uuid::from_u128(0xba1))],
+        ),
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    let StartEligibleTurnOutcome::Activated(activated) =
+        activation_service.execute(session).await?
+    else {
+        panic!("the sole composed queued turn must activate");
+    };
+    assert_eq!(activated.session(), session);
+    assert_eq!(activated.turn(), origin.turn());
+    assert_eq!(activated.accepted_input().id(), origin.accepted_input());
+    assert_eq!(
+        activated.start().lineage(),
+        AcceptedInputStartingLineage::FirstInSession
+    );
+    assert_eq!(activated.start().frontier().snapshot(), starting_frontier);
+
+    let after = input_with_delivery(
+        0x4a3,
+        0x8a1,
+        "after service-activated turn",
+        DeliveryRequest::AfterCurrentTurn {
+            expected_active_turn: activated.turn(),
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    );
+    let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::TurnOrigin(after_applied),
+    )) = submit_service
+        .execute(SubmitInputRequest::try_new(
+            after.command_id(),
+            after.session(),
+            after.content().clone(),
+            after.delivery(),
+        )?)
+        .await?
+    else {
+        panic!("matching AfterCurrentTurn must queue against the service-activated turn");
+    };
+    assert_eq!(after_applied.acceptance_position().as_u64(), 2);
+
+    let safe_point = input_with_delivery(
+        0x4a4,
+        0x8a1,
+        "steer service-activated turn",
+        DeliveryRequest::NextSafePoint {
+            expected_active_turn: activated.turn(),
+        },
+    );
+    let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::PendingSteering(steering),
+    )) = submit_service
+        .execute(SubmitInputRequest::try_new(
+            safe_point.command_id(),
+            safe_point.session(),
+            safe_point.content().clone(),
+            safe_point.delivery(),
+        )?)
+        .await?
+    else {
+        panic!("matching NextSafePoint must bind against the service-activated turn");
+    };
+    assert_eq!(steering.acceptance_position().as_u64(), 3);
+    assert_eq!(steering.binding().source_turn(), activated.turn());
+
+    let blocked_start = start_input(
+        0x4a5,
+        0x8a1,
+        "blocked composed start",
+        1,
+        ModelSelectionOverride::UseSessionDefault,
+    );
+    let blocked = submit_service
+        .execute(SubmitInputRequest::try_new(
+            blocked_start.command_id(),
+            blocked_start.session(),
+            blocked_start.content().clone(),
+            blocked_start.delivery(),
+        )?)
+        .await?;
+    assert!(
+        matches!(
+            blocked,
+            SubmitInputOutcome::Recorded(SubmitInputResult::Rejected(
+                SubmitInputRejectedResult::ActiveTurnPresent {
+                    session: rejected_session,
+                    active_turn,
+                }
+            )) if rejected_session == session && active_turn == activated.turn()
+        ),
+        "a start against the service-activated slot must name it: {blocked:?}"
+    );
+
+    let effect_shape: (i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*)
+               FROM turn_lifecycle
+              WHERE session_id = $1 AND state_kind = 'active'),
+            (SELECT count(*)
+               FROM accepted_input
+              WHERE accepted_input_id = $2
+                AND delivery_kind = 'after_current_turn'
+                AND disposition_kind = 'origin_of'
+                AND origin_turn_id = $3),
+            (SELECT count(*) FROM queued_input_origin WHERE accepted_input_id = $2),
+            (SELECT count(*)
+               FROM accepted_input
+              WHERE accepted_input_id = $4
+                AND delivery_kind = 'next_safe_point'
+                AND disposition_kind = 'pending_steering'
+                AND expected_active_turn_id = $5),
+            (SELECT count(*) FROM queued_input_origin WHERE accepted_input_id = $4)",
+    )
+    .bind(session.into_uuid())
+    .bind(after_applied.accepted_input().into_uuid())
+    .bind(after_applied.turn().into_uuid())
+    .bind(steering.accepted_input().into_uuid())
+    .bind(activated.turn().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(effect_shape, (1, 1, 1, 1, 0));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S01 / S08 / S09 / INV-008 / INV-009 / INV-012: after the production chain
+/// activates the first turn and terminal facts close it, the production
+/// activation service commits the After-lineage successor, and occupied-slot
+/// handling against that successor matches the first-in-session pass: After
+/// queues at the next gap-free position, NextSafePoint binds to the
+/// successor, and a start names it. The predecessor's terminalization uses
+/// this suite's raw terminal seam (the same seam the S09 predecessor-prefix
+/// test uses) because no production terminalization adapter exists yet; every
+/// other step is the production chain.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn occupied_slot_handling_composes_with_service_activated_after_lineage_turn()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = SessionId::from_uuid(Uuid::from_u128(0x8c1));
+    let mut create_service = CreateSessionService::new(
+        FixedSessionIds::new([session]),
+        CreateSessionRepository::new(pool.clone()),
+    );
+    let CreateSessionOutcome::Applied(created) = create_service
+        .execute(CreateSessionRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::from_u128(0x4c1)),
+            SessionConfigurationDefaults::new(direct(0xcc1)),
+        )?)
+        .await?
+    else {
+        panic!("owner-initiated composed creation must apply");
+    };
+    assert_eq!(created.session(), session);
+
+    let first_turn = TurnId::from_uuid(Uuid::from_u128(0xac1));
+    let second_turn = TurnId::from_uuid(Uuid::from_u128(0xac2));
+    let mut submit_service = SubmitInputService::new(
+        FixedSubmitInputIds::new(
+            [
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x9c1)),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x9c2)),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x9c3)),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x9c4)),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x9c5)),
+            ],
+            [
+                first_turn,
+                second_turn,
+                TurnId::from_uuid(Uuid::from_u128(0xac3)),
+                TurnId::from_uuid(Uuid::from_u128(0xac4)),
+            ],
+        ),
+        SubmitInputRepository::new(pool.clone()),
+    );
+    let first_start = start_input(
+        0x4c2,
+        0x8c1,
+        "first composed start",
+        1,
+        ModelSelectionOverride::UseSessionDefault,
+    );
+    let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::TurnOrigin(first_origin),
+    )) = submit_service
+        .execute(SubmitInputRequest::try_new(
+            first_start.command_id(),
+            first_start.session(),
+            first_start.content().clone(),
+            first_start.delivery(),
+        )?)
+        .await?
+    else {
+        panic!("the first composed start must apply");
+    };
+    assert_eq!(first_origin.turn(), first_turn);
+    let second_start = start_input(
+        0x4c3,
+        0x8c1,
+        "second composed start",
+        1,
+        ModelSelectionOverride::UseSessionDefault,
+    );
+    let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::TurnOrigin(second_origin),
+    )) = submit_service
+        .execute(SubmitInputRequest::try_new(
+            second_start.command_id(),
+            second_start.session(),
+            second_start.content().clone(),
+            second_start.delivery(),
+        )?)
+        .await?
+    else {
+        panic!("the second composed start must queue behind the first");
+    };
+    assert_eq!(second_origin.turn(), second_turn);
+    assert_eq!(second_origin.acceptance_position().as_u64(), 2);
+
+    let first_origin_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdc1));
+    let first_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(0xbc1));
+    let mut first_activation = StartEligibleTurnService::new(
+        FixedStartEligibleTurnIds::new(
+            [first_origin_entry],
+            [ContextFrontierId::from_uuid(Uuid::from_u128(0xec1))],
+            [first_attempt],
+        ),
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    let StartEligibleTurnOutcome::Activated(first_activated) =
+        first_activation.execute(session).await?
+    else {
+        panic!("the first composed queued turn must activate");
+    };
+    assert_eq!(first_activated.turn(), first_turn);
+
+    // Raw terminal seam: no production terminalization adapter exists yet, so
+    // the predecessor's failure facts commit exactly as in the S09
+    // predecessor-prefix test.
+    let failure_entry = Uuid::from_u128(0xdc2);
+    let terminal_frontier = Uuid::from_u128(0xec2);
+    let mut terminalize = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             origin_accepted_input_id, failed_turn_id)
+         VALUES ($1, $2, 'turn_failed', NULL, $3)",
+    )
+    .bind(session.into_uuid())
+    .bind(failure_entry)
+    .bind(first_turn.into_uuid())
+    .execute(&mut *terminalize)
+    .await?;
+    insert_frontier(
+        &mut terminalize,
+        session.into_uuid(),
+        terminal_frontier,
+        Decimal::from(2_u64),
+        &[
+            (
+                Decimal::ONE,
+                session.into_uuid(),
+                first_origin_entry.into_uuid(),
+            ),
+            (Decimal::from(2_u64), session.into_uuid(), failure_entry),
+        ],
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'ended',
+                end_variant = 'without_stop',
+                end_disposition = 'known_failure'
+          WHERE turn_attempt_id = $1",
+    )
+    .bind(first_attempt.into_uuid())
+    .execute(&mut *terminalize)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET state_kind = 'terminal',
+                terminal_frontier_id = $1,
+                active_phase_kind = NULL,
+                current_attempt_id = NULL,
+                terminal_disposition_kind = 'failed'
+          WHERE turn_id = $2",
+    )
+    .bind(terminal_frontier)
+    .bind(first_turn.into_uuid())
+    .execute(&mut *terminalize)
+    .await?;
+    terminalize.commit().await?;
+
+    let mut second_activation = StartEligibleTurnService::new(
+        FixedStartEligibleTurnIds::new(
+            [SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdc3))],
+            [ContextFrontierId::from_uuid(Uuid::from_u128(0xec3))],
+            [TurnAttemptId::from_uuid(Uuid::from_u128(0xbc3))],
+        ),
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    let StartEligibleTurnOutcome::Activated(second_activated) =
+        second_activation.execute(session).await?
+    else {
+        panic!("the successor must activate after its failed predecessor");
+    };
+    assert_eq!(second_activated.turn(), second_turn);
+    assert_eq!(
+        second_activated.start().lineage(),
+        AcceptedInputStartingLineage::After {
+            immediate_predecessor: first_turn,
+        }
+    );
+
+    let after = input_with_delivery(
+        0x4c4,
+        0x8c1,
+        "after the After-lineage turn",
+        DeliveryRequest::AfterCurrentTurn {
+            expected_active_turn: second_activated.turn(),
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    );
+    let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::TurnOrigin(after_applied),
+    )) = submit_service
+        .execute(SubmitInputRequest::try_new(
+            after.command_id(),
+            after.session(),
+            after.content().clone(),
+            after.delivery(),
+        )?)
+        .await?
+    else {
+        panic!("matching AfterCurrentTurn must queue against the After-lineage turn");
+    };
+    assert_eq!(after_applied.acceptance_position().as_u64(), 3);
+
+    let safe_point = input_with_delivery(
+        0x4c5,
+        0x8c1,
+        "steer the After-lineage turn",
+        DeliveryRequest::NextSafePoint {
+            expected_active_turn: second_activated.turn(),
+        },
+    );
+    let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::PendingSteering(steering),
+    )) = submit_service
+        .execute(SubmitInputRequest::try_new(
+            safe_point.command_id(),
+            safe_point.session(),
+            safe_point.content().clone(),
+            safe_point.delivery(),
+        )?)
+        .await?
+    else {
+        panic!("matching NextSafePoint must bind against the After-lineage turn");
+    };
+    assert_eq!(steering.acceptance_position().as_u64(), 4);
+    assert_eq!(steering.binding().source_turn(), second_activated.turn());
+
+    let blocked_start = start_input(
+        0x4c6,
+        0x8c1,
+        "blocked start behind the After-lineage turn",
+        1,
+        ModelSelectionOverride::UseSessionDefault,
+    );
+    let blocked = submit_service
+        .execute(SubmitInputRequest::try_new(
+            blocked_start.command_id(),
+            blocked_start.session(),
+            blocked_start.content().clone(),
+            blocked_start.delivery(),
+        )?)
+        .await?;
+    assert!(
+        matches!(
+            blocked,
+            SubmitInputOutcome::Recorded(SubmitInputResult::Rejected(
+                SubmitInputRejectedResult::ActiveTurnPresent {
+                    session: rejected_session,
+                    active_turn,
+                }
+            )) if rejected_session == session && active_turn == second_activated.turn()
+        ),
+        "a start against the After-lineage slot must name it: {blocked:?}"
+    );
+
+    let successor_shape: (i64, String, Uuid, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*)
+               FROM turn_lifecycle
+              WHERE session_id = $1 AND state_kind = 'active'),
+            turn.start_lineage_kind,
+            turn.immediate_predecessor_turn_id,
+            frontier.member_count::bigint
+         FROM turn_lifecycle AS turn
+         JOIN context_frontier AS frontier
+           ON frontier.owning_session_id = turn.session_id
+          AND frontier.context_frontier_id = turn.starting_frontier_id
+        WHERE turn.turn_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(second_activated.turn().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        successor_shape,
+        (1, "after".into(), first_turn.into_uuid(), 3)
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-007 / INV-008 / INV-012: the session-before-scheduler lock order
 /// serializes mixed occupied-slot acceptances into one gap-free order while
 /// preserving each delivery's distinct atomic effect shape.
@@ -4367,6 +5317,8 @@ async fn occupied_slot_mixed_acceptances_serialize_positions_and_effects()
     CreateSessionRepository::new(pool.clone())
         .handle(prepared(0x451, 0x851, direct(0xc51)))
         .await?;
+    let active_origin_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x951));
+    let active_origin_turn = TurnId::from_uuid(Uuid::from_u128(0xa51));
     let repository = SubmitInputRepository::new(pool.clone());
     repository
         .handle(
@@ -4377,20 +5329,22 @@ async fn occupied_slot_mixed_acceptances_serialize_positions_and_effects()
                 1,
                 ModelSelectionOverride::UseSessionDefault,
             ),
-            AcceptedInputId::from_uuid(Uuid::from_u128(0x951)),
-            Some(TurnId::from_uuid(Uuid::from_u128(0xa51))),
+            active_origin_input,
+            Some(active_origin_turn),
         )
         .await?;
-    activate_prepared_turn(
+    let activated = activate_earliest_queued_turn(
         &pool,
-        Uuid::from_u128(0x851),
-        Uuid::from_u128(0x951),
-        Uuid::from_u128(0xa51),
-        Uuid::from_u128(0xd51),
-        Uuid::from_u128(0xe51),
-        Uuid::from_u128(0xb51),
+        EarliestQueuedTurnActivation {
+            session: Uuid::from_u128(0x851),
+            origin_entry: Uuid::from_u128(0xd51),
+            starting_frontier: Uuid::from_u128(0xe51),
+            initial_attempt: Uuid::from_u128(0xb51),
+        },
     )
     .await?;
+    assert_eq!(activated.accepted_input().id(), active_origin_input);
+    assert_eq!(activated.turn(), active_origin_turn);
 
     let (positions, turn_origins, pending_steering) =
         run_mixed_occupied_acceptances(repository).await?;
@@ -4437,6 +5391,8 @@ async fn occupied_slot_schema_constraints_and_checked_decode_fail_closed()
     CreateSessionRepository::new(pool.clone())
         .handle(prepared(0x461, 0x861, direct(0xc61)))
         .await?;
+    let active_origin_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x961));
+    let active_origin_turn = TurnId::from_uuid(Uuid::from_u128(0xa61));
     let repository = SubmitInputRepository::new(pool.clone());
     repository
         .handle(
@@ -4447,20 +5403,22 @@ async fn occupied_slot_schema_constraints_and_checked_decode_fail_closed()
                 1,
                 ModelSelectionOverride::UseSessionDefault,
             ),
-            AcceptedInputId::from_uuid(Uuid::from_u128(0x961)),
-            Some(TurnId::from_uuid(Uuid::from_u128(0xa61))),
+            active_origin_input,
+            Some(active_origin_turn),
         )
         .await?;
-    activate_prepared_turn(
+    let activated = activate_earliest_queued_turn(
         &pool,
-        Uuid::from_u128(0x861),
-        Uuid::from_u128(0x961),
-        Uuid::from_u128(0xa61),
-        Uuid::from_u128(0xd61),
-        Uuid::from_u128(0xe61),
-        Uuid::from_u128(0xb61),
+        EarliestQueuedTurnActivation {
+            session: Uuid::from_u128(0x861),
+            origin_entry: Uuid::from_u128(0xd61),
+            starting_frontier: Uuid::from_u128(0xe61),
+            initial_attempt: Uuid::from_u128(0xb61),
+        },
     )
     .await?;
+    assert_eq!(activated.accepted_input().id(), active_origin_input);
+    assert_eq!(activated.turn(), active_origin_turn);
     let safe_source = input_with_delivery(
         0x463,
         0x861,
@@ -4857,6 +5815,8 @@ async fn inv016_pending_steering_and_source_terminalization_serialize() -> Resul
     CreateSessionRepository::new(pool.clone())
         .handle(prepared(0x471, 0x871, direct(0xc71)))
         .await?;
+    let active_origin_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x971));
+    let active_origin_turn = TurnId::from_uuid(Uuid::from_u128(0xa71));
     let repository = SubmitInputRepository::new(pool.clone());
     repository
         .handle(
@@ -4867,20 +5827,22 @@ async fn inv016_pending_steering_and_source_terminalization_serialize() -> Resul
                 1,
                 ModelSelectionOverride::UseSessionDefault,
             ),
-            AcceptedInputId::from_uuid(Uuid::from_u128(0x971)),
-            Some(TurnId::from_uuid(Uuid::from_u128(0xa71))),
+            active_origin_input,
+            Some(active_origin_turn),
         )
         .await?;
-    activate_prepared_turn(
+    let activated = activate_earliest_queued_turn(
         &pool,
-        Uuid::from_u128(0x871),
-        Uuid::from_u128(0x971),
-        Uuid::from_u128(0xa71),
-        Uuid::from_u128(0xd71),
-        Uuid::from_u128(0xe71),
-        Uuid::from_u128(0xb71),
+        EarliestQueuedTurnActivation {
+            session: Uuid::from_u128(0x871),
+            origin_entry: Uuid::from_u128(0xd71),
+            starting_frontier: Uuid::from_u128(0xe71),
+            initial_attempt: Uuid::from_u128(0xb71),
+        },
     )
     .await?;
+    assert_eq!(activated.accepted_input().id(), active_origin_input);
+    assert_eq!(activated.turn(), active_origin_turn);
 
     let mut terminalize_source = pool.begin().await?;
     sqlx::query(
@@ -5005,6 +5967,8 @@ async fn occupied_slot_rejections_and_matching_interrupt_rollback_are_exact()
     CreateSessionRepository::new(pool.clone())
         .handle(prepared(0x441, 0x841, direct(0xc41)))
         .await?;
+    let active_origin_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x941));
+    let active_origin_turn = TurnId::from_uuid(Uuid::from_u128(0xa41));
     let repository = SubmitInputRepository::new(pool.clone());
     repository
         .handle(
@@ -5015,20 +5979,22 @@ async fn occupied_slot_rejections_and_matching_interrupt_rollback_are_exact()
                 1,
                 ModelSelectionOverride::UseSessionDefault,
             ),
-            AcceptedInputId::from_uuid(Uuid::from_u128(0x941)),
-            Some(TurnId::from_uuid(Uuid::from_u128(0xa41))),
+            active_origin_input,
+            Some(active_origin_turn),
         )
         .await?;
-    activate_prepared_turn(
+    let activated = activate_earliest_queued_turn(
         &pool,
-        Uuid::from_u128(0x841),
-        Uuid::from_u128(0x941),
-        Uuid::from_u128(0xa41),
-        Uuid::from_u128(0xd41),
-        Uuid::from_u128(0xe41),
-        Uuid::from_u128(0xb41),
+        EarliestQueuedTurnActivation {
+            session: Uuid::from_u128(0x841),
+            origin_entry: Uuid::from_u128(0xd41),
+            starting_frontier: Uuid::from_u128(0xe41),
+            initial_attempt: Uuid::from_u128(0xb41),
+        },
     )
     .await?;
+    assert_eq!(activated.accepted_input().id(), active_origin_input);
+    assert_eq!(activated.turn(), active_origin_turn);
 
     let active_start = start_input(
         0x443,
