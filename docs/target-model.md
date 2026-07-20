@@ -278,8 +278,10 @@ replaceable transient content (INV-032; normative in
 [ADR-0021](decisions/0021-compatibility-and-negotiation.md)).
 
 The publication mechanism inside the hub is decided: the transactional outbox is
-normative in [ADR-0040](decisions/0040-transactional-outbox.md). No code
-implements it yet.
+normative in [ADR-0040](decisions/0040-transactional-outbox.md). Its
+commit-order and durable-delivery storage foundation plus the CreateSession
+append are implemented; other transition appends and the publisher remain
+pending.
 
 ## Destination features
 
@@ -436,7 +438,7 @@ reserved ADR number), **Proposed** (an ADR proposal exists but is not accepted),
 | Forking from a transcript frontier                                         | Accepted — [ADR-0003](decisions/0003-session-creation-and-transcript-ancestry.md), [ADR-0030](decisions/0030-context-frontier-snapshots.md); selectable frontier boundaries [open](open-questions.md#identity-representation)                                         |
 | Archive / restore                                                          | Reserved — ADR-0028; destructive retention ADR-0029                                                                                                                                                                                                                   |
 | Live-update protocol semantics                                             | Accepted — [ADR-0019](decisions/0019-process-protocol.md), [ADR-0021](decisions/0021-compatibility-and-negotiation.md)                                                                                                                                                |
-| Transactional outbox publication                                           | Accepted — [ADR-0040](decisions/0040-transactional-outbox.md); no code                                                                                                                                                                                                |
+| Transactional outbox publication                                           | Partially implemented — [ADR-0040](decisions/0040-transactional-outbox.md); storage foundation and CreateSession append only                                                                                                                                          |
 | Actor attribution                                                          | Implemented — [ADR-0039](decisions/0039-actor-attribution.md); SubmitInput attribution storage and stored-actor validation                                                                                                                                            |
 | Streaming response snapshots                                               | Target — streaming-checkpoint question open under [ADR-0022](decisions/0022-persistence-representation.md)                                                                                                                                                            |
 | Artifacts                                                                  | Target                                                                                                                                                                                                                                                                |

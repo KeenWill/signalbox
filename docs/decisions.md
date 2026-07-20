@@ -47,6 +47,83 @@ queued-session index migration, direct application dependencies on Tokio and the
 tests. It adds no queue authority, dispatch transport, startup scan, provider
 behavior, or lifecycle storage representation.
 
+## 2026-07-20 — First outbox append is scoped to CreateSession
+
+**Context.** ADR-0040 makes in-transaction event append a standing obligation
+for client-visible state changes. The commissioned first append slice names
+CreateSession as the least-contended path and explicitly leaves the already
+implemented defaults, input, and activation transactions to their own later
+slices; inventing their event projections here would exceed that scope.
+
+**Decision.** Add a persistence-owned typed append seam that receives the
+state-changing adapter's existing PostgreSQL connection and neither begins nor
+commits a transaction. Call it only after all first-handling CreateSession rows
+are written and before that transaction commits. Equal replay, conflicting
+reuse, and failed handling append nothing. The seam writes the closed
+`session_created` record family selected by the preceding storage decision;
+CreateSession is the only production caller in this slice.
+
+**Rejected alternatives.** Retrofitting every existing transaction now would
+combine several uncommissioned client-event projections in one review. Returning
+an event from the domain or application transition would cross INV-002's
+representation boundary. A generic kind-and-fields append API would make the
+closed storage record family a caller convention.
+
+**Affects.** `crates/persistence/src/outbox.rs`, the PostgreSQL CreateSession
+adapter, its atomicity and replay integration tests, INV-032's enforcement
+index, and the target-model status. Defaults replacement, input acceptance,
+activation, protocol mapping, wake-up, and publication remain later work.
+
+## 2026-07-20 — Outbox append and delivery transactions are isolated
+
+**Context.** The first storage slice allowed a transaction to see its own
+uncommitted outbox event while advancing the durable delivered prefix. Such a
+commit could make restart recovery skip an event that no publisher had observed
+or handed to a consumer, violating ADR-0040's at-least-once contract.
+
+**Decision.** Record the allocating and delivering PostgreSQL transaction IDs on
+their respective singleton rows. Reject event append and delivered-prefix
+advancement in the same transaction in either order. Delivery from a later
+transaction remains limited to the next existing sequence.
+
+**Rejected alternatives.** Treating same-transaction visibility as proof of a
+prior commit cannot distinguish an observable event. An application-only check
+would leave direct database transactions unconstrained. Per-connection state
+would not provide a durable, database-enforced correlation.
+
+**Affects.** The transactional-outbox migration, its real-PostgreSQL
+delivery-isolation test, and the INV-032 enforcement index; no event shape,
+publication API, protocol, retention, or pruning semantics.
+
+## 2026-07-20 — Serialized outbox allocation and durable delivery prefix
+
+**Context.** ADR-0040 requires a commit-ordered global event sequence whose
+delivered prefixes cannot later acquire a lower committed event, while leaving
+the allocation and delivery-bookkeeping technique to the implementation slice. A
+PostgreSQL sequence or an unlocked counter allocates before commit and can
+therefore expose a higher event while a lower transaction remains in flight.
+
+**Decision.** Allocate each outbox header by transactionally incrementing one
+singleton row. Its row lock remains held through commit or rollback, so later
+allocators cannot pass it; a deferred constraint requires every increment to
+have its matching immutable event. Store the independently mutable delivered
+prefix in a second singleton row and permit it to advance only to the next
+existing sequence. Use full-`u64` `numeric(20, 0)` values at this storage-only
+boundary. The first closed header/typed-record family admits only
+`session_created` version 1; its production append arrives in the next stack
+slice.
+
+**Rejected alternatives.** PostgreSQL sequences and unlocked counters permit
+commit-order inversion. Holding an in-process allocation mutex would make
+correctness depend on process memory and would not constrain direct database
+transactions. Tracking per-row delivered flags would permit non-prefix marking
+and make restart recovery reconstruct a fact the singleton can state directly.
+
+**Affects.** The transactional-outbox migration, its real-PostgreSQL ordering
+and prefix-stability tests, the INV-032 enforcement index, and the target-model
+implementation status; no domain, application, wire, retention, or pruning
+semantics.
+
 ## 2026-07-20 — Static TOML supplies model and alias definitions
 
 **Context.** The model-call milestone needs a concrete source for configured
