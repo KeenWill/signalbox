@@ -339,6 +339,78 @@ async fn assert_outbox_truncate_rejected(
     Ok(())
 }
 
+/// Inserts the complete pre-outbox session record family for allocator tests.
+///
+/// The command and model identities derive from the one session seed so the
+/// fixture states only the session identity those tests observe.
+async fn insert_outbox_session_fixture(
+    pool: &PgPool,
+    session_seed: u128,
+) -> Result<Uuid, sqlx::Error> {
+    let session = Uuid::from_u128(session_seed);
+    let command = Uuid::from_u128(session_seed ^ 0x1000);
+    let model = Uuid::from_u128(session_seed ^ 0x2000);
+    let mut transaction = pool.begin().await?;
+
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'create_session', 1, transaction_timestamp())",
+    )
+    .bind(command)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session (session_id, creation_cause, ancestry_kind)
+         VALUES ($1, 'owner_initiated', 'none')",
+    )
+    .bind(session)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query("INSERT INTO session_scheduler (session_id) VALUES ($1)")
+        .bind(session)
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        "INSERT INTO session_defaults_version
+            (session_id, version, model_selection_kind,
+             direct_model_selection_id, model_alias_id)
+         VALUES ($1, 1, 'direct', $2, NULL)",
+    )
+    .bind(session)
+    .bind(model)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO session_current_defaults (session_id, current_version)
+         VALUES ($1, 1)",
+    )
+    .bind(session)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO create_session_command
+            (command_id, command_kind, storage_version,
+             creation_cause, ancestry_kind, initial_defaults_version,
+             model_selection_kind, direct_model_selection_id, model_alias_id,
+             result_kind, created_session_id)
+         VALUES (
+            $1, 'create_session', 1,
+            'owner_initiated', 'none', 1,
+            'direct', $2, NULL,
+            'applied', $3
+         )",
+    )
+    .bind(command)
+    .bind(model)
+    .bind(session)
+    .execute(&mut *transaction)
+    .await?;
+
+    transaction.commit().await?;
+    Ok(session)
+}
+
 fn direct(value: u128) -> ModelSelectionRequest {
     ModelSelectionRequest::Direct(signalbox_domain::DirectModelSelection::from_uuid(
         Uuid::from_u128(value),
@@ -7969,22 +8041,18 @@ async fn inv002_inv008_inv012_submit_corruption_and_position_exhaustion_fail_clo
 async fn s24_inv032_outbox_sequences_follow_concurrent_commit_order() -> Result<(), Box<dyn Error>>
 {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
-        .handle(prepared(0xe01, 0xe11, direct(0xe21)))
-        .await?;
-    CreateSessionRepository::new(pool.clone())
-        .handle(prepared(0xe02, 0xe12, direct(0xe22)))
-        .await?;
+    let first_session = insert_outbox_session_fixture(&pool, 0xe11).await?;
+    let second_session = insert_outbox_session_fixture(&pool, 0xe12).await?;
 
     let mut first_transaction = pool.begin().await?;
     let first_sequence =
-        append_session_created_test_event(&mut first_transaction, Uuid::from_u128(0xe11)).await?;
+        append_session_created_test_event(&mut first_transaction, first_session).await?;
     let second = tokio::spawn({
         let pool = pool.clone();
         async move {
             let mut transaction = pool.begin().await?;
             let sequence =
-                append_session_created_test_event(&mut transaction, Uuid::from_u128(0xe12)).await?;
+                append_session_created_test_event(&mut transaction, second_session).await?;
             transaction.commit().await?;
             Ok::<_, sqlx::Error>(sequence)
         }
@@ -8009,8 +8077,8 @@ async fn s24_inv032_outbox_sequences_follow_concurrent_commit_order() -> Result<
     assert_eq!(
         committed,
         vec![
-            (first_sequence, Uuid::from_u128(0xe11)),
-            (second_sequence, Uuid::from_u128(0xe12)),
+            (first_sequence, first_session),
+            (second_sequence, second_session),
         ]
     );
 
@@ -8026,16 +8094,12 @@ async fn s24_inv032_outbox_sequences_follow_concurrent_commit_order() -> Result<
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s24_inv032_outbox_delivery_prefix_is_stable() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
-        .handle(prepared(0xe03, 0xe13, direct(0xe23)))
-        .await?;
-    CreateSessionRepository::new(pool.clone())
-        .handle(prepared(0xe04, 0xe14, direct(0xe24)))
-        .await?;
+    let first_session = insert_outbox_session_fixture(&pool, 0xe13).await?;
+    let second_session = insert_outbox_session_fixture(&pool, 0xe14).await?;
 
     let mut first_transaction = pool.begin().await?;
     let first_sequence =
-        append_session_created_test_event(&mut first_transaction, Uuid::from_u128(0xe13)).await?;
+        append_session_created_test_event(&mut first_transaction, first_session).await?;
     let (allocated_sender, allocated_receiver) = tokio::sync::oneshot::channel();
     let (commit_sender, commit_receiver) = tokio::sync::oneshot::channel();
     let second = tokio::spawn({
@@ -8043,7 +8107,7 @@ async fn s24_inv032_outbox_delivery_prefix_is_stable() -> Result<(), Box<dyn Err
         async move {
             let mut transaction = pool.begin().await?;
             let sequence =
-                append_session_created_test_event(&mut transaction, Uuid::from_u128(0xe14)).await?;
+                append_session_created_test_event(&mut transaction, second_session).await?;
             allocated_sender
                 .send(sequence)
                 .expect("the prefix test receives the second allocation");
@@ -8131,12 +8195,8 @@ async fn s24_inv032_outbox_delivery_prefix_is_stable() -> Result<(), Box<dyn Err
 async fn s24_inv032_outbox_delivery_rejects_event_producing_transaction()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
-        .handle(prepared(0xe05, 0xe15, direct(0xe25)))
-        .await?;
-    CreateSessionRepository::new(pool.clone())
-        .handle(prepared(0xe06, 0xe16, direct(0xe26)))
-        .await?;
+    insert_outbox_session_fixture(&pool, 0xe15).await?;
+    insert_outbox_session_fixture(&pool, 0xe16).await?;
 
     let mut event_transaction = pool.begin().await?;
     let sequence =
@@ -8244,6 +8304,166 @@ async fn inv032_outbox_storage_rejects_truncate() -> Result<(), Box<dyn Error>> 
     assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE outbox_event CASCADE").await?;
     assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE session_created_outbox_event CASCADE")
         .await?;
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S01 / INV-032: a deferred failure after the production append rolls the
+/// CreateSession state, event, and sequence allocation back together; retry
+/// commits all three together.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s01_inv032_create_session_and_outbox_commit_or_roll_back_together()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    sqlx::query(
+        "CREATE FUNCTION fail_test_session_created_outbox_commit()
+         RETURNS trigger
+         LANGUAGE plpgsql
+         AS $$
+         BEGIN
+             RAISE EXCEPTION 'injected failure after outbox append'
+                 USING ERRCODE = '40001';
+         END;
+         $$",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "CREATE CONSTRAINT TRIGGER zz_test_fail_session_created_outbox_commit
+         AFTER INSERT ON session_created_outbox_event
+         DEFERRABLE INITIALLY DEFERRED
+         FOR EACH ROW
+         EXECUTE FUNCTION fail_test_session_created_outbox_commit()",
+    )
+    .execute(&pool)
+    .await?;
+
+    let repository = CreateSessionRepository::new(pool.clone());
+    let creation = prepared(0xe31, 0xe41, direct(0xe51));
+    let command_id = creation.command().command_id().into_uuid();
+    let session_id = creation.applied_result().session().into_uuid();
+    let error = repository
+        .handle(creation)
+        .await
+        .expect_err("the deferred fixture failure must abort commit");
+    assert!(matches!(error, CreateSessionRepositoryError::Database(_)));
+    let rolled_back: (i64, i64, i64, i64, Decimal) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*)
+               FROM durable_command
+              WHERE command_id = $1),
+            (SELECT count(*)
+               FROM session
+              WHERE session_id = $2),
+            (SELECT count(*)
+               FROM outbox_event
+              WHERE session_id = $2),
+            (SELECT count(*)
+               FROM session_created_outbox_event
+              WHERE session_id = $2),
+            (SELECT last_sequence
+               FROM outbox_sequence_state
+              WHERE singleton)",
+    )
+    .bind(command_id)
+    .bind(session_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(rolled_back, (0, 0, 0, 0, Decimal::ZERO));
+
+    sqlx::query(
+        "DROP TRIGGER zz_test_fail_session_created_outbox_commit
+            ON session_created_outbox_event",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query("DROP FUNCTION fail_test_session_created_outbox_commit()")
+        .execute(&pool)
+        .await?;
+
+    assert_eq!(
+        repository.handle(creation).await?,
+        CreateSessionHandlingOutcome::Applied(creation.applied_result())
+    );
+    let committed: (i64, i64, i64, i64, Decimal) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*)
+               FROM durable_command
+              WHERE command_id = $1),
+            (SELECT count(*)
+               FROM session
+              WHERE session_id = $2),
+            (SELECT count(*)
+               FROM outbox_event
+              WHERE session_id = $2),
+            (SELECT count(*)
+               FROM session_created_outbox_event
+              WHERE session_id = $2),
+            (SELECT last_sequence
+               FROM outbox_sequence_state
+              WHERE singleton)",
+    )
+    .bind(command_id)
+    .bind(session_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(committed, (1, 1, 1, 1, Decimal::ONE));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S01 / INV-012 / INV-032: only first committed handling emits the creation
+/// event; equal replay and conflicting identifier reuse append nothing.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s01_inv012_inv032_create_session_first_handling_appends_exactly_once()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = CreateSessionRepository::new(pool.clone());
+    let creation = prepared(0xe32, 0xe42, direct(0xe52));
+
+    assert_eq!(
+        repository.handle(creation).await?,
+        CreateSessionHandlingOutcome::Applied(creation.applied_result())
+    );
+    assert_eq!(
+        repository.handle(creation).await?,
+        CreateSessionHandlingOutcome::Applied(creation.applied_result())
+    );
+    assert_eq!(
+        repository
+            .handle(prepared(0xe32, 0xe43, direct(0xe53)))
+            .await?,
+        CreateSessionHandlingOutcome::ConflictingReuse {
+            command_id: creation.command().command_id(),
+        }
+    );
+
+    let events: Vec<(Decimal, String, i16, Uuid)> = sqlx::query_as(
+        "SELECT event_sequence, event_kind, storage_version, session_id
+           FROM outbox_event
+          ORDER BY event_sequence",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        events,
+        vec![(
+            Decimal::ONE,
+            "session_created".to_owned(),
+            1,
+            creation.applied_result().session().into_uuid(),
+        )]
+    );
+    let typed_events: i64 = sqlx::query_scalar("SELECT count(*) FROM session_created_outbox_event")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(typed_events, 1);
 
     pool.close().await;
     drop(container);

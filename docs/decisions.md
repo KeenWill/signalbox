@@ -9,6 +9,33 @@ that constrains several components — require a full record under
 [decisions/](decisions/README.md) instead. Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-20 — First outbox append is scoped to CreateSession
+
+**Context.** ADR-0040 makes in-transaction event append a standing obligation
+for client-visible state changes. The commissioned first append slice names
+CreateSession as the least-contended path and explicitly leaves the already
+implemented defaults, input, and activation transactions to their own later
+slices; inventing their event projections here would exceed that scope.
+
+**Decision.** Add a persistence-owned typed append seam that receives the
+state-changing adapter's existing PostgreSQL connection and neither begins nor
+commits a transaction. Call it only after all first-handling CreateSession rows
+are written and before that transaction commits. Equal replay, conflicting
+reuse, and failed handling append nothing. The seam writes the closed
+`session_created` record family selected by the preceding storage decision;
+CreateSession is the only production caller in this slice.
+
+**Rejected alternatives.** Retrofitting every existing transaction now would
+combine several uncommissioned client-event projections in one review. Returning
+an event from the domain or application transition would cross INV-002's
+representation boundary. A generic kind-and-fields append API would make the
+closed storage record family a caller convention.
+
+**Affects.** `crates/persistence/src/outbox.rs`, the PostgreSQL CreateSession
+adapter, its atomicity and replay integration tests, INV-032's enforcement
+index, and the target-model status. Defaults replacement, input acceptance,
+activation, protocol mapping, wake-up, and publication remain later work.
+
 ## 2026-07-20 — Outbox append and delivery transactions are isolated
 
 **Context.** The first storage slice allowed a transaction to see its own
