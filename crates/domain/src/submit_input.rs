@@ -745,6 +745,9 @@ pub enum SubmitInputPreparationFailure {
     /// The supplied complete scheduling aggregate has no active slot owner.
     ActiveTurnProjectionMissing,
     /// This slice cannot yet apply interruption or claim its command result.
+    // The first `StopRequested` slice's rejection scope is recorded in
+    // `docs/decisions.md`, "Authoritative occupied-slot SubmitInput
+    // preparation" (2026-07-19).
     InterruptApplicationUnavailable,
 }
 

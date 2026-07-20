@@ -191,6 +191,16 @@ async fn handle_in_transaction(
     requested_session: SessionId,
     identities: AcceptedInputTurnActivationIdentities,
 ) -> Result<TransactionDecision, StartEligibleTurnRepositoryError> {
+    // Lock inventory for this transaction: the `session_scheduler` row below
+    // is its only explicit lock (`FOR UPDATE`); the session row is locked only
+    // `KEY SHARE`, implicitly, by the inserts' session foreign keys; and the
+    // candidate `turn_lifecycle` row is locked `NO KEY UPDATE` by the guarded
+    // activation UPDATE itself (plus `KEY SHARE` from the `turn_attempt`
+    // insert's foreign key). Two standing constraints: every turn-lifecycle
+    // writer acquires this scheduler lock before touching `turn_lifecycle`
+    // rows, and no production path may lock the session row `FOR UPDATE` —
+    // see the lock-mode contract beside the session-row lock in
+    // `submit_input.rs::prepare_against_locked_state`.
     let session_uuid = session_id_to_uuid(requested_session);
     let (session_exists, scheduler_session) = sqlx::query_as::<_, (bool, Option<Uuid>)>(
         "SELECT

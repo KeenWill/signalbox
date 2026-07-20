@@ -110,6 +110,7 @@ mdformat --check *.md docs/
 cargo check --workspace --all-targets --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-targets --all-features
+cargo test --workspace --all-features --doc
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 cargo metadata --no-deps --format-version 1
 git diff --check
