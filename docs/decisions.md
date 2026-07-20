@@ -9,6 +9,29 @@ that constrains several components — require a full record under
 [decisions/](decisions/README.md) instead. Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-19 — Destination features recorded as owner-directed direction
+
+**Context.** Milestone selection needed the owner's post-model-call product
+direction written down: compaction as a first-class surface, inter-session
+messaging, orchestrator sessions and linking, a linking/visibility authority
+model, platform goal mode, and the tool system as the layer carrying them.
+Nothing recorded where those features sit relative to the reserved and accepted
+decision seats.
+
+**Decision.** Add a directional [Destination features](target-model.md) section
+to the target model mapping each feature to its owning reserved or accepted
+decision seat, plus two Target rows in the concept status map (inter-session
+messaging; session linking and visibility authority). This is owner-directed
+direction only, at ordinary weight: no semantics are decided, no open question
+closes, and every feature still needs its owning decisions before code.
+
+**Rejected alternatives.** Recording the direction as ADR proposals: none of the
+features has settled semantics to propose. Leaving it to the priority order
+alone: the order says when, not what the destination is or which seats own it.
+
+**Affects.** [target-model.md](target-model.md) and milestone selection under
+[goal-mode.md](goal-mode.md); no code, schema, or accepted semantics.
+
 ## 2026-07-19 — CodeRabbit pre-merge checks mirror repository rules
 
 **Context.** Several repository rules — invariant-catalog honesty, decision
