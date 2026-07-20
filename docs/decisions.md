@@ -12,27 +12,16 @@ that constrains several components — require a full record under
 ## 2026-07-20 — ADR-0044 post-merge review corrections
 
 **Context.** Post-merge review of the pull request that introduced
-[ADR-0044](decisions/0044-hub-runtime-foundations.md) found four defects: the
-configuration clause classified the `DATABASE_URL` password under ADR-0017,
-whose scope is provider and integration credentials, silently closing the
-database-credential delivery decision ADR-0032 reserves; the identifier
-redaction rules contradicted the mandatory corruption diagnostic keys; the
-mandatory session key made registry-level corruption events unreportable; and
-the closed taxonomy left ADR-0035's concurrent-staleness category unplaced.
+[ADR-0044](decisions/0044-hub-runtime-foundations.md) found defects in its
+configuration, telemetry, corruption-key, and failure-classification wording.
 
-**Decision.** Amend ADR-0044 in place with four noted corrections: the
-database-credential delivery channel remains open per ADR-0032 and the hubd
-slice's environment read is explicitly provisional — reversing an unauthorized
-silent closure back to ADR-0032's reservation; opaque UUID-backed aggregate and
-command identifiers are classified loggable under ADR-0033, with redaction
-targeting user content, credential material, and free-form payload values; the
-session corruption key is conditional on session-scoped operations; and
-concurrent staleness is consumed inside adapters, outside the operator taxonomy.
+**Decision.** Record that [ADR-0044](decisions/0044-hub-runtime-foundations.md)
+was amended in place on 2026-07-20. The ADR's amendment history is the sole
+statement of the restored semantics.
 
-**Rejected alternatives.** Leaving the identifier contradiction for implementers
-to reconcile: each slice would pick its own resolution, and the mandatory keys
-or the allowlist would be violated silently. Superseding ADR-0044 with a new
-record: the corrections restore accepted meaning rather than change a decision.
+**Rejected alternatives.** Restating the corrections here: that would create a
+second normative owner. Superseding ADR-0044 with a new record: the corrections
+restore accepted meaning rather than change a decision.
 
 **Affects.** [ADR-0044](decisions/0044-hub-runtime-foundations.md) only; no
 code, schema, or other accepted semantics.
