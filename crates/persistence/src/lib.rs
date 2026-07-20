@@ -4,6 +4,7 @@
 //! domain crate.
 
 mod command_registry;
+mod lock_inventory;
 mod outbox;
 
 pub mod create_session;
