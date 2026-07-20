@@ -294,6 +294,51 @@ fn prepared(
     .expect("owner-initiated creation without ancestry is preparable")
 }
 
+async fn append_session_created_test_event(
+    connection: &mut PgConnection,
+    session: Uuid,
+) -> Result<Decimal, sqlx::Error> {
+    let sequence = sqlx::query_scalar(
+        "INSERT INTO outbox_event
+            (event_kind, storage_version, session_id)
+         VALUES ('session_created', 1, $1)
+         RETURNING event_sequence",
+    )
+    .bind(session)
+    .fetch_one(&mut *connection)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO session_created_outbox_event
+            (event_sequence, event_kind, storage_version, session_id)
+         VALUES ($1, 'session_created', 1, $2)",
+    )
+    .bind(sequence)
+    .bind(session)
+    .execute(&mut *connection)
+    .await?;
+
+    Ok(sequence)
+}
+
+async fn assert_outbox_truncate_rejected(
+    pool: &PgPool,
+    statement: &'static str,
+) -> Result<(), Box<dyn Error>> {
+    let error = sqlx::query(statement)
+        .execute(pool)
+        .await
+        .expect_err("outbox storage is not removable through truncate");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|database| database.code())
+            .as_deref(),
+        Some("23514")
+    );
+    Ok(())
+}
+
 fn direct(value: u128) -> ModelSelectionRequest {
     ModelSelectionRequest::Direct(signalbox_domain::DirectModelSelection::from_uuid(
         Uuid::from_u128(value),
@@ -7910,6 +7955,295 @@ async fn inv002_inv008_inv012_submit_corruption_and_position_exhaustion_fail_clo
             SubmitInputReconstitutionFailure::AcceptedContentMismatch
         ))
     ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S24 / INV-032: the transactional allocator holds its singleton row through
+/// commit, so a concurrent event cannot obtain the next sequence and commit
+/// ahead of the lower event.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_inv032_outbox_sequences_follow_concurrent_commit_order() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0xe01, 0xe11, direct(0xe21)))
+        .await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0xe02, 0xe12, direct(0xe22)))
+        .await?;
+
+    let mut first_transaction = pool.begin().await?;
+    let first_sequence =
+        append_session_created_test_event(&mut first_transaction, Uuid::from_u128(0xe11)).await?;
+    let second = tokio::spawn({
+        let pool = pool.clone();
+        async move {
+            let mut transaction = pool.begin().await?;
+            let sequence =
+                append_session_created_test_event(&mut transaction, Uuid::from_u128(0xe12)).await?;
+            transaction.commit().await?;
+            Ok::<_, sqlx::Error>(sequence)
+        }
+    });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "the higher-sequence allocator must wait for the lower transaction"
+    );
+
+    first_transaction.commit().await?;
+    let second_sequence = second.await??;
+    assert_eq!(first_sequence, Decimal::ONE);
+    assert_eq!(second_sequence, Decimal::from(2));
+
+    let committed: Vec<(Decimal, Uuid)> = sqlx::query_as(
+        "SELECT event_sequence, session_id
+           FROM outbox_event
+          ORDER BY event_sequence",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        committed,
+        vec![
+            (first_sequence, Uuid::from_u128(0xe11)),
+            (second_sequence, Uuid::from_u128(0xe12)),
+        ]
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S24 / INV-032: delivery cannot advance to an uncommitted allocation, and a
+/// later concurrent allocation remains a suffix after the committed prefix is
+/// marked delivered.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_inv032_outbox_delivery_prefix_is_stable() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0xe03, 0xe13, direct(0xe23)))
+        .await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0xe04, 0xe14, direct(0xe24)))
+        .await?;
+
+    let mut first_transaction = pool.begin().await?;
+    let first_sequence =
+        append_session_created_test_event(&mut first_transaction, Uuid::from_u128(0xe13)).await?;
+    let (allocated_sender, allocated_receiver) = tokio::sync::oneshot::channel();
+    let (commit_sender, commit_receiver) = tokio::sync::oneshot::channel();
+    let second = tokio::spawn({
+        let pool = pool.clone();
+        async move {
+            let mut transaction = pool.begin().await?;
+            let sequence =
+                append_session_created_test_event(&mut transaction, Uuid::from_u128(0xe14)).await?;
+            allocated_sender
+                .send(sequence)
+                .expect("the prefix test receives the second allocation");
+            commit_receiver
+                .await
+                .expect("the prefix test releases the second commit");
+            transaction.commit().await?;
+            Ok::<_, sqlx::Error>(sequence)
+        }
+    });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "the second allocation must wait while the first is uncommitted"
+    );
+
+    let invisible_events: i64 = sqlx::query_scalar("SELECT count(*) FROM outbox_event")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(invisible_events, 0);
+    let uncommitted_delivery = sqlx::query(
+        "UPDATE outbox_delivery_state
+            SET delivered_through = $1
+          WHERE singleton",
+    )
+    .bind(first_sequence)
+    .execute(&pool)
+    .await
+    .expect_err("an uncommitted sequence is not a deliverable prefix");
+    assert_eq!(
+        uncommitted_delivery
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23503")
+    );
+
+    first_transaction.commit().await?;
+    let second_sequence = allocated_receiver.await?;
+    let visible_sequences: Vec<Decimal> = sqlx::query_scalar(
+        "SELECT event_sequence
+           FROM outbox_event
+          ORDER BY event_sequence",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(visible_sequences, vec![first_sequence]);
+
+    sqlx::query(
+        "UPDATE outbox_delivery_state
+            SET delivered_through = $1
+          WHERE singleton",
+    )
+    .bind(first_sequence)
+    .execute(&pool)
+    .await?;
+    commit_sender
+        .send(())
+        .expect("the prefix test still awaits the second commit");
+    assert_eq!(second.await??, second_sequence);
+
+    let undelivered_suffix: Vec<Decimal> = sqlx::query_scalar(
+        "SELECT event.event_sequence
+           FROM outbox_event AS event
+           CROSS JOIN outbox_delivery_state AS delivery
+          WHERE delivery.singleton
+            AND event.event_sequence > delivery.delivered_through
+          ORDER BY event.event_sequence",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(first_sequence, Decimal::ONE);
+    assert_eq!(second_sequence, Decimal::from(2));
+    assert_eq!(undelivered_suffix, vec![second_sequence]);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S24 / INV-032: an event-producing transaction cannot mark its own
+/// uncommitted event delivered and thereby make restart recovery skip it.
+/// Both append-before-delivery and delivery-before-append orderings are covered.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_inv032_outbox_delivery_rejects_event_producing_transaction()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0xe05, 0xe15, direct(0xe25)))
+        .await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0xe06, 0xe16, direct(0xe26)))
+        .await?;
+
+    let mut event_transaction = pool.begin().await?;
+    let sequence =
+        append_session_created_test_event(&mut event_transaction, Uuid::from_u128(0xe15)).await?;
+    let same_transaction_delivery = sqlx::query(
+        "UPDATE outbox_delivery_state
+            SET delivered_through = $1
+          WHERE singleton",
+    )
+    .bind(sequence)
+    .execute(&mut *event_transaction)
+    .await
+    .expect_err("an event-producing transaction cannot deliver its own event");
+    assert_eq!(
+        same_transaction_delivery
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+    event_transaction.rollback().await?;
+
+    let rolled_back: (Decimal, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT delivered_through
+               FROM outbox_delivery_state
+              WHERE singleton),
+            (SELECT count(*)
+               FROM outbox_event)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(rolled_back, (Decimal::ZERO, 0));
+
+    let mut committed_event = pool.begin().await?;
+    let sequence =
+        append_session_created_test_event(&mut committed_event, Uuid::from_u128(0xe15)).await?;
+    committed_event.commit().await?;
+
+    let mut delivery_then_event = pool.begin().await?;
+    sqlx::query(
+        "UPDATE outbox_delivery_state
+            SET delivered_through = $1
+          WHERE singleton",
+    )
+    .bind(sequence)
+    .execute(&mut *delivery_then_event)
+    .await?;
+    let delivery_first_append =
+        append_session_created_test_event(&mut delivery_then_event, Uuid::from_u128(0xe16))
+            .await
+            .expect_err("delivery and later event append cannot share one transaction");
+    assert_eq!(
+        delivery_first_append
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+    delivery_then_event.rollback().await?;
+
+    let after_delivery_first_rollback: (Decimal, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT delivered_through
+               FROM outbox_delivery_state
+              WHERE singleton),
+            (SELECT count(*)
+               FROM outbox_event)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(after_delivery_first_rollback, (Decimal::ZERO, 1));
+
+    sqlx::query(
+        "UPDATE outbox_delivery_state
+            SET delivered_through = $1
+          WHERE singleton",
+    )
+    .bind(sequence)
+    .execute(&pool)
+    .await?;
+    let delivered_through: Decimal = sqlx::query_scalar(
+        "SELECT delivered_through
+           FROM outbox_delivery_state
+          WHERE singleton",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(delivered_through, sequence);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-032: the durable sequence, prefix, header, and typed-record tables cannot
+/// bypass their row-level guards through PostgreSQL's statement-level truncate.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv032_outbox_storage_rejects_truncate() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+
+    assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE outbox_sequence_state CASCADE").await?;
+    assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE outbox_delivery_state CASCADE").await?;
+    assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE outbox_event CASCADE").await?;
+    assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE session_created_outbox_event CASCADE")
+        .await?;
 
     pool.close().await;
     drop(container);
