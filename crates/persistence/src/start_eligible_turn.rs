@@ -3,7 +3,10 @@
 use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
-use signalbox_application::{StartEligibleTurnOutcome, StartEligibleTurnTransaction};
+use signalbox_application::{
+    ClassifyOperatorFailure, OperatorFailureClass, StartEligibleTurnOutcome,
+    StartEligibleTurnTransaction,
+};
 use signalbox_domain::{
     AcceptedInputEligibilityFailure, AcceptedInputStartingLineage,
     AcceptedInputTurnActivationIdentities, ActiveTurnPhase, CurrentTurnAttemptState,
@@ -108,6 +111,18 @@ impl Error for StartEligibleTurnRepositoryError {
             Self::Database(error) => Some(error),
             Self::Corruption(error) => Some(error),
             Self::IdentityCollision(error) => Some(error),
+        }
+    }
+}
+
+impl ClassifyOperatorFailure for StartEligibleTurnRepositoryError {
+    fn operator_failure_class(&self) -> OperatorFailureClass {
+        match self {
+            Self::Database(_) => OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true,
+            },
+            Self::Corruption(_) => OperatorFailureClass::FailClosedCorruption,
+            Self::IdentityCollision(_) => OperatorFailureClass::IdentityCollision,
         }
     }
 }

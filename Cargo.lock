@@ -2186,6 +2186,8 @@ name = "signalbox-application"
 version = "0.0.0"
 dependencies = [
  "signalbox-domain",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 
