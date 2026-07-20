@@ -72,31 +72,33 @@ the expected classification remains explicit.
 
 ### Real adapters classify at full request send
 
-For a real adapter, the decisive transport boundary is **full request send**.
-The request is fully sent when the selected transport reports successful
-completion of the entire request write, including its end-of-request framing.
-This is a local transport fact, not proof that the provider accepted, processed,
-or billed the request.
+For a real adapter without a complete, correlated definitive provider response,
+the decisive transport boundary is **full request send**. The request is fully
+sent when the selected transport reports successful completion of the entire
+request write, including its end-of-request framing. This is a local transport
+fact, not proof that the provider accepted, processed, or billed the request.
 
 Classification follows this exhaustive rule:
 
-| Evidence                                                                                                                                                                                                       | Physical disposition |
-| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
-| The aggregate carries the exact `AppliedInterruptProof` for this predecessor, and evidence proves the request was not accepted and the interrupt prevented all remaining work, including the full request send | `Cancelled`          |
-| A failure is observed while the adapter can establish that the full request send did not complete, and the proof-bearing cancellation branch above does not apply                                              | `KnownFailed`        |
-| A complete, correlated provider response has a recognized refusal status or payload                                                                                                                            | `Refused`            |
-| A complete, correlated provider response definitively confirms provider cancellation and is not recognized as refusal                                                                                          | `Cancelled`          |
-| A complete, correlated provider response has a recognized terminal success status and valid completion material and is not recognized as refusal or cancellation                                               | `Completed`          |
-| A complete, correlated provider response has an explicit terminal error status and is not recognized as refusal or cancellation                                                                                | `KnownFailed`        |
-| The full request was sent, or may have been sent, and no definitive provider response establishes another disposition                                                                                          | `Ambiguous`          |
+| Evidence                                                                                                                                                                                                        | Physical disposition |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
+| The aggregate carries the exact `AppliedInterruptProof` for this predecessor, and evidence proves the request was not accepted and the interrupt prevented all remaining work, including the full request send  | `Cancelled`          |
+| A complete, correlated provider response has a recognized refusal status or payload                                                                                                                             | `Refused`            |
+| A complete, correlated provider response definitively confirms provider cancellation and is not recognized as refusal                                                                                           | `Cancelled`          |
+| A complete, correlated provider response has a recognized terminal success status and valid completion material and is not recognized as refusal or cancellation                                                | `Completed`          |
+| A complete, correlated provider response has an explicit terminal error status and is not recognized as refusal or cancellation                                                                                 | `KnownFailed`        |
+| A failure is observed while the adapter can establish that the full request send did not complete, no definitive provider response is available, and the proof-bearing cancellation branch above does not apply | `KnownFailed`        |
+| The full request was sent, or may have been sent, and no definitive provider response establishes another disposition                                                                                           | `Ambiguous`          |
 
 Pre-send credential lookup, request construction, serialization, connection,
 TLS, and incomplete-write failures therefore classify `KnownFailed` when the
-adapter has the stated evidence and the proof-bearing cancellation branch does
-not apply. Partial response bytes, an unrecognized or truncated response,
-connection loss, process loss, and local cancellation after full send are not
-definitive provider responses and therefore classify `Ambiguous` unless stronger
-evidence establishes a terminal status.
+adapter has the stated evidence, no definitive provider response is available,
+and the proof-bearing cancellation branch does not apply. Partial response bytes
+and an unrecognized or truncated response are not definitive; with no stronger
+response evidence, they classify `KnownFailed` when the adapter proves the write
+stopped short and `Ambiguous` when the request was or may have been fully sent.
+In the absence of a complete, correlated definitive response, connection loss,
+process loss, and local cancellation follow the same boundary.
 
 After ADR-0005's trusted-target-mismatch precedence, each real adapter must
 define an exhaustive, mutually exclusive mapping of its provider-native terminal
@@ -106,27 +108,31 @@ mapping, including when the provider carries the refusal in a generic error
 response; only the remaining explicit terminal error responses classify
 `KnownFailed`. No native response may match more than one disposition. An
 explicit provider error response classified by that mapping is definitive even
-though it arrives after full send; observable acceptance, processing, or billing
-may be recorded separately and does not change the call disposition. An SDK's
-`retryable`, `transient`, or equivalent flag does not alter the mapping and
-never authorizes retry or fallback.
+if it arrives before the request upload finishes. When the proof-bearing
+cancellation branch does not apply, any complete, correlated definitive response
+takes its exact native disposition rather than a disposition inferred from local
+send progress. Observable acceptance, processing, or billing may be recorded
+separately and does not change the call disposition. An SDK's `retryable`,
+`transient`, or equivalent flag does not alter the mapping and never authorizes
+retry or fallback.
 
-If evidence cannot establish that failure occurred before full send, the
-classifier uses the post-send branch. In particular, startup may not infer
-`KnownFailed` merely because no durable full-send acknowledgement exists. An
-`InFlight` call with neither definitive response evidence nor proof that the
-write stopped short is `Ambiguous`. A provider request-status API may later
-supply definitive evidence, but absence, lookup failure, or an unrecognized
-status does not.
+When no definitive provider response is available and evidence cannot establish
+that failure occurred before full send, the classifier uses the post-send
+branch. In particular, startup may not infer `KnownFailed` merely because no
+durable full-send acknowledgement exists. An `InFlight` call with neither
+definitive response evidence nor proof that the write stopped short is
+`Ambiguous`. A provider request-status API may later supply definitive evidence,
+but absence, lookup failure, or an unrecognized status does not.
 
 ### Timeouts use the boundary but budgets stay open
 
-An observed timeout is not a disposition by itself. Before full send it follows
-the applicable pre-send rule; absent the proof-bearing cancellation branch, it
-is `KnownFailed`. After full send, or when send completion is uncertain, it is
-`Ambiguous` unless a definitive provider response is also available. An explicit
+An observed timeout is not a disposition by itself. With no definitive provider
+response, a timeout proven before full send follows the applicable pre-send
+rule; absent the proof-bearing cancellation branch, it is `KnownFailed`. After
+full send, or when send completion is uncertain, it is `Ambiguous`. An explicit
 provider timeout error response follows the adapter's exact native response
-mapping.
+mapping regardless of local send progress when the proof-bearing cancellation
+branch does not apply.
 
 This record selects no timeout budget, clock, deadline source, grace period,
 polling duration, cancellation trigger, or resource-limit policy. Adding any
@@ -206,10 +212,11 @@ No dependency, domain state, retry mechanism, or timeout budget is selected.
 - **S02:** A scripted response declares its disposition. For a real adapter, an
   applied interrupt with exact proof and evidence that the request was not
   accepted and the interrupt prevented all remaining work cancels before full
-  send; other request-preparation or incomplete-send failure is known. A
-  recognized refusal takes precedence over a generic terminal error; other
-  native responses follow their exact mapping, while loss after full send is
-  ambiguous. No partial draft becomes authoritative.
+  send. Otherwise a complete, correlated definitive response follows its exact
+  native mapping even before the upload finishes, with recognized refusal
+  preceding generic terminal error. Only in the absence of such a response is
+  another request-preparation or incomplete-send failure known, while loss after
+  full or uncertain send is ambiguous. No partial draft becomes authoritative.
 - **S04:** Startup uses definitive provider evidence when available. Otherwise
   an `InFlight` call that may have crossed full send is ambiguous while its
   prior-process attempt ends in the matching `Lost` branch. A request-status API

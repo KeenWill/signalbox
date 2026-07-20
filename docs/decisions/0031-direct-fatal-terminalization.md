@@ -8,8 +8,6 @@
   [ADR-0027](0027-input-delivery-lifecycle.md)
 - Refines: ADR-0004's exhaustive live turn-transition matrix and ADR-0005's
   fatal-mismatch handling
-- Refined by: [ADR-0043](0043-provider-failure-classification.md) for provider
-  failure evidence at the send boundary
 - Decision questions: when fatal mismatch requires `StopRequested`; direct
   `Failed` versus `ReconciliationRequired`; complete cause and ambiguity
   derivation; audit without an intermediate stop state; best-effort cancellation
