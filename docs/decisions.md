@@ -15,13 +15,15 @@ that constrains several components — require a full record under
 direction written down: compaction as a first-class surface, inter-session
 messaging, orchestrator sessions and linking, a linking/visibility authority
 model, platform goal mode, and the tool system as the layer carrying them.
-Nothing recorded where those features sit relative to the reserved and accepted
-decision seats.
+Nothing recorded where those features sit relative to reserved, accepted, or
+required future decision records.
 
 **Decision.** Add a directional [Destination features](target-model.md) section
-to the target model mapping each feature to its owning reserved or accepted
-decision seat, plus two Target rows in the concept status map (inter-session
-messaging; session linking and visibility authority). This is owner-directed
+to the target model mapping each feature to its owning reserved, accepted, or
+required future decision record, plus Target rows in the concept status map for
+inter-session messaging, session linking and visibility authority, and
+persistent goal identity and lifecycle, plus the standing update-subscription
+lifecycle the planned callback surface requires. This is owner-directed
 direction only, at ordinary weight: no semantics are decided, no open question
 closes, and every feature still needs its owning decisions before code.
 
