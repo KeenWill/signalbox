@@ -34,16 +34,8 @@ jobs:
       # FOR UPDATE, until the designated lock-acquisition helper lands.
       - name: Check session-lock protocol
         run: |
-          if [ ! -d crates/persistence/src ]; then
-            echo "persistence source directory is missing; session-lock protocol was not checked" >&2
-            exit 1
-          fi
-          if rg --ignore-case --line-number --multiline --pcre2 \
-            '(?s)"(?:(?!").)*\bFROM\s+session\b(?:(?!\bFROM\b|").)*\bFOR\s+UPDATE\b' \
-            crates/persistence/src; then
-            echo "session table locked FOR UPDATE outside the designated helper; see the 2026-07-20 decision-log entry" >&2
-            exit 1
-          fi
+          python3 scripts/check_session_lock_protocol.py --self-test
+          python3 scripts/check_session_lock_protocol.py
       # Must run after the non-compiling checks above: a failure before any
       # compilation would otherwise save a dependency-less cache under the
       # exact key, which rust-cache never replaces on later exact-key hits.
