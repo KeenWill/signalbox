@@ -8,13 +8,11 @@ use std::{env, ffi::OsString, future::Future, process::ExitCode, time::Duration}
 use signalbox_application::{
     ClassifyOperatorFailure, EligibilityPass, EligibilityWorkSource,
     InProcessEligibilityWorkSource, OperatorFailureClass, SchedulerLoop, StartEligibleTurnService,
-    UuidV7StartEligibleTurnIdGenerator,
+    StartupScanService, UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
 };
 use signalbox_persistence::{
-    connect_production, migrate,
-    scheduler::PostgresEligibilitySweep,
-    start_eligible_turn::StartEligibleTurnRepository,
-    startup::{PostgresStartupRecoveryBarrier, StartupRecoveryBarrierOutcome},
+    connect_production, migrate, scheduler::PostgresEligibilitySweep,
+    start_eligible_turn::StartEligibleTurnRepository, startup::PostgresStartupScanRepository,
 };
 use tokio::{pin, select, sync::oneshot, time::timeout};
 
@@ -55,13 +53,13 @@ impl HubRuntimeError {
         }
     }
 
-    const fn recovery_blocked(active_turn_count: u64) -> Self {
+    const fn recovery_blocked(pending_steering_count: u64) -> Self {
         Self {
             phase: RuntimePhase::StartupScan,
             failure_class: OperatorFailureClass::Infrastructure {
                 commit_ambiguous: false,
             },
-            blocker_count: Some(active_turn_count),
+            blocker_count: Some(pending_steering_count),
         }
     }
 }
@@ -191,24 +189,32 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
             Ok(())
         },
         async move {
-            let barrier = PostgresStartupRecoveryBarrier::new(scan_pool);
-            let outcome = barrier.inspect().await.map_err(|error| {
+            let mut scan = StartupScanService::new(
+                UuidV7StartupScanIdGenerator,
+                PostgresStartupScanRepository::new(scan_pool),
+            );
+            let outcome = scan.execute().await.map_err(|error| {
                 HubRuntimeError::classified(
                     RuntimePhase::StartupScan,
                     error.operator_failure_class(),
                 )
             })?;
-            match outcome {
-                StartupRecoveryBarrierOutcome::Clean => {
-                    tracing::info!(
-                        phase = ?RuntimePhase::StartupScan,
-                        "hub startup phase completed"
-                    );
-                    Ok(())
-                }
-                StartupRecoveryBarrierOutcome::RecoveryRequired { active_turn_count } => {
-                    Err(HubRuntimeError::recovery_blocked(active_turn_count))
-                }
+            if outcome.is_complete() {
+                tracing::info!(
+                    phase = ?RuntimePhase::StartupScan,
+                    recovered_turn_count = outcome.recovered_turn_count(),
+                    "hub startup phase completed"
+                );
+                Ok(())
+            } else {
+                let blocker_count = u64::try_from(outcome.pending_steering_sessions().len())
+                    .map_err(|_| {
+                        HubRuntimeError::classified(
+                            RuntimePhase::StartupScan,
+                            OperatorFailureClass::CallerOrHubBug,
+                        )
+                    })?;
+                Err(HubRuntimeError::recovery_blocked(blocker_count))
             }
         },
         || async move {

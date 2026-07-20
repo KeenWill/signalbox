@@ -9,6 +9,7 @@ mod operator_failure;
 mod replace_session_defaults;
 mod scheduler;
 mod start_eligible_turn;
+mod startup_scan;
 mod submit_input;
 
 pub use create_session::{
@@ -31,6 +32,10 @@ pub use scheduler::{
 pub use start_eligible_turn::{
     StartEligibleTurnIdGenerator, StartEligibleTurnOutcome, StartEligibleTurnService,
     StartEligibleTurnTransaction, UuidV7StartEligibleTurnIdGenerator,
+};
+pub use startup_scan::{
+    StartupScanIdGenerator, StartupScanOutcome, StartupScanRepository, StartupScanService,
+    StartupScanSessionOutcome, UuidV7StartupScanIdGenerator,
 };
 pub use submit_input::{
     SubmitInputIdGenerator, SubmitInputOutcome, SubmitInputRequest, SubmitInputRequestError,

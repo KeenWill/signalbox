@@ -9,6 +9,36 @@ that constrains several components — require a full record under
 [decisions/](decisions/README.md) instead. Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-20 — Startup failure seam and pending-steering blocker
+
+**Context.** INV-034 commissions the first startup producer for ADR-0036's
+failed-side semantic closure. The evidence-free scheduling projection can prove
+Prepared or Running prior-process attempts, while the
+[occupied-slot storage decision](#atomic-postgres-occupied-slot-input-handling)
+requires an active source until its accepted pending steering is closed. The
+[post-milestone-2 audit](#post-milestone-2-audit-corrections-and-tracked-obligations)
+assigns that closure and replay widening to the later reclassification slice.
+
+**Decision.** Let the complete domain scheduling projection prepare the sealed
+failed-terminal candidate. For evidence-free Prepared or Running state, its
+complete stop-cause set is empty, so startup ends the exact attempt as
+`WithoutStop(Lost)`, appends one `TurnFailed`, derives the terminal frontier as
+the starting frontier plus that marker, and selects `Terminal(Failed)`.
+Application orchestration inventories active sessions once, retries only fresh
+identity collisions, and commits each session independently. Pending steering
+instead returns the exact unchanged projection as a visible session blocker;
+hubd fails startup with the blocker count and never starts scheduling.
+
+**Rejected alternatives.** Raw SQL selecting terminal meaning bypasses domain
+authority. Treating steering as a stop cause, deleting it, or terminalizing its
+source contradicts its recorded assignment. A replacement attempt, provider
+classification, or fatal-surface widening exceeds this evidence-free slice.
+
+**Affects.** `crates/domain/src/turn_eligibility.rs`, the application startup
+scan, its PostgreSQL adapter, hubd startup wiring, restart integration tests,
+the public spine, and INV-034 enforcement. No migration or frozen fatal/provider
+surface changes.
+
 ## 2026-07-20 — Compact INFO telemetry and a 30-second shutdown window
 
 **Context.** ADR-0044 assigns tracing-subscriber selection, formatting,
