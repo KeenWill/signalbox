@@ -42,9 +42,9 @@ dc1.<key-id>.<digest>
 ```
 
 `key-id` is a deployment-assigned, non-secret identifier for one key epoch. It
-contains only lowercase ASCII letters, digits, and hyphens, is at most 32 bytes,
-and is never reused for different key bytes. `digest` is unpadded base64url of
-the first 16 bytes of:
+contains only lowercase ASCII letters, digits, and hyphens, is 1–32 bytes, and
+is never reused for different key bytes. `digest` is unpadded base64url of the
+first 16 bytes of:
 
 ```text
 HMAC-SHA-256(key, "signalbox/durable-command-telemetry/v1\0" || uuid-bytes)
@@ -128,13 +128,13 @@ user-content and payload redaction.
 
 Missing, unreadable, malformed, non-32-byte, or inconsistent key files fail hubd
 startup before migrations, recovery, scheduling, protocol admission, or worker
-startup. An invalid `key-id` is likewise a configuration failure. There is no
-fallback to a raw identifier, unkeyed digest, process-random key, or fixed
-default key. If the already-validated in-memory derivation capability becomes
-unavailable at runtime, the event may retain its fixed taxonomy and safe
-hub-minted keys but omits command correlation; it must not substitute raw or
-reversible material. The failure is itself reported without the command ID or
-key.
+startup. An empty, longer-than-32-byte, or otherwise invalid `key-id` is
+likewise a configuration failure. There is no fallback to a raw identifier,
+unkeyed digest, process-random key, or fixed default key. If the
+already-validated in-memory derivation capability becomes unavailable at
+runtime, the event may retain its fixed taxonomy and safe hub-minted keys but
+omits command correlation; it must not substitute raw or reversible material.
+The failure is itself reported without the command ID or key.
 
 ## Invariants
 
