@@ -3130,24 +3130,27 @@ async fn blocked_backends_reached(pool: &PgPool, expected: i64) -> Result<bool, 
     Ok(false)
 }
 
-/// Focused coverage for the interleave tests' blocked-backend poll: an idle
-/// database reports zero blocked backends, one queued scheduler-row waiter is
-/// detected once its lock wait forms, a count that never forms exhausts the
-/// polling budget and reports false, and releasing the held row returns the
-/// count to zero.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn blocked_backends_poll_detects_lock_waits_and_reports_absence() -> Result<(), Box<dyn Error>>
-{
+async fn blocked_backends_poll_reports_zero_for_an_idle_database() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
-        .handle(prepared(0x4e1, 0x8e1, direct(0xce1)))
-        .await?;
     assert!(
         blocked_backends_reached(&pool, 0).await?,
         "an idle database has no lock-blocked backend"
     );
 
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn blocked_backends_poll_detects_one_scheduler_row_waiter() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0x4e1, 0x8e1, direct(0xce1)))
+        .await?;
     let mut holder = pool.begin().await?;
     sqlx::query("SELECT session_id FROM session_scheduler WHERE session_id = $1 FOR UPDATE")
         .bind(Uuid::from_u128(0x8e1))
@@ -3166,11 +3169,77 @@ async fn blocked_backends_poll_detects_lock_waits_and_reports_absence() -> Resul
         blocked_backends_reached(&pool, 1).await?,
         "one queued scheduler-row waiter must be detected"
     );
+
+    holder.rollback().await?;
+    waiter.await??;
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn blocked_backends_poll_reports_when_expected_count_never_forms()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0x4e2, 0x8e2, direct(0xce2)))
+        .await?;
+    let mut holder = pool.begin().await?;
+    sqlx::query("SELECT session_id FROM session_scheduler WHERE session_id = $1 FOR UPDATE")
+        .bind(Uuid::from_u128(0x8e2))
+        .execute(&mut *holder)
+        .await?;
+    let waiter = tokio::spawn({
+        let pool = pool.clone();
+        async move {
+            sqlx::query("SELECT session_id FROM session_scheduler WHERE session_id = $1 FOR UPDATE")
+                .bind(Uuid::from_u128(0x8e2))
+                .execute(&pool)
+                .await
+        }
+    });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "the fixture must establish its sole blocked waiter"
+    );
     assert!(
         !blocked_backends_reached(&pool, 2).await?,
         "a second waiter never forms, so the poll must exhaust its budget and report false"
     );
 
+    holder.rollback().await?;
+    waiter.await??;
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn blocked_backends_poll_returns_to_zero_after_release() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0x4e3, 0x8e3, direct(0xce3)))
+        .await?;
+    let mut holder = pool.begin().await?;
+    sqlx::query("SELECT session_id FROM session_scheduler WHERE session_id = $1 FOR UPDATE")
+        .bind(Uuid::from_u128(0x8e3))
+        .execute(&mut *holder)
+        .await?;
+    let waiter = tokio::spawn({
+        let pool = pool.clone();
+        async move {
+            sqlx::query("SELECT session_id FROM session_scheduler WHERE session_id = $1 FOR UPDATE")
+                .bind(Uuid::from_u128(0x8e3))
+                .execute(&pool)
+                .await
+        }
+    });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "the fixture must establish a blocked waiter before releasing it"
+    );
     holder.rollback().await?;
     waiter.await??;
     assert!(
