@@ -2,7 +2,9 @@
 
 use std::{error::Error, fmt};
 
-use signalbox_application::{ClassifyOperatorFailure, EligibilitySweep, OperatorFailureClass};
+use signalbox_application::{
+    ClassifyOperatorFailure, EligibilitySweep, EligibilitySweepBatch, OperatorFailureClass,
+};
 use signalbox_domain::SessionId;
 use sqlx::{PgPool, types::Uuid};
 
@@ -79,7 +81,9 @@ impl PostgresEligibilitySweep {
     /// The result is only a set of hints. The authoritative per-session pass
     /// reconstitutes complete queue and lifecycle state under its scheduler-row
     /// lock before applying any transition.
-    pub async fn find_sessions(&mut self) -> Result<Vec<SessionId>, PostgresEligibilitySweepError> {
+    pub async fn find_sessions(
+        &mut self,
+    ) -> Result<EligibilitySweepBatch, PostgresEligibilitySweepError> {
         let after = self.after.map(session_id_to_uuid);
         let scan_through = self.scan_through.map(session_id_to_uuid);
         let rows = sqlx::query_as::<_, (Uuid, Uuid)>(
@@ -127,15 +131,20 @@ impl PostgresEligibilitySweep {
                 )
             })
             .collect::<Vec<_>>();
-        (self.after, self.scan_through) = next_page_state(&rows);
-        Ok(rows.into_iter().map(|(session, _)| session).collect())
+        let next_state = next_page_state(&rows);
+        let continuation = next_state.0.is_some();
+        (self.after, self.scan_through) = next_state;
+        Ok(EligibilitySweepBatch::new(
+            rows.into_iter().map(|(session, _)| session).collect(),
+            continuation,
+        ))
     }
 }
 
 impl EligibilitySweep for PostgresEligibilitySweep {
     type Error = PostgresEligibilitySweepError;
 
-    async fn find_sessions(&mut self) -> Result<Vec<SessionId>, Self::Error> {
+    async fn find_sessions(&mut self) -> Result<EligibilitySweepBatch, Self::Error> {
         self.find_sessions().await
     }
 }
