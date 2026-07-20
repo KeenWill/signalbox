@@ -138,26 +138,40 @@ impl SemanticTranscriptEntryReconstitutionInput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{accepted_input_id, turn_id};
+    use crate::test_support::{
+        accepted_input_id, semantic_transcript_entry_id, session_id, turn_id,
+    };
+
+    /// One semantic entry with canonical identity and source-session plumbing;
+    /// only its payload varies at the call site.
+    fn semantic_entry(payload: InitialSemanticTranscriptEntryPayload) -> SemanticTranscriptEntry {
+        SemanticTranscriptEntry::from_validated_parts(
+            semantic_transcript_entry_id(1),
+            session_id(1),
+            payload,
+        )
+    }
 
     /// INV-001 / INV-005: the initial semantic projection remains a closed
     /// typed reference to its distinct accepted-input or turn subject.
     #[test]
     fn initial_payload_variants_preserve_exact_typed_subjects() {
-        let origin = InitialSemanticTranscriptEntryPayload::OriginAcceptedInput {
-            accepted_input: accepted_input_id(1),
-        };
-        let failed = InitialSemanticTranscriptEntryPayload::TurnFailed { turn: turn_id(1) };
+        let accepted_input = accepted_input_id(2);
+        let turn = turn_id(3);
+        let origin = semantic_entry(InitialSemanticTranscriptEntryPayload::OriginAcceptedInput {
+            accepted_input,
+        });
+        let failed = semantic_entry(InitialSemanticTranscriptEntryPayload::TurnFailed { turn });
 
-        assert_ne!(origin, failed);
         assert!(matches!(
-            origin,
-            InitialSemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input }
-                if accepted_input == accepted_input_id(1)
+            origin.payload(),
+            InitialSemanticTranscriptEntryPayload::OriginAcceptedInput {
+                accepted_input: actual,
+            } if actual == accepted_input
         ));
         assert!(matches!(
-            failed,
-            InitialSemanticTranscriptEntryPayload::TurnFailed { turn } if turn == turn_id(1)
+            failed.payload(),
+            InitialSemanticTranscriptEntryPayload::TurnFailed { turn: actual } if actual == turn
         ));
     }
 }
