@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, error::Error, sync::Arc};
+use std::{collections::VecDeque, error::Error, future::Future, sync::Arc};
 
 use rust_decimal::Decimal;
 use signalbox_application::{
@@ -6543,6 +6543,32 @@ async fn s03_s04_inv034_restart_scan_recovers_lost_attempt_once_and_unblocks_suc
     Ok(())
 }
 
+#[track_caller]
+fn assert_restart_scan_visibly_defers_pending_steering(
+    scan: &mut StartupScanService<FixedStartupScanIds, PostgresStartupScanRepository>,
+    session: SessionId,
+) -> impl Future<Output = Result<(), Box<dyn Error>>> + '_ {
+    let caller = std::panic::Location::caller();
+    async move {
+        let outcome = scan.execute().await?;
+        assert_eq!(
+            outcome.recovered_turn_count(),
+            0,
+            "restart scan asserted at {caller} must not recover pending steering"
+        );
+        assert_eq!(
+            outcome.pending_steering_sessions(),
+            &[session],
+            "restart scan asserted at {caller} must report its pending-steering blocker"
+        );
+        assert!(
+            !outcome.is_complete(),
+            "restart scan asserted at {caller} must remain incomplete"
+        );
+        Ok(())
+    }
+}
+
 /// S08 / INV-016 / INV-034: a restart scan never treats pending steering as a
 /// stop cause or silently drops it; the source remains active and each scan
 /// returns the same visible session blocker without adding terminal facts.
@@ -6623,15 +6649,9 @@ async fn s08_inv016_inv034_restart_scan_visibly_defers_pending_steering_unchange
         PostgresStartupScanRepository::new(restarted_pool.clone()),
     );
 
-    for _ in 0..2 {
-        let outcome = scan.execute().await?;
-        assert_eq!(outcome.recovered_turn_count(), 0);
-        assert_eq!(
-            outcome.pending_steering_sessions(),
-            &[SessionId::from_uuid(session_uuid)]
-        );
-        assert!(!outcome.is_complete());
-    }
+    let session = SessionId::from_uuid(session_uuid);
+    assert_restart_scan_visibly_defers_pending_steering(&mut scan, session).await?;
+    assert_restart_scan_visibly_defers_pending_steering(&mut scan, session).await?;
 
     let unchanged: (String, String, i64, i64, i64) = sqlx::query_as(
         "SELECT turn.state_kind,
