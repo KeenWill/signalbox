@@ -9,6 +9,18 @@ import sys
 from pathlib import Path
 
 TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|[(),;.]")
+RELATION_BOUNDARIES = {
+    "for",
+    "group",
+    "having",
+    "join",
+    "limit",
+    "on",
+    "order",
+    "returning",
+    "union",
+    "where",
+}
 
 
 def rust_strings(source: str) -> list[str]:
@@ -129,29 +141,64 @@ def locks_session_with_plain_update(sql: str) -> bool:
         if token == ")" and stack:
             stack.pop()
 
-    relations: list[tuple[int, tuple[int, ...], str]] = []
+    relations: list[tuple[int, tuple[int, ...], str, str]] = []
     statement_start = 0
+
+    def relation_at(index: int) -> tuple[int, str, str] | None:
+        if index >= len(tokens) or not re.fullmatch(r"[a-z_][a-z0-9_]*", tokens[index]):
+            return None
+        name_index = index
+        while name_index + 2 < len(tokens) and tokens[name_index + 1] == ".":
+            name_index += 2
+        end = name_index + 1
+        alias = tokens[name_index]
+        if end + 1 < len(tokens) and tokens[end] == "as":
+            alias = tokens[end + 1]
+            end += 2
+        elif (
+            end < len(tokens)
+            and re.fullmatch(r"[a-z_][a-z0-9_]*", tokens[end])
+            and tokens[end] not in RELATION_BOUNDARIES
+        ):
+            alias = tokens[end]
+            end += 1
+        return end, tokens[name_index], alias
+
     for index, token in enumerate(tokens):
         if token == ";":
             statement_start = index + 1
             relations.clear()
             continue
         if token in {"from", "join"} and index + 1 < len(tokens):
-            name_index = index + 1
-            while name_index + 2 < len(tokens) and tokens[name_index + 1] == ".":
-                name_index += 2
-            relations.append((index, paths[index], tokens[name_index]))
+            cursor = index + 1
+            while parsed := relation_at(cursor):
+                end, name, alias = parsed
+                relations.append((index, paths[index], name, alias))
+                cursor = end
+                if (
+                    cursor >= len(tokens)
+                    or paths[cursor] != paths[index]
+                    or tokens[cursor] != ","
+                ):
+                    break
+                cursor += 1
             continue
         if token != "for" or index + 1 >= len(tokens) or tokens[index + 1] != "update":
             continue
 
         if index + 2 < len(tokens) and tokens[index + 2] == "of":
-            targets = []
+            targets: list[str] = []
             for candidate in tokens[index + 3 :]:
                 if candidate == ";":
                     break
                 targets.append(candidate)
-            if "session" in targets:
+            if any(
+                relation_index >= statement_start
+                and relation_path == paths[index]
+                and relation == "session"
+                and (relation in targets or alias in targets)
+                for relation_index, relation_path, relation, alias in relations
+            ):
                 return True
             continue
 
@@ -159,7 +206,7 @@ def locks_session_with_plain_update(sql: str) -> bool:
             relation_index >= statement_start
             and relation_path == paths[index]
             and relation == "session"
-            for relation_index, relation_path, relation in relations
+            for relation_index, relation_path, relation, _alias in relations
         ):
             return True
     return False
@@ -170,6 +217,8 @@ def self_test() -> None:
         "select * from session for update",
         "SELECT * FROM public.session FOR UPDATE",
         "SELECT * FROM other JOIN session ON true FOR UPDATE OF session",
+        "SELECT * FROM session AS s FOR UPDATE OF s",
+        "SELECT * FROM other, session WHERE true FOR UPDATE",
         "SELECT * FROM session WHERE id IN (SELECT id FROM other) FOR UPDATE",
     ]
     allowed = [
