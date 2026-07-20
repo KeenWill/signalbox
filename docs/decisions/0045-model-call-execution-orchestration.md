@@ -11,16 +11,18 @@
   [ADR-0033](0033-identity-generation-supply-and-encoding.md),
   [ADR-0035](0035-domain-owned-persistence-reconstitution.md),
   [ADR-0040](0040-transactional-outbox.md),
-  [ADR-0041](0041-evidence-bearing-reconstitution.md), and
+  [ADR-0041](0041-evidence-bearing-reconstitution.md),
+  [ADR-0042](0042-assistant-content-and-completion.md),
+  [ADR-0043](0043-provider-failure-classification.md), and
   [ADR-0044](0044-hub-runtime-foundations.md)
 - Refines: the architecture's application-orchestration boundary for provider
   effects with the first purpose-specific execution shape
 - Resolves: the application port and transaction boundary for one model-call
-  execution; provider-specific evidence thresholds and assistant-content
-  semantics remain open
+  execution; provider-target identity evidence thresholds and later semantic
+  variants remain open
 - Decision questions: prepare-call transaction ownership; provider port
-  ownership; outcome-commit transaction ownership; transaction scope around the
-  provider effect; correlation and authority between stages; per-effect
+  ownership; observation-commit transaction ownership; transaction scope around
+  the provider effect; correlation and authority between stages; per-effect
   one-call/no-retry policy; crash and failure handling between stages
 
 ## Context
@@ -208,7 +210,11 @@ call. It does not perform a second credential lookup. The observation carries
 provider facts and boundary knowledge, not a caller-selected domain disposition.
 It must distinguish evidence that proves the request never crossed the
 provider-acceptance boundary from uncertainty that it may have crossed;
-provider-specific evidence thresholds remain provider-contract work.
+provider-target identity evidence thresholds remain provider-contract work.
+
+ADR-0043's full-request-send boundary and classification table govern the
+observation's physical disposition. This orchestration record chooses neither a
+second classification nor a weaker evidence threshold.
 
 Ordinary pre-send failure facts, provider outcomes, and uncertain transport
 facts produce trustworthy correlated observations for the commit stage. The
@@ -258,14 +264,16 @@ adapter:
    provider adapter; and
 4. atomically commits the physical call outcome and evidence, the resulting
    lifecycle transitions required by accepted semantics, and any client-visible
-   ADR-0040 outbox rows. Whether authoritative assistant content shares that
-   transaction, uses a separate transaction, or has another placement remains
-   wholly open for its owning decision.
+   ADR-0040 outbox rows. When the observation is the definitive successful
+   response, that same transaction also commits ADR-0042's complete ordered
+   assistant-content sequence and any supported `TurnCompleted` marker under its
+   all-or-nothing final-response boundary.
 
-Provider completion does not by itself make assistant content authoritative.
-Mismatch, refusal, cancellation, ambiguity, late evidence, transferred outcome
-authority, and direct fatal closure retain the semantics of ADR-0005 and
-ADR-0031; this port decomposition adds no competing precedence.
+Provider completion does not by itself make assistant content authoritative;
+only ADR-0042's checked final-response transaction does. Mismatch, refusal,
+cancellation, ambiguity, late evidence, transferred outcome authority, and
+direct fatal closure retain the semantics of ADR-0005 and ADR-0031; this port
+decomposition adds no competing precedence.
 
 An early mismatch observation is committed before waiting for final response or
 physical cancellation. Later chunks, completion, refusal, or cancellation are
@@ -467,9 +475,10 @@ prefers honest ambiguity to an invented exactly-once claim.
   `InFlight` before the scripted provider port receives the capability, streams
   replaceable drafts, and reports its observations. A trusted streaming mismatch
   commits immediately with the durable cancellation request; later physical
-  outcome is audit evidence only. The observation transaction commits lifecycle
-  state and its client-visible outbox rows. Assistant-content transaction
-  placement remains open for its owning decision.
+  outcome is audit evidence only. For a definitive successful response, the
+  observation transaction commits lifecycle state, ADR-0042's complete ordered
+  assistant sequence and supported completion marker, and their client-visible
+  outbox rows atomically.
 - **S04:** An owner-authorized replacement enters preparation as an already
   fully targeted `Prepared` call on its new attempt. Preparation neither creates
   another call nor changes its target, frontier, or steering consumption. A
@@ -481,8 +490,9 @@ prefers honest ambiguity to an invented exactly-once claim.
 
 ## Open questions
 
-- The assistant-content and outcome semantic-entry variants, provider/client
-  rendering, and final-content commit granularity remain open under the
+- ADR-0042 fixes assistant text, logical tool-use references, completed-turn
+  markers, and their final-response commit boundary. Later semantic variants,
+  rich assistant content, and provider/client rendering remain open under the
   identity-representation inventory.
 - Provider-specific known-failure, ambiguity, identity, and request-status
   evidence remain ADR-0007 and provider-contract work.
@@ -500,9 +510,10 @@ prefers honest ambiguity to an invented exactly-once claim.
 
 This record adds no code, schema, crate, dependency, provider SDK, provider,
 runtime, task model, wire type, or assistant-content variant. It does not select
-fallback, known-failure retry, refusal remediation, evidence thresholds,
-provider identity normalization, request idempotency keys, or a durable
-provider-dispatch worker. It does not change ADR-0005's call dispositions,
-authority transfer, or outcome precedence; ADR-0017's credential lifecycle or
-failure transition; ADR-0031's fatal closure; ADR-0040's outbox scope; or
-ADR-0044's runtime, taxonomy, and composition-root contract.
+fallback, known-failure retry, refusal remediation, provider-target identity
+evidence thresholds, provider identity normalization, request idempotency keys,
+or a durable provider-dispatch worker. It does not change ADR-0005's call
+dispositions, authority transfer, or outcome precedence; ADR-0017's credential
+lifecycle or failure transition; ADR-0031's fatal closure; ADR-0040's outbox
+scope; ADR-0042's final-response boundary; ADR-0043's provider-failure
+classification; or ADR-0044's runtime, taxonomy, and composition-root contract.
