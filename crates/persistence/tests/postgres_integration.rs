@@ -8347,6 +8347,8 @@ async fn s01_inv032_create_session_and_outbox_commit_or_roll_back_together()
 
     let repository = CreateSessionRepository::new(pool.clone());
     let creation = prepared(0xe31, 0xe41, direct(0xe51));
+    let command_id = creation.command().command_id().into_uuid();
+    let session_id = creation.applied_result().session().into_uuid();
     let error = repository
         .handle(creation)
         .await
@@ -8370,8 +8372,8 @@ async fn s01_inv032_create_session_and_outbox_commit_or_roll_back_together()
                FROM outbox_sequence_state
               WHERE singleton)",
     )
-    .bind(Uuid::from_u128(0xe31))
-    .bind(Uuid::from_u128(0xe41))
+    .bind(command_id)
+    .bind(session_id)
     .fetch_one(&pool)
     .await?;
     assert_eq!(rolled_back, (0, 0, 0, 0, Decimal::ZERO));
@@ -8408,8 +8410,8 @@ async fn s01_inv032_create_session_and_outbox_commit_or_roll_back_together()
                FROM outbox_sequence_state
               WHERE singleton)",
     )
-    .bind(Uuid::from_u128(0xe31))
-    .bind(Uuid::from_u128(0xe41))
+    .bind(command_id)
+    .bind(session_id)
     .fetch_one(&pool)
     .await?;
     assert_eq!(committed, (1, 1, 1, 1, Decimal::ONE));
