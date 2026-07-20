@@ -130,7 +130,7 @@ handling:
   touch them.
 
 Domain rejections stay recorded applied-or-rejected results under
-[ADR-0001](0001-command-outcomes.md) and
+[ADR-0001](0001-domain-terminology-and-identity.md) and
 [ADR-0034](0034-durable-command-storage-and-equality.md) — never errors, never
 taxonomy members. Diagnostics attach aggregate keys at the adapter/runtime
 boundary, and for corruption events the discipline is mandatory: every
