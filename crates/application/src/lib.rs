@@ -24,6 +24,6 @@ pub use start_eligible_turn::{
     StartEligibleTurnTransaction, UuidV7StartEligibleTurnIdGenerator,
 };
 pub use submit_input::{
-    SubmitInputIdGenerator, SubmitInputOutcome, SubmitInputRequest, SubmitInputService,
-    SubmitInputTransaction, UuidV7SubmitInputIdGenerator,
+    SubmitInputIdGenerator, SubmitInputOutcome, SubmitInputRequest, SubmitInputRequestError,
+    SubmitInputService, SubmitInputTransaction, UuidV7SubmitInputIdGenerator,
 };

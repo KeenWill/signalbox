@@ -9,6 +9,141 @@ that constrains several components — require a full record under
 [decisions/](decisions/README.md) instead. Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-20 — First outbox append is scoped to CreateSession
+
+**Context.** ADR-0040 makes in-transaction event append a standing obligation
+for client-visible state changes. The commissioned first append slice names
+CreateSession as the least-contended path and explicitly leaves the already
+implemented defaults, input, and activation transactions to their own later
+slices; inventing their event projections here would exceed that scope.
+
+**Decision.** Add a persistence-owned typed append seam that receives the
+state-changing adapter's existing PostgreSQL connection and neither begins nor
+commits a transaction. Call it only after all first-handling CreateSession rows
+are written and before that transaction commits. Equal replay, conflicting
+reuse, and failed handling append nothing. The seam writes the closed
+`session_created` record family selected by the preceding storage decision;
+CreateSession is the only production caller in this slice.
+
+**Rejected alternatives.** Retrofitting every existing transaction now would
+combine several uncommissioned client-event projections in one review. Returning
+an event from the domain or application transition would cross INV-002's
+representation boundary. A generic kind-and-fields append API would make the
+closed storage record family a caller convention.
+
+**Affects.** `crates/persistence/src/outbox.rs`, the PostgreSQL CreateSession
+adapter, its atomicity and replay integration tests, INV-032's enforcement
+index, and the target-model status. Defaults replacement, input acceptance,
+activation, protocol mapping, wake-up, and publication remain later work.
+
+## 2026-07-20 — Outbox append and delivery transactions are isolated
+
+**Context.** The first storage slice allowed a transaction to see its own
+uncommitted outbox event while advancing the durable delivered prefix. Such a
+commit could make restart recovery skip an event that no publisher had observed
+or handed to a consumer, violating ADR-0040's at-least-once contract.
+
+**Decision.** Record the allocating and delivering PostgreSQL transaction IDs on
+their respective singleton rows. Reject event append and delivered-prefix
+advancement in the same transaction in either order. Delivery from a later
+transaction remains limited to the next existing sequence.
+
+**Rejected alternatives.** Treating same-transaction visibility as proof of a
+prior commit cannot distinguish an observable event. An application-only check
+would leave direct database transactions unconstrained. Per-connection state
+would not provide a durable, database-enforced correlation.
+
+**Affects.** The transactional-outbox migration, its real-PostgreSQL
+delivery-isolation test, and the INV-032 enforcement index; no event shape,
+publication API, protocol, retention, or pruning semantics.
+
+## 2026-07-20 — Serialized outbox allocation and durable delivery prefix
+
+**Context.** ADR-0040 requires a commit-ordered global event sequence whose
+delivered prefixes cannot later acquire a lower committed event, while leaving
+the allocation and delivery-bookkeeping technique to the implementation slice. A
+PostgreSQL sequence or an unlocked counter allocates before commit and can
+therefore expose a higher event while a lower transaction remains in flight.
+
+**Decision.** Allocate each outbox header by transactionally incrementing one
+singleton row. Its row lock remains held through commit or rollback, so later
+allocators cannot pass it; a deferred constraint requires every increment to
+have its matching immutable event. Store the independently mutable delivered
+prefix in a second singleton row and permit it to advance only to the next
+existing sequence. Use full-`u64` `numeric(20, 0)` values at this storage-only
+boundary. The first closed header/typed-record family admits only
+`session_created` version 1; its production append arrives in the next stack
+slice.
+
+**Rejected alternatives.** PostgreSQL sequences and unlocked counters permit
+commit-order inversion. Holding an in-process allocation mutex would make
+correctness depend on process memory and would not constrain direct database
+transactions. Tracking per-row delivered flags would permit non-prefix marking
+and make restart recovery reconstruct a fact the singleton can state directly.
+
+**Affects.** The transactional-outbox migration, its real-PostgreSQL ordering
+and prefix-stability tests, the INV-032 enforcement index, and the target-model
+implementation status; no domain, application, wire, retention, or pruning
+semantics.
+
+## 2026-07-20 — Static TOML supplies model and alias definitions
+
+**Context.** The model-call milestone needs a concrete source for configured
+model and alias definitions. The
+[architecture](architecture.md#sources-of-truth) already assigns current alias
+definitions to hub configuration, while accepted configuration semantics govern
+how selected meanings become immutable historical intent. They do not choose the
+configuration mechanism.
+
+**Decision.** `hubd` reads model and alias definitions from a static TOML
+configuration file at startup. A database-backed catalog is deferred.
+
+**Rejected alternatives.** A database-backed model catalog now: it would add a
+storage and administration surface before the initial model-resolution path
+needs one.
+
+**Affects.** Future `hubd` configuration loading and model-resolution
+integration, plus deployment configuration. This decision adds no database
+schema and does not choose the TOML layout; replacing the file with a database
+catalog requires a later decision.
+
+## 2026-07-20 — Provisional one-mebibyte accepted-input content bound
+
+**Context.** [ADR-0037](decisions/0037-baseline-user-content.md) defines
+baseline user content with no maximum length, leaves concrete resource-size
+limits to resource governance, and permits a limit that rejects before typed
+construction without rewriting content. Unbounded accepted text let one
+submission consume arbitrary memory and storage before any governance policy
+exists. The owner decided a provisional bound.
+
+**Decision.** `SubmitInputRequest::try_new`, the application admission boundary
+before typed `SubmitInput` construction, rejects text whose UTF-8 encoding
+exceeds 1,048,576 bytes. Its `OversizedContent` failure retains only the byte
+length, not the rejected content. Migration
+`202607200001_bounded_user_content.sql` adds matching
+`octet_length(convert_to(content_text, 'UTF8'))` checks to both durable content
+columns, so the storage measure is independent of the database's server
+encoding. The bound counts bytes, not scalar values, matching wire and durable
+resource measurement. `NonEmptyUnicodeText` remains unbounded exactly as
+ADR-0037 requires. This is a provisional owner-decided floor, not the
+resource-governance policy; ADR-0037's open question remains open. No deployed
+row exceeds the bound (test databases only), so no formerly replayable command
+is affected; constructibility, equality, exactness, and non-rewriting are
+unchanged.
+
+**Rejected alternatives.** Counting Unicode scalar values: admits up to four
+mebibytes of bytes and diverges from the storage check. Enforcing only at an
+adapter boundary: duplicates policy across entry paths and permits typed-command
+construction before rejection. Putting the limit in `NonEmptyUnicodeText`:
+contradicts ADR-0037's explicit unbounded domain value. Retaining the oversized
+content in the admission error: recreates the hazard the bound exists to
+prevent.
+
+**Affects.** `crates/application/src/submit_input.rs`, its construction callers,
+migration `202607200001_bounded_user_content.sql`, and
+[domain-spine.md](domain-spine.md); no accepted ADR semantics change and no open
+question closes.
+
 ## 2026-07-20 — Orientation-doc refresh through the ADR-0041 boundary
 
 **Context.** A documentation-truth audit found the orientation documents stopped
