@@ -375,22 +375,10 @@ mod tests {
     };
     use crate::{
         AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputQueueOrder,
-        AcceptedInputQueueOrderError, AcceptedInputQueueWork, DeliveryRequest,
+        AcceptedInputQueueOrderError, AcceptedInputQueueWork, DeliveryRequest, DurableCommandId,
         ModelSelectionOverride, PerInputConfigurationChoices, SessionConfigurationDefaultsVersion,
-        SessionInputPosition, SteeringBinding, SteeringReclassificationReason, TurnId,
+        SessionId, SessionInputPosition, SteeringBinding, SteeringReclassificationReason, TurnId,
     };
-
-    fn positions(count: usize) -> Vec<SessionInputPosition> {
-        let mut positions = Vec::with_capacity(count);
-        let mut current = SessionInputPosition::first();
-        for _ in 0..count {
-            positions.push(current);
-            current = current
-                .checked_next()
-                .expect("test position range must remain representable");
-        }
-        positions
-    }
 
     fn choices() -> PerInputConfigurationChoices {
         PerInputConfigurationChoices::new(
@@ -406,58 +394,106 @@ mod tests {
         }
     }
 
-    fn ordinary(turn: u128, position: SessionInputPosition) -> AcceptedInputQueueWork {
+    /// Ordinary work accepted at the given ordinal; its turn seed derives
+    /// from that one knob, decorrelated (`docs/testing-style.md`, rule 4).
+    fn accepted_ordinary(acceptance: u64) -> AcceptedInputQueueWork {
         AcceptedInputQueueWork::new(
             session_id(100),
-            turn_id(turn),
-            AcceptedInputQueueOrder::ordinary(position),
+            decorrelated_turn(acceptance),
+            AcceptedInputQueueOrder::ordinary(nth_position(acceptance)),
         )
     }
 
-    fn interrupt(
-        turn: u128,
-        position: SessionInputPosition,
-        predecessor: u128,
+    /// Interrupt work accepted at the given ordinal, immediately after the
+    /// exact predecessor fixture; its turn seed derives from that one knob,
+    /// decorrelated (`docs/testing-style.md`, rule 4).
+    fn accepted_interrupt(
+        acceptance: u64,
+        predecessor: AcceptedInputQueueWork,
     ) -> AcceptedInputQueueWork {
         AcceptedInputQueueWork::new(
-            session_id(100),
-            turn_id(turn),
-            AcceptedInputQueueOrder::interrupt_immediately_after(position, turn_id(predecessor)),
+            predecessor.session(),
+            decorrelated_turn(acceptance),
+            AcceptedInputQueueOrder::interrupt_immediately_after(
+                nth_position(acceptance),
+                predecessor.turn(),
+            ),
         )
     }
 
-    /// Applied facts correlating one command with the exact successor work it
-    /// created immediately after `predecessor`; the accepted-input identity,
-    /// disposition, delivery, and position all derive from those two knobs.
-    fn applied_facts(
-        command: u128,
+    /// A turn identity seed descending as the acceptance ordinal ascends, so
+    /// identity order and acceptance order disagree by construction.
+    fn decorrelated_turn(acceptance: u64) -> TurnId {
+        turn_id(u128::from(u64::MAX - acceptance))
+    }
+
+    fn nth_position(ordinal: u64) -> SessionInputPosition {
+        SessionInputPosition::try_from_u64(ordinal).expect("test acceptance ordinals are positive")
+    }
+
+    /// The complete facts supplied to interrupt correlation, mirroring
+    /// [`AppliedSubmitInputFacts`] field for field so a test perturbs exactly
+    /// the named relationship it exercises (`docs/testing-style.md`, rule 4).
+    #[derive(Clone)]
+    struct AppliedFacts {
+        command: DurableCommandId,
+        command_session: SessionId,
+        command_delivery: DeliveryRequest,
+        predecessor_session: SessionId,
         predecessor: TurnId,
+        accepted_input_session: SessionId,
+        accepted_input: AcceptedInputLifecycle,
+        accepted_delivery: DeliveryRequest,
+        accepted_position: SessionInputPosition,
         successor: AcceptedInputQueueWork,
-    ) -> AppliedSubmitInputFacts {
-        let delivery = interrupt_delivery(predecessor);
-        AppliedSubmitInputFacts {
-            command: command_id(command),
-            command_session: session_id(100),
-            command_delivery: delivery,
-            predecessor_session: session_id(100),
-            predecessor,
-            accepted_input_session: session_id(100),
-            accepted_input: AcceptedInputLifecycle::new(
-                accepted_input_id(command),
-                AcceptedInputDisposition::OriginOf(successor.turn()),
-            ),
-            accepted_delivery: delivery,
-            accepted_position: successor.order().acceptance_position(),
-            successor,
+    }
+
+    impl AppliedFacts {
+        /// Canonically matching applied facts for a successor accepted at the
+        /// given ordinal after the exact predecessor fixture. Command and
+        /// accepted-input identities derive from the acceptance knob.
+        fn matching(successor_acceptance: u64, predecessor: AcceptedInputQueueWork) -> Self {
+            let successor = accepted_interrupt(successor_acceptance, predecessor);
+            let delivery = interrupt_delivery(predecessor.turn());
+            Self {
+                command: command_id(u128::from(successor_acceptance) + 100),
+                command_session: predecessor.session(),
+                command_delivery: delivery,
+                predecessor_session: predecessor.session(),
+                predecessor: predecessor.turn(),
+                accepted_input_session: predecessor.session(),
+                accepted_input: AcceptedInputLifecycle::new(
+                    accepted_input_id(u128::from(successor_acceptance) + 200),
+                    AcceptedInputDisposition::OriginOf(successor.turn()),
+                ),
+                accepted_delivery: delivery,
+                accepted_position: successor.order().acceptance_position(),
+                successor,
+            }
+        }
+
+        fn input(self) -> AppliedSubmitInputFacts {
+            AppliedSubmitInputFacts {
+                command: self.command,
+                command_session: self.command_session,
+                command_delivery: self.command_delivery,
+                predecessor_session: self.predecessor_session,
+                predecessor: self.predecessor,
+                accepted_input_session: self.accepted_input_session,
+                accepted_input: self.accepted_input,
+                accepted_delivery: self.accepted_delivery,
+                accepted_position: self.accepted_position,
+                successor: self.successor,
+            }
         }
     }
 
     fn correlate(
-        facts: AppliedSubmitInputFacts,
+        facts: AppliedFacts,
         known_work: &[AcceptedInputQueueWork],
     ) -> Result<super::AppliedInterruptCommandResult, AppliedInterruptConstructionError> {
         correlate_applied_interrupt(
-            &HandledSubmitInputProjection::Applied(Box::new(facts)),
+            &HandledSubmitInputProjection::Applied(Box::new(facts.input())),
             known_work,
         )
     }
@@ -466,42 +502,38 @@ mod tests {
     /// supplies proof tied to its command, predecessor, input, and successor.
     #[test]
     fn s07_inv001_inv029_exact_applied_interrupt_constructs_correlated_authority() {
-        let position = positions(3);
-        let known_work = [ordinary(1, position[0]), ordinary(2, position[1])];
-        let successor = interrupt(3, position[2], 1);
-        let facts = applied_facts(10, turn_id(1), successor);
+        let predecessor = accepted_ordinary(1);
+        let waiting = accepted_ordinary(2);
+        let facts = AppliedFacts::matching(3, predecessor);
+        let known_work = [predecessor, waiting];
 
-        let result = correlate(facts, &known_work)
+        let result = correlate(facts.clone(), &known_work)
             .expect("the exact correlated applied interrupt constructs authority");
 
-        assert_eq!(result.proof().command(), command_id(10));
-        assert_eq!(result.proof().predecessor(), turn_id(1));
-        assert_eq!(result.session(), session_id(100));
-        assert_eq!(result.accepted_input(), accepted_input_id(10));
-        assert_eq!(result.successor(), successor.turn());
-        assert_eq!(result.successor_order(), successor.order());
+        assert_eq!(result.proof().command(), facts.command);
+        assert_eq!(result.proof().predecessor(), facts.predecessor);
+        assert_eq!(result.session(), facts.command_session);
+        assert_eq!(result.accepted_input(), facts.accepted_input.id());
+        assert_eq!(result.successor(), facts.successor.turn());
+        assert_eq!(result.successor_order(), facts.successor.order());
     }
 
     /// S07 / INV-001 / INV-029: nested applications produce structurally
     /// exact proof values for their distinct commands and active predecessors.
     #[test]
     fn s07_inv001_inv029_nested_interrupt_proofs_preserve_exact_identity() {
-        let position = positions(3);
-        let root = ordinary(1, position[0]);
-        let first_successor = interrupt(2, position[1], 1);
-        let nested_successor = interrupt(3, position[2], 2);
-        let first = correlate(applied_facts(10, root.turn(), first_successor), &[root])
-            .expect("the first interrupt is correlated");
-        let nested = correlate(
-            applied_facts(11, first_successor.turn(), nested_successor),
-            &[root, first_successor],
-        )
-        .expect("the nested interrupt is correlated");
+        let root = accepted_ordinary(1);
+        let first_facts = AppliedFacts::matching(2, root);
+        let nested_facts = AppliedFacts::matching(3, first_facts.successor);
+        let first =
+            correlate(first_facts.clone(), &[root]).expect("the first interrupt is correlated");
+        let nested = correlate(nested_facts.clone(), &[root, first_facts.successor])
+            .expect("the nested interrupt is correlated");
 
-        assert_eq!(first.proof().command(), command_id(10));
-        assert_eq!(first.proof().predecessor(), root.turn());
-        assert_eq!(nested.proof().command(), command_id(11));
-        assert_eq!(nested.proof().predecessor(), first_successor.turn());
+        assert_eq!(first.proof().command(), first_facts.command);
+        assert_eq!(first.proof().predecessor(), first_facts.predecessor);
+        assert_eq!(nested.proof().command(), nested_facts.command);
+        assert_eq!(nested.proof().predecessor(), nested_facts.predecessor);
         assert_ne!(first.proof(), nested.proof());
     }
 
@@ -510,16 +542,19 @@ mod tests {
     #[test]
     fn s07_inv001_inv029_rejected_command_cannot_construct_proof() {
         let no_known_work: [AcceptedInputQueueWork; 0] = [];
+        let rejected_command = command_id(10);
+        let command_session = session_id(100);
+        let requested_predecessor = turn_id(1);
         let handled = HandledSubmitInputProjection::Rejected {
-            command: command_id(10),
-            command_session: session_id(100),
-            command_delivery: interrupt_delivery(turn_id(1)),
+            command: rejected_command,
+            command_session,
+            command_delivery: interrupt_delivery(requested_predecessor),
         };
 
         assert_eq!(
             correlate_applied_interrupt(&handled, &no_known_work),
             Err(AppliedInterruptConstructionError::RejectedCommand {
-                command: command_id(10),
+                command: rejected_command,
             })
         );
     }
@@ -542,16 +577,15 @@ mod tests {
 
     #[track_caller]
     fn assert_non_interrupt_delivery_rejected(command_delivery: DeliveryRequest) {
-        let position = positions(2);
-        let predecessor = ordinary(1, position[0]);
-        let mut facts = applied_facts(10, predecessor.turn(), interrupt(2, position[1], 1));
+        let predecessor = accepted_ordinary(1);
+        let mut facts = AppliedFacts::matching(2, predecessor);
         facts.command_delivery = command_delivery;
         facts.accepted_delivery = command_delivery;
 
         assert_eq!(
-            correlate(facts, &[predecessor]),
+            correlate(facts.clone(), &[predecessor]),
             Err(AppliedInterruptConstructionError::NonInterruptCommand {
-                command: command_id(10),
+                command: facts.command,
             })
         );
     }
@@ -560,23 +594,29 @@ mod tests {
     /// authoritative predecessor must match the applied command payload.
     #[test]
     fn s07_inv001_inv029_cross_wired_delivery_or_target_is_rejected() {
-        let position = positions(2);
-        let known_work = [ordinary(1, position[0])];
-        let successor = interrupt(2, position[1], 1);
-        let mut delivery_mismatch = applied_facts(10, turn_id(1), successor);
-        delivery_mismatch.accepted_delivery = interrupt_delivery(turn_id(9));
-        let mut target_mismatch = applied_facts(10, turn_id(1), successor);
-        target_mismatch.predecessor = turn_id(9);
+        let predecessor = accepted_ordinary(1);
+        let unrelated = accepted_ordinary(9);
+        let known_work = [predecessor];
+        let matching = AppliedFacts::matching(2, predecessor);
+        let mut delivery_mismatch = matching.clone();
+        delivery_mismatch.accepted_delivery = interrupt_delivery(unrelated.turn());
+        let mut target_mismatch = matching;
+        target_mismatch.predecessor = unrelated.turn();
 
-        assert!(matches!(
-            correlate(delivery_mismatch, &known_work),
-            Err(AppliedInterruptConstructionError::AcceptedDeliveryMismatch { .. })
-        ));
         assert_eq!(
-            correlate(target_mismatch, &known_work),
+            correlate(delivery_mismatch.clone(), &known_work),
+            Err(
+                AppliedInterruptConstructionError::AcceptedDeliveryMismatch {
+                    command_delivery: delivery_mismatch.command_delivery,
+                    accepted_delivery: delivery_mismatch.accepted_delivery,
+                }
+            )
+        );
+        assert_eq!(
+            correlate(target_mismatch.clone(), &known_work),
             Err(AppliedInterruptConstructionError::TargetMismatch {
-                requested: turn_id(1),
-                authoritative: turn_id(9),
+                requested: predecessor.turn(),
+                authoritative: target_mismatch.predecessor,
             })
         );
     }
@@ -585,49 +625,53 @@ mod tests {
     /// must all remain in the command's session.
     #[test]
     fn s07_inv029_every_cross_session_association_is_rejected() {
-        let position = positions(2);
-        let successor_work = interrupt(2, position[1], 1);
-        let base = applied_facts(10, turn_id(1), successor_work);
+        let predecessor_work = accepted_ordinary(1);
+        let other_session = session_id(200);
+        let base = AppliedFacts::matching(2, predecessor_work);
         let mut predecessor = base.clone();
-        predecessor.predecessor_session = session_id(200);
+        predecessor.predecessor_session = other_session;
         let mut accepted_input = base.clone();
-        accepted_input.accepted_input_session = session_id(200);
+        accepted_input.accepted_input_session = other_session;
         let mut successor = base;
         successor.successor = AcceptedInputQueueWork::new(
-            session_id(200),
-            successor_work.turn(),
-            successor_work.order(),
+            other_session,
+            successor.successor.turn(),
+            successor.successor.order(),
         );
 
         assert_cross_session_association_rejected(
             predecessor,
             InterruptSessionAssociation::Predecessor,
-            &[ordinary(1, position[0])],
+            other_session,
+            &[predecessor_work],
         );
         assert_cross_session_association_rejected(
             accepted_input,
             InterruptSessionAssociation::AcceptedInput,
-            &[ordinary(1, position[0])],
+            other_session,
+            &[predecessor_work],
         );
         assert_cross_session_association_rejected(
             successor,
             InterruptSessionAssociation::Successor,
-            &[ordinary(1, position[0])],
+            other_session,
+            &[predecessor_work],
         );
     }
 
     #[track_caller]
     fn assert_cross_session_association_rejected(
-        facts: AppliedSubmitInputFacts,
+        facts: AppliedFacts,
         association: InterruptSessionAssociation,
+        associated_session: SessionId,
         known_work: &[AcceptedInputQueueWork],
     ) {
         assert_eq!(
-            correlate(facts, known_work),
+            correlate(facts.clone(), known_work),
             Err(AppliedInterruptConstructionError::SessionMismatch {
                 association,
-                command_session: session_id(100),
-                associated_session: session_id(200),
+                command_session: facts.command_session,
+                associated_session,
             })
         );
     }
@@ -635,18 +679,27 @@ mod tests {
     /// S07 / INV-029: interrupt work must create a distinct successor turn.
     #[test]
     fn s07_inv029_predecessor_cannot_be_its_own_successor() {
-        let position = positions(2);
-        let mut facts = applied_facts(10, turn_id(1), interrupt(2, position[1], 1));
+        let predecessor = accepted_ordinary(1);
+        let mut facts = AppliedFacts::matching(2, predecessor);
         facts.accepted_input = AcceptedInputLifecycle::new(
-            accepted_input_id(10),
-            AcceptedInputDisposition::OriginOf(turn_id(1)),
+            facts.accepted_input.id(),
+            AcceptedInputDisposition::OriginOf(facts.predecessor),
         );
-        facts.successor = interrupt(1, position[1], 1);
+        facts.successor = AcceptedInputQueueWork::new(
+            facts.successor.session(),
+            facts.predecessor,
+            AcceptedInputQueueOrder::interrupt_immediately_after(
+                facts.accepted_position,
+                facts.predecessor,
+            ),
+        );
 
         assert_eq!(
-            correlate(facts, &[ordinary(1, position[0])]),
+            correlate(facts.clone(), &[predecessor]),
             Err(
-                AppliedInterruptConstructionError::SuccessorMatchesPredecessor { turn: turn_id(1) }
+                AppliedInterruptConstructionError::SuccessorMatchesPredecessor {
+                    turn: facts.predecessor
+                }
             )
         );
     }
@@ -672,18 +725,17 @@ mod tests {
 
     #[track_caller]
     fn assert_non_origin_disposition_rejected(disposition: AcceptedInputDisposition) {
-        let position = positions(2);
-        let successor = interrupt(2, position[1], 1);
-        let mut facts = applied_facts(10, turn_id(1), successor);
+        let predecessor = accepted_ordinary(1);
+        let mut facts = AppliedFacts::matching(2, predecessor);
         facts.accepted_input =
-            AcceptedInputLifecycle::new(accepted_input_id(10), disposition.clone());
+            AcceptedInputLifecycle::new(facts.accepted_input.id(), disposition.clone());
 
         assert_eq!(
-            correlate(facts, &[ordinary(1, position[0])]),
+            correlate(facts.clone(), &[predecessor]),
             Err(
                 AppliedInterruptConstructionError::AcceptedInputNotSuccessorOrigin {
                     disposition,
-                    successor: successor.turn(),
+                    successor: facts.successor.turn(),
                 }
             )
         );
@@ -693,30 +745,47 @@ mod tests {
     /// describe the same exact interrupt-created work.
     #[test]
     fn s07_inv029_cross_wired_position_or_priority_is_rejected() {
-        let position = positions(3);
-        let known_work = [ordinary(1, position[0])];
-        let successor = interrupt(2, position[1], 1);
-        let mut position_mismatch = applied_facts(10, turn_id(1), successor);
-        position_mismatch.accepted_position = position[2];
-        let mut ordinary_priority = applied_facts(10, turn_id(1), successor);
-        ordinary_priority.successor = ordinary(2, position[1]);
-        let mut wrong_target = applied_facts(10, turn_id(1), successor);
-        wrong_target.successor = interrupt(2, position[1], 9);
+        let predecessor = accepted_ordinary(1);
+        let unrelated = accepted_ordinary(9);
+        let known_work = [predecessor];
+        let matching = AppliedFacts::matching(2, predecessor);
+        let mut position_mismatch = matching.clone();
+        position_mismatch.accepted_position = nth_position(3);
+        let mut ordinary_priority = matching.clone();
+        ordinary_priority.successor = AcceptedInputQueueWork::new(
+            matching.successor.session(),
+            matching.successor.turn(),
+            AcceptedInputQueueOrder::ordinary(matching.successor.order().acceptance_position()),
+        );
+        let mut wrong_target = matching;
+        wrong_target.successor = AcceptedInputQueueWork::new(
+            wrong_target.successor.session(),
+            wrong_target.successor.turn(),
+            AcceptedInputQueueOrder::interrupt_immediately_after(
+                wrong_target.successor.order().acceptance_position(),
+                unrelated.turn(),
+            ),
+        );
 
-        assert!(matches!(
-            correlate(position_mismatch, &known_work),
-            Err(AppliedInterruptConstructionError::AcceptedPositionMismatch { .. })
-        ));
+        assert_eq!(
+            correlate(position_mismatch.clone(), &known_work),
+            Err(
+                AppliedInterruptConstructionError::AcceptedPositionMismatch {
+                    accepted_position: position_mismatch.accepted_position,
+                    successor_position: position_mismatch.successor.order().acceptance_position(),
+                }
+            )
+        );
         assert_eq!(
             correlate(ordinary_priority, &known_work),
             Err(AppliedInterruptConstructionError::SuccessorHasOrdinaryPriority)
         );
         assert_eq!(
-            correlate(wrong_target, &known_work),
+            correlate(wrong_target.clone(), &known_work),
             Err(
                 AppliedInterruptConstructionError::SuccessorTargetsDifferentPredecessor {
-                    expected: turn_id(1),
-                    actual: turn_id(9),
+                    expected: wrong_target.predecessor,
+                    actual: unrelated.turn(),
                 }
             )
         );
@@ -726,25 +795,22 @@ mod tests {
     /// exist in the complete pre-application queue projection.
     #[test]
     fn s07_inv009_inv029_preexisting_successor_or_missing_predecessor_is_rejected() {
-        let position = positions(2);
+        let predecessor = accepted_ordinary(1);
+        let facts = AppliedFacts::matching(2, predecessor);
         let no_known_work: [AcceptedInputQueueWork; 0] = [];
-        let facts = applied_facts(10, turn_id(1), interrupt(2, position[1], 1));
 
         assert_eq!(
-            correlate(
-                facts.clone(),
-                &[ordinary(1, position[0]), ordinary(2, position[1])]
-            ),
+            correlate(facts.clone(), &[predecessor, facts.successor]),
             Err(AppliedInterruptConstructionError::SuccessorAlreadyKnown {
-                successor: turn_id(2),
+                successor: facts.successor.turn(),
             })
         );
         assert_eq!(
-            correlate(facts, &no_known_work),
+            correlate(facts.clone(), &no_known_work),
             Err(AppliedInterruptConstructionError::InvalidQueueOrder {
                 error: AcceptedInputQueueOrderError::MissingInterruptPredecessor {
-                    turn: turn_id(2),
-                    predecessor: turn_id(1),
+                    turn: facts.successor.turn(),
+                    predecessor: facts.predecessor,
                 },
             })
         );
@@ -754,18 +820,17 @@ mod tests {
     /// another immediate interrupt successor for the same predecessor.
     #[test]
     fn s07_inv009_inv029_competing_interrupt_successor_is_rejected() {
-        let position = positions(3);
+        let predecessor = accepted_ordinary(1);
+        let existing_successor = accepted_interrupt(2, predecessor);
+        let facts = AppliedFacts::matching(3, predecessor);
 
         assert_eq!(
-            correlate(
-                applied_facts(10, turn_id(1), interrupt(3, position[2], 1)),
-                &[ordinary(1, position[0]), interrupt(2, position[1], 1)]
-            ),
+            correlate(facts.clone(), &[predecessor, existing_successor]),
             Err(AppliedInterruptConstructionError::InvalidQueueOrder {
                 error: AcceptedInputQueueOrderError::MultipleInterruptSuccessors {
-                    predecessor: turn_id(1),
-                    first_successor: turn_id(2),
-                    second_successor: turn_id(3),
+                    predecessor: predecessor.turn(),
+                    first_successor: facts.successor.turn(),
+                    second_successor: existing_successor.turn(),
                 },
             })
         );
@@ -775,19 +840,17 @@ mod tests {
     /// predecessor that was accepted later.
     #[test]
     fn s07_inv009_inv029_time_inverted_interrupt_successor_is_rejected() {
-        let position = positions(2);
+        let predecessor = accepted_ordinary(2);
+        let facts = AppliedFacts::matching(1, predecessor);
 
         assert_eq!(
-            correlate(
-                applied_facts(10, turn_id(1), interrupt(2, position[0], 1)),
-                &[ordinary(1, position[1])]
-            ),
+            correlate(facts.clone(), &[predecessor]),
             Err(AppliedInterruptConstructionError::InvalidQueueOrder {
                 error: AcceptedInputQueueOrderError::InterruptPositionNotAfterPredecessor {
-                    turn: turn_id(2),
-                    predecessor: turn_id(1),
-                    position: position[0],
-                    predecessor_position: position[1],
+                    turn: facts.successor.turn(),
+                    predecessor: facts.predecessor,
+                    position: facts.successor.order().acceptance_position(),
+                    predecessor_position: predecessor.order().acceptance_position(),
                 },
             })
         );
