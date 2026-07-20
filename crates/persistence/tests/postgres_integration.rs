@@ -8195,12 +8195,8 @@ async fn s24_inv032_outbox_delivery_prefix_is_stable() -> Result<(), Box<dyn Err
 async fn s24_inv032_outbox_delivery_rejects_event_producing_transaction()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    CreateSessionRepository::new(pool.clone())
-        .handle(prepared(0xe05, 0xe15, direct(0xe25)))
-        .await?;
-    CreateSessionRepository::new(pool.clone())
-        .handle(prepared(0xe06, 0xe16, direct(0xe26)))
-        .await?;
+    insert_outbox_session_fixture(&pool, 0xe15).await?;
+    insert_outbox_session_fixture(&pool, 0xe16).await?;
 
     let mut event_transaction = pool.begin().await?;
     let sequence =
