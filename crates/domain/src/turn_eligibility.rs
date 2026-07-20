@@ -2463,12 +2463,13 @@ mod tests {
         let queued = origin.record(&session, AcceptedInputTurnSchedulingRecordState::Queued);
         let no_semantic_entries = Vec::new();
         let no_snapshots = Vec::new();
+        let no_active_acceptance_tail = None;
         let projection = AcceptedInputSchedulingReconstitutionInput::new(
             session.clone(),
             vec![queued.clone()],
             no_semantic_entries,
             no_snapshots,
-            None,
+            no_active_acceptance_tail,
         )
         .reconstitute()
         .expect("the complete queued record is valid");
@@ -2499,12 +2500,13 @@ mod tests {
         );
         let no_semantic_entries = Vec::new();
         let no_snapshots = Vec::new();
+        let no_active_acceptance_tail = None;
         let error = AcceptedInputSchedulingReconstitutionInput::new(
             session,
             vec![cross_wired],
             no_semantic_entries,
             no_snapshots,
-            None,
+            no_active_acceptance_tail,
         )
         .reconstitute()
         .expect_err("the exact OriginOf(turn) correlation is required");
@@ -2963,6 +2965,7 @@ mod tests {
         let queued = accepted_origin(1);
         let no_semantic_entries = Vec::new();
         let no_snapshots = Vec::new();
+        let no_active_acceptance_tail = None;
         let input = AcceptedInputSchedulingReconstitutionInput::new(
             session.clone(),
             vec![queued.record_with(
@@ -2977,7 +2980,7 @@ mod tests {
             )],
             no_semantic_entries,
             no_snapshots,
-            None,
+            no_active_acceptance_tail,
         );
 
         let error = input
@@ -3001,6 +3004,7 @@ mod tests {
             .expect("the mismatched test version is positive");
         let no_semantic_entries = Vec::new();
         let no_snapshots = Vec::new();
+        let no_active_acceptance_tail = None;
         let input = AcceptedInputSchedulingReconstitutionInput::new(
             session.clone(),
             vec![queued.record_with(
@@ -3018,7 +3022,7 @@ mod tests {
             )],
             no_semantic_entries,
             no_snapshots,
-            None,
+            no_active_acceptance_tail,
         );
 
         let error = input
@@ -3041,6 +3045,7 @@ mod tests {
         let requested = ModelSelectionRequest::Direct(direct(99));
         let no_semantic_entries = Vec::new();
         let no_snapshots = Vec::new();
+        let no_active_acceptance_tail = None;
         let input = AcceptedInputSchedulingReconstitutionInput::new(
             session.clone(),
             vec![queued.record_with(
@@ -3058,7 +3063,7 @@ mod tests {
             )],
             no_semantic_entries,
             no_snapshots,
-            None,
+            no_active_acceptance_tail,
         );
 
         let error = input
@@ -3354,6 +3359,7 @@ mod tests {
         let predecessor_starting_frontier = frontier(40);
         let predecessor_terminal_frontier = frontier(41);
         let activation = activation(1);
+        let no_active_acceptance_tail = None;
         let predecessor_record = predecessor.record(
             &session,
             AcceptedInputTurnSchedulingRecordState::TerminalFailed {
@@ -3378,7 +3384,7 @@ mod tests {
                 ),
                 predecessor_starting_frontier.snapshot(&session, &[predecessor_origin_entry]),
             ],
-            None,
+            no_active_acceptance_tail,
         )
         .reconstitute()
         .expect("the failed predecessor has a complete validated frontier");
@@ -3417,6 +3423,7 @@ mod tests {
         let failure_entry = semantic_entry(31);
         let starting_frontier = frontier(40);
         let terminal_frontier = frontier(41);
+        let no_active_acceptance_tail = None;
         let error = AcceptedInputSchedulingReconstitutionInput::new(
             session.clone(),
             vec![predecessor.record(
@@ -3435,7 +3442,7 @@ mod tests {
                 starting_frontier.snapshot(&session, &[origin_entry]),
                 terminal_frontier.snapshot(&session, &[origin_entry]),
             ],
-            None,
+            no_active_acceptance_tail,
         )
         .reconstitute()
         .expect_err("the failed marker must follow the exact starting prefix");
