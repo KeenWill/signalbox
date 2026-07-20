@@ -96,6 +96,8 @@ pub enum StartEligibleTurnRepositoryError {
     Corruption(StartEligibleTurnCorruption),
     /// A supplied fresh identity already names a durable record.
     IdentityCollision(StartEligibleTurnIdentityCollision),
+    /// Checked activation output violated an internal hub invariant.
+    HubInvariant(&'static str),
 }
 
 impl fmt::Display for StartEligibleTurnRepositoryError {
@@ -106,6 +108,12 @@ impl fmt::Display for StartEligibleTurnRepositoryError {
             }
             Self::Corruption(error) => error.fmt(formatter),
             Self::IdentityCollision(error) => error.fmt(formatter),
+            Self::HubInvariant(invariant) => {
+                write!(
+                    formatter,
+                    "StartEligibleTurn hub invariant failed: {invariant}"
+                )
+            }
         }
     }
 }
@@ -116,6 +124,7 @@ impl Error for StartEligibleTurnRepositoryError {
             Self::Database { source, .. } => Some(source),
             Self::Corruption(error) => Some(error),
             Self::IdentityCollision(error) => Some(error),
+            Self::HubInvariant(_) => None,
         }
     }
 }
@@ -130,6 +139,7 @@ impl ClassifyOperatorFailure for StartEligibleTurnRepositoryError {
             },
             Self::Corruption(_) => OperatorFailureClass::FailClosedCorruption,
             Self::IdentityCollision(_) => OperatorFailureClass::IdentityCollision,
+            Self::HubInvariant(_) => OperatorFailureClass::CallerOrHubBug,
         }
     }
 }
@@ -323,18 +333,18 @@ async fn insert_prepared_activation(
             accepted_input
         }
         InitialSemanticTranscriptEntryPayload::TurnFailed { .. } => {
-            return Err(
-                StartEligibleTurnCorruption::Inconsistent("prepared origin-entry payload").into(),
-            );
+            return Err(StartEligibleTurnRepositoryError::HubInvariant(
+                "prepared origin-entry payload",
+            ));
         }
     };
     let session = activated.session();
     if origin_entry.source_session() != session
         || starting_snapshot.frontier().owning_session() != session
     {
-        return Err(
-            StartEligibleTurnCorruption::Inconsistent("prepared activation ownership").into(),
-        );
+        return Err(StartEligibleTurnRepositoryError::HubInvariant(
+            "prepared activation ownership",
+        ));
     }
 
     sqlx::query(
@@ -349,8 +359,9 @@ async fn insert_prepared_activation(
     .execute(&mut *connection)
     .await?;
 
-    let member_count = u64::try_from(starting_snapshot.entry_count())
-        .map_err(|_| StartEligibleTurnCorruption::Inconsistent("starting frontier member count"))?;
+    let member_count = u64::try_from(starting_snapshot.entry_count()).map_err(|_| {
+        StartEligibleTurnRepositoryError::HubInvariant("starting frontier member count")
+    })?;
     sqlx::query(
         "INSERT INTO context_frontier
             (owning_session_id, context_frontier_id, member_count)
@@ -363,7 +374,7 @@ async fn insert_prepared_activation(
     .await?;
     for (index, entry) in starting_snapshot.ordered_entries().enumerate() {
         let position = u64::try_from(index + 1).map_err(|_| {
-            StartEligibleTurnCorruption::Inconsistent("starting frontier member position")
+            StartEligibleTurnRepositoryError::HubInvariant("starting frontier member position")
         })?;
         sqlx::query(
             "INSERT INTO context_frontier_member
@@ -389,9 +400,9 @@ async fn insert_prepared_activation(
         ActiveTurnPhase::Running { .. }
         | ActiveTurnPhase::AwaitingApproval { .. }
         | ActiveTurnPhase::AwaitingRecoveryDecision { .. } => {
-            return Err(
-                StartEligibleTurnCorruption::Inconsistent("prepared initial active phase").into(),
-            );
+            return Err(StartEligibleTurnRepositoryError::HubInvariant(
+                "prepared initial active phase",
+            ));
         }
     };
     sqlx::query(
@@ -480,9 +491,9 @@ async fn insert_prepared_activation(
     match updated {
         1 => Ok(Some(activated)),
         0 => Ok(None),
-        _ => {
-            Err(StartEligibleTurnCorruption::Inconsistent("guarded activation cardinality").into())
-        }
+        _ => Err(StartEligibleTurnRepositoryError::HubInvariant(
+            "guarded activation cardinality",
+        )),
     }
 }
 
@@ -586,6 +597,16 @@ mod tests {
             OperatorFailureClass::Infrastructure {
                 commit_ambiguous: false
             }
+        );
+    }
+
+    #[test]
+    fn impossible_prepared_activation_shape_is_a_hub_bug() {
+        let error = StartEligibleTurnRepositoryError::HubInvariant("prepared origin-entry payload");
+
+        assert_eq!(
+            error.operator_failure_class(),
+            OperatorFailureClass::CallerOrHubBug
         );
     }
 

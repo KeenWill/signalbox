@@ -3369,7 +3369,10 @@ async fn s03_inv007_inv009_postgres_sweep_reconstructs_only_candidate_sessions()
     ));
 
     let mut sweep = PostgresEligibilitySweep::new(pool.clone());
-    let candidates = EligibilitySweep::find_sessions(&mut sweep).await?;
+    let (candidates, continuation) = EligibilitySweep::find_sessions(&mut sweep)
+        .await?
+        .into_parts();
+    assert!(!continuation);
     let queued_index_count = sqlx::query_scalar::<_, i64>(
         "SELECT count(*)
            FROM pg_indexes
