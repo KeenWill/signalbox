@@ -9,6 +9,43 @@ that constrains several components — require a full record under
 [decisions/](decisions/README.md) instead. Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-19 — CodeRabbit pre-merge checks mirror repository rules
+
+**Context.** Several repository rules — invariant-catalog honesty, decision
+weights, single statement of record, description budget and claim accuracy,
+testing style, migration immutability, goal-mode surface freezes, sealed-spine
+prose, and append-only decision records — bind every pull request but are
+judgment calls no CI step can run, so compliance depended on reviewers
+remembering to check. CodeRabbit's pre-merge checks can evaluate such criteria
+per pull request from a version-controlled `.coderabbit.yaml`.
+
+**Decision.** Adopt nine custom pre-merge checks in `.coderabbit.yaml` as
+verdict-logic mirrors of rules owned by [AGENTS.md](../AGENTS.md),
+[testing-style.md](testing-style.md), [goal-mode.md](goal-mode.md), and
+[decisions/README.md](decisions/README.md). Ownership stays with those
+documents; the YAML restates only operational pass/fail logic, and a comment
+above each check names its owning document. The three mechanical checks —
+migration immutability, frozen-surface citation, append-only decision records —
+run in `error` mode now; the six judgment checks run in `warning` mode pending
+calibration against real reviews, with the catalog-honesty and
+description-accuracy checks first in line for promotion to `error`.
+`request_changes_workflow` and `override_requested_reviewers_only` are enabled
+so failing checks gate approval and only requested reviewers can override them.
+
+**Rejected alternatives.** Configuring the checks only in CodeRabbit's web UI:
+unreviewable, unversioned, and subject to a documented 1,000-character limit on
+in-app instructions that these checks exceed. Encoding rules CI already enforces
+(fmt, clippy, spine sync, mdformat) as checks: redundant with faster,
+deterministic enforcement. Checks for the consumer rule, wave hygiene, and
+CI-green status: unverifiable from the sandbox this configuration was authored
+in, so they would ship untested.
+
+**Affects.** `.coderabbit.yaml` (new); CodeRabbit review behavior on every
+future pull request; no code, schema, or accepted semantics. As a change to
+process and tooling rules, the pull request introducing this file fires the
+ordinary-decision trigger of its own check 2 — this entry is that check's
+required record, satisfying the checker with the checker's own paperwork.
+
 ## 2026-07-19 — Post-milestone-2 audit corrections and tracked obligations
 
 **Context.** A post-milestone-2 audit of the turn-activation stack reviewed CI
