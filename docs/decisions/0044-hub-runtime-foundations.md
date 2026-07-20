@@ -1,6 +1,17 @@
 # ADR-0044: Hub runtime foundations
 
 - Date: 2026-07-20
+- Amended: 2026-07-20 — four corrections from post-merge review: (1) the
+  configuration clause no longer places the database credential under ADR-0017,
+  whose scope is provider and integration credentials — the original sentence
+  silently closed the database-credential delivery decision ADR-0032 reserves,
+  and the correction restores that accepted open reservation, with the hubd
+  slice's environment read explicitly provisional; (2) opaque UUID-backed
+  aggregate and command identifiers are classified loggable, reconciling the
+  redaction rules with the mandatory corruption keys; (3) the mandatory session
+  corruption key is conditional on session-scoped operations; (4) ADR-0035
+  concurrent staleness is explicitly consumed inside adapters, outside the
+  operator taxonomy
 - Supersedes: none
 - Superseded by: none
 - Depends on: [ADR-0010](0010-initial-scheduler-mechanics.md),
@@ -77,14 +88,21 @@ repository's large-dependency gate; the owner approved its adoption when
 commissioning this record, and merging the record is the recorded acceptance.
 Explicit non-goals: metrics and OpenTelemetry are deferred, and no log-content
 policy exists beyond ADR-0017's credential redaction plus one rule this record
-adds — full user content never appears in logs. Non-secret opaque aggregate
-identities, lengths, and taxonomy classifications may appear; caller-provided,
-user-associated, and secret-associated identifiers may not.
+adds — full user content never appears in logs. The opaque UUID-backed aggregate
+and command identifiers (`SessionId`, `DurableCommandId`, `TurnId`, and their
+[ADR-0033](0033-identity-generation-supply-and-encoding.md) siblings) are
+loggable — they are semantically opaque references under ADR-0033, not content —
+and the redaction prohibition targets user content, credential material, and
+free-form payload values. Lengths and taxonomy classifications may likewise
+appear.
 
 ### One shared operator failure taxonomy
 
 The application crate owns one closed operator-facing failure classification,
-and every adapter error family maps into it:
+and every adapter error family maps into it. Concurrent staleness per ADR-0035
+is consumed inside adapters by reload-and-rederive and is never surfaced through
+the operator taxonomy; the four categories classify only genuine failures after
+staleness handling:
 
 - **Infrastructure** — the operation could not complete; carries a
   commit-ambiguous flag for failures (a connection lost around commit) where the
@@ -103,19 +121,25 @@ and every adapter error family maps into it:
 Domain rejections stay recorded applied-or-rejected results under ADR-0001 and
 ADR-0034 — never errors, never taxonomy members. Diagnostics attach aggregate
 keys at the adapter/runtime boundary, and for corruption events the discipline
-is mandatory: every corruption-classified event names the session identity plus
-the durable command and/or turn identity when the failing operation is scoped to
-one — and never a credential value or user content.
+is mandatory: every corruption-classified event names the session identity when
+the failing operation is session-scoped, plus the durable command and/or turn
+identity when the failing operation is scoped to one — and never a credential
+value or user content. Registry-level and pre-claim corruption events (for
+example a `command_registry` cross-kind finding) carry the durable command
+identity without a session key.
 
 ### Composition-root contract
 
 hubd is the composition root and owns construction:
 
 - **Configuration.** `DATABASE_URL` arrives as deployment configuration supplied
-  to the process environment; its embedded password is deployment-channel
-  material under ADR-0017's sops-age deployment-config clause, never a 1Password
-  runtime credential and never a durable record. Production connections use the
-  persistence crate's verify-full options.
+  to the process environment. The delivery channel for database credentials
+  remains open per ADR-0032, which reserves that decision for a separate future
+  record — ADR-0017's channel split governs provider and integration
+  credentials, not this one — and until that decision lands the hubd slice uses
+  an explicitly provisional deployment-configuration read from the process
+  environment, never a 1Password runtime credential and never a durable record.
+  Production connections use the persistence crate's verify-full options.
 - **Migration at startup.** The baseline resolves ADR-0032's open wiring: the
   hub process itself runs the embedded migrations at startup, before ADR-0004's
   recovery scan, which completes before ADR-0010 permits scheduling. A failed
