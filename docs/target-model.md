@@ -301,24 +301,25 @@ strategy. The owning seats are already identified: the
 [ADR-0036](decisions/0036-initial-semantic-transcript-entries.md) is the
 explicit semantic marker, and any non-prefix-preserving context policy needs the
 foundation decision [ADR-0030](decisions/0030-context-frontier-snapshots.md)
-reserves for it. Because ADR-0030 makes every consumed context an immutable
-identified snapshot, a compacted context is simply a different frontier snapshot
-over the same retained history — which makes strategy experimentation cheap:
-competing compactions coexist as distinct snapshots, and trying one discards
-nothing.
+reserves for it. The future foundation decision should preserve cheap strategy
+experimentation: competing compactions should be able to coexist as distinct
+snapshots over retained history. That decision must define when trying one may
+discard anything and how compaction interacts with the still-open retention
+policy.
 
 ### Inter-session messaging (target)
 
 Sessions send messages to sessions: an accepted input whose actor is another
-session's agency rather than the owner. This is the intended payoff of the
-[ADR-0039](decisions/0039-actor-attribution.md) actor seed — the typed
-provenance vocabulary is accepted while the baseline command boundary constructs
-only owner agency, so admitting a session's agency as a `SubmitInput` actor is
-exactly the explicit later decision ADR-0039 anticipates. Delivery and queueing
-reuse the accepted [ADR-0027](decisions/0027-input-delivery-lifecycle.md)
-treatments: a session-sent message arrives under the same explicit delivery
-requests and durable queue order as owner input, never through a parallel
-channel. The client-facing surface is a planned
+session's agency rather than the owner. This requires a foundation extension to
+the closed actor algebra in [ADR-0039](decisions/0039-actor-attribution.md), an
+explicit decision admitting that actor for `SubmitInput`, and the authentication
+and authorization work reserved under
+[ADR-0015 through ADR-0018](open-questions.md#identity-credentials-and-resource-governance-reserved-adr-0015-through-adr-0018).
+Delivery and queueing reuse the accepted
+[ADR-0027](decisions/0027-input-delivery-lifecycle.md) treatments: a
+session-sent message arrives under the same explicit delivery requests and
+durable queue order as owner input, never through a parallel channel. The
+client-facing surface is a planned
 [session-management tool family](#the-tool-system-as-the-load-bearing-layer):
 list sessions, send a message, and receive-update callbacks.
 
@@ -326,26 +327,32 @@ list sessions, send a message, and receive-update callbacks.
 
 An orchestrator session coordinates linked sub-sessions — created by it, or
 created separately and linked on request — with results and messages flowing
-between orchestrator and sub-sessions. Sub-sessions span worktrees, pull
-requests, and separate machines through runners: a sandboxed runner's agent
-messaging a workstation agent uses the same durable messaging surface, not a
-special channel. The grounding is reserved delegation
+between orchestrator and sub-sessions. Sessions and their durable messages
+remain hub-owned when work spans worktrees, pull requests, or machines; runners
+only execute dispatched tools, and the hub applies every resulting message
+through the same durable messaging surface. The grounding is reserved delegation
 ([ADR-0002](open-questions.md#delegation-reserved-adr-0002)) and the accepted
 rule it builds on — a child is a real session, independently browsable, with an
 explicit typed relationship to the exact parent work (INV-031), per the
 [delegation sketch](#delegation-target-reserved-adr-0002) above. Linking a
-session delegation did not create needs its own typed relationship under the
-same seat, and cross-machine placement rides the reserved runner protocol
+session that delegation did not create requires its own foundation decision for
+the typed relationship, as
+[ADR-0038](decisions/0038-session-aggregate-boundary.md) requires for
+related-session navigation. Cross-machine tool placement remains owned by the
+reserved runner protocol
 ([ADR-0008](open-questions.md#scheduling-and-runners-reserved-adr-0008)).
 
 ### Session linking and visibility authority (target)
 
 Which sessions may create sub-sessions, which may link other sessions without an
 approval pause, and which may see other sessions at all is per-session
-configurable authority, adjustable while the session runs: an attended watch
-mode can relax limits while the owner is watching, and background work runs
-under stricter authority. No configuration grants unlimited permission. The
-owning seats are the reserved tool-policy and approval decisions
+configurable authority. An attended watch mode can set less restrictive
+authority for subsequently accepted origin turns while the owner is watching,
+and background work can set stricter authority for later turns; an accepted
+turn's frozen effective configuration does not change. Affecting an in-flight
+tool request would instead require an explicit policy-reevaluation and
+approval-invalidation decision. No configuration grants unlimited permission.
+The owning seats are the reserved tool-policy and approval decisions
 ([ADR-0011 through ADR-0014](open-questions.md#tool-safety-reserved-adr-0011-adr-0012-adr-0013-adr-0014)),
 constrained by the accepted binding and honesty rules (INV-019, INV-020,
 INV-023); per-session configurability lands through the
@@ -357,9 +364,10 @@ algebras together.
 
 A persistent objective a session works toward across turns — pursued, paused,
 resumed, revised — as a product capability, not only this repository's own
-[operating rules](goal-mode.md). No new primitive is expected: the target is
-composition — long-running turns under the accepted lifecycle, scheduled
-creation causes at the explicit feature-ADR extension point
+[operating rules](goal-mode.md). A foundation decision must define durable goal
+identity and the pursue, pause, resume, and revise transitions. That lifecycle
+then composes with long-running turns, scheduled creation causes at the explicit
+feature-ADR extension point
 [ADR-0003](decisions/0003-session-creation-and-transcript-ancestry.md) leaves
 open, and delegation under reserved
 [ADR-0002](open-questions.md#delegation-reserved-adr-0002).
@@ -370,7 +378,7 @@ Most of the features above surface as tools, so the reserved tool decisions
 ([ADR-0011 through ADR-0014](open-questions.md#tool-safety-reserved-adr-0011-adr-0012-adr-0013-adr-0014))
 and the reserved runner protocol
 ([ADR-0008](open-questions.md#scheduling-and-runners-reserved-adr-0008)) are the
-enabling decisions for this whole section, not merely for step four of the
+enabling decisions for this whole section, not merely for step five of the
 priority order. Session-management tools — list sessions, send a message, link a
 session, subscribe to updates — are a planned tool family under those seats,
 entering turns like any other tool: normalized logical requests, policy,
@@ -408,8 +416,8 @@ reserved ADR number), **Proposed** (an ADR proposal exists but is not accepted),
 | Runner protocol, capabilities, placement                                   | Reserved — ADR-0008 ([open](open-questions.md#scheduling-and-runners-reserved-adr-0008))                                                                                                                                                                              |
 | Execution isolation profiles                                               | Reserved — sandbox minimums with ADR-0011 through ADR-0014; execution identity, enrollment, and credentials with ADR-0015 through ADR-0018 ([ADR-0017](decisions/0017-credential-lifecycle.md) accepted)                                                              |
 | Delegation and child sessions                                              | Reserved — ADR-0002 ([open](open-questions.md#delegation-reserved-adr-0002))                                                                                                                                                                                          |
-| Inter-session messaging (session-actor accepted input)                     | Target — actor vocabulary accepted ([ADR-0039](decisions/0039-actor-attribution.md)); admitting a non-owner command actor stays with the owning decisions                                                                                                             |
-| Session linking and visibility authority                                   | Target — composes reserved ADR-0011 through ADR-0014 with the open [configuration categories](open-questions.md#configuration-categories)                                                                                                                             |
+| Inter-session messaging (session-actor accepted input)                     | Target — requires an ADR-0039 actor-algebra extension, explicit `SubmitInput` admissibility, and ADR-0015 through ADR-0018 authentication and authorization decisions                                                                                                 |
+| Session linking and visibility authority                                   | Target — independent links require their own foundation decision; authority composes reserved ADR-0011 through ADR-0014 with the open [configuration categories](open-questions.md#configuration-categories)                                                          |
 | Forking from a transcript frontier                                         | Accepted — [ADR-0003](decisions/0003-session-creation-and-transcript-ancestry.md), [ADR-0030](decisions/0030-context-frontier-snapshots.md); selectable frontier boundaries [open](open-questions.md#identity-representation)                                         |
 | Archive / restore                                                          | Reserved — ADR-0028; destructive retention ADR-0029                                                                                                                                                                                                                   |
 | Live-update protocol semantics                                             | Accepted — [ADR-0019](decisions/0019-process-protocol.md), [ADR-0021](decisions/0021-compatibility-and-negotiation.md)                                                                                                                                                |
@@ -469,16 +477,25 @@ or open is reached by proposing that decision, not by implementing around it.
    prepared-call creation, an in-repo scripted provider adapter, transient draft
    streaming, assistant-content commit, and the idempotent startup scan
    (INV-034). Blocked in part by the open assistant-content entry variant.
-4. **The tool loop with approvals.** ToolRequest and ToolAttempt lifecycles, the
+4. **A smoke against a real provider.** Exercise the same accepted model-call
+   lifecycle through one provider adapter, including resolved and reported
+   target evidence; this is the gate before destination-feature milestones.
+5. **The tool loop with approvals.** ToolRequest and ToolAttempt lifecycles, the
    trusted risk registry, approval consumption, and a first harmless hub-local
    tool. Blocked by reserved ADR-0011 through ADR-0014.
-5. **The restricted executor.** The
+6. **The restricted executor.** The
    [execution isolation target](#execution-isolation-target) applied to a first
    restricted placement. Blocked by the sandbox-minimum and execution-identity
    decisions above.
-6. **Delegation and forking.** Fork frontier selection (the open
+7. **Delegation and forking.** Fork frontier selection (the open
    selectable-boundary question), then delegation under reserved ADR-0002:
    delegated cause, child waits, targeted result delivery, cancellation
    propagation.
-7. **Artifacts.** Identity, digest, producer provenance, controlled byte
+8. **Artifacts.** Identity, digest, producer provenance, controlled byte
    storage, and transcript links.
+9. **Destination features.** Reach the
+   [destination-feature arc](#destination-features) through its owning
+   decisions: context management and compaction; inter-session messaging;
+   orchestrator sessions, linking, and visibility authority; and persistent goal
+   mode. Their order within this step remains owner-directed milestone
+   selection, but none precedes the real-provider smoke.
