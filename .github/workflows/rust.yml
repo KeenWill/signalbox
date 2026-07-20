@@ -14,6 +14,7 @@ env:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -26,6 +27,15 @@ jobs:
           python3 -m venv /tmp/mdformat-venv
           /tmp/mdformat-venv/bin/pip install --quiet mdformat==0.7.22 mdformat-gfm==0.4.1
           /tmp/mdformat-venv/bin/mdformat --check *.md docs/
+      # Tripwire for the session-lock protocol recorded in the 2026-07-20
+      # decision-log entry: session-row locks use FOR NO KEY UPDATE (see
+      # crates/persistence/src/submit_input.rs); FOR UPDATE belongs to the
+      # scheduler row only. This fails if a query locks the session table
+      # FOR UPDATE, until the designated lock-acquisition helper lands.
+      - name: Check session-lock protocol
+        run: |
+          python3 scripts/check_session_lock_protocol.py --self-test
+          python3 scripts/check_session_lock_protocol.py
       # Must run after the non-compiling checks above: a failure before any
       # compilation would otherwise save a dependency-less cache under the
       # exact key, which rust-cache never replaces on later exact-key hits.
