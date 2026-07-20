@@ -557,23 +557,22 @@ mod tests {
         let owner = session_id(1);
         let source_entries = [entry(1), entry(2)];
         let appended_entries = vec![entry(3), entry(4)];
+        let expected_derived_entries = [entry(1), entry(2), entry(3), entry(4)];
+        let next_snapshot = context_frontier_id(2);
         let source = snapshot(owner, 1, source_entries);
         let derived = source
-            .derive_appending_candidate(context_frontier_id(2), appended_entries.clone())
+            .derive_appending_candidate(next_snapshot, appended_entries)
             .expect("distinct entries and a fresh identity derive a candidate");
 
         assert_eq!(source.ordered_entries().collect::<Vec<_>>(), source_entries);
         assert_eq!(
             derived.ordered_entries().collect::<Vec<_>>(),
-            source_entries
-                .into_iter()
-                .chain(appended_entries)
-                .collect::<Vec<_>>()
+            expected_derived_entries
         );
         assert!(source.is_semantic_prefix_of(&derived));
         assert!(!derived.is_semantic_prefix_of(&source));
         assert_eq!(derived.frontier().owning_session(), owner);
-        assert_eq!(derived.frontier().snapshot(), context_frontier_id(2));
+        assert_eq!(derived.frontier().snapshot(), next_snapshot);
 
         let no_new_entries = vec![];
         let equal_content = source
