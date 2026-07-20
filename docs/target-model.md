@@ -300,12 +300,12 @@ strategy. The owning seats are already identified: the
 [compaction-summary entry](#target-semantic-entry-types) deferred by
 [ADR-0036](decisions/0036-initial-semantic-transcript-entries.md) is the
 explicit semantic marker, and any non-prefix-preserving context policy needs the
-foundation decision [ADR-0030](decisions/0030-context-frontier-snapshots.md)
-reserves for it. The future foundation decision should preserve cheap strategy
-experimentation: competing compactions should be able to coexist as distinct
-snapshots over retained history. That decision must define when trying one may
-discard anything and how compaction interacts with the still-open retention
-policy.
+additional foundation decision reserved by
+[ADR-0030](decisions/0030-context-frontier-snapshots.md). The future foundation
+decision should preserve cheap strategy experimentation: competing compactions
+should be able to coexist as distinct snapshots over retained history. That
+decision must define when trying one may discard anything and how compaction
+interacts with the still-open retention policy.
 
 ### Inter-session messaging (target)
 
