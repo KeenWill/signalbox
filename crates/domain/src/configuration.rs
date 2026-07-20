@@ -471,20 +471,27 @@ mod tests {
     #[test]
     fn selection_keys_expose_their_uuid_values() {
         let uuid = Uuid::from_u128(1);
+        let selection = direct(1);
+        let other_selection = direct(2);
+        let model_alias = alias(1);
+        let other_alias = alias(2);
 
-        assert_eq!(direct(1), DirectModelSelection::from_uuid(uuid));
-        assert_ne!(direct(1), direct(2));
-        assert_eq!(direct(1).as_uuid(), &uuid);
-        assert_eq!(alias(1).into_uuid(), uuid);
-        assert_ne!(alias(1), alias(2));
+        assert_eq!(selection, DirectModelSelection::from_uuid(uuid));
+        assert_ne!(selection, other_selection);
+        assert_eq!(selection.as_uuid(), &uuid);
+        assert_eq!(model_alias.into_uuid(), uuid);
+        assert_ne!(model_alias, other_alias);
     }
 
     #[test]
     fn frozen_alias_definition_selects_exactly_one_direct_selection() {
-        let definition = FrozenAliasDefinition::selecting(direct(1));
+        let selected = direct(1);
+        let other = direct(2);
+        let definition = FrozenAliasDefinition::selecting(selected);
+        let other_definition = FrozenAliasDefinition::selecting(other);
 
-        assert_eq!(definition.selected(), direct(1));
-        assert_ne!(definition, FrozenAliasDefinition::selecting(direct(2)));
+        assert_eq!(definition.selected(), selected);
+        assert_ne!(definition, other_definition);
     }
 
     /// INV-008: comparison uses constructible semantic values; a direct
@@ -529,13 +536,10 @@ mod tests {
 
     #[test]
     fn baseline_effective_configuration_fixes_the_unit_policy_values() {
-        let configuration =
-            EffectiveConfiguration::baseline(FrozenModelSelection::Direct(direct(1)));
+        let selection = FrozenModelSelection::Direct(direct(1));
+        let configuration = EffectiveConfiguration::baseline(selection);
 
-        assert_eq!(
-            configuration.model(),
-            &FrozenModelSelection::Direct(direct(1))
-        );
+        assert_eq!(configuration.model(), &selection);
         assert_eq!(
             configuration.parameters(),
             ModelParameters::ProviderDefaults
@@ -551,23 +555,40 @@ mod tests {
     /// over the frozen model selection and the unit policy values.
     #[test]
     fn effective_configuration_equality_is_structural_over_the_frozen_selection() {
+        let selected = direct(2);
         let selection = FrozenModelSelection::FrozenAlias {
             alias: alias(1),
-            definition: FrozenAliasDefinition::selecting(direct(2)),
+            definition: FrozenAliasDefinition::selecting(selected),
         };
+        let configuration = EffectiveConfiguration::baseline(selection);
+        let same_configuration = EffectiveConfiguration::baseline(selection);
+        let direct_configuration =
+            EffectiveConfiguration::baseline(FrozenModelSelection::Direct(selected));
 
-        assert_eq!(
-            EffectiveConfiguration::baseline(selection),
-            EffectiveConfiguration::baseline(selection)
-        );
-        assert_ne!(
-            EffectiveConfiguration::baseline(selection),
-            EffectiveConfiguration::baseline(FrozenModelSelection::Direct(direct(2)))
-        );
+        assert_eq!(configuration, same_configuration);
+        assert_ne!(configuration, direct_configuration);
     }
 
     fn defaults(value: u128) -> SessionConfigurationDefaults {
         SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(direct(value)))
+    }
+
+    fn canonical_defaults() -> SessionConfigurationDefaults {
+        defaults(1)
+    }
+
+    /// Canonical current defaults for tests whose behavior does not depend on
+    /// the configured direct selection.
+    fn current_defaults() -> VersionedSessionConfigurationDefaults {
+        VersionedSessionConfigurationDefaults::establish(canonical_defaults())
+    }
+
+    /// Canonical version-two defaults for tests whose behavior depends only
+    /// on having advanced beyond the first version.
+    fn second_version_defaults() -> VersionedSessionConfigurationDefaults {
+        current_defaults()
+            .replace(canonical_defaults())
+            .expect("an unexhausted version counter installs the next version")
     }
 
     #[test]
@@ -603,54 +624,53 @@ mod tests {
     fn replacement_at_an_exhausted_version_is_reported_rather_than_panicking() {
         let exhausted = VersionedSessionConfigurationDefaults {
             version: SessionConfigurationDefaultsVersion(u64::MAX),
-            defaults: defaults(1),
+            defaults: canonical_defaults(),
         };
 
-        assert_eq!(exhausted.replace(defaults(2)), None);
+        assert_eq!(exhausted.replace(canonical_defaults()), None);
     }
 
     #[test]
     fn session_creation_establishes_defaults_version_one() {
-        let established = VersionedSessionConfigurationDefaults::establish(defaults(1));
+        let initial = defaults(1);
+        let established = VersionedSessionConfigurationDefaults::establish(initial);
 
         assert_eq!(
             established.version(),
             SessionConfigurationDefaultsVersion::first()
         );
-        assert_eq!(established.defaults(), &defaults(1));
+        assert_eq!(established.defaults(), &initial);
     }
 
     /// INV-008: session model-selection defaults are versioned; a
     /// replacement installs a complete later immutable version.
     #[test]
     fn replacement_installs_the_next_complete_version() {
-        let established = VersionedSessionConfigurationDefaults::establish(defaults(1));
+        let initial = defaults(1);
+        let replacement = defaults(2);
+        let expected_version = SessionConfigurationDefaultsVersion(2);
+        let established = VersionedSessionConfigurationDefaults::establish(initial);
         let replaced = established
-            .replace(defaults(2))
+            .replace(replacement)
             .expect("an unexhausted version counter installs the next version");
 
-        assert_eq!(
-            replaced.version(),
-            SessionConfigurationDefaultsVersion::first()
-                .checked_next()
-                .expect("the second version is representable")
-        );
+        assert_eq!(replaced.version(), expected_version);
         assert_ne!(replaced.version(), established.version());
-        assert_eq!(replaced.defaults(), &defaults(2));
+        assert_eq!(replaced.defaults(), &replacement);
     }
 
     #[test]
     fn use_session_default_derives_the_named_default() {
-        let current = VersionedSessionConfigurationDefaults::establish(defaults(1));
+        let named_default = ModelSelectionRequest::Direct(direct(1));
+        let current = VersionedSessionConfigurationDefaults::establish(
+            SessionConfigurationDefaults::new(named_default),
+        );
 
         let checked = current
             .derive_request(current.version(), ModelSelectionOverride::UseSessionDefault)
             .expect("current expected version derives a request");
 
-        assert_eq!(
-            checked.request().model(),
-            ModelSelectionRequest::Direct(direct(1))
-        );
+        assert_eq!(checked.request().model(), named_default);
         assert_eq!(checked.session_defaults_version(), current.version());
     }
 
@@ -687,9 +707,7 @@ mod tests {
 
     #[test]
     fn stale_expected_version_is_an_authoritative_rejection() {
-        let current = VersionedSessionConfigurationDefaults::establish(defaults(1))
-            .replace(defaults(2))
-            .expect("an unexhausted version counter installs the next version");
+        let current = second_version_defaults();
         let stale = SessionConfigurationDefaultsVersion::first();
 
         let error = current
@@ -708,22 +726,22 @@ mod tests {
     }
 
     fn checked_direct_request(
-        value: u128,
+        selection: DirectModelSelection,
         current: &VersionedSessionConfigurationDefaults,
     ) -> VersionCheckedConfigurationRequest {
         current
             .derive_request(
                 current.version(),
-                ModelSelectionOverride::ReplaceWith(ModelSelectionRequest::Direct(direct(value))),
+                ModelSelectionOverride::ReplaceWith(ModelSelectionRequest::Direct(selection)),
             )
             .expect("current expected version derives a request")
     }
 
     fn freeze_direct_request(
-        value: u128,
+        selection: DirectModelSelection,
         current: &VersionedSessionConfigurationDefaults,
     ) -> OriginConfiguration {
-        OriginConfiguration::freeze(checked_direct_request(value, current), |_| None)
+        OriginConfiguration::freeze(checked_direct_request(selection, current), |_| None)
             .expect("a direct request freezes without an alias definition")
     }
 
@@ -731,80 +749,87 @@ mod tests {
     /// version-checked request, exact defaults version, and effective value.
     #[test]
     fn origin_configuration_freezes_the_derived_direct_request_coherently() {
-        let current = VersionedSessionConfigurationDefaults::establish(defaults(1));
+        let selection = direct(1);
+        let named_default = ModelSelectionRequest::Direct(selection);
+        let current = VersionedSessionConfigurationDefaults::establish(
+            SessionConfigurationDefaults::new(named_default),
+        );
+        let current_version = current.version();
+        let expected_effective =
+            EffectiveConfiguration::baseline(FrozenModelSelection::Direct(selection));
         let checked = current
-            .derive_request(current.version(), ModelSelectionOverride::UseSessionDefault)
+            .derive_request(current_version, ModelSelectionOverride::UseSessionDefault)
             .expect("current expected version derives a request");
 
         let origin = OriginConfiguration::freeze(checked, |_| None)
             .expect("a direct request freezes without an alias definition");
 
         assert_eq!(origin.requested(), checked.request());
-        assert_eq!(origin.session_defaults_version(), current.version());
-        assert_eq!(
-            origin.effective(),
-            &EffectiveConfiguration::baseline(FrozenModelSelection::Direct(direct(1)))
-        );
+        assert_eq!(origin.session_defaults_version(), current_version);
+        assert_eq!(origin.effective(), &expected_effective);
     }
 
     #[test]
     fn origin_configuration_freezes_an_alias_request_with_the_selected_definition() {
-        let current = VersionedSessionConfigurationDefaults::establish(defaults(1));
-        let definition = FrozenAliasDefinition::selecting(direct(1));
+        let current = current_defaults();
+        let current_version = current.version();
+        let requested_alias = alias(2);
+        let request = ModelSelectionRequest::Alias(requested_alias);
+        let selected = direct(1);
+        let definition = FrozenAliasDefinition::selecting(selected);
+        let frozen_selection = FrozenModelSelection::FrozenAlias {
+            alias: requested_alias,
+            definition,
+        };
+        let expected_effective = EffectiveConfiguration::baseline(frozen_selection);
         let checked = current
             .derive_request(
-                current.version(),
-                ModelSelectionOverride::ReplaceWith(ModelSelectionRequest::Alias(alias(2))),
+                current_version,
+                ModelSelectionOverride::ReplaceWith(request),
             )
             .expect("current expected version derives a request");
 
         let origin = OriginConfiguration::freeze(checked, |requested| {
-            assert_eq!(requested, alias(2));
+            assert_eq!(requested, requested_alias);
             Some(definition)
         })
         .expect("a selectable alias definition freezes the request");
 
-        assert_eq!(
-            origin.requested().model(),
-            ModelSelectionRequest::Alias(alias(2))
-        );
-        assert_eq!(origin.session_defaults_version(), current.version());
-        assert_eq!(
-            origin.effective(),
-            &EffectiveConfiguration::baseline(FrozenModelSelection::FrozenAlias {
-                alias: alias(2),
-                definition,
-            })
-        );
+        assert_eq!(origin.requested().model(), request);
+        assert_eq!(origin.session_defaults_version(), current_version);
+        assert_eq!(origin.effective(), &expected_effective);
     }
 
     #[test]
     fn an_alias_request_without_a_selectable_definition_freezes_nothing() {
-        let current = VersionedSessionConfigurationDefaults::establish(defaults(1));
+        let current = current_defaults();
+        let requested_alias = alias(1);
+        let request = ModelSelectionRequest::Alias(requested_alias);
         let checked = current
             .derive_request(
                 current.version(),
-                ModelSelectionOverride::ReplaceWith(ModelSelectionRequest::Alias(alias(1))),
+                ModelSelectionOverride::ReplaceWith(request),
             )
             .expect("current expected version derives a request");
 
         let error = OriginConfiguration::freeze(checked, |_| None)
             .expect_err("an unknown alias cannot freeze provenance");
 
-        assert_eq!(error.alias(), alias(1));
+        assert_eq!(error.alias(), requested_alias);
     }
 
     /// INV-008: the defaults version belongs to provenance, not
     /// effective-value equality.
     #[test]
     fn defaults_version_is_provenance_rather_than_effective_equality() {
-        let established = VersionedSessionConfigurationDefaults::establish(defaults(1));
+        let established = current_defaults();
         let replaced = established
-            .replace(defaults(1))
+            .replace(canonical_defaults())
             .expect("an unexhausted version counter installs the next version");
+        let selection = direct(1);
 
-        let first = freeze_direct_request(1, &established);
-        let later = freeze_direct_request(1, &replaced);
+        let first = freeze_direct_request(selection, &established);
+        let later = freeze_direct_request(selection, &replaced);
 
         assert_eq!(first.effective(), later.effective());
         assert_ne!(
@@ -819,33 +844,30 @@ mod tests {
     /// binding.
     #[test]
     fn provenance_variants_carry_an_origin_record_or_only_the_binding() {
-        let current = VersionedSessionConfigurationDefaults::establish(defaults(1));
-        let origin = freeze_direct_request(1, &current);
+        let current = current_defaults();
+        let origin = freeze_direct_request(direct(1), &current);
+        let other_origin = freeze_direct_request(direct(3), &current);
         let binding = SteeringBinding::new(turn_id(2));
 
-        let explicit = TurnConfigurationProvenance::ExplicitOrigin(origin.clone());
+        let explicit = TurnConfigurationProvenance::ExplicitOrigin(origin);
         let inherited = TurnConfigurationProvenance::InheritedForReclassifiedSteering(binding);
 
         assert_ne!(
             explicit,
-            TurnConfigurationProvenance::ExplicitOrigin(freeze_direct_request(3, &current))
+            TurnConfigurationProvenance::ExplicitOrigin(other_origin)
         );
-        match inherited {
-            TurnConfigurationProvenance::InheritedForReclassifiedSteering(carried) => {
-                assert_eq!(carried, binding);
-            }
-            TurnConfigurationProvenance::ExplicitOrigin(_) => {
-                panic!("reclassified steering carries only its binding");
-            }
-        }
+        let TurnConfigurationProvenance::InheritedForReclassifiedSteering(carried) = inherited
+        else {
+            panic!("reclassified steering carries only its binding");
+        };
+        assert_eq!(carried, binding);
     }
 
     #[test]
     fn configuration_request_exposes_its_model_selection() {
-        let request = ConfigurationRequest {
-            model: ModelSelectionRequest::Direct(direct(1)),
-        };
+        let model = ModelSelectionRequest::Direct(direct(1));
+        let request = ConfigurationRequest { model };
 
-        assert_eq!(request.model(), ModelSelectionRequest::Direct(direct(1)));
+        assert_eq!(request.model(), model);
     }
 }
