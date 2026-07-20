@@ -9,6 +9,32 @@ that constrains several components — require a full record under
 [decisions/](decisions/README.md) instead. Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-19 — Meaningful review re-requests and surfaced stack replacement
+
+**Context.** The finished-pull-request protocol re-requested external reviews on
+the final commit after any rebase, so quiet-state pull requests re-summoned full
+bot passes after merge-main and formatting commits — about 15–20% of CI runs
+reviewed nothing new. Separately, an autonomous run replaced an open
+pull-request stack with a rewrite without the owner seeing the choice. Codex
+review also requires an explicit trigger, so relying on implicit branch events
+can leave the requested review absent.
+
+**Decision.** External review re-requests follow the meaningful-diff bar now
+stated in the finished-pull-request bullets of [AGENTS.md](../AGENTS.md), Codex
+is invoked there through an explicit `@codex review` comment, and replacing or
+abandoning an open stack is surfaced to the owner under that file's
+working-autonomously guidance. `AGENTS.md` carries the normative wording.
+
+**Rejected alternatives.** Re-requesting on every push: keeps spending full
+review passes on commits that cannot change an approval. Relying on implicit
+Codex automation: does not reliably start a review. A hard approval gate on
+stack replacement: heavier than the problem — surfacing before the replacement
+lands preserves owner visibility without blocking work.
+
+**Affects.** Review-request behavior on every pull request, stack management in
+autonomous runs, and the linked rule home. It changes no code, CI configuration,
+or review-wave semantics.
+
 ## 2026-07-19 — Post-milestone-2 audit corrections and tracked obligations
 
 **Context.** A post-milestone-2 audit of the turn-activation stack reviewed CI

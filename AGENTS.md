@@ -19,6 +19,9 @@ change), and open and revise pull requests. Stop only at owner gates — merges,
 foundation-weight decisions, large dependencies — and when two rules conflict in
 practice, stop and report the conflict rather than reconciling it silently.
 Autonomous milestone-delivering runs additionally follow `docs/goal-mode.md`.
+Replacing or abandoning an open pull-request stack — closing its pull requests
+in favor of a rewrite — is surfaced to the owner before the replacement lands,
+never decided silently.
 
 **Domain spine.** `docs/domain-spine.md` mirrors the public API of the domain
 and application crates as bare declarations and is the owner's primary review
@@ -38,7 +41,13 @@ one finished and awaiting owner merge:
   at the same time, a replied thread a later fix commit or rebase outdates is
   resolved then, and a final sweep before declaring the pull request finished
   confirms no unresolved outdated thread remains.
-- External reviews are re-requested on the final commit after any rebase.
+- External reviews are re-requested after a change that could alter what a
+  reviewer already approved — code, tests, normative documentation or
+  specifications, contract-bearing comments, or claims in the description — not
+  after one that leaves a previously green state effectively unchanged (a
+  rename, non-semantic comment-only edits, or a merge of `main` with no
+  meaningful interaction). Codex runs only on an explicit `@codex review`
+  comment.
 - The description is at most 350 words, states the count of meaningfully changed
   lines (excluding lockfiles), and claims only what the code enforces — a
   contract binding future implementors is described as a contract, not an
