@@ -27,15 +27,24 @@ jobs:
           python3 -m venv /tmp/mdformat-venv
           /tmp/mdformat-venv/bin/pip install --quiet mdformat==0.7.22 mdformat-gfm==0.4.1
           /tmp/mdformat-venv/bin/mdformat --check *.md docs/
-      # Tripwire for the session-lock protocol recorded in the 2026-07-20
-      # decision-log entry: session-row locks use FOR NO KEY UPDATE (see
-      # crates/persistence/src/submit_input.rs); FOR UPDATE belongs to the
-      # scheduler row only. This fails if a query locks the session table
-      # FOR UPDATE, until the designated lock-acquisition helper lands.
-      - name: Check session-lock protocol
+      # Conservative inventory for the session-lock protocol recorded in the
+      # 2026-07-20 decision-log entry. The checksum makes changes to the small
+      # reviewed inventory explicit; the scan rejects strongest-mode row-lock
+      # clauses anywhere else in production Rust. This deliberately performs
+      # no Rust or SQL parsing.
+      - name: Check explicit-lock inventory
         run: |
-          python3 scripts/check_session_lock_protocol.py --self-test
-          python3 scripts/check_session_lock_protocol.py
+          inventory_hash="$(sha256sum \
+            crates/persistence/src/lock_inventory.rs | cut -d ' ' -f 1)"
+          test "$inventory_hash" = \
+            d7745b9fa6388a10d668025ce7f5047d132f9e0206376ccaa01eadb116b28f81
+          unexpected="$(git grep -Il -E 'FOR[[:space:]]+UPDATE' -- \
+            crates/persistence/src \
+            ':!crates/persistence/src/lock_inventory.rs' || true)"
+          test -z "$unexpected" || {
+            printf 'explicit row lock outside inventory:\n%s\n' "$unexpected"
+            exit 1
+          }
       # Must run after the non-compiling checks above: a failure before any
       # compilation would otherwise save a dependency-less cache under the
       # exact key, which rust-cache never replaces on later exact-key hits.
