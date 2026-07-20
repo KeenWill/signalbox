@@ -129,6 +129,10 @@ impl SubmitInput {
                     failure: SubmitInputPreparationFailure::TurnCandidateMismatch,
                 });
             }
+            #[expect(
+                clippy::expect_used,
+                reason = "temporary ledger site: non-start delivery exhaustiveness is validated above; typed conversion is commissioned by the 2026-07-20 audit"
+            )]
             let expected_active_turn =
                 expected_active_turn(self.delivery).expect("non-start delivery names a turn");
             let target_session = self.session;
@@ -248,6 +252,10 @@ impl SubmitInput {
                 failure: SubmitInputPreparationFailure::ActiveTurnProjectionMissing,
             });
         };
+        #[expect(
+            clippy::expect_used,
+            reason = "temporary ledger site: scheduling reconstitution validates every active acceptance tail; typed conversion is commissioned by the 2026-07-20 audit"
+        )]
         let previous_position = Some(
             scheduling
                 .active_acceptance_tail()
@@ -344,6 +352,10 @@ impl SubmitInput {
                 })
             }
             DeliveryRequest::AfterCurrentTurn { configuration, .. } => {
+                #[expect(
+                    clippy::unreachable,
+                    reason = "temporary ledger site: delivery-to-candidate correlation is validated above; typed conversion is commissioned by the 2026-07-20 audit"
+                )]
                 let Some(turn) = turn else {
                     unreachable!("turn-candidate correlation was validated above");
                 };
@@ -424,6 +436,10 @@ impl SubmitInput {
                     )),
                 })
             }
+            #[expect(
+                clippy::unreachable,
+                reason = "temporary ledger site: the start variant returns before this active-turn match; typed conversion is commissioned by the 2026-07-20 audit"
+            )]
             DeliveryRequest::StartWhenNoActiveTurn { .. } => {
                 unreachable!("start returned the active-turn rejection above")
             }
