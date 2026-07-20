@@ -357,13 +357,15 @@ and background work can set stricter authority for later turns; an accepted
 turn's frozen effective configuration does not change. Affecting an in-flight
 tool request would instead require an explicit policy-reevaluation and
 approval-invalidation decision. No configuration grants unlimited permission.
-The owning seats are the reserved tool-policy and approval decisions
+Visibility and approval authority is owned by the reserved tool-policy and
+approval decisions
 ([ADR-0011 through ADR-0014](open-questions.md#tool-safety-reserved-adr-0011-adr-0012-adr-0013-adr-0014)),
 constrained by the accepted binding and honesty rules (INV-019, INV-020,
 INV-023); per-session configurability lands through the
 [configuration categories](open-questions.md#configuration-categories) that
 ADR-0027 requires to extend the request, default, override, and effective-value
-algebras together.
+algebras together. Independent-session linking remains blocked on the separate
+foundation decision identified above.
 
 ### Goal mode as a platform feature (target)
 
@@ -385,12 +387,13 @@ Most of the features above surface as tools, so the reserved tool decisions
 and the reserved runner protocol
 ([ADR-0008](open-questions.md#scheduling-and-runners-reserved-adr-0008)) are the
 enabling decisions for this whole section, not merely for step five of the
-priority order. Session-management tools — list sessions, send a message, link a
-session — are a planned tool family under those seats, entering turns like any
-other tool: normalized logical requests, policy, approvals, and fenced attempts
-per the [target lifecycles](#target-lifecycles) above. A standing update
-subscription is not an ordinary tool attempt: it needs its own decision for
-registration identity, lifetime, callback delivery, and conversion of later
+priority order. Session-management tools to list sessions and send a message are
+a planned tool family under those seats, entering turns like any other tool:
+normalized logical requests, policy, approvals, and fenced attempts per the
+[target lifecycles](#target-lifecycles) above. A link-session tool additionally
+requires the independent-link foundation decision identified above. A standing
+update subscription is not an ordinary tool attempt: it needs its own decision
+for registration identity, lifetime, callback delivery, and conversion of later
 events into session input, recorded under [decisions/](decisions/README.md).
 
 ## Concept status map
