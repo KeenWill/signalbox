@@ -37,6 +37,22 @@ spelling. “Provisional” means the name, boundary, or both still need an ADR.
   consumed at a safe point or visibly reclassified as queued work because the
   active turn ends first.
 
+## UserContent
+
+- **Definition:** The caller-supplied immutable content value owned by one
+  accepted input. The complete baseline algebra and its exact-equality
+  participation in durable-command replay are defined by
+  [ADR-0037](decisions/0037-baseline-user-content.md).
+- **Status:** Accepted by [ADR-0037](decisions/0037-baseline-user-content.md),
+  refining [ADR-0027](decisions/0027-input-delivery-lifecycle.md)'s placeholder;
+  non-text content kinds remain open.
+- **Do not confuse with:** A semantic transcript entry, provider prompt
+  rendering, client presentation text, a storage or wire encoding, or a
+  normalized search projection.
+- **Example:** Two submissions whose wire spellings decode to the same scalar
+  sequence replay equally, while a changed line ending under a claimed
+  identifier is conflicting reuse.
+
 ## Durable command identity
 
 - **Definition:** One owner-global idempotency identity for a durably handled
@@ -50,9 +66,11 @@ spelling. “Provisional” means the name, boundary, or both still need an ADR.
   [ADR-0001](decisions/0001-domain-terminology-and-identity.md) and
   [ADR-0027](decisions/0027-input-delivery-lifecycle.md); generation and supply
   mechanics are defined by
-  [ADR-0033](decisions/0033-identity-generation-supply-and-encoding.md), and
-  typed relational storage and replay equality by
-  [ADR-0034](decisions/0034-durable-command-storage-and-equality.md).
+  [ADR-0033](decisions/0033-identity-generation-supply-and-encoding.md), typed
+  relational storage and replay equality by
+  [ADR-0034](decisions/0034-durable-command-storage-and-equality.md), and actor
+  participation in replay equality by
+  [ADR-0039](decisions/0039-actor-attribution.md).
 - **Do not confuse with:** Accepted-input identity, logical-work identity, a
   provider idempotency key, or a token reusable in separate session/command
   namespaces.
@@ -62,6 +80,23 @@ spelling. “Provisional” means the name, boundary, or both still need an ADR.
   rejected before state validation. Equivalent normalized forms compare equal;
   corrected unconstructible input may reuse an unclaimed identifier, while
   correction after recorded domain rejection uses a new one.
+
+## Actor
+
+- **Definition:** The typed provenance fact — actor attribution — recording
+  which kind of agency (the owner, one turn's model output, the startup recovery
+  scan, or one tool request's execution) initiated a durable command or recorded
+  transition. The closed algebra, its replay-equality participation, and the
+  adoption path are defined by [ADR-0039](decisions/0039-actor-attribution.md).
+- **Status:** Accepted by [ADR-0039](decisions/0039-actor-attribution.md).
+  Attribution is provenance, not authentication, authorization, or approval; the
+  baseline command boundary constructs only the owner variant.
+- **Do not confuse with:** A session's creation cause, an authenticated
+  principal, a capability or proof, or permission for a non-owner agency to
+  issue commands.
+- **Example:** A turn's model output creates a tool request attributable to the
+  model actor for that turn; replaying a claimed command identifier under a
+  different actor is conflicting reuse.
 
 ## Turn
 
@@ -205,6 +240,25 @@ spelling. “Provisional” means the name, boundary, or both still need an ADR.
   ownership.
 - **Example:** An owner-created session forks session A through message 18; its
   cause is `OwnerInitiated` and its ancestry is A at frontier 18.
+
+## TranscriptFrontier
+
+- **Definition:** The purpose-specific domain boundary identifying an immutable
+  point in a source session's semantic transcript history, referenced by
+  transcript ancestry to state where a derived session's initial context came
+  from ([ADR-0003](decisions/0003-session-creation-and-transcript-ancestry.md));
+  resolving one to its ordered semantic-entry prefix is defined by
+  [ADR-0030](decisions/0030-context-frontier-snapshots.md).
+- **Status:** Accepted by
+  [ADR-0003](decisions/0003-session-creation-and-transcript-ancestry.md);
+  [ADR-0030](decisions/0030-context-frontier-snapshots.md) keeps it distinct
+  from `ContextFrontier`. Selectable fork boundaries and the representation
+  remain open.
+- **Do not confuse with:** A context frontier or its identifier, transcript
+  ancestry itself, or client rendering state.
+- **Example:** A fork records session A at frontier 18; resolving that boundary
+  yields the ordered semantic-entry prefix preserved in the fork's first context
+  snapshot.
 
 ## Input delivery policy
 
@@ -389,6 +443,25 @@ spelling. “Provisional” means the name, boundary, or both still need an ADR.
   the slot only with a marker naming that exact tool attempt and the applied
   interrupt proof.
 
+## Semantic transcript entry
+
+- **Definition:** One immutable identified semantic-history fact owned by a
+  source session. Identity and frontier membership are defined by
+  [ADR-0030](decisions/0030-context-frontier-snapshots.md); the initial closed
+  payload set — an origin reference to one accepted input or an explicit
+  turn-failure marker — and its commit boundaries are defined by
+  [ADR-0036](decisions/0036-initial-semantic-transcript-entries.md).
+- **Status:** Accepted by
+  [ADR-0030](decisions/0030-context-frontier-snapshots.md) and
+  [ADR-0036](decisions/0036-initial-semantic-transcript-entries.md); later
+  variants (assistant content, refusal, steering, tools, approvals, and others)
+  remain open.
+- **Do not confuse with:** The accepted-input record, operational audit rows,
+  provider prompt messages, streaming chunks, or client presentation messages.
+- **Example:** A queued input is durable but becomes transcript history only
+  when its turn's eligibility transaction commits the origin entry and starting
+  snapshot together.
+
 ## Context frontier
 
 - **Definition:** A session-owned immutable identified snapshot that resolves to
@@ -446,6 +519,24 @@ spelling. “Provisional” means the name, boundary, or both still need an ADR.
 - **Example:** After I terminalizes, B fixes `After(I)` and derives its starting
   context through I even though B was accepted before I.
 
+## Session acceptance tail
+
+- **Definition:** The completeness witness carried by an evidence-bearing
+  active-turn reconstitution: every accepted input from the owning turn's origin
+  through the session's authoritatively observed last acceptance position,
+  validated as one gap-free session-scoped interval as defined by
+  [ADR-0041](decisions/0041-evidence-bearing-reconstitution.md).
+- **Status:** Accepted by
+  [ADR-0041](decisions/0041-evidence-bearing-reconstitution.md), refining
+  [ADR-0035](decisions/0035-domain-owned-persistence-reconstitution.md)'s
+  completeness rule for these projections.
+- **Do not confuse with:** A filtered pending-steering query result, a
+  caller-supplied count or completeness flag, the entire session history, or
+  queue order itself.
+- **Example:** Before a terminal path releases the slot, the validated tail
+  supplies every pending steering input to reclassify; an omitted interior
+  acceptance position fails reconstitution closed.
+
 ## Session configuration defaults
 
 - **Definition:** A mutable-by-version session-level model-selection value used
@@ -496,3 +587,54 @@ spelling. “Provisional” means the name, boundary, or both still need an ADR.
 - **Example:** A result for generation 3 arrives after generation 4 was
   assigned; the hub records or discards it as stale without advancing current
   state.
+
+## Transactional outbox
+
+- **Definition:** The append-only event-row family written inside the same
+  transactions that commit client-observable durable state and drained by an
+  in-process publisher, as the sole path from a commit to a client-visible
+  update event; defined by [ADR-0040](decisions/0040-transactional-outbox.md).
+- **Status:** Accepted by [ADR-0040](decisions/0040-transactional-outbox.md),
+  refining [ADR-0019](decisions/0019-process-protocol.md)'s durable-transition
+  event and cursor semantics. Exact schema, delivered-marking, and retention
+  remain open.
+- **Do not confuse with:** A source of truth or event-sourcing log, the
+  transient streaming path, the unary command response, or the separate outbound
+  cancellation-intent concern.
+- **Example:** A stale runner result that changes zero rows appends zero events,
+  so subscribers never observe an update for an effect that did not happen.
+
+## Update event
+
+- **Definition:** One durable-transition fact delivered on
+  [ADR-0019](decisions/0019-process-protocol.md)'s subscription surface,
+  produced only from the transactional outbox rows its committing transaction
+  appended under [ADR-0040](decisions/0040-transactional-outbox.md); delivery is
+  at-least-once, and consumers deduplicate by cursor.
+- **Status:** Observation semantics accepted by
+  [ADR-0019](decisions/0019-process-protocol.md); the committing-side mechanism
+  by [ADR-0040](decisions/0040-transactional-outbox.md). Concrete event kinds
+  arrive with their slices under
+  [ADR-0021](decisions/0021-compatibility-and-negotiation.md)'s rules.
+- **Do not confuse with:** A transient streaming delta or draft, the recorded
+  command result on the unary path, an authoritative snapshot, or the stored
+  outbox row itself.
+- **Example:** Committed assistant content arrives as one durable-transition
+  event whose row was appended by the committing transaction; token deltas
+  stream transiently and never advance the cursor.
+
+## Subscription cursor
+
+- **Definition:** The opaque resumption token each durable update event
+  advances, derived from the outbox's monotonic commit-ordered sequence so that
+  a delivered prefix is never later discovered to have skipped a committed
+  event; observation semantics in
+  [ADR-0019](decisions/0019-process-protocol.md), derivation in
+  [ADR-0040](decisions/0040-transactional-outbox.md).
+- **Status:** Accepted by [ADR-0019](decisions/0019-process-protocol.md) and
+  [ADR-0040](decisions/0040-transactional-outbox.md); the wire encoding remains
+  an opaque protocol value.
+- **Do not confuse with:** The stored global sequence itself, a cross-session
+  ordering claim, a dispatch generation, or a queue position.
+- **Example:** A reconnecting client resumes strictly after its stored cursor,
+  or receives `SnapshotRequired` when that cursor predates retained history.
