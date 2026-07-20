@@ -9,8 +9,9 @@
   [ADR-0034](0034-durable-command-storage-and-equality.md),
   [ADR-0035](0035-domain-owned-persistence-reconstitution.md), and
   [ADR-0040](0040-transactional-outbox.md)
-- Refines: ADR-0032's Tokio selection with the hub binary's runtime contract,
-  and ADR-0035's failure boundary with one shared operator taxonomy
+- Refines: ADR-0032's runtime boundary with the hub binary's entrypoint and
+  composition-root contract, and ADR-0035's failure boundary with one shared
+  operator taxonomy
 - Resolves: the typed caller-error family the
   [2026-07-19 audit entry](../decisions.md#2026-07-19--post-milestone-2-audit-corrections-and-tracked-obligations)
   tracks (the classification here; each mapping lands with its slice)
@@ -46,16 +47,16 @@ migration-invocation and configuration questions open.
 
 ## Decision
 
-### Tokio is the hub's runtime
+### Hub runtime entrypoint
 
-The Tokio 1 series is hubd's official async runtime, confirming ADR-0032's
-selection for the binary itself: hubd owns the runtime entrypoint, and
-application-adjacent runtime code (task spawning, shutdown signals, nudge
-channels) assumes Tokio. Tokio is already transitively present through SQLx's
-`runtime-tokio` feature; hubd now depends on it directly, with narrowly selected
-features per ADR-0032's discipline. `crates/domain` remains runtime-free: no
-Tokio task, channel, timer, lock, or error type crosses into it (INV-002,
-restating nothing — ADR-0032's boundary is the statement of record).
+[ADR-0032](0032-postgres-implementation-dependencies.md) owns the selection of
+Tokio 1 as the hub's asynchronous runtime and the runtime-free domain boundary.
+This record decides the remaining entrypoint contract: hubd owns the runtime
+entrypoint, and application-adjacent runtime code (task spawning, shutdown
+signals, nudge channels) uses that selected runtime. Tokio is already
+transitively present through SQLx's `runtime-tokio` feature; the hubd wiring
+slice must add a direct dependency with narrowly selected features under
+ADR-0032's dependency discipline.
 
 ### Observability through the `tracing` facade
 
@@ -71,12 +72,14 @@ classification plus diagnostic keys at the boundary, per ADR-0035's allowance.
 Operational telemetry never rides the ADR-0040 outbox, which carries
 client-visible update events only; a log line is not a client fact.
 
-`tracing` is a new dependency crossing the repository's large-dependency gate;
-the owner approved its adoption when commissioning this record, and merging the
-record is the recorded acceptance. Explicit non-goals: metrics and OpenTelemetry
-are deferred, and no log-content policy exists beyond ADR-0017's credential
-redaction plus one rule this record adds — full user content never appears in
-logs; identifiers, lengths, and classifications may.
+The hubd wiring slice must add `tracing` as a new dependency crossing the
+repository's large-dependency gate; the owner approved its adoption when
+commissioning this record, and merging the record is the recorded acceptance.
+Explicit non-goals: metrics and OpenTelemetry are deferred, and no log-content
+policy exists beyond ADR-0017's credential redaction plus one rule this record
+adds — full user content never appears in logs. Non-secret opaque aggregate
+identities, lengths, and taxonomy classifications may appear; caller-provided,
+user-associated, and secret-associated identifiers may not.
 
 ### One shared operator failure taxonomy
 
@@ -161,10 +164,11 @@ hubd is the composition root and owns construction:
 
 ## Explicit non-decisions
 
-This record adds no code by itself and writes no manifests. It does not decide
-scheduler mechanics beyond naming the hook boundary (ADR-0010 owns them), the
-protocol server or transport startup (ADR-0019 scope), pool sizing or timeouts,
-log content schemas, or any storage DDL. It selects no metrics,
-tracing-subscriber ecosystem beyond hubd's private choice, or process
-supervisor. Names above (`SessionRepository`, `migrate`, error variants)
-describe today's code for falsifiability, not a frozen API.
+This record adds no code by itself and writes no manifests; its dependency
+requirements land with the hubd wiring slice. It does not decide scheduler
+mechanics beyond naming the hook boundary (ADR-0010 owns them), the protocol
+server or transport startup (ADR-0019 scope), pool sizing or timeouts, log
+content schemas, or any storage DDL. It selects no metrics, tracing-subscriber
+ecosystem beyond hubd's private choice, or process supervisor. Names above
+(`SessionRepository`, `migrate`, error variants) describe today's code for
+falsifiability, not a frozen API.
