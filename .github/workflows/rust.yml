@@ -38,9 +38,14 @@ jobs:
             crates/persistence/src/lock_inventory.rs | cut -d ' ' -f 1)"
           test "$inventory_hash" = \
             d7745b9fa6388a10d668025ce7f5047d132f9e0206376ccaa01eadb116b28f81
-          unexpected="$(git grep -Iil -E 'FOR[[:space:]]+UPDATE' -- \
-            crates/persistence/src \
-            ':!crates/persistence/src/lock_inventory.rs' || true)"
+          unexpected="$(git ls-files -z 'crates/persistence/src/*.rs' \
+            | xargs -0 perl -0777 -ne '
+              next if $ARGV =~ m{/lock_inventory[.]rs$};
+              s{/[*].*?[*]/}{ }gs;
+              s{--[^\n]*}{ }g;
+              s/\s+/ /g;
+              print "$ARGV\n" if /\bfor update\b/i;
+            ')"
           test -z "$unexpected" || {
             printf 'explicit row lock outside inventory:\n%s\n' "$unexpected"
             exit 1
