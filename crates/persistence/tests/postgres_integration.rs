@@ -8123,6 +8123,114 @@ async fn s24_inv032_outbox_delivery_prefix_is_stable() -> Result<(), Box<dyn Err
     Ok(())
 }
 
+/// S24 / INV-032: an event-producing transaction cannot mark its own
+/// uncommitted event delivered and thereby make restart recovery skip it.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_inv032_outbox_delivery_rejects_event_producing_transaction()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0xe05, 0xe15, direct(0xe25)))
+        .await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0xe06, 0xe16, direct(0xe26)))
+        .await?;
+
+    let mut event_transaction = pool.begin().await?;
+    let sequence =
+        append_session_created_test_event(&mut event_transaction, Uuid::from_u128(0xe15)).await?;
+    let same_transaction_delivery = sqlx::query(
+        "UPDATE outbox_delivery_state
+            SET delivered_through = $1
+          WHERE singleton",
+    )
+    .bind(sequence)
+    .execute(&mut *event_transaction)
+    .await
+    .expect_err("an event-producing transaction cannot deliver its own event");
+    assert_eq!(
+        same_transaction_delivery
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+    event_transaction.rollback().await?;
+
+    let rolled_back: (Decimal, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT delivered_through
+               FROM outbox_delivery_state
+              WHERE singleton),
+            (SELECT count(*)
+               FROM outbox_event)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(rolled_back, (Decimal::ZERO, 0));
+
+    let mut committed_event = pool.begin().await?;
+    let sequence =
+        append_session_created_test_event(&mut committed_event, Uuid::from_u128(0xe15)).await?;
+    committed_event.commit().await?;
+
+    let mut delivery_then_event = pool.begin().await?;
+    sqlx::query(
+        "UPDATE outbox_delivery_state
+            SET delivered_through = $1
+          WHERE singleton",
+    )
+    .bind(sequence)
+    .execute(&mut *delivery_then_event)
+    .await?;
+    let delivery_first_append =
+        append_session_created_test_event(&mut delivery_then_event, Uuid::from_u128(0xe16))
+            .await
+            .expect_err("delivery and later event append cannot share one transaction");
+    assert_eq!(
+        delivery_first_append
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+    delivery_then_event.rollback().await?;
+
+    let after_delivery_first_rollback: (Decimal, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT delivered_through
+               FROM outbox_delivery_state
+              WHERE singleton),
+            (SELECT count(*)
+               FROM outbox_event)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(after_delivery_first_rollback, (Decimal::ZERO, 1));
+
+    sqlx::query(
+        "UPDATE outbox_delivery_state
+            SET delivered_through = $1
+          WHERE singleton",
+    )
+    .bind(sequence)
+    .execute(&pool)
+    .await?;
+    let delivered_through: Decimal = sqlx::query_scalar(
+        "SELECT delivered_through
+           FROM outbox_delivery_state
+          WHERE singleton",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(delivered_through, sequence);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-032: the durable sequence, prefix, header, and typed-record tables cannot
 /// bypass their row-level guards through PostgreSQL's statement-level truncate.
 #[tokio::test]

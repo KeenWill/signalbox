@@ -10,6 +10,7 @@
 CREATE TABLE outbox_sequence_state (
     singleton boolean PRIMARY KEY,
     last_sequence numeric(20, 0) NOT NULL,
+    last_allocation_xid xid8,
 
     CONSTRAINT outbox_sequence_state_singleton
         CHECK (singleton),
@@ -17,6 +18,11 @@ CREATE TABLE outbox_sequence_state (
         CHECK (
             last_sequence >= 0
             AND last_sequence <= 18446744073709551615
+        ),
+    CONSTRAINT outbox_sequence_state_allocator_recorded
+        CHECK (
+            last_sequence = 0
+            OR last_allocation_xid IS NOT NULL
         )
 );
 
@@ -26,6 +32,7 @@ VALUES (TRUE, 0);
 CREATE TABLE outbox_delivery_state (
     singleton boolean PRIMARY KEY,
     delivered_through numeric(20, 0) NOT NULL,
+    last_delivery_xid xid8,
 
     CONSTRAINT outbox_delivery_state_singleton
         CHECK (singleton),
@@ -33,6 +40,11 @@ CREATE TABLE outbox_delivery_state (
         CHECK (
             delivered_through >= 0
             AND delivered_through <= 18446744073709551615
+        ),
+    CONSTRAINT outbox_delivery_state_transaction_recorded
+        CHECK (
+            delivered_through = 0
+            OR last_delivery_xid IS NOT NULL
         )
 );
 
@@ -110,8 +122,20 @@ BEGIN
             USING ERRCODE = '23514';
     END IF;
 
+    IF EXISTS (
+        SELECT 1
+          FROM outbox_delivery_state
+         WHERE singleton
+           AND last_delivery_xid = pg_current_xact_id()
+    ) THEN
+        RAISE EXCEPTION
+            'outbox event append cannot follow delivery in one transaction'
+            USING ERRCODE = '23514';
+    END IF;
+
     UPDATE outbox_sequence_state
-       SET last_sequence = last_sequence + 1
+       SET last_sequence = last_sequence + 1,
+           last_allocation_xid = pg_current_xact_id()
      WHERE singleton
        AND last_sequence < 18446744073709551615
     RETURNING last_sequence INTO NEW.event_sequence;
@@ -137,6 +161,12 @@ AS $$
 BEGIN
     IF NEW.last_sequence <> OLD.last_sequence + 1 THEN
         RAISE EXCEPTION 'outbox sequence must advance exactly once per event'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF NEW.last_allocation_xid IS DISTINCT FROM pg_current_xact_id() THEN
+        RAISE EXCEPTION
+            'outbox allocator transaction must accompany its sequence'
             USING ERRCODE = '23514';
     END IF;
 
@@ -209,6 +239,19 @@ BEGIN
             'outbox delivery must advance by exactly one sequence'
             USING ERRCODE = '23514';
     END IF;
+
+    IF EXISTS (
+        SELECT 1
+          FROM outbox_sequence_state
+         WHERE singleton
+           AND last_allocation_xid = pg_current_xact_id()
+    ) THEN
+        RAISE EXCEPTION
+            'outbox delivery cannot advance in an event-producing transaction'
+            USING ERRCODE = '23514';
+    END IF;
+
+    NEW.last_delivery_xid := pg_current_xact_id();
 
     IF NOT EXISTS (
         SELECT 1

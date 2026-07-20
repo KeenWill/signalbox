@@ -20,12 +20,13 @@ therefore expose a higher event while a lower transaction remains in flight.
 **Decision.** Allocate each outbox header by transactionally incrementing one
 singleton row. Its row lock remains held through commit or rollback, so later
 allocators cannot pass it; a deferred constraint requires every increment to
-have its matching immutable event. Store the independently mutable delivered
-prefix in a second singleton row and permit it to advance only to the next
-existing sequence. Use full-`u64` `numeric(20, 0)` values at this storage-only
-boundary. The first closed header/typed-record family admits only
-`session_created` version 1; its production append arrives in the next stack
-slice.
+have its matching immutable event. Record the allocating and delivering
+PostgreSQL transactions on their singleton rows so event append and
+delivered-prefix advancement cannot share a transaction in either order;
+otherwise permit the prefix to advance only to the next existing sequence. Use
+full-`u64` `numeric(20, 0)` values at this storage-only boundary. The first
+closed header/typed-record family admits only `session_created` version 1; its
+production append arrives in the next stack slice.
 
 **Rejected alternatives.** PostgreSQL sequences and unlocked counters permit
 commit-order inversion. Holding an in-process allocation mutex would make
@@ -33,10 +34,10 @@ correctness depend on process memory and would not constrain direct database
 transactions. Tracking per-row delivered flags would permit non-prefix marking
 and make restart recovery reconstruct a fact the singleton can state directly.
 
-**Affects.** The transactional-outbox migration, its real-PostgreSQL ordering
-and prefix-stability tests, the INV-032 enforcement index, and the target-model
-implementation status; no domain, application, wire, retention, or pruning
-semantics.
+**Affects.** The transactional-outbox migration, its real-PostgreSQL ordering,
+delivery-isolation, and prefix-stability tests, the INV-032 enforcement index,
+and the target-model implementation status; no domain, application, wire,
+retention, or pruning semantics.
 
 ## 2026-07-20 — Static TOML supplies model and alias definitions
 
