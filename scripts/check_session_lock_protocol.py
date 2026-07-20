@@ -6,9 +6,13 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|[(),;.]")
+QUERY_CALL = re.compile(
+    r"sqlx::(query_file(?:_as|_scalar)?|query(?:_as|_scalar)?)(!)?"
+)
 RELATION_BOUNDARIES = {
     "for",
     "group",
@@ -80,6 +84,19 @@ def rust_strings(source: str) -> list[str]:
     return strings
 
 
+def static_strings(expression: str) -> list[str] | None:
+    """Resolve a Rust string literal or a static concat! expression."""
+    expression = expression.strip()
+    strings = rust_strings(expression)
+    if not strings:
+        return None
+    if expression.startswith("concat!"):
+        return strings
+    raw = re.fullmatch(r'r(#+)?".*"\1', expression, re.DOTALL)
+    normal = re.fullmatch(r'"(?:\\.|[^"\\])*"', expression, re.DOTALL)
+    return strings if raw or normal else None
+
+
 def query_strings(source: str) -> list[str]:
     """Return literal SQL candidates, including statically concatenated literals."""
     candidates = rust_strings(source)
@@ -127,9 +144,149 @@ def query_strings(source: str) -> list[str]:
     return candidates
 
 
+def query_inputs(source: str, crate_root: Path) -> tuple[list[str], list[str]]:
+    """Resolve SQLx query inputs, reporting expressions that cannot be inspected."""
+    candidates: list[str] = []
+    errors: list[str] = []
+    for match in QUERY_CALL.finditer(source):
+        cursor = match.end()
+        angle_depth = 0
+        while cursor < len(source):
+            character = source[cursor]
+            if character == "<":
+                angle_depth += 1
+            elif character == ">" and angle_depth:
+                angle_depth -= 1
+            elif character == "(" and angle_depth == 0:
+                break
+            cursor += 1
+        if cursor == len(source):
+            errors.append(f"{match.group(0)} has no inspectable argument list")
+            continue
+
+        start = cursor + 1
+        index = start
+        depths = {"(": 0, "[": 0, "{": 0}
+        pairs = {")": "(", "]": "[", "}": "{"}
+        while index < len(source):
+            if source[index] in {'"', "'"} or re.match(r'r(#+)?"', source[index:]):
+                before = index
+                strings = rust_strings(source[index:])
+                if not strings:
+                    index = len(source)
+                    break
+                raw = re.match(r'r(#+)?"', source[index:])
+                if raw:
+                    marker = '"' + (raw.group(1) or "")
+                    end = source.find(marker, index + len(raw.group(0)))
+                    index = len(source) if end < 0 else end + len(marker)
+                elif source[index] == '"':
+                    index += 1
+                    while index < len(source):
+                        if source[index] == "\\":
+                            index += 2
+                        elif source[index] == '"':
+                            index += 1
+                            break
+                        else:
+                            index += 1
+                else:
+                    character = re.match(r"'(?:\\.|[^'\\\n])'", source[index:])
+                    index += len(character.group(0)) if character else 1
+                if index == before:
+                    index += 1
+                continue
+            character = source[index]
+            if character in depths:
+                depths[character] += 1
+            elif character in pairs:
+                opener = pairs[character]
+                if character == ")" and not any(depths.values()):
+                    break
+                if depths[opener]:
+                    depths[opener] -= 1
+            elif character == "," and not any(depths.values()):
+                break
+            index += 1
+
+        expression = source[start:index].strip()
+        fragments = static_strings(expression)
+        if fragments is None:
+            errors.append(f"{match.group(0)} uses dynamic SQL: {expression[:80]}")
+            continue
+        if match.group(1).startswith("query_file"):
+            query_path = crate_root / fragments[0]
+            try:
+                candidates.append(query_path.read_text())
+            except OSError as error:
+                errors.append(f"cannot inspect {query_path}: {error}")
+        else:
+            candidates.append("".join(fragments))
+    return candidates, errors
+
+
+def sanitize_sql(sql: str) -> str:
+    """Blank SQL comments and literal contents without changing token separation."""
+    output = list(sql)
+    index = 0
+    while index < len(sql):
+        if sql.startswith("--", index):
+            end = sql.find("\n", index + 2)
+            end = len(sql) if end < 0 else end
+        elif sql.startswith("/*", index):
+            depth = 1
+            end = index + 2
+            while end < len(sql) and depth:
+                if sql.startswith("/*", end):
+                    depth += 1
+                    end += 2
+                elif sql.startswith("*/", end):
+                    depth -= 1
+                    end += 2
+                else:
+                    end += 1
+        elif sql[index] == "'":
+            end = index + 1
+            while end < len(sql):
+                if sql.startswith("''", end):
+                    end += 2
+                elif sql[end] == "'":
+                    end += 1
+                    break
+                else:
+                    end += 1
+        elif sql[index] == "$" and (tag := re.match(r"\$[A-Za-z_0-9]*\$", sql[index:])):
+            marker = tag.group(0)
+            end = sql.find(marker, index + len(marker))
+            end = len(sql) if end < 0 else end + len(marker)
+        elif sql[index] == '"':
+            end = index + 1
+            identifier: list[str] = []
+            while end < len(sql):
+                if sql.startswith('""', end):
+                    identifier.append('"')
+                    end += 2
+                elif sql[end] == '"':
+                    end += 1
+                    break
+                else:
+                    identifier.append(sql[end])
+                    end += 1
+            replacement = "".join(identifier)
+            output[index:end] = list(replacement.ljust(end - index))
+            index = end
+            continue
+        else:
+            index += 1
+            continue
+        output[index:end] = " " * (end - index)
+        index = end
+    return "".join(output)
+
+
 def locks_session_with_plain_update(sql: str) -> bool:
     """Whether one SQL string applies plain FOR UPDATE to a session relation."""
-    tokens = [match.group(0).lower() for match in TOKEN.finditer(sql)]
+    tokens = [match.group(0).lower() for match in TOKEN.finditer(sanitize_sql(sql))]
     paths: list[tuple[int, ...]] = []
     stack: list[int] = []
     next_scope = 0
@@ -145,6 +302,8 @@ def locks_session_with_plain_update(sql: str) -> bool:
     statement_start = 0
 
     def relation_at(index: int) -> tuple[int, str, str] | None:
+        if index < len(tokens) and tokens[index] == "only":
+            index += 1
         if index >= len(tokens) or not re.fullmatch(r"[a-z_][a-z0-9_]*", tokens[index]):
             return None
         name_index = index
@@ -220,6 +379,9 @@ def self_test() -> None:
         "SELECT * FROM session AS s FOR UPDATE OF s",
         "SELECT * FROM other, session WHERE true FOR UPDATE",
         "SELECT * FROM session WHERE id IN (SELECT id FROM other) FOR UPDATE",
+        "SELECT * FROM ONLY session FOR UPDATE",
+        "SELECT * FROM session /* ( */ FOR UPDATE",
+        'SELECT * FROM "session" FOR UPDATE',
     ]
     allowed = [
         "SELECT * FROM session FOR NO KEY UPDATE",
@@ -240,6 +402,24 @@ def self_test() -> None:
             'sqlx::query(concat!("SELECT count(*) FROM session ", "FOR UPDATE"))'
         )
     )
+    assert not locks_session_with_plain_update(
+        "SELECT '(' FROM session_scheduler -- FROM session (\nFOR UPDATE"
+    )
+    candidates, errors = query_inputs(
+        'sqlx::query(concat!("SELECT * FROM session ", "FOR UPDATE"))', Path(".")
+    )
+    assert not errors and locks_session_with_plain_update(candidates[0])
+    _, errors = query_inputs(
+        'sqlx::query(&format!("SELECT * FROM session {}", lock_mode))', Path(".")
+    )
+    assert errors
+    with tempfile.TemporaryDirectory() as directory:
+        crate_root = Path(directory)
+        (crate_root / "lock.sql").write_text("SELECT * FROM session FOR UPDATE")
+        candidates, errors = query_inputs(
+            'sqlx::query_file!("lock.sql")', crate_root
+        )
+        assert not errors and locks_session_with_plain_update(candidates[0])
 
 
 def main() -> int:
@@ -261,14 +441,18 @@ def main() -> int:
         return 1
 
     violations: list[Path] = []
+    inspection_errors: list[tuple[Path, str]] = []
     for path in sorted(root.rglob("*.rs")):
-        if any(locks_session_with_plain_update(sql) for sql in query_strings(path.read_text())):
+        candidates, errors = query_inputs(path.read_text(), root.parent)
+        inspection_errors.extend((path, error) for error in errors)
+        if any(locks_session_with_plain_update(sql) for sql in candidates):
             violations.append(path)
+    for path, error in inspection_errors:
+        print(f"{path}: {error}", file=sys.stderr)
     if violations:
         for path in violations:
             print(f"{path}: session table locked with plain FOR UPDATE", file=sys.stderr)
-        return 1
-    return 0
+    return 1 if violations or inspection_errors else 0
 
 
 if __name__ == "__main__":
