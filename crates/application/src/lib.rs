@@ -34,8 +34,8 @@ pub use start_eligible_turn::{
     StartEligibleTurnTransaction, UuidV7StartEligibleTurnIdGenerator,
 };
 pub use startup_scan::{
-    StartupScanIdGenerator, StartupScanOutcome, StartupScanRepository, StartupScanService,
-    StartupScanSessionOutcome, UuidV7StartupScanIdGenerator,
+    StartupScanError, StartupScanIdGenerator, StartupScanOutcome, StartupScanRepository,
+    StartupScanService, StartupScanSessionOutcome, UuidV7StartupScanIdGenerator,
 };
 pub use submit_input::{
     SubmitInputIdGenerator, SubmitInputOutcome, SubmitInputRequest, SubmitInputRequestError,

@@ -4,7 +4,7 @@
 //! scheduler starts. ADR-0036 owns the failed marker and terminal frontier,
 //! while INV-034 requires prior-process nonterminal attempts to end as Lost.
 
-use std::future::Future;
+use std::{error::Error, fmt, future::Future};
 
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputTurnFailureIdentities, ContextFrontierId,
@@ -93,6 +93,74 @@ impl StartupScanOutcome {
     }
 }
 
+/// Repository failure annotated with the startup-scan aggregate scope.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StartupScanError<RepositoryError> {
+    repository_error: RepositoryError,
+    session: Option<SessionId>,
+}
+
+impl<RepositoryError> StartupScanError<RepositoryError> {
+    const fn inventory(repository_error: RepositoryError) -> Self {
+        Self {
+            repository_error,
+            session: None,
+        }
+    }
+
+    const fn recovery(session: SessionId, repository_error: RepositoryError) -> Self {
+        Self {
+            repository_error,
+            session: Some(session),
+        }
+    }
+
+    /// Returns the session scoped by a failed recovery transaction.
+    ///
+    /// Inventory failures occur before one session is selected and return
+    /// `None`.
+    pub const fn session(&self) -> Option<SessionId> {
+        self.session
+    }
+
+    /// Returns the adapter-specific failure without discarding its detail.
+    pub const fn repository_error(&self) -> &RepositoryError {
+        &self.repository_error
+    }
+
+    /// Consumes the scan annotation and returns the adapter-specific failure.
+    pub fn into_repository_error(self) -> RepositoryError {
+        self.repository_error
+    }
+}
+
+impl<RepositoryError> fmt::Display for StartupScanError<RepositoryError>
+where
+    RepositoryError: fmt::Display,
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.repository_error.fmt(formatter)
+    }
+}
+
+impl<RepositoryError> Error for StartupScanError<RepositoryError>
+where
+    RepositoryError: Error + 'static,
+{
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.repository_error)
+    }
+}
+
+impl<RepositoryError> ClassifyOperatorFailure for StartupScanError<RepositoryError>
+where
+    RepositoryError: ClassifyOperatorFailure,
+{
+    fn operator_failure_class(&self) -> OperatorFailureClass {
+        self.repository_error.operator_failure_class()
+    }
+}
+
 /// Coordinates one finite, idempotent startup recovery scan.
 #[derive(Clone, Debug)]
 pub struct StartupScanService<Generator, Repository> {
@@ -122,8 +190,14 @@ where
     /// Each session transaction independently rechecks authority under lock.
     /// A crash or ambiguous infrastructure failure stops startup; a later
     /// invocation safely inventories only work still active.
-    pub async fn execute(&mut self) -> Result<StartupScanOutcome, Repository::Error> {
-        let sessions = self.repository.active_sessions().await?;
+    pub async fn execute(
+        &mut self,
+    ) -> Result<StartupScanOutcome, StartupScanError<Repository::Error>> {
+        let sessions = self
+            .repository
+            .active_sessions()
+            .await
+            .map_err(StartupScanError::inventory)?;
         let mut recovered_turn_count = 0_usize;
         let mut pending_steering_sessions = Vec::new();
 
@@ -149,7 +223,7 @@ where
                     {
                         continue;
                     }
-                    Err(error) => return Err(error),
+                    Err(error) => return Err(StartupScanError::recovery(session, error)),
                 }
             }
         }
@@ -295,7 +369,15 @@ mod tests {
         };
         let mut service = StartupScanService::new(FakeIds { next: 10, calls: 0 }, repository);
 
-        assert_eq!(run_ready(service.execute()), Err(FakeError::Infrastructure));
+        let error = run_ready(service.execute()).expect_err("infrastructure stops the scan");
+        assert_eq!(error.session(), Some(requested));
+        assert_eq!(error.repository_error(), &FakeError::Infrastructure);
+        assert_eq!(
+            error.operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false
+            }
+        );
         let (ids, repository) = service.into_parts();
         assert_eq!(ids.calls, 2);
         assert_eq!(repository.observed, vec![requested]);

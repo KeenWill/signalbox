@@ -9,13 +9,14 @@ use signalbox_application::{
 use signalbox_domain::{
     AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities, AttemptEnd,
     InitialSemanticTranscriptEntryPayload, PreparedAcceptedInputTurnFailure, SessionId,
-    TurnDisposition, UnstoppedAttemptDisposition,
+    TurnDisposition, TurnId, UnstoppedAttemptDisposition,
 };
 use sqlx::{PgConnection, PgPool, types::Uuid};
 
 use crate::{
     mapping::{
-        input_position_to_numeric, session_id_from_uuid, session_id_to_uuid, turn_id_to_uuid,
+        input_position_to_numeric, session_id_from_uuid, session_id_to_uuid, turn_id_from_uuid,
+        turn_id_to_uuid,
     },
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
     submit_input::{SubmitInputCorruption, SubmitInputRepositoryError, load_scheduling_projection},
@@ -91,7 +92,12 @@ pub enum StartupScanRepositoryError {
         commit_ambiguous: bool,
     },
     /// Durable records cannot reconstruct or commit the accepted shape.
-    Corruption(StartupScanCorruption),
+    Corruption {
+        /// The invalid durable shape.
+        source: StartupScanCorruption,
+        /// The active durable turn observed for the scoped session.
+        turn: Option<TurnId>,
+    },
     /// A supplied fresh identity already names a durable record.
     IdentityCollision(StartupScanIdentityCollision),
 }
@@ -100,7 +106,7 @@ impl fmt::Display for StartupScanRepositoryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Database { source, .. } => write!(formatter, "startup scan failed: {source}"),
-            Self::Corruption(error) => error.fmt(formatter),
+            Self::Corruption { source, .. } => source.fmt(formatter),
             Self::IdentityCollision(error) => error.fmt(formatter),
         }
     }
@@ -110,7 +116,7 @@ impl Error for StartupScanRepositoryError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Database { source, .. } => Some(source),
-            Self::Corruption(error) => Some(error),
+            Self::Corruption { source, .. } => Some(source),
             Self::IdentityCollision(error) => Some(error),
         }
     }
@@ -124,7 +130,7 @@ impl ClassifyOperatorFailure for StartupScanRepositoryError {
             } => OperatorFailureClass::Infrastructure {
                 commit_ambiguous: *commit_ambiguous,
             },
-            Self::Corruption(_) => OperatorFailureClass::FailClosedCorruption,
+            Self::Corruption { .. } => OperatorFailureClass::FailClosedCorruption,
             Self::IdentityCollision(_) => OperatorFailureClass::IdentityCollision,
         }
     }
@@ -132,7 +138,10 @@ impl ClassifyOperatorFailure for StartupScanRepositoryError {
 
 impl From<StartupScanCorruption> for StartupScanRepositoryError {
     fn from(error: StartupScanCorruption) -> Self {
-        Self::Corruption(error)
+        Self::Corruption {
+            source: error,
+            turn: None,
+        }
     }
 }
 
@@ -143,6 +152,15 @@ impl From<sqlx::Error> for StartupScanRepositoryError {
 }
 
 impl StartupScanRepositoryError {
+    /// Returns the relevant durable turn for corruption scoped to one active
+    /// turn.
+    pub const fn corruption_turn(&self) -> Option<TurnId> {
+        match self {
+            Self::Corruption { turn, .. } => *turn,
+            Self::Database { .. } | Self::IdentityCollision(_) => None,
+        }
+    }
+
     fn from_database(error: sqlx::Error, commit_ambiguous: bool) -> Self {
         if let Some(collision) = identity_collision(&error) {
             Self::IdentityCollision(collision)
@@ -151,6 +169,13 @@ impl StartupScanRepositoryError {
                 source: error,
                 commit_ambiguous,
             }
+        }
+    }
+
+    fn with_corruption_turn(self, turn: Option<TurnId>) -> Self {
+        match self {
+            Self::Corruption { source, turn: None } => Self::Corruption { source, turn },
+            error => error,
         }
     }
 }
@@ -244,8 +269,9 @@ async fn recover_in_transaction(
     // This is the same scheduler-row lock ordering used by every lifecycle
     // writer. Reconstitution and all guarded writes happen while it is held.
     let session_uuid = session_id_to_uuid(requested_session);
-    let (session_exists, scheduler_session) = sqlx::query_as::<_, (bool, Option<Uuid>)>(
-        "SELECT
+    let (session_exists, scheduler_session, active_turn) =
+        sqlx::query_as::<_, (bool, Option<Uuid>, Option<Uuid>)>(
+            "SELECT
             EXISTS (
                 SELECT 1
                   FROM session
@@ -256,12 +282,36 @@ async fn recover_in_transaction(
                   FROM session_scheduler
                  WHERE session_id = $1
                  FOR UPDATE
+            ),
+            (
+                SELECT turn_id
+                  FROM turn_lifecycle
+                 WHERE session_id = $1
+                   AND state_kind = 'active'
             )",
-    )
-    .bind(session_uuid)
-    .fetch_one(&mut *connection)
-    .await?;
+        )
+        .bind(session_uuid)
+        .fetch_one(&mut *connection)
+        .await?;
 
+    recover_locked_session(
+        connection,
+        requested_session,
+        identities,
+        session_exists,
+        scheduler_session,
+    )
+    .await
+    .map_err(|error| error.with_corruption_turn(active_turn.map(turn_id_from_uuid)))
+}
+
+async fn recover_locked_session(
+    connection: &mut PgConnection,
+    requested_session: SessionId,
+    identities: AcceptedInputTurnFailureIdentities,
+    session_exists: bool,
+    scheduler_session: Option<Uuid>,
+) -> Result<TransactionDecision, StartupScanRepositoryError> {
     if scheduler_session.is_none() {
         if session_exists {
             return Err(StartupScanCorruption::Missing("session scheduler row").into());
@@ -486,8 +536,24 @@ fn identity_collision(error: &sqlx::Error) -> Option<StartupScanIdentityCollisio
 #[cfg(test)]
 mod tests {
     use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
+    use signalbox_domain::TurnId;
+    use sqlx::types::Uuid;
 
-    use super::StartupScanRepositoryError;
+    use super::{StartupScanCorruption, StartupScanRepositoryError};
+
+    #[test]
+    fn corruption_retains_the_scoped_durable_turn() {
+        let turn = TurnId::from_uuid(Uuid::from_u128(1));
+        let error =
+            StartupScanRepositoryError::from(StartupScanCorruption::Missing("active turn record"))
+                .with_corruption_turn(Some(turn));
+
+        assert_eq!(error.corruption_turn(), Some(turn));
+        assert_eq!(
+            error.operator_failure_class(),
+            OperatorFailureClass::FailClosedCorruption
+        );
+    }
 
     #[test]
     fn precommit_database_failure_is_not_commit_ambiguous() {

@@ -10,6 +10,7 @@ use signalbox_application::{
     InProcessEligibilityWorkSource, OperatorFailureClass, SchedulerLoop, StartEligibleTurnService,
     StartupScanService, UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
 };
+use signalbox_domain::{SessionId, TurnId};
 use signalbox_persistence::{
     connect_production, migrate, scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository, startup::PostgresStartupScanRepository,
@@ -32,6 +33,8 @@ struct HubRuntimeError {
     phase: RuntimePhase,
     failure_class: OperatorFailureClass,
     blocker_count: Option<u64>,
+    session: Option<SessionId>,
+    turn: Option<TurnId>,
 }
 
 impl HubRuntimeError {
@@ -42,6 +45,8 @@ impl HubRuntimeError {
                 commit_ambiguous: false,
             },
             blocker_count: None,
+            session: None,
+            turn: None,
         }
     }
 
@@ -50,6 +55,22 @@ impl HubRuntimeError {
             phase,
             failure_class,
             blocker_count: None,
+            session: None,
+            turn: None,
+        }
+    }
+
+    const fn startup_scan(
+        failure_class: OperatorFailureClass,
+        session: Option<SessionId>,
+        turn: Option<TurnId>,
+    ) -> Self {
+        Self {
+            phase: RuntimePhase::StartupScan,
+            failure_class,
+            blocker_count: None,
+            session,
+            turn,
         }
     }
 
@@ -60,6 +81,8 @@ impl HubRuntimeError {
                 commit_ambiguous: false,
             },
             blocker_count: Some(pending_steering_count),
+            session: None,
+            turn: None,
         }
     }
 }
@@ -194,9 +217,10 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
                 PostgresStartupScanRepository::new(scan_pool),
             );
             let outcome = scan.execute().await.map_err(|error| {
-                HubRuntimeError::classified(
-                    RuntimePhase::StartupScan,
+                HubRuntimeError::startup_scan(
                     error.operator_failure_class(),
+                    error.session(),
+                    error.repository_error().corruption_turn(),
                 )
             })?;
             if outcome.is_complete() {
@@ -288,6 +312,8 @@ async fn main() -> ExitCode {
                 phase = ?error.phase,
                 failure_class = ?error.failure_class,
                 blocker_count = error.blocker_count,
+                session_id = ?error.session,
+                turn_id = ?error.turn,
                 "hub startup failed"
             );
             ExitCode::FAILURE
@@ -311,7 +337,7 @@ mod tests {
         ClassifyOperatorFailure, EligibilityPass, EligibilityWorkSource, OperatorFailureClass,
         SchedulerLoop,
     };
-    use signalbox_domain::SessionId;
+    use signalbox_domain::{SessionId, TurnId};
     use tokio::sync::oneshot;
     use uuid::Uuid;
 
@@ -392,6 +418,27 @@ mod tests {
             HubConfiguration::from_database_url(Some(OsString::from("postgres://secret")))
                 .expect("nonempty deployment value is accepted before SQLx parsing");
         assert_eq!(configuration.database_url(), "postgres://secret");
+    }
+
+    #[test]
+    fn adr0044_startup_corruption_retains_safe_aggregate_context() {
+        let session = SessionId::from_uuid(Uuid::from_u128(1));
+        let turn = TurnId::from_uuid(Uuid::from_u128(2));
+
+        assert_eq!(
+            HubRuntimeError::startup_scan(
+                OperatorFailureClass::FailClosedCorruption,
+                Some(session),
+                Some(turn),
+            ),
+            HubRuntimeError {
+                phase: RuntimePhase::StartupScan,
+                failure_class: OperatorFailureClass::FailClosedCorruption,
+                blocker_count: None,
+                session: Some(session),
+                turn: Some(turn),
+            }
+        );
     }
 
     #[derive(Clone, Copy, Debug)]

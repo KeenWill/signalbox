@@ -1969,6 +1969,13 @@ impl StartupScanOutcome {
     // is_complete()
 }
 
+pub struct StartupScanError<RepositoryError> { /* private */ }
+// sealed: StartupScanService::execute
+// impl Clone, Debug, Eq, PartialEq, Display, Error, ClassifyOperatorFailure
+impl<RepositoryError> StartupScanError<RepositoryError> {
+    // accessors: session(), repository_error(), into_repository_error()
+}
+
 pub struct StartupScanService<Generator, Repository> { /* private */ }
 impl<Generator, Repository> StartupScanService<Generator, Repository> {
     pub const fn new(ids: Generator, repository: Repository) -> Self;
@@ -1981,7 +1988,7 @@ impl<
 {
     pub async fn execute(
         &mut self,
-    ) -> Result<StartupScanOutcome, Repository::Error>;
+    ) -> Result<StartupScanOutcome, StartupScanError<Repository::Error>>;
 }
 ```
 
@@ -2076,6 +2083,6 @@ impl<
 | application: replace_session_defaults | 4 (incl. 1 trait)    |
 | application: scheduler                | 11 (incl. 4 traits)  |
 | application: start_eligible_turn      | 5 (incl. 2 traits)   |
-| application: startup_scan             | 6 (incl. 2 traits)   |
+| application: startup_scan             | 7 (incl. 2 traits)   |
 | application: submit_input             | 7 (incl. 2 traits)   |
-| **signalbox-application total**       | **45**               |
+| **signalbox-application total**       | **46**               |
