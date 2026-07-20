@@ -8,3 +8,4 @@ keys.txt
 # Decrypted sops output; encrypted sources are committed, plaintext is not.
 *.decrypted.*
 *.dec
+*.dec.*

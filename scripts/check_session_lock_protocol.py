@@ -8,7 +8,7 @@ import re
 import sys
 from pathlib import Path
 
-TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|[(),;]")
+TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|[(),;.]")
 
 
 def rust_strings(source: str) -> list[str]:
@@ -68,6 +68,53 @@ def rust_strings(source: str) -> list[str]:
     return strings
 
 
+def query_strings(source: str) -> list[str]:
+    """Return literal SQL candidates, including statically concatenated literals."""
+    candidates = rust_strings(source)
+    search_from = 0
+    while (macro := source.find("concat!(", search_from)) >= 0:
+        start = macro + len("concat!(")
+        depth = 1
+        index = start
+        while index < len(source) and depth:
+            if source.startswith("//", index):
+                newline = source.find("\n", index + 2)
+                index = len(source) if newline < 0 else newline
+                continue
+            if source.startswith("/*", index):
+                end = source.find("*/", index + 2)
+                index = len(source) if end < 0 else end + 2
+                continue
+            raw = re.match(r'r(#+)?"', source[index:])
+            if raw:
+                terminator = '"' + (raw.group(1) or "")
+                end = source.find(terminator, index + len(raw.group(0)))
+                index = len(source) if end < 0 else end + len(terminator)
+                continue
+            if source[index] == '"':
+                index += 1
+                while index < len(source):
+                    if source[index] == "\\":
+                        index += 2
+                    elif source[index] == '"':
+                        index += 1
+                        break
+                    else:
+                        index += 1
+                continue
+            if source[index] == "(":
+                depth += 1
+            elif source[index] == ")":
+                depth -= 1
+            index += 1
+        body = source[start : index - 1] if depth == 0 else ""
+        fragments = rust_strings(body)
+        if fragments:
+            candidates.append("".join(fragments))
+        search_from = max(index, start)
+    return candidates
+
+
 def locks_session_with_plain_update(sql: str) -> bool:
     """Whether one SQL string applies plain FOR UPDATE to a session relation."""
     tokens = [match.group(0).lower() for match in TOKEN.finditer(sql)]
@@ -90,15 +137,23 @@ def locks_session_with_plain_update(sql: str) -> bool:
             relations.clear()
             continue
         if token in {"from", "join"} and index + 1 < len(tokens):
-            relations.append((index, paths[index], tokens[index + 1]))
+            name_index = index + 1
+            while name_index + 2 < len(tokens) and tokens[name_index + 1] == ".":
+                name_index += 2
+            relations.append((index, paths[index], tokens[name_index]))
             continue
         if token != "for" or index + 1 >= len(tokens) or tokens[index + 1] != "update":
             continue
 
         if index + 2 < len(tokens) and tokens[index + 2] == "of":
-            targets = tokens[index + 3 :]
+            targets = []
+            for candidate in tokens[index + 3 :]:
+                if candidate == ";":
+                    break
+                targets.append(candidate)
             if "session" in targets:
                 return True
+            continue
 
         if any(
             relation_index >= statement_start
@@ -113,18 +168,29 @@ def locks_session_with_plain_update(sql: str) -> bool:
 def self_test() -> None:
     forbidden = [
         "select * from session for update",
+        "SELECT * FROM public.session FOR UPDATE",
         "SELECT * FROM other JOIN session ON true FOR UPDATE OF session",
         "SELECT * FROM session WHERE id IN (SELECT id FROM other) FOR UPDATE",
     ]
     allowed = [
         "SELECT * FROM session FOR NO KEY UPDATE",
         "SELECT * FROM session_scheduler FOR UPDATE",
+        "SELECT * FROM session_scheduler JOIN session ON true "
+        "FOR UPDATE OF session_scheduler",
         "SELECT EXISTS (SELECT 1 FROM session), "
         "(SELECT id FROM session_scheduler FOR UPDATE)",
+        "SELECT * FROM session_scheduler FOR UPDATE OF session_scheduler; "
+        "SELECT * FROM session",
     ]
     assert all(locks_session_with_plain_update(sql) for sql in forbidden)
     assert not any(locks_session_with_plain_update(sql) for sql in allowed)
     assert not rust_strings('// "SELECT * FROM session FOR UPDATE"\nfn main() {}')
+    assert any(
+        locks_session_with_plain_update(sql)
+        for sql in query_strings(
+            'sqlx::query(concat!("SELECT count(*) FROM session ", "FOR UPDATE"))'
+        )
+    )
 
 
 def main() -> int:
@@ -147,7 +213,7 @@ def main() -> int:
 
     violations: list[Path] = []
     for path in sorted(root.rglob("*.rs")):
-        if any(locks_session_with_plain_update(sql) for sql in rust_strings(path.read_text())):
+        if any(locks_session_with_plain_update(sql) for sql in query_strings(path.read_text())):
             violations.append(path)
     if violations:
         for path in violations:
