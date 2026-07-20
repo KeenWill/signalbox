@@ -9,9 +9,11 @@ The scenarios are frozen design fixtures. New or changed normative behavior
 belongs in the record that owns it (an ADR or the [decision log](decisions.md));
 a scenario's normative content changes or is added only alongside the decision
 that motivates it, and a decision introducing a new lifecycle edge adds or
-amends its scenario fixture in the same change. `Covered by:` lines naming a
-scenario's integration tests are coverage links rather than normative changes
-and are added with the tests themselves.
+amends its scenario fixture in the same change. Test coverage is recorded
+outside this document: tests name the scenario identifiers they enforce under
+the rules in [AGENTS.md](../AGENTS.md) and [testing-style.md](testing-style.md),
+and the [invariant catalog](invariants.md)'s enforcement column accumulates the
+links to those tests.
 
 ## S01 — Create a new interactive session
 
@@ -48,7 +50,8 @@ and are added with the tests themselves.
   owner-global idempotency scope and typed relational command representation are
   decided by ADR-0001 and ADR-0034; the baseline accepted-input content value is
   decided by ADR-0037; the long-lived session aggregate and current-pointer load
-  boundary are decided by ADR-0038.
+  boundary are decided by ADR-0038; actor attribution in the canonical command
+  payload and its replay equality are decided by ADR-0039.
 
 ## S02 — Stream a centrally called provider response
 
@@ -417,7 +420,8 @@ and are added with the tests themselves.
 - **Required invariants:** INV-011, INV-012, INV-021.
 - **Remaining questions:** Fence representation, retention of rejected evidence,
   and result acknowledgement protocol. The compatibility window is decided by
-  ADR-0021.
+  ADR-0021; subscriber observation semantics and the committing-side update
+  mechanism are decided by ADR-0019 and ADR-0040, respectively.
 
 ## S13 — Use an ambient-user runner
 
@@ -734,7 +738,9 @@ and are added with the tests themselves.
 - **Required invariants:** INV-005, INV-012, INV-032, INV-033.
 - **Remaining questions:** Concrete snapshot/event schemas, delta sequencing,
   checkpointing, and browser transport. Protocol semantics and the compatibility
-  window are decided by ADR-0019 and ADR-0021.
+  window are decided by ADR-0019 and ADR-0021; update-event derivation and
+  cursor delivery from committed state are decided by ADR-0040, whose retention
+  window remains open.
 
 ## S25 — Archive and restore a session
 
