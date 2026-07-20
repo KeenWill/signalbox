@@ -104,6 +104,7 @@ prevent.
 migration `202607200001_bounded_user_content.sql`, and
 [domain-spine.md](domain-spine.md); no accepted ADR semantics change and no open
 question closes.
+
 ## 2026-07-20 — Orientation-doc refresh through the ADR-0041 boundary
 
 **Context.** A documentation-truth audit found the orientation documents stopped
