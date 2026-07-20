@@ -3151,7 +3151,7 @@ async fn scheduler_lock_waiters_reached(
 /// exactly one active turn exists either way.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv007_inv009_inv012_submit_and_activation_interleave_without_deadlock()
+async fn inv007_inv008_inv009_inv012_submit_and_activation_interleave_without_deadlock()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone())
