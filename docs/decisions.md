@@ -9,6 +9,27 @@ that constrains several components — require a full record under
 [decisions/](decisions/README.md) instead. Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-20 — Static TOML supplies model and alias definitions
+
+**Context.** The model-call milestone needs a concrete source for configured
+model and alias definitions. The
+[architecture](architecture.md#sources-of-truth) already assigns current alias
+definitions to hub configuration, while accepted configuration semantics govern
+how selected meanings become immutable historical intent. They do not choose the
+configuration mechanism.
+
+**Decision.** `hubd` reads model and alias definitions from a static TOML
+configuration file at startup. A database-backed catalog is deferred.
+
+**Rejected alternatives.** A database-backed model catalog now: it would add a
+storage and administration surface before the initial model-resolution path
+needs one.
+
+**Affects.** Future `hubd` configuration loading and model-resolution
+integration, plus deployment configuration. This decision adds no database
+schema and does not choose the TOML layout; replacing the file with a database
+catalog requires a later decision.
+
 ## 2026-07-20 — Orientation-doc refresh through the ADR-0041 boundary
 
 **Context.** A documentation-truth audit found the orientation documents stopped
