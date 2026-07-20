@@ -51,8 +51,8 @@ session/scheduler lock-ordering protocol lives only in comments in
   application test modules into shared test support (testing-style rule 3:
   plumbing irrelevant to the behavior under test); normalize the
   `CreateSessionError` asymmetry and delete its unreachable `Preparation`
-  variant when the separately proposed classification ADR (slated ADR-0044)
-  lands.
+  variant as remaining implementation work under accepted
+  [ADR-0044](decisions/0044-hub-runtime-foundations.md).
 - *Rigor tier.* Uniform rigor stays; the model-call milestone's time-to-land is
   the canary that reopens this decision.
 - *Supply chain.* `cargo-deny` (advisories, an exact license allow-list,

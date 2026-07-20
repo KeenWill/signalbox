@@ -197,10 +197,8 @@ questions below remain open.
 
 ## Actor attribution (ADR-0039 follow-ups)
 
-- **Non-owner actor admissibility.** Which command kinds admit non-owner actors
-  and under what verification is left open by
-  [ADR-0039](decisions/0039-actor-attribution.md)'s closed algebra. Blocks
-  non-owner agency. (S18, S19)
+- **Non-owner actor admissibility.** This open question remains owned by
+  [ADR-0039](decisions/0039-actor-attribution.md).
 - **Policy actor.** Whether an autonomous policy or scheduler actor joins the
   algebra is deferred by [ADR-0039](decisions/0039-actor-attribution.md). Blocks
   autonomous policy features. (S18, S19)
