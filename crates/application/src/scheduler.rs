@@ -48,8 +48,8 @@ impl ReconciliationSweepInterval {
     }
 
     /// Validates an operator-supplied interval.
-    pub const fn try_new(interval: Duration) -> Result<Self, InvalidReconciliationSweepInterval> {
-        if interval.is_zero() {
+    pub fn try_new(interval: Duration) -> Result<Self, InvalidReconciliationSweepInterval> {
+        if interval.is_zero() || Instant::now().checked_add(interval).is_none() {
             Err(InvalidReconciliationSweepInterval)
         } else {
             Ok(Self(interval))
@@ -62,13 +62,14 @@ impl ReconciliationSweepInterval {
     }
 }
 
-/// A zero duration cannot drive the periodic safety-net sweep.
+/// A zero or timer-unrepresentable duration cannot drive the safety-net sweep.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InvalidReconciliationSweepInterval;
 
 impl fmt::Display for InvalidReconciliationSweepInterval {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("scheduler reconciliation interval must be nonzero")
+        formatter
+            .write_str("scheduler reconciliation interval must be nonzero and fit the timer range")
     }
 }
 
@@ -160,6 +161,7 @@ pub struct InProcessEligibilityWorkSource<Sweep> {
     initial_sweep_due: bool,
     pending_sweep_hints: VecDeque<SessionId>,
     nudge_preferred_over_sweep_hint: bool,
+    sweep_preferred_over_pending_hint: bool,
 }
 
 impl<Sweep> InProcessEligibilityWorkSource<Sweep> {
@@ -194,8 +196,10 @@ impl<Sweep> InProcessEligibilityWorkSource<Sweep> {
     ) -> (InProcessEligibilityNudge, Self) {
         let (sender, nudges) = mpsc::channel(nudge_buffer_capacity.get());
         let nudge = InProcessEligibilityNudge { sender };
-        let mut interval =
-            time::interval_at(Instant::now() + sweep_interval.get(), sweep_interval.get());
+        let first_sweep_deadline = Instant::now()
+            .checked_add(sweep_interval.get())
+            .expect("validated reconciliation interval fits the timer range");
+        let mut interval = time::interval_at(first_sweep_deadline, sweep_interval.get());
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let source = Self {
             nudges,
@@ -204,8 +208,38 @@ impl<Sweep> InProcessEligibilityWorkSource<Sweep> {
             initial_sweep_due: true,
             pending_sweep_hints: VecDeque::new(),
             nudge_preferred_over_sweep_hint: true,
+            sweep_preferred_over_pending_hint: false,
         };
         (nudge, source)
+    }
+
+    fn extend_pending_sweep_hints(&mut self, hints: impl IntoIterator<Item = SessionId>) {
+        let mut pending = self
+            .pending_sweep_hints
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        for session in hints {
+            if pending.insert(session) {
+                self.pending_sweep_hints.push_back(session);
+            }
+        }
+    }
+
+    fn take_interleaved_pending_hint(&mut self) -> SessionId {
+        if self.nudge_preferred_over_sweep_hint {
+            match self.nudges.try_recv() {
+                Ok(session) => {
+                    self.nudge_preferred_over_sweep_hint = false;
+                    return session;
+                }
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => {}
+            }
+        }
+        self.nudge_preferred_over_sweep_hint = true;
+        self.pending_sweep_hints
+            .pop_front()
+            .expect("the pending sweep backlog is nonempty")
     }
 }
 
@@ -219,33 +253,26 @@ where
         loop {
             if self.initial_sweep_due {
                 self.initial_sweep_due = false;
-                self.pending_sweep_hints
-                    .extend(self.sweep.find_sessions().await?);
+                let hints = self.sweep.find_sessions().await?;
+                self.extend_pending_sweep_hints(hints);
+                self.sweep_preferred_over_pending_hint = false;
                 continue;
             }
             if !self.pending_sweep_hints.is_empty() {
+                if !self.sweep_preferred_over_pending_hint {
+                    self.sweep_preferred_over_pending_hint = true;
+                    return Ok(self.take_interleaved_pending_hint());
+                }
                 select! {
                     biased;
 
                     _ = self.sweep_interval.tick() => {
-                        self.pending_sweep_hints
-                            .extend(self.sweep.find_sessions().await?);
+                        let hints = self.sweep.find_sessions().await?;
+                        self.extend_pending_sweep_hints(hints);
+                        self.sweep_preferred_over_pending_hint = false;
                     }
                     () = ready(()) => {
-                        if self.nudge_preferred_over_sweep_hint {
-                            match self.nudges.try_recv() {
-                                Ok(session) => {
-                                    self.nudge_preferred_over_sweep_hint = false;
-                                    return Ok(session);
-                                }
-                                Err(TryRecvError::Empty | TryRecvError::Disconnected) => {}
-                            }
-                        }
-                        self.nudge_preferred_over_sweep_hint = true;
-                        return Ok(self
-                            .pending_sweep_hints
-                            .pop_front()
-                            .expect("the pending sweep backlog is nonempty"));
+                        return Ok(self.take_interleaved_pending_hint());
                     }
                 }
                 continue;
@@ -254,8 +281,9 @@ where
             select! {
                 Some(session) = self.nudges.recv() => return Ok(session),
                 _ = self.sweep_interval.tick() => {
-                    self.pending_sweep_hints
-                        .extend(self.sweep.find_sessions().await?);
+                    let hints = self.sweep.find_sessions().await?;
+                    self.extend_pending_sweep_hints(hints);
+                    self.sweep_preferred_over_pending_hint = false;
                 }
             }
         }
@@ -446,7 +474,10 @@ mod tests {
         collections::VecDeque,
         future::{Future, pending, ready},
         num::NonZeroUsize,
-        sync::{Arc, Mutex},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
         time::Duration,
     };
 
@@ -511,10 +542,41 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct SlowSweep {
+        calls: Arc<AtomicUsize>,
+        delay: Duration,
+        hints: Vec<SessionId>,
+    }
+
+    impl EligibilitySweep for SlowSweep {
+        type Error = FakeSweepError;
+
+        fn find_sessions(
+            &mut self,
+        ) -> impl Future<Output = Result<Vec<SessionId>, Self::Error>> + Send {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let delay = self.delay;
+            let hints = self.hints.clone();
+            async move {
+                tokio::time::sleep(delay).await;
+                Ok(hints)
+            }
+        }
+    }
+
     #[test]
     fn zero_reconciliation_interval_is_rejected() {
         assert_eq!(
             ReconciliationSweepInterval::try_new(Duration::ZERO),
+            Err(InvalidReconciliationSweepInterval)
+        );
+    }
+
+    #[test]
+    fn timer_unrepresentable_reconciliation_interval_is_rejected() {
+        assert_eq!(
+            ReconciliationSweepInterval::try_new(Duration::MAX),
             Err(InvalidReconciliationSweepInterval)
         );
     }
@@ -554,6 +616,40 @@ mod tests {
         assert_eq!(source.next().await, Ok(first_nudged));
         assert_eq!(source.next().await, Ok(second_swept));
         assert_eq!(source.next().await, Ok(second_nudged));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn inv007_slow_sweep_yields_and_deduplicates_pending_hints() {
+        let first = session(41);
+        let second = session(42);
+        let interval = ReconciliationSweepInterval::try_new(Duration::from_secs(5))
+            .expect("test interval is timer-representable");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (_nudge, mut source) = InProcessEligibilityWorkSource::with_interval(
+            SlowSweep {
+                calls: Arc::clone(&calls),
+                delay: interval.get(),
+                hints: vec![first, second],
+            },
+            interval,
+        );
+
+        assert_eq!(
+            timeout(Duration::from_secs(16), source.next()).await,
+            Ok(Ok(first))
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        assert_eq!(source.next().await, Ok(second));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            source
+                .pending_sweep_hints
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![first]
+        );
     }
 
     #[tokio::test(start_paused = true)]

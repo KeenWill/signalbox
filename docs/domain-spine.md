@@ -1782,7 +1782,7 @@ impl<
 pub struct ReconciliationSweepInterval(/* private */);
 impl ReconciliationSweepInterval {
     pub const fn baseline() -> Self;
-    pub const fn try_new(
+    pub fn try_new(
         interval: Duration,
     ) -> Result<Self, InvalidReconciliationSweepInterval>;
     pub const fn get(self) -> Duration;
