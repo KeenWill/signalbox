@@ -39,7 +39,7 @@ Clients never need a direct provider or runner connection. Provider calls
 originate in the hub; runner-local tool execution is dispatched over a runner's
 outbound connection. Both placements participate in one hub-coordinated logical
 tool lifecycle. On the snapshots/events edge, client-visible durable update
-events flow only through the transactional outbox decided by
+events follow the mechanism defined by
 [ADR-0040](decisions/0040-transactional-outbox.md).
 
 ## Responsibilities

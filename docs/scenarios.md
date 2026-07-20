@@ -420,8 +420,8 @@ links to those tests.
 - **Required invariants:** INV-011, INV-012, INV-021.
 - **Remaining questions:** Fence representation, retention of rejected evidence,
   and result acknowledgement protocol. The compatibility window is decided by
-  ADR-0021, and the subscriber-visible update-event behavior is decided by
-  ADR-0040.
+  ADR-0021; subscriber observation semantics and the committing-side update
+  mechanism are decided by ADR-0019 and ADR-0040, respectively.
 
 ## S13 — Use an ambient-user runner
 
