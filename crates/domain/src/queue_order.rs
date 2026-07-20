@@ -831,26 +831,31 @@ mod tests {
     #[test]
     fn s03_inv009_duplicate_turns_and_positions_are_rejected() {
         let position = positions(2);
+        let distinct_turn = ordinary(1, position[0]);
+        let duplicated_turn_at_first_position = ordinary(2, position[0]);
+        let duplicated_turn_at_second_position = ordinary(2, position[1]);
         let mut overlapping_duplicates = vec![
-            ordinary(1, position[0]),
-            ordinary(2, position[0]),
-            ordinary(2, position[1]),
+            distinct_turn,
+            duplicated_turn_at_first_position,
+            duplicated_turn_at_second_position,
         ];
-        let duplicate_turn = AcceptedInputQueueOrderError::DuplicateTurn { turn: turn_id(2) };
+        let duplicate_turn = AcceptedInputQueueOrderError::DuplicateTurn {
+            turn: duplicated_turn_at_first_position.turn(),
+        };
         assert_eq!(
             assert_all_permutations_reject(&mut overlapping_duplicates, &duplicate_turn),
             6,
             "three facts have six permutations"
         );
-        let mut duplicate_positions = vec![
-            ordinary(3, position[0]),
-            ordinary(1, position[0]),
-            ordinary(2, position[0]),
-        ];
+        let higher_turn = ordinary(3, position[0]);
+        let first_canonical_turn = ordinary(1, position[0]);
+        let second_canonical_turn = ordinary(2, position[0]);
+        let mut duplicate_positions =
+            vec![higher_turn, first_canonical_turn, second_canonical_turn];
         let expected = AcceptedInputQueueOrderError::DuplicateAcceptancePosition {
             position: position[0],
-            first_turn: turn_id(1),
-            second_turn: turn_id(2),
+            first_turn: first_canonical_turn.turn(),
+            second_turn: second_canonical_turn.turn(),
         };
 
         assert_eq!(
