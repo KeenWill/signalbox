@@ -409,7 +409,7 @@ reserved ADR number), **Proposed** (an ADR proposal exists but is not accepted),
 | Durable command identity, storage, and replay                              | Implemented — [ADR-0001](decisions/0001-domain-terminology-and-identity.md), [ADR-0033](decisions/0033-identity-generation-supply-and-encoding.md), [ADR-0034](decisions/0034-durable-command-storage-and-equality.md); registry and first typed command family exist |
 | Accepted-input delivery lifecycle                                          | Accepted — [ADR-0027](decisions/0027-input-delivery-lifecycle.md), [ADR-0037](decisions/0037-baseline-user-content.md); acceptance transaction and occupied-slot storage implemented; steering consumption and matching interrupt pending (owner-ratified deferral)   |
 | Turn / TurnAttempt lifecycle                                               | Accepted — [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md), [ADR-0031](decisions/0031-direct-fatal-terminalization.md); eligible-turn activation orchestration and Postgres slot storage implemented; attempt progression, stop, and recovery pending        |
-| ModelCall lifecycle and provider evidence                                  | Accepted — [ADR-0005](decisions/0005-model-call-retry-semantics.md); domain values and transitions implemented, no provider adapter                                                                                                                                   |
+| ModelCall lifecycle and provider evidence                                  | Accepted — [ADR-0005](decisions/0005-model-call-retry-semantics.md) and failure classification [ADR-0043](decisions/0043-provider-failure-classification.md); domain values and transitions implemented, no provider adapter                                          |
 | ContextFrontier snapshots                                                  | Implemented — [ADR-0030](decisions/0030-context-frontier-snapshots.md); domain values and Postgres materialized membership                                                                                                                                            |
 | SemanticTranscriptEntry (origin and failed-turn variants)                  | Implemented for origin entries (committed at activation) — [ADR-0036](decisions/0036-initial-semantic-transcript-entries.md); the TurnFailed producer is pending                                                                                                      |
 | Assistant-content, steering, tool, and outcome entry variants              | Target — [open](open-questions.md#identity-representation)                                                                                                                                                                                                            |
@@ -492,10 +492,10 @@ or open is reached by proposing that decision, not by implementing around it.
    (INV-034). Blocked in part by the open assistant-content entry variant.
 4. **A smoke against a real provider.** Exercise the same accepted model-call
    lifecycle through one provider adapter, including resolved and reported
-   target evidence. Blocked by ADR-0007's provider-identity normalization and
-   provenance decision and the
-   [provider ambiguity-evidence thresholds](open-questions.md#model-fallback-and-provenance-reserved-adr-0006-adr-0007);
-   this is the gate before destination-feature milestones.
+   target evidence. Failure classification is decided by
+   [ADR-0043](decisions/0043-provider-failure-classification.md); the remaining
+   blocker is ADR-0007's provider-identity normalization and provenance
+   decision. This is the gate before destination-feature milestones.
 5. **The tool loop with approvals.** ToolRequest and ToolAttempt lifecycles, the
    trusted risk registry, approval consumption, and a first harmless hub-local
    tool. Blocked by reserved ADR-0011 through ADR-0014.

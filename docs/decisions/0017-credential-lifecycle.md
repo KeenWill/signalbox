@@ -13,6 +13,8 @@
   credential table and which explicitly did not decide credential storage
 - Refines: the enforcement boundary of INV-035 (see the INV-035 enforcement
   index)
+- Refined by: [ADR-0043](0043-provider-failure-classification.md) for
+  provider-side credential rejection classification
 - Resolves: the
   ["Provider and integration credential storage and rotation"](../open-questions.md#identity-credentials-and-resource-governance-reserved-adr-0015-through-adr-0018)
   question (reserved ADR-0017)
@@ -407,8 +409,6 @@ deployment would add an owner namespace to references before anything else.
 - Integration-credential scoping per adapter and whether centrally hosted MCP is
   one adapter type (S15's remaining questions; tool ADRs).
 - Per-credential usage limits and quota behavior (reserved ADR-0018).
-- Provider-contract evidence thresholds for authentication rejections, within
-  the open classification question of ADR-0004 and ADR-0005.
 - Verification at deployment that the operator retains last-synced Secrets
   across manager outages, and the tuned values for polling and kubelet sync
   intervals.

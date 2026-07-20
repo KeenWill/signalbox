@@ -120,10 +120,6 @@ accepted records; those numbers remain reserved for their topics.
   retries a known or ambiguous provider failure; any later retry command or
   policy, including backoff and resource limits, is a separate decision left
   open by ADR-0005. Blocks retry features. (S02, S04, S22)
-- **Provider ambiguity evidence thresholds.** Which provider evidence classifies
-  an uncertain outcome as known failure versus ambiguous is provider-contract
-  scope left open by ADR-0004 and ADR-0005. Blocks the first provider adapter.
-  (S02, S04)
 
 ## Scheduling and runners (reserved ADR-0008)
 

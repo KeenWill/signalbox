@@ -7,7 +7,8 @@
 - Superseded by: none
 - Accepted with: ADR-0001, ADR-0003, ADR-0004, and ADR-0027 as one atomic
   foundation set
-- Refined by: [ADR-0031](0031-direct-fatal-terminalization.md)
+- Refined by: [ADR-0031](0031-direct-fatal-terminalization.md) and
+  [ADR-0043](0043-provider-failure-classification.md)
 - Decision questions: target-before-call creation; provider-reported target
   mismatch; no automatic known-failure retry; ambiguous provider-call
   disposition; acceptance-time alias meaning; model or configuration change
@@ -574,8 +575,6 @@ hub-owned call records and policy.
 - Whether a future ADR introduces explicit or automatic retries for known
   failures, and their backoff/resource limits, remains later provider-policy and
   resource-governance scope; the version-one answer is none.
-- The exact evidence thresholds for known failure versus ambiguous outcome are
-  provider-specific contract work.
 - ADR-0007 must define provider-identity normalization and provenance
   representation beyond the typed baseline observation; the mismatch disposition
   is decided here.

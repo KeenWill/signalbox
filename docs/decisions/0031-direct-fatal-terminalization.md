@@ -8,6 +8,8 @@
   [ADR-0027](0027-input-delivery-lifecycle.md)
 - Refines: ADR-0004's exhaustive live turn-transition matrix and ADR-0005's
   fatal-mismatch handling
+- Refined by: [ADR-0043](0043-provider-failure-classification.md) for provider
+  failure evidence at the send boundary
 - Decision questions: when fatal mismatch requires `StopRequested`; direct
   `Failed` versus `ReconciliationRequired`; complete cause and ambiguity
   derivation; audit without an intermediate stop state; best-effort cancellation
@@ -242,8 +244,8 @@ must retain `StopRequested`.
 
 ## Open questions
 
-- Provider-specific evidence thresholds for mismatch, known failure, and
-  ambiguity remain with provider contracts.
+- Provider-native target-identity evidence and its trust threshold remain
+  reserved ADR-0007 scope.
 - ADR-0022 fixes the normalized relational persistence baseline and durable
   cancellation-intent boundary; the exact physical table layout, deduplication,
   outbox or delivery mechanism, and operational acknowledgement handling remain
@@ -259,4 +261,5 @@ This ADR does not change provider-call dispositions, mismatch evidence variants,
 terminal guard membership, fatal-cause union, ambiguity acknowledgement,
 recovery waits, startup precedence, interrupt authority, steering order, or
 terminal monotonicity. It does not choose a database schema, outbox, scheduler,
-provider SDK, evidence threshold, cancellation protocol, or monitoring system.
+provider SDK, target-identity trust threshold, cancellation protocol, or
+monitoring system.
