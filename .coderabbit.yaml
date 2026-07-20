@@ -1,0 +1,130 @@
+# yaml-language-server: $schema=https://storage.googleapis.com/coderabbit_public_assets/schema.v2.json
+#
+# CodeRabbit configuration: pre-merge checks as verdict-logic mirrors of rules
+# owned by AGENTS.md, docs/testing-style.md, docs/goal-mode.md, and
+# docs/decisions/README.md. Ownership stays with those documents; each check
+# restates only the operational pass/fail logic, and the comment above each
+# check names its owning rule document. See the docs/decisions.md entry
+# "CodeRabbit pre-merge checks mirror repository rules" for modes and rollout.
+
+reviews:
+  request_changes_workflow: true
+  pre_merge_checks:
+    # Only requested reviewers (not the PR author) may override failing checks.
+    override_requested_reviewers_only: true
+    # Built-in checks (docstrings, title, description, issue_assessment) keep
+    # their schema defaults and are deliberately not restated here.
+    custom_checks:
+      # verdict logic for the invariant-enforcement linking rule owned by
+      # AGENTS.md and the catalog preamble in docs/invariants.md
+      - name: "Invariant catalog claims are backed by tests"
+        mode: warning
+        instructions: |-
+          Scope: only PRs that add or modify text in the Enforcement column of docs/invariants.md. Pass immediately if that column is untouched.
+          For every Enforcement cell added or changed in this PR:
+          1. Every cited file path must exist in the repository at the PR head. Fail on any dead path.
+          2. A claim of the form "INV-NNN-tagged tests in <file>" must be verifiable: search the cited file case-insensitively for "invNNN" in test function names or "INV-NNN" in comments. Zero matches is a Fail.
+          3. A test function name cited verbatim must exist in the cited file. Fail if absent.
+          4. Totality language — "complete", "every variant", "all transitions", "exhaustive", "each <case>" — is allowed only when the cited file's tests visibly enumerate the claimed cases: every variant, transition, or case named in the claim must appear in the cited file's test code. Fail if any claimed case has no match.
+          5. Enforcement that exists only as a plan must not be stated in the present tense. Fail on a present-tense claim ("is enforced by", "tests in") whose cited artifact is absent from the PR head.
+          Evidence must come from the PR head tree — the cited tests may be added by this same PR. Report each failing cell with its INV ID and the missing evidence. If docs/invariants.md is changed but no Enforcement cell is, Pass.
+
+      # verdict logic for the decision-weight rules owned by AGENTS.md and
+      # docs/decisions/README.md
+      - name: "Decisions recorded at the correct weight"
+        mode: warning
+        instructions: |-
+          Determine whether this PR makes a decision, then verify it is recorded.
+          Ordinary-decision triggers (any): a new public trait or port in crates/domain or crates/application; a new file under crates/persistence/migrations/; a new public domain type or changed public domain semantics; a dependency added to any Cargo.toml [dependencies] or [dev-dependencies] (not a pure version bump); a change to process or tooling rules (.github/workflows/, scripts/, .coderabbit.yaml, AGENTS.md, CONTRIBUTING.md, docs/goal-mode.md, docs/testing-style.md).
+          If any trigger fires, docs/decisions.md must gain a new entry in this PR headed "## YYYY-MM-DD — <title>" (newest first) containing all four bolded sections: **Context.**, **Decision.**, **Rejected alternatives.**, **Affects.**. Fail if the entry or any section is missing.
+          Foundation-weight triggers (any): the meaning of an accepted file under docs/decisions/ changes; a boundary between domain, storage, wire, or framework representations moves; an invariant row in docs/invariants.md is weakened or deleted; an entry in docs/open-questions.md is closed or removed. If any fires, the PR must add an ADR file under docs/decisions/ (or an explicit supersession linking both directions). A decisions.md entry alone is a Fail for foundation weight.
+          Pass when no trigger fires (mechanical fixes, refactors adding no public surface, formatting), or the required record is present. Report which trigger fired and which record is missing.
+
+      # verdict logic for the single-statement-of-record rule owned by AGENTS.md
+      - name: "Normative statements live in one place"
+        mode: warning
+        instructions: |-
+          Scope: Markdown prose added or modified under docs/ or in README.md. Pass immediately if none changed.
+          Fail when the PR adds a normative statement — a sentence using must, never, always, only, cannot, or "is rejected" about system behavior or process — that duplicates a statement owned elsewhere: an accepted ADR under docs/decisions/, a docs/decisions.md entry, an invariant row in docs/invariants.md, a scenario in docs/scenarios.md, or a rule in AGENTS.md or docs/testing-style.md. Duplication means a reader could learn the rule from the new text alone; a restatement is acceptable only when the same sentence or paragraph links to the owning document.
+          Also fail when the PR copies a single-owner list into a second file: the validation command sequence (owned by AGENTS.md), the foundation-weight criteria (owned by docs/decisions/README.md, mirrored only by the decision-log preamble), or ADR-owned semantics restated into docs/architecture.md or docs/glossary.md.
+          Pass when: the new text is itself the statement of record (a new ADR, invariant row, or decision entry); or the added prose links to its owner in the same paragraph; or the change is a cross-reference, link, or wording fix adding no normative content.
+          Report each failure as: the added sentence, the owning document, and the link that should replace the restatement.
+
+      # verdict logic for the finished-pull-request description rule owned by
+      # AGENTS.md
+      - name: "PR description budget and claim accuracy"
+        mode: warning
+        instructions: |-
+          Evaluate the PR description as it stands now.
+          Fail if any of:
+          1. The description exceeds 350 words (count words outside fenced code blocks).
+          2. It does not state the count of meaningfully changed lines excluding lockfiles (a number plus wording equivalent to "meaningfully changed lines, excluding Cargo.lock").
+          3. A sentence claims the PR enforces, guarantees, ensures, prevents, or validates a behavior that no code or test in this diff implements. For each such verb, locate the enforcing artifact in the diff: a type making the state unrepresentable, a rejecting code path, a database constraint, or a test asserting the behavior. If the obligation only binds future implementors — documentation, a trait contract, a doc-comment requirement with no runtime or test enforcement — the description must present it as a contract; describing a contract as an enforcement is a Fail.
+          4. The description claims test coverage for a case no test at the PR head exercises (verify the named test or behavior by search).
+          Pass when the description is within budget, states the changed-line count, and every enforcement claim maps to a concrete artifact in the diff. Do not fail on style, tone, or missing optional sections. Report each failing claim verbatim with the reason no artifact matches.
+
+      # verdict logic for the rules owned by docs/testing-style.md
+      - name: "Modified tests follow testing-style rules"
+        mode: warning
+        instructions: |-
+          Scope: test code added or modified by this PR — files under crates/*/tests/ and #[cfg(test)] modules touched by the diff. Pass immediately if none.
+          Apply docs/testing-style.md; cite rule numbers in findings:
+          1. Rule 2: an added or modified #[test] body must contain no for/while loop and no if/match selecting between test cases. Straight-line calls to #[track_caller] helpers are the accepted replacement. Fail per offending test.
+          2. Rule 6: an added assertion must not compare against a literal re-encoding a value the fixture already states (e.g. asserting `.as_u64() == 4` where setup built version 4 from a seeded helper). Fail when the literal duplicates a fixture value reachable through an accessor.
+          3. Rule 10: in any file cited by an Enforcement cell of docs/invariants.md, targeted asserts are decisive; a change leaving only an expect![...] snapshot where a targeted assert previously existed is a Fail.
+          4. Rule 17: if the PR renames, splits, or deletes a test in a file cited by docs/invariants.md, the file must still contain tests tagged with each INV the catalog binds to it, and the catalog cell must be updated in this PR when coverage moves. Fail otherwise.
+          5. If the count of #[test] functions in a modified test file decreases, the PR description or a decision-log entry must state which tests were removed and why (rule 19 deletions qualify). A silent decrease is a Fail.
+
+      # verdict logic for the embedded-migrations discipline owned by ADR-0022
+      # and ADR-0032 (docs/decisions/0022-persistence-representation.md,
+      # docs/decisions/0032-postgres-implementation-dependencies.md)
+      - name: "Migration files are immutable once merged"
+        mode: error
+        instructions: |-
+          Scope: crates/persistence/migrations/. Pass immediately if the diff touches nothing under it.
+          Fail if the diff modifies, renames, or deletes any file under crates/persistence/migrations/ that exists on the PR's base branch. Every base-branch migration file is immutable; corrections ship as a new migration file.
+          For files the PR adds under that directory:
+          1. The filename must match the existing pattern: a 12-digit numeric prefix, an underscore, a snake_case name, ending in .sql.
+          2. The numeric prefix must be strictly greater than the highest prefix on the base branch, and no two files added by this PR may share a prefix.
+          Exception: a migration file this same PR introduced (present in the PR's commits but absent from the base branch) may still be edited within the PR — that is not a violation.
+          Pass when no base-branch migration file is touched and all added filenames order correctly. Report each violation with the filename and whether it is an edit of a merged migration or an ordering conflict.
+
+      # verdict logic for the frozen-surface rule owned by docs/goal-mode.md
+      - name: "Frozen surfaces cite the freeze-lift condition"
+        mode: error
+        instructions: |-
+          Scope: crates/domain/src/fatal_mismatch.rs, all files under crates/domain/src/fatal_mismatch/, and crates/domain/src/provider_evidence.rs. Pass immediately if the diff touches none of them.
+          These surfaces are frozen by docs/goal-mode.md: no new public items and no semantic changes until model-call preparation exists. Mechanical changes are allowed: formatting, comment and doc-comment fixes, and adjustments required by CI (fmt, clippy, spine sync) or by an accepted review finding on this PR.
+          Fail if the diff adds any new public item (pub struct, enum, trait, fn, method, variant, or field) in these files, or changes runtime behavior, type semantics, or state transitions in them — unless the PR description explicitly states the freeze is lifted because the model-call preparation milestone has been selected, citing docs/goal-mode.md.
+          Judging "semantic": a change that alters what any caller can construct, observe, or trigger is semantic; a change invisible to all callers is mechanical.
+          Report the changed item, whether it is a new public item or a semantic change, and whether the description carries the required freeze-lift citation.
+
+      # verdict logic for the sealed-annotation contract owned by
+      # docs/domain-spine.md (spine-maintenance rule owned by AGENTS.md)
+      - name: "Sealed-producer prose stays truthful"
+        mode: warning
+        instructions: |-
+          Scope: the "// sealed:" annotations in docs/domain-spine.md. CI verifies the spine's exported names and inventory counts, not its prose; this check guards the prose.
+          Trigger when the PR (a) adds or changes a public function, method, or constructor in crates/domain or crates/application that produces a type annotated "// sealed:" in docs/domain-spine.md, or (b) edits any "// sealed:" line. Pass immediately otherwise.
+          Fail if, at the PR head:
+          1. A "// sealed:" annotation names a producer (function or method path) that no longer exists in source.
+          2. A sealed-annotated type gains a public producer in this PR that its annotation does not name — including a first-ever producer while the annotation still reads "no public producer in this slice".
+          3. A "// sealed:" annotation is deleted while its type still has no public constructor.
+          Verification: for each sealed annotation on a type whose producing code this PR touches, list the type's public producers in source (search for public fns and methods returning the type) and compare against the producers the annotation names. The sets must match exactly.
+          Report each stale annotation with the type, the producers the prose names, and the producers found in source.
+
+      # verdict logic for the append-only record rules owned by the
+      # docs/decisions.md preamble and docs/decisions/README.md
+      - name: "Decision log and ADRs are append-only"
+        mode: error
+        instructions: |-
+          Scope: docs/decisions.md and files under docs/decisions/ that exist on the base branch. Pass immediately if neither is touched.
+          docs/decisions.md: Fail if the diff changes or deletes any line inside an entry (a "## YYYY-MM-DD — ..." section) that exists on the base branch, except pure mdformat rewrapping with identical words, or fixing a hyperlink whose target this same PR moved. A new entry must be inserted above all existing entries with a date not older than the newest existing entry; Fail on out-of-order insertion. An entry this same PR introduced may still be edited within the PR.
+          docs/decisions/*.md existing on the base branch: Fail if the diff changes the Decision section or any normative statement, unless (a) the PR description declares a meaning-preserving correction and the change does not alter what is permitted or forbidden, or (b) it is a supersession: a new ADR file is added in this PR and the two records link both directions (Superseded-by on the old, Supersedes on the new). Header history notes (Amended, Accepted-with) accompanying such a declared change are allowed.
+          Report each violated entry or ADR and which rule it breaks.
+
+knowledge_base:
+  code_guidelines:
+    filePatterns:
+      - "docs/testing-style.md"
+      - "docs/goal-mode.md"
