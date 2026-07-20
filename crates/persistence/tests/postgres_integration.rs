@@ -6,18 +6,18 @@ use signalbox_application::{
     LoadSessionService, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
     ReplaceSessionDefaultsService, SessionIdGenerator, StartEligibleTurnIdGenerator,
     StartEligibleTurnOutcome, StartEligibleTurnService, SubmitInputIdGenerator, SubmitInputOutcome,
-    SubmitInputRequest, SubmitInputService,
+    SubmitInputRequest, SubmitInputRequestError, SubmitInputService,
 };
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputStartingLineage, ActiveTurnPhase, ContextFrontierId,
     CreateSession, CurrentTurnAttemptState, DeliveryRequest, DurableCommandId, ModelAlias,
-    ModelSelectionOverride, ModelSelectionRequest, NonEmptyUnicodeTextFailure,
-    PerInputConfigurationChoices, PreparedCreateSession, ReplaceSessionDefaults,
-    ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult, SemanticTranscriptEntryId,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
-    SessionCreationProvenance, SessionId, SubmitInput, SubmitInputAppliedResult,
-    SubmitInputReconstitutionFailure, SubmitInputRejectedResult, SubmitInputResult,
-    TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
+    ModelSelectionOverride, ModelSelectionRequest, PerInputConfigurationChoices,
+    PreparedCreateSession, ReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult,
+    ReplaceSessionDefaultsResult, SemanticTranscriptEntryId, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
+    SessionId, SubmitInput, SubmitInputAppliedResult, SubmitInputReconstitutionFailure,
+    SubmitInputRejectedResult, SubmitInputResult, TranscriptAncestry, TurnAttemptId, TurnId,
+    UserContent,
 };
 use signalbox_persistence::{
     MIGRATOR,
@@ -2762,33 +2762,38 @@ async fn inv002_inv007_inv008_inv012_submit_schema_is_closed_and_normalized()
 
 /// Decision log 2026-07-20: the provisional one-mebibyte accepted-input
 /// content bound is one contract enforced at correlated layers — oversized
-/// text never constructs the domain command and so never reaches SQL,
+/// text fails application admission before the typed command and never reaches SQL,
 /// exact-bound text commits through the real adapter, and a direct SQL
 /// insert of oversized content is refused by the schema checks.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn content_size_bound_rejects_oversized_text_at_domain_and_schema()
+async fn content_size_bound_rejects_oversized_text_at_application_and_schema()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
 
-    let oversized = "a".repeat(1_048_577);
-    let error = UserContent::try_text(oversized)
-        .expect_err("text over the one-mebibyte provisional bound never constructs a command");
+    let oversized = UserContent::try_text("a".repeat(1_048_577))
+        .expect("domain text is intentionally unbounded");
+    let error = SubmitInputRequest::try_new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0x320)),
+        SessionId::from_uuid(Uuid::from_u128(0x720)),
+        oversized,
+        DeliveryRequest::StartWhenNoActiveTurn {
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    )
+    .expect_err("text over the provisional bound fails application admission");
     assert_eq!(
-        error.into_parts(),
-        (
-            None,
-            NonEmptyUnicodeTextFailure::Oversized {
-                utf8_byte_length: 1_048_577,
-            }
-        )
+        error,
+        SubmitInputRequestError::OversizedContent {
+            utf8_byte_length: 1_048_577,
+        }
     );
     let claimed: i64 = sqlx::query_scalar("SELECT count(*) FROM durable_command")
         .fetch_one(&pool)
         .await?;
     assert_eq!(
         claimed, 0,
-        "unconstructible content claims no durable command identifier"
+        "content rejected before typed-command construction claims no durable identifier"
     );
 
     CreateSessionRepository::new(pool.clone())

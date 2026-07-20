@@ -427,7 +427,6 @@ pub enum DeliveryRequest {
 ```rust
 pub struct NonEmptyUnicodeText(/* private String */);
 impl NonEmptyUnicodeText {
-    pub const MAX_UTF8_BYTES: usize; // 1_048_576
     pub fn try_new(value: String) -> Result<Self, NonEmptyUnicodeTextError>;
     pub fn into_string(self) -> String;
     // accessors: as_str()
@@ -436,13 +435,12 @@ impl NonEmptyUnicodeText {
 pub enum NonEmptyUnicodeTextFailure {
     Empty,
     ContainsNull,
-    Oversized { utf8_byte_length: usize },
 }
 
 pub struct NonEmptyUnicodeTextError { /* private */ }
 impl NonEmptyUnicodeTextError {
-    pub fn into_parts(self) -> (Option<String>, NonEmptyUnicodeTextFailure);
-    // accessors: failure(), retained_value()
+    pub fn into_parts(self) -> (String, NonEmptyUnicodeTextFailure);
+    // accessors: failure(), value()
 }
 
 pub enum UserContent {
@@ -1765,14 +1763,20 @@ impl<
 ## application: submit_input
 
 ```rust
+pub enum SubmitInputRequestError {
+    InvalidCommandId(InvalidDurableCommandId),
+    OversizedContent { utf8_byte_length: usize },
+}
+
 pub struct SubmitInputRequest { /* private */ }
 impl SubmitInputRequest {
+    pub const MAX_CONTENT_UTF8_BYTES: usize; // 1_048_576
     pub fn try_new(
         command_id: DurableCommandId,
         session: SessionId,
         content: UserContent,
         delivery: DeliveryRequest,
-    ) -> Result<Self, InvalidDurableCommandId>;
+    ) -> Result<Self, SubmitInputRequestError>;
     // accessors: command_id(), session(), content(), delivery()
 }
 
@@ -1842,5 +1846,5 @@ impl<Generator: SubmitInputIdGenerator, Transaction: SubmitInputTransaction>
 | application: load_session             | 2 (incl. 1 trait)    |
 | application: replace_session_defaults | 4 (incl. 1 trait)    |
 | application: start_eligible_turn      | 5 (incl. 2 traits)   |
-| application: submit_input             | 6 (incl. 2 traits)   |
-| **signalbox-application total**       | **25**               |
+| application: submit_input             | 7 (incl. 2 traits)   |
+| **signalbox-application total**       | **26**               |

@@ -18,27 +18,30 @@ construction without rewriting content. Unbounded accepted text let one
 submission consume arbitrary memory and storage before any governance policy
 exists. The owner decided a provisional bound.
 
-**Decision.** `NonEmptyUnicodeText::try_new` rejects text whose UTF-8 encoding
-exceeds 1,048,576 bytes, and migration `202607200001_bounded_user_content.sql`
-adds matching `octet_length` checks to both durable content columns. The bound
-counts bytes, not scalar values, because the durable representation
-(`octet_length` over UTF-8 `text`) and the wire measure bytes. The new
-`Oversized` failure deviates from the retain-the-rejected-input error pattern
-and retains only the byte length: holding an arbitrarily large rejected string
-inside the error value would recreate the hazard the bound prevents, so
-construction checks size before U+0000 and no retained string exceeds the bound.
-This is a provisional owner-decided floor, not the resource-governance policy:
-ADR-0037's resource-governance open question remains open. No deployed row
-exceeds the bound (test databases only), so no formerly replayable command is
-affected; equality, exactness, and non-rewriting are unchanged.
+**Decision.** `SubmitInputRequest::try_new`, the application admission boundary
+before typed `SubmitInput` construction, rejects text whose UTF-8 encoding
+exceeds 1,048,576 bytes. Its `OversizedContent` failure retains only the byte
+length, not the rejected content. Migration
+`202607200001_bounded_user_content.sql` adds matching
+`octet_length(convert_to(content_text, 'UTF8'))` checks to both durable content
+columns, so the storage measure is independent of the database's server
+encoding. The bound counts bytes, not scalar values, matching wire and durable
+resource measurement. `NonEmptyUnicodeText` remains unbounded exactly as
+ADR-0037 requires. This is a provisional owner-decided floor, not the
+resource-governance policy; ADR-0037's open question remains open. No deployed
+row exceeds the bound (test databases only), so no formerly replayable command
+is affected; constructibility, equality, exactness, and non-rewriting are
+unchanged.
 
 **Rejected alternatives.** Counting Unicode scalar values: admits up to four
 mebibytes of bytes and diverges from the storage check. Enforcing only at an
-outer admission boundary: leaves the domain value and schema unbounded, so every
-entry path would need its own guard. Retaining the oversized string in the
-error: recreates the hazard the bound exists to prevent.
+adapter boundary: duplicates policy across entry paths and permits typed-command
+construction before rejection. Putting the limit in `NonEmptyUnicodeText`:
+contradicts ADR-0037's explicit unbounded domain value. Retaining the oversized
+content in the admission error: recreates the hazard the bound exists to
+prevent.
 
-**Affects.** `crates/domain/src/user_content.rs` and its construction callers,
+**Affects.** `crates/application/src/submit_input.rs`, its construction callers,
 migration `202607200001_bounded_user_content.sql`, and
 [domain-spine.md](domain-spine.md); no accepted ADR semantics change and no open
 question closes.
