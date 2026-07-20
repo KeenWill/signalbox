@@ -1352,8 +1352,8 @@ impl ResolvedContextFrontierReconstitutionInput {
 
 pub struct ResolvedContextFrontierSnapshot { /* private */ }
 // sealed: crate-private try_from_candidate and derive_appending_candidate,
-// consumed by the turn_eligibility activation seam; the call-preparation
-// slice remains a future consumer
+// consumed by the turn_eligibility scheduling and activation seams; the
+// call-preparation slice remains a future consumer
 impl ResolvedContextFrontierSnapshot {
     pub fn entry_count(&self) -> usize;
     pub fn ordered_entries(
