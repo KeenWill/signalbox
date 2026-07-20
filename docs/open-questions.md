@@ -136,10 +136,8 @@ accepted records; those numbers remain reserved for their topics.
   Blocks the first provider adapter. (S02, S04, S24)
 - **Provider call timeout budgets.** Connect, read, and total budgets for one
   provider call, where they are enforced, and how an elapsed budget maps to a
-  known versus ambiguous failure under ADR-0004 and ADR-0005. The separately
-  proposed classification ADR covers the send-boundary rule; this question keeps
-  the budgets and their enforcement. Blocks the first provider adapter. (S02,
-  S04, S22)
+  known versus ambiguous failure under ADR-0004 and ADR-0005, including the
+  send-boundary rule. Blocks the first provider adapter. (S02, S04, S22)
 - **Provider-response parsing hardening.** Parsing limits and rejection behavior
   for provider responses under the malicious-model-output threat model. Blocks
   the first provider adapter. (S02, S04, S23)
