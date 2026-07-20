@@ -1760,6 +1760,7 @@ pub trait StartEligibleTurnTransaction {
 }
 
 pub struct StartEligibleTurnService<Generator, Transaction> { /* private */ }
+// Clone when both ports are Clone
 impl<Generator, Transaction> StartEligibleTurnService<Generator, Transaction> {
     pub const fn new(ids: Generator, transaction: Transaction) -> Self;
     pub fn into_parts(self) -> (Generator, Transaction);
@@ -1792,6 +1793,7 @@ pub struct InvalidReconciliationSweepInterval;
 
 pub enum EligibilityNudgeOutcome {
     Enqueued,
+    DroppedAtCapacity,
     WorkSourceClosed,
 }
 
@@ -1833,6 +1835,11 @@ impl<Sweep> InProcessEligibilityWorkSource<Sweep> {
         sweep: Sweep,
         sweep_interval: ReconciliationSweepInterval,
     ) -> (InProcessEligibilityNudge, Self);
+    pub fn with_options(
+        sweep: Sweep,
+        sweep_interval: ReconciliationSweepInterval,
+        nudge_buffer_capacity: NonZeroUsize,
+    ) -> (InProcessEligibilityNudge, Self);
 }
 
 pub enum SchedulerLoopExit {
@@ -1842,9 +1849,17 @@ pub enum SchedulerLoopExit {
 pub struct SchedulerLoop<WorkSource, Pass> { /* private */ }
 impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass> {
     pub const fn new(work_source: WorkSource, pass: Pass) -> Self;
+    pub const fn with_max_in_flight(
+        work_source: WorkSource,
+        pass: Pass,
+        max_in_flight_passes: NonZeroUsize,
+    ) -> Self;
     pub fn into_parts(self) -> (WorkSource, Pass);
 }
-impl<WorkSource: EligibilityWorkSource, Pass: EligibilityPass>
+impl<
+    WorkSource: EligibilityWorkSource,
+    Pass: EligibilityPass + Clone + Send + 'static,
+>
     SchedulerLoop<WorkSource, Pass>
 {
     pub async fn run_until<Shutdown>(

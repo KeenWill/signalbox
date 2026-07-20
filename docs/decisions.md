@@ -20,26 +20,32 @@ runtime loop.
 **Decision.** Put a typed best-effort nudge, reconciliation-sweep port, combined
 work source, and scheduler loop in the application crate; implement the first
 sweep adapter with one Postgres query for sessions containing queued work and no
-active turn. The loop runs one full sweep immediately, consumes nudges between
-sweeps, sweeps every second without nudge starvation, and continues after
+active turn backed by a partial queued-session index. The loop runs one full
+sweep immediately, consumes nudges between sweeps, delays rather than bursts
+missed ticks, sweeps every second without nudge starvation, and continues after
 visible sweep or eligibility-pass failures classified through ADR-0044's shared
-operator taxonomy. One second is the baseline lost-wake-up latency; the
-composition root may supply another validated nonzero duration. Hints remain
-nonauthoritative and the existing transaction revalidates every session.
+operator taxonomy. A bounded 1,024-hint channel drops excess hints to
+reconciliation, and at most 16 cloned per-invocation passes run concurrently
+while duplicate in-flight session hints coalesce. One second is the baseline
+lost-wake-up latency; the composition root may supply another validated nonzero
+duration. Hints remain nonauthoritative and every pass revalidates its session.
 
 **Rejected alternatives.** Polling without nudges imposes the interval on every
 commit. A nudge-only loop loses liveness at a commit/crash boundary. Retrying a
 failed transaction inside the loop hides commit ambiguity; a later nudge or
-sweep must re-read durable state instead. A zero or hard-coded unchangeable
-interval prevents safe timer construction or operational tuning.
+sweep must re-read durable state instead. Unbounded nudges or pass tasks turn
+overload into process-memory growth, while one serial pass lets a contended
+session delay unrelated sessions. Replaying missed interval ticks amplifies
+backend stalls. A zero or hard-coded unchangeable interval prevents safe timer
+construction or operational tuning.
 
 **Affects.** `crates/application/src/scheduler.rs`,
 `crates/application/src/operator_failure.rs`, their public spine,
-`crates/persistence/src/scheduler.rs`, the touched activation-error mapping,
-direct application dependencies on Tokio and the `tracing` facade selected by
-ADR-0032/ADR-0044, and INV-007/INV-009 scheduler tests. It adds no queue
-authority, dispatch transport, startup scan, provider behavior, or storage
-schema.
+`crates/persistence/src/scheduler.rs`, the touched activation-error mapping, the
+queued-session index migration, direct application dependencies on Tokio and the
+`tracing` facade selected by ADR-0032/ADR-0044, and INV-007/INV-009 scheduler
+tests. It adds no queue authority, dispatch transport, startup scan, provider
+behavior, or lifecycle storage representation.
 
 ## 2026-07-20 — Static TOML supplies model and alias definitions
 

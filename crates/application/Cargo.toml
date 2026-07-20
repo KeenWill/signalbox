@@ -11,6 +11,7 @@ publish.workspace = true
 signalbox-domain = { path = "../domain" }
 tokio = { version = "1.53.0", default-features = false, features = [
     "macros",
+    "rt",
     "sync",
     "time",
 ] }

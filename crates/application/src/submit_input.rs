@@ -233,15 +233,18 @@ where
         let accepted_input = self.ids.next_accepted_input_id();
 
         let outcome = self.transaction.handle(command, accepted_input, turn).await;
-        if outcome.is_ok() && self.nudge.nudge(session) == EligibilityNudgeOutcome::WorkSourceClosed
-        {
-            tracing::error!(
-                failure_class = ?OperatorFailureClass::Infrastructure {
-                    commit_ambiguous: false,
-                },
-                "eligibility nudge was lost after command handling; \
-                 the reconciliation sweep will recover it"
-            );
+        if outcome.is_ok() {
+            let nudge_outcome = self.nudge.nudge(session);
+            if nudge_outcome != EligibilityNudgeOutcome::Enqueued {
+                tracing::warn!(
+                    failure_class = ?OperatorFailureClass::Infrastructure {
+                        commit_ambiguous: false,
+                    },
+                    ?nudge_outcome,
+                    "eligibility nudge was lost after command handling; \
+                     the reconciliation sweep will recover it"
+                );
+            }
         }
         outcome
     }

@@ -75,7 +75,7 @@ pub trait StartEligibleTurnTransaction {
 }
 
 /// Coordinates one session's eligibility-time activation pass.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct StartEligibleTurnService<Generator, Transaction> {
     ids: Generator,
     transaction: Transaction,

@@ -86,7 +86,12 @@ impl Error for StartEligibleTurnCorruption {}
 #[derive(Debug)]
 pub enum StartEligibleTurnRepositoryError {
     /// PostgreSQL could not complete the transaction.
-    Database(sqlx::Error),
+    Database {
+        /// The underlying SQLx failure.
+        source: sqlx::Error,
+        /// Whether the failure occurred while awaiting commit.
+        commit_ambiguous: bool,
+    },
     /// Durable records cannot reconstruct or commit the accepted domain shape.
     Corruption(StartEligibleTurnCorruption),
     /// A supplied fresh identity already names a durable record.
@@ -96,8 +101,8 @@ pub enum StartEligibleTurnRepositoryError {
 impl fmt::Display for StartEligibleTurnRepositoryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Database(error) => {
-                write!(formatter, "StartEligibleTurn database failure: {error}")
+            Self::Database { source, .. } => {
+                write!(formatter, "StartEligibleTurn database failure: {source}")
             }
             Self::Corruption(error) => error.fmt(formatter),
             Self::IdentityCollision(error) => error.fmt(formatter),
@@ -108,7 +113,7 @@ impl fmt::Display for StartEligibleTurnRepositoryError {
 impl Error for StartEligibleTurnRepositoryError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Database(error) => Some(error),
+            Self::Database { source, .. } => Some(source),
             Self::Corruption(error) => Some(error),
             Self::IdentityCollision(error) => Some(error),
         }
@@ -118,8 +123,10 @@ impl Error for StartEligibleTurnRepositoryError {
 impl ClassifyOperatorFailure for StartEligibleTurnRepositoryError {
     fn operator_failure_class(&self) -> OperatorFailureClass {
         match self {
-            Self::Database(_) => OperatorFailureClass::Infrastructure {
-                commit_ambiguous: true,
+            Self::Database {
+                commit_ambiguous, ..
+            } => OperatorFailureClass::Infrastructure {
+                commit_ambiguous: *commit_ambiguous,
             },
             Self::Corruption(_) => OperatorFailureClass::FailClosedCorruption,
             Self::IdentityCollision(_) => OperatorFailureClass::IdentityCollision,
@@ -135,10 +142,19 @@ impl From<StartEligibleTurnCorruption> for StartEligibleTurnRepositoryError {
 
 impl From<sqlx::Error> for StartEligibleTurnRepositoryError {
     fn from(error: sqlx::Error) -> Self {
+        Self::from_database(error, false)
+    }
+}
+
+impl StartEligibleTurnRepositoryError {
+    fn from_database(error: sqlx::Error, commit_ambiguous: bool) -> Self {
         if let Some(collision) = identity_collision(&error) {
             Self::IdentityCollision(collision)
         } else {
-            Self::Database(error)
+            Self::Database {
+                source: error,
+                commit_ambiguous,
+            }
         }
     }
 }
@@ -172,7 +188,9 @@ impl StartEligibleTurnRepository {
 
         match decision {
             Ok(TransactionDecision::Commit(outcome)) => {
-                transaction.commit().await?;
+                transaction.commit().await.map_err(|error| {
+                    StartEligibleTurnRepositoryError::from_database(error, true)
+                })?;
                 Ok(outcome)
             }
             Ok(TransactionDecision::Rollback(outcome)) => {
@@ -498,5 +516,36 @@ fn identity_collision(error: &sqlx::Error) -> Option<StartEligibleTurnIdentityCo
         }
         Some("turn_attempt_pkey") => Some(StartEligibleTurnIdentityCollision::InitialAttempt),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
+
+    use super::StartEligibleTurnRepositoryError;
+
+    #[test]
+    fn precommit_database_failure_is_not_commit_ambiguous() {
+        let error = StartEligibleTurnRepositoryError::from_database(sqlx::Error::PoolClosed, false);
+
+        assert_eq!(
+            error.operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false
+            }
+        );
+    }
+
+    #[test]
+    fn commit_database_failure_is_commit_ambiguous() {
+        let error = StartEligibleTurnRepositoryError::from_database(sqlx::Error::PoolClosed, true);
+
+        assert_eq!(
+            error.operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true
+            }
+        );
     }
 }

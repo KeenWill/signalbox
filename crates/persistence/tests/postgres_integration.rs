@@ -3253,8 +3253,18 @@ async fn s03_inv007_inv009_postgres_sweep_reconstructs_only_candidate_sessions()
 
     let mut sweep = PostgresEligibilitySweep::new(pool.clone());
     let candidates = EligibilitySweep::find_sessions(&mut sweep).await?;
+    let queued_index_count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)
+           FROM pg_indexes
+          WHERE schemaname = current_schema()
+            AND tablename = 'turn_lifecycle'
+            AND indexname = 'turn_lifecycle_queued_by_session'",
+    )
+    .fetch_one(&pool)
+    .await?;
 
     assert_eq!(candidates, vec![queued_session]);
+    assert_eq!(queued_index_count, 1);
 
     pool.close().await;
     drop(container);
