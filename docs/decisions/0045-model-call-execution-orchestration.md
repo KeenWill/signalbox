@@ -75,9 +75,11 @@ One application service owns a single linear execution:
 prepare-call transaction
   create and commit exact Prepared call, then stop
     OR
-  load a previously committed Prepared call
-  prepare opaque one-shot send capability
-  commit Prepared -> InFlight
+  load a previously committed Prepared call, then close transaction
+prepare opaque one-shot send capability (no database transaction open)
+acquire shared attempt dispatch/stop gate
+authorize-send transaction: recheck authority, commit Prepared -> InFlight
+close transaction, then begin the physical send while retaining the gate
         |
         | issued-call metadata + send capability
         v
@@ -89,21 +91,22 @@ provider interaction (no database transaction open)
 commit-observation transaction(s), serialized per observation
 ```
 
-The service composes three purpose-specific ports: a prepare-call transaction
-port, a provider-interaction port, and a commit-observation transaction port.
-These are separate effects, and orchestration failure retains the failing stage.
-ADR-0044 independently governs how the adapters' errors map into the shared
-operator taxonomy; this record adds no competing classification. The service
-calls the prepare port once and invokes the provider interaction once per
-invocation. It commits each trustworthy provider observation once, except that a
-proven hub-minted identity collision retries that same observation with fresh
-candidates as ADR-0044 requires. An ambiguous commit is never retried.
+The service composes purpose-specific prepare, authorize-send, provider, and
+commit-observation ports plus the provider adapter's local
+capability-preparation operation. These are separate effects, and orchestration
+failure retains the failing stage. ADR-0044 independently governs how the
+adapters' errors map into the shared operator taxonomy; this record adds no
+competing classification. The service invokes the provider interaction once per
+invocation. A proven hub-minted identity collision may repeat a rolled-back
+prepare, authorize, or observation transaction with fresh candidates; no other
+failure repeats a port whose outcome is uncertain, and no such retry repeats
+credential I/O or provider work.
 
 An invocation that creates a new `Prepared` call ends after committing that
 checkpoint and returns no provider authorization. A later invocation may reload
-that same committed call and continue the prepare transaction through credential
-access and `InFlight` authorization. This is a staged continuation of one
-durable call, not a retry or a second provider interaction. An
+that same committed call, close the load transaction, prepare its capability,
+and perform the gated `InFlight` authorization. This is a staged continuation of
+one durable call, not a retry or a second provider interaction. An
 ambiguity-replacement call already has that committed checkpoint when this use
 case receives it.
 
@@ -125,52 +128,57 @@ can use or discard them according to the authoritative domain transition but
 never mints replacements. Inside one serialized transaction, the prepare
 adapter:
 
-1. loads the complete purpose-specific authoritative projection and validates it
-   through the domain-owned reconstitution boundary;
-2. derives whether the exact turn and attempt may authorize a provider effect;
-3. selects one of three preparation paths:
-   - for a new initial call or intentional continuation, resolves and pins the
-     target where required, derives the exact ordered context frontier, consumes
-     eligible steering atomically, and creates the distinct call and frontier
-     from the supplied `ModelCallId` and `ContextFrontierId` candidates as
-     `Prepared`;
-   - for an ordinary initial or continuation call already committed as
-     `Prepared`, reloads that exact call and preserves its identity, pinned
-     target, context frontier, and completed steering consumption unchanged;
-   - for an owner-authorized ambiguity replacement, loads the existing new
-     attempt and its fully targeted `Prepared` call created by the authority
-     transfer, validates that it still owns outcome authority, and uses its call
-     identity, pinned target, frontier, and steering consumption unchanged;
-4. if target resolution fails before call creation, leaves the supplied call and
-   frontier candidates unused, applies the accepted no-call attempt and turn
-   failure, commits that closure and its client-visible ADR-0040 outbox rows,
-   and returns no provider authorization;
-5. if this transaction created a new `Prepared` call, commits that checkpoint
-   and its client-visible ADR-0040 outbox rows, returns a durably-prepared
-   result without a capability, and invokes no later port in this service
-   invocation;
-6. only when the exact `Prepared` call was already committed before this
-   transaction began, asks the provider adapter to prepare a send capability
-   through ADR-0017's credential port for the call's pinned non-secret
-   credential reference; the credential value reaches only the adapter's
-   outbound authenticator, while the transaction coordinator and application and
-   domain values see no secret material;
-7. if credential lookup or local capability preparation returns a trustworthy
-   ordinary preparation failure, applies the accepted
-   `Prepared -> Terminal(KnownFailed)` call transition and matching
-   known-failure attempt and turn transitions, commits their client-visible
-   ADR-0040 outbox rows, and returns no send authorization; fail-closed
-   corruption, an identity collision, a caller or hub bug, or another adapter
-   defect instead follows ADR-0044's operator taxonomy, does not terminalize the
-   call as a provider failure, and invokes no later port (with only an identity
-   collision retried using fresh hub-minted candidates);
-8. if capability preparation succeeds, advances the current turn attempt from
-   `Prepared` to `Running` when applicable, records the call's accepted
-   `Prepared -> InFlight` transition, and commits every other atomic lifecycle
-   fact and client-visible outbox row belonging to that transition; and
-9. returns the provider-neutral issued-call metadata and the separately opaque
-   one-shot send capability only after the `InFlight` commit is known to have
-   succeeded.
+01. loads the complete purpose-specific authoritative projection and validates
+    it through the domain-owned reconstitution boundary;
+02. derives whether the exact turn and attempt may authorize a provider effect;
+03. selects one of three preparation paths:
+    - for a new initial call or intentional continuation, resolves and pins the
+      target where required, derives the exact ordered context frontier,
+      consumes eligible steering atomically, and creates the distinct call and
+      frontier from the supplied `ModelCallId` and `ContextFrontierId`
+      candidates as `Prepared`;
+    - for an ordinary initial or continuation call already committed as
+      `Prepared`, reloads that exact call and preserves its identity, pinned
+      target, context frontier, and completed steering consumption unchanged;
+    - for an owner-authorized ambiguity replacement, loads the existing new
+      attempt and its fully targeted `Prepared` call created by the authority
+      transfer, validates that it still owns outcome authority, and uses its
+      call identity, pinned target, frontier, and steering consumption
+      unchanged;
+04. if target resolution fails before call creation, leaves the supplied call
+    and frontier candidates unused, applies the accepted no-call attempt and
+    turn failure, commits that closure and its client-visible ADR-0040 outbox
+    rows, and returns no provider authorization;
+05. if this transaction created a new `Prepared` call, commits that checkpoint
+    and its client-visible ADR-0040 outbox rows, returns a durably-prepared
+    result without a capability, and invokes no later port in this service
+    invocation;
+06. only when the exact `Prepared` call was already committed before this
+    transaction began, returns its checked request-preparation material and
+    closes the transaction without an outbox append;
+07. after that transaction closes, asks the provider adapter to prepare a send
+    capability through ADR-0017's credential port; the credential value reaches
+    only the adapter's outbound authenticator, while application and domain
+    values see no secret material;
+08. acquires the process-shared attempt dispatch/stop gate, then opens a
+    distinct authorize-send transaction that reloads authority and either
+    rejects stale or stopped work, or commits `Prepared -> InFlight` with its
+    attempt, lifecycle, and outbox facts;
+09. if credential lookup or local capability preparation returned a trustworthy
+    ordinary failure, uses a guarded closure transaction to apply the accepted
+    `Prepared -> Terminal(KnownFailed)` call transition and matching
+    known-failure attempt and turn transitions, commits their client-visible
+    ADR-0040 outbox rows, and returns no send authorization; fail-closed
+    corruption, an identity collision, a caller or hub bug, or another adapter
+    defect instead follows ADR-0044's operator taxonomy, does not terminalize
+    the call as a provider failure, and invokes no later port (with only an
+    identity collision retried using fresh hub-minted candidates); and
+10. after the `InFlight` commit is known, closes its transaction and begins the
+    physical send while retaining the dispatch/stop gate. It releases the gate
+    only after the adapter proves no acceptance crossing or reports crossing as
+    possible. Every in-process stop, invalidation, or cancellation transition
+    for the attempt acquires the same gate before its transaction, so stopped
+    authority and a new physical send cannot pass one another.
 
 The issued-call metadata is bound to the durable model call, current turn
 attempt, exact pinned target, and exact context frontier. Together with the
@@ -197,10 +205,10 @@ reported distinctly and authorizes no later port in that invocation.
 
 ### Provider-interaction port
 
-After the prepare transaction has ended and its `InFlight` commit is known, the
-service invokes the provider port once with the issued-call metadata and its
-opaque one-shot capability. No database transaction, row lock, or persistence
-transaction handle crosses this call.
+After the authorize-send transaction has ended and its `InFlight` commit is
+known, the service invokes the provider port once with the issued-call metadata
+and its opaque one-shot capability. No database transaction, row lock, or
+persistence transaction handle crosses this call.
 
 The provider adapter used the credential during local preparation to construct
 the request-bound send capability. The provider interaction consumes that
@@ -227,8 +235,10 @@ its later physical outcome or audit evidence; this is neither a second provider
 interaction nor authority for new semantic content from the terminalized call.
 Fail-closed corruption, a caller or adapter bug, or any other condition in which
 the adapter cannot construct a trustworthy observation instead returns a
-provider-stage operator failure. The service then calls no commit port, performs
-no retry, and leaves the issued `InFlight` call for authoritative recovery.
+provider-stage operator failure. The service calls no commit port or retry and
+escalates the failure as fatal to hubd supervision. It does not return to
+ordinary scheduling: the process terminates, and the next incarnation performs
+ADR-0004 startup recovery for the issued call.
 
 Transient draft delivery may occur while the provider port is running. Such
 delivery is replaceable, non-authoritative, outside Postgres, and outside the
@@ -295,12 +305,12 @@ The application service follows this exhaustive stage policy:
 | Target resolution fails before a call exists                                                  | Atomically commit the accepted no-call attempt and turn failure plus outbox rows. Return the closed no-call result and invoke no later port.                                                                       |
 | A newly created `Prepared` call commits                                                       | Return its durably-prepared result with no capability and invoke no later port. A later invocation may reload that same call; it does not recreate it.                                                             |
 | No-work, stale, validation refusal, or definite prepare rollback occurs                       | Return the prepare-stage failure or closed no-call result. Do not invoke the provider or commit port.                                                                                                              |
-| Credential lookup or capability preparation has a trustworthy ordinary failure                | Commit its accepted known-failure closure and outbox rows in the prepare transaction. Return no capability and do not invoke the provider or commit port.                                                          |
+| Credential lookup or capability preparation has a trustworthy ordinary failure                | Commit its accepted known-failure closure and outbox rows in a new guarded transaction. Return no capability and do not invoke the provider or commit port.                                                        |
 | Capability preparation reports corruption, identity collision, or a caller/hub bug            | Apply ADR-0044's operator taxonomy without recording a provider known-failure closure. Invoke no later port; only a proven identity collision retries with fresh hub-minted candidates.                            |
 | A no-call, `Prepared`, known-failure, or `InFlight` prepare commit is ambiguous               | Return a prepare-stage commit-ambiguous failure, invoke no later port, and reread authoritative state before any later action; discard any locally prepared capability.                                            |
 | Prepare commits `InFlight`, then the process stops before or during provider invocation       | Leave the durably issued call for ADR-0004/ADR-0005 startup classification. Recovery uses evidence; it neither assumes the request was sent nor invokes the provider for that authorization.                       |
 | Provider work observes an ordinary pre-send failure, provider outcome, or uncertain transport | Report each trustworthy correlated observation to the commit port. Commit an early trusted mismatch immediately; later physical outcome is audit evidence only. The application does not choose lifecycle results. |
-| Provider work cannot construct a trustworthy observation                                      | Return the provider-stage operator failure. Do not call the commit port or retry; leave the issued call for authoritative recovery.                                                                                |
+| Provider work cannot construct a trustworthy observation                                      | Escalate fatally to hubd supervision, call no commit port, and terminate the process so the next incarnation performs ADR-0004 startup recovery.                                                                   |
 | The process stops after provider interaction but before outcome commit                        | Startup recovery classifies the issued call from durable and provider evidence under INV-034. It never repeats that call merely because its in-process observation was lost.                                       |
 | Outcome commit proves rollback because a hub-minted identity collided                         | Mint fresh candidates and retry committing the same in-memory observation without invoking the provider again.                                                                                                     |
 | Commit port has any other failure, including commit ambiguity                                 | Return the commit-stage failure. Do not invoke the provider again or retry the observation. Recovery or a later authoritative pass first rereads durable state.                                                    |
@@ -316,14 +326,17 @@ known outcome; otherwise accepted ambiguity handling applies.
 
 The one-call/no-retry rule has two layers:
 
-- Per application invocation, the service calls the prepare port once and the
-  provider interaction once, in that order. Its one credential lookup and local
-  capability preparation occur inside the prepare transaction, not as a fourth
-  independently retryable effect. An invocation that establishes the durable
-  `Prepared` checkpoint ends there; a later invocation may continue that exact
-  unissued call. Each observation is committed once, apart from ADR-0044's
-  fresh-candidate retry after a proven identity-collision rollback; early and
-  terminal observations from one interaction are distinct durable inputs.
+- Per application invocation, the service invokes the provider interaction once.
+  Credential lookup and capability preparation occur after the load transaction
+  closes and before the gated authorize transaction. An invocation that
+  establishes the durable `Prepared` checkpoint ends there; a later invocation
+  may continue that exact unissued call. Each observation is committed once,
+  apart from ADR-0044's fresh-candidate retry after a proven identity-collision
+  rollback; early and terminal observations from one interaction are distinct
+  durable inputs. A proven identity-collision rollback may repeat only the
+  affected transaction with fresh candidates while preserving an already
+  prepared, unconsumed capability; it repeats neither credential I/O nor
+  provider work.
 - Per durable issue authorization, the provider port performs no more than one
   physical interaction that might reach provider acceptance, using the
   call-bound capability at most once.
@@ -345,13 +358,13 @@ after it rereads durable state.
 
 ### Relationship to the client-update outbox
 
-The prepare and commit transactions append ADR-0040 outbox rows for whichever of
-their durable transitions the protocol declares client-visible. Neither
+The prepare, authorize, and commit transactions append ADR-0040 outbox rows for
+whichever durable transitions the protocol declares client-visible. None
 transaction publishes after commit, performs provider network I/O, or writes
-transient drafts to the outbox. The prepare transaction's ADR-0017 credential
-lookup and provider-adapter-local capability construction do not cross the
-provider-acceptance boundary. The outbox publisher's post-commit nudge remains a
-hint and is not part of model-call outcome authority.
+transient drafts to the outbox. ADR-0017 credential lookup and adapter-local
+capability construction happen only while no database transaction is open. The
+outbox publisher's post-commit nudge remains a hint and is not part of
+model-call outcome authority.
 
 ADR-0040's client-update outbox is not an outbound provider-effect queue. A
 future decision may introduce a durable provider-dispatch mechanism, but it must
@@ -422,16 +435,18 @@ crosses the provider-acceptance boundary.
 
 ## Consequences
 
-The first scripted-provider application slice needs three fakes. Its tests must
+The first scripted-provider application slice needs purpose-specific
+transaction, capability, provider, gate, and observation fakes. Its tests must
 carry the meaningful scenario and invariant identifiers in their names or doc
 comments and cover these groups:
 
 - S02 / [INV-006](../invariants.md), [INV-009](../invariants.md),
   [INV-014](../invariants.md), and [INV-015](../invariants.md): port order and
-  correlation, transaction closure before provider entry, one prepare and one
-  provider interaction, the separately committed `Prepared` checkpoint, its
-  ordinary resume path without identity/frontier/steering changes, and no later
-  stage after an earlier-stage or commit-ambiguous failure.
+  correlation, transaction closure around capability I/O and provider entry, one
+  provider interaction, identity-collision-only transaction retries, the
+  separately committed `Prepared` checkpoint, its ordinary resume path without
+  identity/frontier/steering changes, and no later stage after an earlier-stage
+  or commit-ambiguous failure.
 - S02 / [INV-002](../invariants.md) and [INV-035](../invariants.md): only the
   provider adapter consumes the credential value, trustworthy ordinary
   credential failure commits known failure without a capability, adapter defects
