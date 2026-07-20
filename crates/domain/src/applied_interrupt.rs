@@ -427,6 +427,20 @@ mod tests {
         turn_id(u128::from(u64::MAX - acceptance))
     }
 
+    /// A command seed decorrelated from successor acceptance: it descends
+    /// from the top of the `u128` range as the ordinal ascends.
+    fn decorrelated_command_seed(successor_acceptance: u64) -> u128 {
+        u128::MAX - u128::from(successor_acceptance)
+    }
+
+    /// An accepted-input seed decorrelated from successor acceptance: it
+    /// descends from the top of the `u64` range as the ordinal ascends. The
+    /// separate range keeps it distinct from the command seed for every
+    /// ordinal used by these tests.
+    fn decorrelated_accepted_input_seed(successor_acceptance: u64) -> u128 {
+        u128::from(u64::MAX - successor_acceptance)
+    }
+
     fn nth_position(ordinal: u64) -> SessionInputPosition {
         SessionInputPosition::try_from_u64(ordinal).expect("test acceptance ordinals are positive")
     }
@@ -456,14 +470,14 @@ mod tests {
             let successor = accepted_interrupt(successor_acceptance, predecessor);
             let delivery = interrupt_delivery(predecessor.turn());
             Self {
-                command: command_id(u128::from(successor_acceptance) + 100),
+                command: command_id(decorrelated_command_seed(successor_acceptance)),
                 command_session: predecessor.session(),
                 command_delivery: delivery,
                 predecessor_session: predecessor.session(),
                 predecessor: predecessor.turn(),
                 accepted_input_session: predecessor.session(),
                 accepted_input: AcceptedInputLifecycle::new(
-                    accepted_input_id(u128::from(successor_acceptance) + 200),
+                    accepted_input_id(decorrelated_accepted_input_seed(successor_acceptance)),
                     AcceptedInputDisposition::OriginOf(successor.turn()),
                 ),
                 accepted_delivery: delivery,
@@ -821,16 +835,16 @@ mod tests {
     #[test]
     fn s07_inv009_inv029_competing_interrupt_successor_is_rejected() {
         let predecessor = accepted_ordinary(1);
-        let existing_successor = accepted_interrupt(2, predecessor);
-        let facts = AppliedFacts::matching(3, predecessor);
+        let existing_successor = accepted_interrupt(3, predecessor);
+        let facts = AppliedFacts::matching(2, predecessor);
 
         assert_eq!(
             correlate(facts.clone(), &[predecessor, existing_successor]),
             Err(AppliedInterruptConstructionError::InvalidQueueOrder {
                 error: AcceptedInputQueueOrderError::MultipleInterruptSuccessors {
                     predecessor: predecessor.turn(),
-                    first_successor: facts.successor.turn(),
-                    second_successor: existing_successor.turn(),
+                    first_successor: existing_successor.turn(),
+                    second_successor: facts.successor.turn(),
                 },
             })
         );
