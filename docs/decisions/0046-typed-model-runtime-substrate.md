@@ -86,30 +86,30 @@ Their dependency rule mirrors the persistence rule: runtime crates live in a
 provider-runtime boundary outside `crates/domain` and `crates/application`, per
 INV-002 and the architecture's dependency direction. The domain and application
 crates must never depend on a Layer-1 crate, and no runtime type may appear in a
-domain or application signature or value. Only two consumers may depend on
-Layer-1 crates: the future provider-adapter crate that implements the accepted
-application-side model-execution port, and the hubd composition root that wires
-it.
+domain or application signature or value. The intended consumers are the future
+provider-adapter crate that implements the accepted application-side
+model-execution port and the hubd composition root that wires it; review of any
+other manifest dependency is the policy gate for this consumer restriction.
 
 Enforcement is the same mechanism that keeps the domain crate free of SQLx and
 serde today: the Cargo manifest is the boundary. `crates/domain/Cargo.toml`
 declares exactly one dependency (`uuid`) and `crates/application/Cargo.toml`
 declares exactly two (`signalbox-domain` and `uuid`); a crate cannot name a
-dependency its manifest does not declare, so any runtime import fails the
-workspace build that CI runs on every pull request, and relaxing the rule
-requires a manifest diff that review and the repository dependency guidance gate
-explicitly. There is no additional allowlist script to maintain; the manifests
-are the checked statement of the rule. Those manifest contents describe today's
-code for falsifiability, not a frozen dependency set — accepted records may add
+dependency its manifest does not declare, so an attempted runtime import there
+fails the workspace build that CI runs on every pull request. Relaxing that
+boundary requires a visible manifest diff governed by review and the repository
+dependency guidance. Cargo does not enforce the two-consumer policy above; that
+restriction remains a review-time contract until a later slice adds an explicit
+allowlist check. The current manifest contents describe today's code for
+falsifiability, not a frozen dependency set — accepted records may add
 dependencies there (ADR-0044's `tracing` facade, for example) — while the rule
 this record fixes is that no Layer-1 crate ever appears in the domain or
 application manifests.
 
 Layer-1 crates follow ADR-0044's library discipline: they may emit through the
 `tracing` facade but never install a subscriber, never select the hub's runtime,
-and never log or persist credential material — credential-value consumption
-stays inside the adapter boundary [ADR-0017](0017-credential-lifecycle.md)
-fixes.
+and never log or persist credential material. Credential-value consumption stays
+inside the adapter boundary fixed by [ADR-0017](0017-credential-lifecycle.md).
 
 ### The model-execution port is owned by the orchestration record, not the runtime
 
@@ -216,10 +216,10 @@ incompatible.
 
 This record's boundary depends on accepted rules indexed by the
 [invariant catalog](../invariants.md): INV-002, INV-005, INV-014, INV-025,
-INV-026, and INV-032. Their owning records remain normative; this section does
-not duplicate them. No catalog row claims executable enforcement from this
-record: the manifest boundary above becomes checkable only when the first
-runtime crate lands.
+INV-026, INV-032, and INV-035. Their owning records remain normative; this
+section does not duplicate them. No catalog row claims executable enforcement
+from this record: the manifest boundary above becomes checkable only when the
+first runtime crate lands.
 
 ## Strongest alternative
 
@@ -275,10 +275,11 @@ the port review inside the orchestration record where it belongs.
 
 - **S02:** Layer 2 prepares and authorizes a durable call under its accepted
   lifecycle, then hands the runtime one operation carrying the caller-owned
-  `ModelCallId`. The runtime performs at most one provider interaction, streams
-  observations correlated to that identity, and reports typed terminal evidence;
-  Layer 2 classifies and commits under ADR-0043 and ADR-0042. No runtime
-  component retries, reorders, or reinterprets the outcome.
+  `ModelCallId`. The runtime may retry provably pre-send preparation, then
+  performs at most one provider interaction, streams observations correlated to
+  that identity, and reports typed terminal evidence. Layer 2 classifies and
+  commits under ADR-0043 and ADR-0042. No runtime component repeats a provider
+  interaction, reorders observations, or reinterprets the outcome.
 - **S04:** After a crash, startup recovery classifies the issued call from
   durable state and evidence under the accepted records. The runtime holds no
   durable state to recover and is not consulted; whether its process-local

@@ -192,33 +192,22 @@ async fn handle_in_transaction(
     identities: AcceptedInputTurnActivationIdentities,
 ) -> Result<TransactionDecision, StartEligibleTurnRepositoryError> {
     // Lock inventory for this transaction: the `session_scheduler` row below
-    // is its only explicit lock (`FOR UPDATE`); the session row is locked only
+    // is its only explicit row lock; the session row is locked only
     // `KEY SHARE`, implicitly, by the inserts' session foreign keys; and the
     // candidate `turn_lifecycle` row is locked `NO KEY UPDATE` by the guarded
     // activation UPDATE itself (plus `KEY SHARE` from the `turn_attempt`
     // insert's foreign key). Two standing constraints: every turn-lifecycle
     // writer acquires this scheduler lock before touching `turn_lifecycle`
-    // rows, and no production path may lock the session row `FOR UPDATE` —
+    // rows, and no production path may take the strongest row-lock mode on the
+    // session row —
     // see the lock-mode contract beside the session-row lock in
     // `submit_input.rs::prepare_against_locked_state`.
     let session_uuid = session_id_to_uuid(requested_session);
-    let (session_exists, scheduler_session) = sqlx::query_as::<_, (bool, Option<Uuid>)>(
-        "SELECT
-            EXISTS (
-                SELECT 1
-                  FROM session
-                 WHERE session_id = $1
-            ),
-            (
-                SELECT session_id
-                  FROM session_scheduler
-                 WHERE session_id = $1
-                 FOR UPDATE
-            )",
-    )
-    .bind(session_uuid)
-    .fetch_one(&mut *connection)
-    .await?;
+    let (session_exists, scheduler_session) =
+        sqlx::query_as::<_, (bool, Option<Uuid>)>(crate::lock_inventory::START_ELIGIBLE_TURN)
+            .bind(session_uuid)
+            .fetch_one(&mut *connection)
+            .await?;
 
     if scheduler_session.is_none() {
         if session_exists {
@@ -264,25 +253,41 @@ async fn handle_in_transaction(
                 AcceptedInputEligibilityFailure::InitialAttemptIdentityAlreadyExists => {
                     StartEligibleTurnIdentityCollision::InitialAttempt
                 }
+                AcceptedInputEligibilityFailure::InternalOriginFrontierConstructionFailed => {
+                    return Err(StartEligibleTurnCorruption::Inconsistent(
+                        "origin frontier construction",
+                    )
+                    .into());
+                }
+                AcceptedInputEligibilityFailure::InternalPredecessorTerminalFrontierMissing {
+                    ..
+                } => {
+                    return Err(StartEligibleTurnCorruption::Inconsistent(
+                        "predecessor terminal frontier",
+                    )
+                    .into());
+                }
+                AcceptedInputEligibilityFailure::InternalStartingFrontierDerivationFailed => {
+                    return Err(StartEligibleTurnCorruption::Inconsistent(
+                        "starting frontier derivation",
+                    )
+                    .into());
+                }
             };
             return Err(StartEligibleTurnRepositoryError::IdentityCollision(outcome));
         }
     };
 
     let activated = insert_prepared_activation(connection, prepared).await?;
-    Ok(match activated {
-        Some(activated) => {
-            TransactionDecision::Commit(StartEligibleTurnOutcome::Activated(Box::new(activated)))
-        }
-        None => TransactionDecision::Rollback(StartEligibleTurnOutcome::NoEligibleTurn),
-    })
+    Ok(TransactionDecision::Commit(
+        StartEligibleTurnOutcome::Activated(Box::new(activated)),
+    ))
 }
 
 async fn insert_prepared_activation(
     connection: &mut PgConnection,
     prepared: PreparedAcceptedInputTurnActivation,
-) -> Result<Option<signalbox_domain::ActivatedAcceptedInputTurn>, StartEligibleTurnRepositoryError>
-{
+) -> Result<signalbox_domain::ActivatedAcceptedInputTurn, StartEligibleTurnRepositoryError> {
     let (activated, origin_entry, starting_snapshot) = prepared.into_parts();
     let accepted_input = match origin_entry.payload() {
         InitialSemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input } => {
@@ -444,8 +449,10 @@ async fn insert_prepared_activation(
     .rows_affected();
 
     match updated {
-        1 => Ok(Some(activated)),
-        0 => Ok(None),
+        1 => Ok(activated),
+        0 => Err(
+            StartEligibleTurnCorruption::Inconsistent("guarded activation matched no row").into(),
+        ),
         _ => {
             Err(StartEligibleTurnCorruption::Inconsistent("guarded activation cardinality").into())
         }

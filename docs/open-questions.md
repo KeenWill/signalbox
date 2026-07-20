@@ -123,6 +123,21 @@ accepted records; those numbers remain reserved for their topics.
   policy, including backoff and resource limits, is a separate decision left
   open by ADR-0005. Blocks retry features. (S02, S04, S22)
 
+## Provider call security
+
+- **Outbound TLS posture for provider calls.** Certificate-verification
+  requirements, trust roots, TLS-version floor, and any proxy allowance for the
+  hub's outbound provider connections are undecided. Blocks the first outbound
+  provider adapter. (S02, S04, S20–S23)
+- **Provider response-size limits.** Whether and where the hub bounds provider
+  response bodies and streamed deltas before they reach parsing and storage.
+  Blocks the first outbound provider adapter. (S02, S04, S24)
+- **Provider call timeout budgets.** See the authoritative open question in
+  [ADR-0043](decisions/0043-provider-failure-classification.md#timeouts-use-the-boundary-but-budgets-stay-open).
+- **Provider-response parsing hardening.** Parsing limits and rejection behavior
+  for provider responses under the malicious-model-output threat model. Blocks
+  the first outbound provider adapter. (S02, S04, S23)
+
 ## Scheduling and runners (reserved ADR-0008)
 
 Dispatch fencing and initial scheduler mechanics are decided by accepted
@@ -176,6 +191,11 @@ questions below remain open.
   configurable usage limits at effect boundaries. Blocks public release.
   (S02–S06, S13–S18)
 
+## Actor attribution (ADR-0039 follow-ups)
+
+- **Actor-admissibility follow-ups.** See the authoritative routing and open
+  questions in [ADR-0039](decisions/0039-actor-attribution.md#open-questions).
+
 ## Protocols and persistence (ADR-0019 through ADR-0023)
 
 - **Browser transport.** Preserve authoritative-snapshot-plus-transient-stream
@@ -189,15 +209,31 @@ questions below remain open.
   canonical command payload/result storage and equality,
   [ADR-0035](decisions/0035-domain-owned-persistence-reconstitution.md) fixes
   the domain-owned complete-projection boundary for reconstructing opaque
-  values, and [ADR-0038](decisions/0038-session-aggregate-boundary.md) fixes the
-  complete current-session projection and load-by-identity semantics. Streaming
-  checkpoints, dispatch-generation placement, archival form, and exact
-  cancellation-delivery records remain open. The
+  values, [ADR-0038](decisions/0038-session-aggregate-boundary.md) fixes the
+  complete current-session projection and load-by-identity semantics,
+  [ADR-0040](decisions/0040-transactional-outbox.md) closes atomic
+  client-visible update-event append with commit-ordered cursors, and
+  [ADR-0041](decisions/0041-evidence-bearing-reconstitution.md) fixes
+  evidence-bearing active-turn reconstitution with session-scoped acceptance
+  tails. Streaming checkpoints, dispatch-generation placement, archival form,
+  and exact cancellation-delivery records remain open. The
   [first physical frontier-layout choice](decisions.md#2026-07-17--materialize-complete-membership-for-first-context-frontier-storage)
   materializes complete ordered membership while preserving ADR-0030's freedom
   for a later semantics-preserving migration. Those remaining questions block
   only their corresponding adapter slices; the generic scaffold and first typed
   command family are not blocked. (S03, S04, S17, S25, S27)
+- **Submit-path scaling: scheduling projection and frontier storage.** The
+  [first frontier layout](decisions.md#2026-07-17--materialize-complete-membership-for-first-context-frontier-storage)
+  materializes complete membership per snapshot and the submit path loads the
+  complete scheduling projection, content included per submission, inside the
+  session lock, degrading at hundreds of turns per session. A completeness
+  representation that bounds scheduling reads, plus an ADR-0030-permitted
+  prefix-sharing or delta layout, remains concretely undesigned. The
+  [decision log](decisions.md#2026-07-20--adversarial-audit-corrective-package)
+  owns its accepted scheduling disposition. (S03, S04, S17)
+- **Update-event retention, pruning, and multi-process fan-out.** See the
+  authoritative open questions in
+  [ADR-0040](decisions/0040-transactional-outbox.md#open-questions).
 - **Swift client type generation.** Leaning: generated boundary types mapped to
   hand-written client domain types. Deferrable until the Swift client. (S01,
   S24)
@@ -212,3 +248,22 @@ questions below remain open.
   native slice are known. (S01, S24)
 - **Web client technology (Rust/Wasm or TypeScript).** No leaning until the
   browser protocol and product slice are measured. (S01, S02, S24)
+
+## Destination features (target model)
+
+These unresolved foundation requirements are authoritative here. The
+[target-model concept status map](target-model.md#concept-status-map) is
+non-normative direction for their destination and ordering.
+
+- **Goal identity and lifecycle.** Durable persistent-objective identity and
+  lifecycle require a future foundation decision. Blocks platform goal mode.
+- **Standing update-subscription lifecycle.** Identity, lifetime, delivery, and
+  cancellation for standing update subscriptions require a future foundation
+  decision. Blocks the planned callback surface.
+- **Independent session-link relationship.** Links between sessions that
+  delegation did not create require their own foundation decision. Blocks
+  session linking and visibility authority. (S18, S19)
+- **Inter-session messaging actor extension.** Session-actor accepted input
+  requires an ADR-0039 algebra extension, explicit `SubmitInput` admissibility,
+  and the reserved ADR-0015 through ADR-0018 decisions. Blocks inter-session
+  messaging. (S18, S19)

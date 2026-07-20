@@ -9,37 +9,82 @@ that constrains several components — require a full record under
 [decisions/](decisions/README.md) instead. Unresolved questions live in
 [open-questions.md](open-questions.md).
 
-## 2026-07-20 — Typed model-runtime substrate boundary adopted
+## 2026-07-20 — Adversarial-audit corrective package
 
-**Context.** The model-call milestone needs provider-translation machinery —
-request translation, capability profiles, schema generation, typed structured
-output, tool-call decoding, streaming normalization. A distilled external
-exploration proposed a three-layer shape with SerdesAI as a candidate vendoring
-substrate and a Phase-0 audit running separately. Without a recorded boundary,
-the first provider slice could couple durable orchestration to a provider
-framework's loop, retries, or event types.
+**Context.** A six-agent adversarial audit of the merged stack examined scaling
+limits, panic discipline, lock ordering, dead surface area, and process rigor.
+Its load-bearing finding: the
+[first frontier layout](#2026-07-17--materialize-complete-membership-for-first-context-frontier-storage)
+materializes complete membership per snapshot — order S² member rows across a
+session's life — while the submit path loads the complete scheduling projection,
+content included per submission, inside the session-row lock, so sessions
+degrade at hundreds of turns. The
+[2026-07-19 audit entry](#2026-07-19--post-milestone-2-audit-corrections-and-tracked-obligations)
+tracks a typed-error obligation for three panic sites; ten more non-test
+`expect()`/`unreachable!` sites carry no recorded obligation. The
+session/scheduler lock-ordering protocol lives only in comments in
+`crates/persistence/src/submit_input.rs` and
+`crates/persistence/src/start_eligible_turn.rs`.
 
-**Decision.** Adopt [ADR-0046](decisions/0046-typed-model-runtime-substrate.md):
-provider-neutral typed model-runtime crates live in this repository under
-`crates/`, importable only by the future provider-adapter crate and the hubd
-composition root, with the Cargo-manifest boundary as enforcement; the
-application-side model-execution port stays owned by the model-call
-orchestration ADR process; caller-owned `ModelCallId` correlation, the
-pre-send-only retry boundary, prepared-versus-boundary-crossed evidence, typed
-ADR-0043 classification, and three separate target-identity facts bind every
-integration; vendoring awaits the Phase-0 audit. The
-[target model](target-model.md#an-app-facing-sdk-target) gains the
-not-yet-scheduled app-SDK destination paragraph.
+**Decision.** Owner-decided dispositions, recorded together:
 
-**Rejected alternatives.** Depending on upstream releases: the recorded
-maintenance signals make that cadence unacceptable authority over
-provider-boundary semantics. Forking or hand-rolling now: structural mismatch is
-unmeasured before the first provider slice. Scheduling the app SDK: no
-end-to-end application exists to generalize from.
+- *Scaling timing.* Record now; fix after the model-call milestone. The remedy
+  requires a still-undesigned representation that keeps complete scheduling
+  reads bounded, together with a frontier storage change (prefix sharing or
+  deltas) the 2026-07-17 layout entry already permits under
+  [ADR-0030](decisions/0030-context-frontier-snapshots.md). Accepted cost: that
+  fix reopens model-call storage after the milestone lands.
+- *Panic ledger.* The typed-error obligation extends from the three
+  `prepare_earliest_queued_activation` sites to all thirteen non-test sites.
+  Stable enclosing identifiers are `SubmitInput::prepare_when_no_active_turn`
+  (one) and `SubmitInput::prepare_with_active_turn` (three) in domain
+  `submit_input`; `EvidenceFreeCurrentAttempt::canonical_phase` (one),
+  `reconstitute_active_acceptance_tail` (one), and
+  `prepare_earliest_queued_activation` (three) in `turn_eligibility`; and
+  `prepare_against_locked_state` (one), `load_scheduling_projection` (two), and
+  `load_turn_origin_graph` (one) in persistence `submit_input`. A clippy
+  `expect_used`/`unwrap_used`/`unreachable` deny gate, covering every panic form
+  in this ledger, is commissioned as an ordinary slice once the conversions
+  land.
+- *Lock protocol.* The persistence crate's small `lock_inventory` module is the
+  only production Rust location for explicit strongest-mode row-lock SQL. CI
+  verifies its exact reviewed contents by checksum and rejects that clause in
+  every other production Rust file. This is a conservative textual boundary, not
+  Rust or SQL semantic analysis. A later lock-acquisition helper may replace the
+  inventory when it can own all session and scheduler row locks.
+- *Application punch list.* Commissioned as ordinary slices: delete the
+  isomorphic persistence `*HandlingOutcome` mirrors of application outcomes;
+  extract the `run_ready` and scripted-fake plumbing duplicated across the five
+  application test modules into shared test support (testing-style rule 3:
+  plumbing irrelevant to the behavior under test); normalize the
+  `CreateSessionError` asymmetry and delete its unreachable `Preparation`
+  variant as remaining implementation work under accepted
+  [ADR-0044](decisions/0044-hub-runtime-foundations.md).
+- *Rigor tier.* Uniform rigor stays; the model-call milestone's time-to-land is
+  the canary that reopens this decision.
+- *Supply chain.* `cargo-deny` (advisories, an exact license allow-list,
+  registry sources) gates pull requests and a weekly schedule via `deny.toml`
+  and `.github/workflows/deny.yml`; `.gitignore` adds local secret and key
+  patterns.
 
-**Affects.** [ADR-0046](decisions/0046-typed-model-runtime-substrate.md) (new),
-[target-model.md](target-model.md), and future runtime and adapter crate
-placement; no code, schema, dependency, or accepted-record semantics.
+**Rejected alternatives.** Fixing the scaling pair now: it would delay the
+model-call milestone the owner prioritized against a load only sessions with
+hundreds of turns produce. Converting the thirteen panic sites in this package:
+each conversion needs its owning slice's tests, and this package is docs,
+configuration, and CI; moving the existing SQL strings into one private module
+does not alter their runtime statements. Enforcing the lock protocol by comments
+and review alone: that is the state the audit found insufficient. Building a
+Rust/SQL parser for the tripwire: its complexity and inevitable syntax gaps
+would outweigh this narrow guard. Tiered rigor now: no measurement yet shows
+uniform rigor is the constraint.
+
+**Affects.** This entry; new provider-security, scaling, and reconciliation
+entries in [open-questions.md](open-questions.md); `.github/workflows/rust.yml`
+(exact lock inventory, `validate` timeout); `.github/workflows/deny.yml`,
+`deny.toml`, and `.gitignore` (new supply-chain gate); the commissioned slices
+bind future work. Rust runtime behavior, schema, API, and accepted semantics do
+not change; the documented tripwire, timeout, and supply-chain gates change CI
+and configuration behavior.
 
 ## 2026-07-20 — First outbox append is scoped to CreateSession
 
