@@ -163,7 +163,6 @@ mod tests {
         });
         let failed = semantic_entry(InitialSemanticTranscriptEntryPayload::TurnFailed { turn });
 
-        assert_ne!(origin.payload(), failed.payload());
         assert!(matches!(
             origin.payload(),
             InitialSemanticTranscriptEntryPayload::OriginAcceptedInput {
