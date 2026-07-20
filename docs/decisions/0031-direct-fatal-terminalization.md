@@ -242,8 +242,8 @@ must retain `StopRequested`.
 
 ## Open questions
 
-- Provider-specific evidence thresholds for mismatch, known failure, and
-  ambiguity remain with provider contracts.
+- Provider-native target-identity evidence and its trust threshold remain
+  reserved ADR-0007 scope.
 - ADR-0022 fixes the normalized relational persistence baseline and durable
   cancellation-intent boundary; the exact physical table layout, deduplication,
   outbox or delivery mechanism, and operational acknowledgement handling remain
@@ -259,4 +259,5 @@ This ADR does not change provider-call dispositions, mismatch evidence variants,
 terminal guard membership, fatal-cause union, ambiguity acknowledgement,
 recovery waits, startup precedence, interrupt authority, steering order, or
 terminal monotonicity. It does not choose a database schema, outbox, scheduler,
-provider SDK, evidence threshold, cancellation protocol, or monitoring system.
+provider SDK, target-identity trust threshold, cancellation protocol, or
+monitoring system.
