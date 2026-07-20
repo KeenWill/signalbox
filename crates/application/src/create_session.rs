@@ -415,12 +415,16 @@ mod tests {
         let second = generator.next_session_id();
 
         assert_ne!(first, second);
-        for session in [first, second] {
-            assert_eq!(session.as_uuid().get_variant(), Variant::RFC4122);
-            assert_eq!(session.as_uuid().get_version(), Some(Version::SortRand));
-            assert!(!session.as_uuid().is_nil());
-            assert!(!session.as_uuid().is_max());
-        }
+        assert_session_is_rfc_9562_uuid_v7(first);
+        assert_session_is_rfc_9562_uuid_v7(second);
+    }
+
+    #[track_caller]
+    fn assert_session_is_rfc_9562_uuid_v7(session: SessionId) {
+        assert_eq!(session.as_uuid().get_variant(), Variant::RFC4122);
+        assert_eq!(session.as_uuid().get_version(), Some(Version::SortRand));
+        assert!(!session.as_uuid().is_nil());
+        assert!(!session.as_uuid().is_max());
     }
 
     /// S01 / INV-003 / INV-008 / INV-012: orchestration fixes the admitted

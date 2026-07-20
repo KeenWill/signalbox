@@ -23,13 +23,15 @@ What it is being built to do:
 The [vision](docs/vision.md) and [target model](docs/target-model.md) describe
 the purpose, deployment shape, and destination in full; the target model details
 these capabilities directionally — accepted records decide them — and several
-(fork selection, delegation) remain [open decisions](docs/open-questions.md).
+(fork selection, delegation, steering consumption) remain
+[open decisions](docs/open-questions.md).
 
 > **Status:** design and foundation phase, not yet a usable product. The initial
 > domain and persistence slices exist behind accepted decisions — session
-> creation and loading, defaults replacement, durable input acceptance — with
-> turn activation next; provider adapters, runners, and the clients are
-> milestones ahead, and APIs, protocols, and storage details are not yet stable.
+> creation and loading, defaults replacement, durable input acceptance, and
+> eligible-turn activation — with model calls next; provider adapters, runners,
+> and the clients are milestones ahead, and APIs, protocols, and storage details
+> are not yet stable.
 
 ```text
  Terminal       Web       macOS / iOS
@@ -73,24 +75,11 @@ Install [rustup](https://rustup.rs/). The repository's `rust-toolchain.toml`
 makes rustup select the pinned minimal stable toolchain with rustfmt and Clippy.
 
 The workspace contains the dependency chain `apps/hubd` → `crates/application` →
-`crates/domain`. Run the full local validation sequence from the repository
-root:
-
-```bash
-python3 scripts/check_domain_spine.py
-cargo fmt --all -- --check
-mdformat --check *.md docs/
-cargo check --workspace --all-targets --all-features
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-targets --all-features
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
-cargo metadata --no-deps --format-version 1
-git diff --check
-```
-
-The Markdown check needs `pip install mdformat==0.7.22 mdformat-gfm==0.4.1` (the
-versions CI pins); drop `--check` to rewrap in place. Wrapping rules live in
-`.mdformat.toml`.
+`crates/domain`, with `crates/persistence` depending on both
+`crates/application` and `crates/domain`, and the dev-only `crates/expect-table`
+consumed by the domain crate's tests. Before finishing any change, run the
+repository-wide validation sequence in [AGENTS.md](AGENTS.md) — the canonical
+list of required commands and their setup notes — from the repository root.
 
 ## License
 

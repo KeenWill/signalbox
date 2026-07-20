@@ -9,6 +9,91 @@ that constrains several components — require a full record under
 [decisions/](decisions/README.md) instead. Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-19 — Meaningful review re-requests and surfaced stack replacement
+
+**Context.** The finished-pull-request protocol re-requested external reviews on
+the final commit after any rebase, so quiet-state pull requests re-summoned full
+bot passes after merge-main and formatting commits — about 15–20% of CI runs
+reviewed nothing new. Separately, an autonomous run replaced an open
+pull-request stack with a rewrite without the owner seeing the choice. Codex
+review also requires an explicit trigger, so relying on implicit branch events
+can leave the requested review absent.
+
+**Decision.** External review re-requests follow the meaningful-diff bar now
+stated in the finished-pull-request bullets of [AGENTS.md](../AGENTS.md), Codex
+is invoked there through an explicit `@codex review` comment, and replacing or
+abandoning an open stack is surfaced to the owner under that file's
+working-autonomously guidance. `AGENTS.md` carries the normative wording.
+
+**Rejected alternatives.** Re-requesting on every push: keeps spending full
+review passes on commits that cannot change an approval. Relying on implicit
+Codex automation: does not reliably start a review. A hard approval gate on
+stack replacement: heavier than the problem — surfacing before the replacement
+lands preserves owner visibility without blocking work.
+
+**Affects.** Review-request behavior on every pull request, stack management in
+autonomous runs, and the linked rule home. It changes no code, CI configuration,
+or review-wave semantics.
+
+## 2026-07-19 — Post-milestone-2 audit corrections and tracked obligations
+
+**Context.** A post-milestone-2 audit of the turn-activation stack reviewed CI
+coverage, documentation truthfulness, and the fail-closed posture of the new
+scheduling and activation seams. It found that
+`cargo test --workspace --all-targets --all-features` excludes doctests, so the
+domain's 53 `compile_fail` sealing proofs never ran in CI; that several overview
+documents had gone stale behind merged code; and that one coverage gap and
+several deliberately accepted asymmetries were recorded nowhere.
+
+**Decision.** CI's `validate` job and the validation sequence gain
+`cargo test --workspace --all-features --doc`. The scheduling reconstitution
+fail-closed matrix is incomplete — `AcceptedInputSchedulingReconstitutionInput`
+has 39 reconstitution-failure variants and tests exercise 11 — so a follow-up is
+commissioned to complete that matrix; the INV-009/INV-016 rows in
+[invariants.md](invariants.md) are corrected now to claim only test-exercised
+coverage, and the follow-up restores the stronger claims with their tests. When
+that matrix lands, the three `expect()` calls in
+`prepare_earliest_queued_activation`
+(`crates/domain/src/turn_eligibility.rs:1844/1850/1856`) must become typed
+errors under ADR-0035's no-panic reconstitution posture. Accepted on record:
+orphan empty context-frontier headers remain committable, and read-side
+mitigation — lifecycle-referenced loads plus the domain's `UnreferencedSnapshot`
+rejection — is the design; the attempt-Prepared durable boundary at activation
+is enforced by domain reconstitution plus the monotonic triggers, not a
+schema-forced same-transaction ban, an accepted defense-in-depth asymmetry.
+Tracked for future slices: preparation failures that can only be caller bugs
+currently conflate into `Corruption::Inconsistent` (the
+`crates/persistence/src/submit_input.rs` preparation mapping and the
+`crates/persistence/src/start_eligible_turn.rs` internal guards) pending a typed
+caller-error family; activation's zero-row guarded UPDATE under the held
+scheduler lock can only mean divergence, never a stale wakeup, and must become a
+distinct `Inconsistent` outcome; and the future reclassification slice must
+widen the pending-steering replay decode (the `queued_effect_count == 0`
+coupling and the migration-0005 active-source trigger) or original-command
+replay fails closed as corruption. Two process facts: the milestone-2
+wave-history report [goal-mode.md](goal-mode.md) requires was not posted — the
+rule postdated most of that stack's waves — and future milestones comply; and
+`ActiveTurnPhase`'s wait variants remain publicly constructible pending the
+`StopRequested` slice sealing them under ADR-0041's discipline.
+
+**Rejected alternatives.** Fixing the tracked items inside this corrective
+package: each needs its owning slice's tests, and this package is docs,
+comments, and one CI step with zero behavior changes. Leaving the obligations
+unrecorded: they would be silently lost between milestones. Weakening
+INV-009/INV-016 permanently instead of commissioning the matrix: the checks
+exist; only their tests are missing. Adding schema bans for the orphan-header
+and attempt-boundary asymmetries now: migration weight for boundaries the read
+side and triggers already hold.
+
+**Affects.** `.github/workflows/rust.yml` and the validation sequences in
+[AGENTS.md](../AGENTS.md) and `README.md`; annotation and status corrections in
+[domain-spine.md](domain-spine.md), [target-model.md](target-model.md),
+[goal-mode.md](goal-mode.md), and `README.md`; the INV-009/INV-016 rows in
+[invariants.md](invariants.md); and pointer comments in
+`crates/domain/src/submit_input.rs`, `crates/persistence/src/submit_input.rs`,
+and `crates/persistence/src/start_eligible_turn.rs`. No behavior, schema, API,
+or accepted semantics change; the tracked obligations bind their future slices.
+
 ## 2026-07-19 — Machine-enforced 80-column Markdown formatting with mdformat
 
 **Context.** Documentation prose had no wrapping rule: line lengths drifted per

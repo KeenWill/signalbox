@@ -461,17 +461,20 @@ mod tests {
 
         assert_ne!(first_input, second_input);
         assert_ne!(first_turn, second_turn);
-        for value in [
-            first_input.into_uuid(),
-            first_turn.into_uuid(),
-            second_input.into_uuid(),
-            second_turn.into_uuid(),
-        ] {
-            assert_eq!(value.get_variant(), Variant::RFC4122);
-            assert_eq!(value.get_version(), Some(Version::SortRand));
-            assert!(!value.is_nil());
-            assert!(!value.is_max());
-        }
+        assert_uuid_v7_candidate_shape(first_input.into_uuid());
+        assert_uuid_v7_candidate_shape(first_turn.into_uuid());
+        assert_uuid_v7_candidate_shape(second_input.into_uuid());
+        assert_uuid_v7_candidate_shape(second_turn.into_uuid());
+    }
+
+    /// Asserts the production candidate's UUIDv7 shape, reporting a failure
+    /// at the generated candidate's call site.
+    #[track_caller]
+    fn assert_uuid_v7_candidate_shape(candidate: Uuid) {
+        assert_eq!(candidate.get_variant(), Variant::RFC4122);
+        assert_eq!(candidate.get_version(), Some(Version::SortRand));
+        assert!(!candidate.is_nil());
+        assert!(!candidate.is_max());
     }
 
     /// S01 / INV-002 / INV-007 / INV-008 / INV-012 / INV-028: orchestration
