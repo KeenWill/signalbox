@@ -422,16 +422,20 @@ mod tests {
     impl EligibilityPass for BlockingPass {
         type Error = FakeFailure;
 
-        async fn run(&mut self, _session: SessionId) -> Result<(), Self::Error> {
+        fn run(
+            &mut self,
+            _session: SessionId,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
             let entered = self
                 .entered
                 .lock()
                 .expect("the fake pass state is not poisoned")
                 .take()
-                .expect("the test pass runs once")
-                .send(());
-            entered.expect("the test waits for pass entry");
-            pending().await
+                .expect("the test pass runs once");
+            async move {
+                entered.send(()).expect("the test waits for pass entry");
+                pending().await
+            }
         }
     }
 
@@ -454,7 +458,7 @@ mod tests {
         fn run(
             &mut self,
             _session: SessionId,
-        ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
             ready(Ok(()))
         }
     }

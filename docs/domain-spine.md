@@ -1827,7 +1827,7 @@ pub trait EligibilityPass {
     fn run(
         &mut self,
         session: SessionId,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static;
 }
 
 pub struct InProcessEligibilityNudge { /* private */ }
@@ -1868,7 +1868,7 @@ impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass> {
 impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass>
 where
     WorkSource: EligibilityWorkSource,
-    Pass: EligibilityPass + Clone + Send + 'static,
+    Pass: EligibilityPass + Send,
     WorkSource::Error: ClassifyOperatorFailure,
     Pass::Error: ClassifyOperatorFailure + Send + 'static,
 {
