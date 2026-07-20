@@ -445,7 +445,7 @@ fn canonical_pair(first: TurnId, second: TurnId) -> (TurnId, TurnId) {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use expect_test::expect;
     use signalbox_expect_table::table;
@@ -786,7 +786,11 @@ mod tests {
         let mut facts = vec![first, second, interrupt, nested];
         let expected = vec![first.turn(), interrupt.turn(), nested.turn(), second.turn()];
 
-        assert_all_permutations_derive(&mut facts, 0, &expected);
+        assert_eq!(
+            assert_all_permutations_derive(&mut facts, &expected),
+            24,
+            "four facts have 24 permutations"
+        );
     }
 
     /// S03 / INV-009: the empty and singleton currently-known fact sets each
@@ -827,25 +831,38 @@ mod tests {
     #[test]
     fn s03_inv009_duplicate_turns_and_positions_are_rejected() {
         let position = positions(2);
+        let distinct_turn = ordinary(1, position[0]);
+        let duplicated_turn_at_first_position = ordinary(2, position[0]);
+        let duplicated_turn_at_second_position = ordinary(2, position[1]);
         let mut overlapping_duplicates = vec![
-            ordinary(1, position[0]),
-            ordinary(2, position[0]),
-            ordinary(2, position[1]),
+            distinct_turn,
+            duplicated_turn_at_first_position,
+            duplicated_turn_at_second_position,
         ];
-        let duplicate_turn = AcceptedInputQueueOrderError::DuplicateTurn { turn: turn_id(2) };
-        assert_all_permutations_reject(&mut overlapping_duplicates, 0, &duplicate_turn);
-        let mut duplicate_positions = vec![
-            ordinary(3, position[0]),
-            ordinary(1, position[0]),
-            ordinary(2, position[0]),
-        ];
+        let duplicate_turn = AcceptedInputQueueOrderError::DuplicateTurn {
+            turn: duplicated_turn_at_first_position.turn(),
+        };
+        assert_eq!(
+            assert_all_permutations_reject(&mut overlapping_duplicates, &duplicate_turn),
+            6,
+            "three facts have six permutations"
+        );
+        let higher_turn = ordinary(3, position[0]);
+        let first_canonical_turn = ordinary(1, position[0]);
+        let second_canonical_turn = ordinary(2, position[0]);
+        let mut duplicate_positions =
+            vec![higher_turn, first_canonical_turn, second_canonical_turn];
         let expected = AcceptedInputQueueOrderError::DuplicateAcceptancePosition {
             position: position[0],
-            first_turn: turn_id(1),
-            second_turn: turn_id(2),
+            first_turn: first_canonical_turn.turn(),
+            second_turn: second_canonical_turn.turn(),
         };
 
-        assert_all_permutations_reject(&mut duplicate_positions, 0, &expected);
+        assert_eq!(
+            assert_all_permutations_reject(&mut duplicate_positions, &expected),
+            6,
+            "three facts have six permutations"
+        );
     }
 
     /// S07 / INV-009: every interrupt priority fact names one different,
@@ -974,43 +991,78 @@ mod tests {
         );
     }
 
+    #[test]
+    fn permutation_traversal_visits_each_arrangement_once() {
+        let first_sentinel = "first";
+        let second_sentinel = "second";
+        let third_sentinel = "third";
+        let mut sentinels = [first_sentinel, second_sentinel, third_sentinel];
+        let observed = all_permutations(&mut sentinels);
+
+        assert_eq!(observed.len(), 6);
+        assert_eq!(
+            observed.into_iter().collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                vec![first_sentinel, second_sentinel, third_sentinel],
+                vec![first_sentinel, third_sentinel, second_sentinel],
+                vec![second_sentinel, first_sentinel, third_sentinel],
+                vec![second_sentinel, third_sentinel, first_sentinel],
+                vec![third_sentinel, first_sentinel, second_sentinel],
+                vec![third_sentinel, second_sentinel, first_sentinel],
+            ])
+        );
+    }
+
+    #[track_caller]
     fn assert_all_permutations_derive(
         facts: &mut [AcceptedInputQueueWork],
-        index: usize,
         expected: &[TurnId],
-    ) {
-        if index == facts.len() {
+    ) -> usize {
+        let permutations = all_permutations(facts);
+        for facts in &permutations {
             assert_eq!(
                 derive_accepted_input_total_order(facts.iter().copied()),
                 Ok(expected.to_vec())
             );
-            return;
         }
-
-        for swap_index in index..facts.len() {
-            facts.swap(index, swap_index);
-            assert_all_permutations_derive(facts, index + 1, expected);
-            facts.swap(index, swap_index);
-        }
+        permutations.len()
     }
 
+    #[track_caller]
     fn assert_all_permutations_reject(
         facts: &mut [AcceptedInputQueueWork],
-        index: usize,
         expected: &AcceptedInputQueueOrderError,
-    ) {
-        if index == facts.len() {
+    ) -> usize {
+        let permutations = all_permutations(facts);
+        for facts in &permutations {
             assert_eq!(
                 derive_accepted_input_total_order(facts.iter().copied()),
                 Err(expected.clone())
             );
+        }
+        permutations.len()
+    }
+
+    fn all_permutations<T: Clone>(values: &mut [T]) -> Vec<Vec<T>> {
+        let mut permutations = Vec::new();
+        collect_permutations_from(values, 0, &mut permutations);
+        permutations
+    }
+
+    fn collect_permutations_from<T: Clone>(
+        values: &mut [T],
+        index: usize,
+        permutations: &mut Vec<Vec<T>>,
+    ) {
+        if index == values.len() {
+            permutations.push(values.to_vec());
             return;
         }
 
-        for swap_index in index..facts.len() {
-            facts.swap(index, swap_index);
-            assert_all_permutations_reject(facts, index + 1, expected);
-            facts.swap(index, swap_index);
+        for swap_index in index..values.len() {
+            values.swap(index, swap_index);
+            collect_permutations_from(values, index + 1, permutations);
+            values.swap(index, swap_index);
         }
     }
 }
