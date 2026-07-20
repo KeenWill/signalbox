@@ -82,12 +82,12 @@ Classification follows this exhaustive rule:
 
 | Evidence                                                                                                                                                                                                                                                                                                                   | Physical disposition |
 | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
-| The aggregate carries the exact `AppliedInterruptProof` for this predecessor, and evidence proves the request was not accepted and the interrupt prevented all remaining work, including the full request send                                                                                                             | `Cancelled`          |
+| No complete, correlated definitive provider response is available; the aggregate carries the exact `AppliedInterruptProof` for this predecessor; and evidence proves the request was not accepted and the interrupt prevented all remaining work, including the full request send                                          | `Cancelled`          |
 | A complete, correlated provider response is a recognized provider-side credential or authentication rejection                                                                                                                                                                                                              | `KnownFailed`        |
-| A complete, correlated provider response has a recognized refusal status or payload and is not a credential or authentication rejection                                                                                                                                                                                    | `Refused`            |
+| A complete, correlated provider response has a recognized refusal status or payload, is not a credential or authentication rejection, and evidence proves the authenticated request exchange completed                                                                                                                     | `Refused`            |
 | A complete, correlated provider response definitively confirms provider cancellation and is not recognized as refusal or credential rejection                                                                                                                                                                              | `Cancelled`          |
 | A complete, correlated provider response has a recognized terminal success status and valid completion material and is not recognized as refusal, credential rejection, or cancellation                                                                                                                                    | `Completed`          |
-| A complete, correlated provider response has an explicit terminal error status and is not recognized as refusal, credential rejection, or cancellation                                                                                                                                                                     | `KnownFailed`        |
+| A complete, correlated provider response has an explicit terminal error status—including a refusal-like response whose authenticated completed-exchange precondition is not met—and is not recognized as credential rejection or cancellation                                                                              | `KnownFailed`        |
 | A failure is observed while the adapter can establish that the full request send did not complete and provider-contract evidence proves that the incomplete request could not have been accepted or acted on; no definitive provider response is available, and the proof-bearing cancellation branch above does not apply | `KnownFailed`        |
 | The request crossed or may have crossed the provider's acceptance-capable boundary, including an incomplete write without proof that partial input could not be accepted or acted on, and no definitive provider response establishes another disposition                                                                  | `Ambiguous`          |
 
@@ -108,18 +108,23 @@ define an exhaustive, mutually exclusive mapping of its provider-native terminal
 success, credential rejection, refusal, error, and cancellation statuses and
 payloads. A recognized credential or authentication rejection is always
 `KnownFailed` under ADR-0017 and takes precedence over refusal. A remaining
-recognized refusal takes precedence over a generic terminal-error mapping,
-including when the provider carries the refusal in a generic error response;
-only the remaining explicit terminal error responses classify `KnownFailed`. No
-native response may match more than one disposition. An explicit provider error
-response classified by that mapping is definitive even if it arrives before the
-request upload finishes. When the proof-bearing cancellation branch does not
-apply, any complete, correlated definitive response takes its exact native
-disposition rather than a disposition inferred from local send progress.
-Observable acceptance, processing, or billing may be recorded separately and
-does not change the call disposition. An SDK's `retryable`, `transient`, or
-equivalent flag does not alter the mapping and never authorizes retry or
-fallback.
+status or payload is recognized as `Refused` only when evidence proves the
+authenticated request exchange completed, as ADR-0017 requires. Under that
+precondition, refusal takes precedence over a generic terminal-error mapping,
+including when the provider carries the refusal in a generic error response. A
+complete refusal-like response received before that precondition is met follows
+the adapter's explicit non-refusal terminal-error mapping and is `KnownFailed`.
+No native response may match more than one disposition.
+
+Any complete, correlated definitive response takes its exact native disposition
+before the proof-bearing interrupt branch is considered, rather than a
+disposition inferred from local send progress. An explicit provider error
+response classified by that mapping is therefore definitive even if it arrives
+before request upload finishes; `Refused` remains unavailable until its
+completed-exchange precondition holds. Observable acceptance, processing, or
+billing may be recorded separately and does not change the call disposition. An
+SDK's `retryable`, `transient`, or equivalent flag does not alter the mapping
+and never authorizes retry or fallback.
 
 When no definitive provider response is available and evidence cannot establish
 that failure occurred before any provider acceptance was possible, the
@@ -217,15 +222,17 @@ No dependency, domain state, retry mechanism, or timeout budget is selected.
 ## Scenario walkthroughs
 
 - **S02:** A scripted response declares its disposition. For a real adapter, an
-  applied interrupt with exact proof and evidence that the request was not
-  accepted and the interrupt prevented all remaining work cancels before full
-  send. Otherwise a complete, correlated definitive response follows its exact
-  native mapping even before the upload finishes, with credential rejection
-  classified known failure before refusal and generic terminal error. Only in
-  the absence of such a response is another request-preparation or
-  incomplete-send failure known, and then only with proof that provider
-  acceptance was impossible; loss after an acceptance-capable boundary is
-  ambiguous. No partial draft becomes authoritative.
+  applied interrupt with exact proof, no definitive response, and evidence that
+  the request was not accepted and the interrupt prevented all remaining work
+  cancels before full send. A complete, correlated definitive response instead
+  follows its exact native mapping before interrupt handling. Credential
+  rejection is known failure; refusal additionally requires an authenticated
+  completed exchange, so a refusal-like response before upload completion is a
+  non-refusal terminal known failure. Only in the absence of such a response is
+  another request-preparation or incomplete-send failure known, and then only
+  with proof that provider acceptance was impossible; loss after an
+  acceptance-capable boundary is ambiguous. No partial draft becomes
+  authoritative.
 - **S04:** Startup uses definitive provider evidence when available. Otherwise
   an `InFlight` call that may have crossed full send is ambiguous while its
   prior-process attempt ends in the matching `Lost` branch. A request-status API
