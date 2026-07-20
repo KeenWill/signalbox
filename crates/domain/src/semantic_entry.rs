@@ -156,8 +156,8 @@ mod tests {
     /// typed reference to its distinct accepted-input or turn subject.
     #[test]
     fn initial_payload_variants_preserve_exact_typed_subjects() {
-        let accepted_input = accepted_input_id(1);
-        let turn = turn_id(1);
+        let accepted_input = accepted_input_id(2);
+        let turn = turn_id(3);
         let origin = semantic_entry(InitialSemanticTranscriptEntryPayload::OriginAcceptedInput {
             accepted_input,
         });
