@@ -1895,7 +1895,7 @@ mod tests {
         SessionReconstitutionInput,
         test_support::{
             accepted_input_id, context_frontier_id, direct, semantic_transcript_entry_id,
-            session_id, turn_attempt_id, turn_id,
+            session_id, transcript_frontier, turn_attempt_id, turn_id,
         },
     };
 
@@ -2153,6 +2153,28 @@ mod tests {
                 initial_attempt,
             )
         }
+
+        fn identities_with_origin_entry(
+            self,
+            origin_entry: SemanticTranscriptEntryId,
+        ) -> AcceptedInputTurnActivationIdentities {
+            AcceptedInputTurnActivationIdentities::new(
+                origin_entry,
+                self.starting_frontier().id(),
+                self.initial_attempt(),
+            )
+        }
+
+        fn identities_with_starting_frontier(
+            self,
+            starting_frontier: ContextFrontierId,
+        ) -> AcceptedInputTurnActivationIdentities {
+            AcceptedInputTurnActivationIdentities::new(
+                self.origin_entry().id(),
+                starting_frontier,
+                self.initial_attempt(),
+            )
+        }
     }
 
     #[derive(Clone)]
@@ -2165,9 +2187,21 @@ mod tests {
     }
 
     impl ActiveReconstitutionFacts {
+        /// The origin-entry fixture the matching baseline stores for its
+        /// active turn.
+        fn matching_origin_entry() -> SemanticEntryFixture {
+            semantic_entry(30)
+        }
+
+        /// The starting-snapshot fixture the matching baseline stores for
+        /// its active turn.
+        fn matching_starting_frontier() -> FrontierFixture {
+            frontier(40)
+        }
+
         fn matching(session: &Session, active: OriginFixture) -> Self {
-            let origin_entry = semantic_entry(30);
-            let starting_frontier = frontier(40);
+            let origin_entry = Self::matching_origin_entry();
+            let starting_frontier = Self::matching_starting_frontier();
             Self {
                 session: session.clone(),
                 turns: vec![active.record(
@@ -2199,6 +2233,30 @@ mod tests {
             *phase = replacement;
         }
 
+        /// Replaces only the stored starting lineage while retaining every
+        /// other matching fact.
+        fn replace_starting_lineage(&mut self, replacement: AcceptedInputStartingLineage) {
+            let AcceptedInputTurnSchedulingRecordState::Active {
+                starting_lineage, ..
+            } = &mut self.turns[0].state
+            else {
+                panic!("matching active facts retain an active scheduling record");
+            };
+            *starting_lineage = replacement;
+        }
+
+        /// Replaces only the stored starting-snapshot identity while
+        /// retaining every other matching fact.
+        fn replace_starting_frontier(&mut self, replacement: ContextFrontierId) {
+            let AcceptedInputTurnSchedulingRecordState::Active {
+                starting_frontier, ..
+            } = &mut self.turns[0].state
+            else {
+                panic!("matching active facts retain an active scheduling record");
+            };
+            *starting_frontier = replacement;
+        }
+
         fn input(self) -> AcceptedInputSchedulingReconstitutionInput {
             AcceptedInputSchedulingReconstitutionInput::new(
                 self.session,
@@ -2220,6 +2278,110 @@ mod tests {
             ..ActiveReconstitutionFacts::matching(session, active)
         }
         .input()
+    }
+
+    /// One-record queued scheduling input: a queued turn stores no semantic
+    /// entries, snapshots, or acceptance tail, so those collections are
+    /// canonically empty here.
+    fn queued_input(
+        session: &Session,
+        queued: OriginFixture,
+    ) -> AcceptedInputSchedulingReconstitutionInput {
+        AcceptedInputSchedulingReconstitutionInput::new(
+            session.clone(),
+            vec![queued.record(session, AcceptedInputTurnSchedulingRecordState::Queued)],
+            Vec::new(),
+            Vec::new(),
+            None,
+        )
+    }
+
+    /// Matching stored facts for one first-in-session failed-terminal turn:
+    /// its origin entry, failed marker, starting snapshot, and terminal
+    /// snapshot agree with each other, so each perturbation changes exactly
+    /// one stored fact.
+    #[derive(Clone)]
+    struct FailedTerminalReconstitutionFacts {
+        session: Session,
+        turns: Vec<AcceptedInputTurnSchedulingRecord>,
+        semantic_entries: Vec<SemanticTranscriptEntryReconstitutionInput>,
+        snapshots: Vec<ResolvedContextFrontierReconstitutionInput>,
+        acceptance_tail: Option<SessionAcceptanceTailReconstitutionInput>,
+    }
+
+    impl FailedTerminalReconstitutionFacts {
+        /// The origin-entry fixture the matching baseline stores for its
+        /// failed turn.
+        fn matching_origin_entry() -> SemanticEntryFixture {
+            semantic_entry(30)
+        }
+
+        /// The failed-marker fixture the matching baseline stores for its
+        /// failed turn.
+        fn matching_failure_entry() -> SemanticEntryFixture {
+            semantic_entry(31)
+        }
+
+        /// The starting-snapshot fixture the matching baseline stores for
+        /// its failed turn.
+        fn matching_starting_frontier() -> FrontierFixture {
+            frontier(40)
+        }
+
+        /// The terminal-snapshot fixture the matching baseline stores for
+        /// its failed turn.
+        fn matching_terminal_frontier() -> FrontierFixture {
+            frontier(41)
+        }
+
+        fn matching(session: &Session, failed: OriginFixture) -> Self {
+            let origin_entry = Self::matching_origin_entry();
+            let failure_entry = Self::matching_failure_entry();
+            let starting_frontier = Self::matching_starting_frontier();
+            let terminal_frontier = Self::matching_terminal_frontier();
+            Self {
+                session: session.clone(),
+                turns: vec![failed.record(
+                    session,
+                    AcceptedInputTurnSchedulingRecordState::TerminalFailed {
+                        starting_lineage: AcceptedInputStartingLineage::FirstInSession,
+                        starting_frontier: starting_frontier.id(),
+                        terminal_frontier: terminal_frontier.id(),
+                    },
+                )],
+                semantic_entries: vec![
+                    failed.entry(session, origin_entry),
+                    failure_entry.failed_turn(session, failed),
+                ],
+                snapshots: vec![
+                    starting_frontier.snapshot(session, &[origin_entry]),
+                    terminal_frontier.snapshot(session, &[origin_entry, failure_entry]),
+                ],
+                acceptance_tail: None,
+            }
+        }
+
+        /// Replaces only the stored terminal-snapshot identity while
+        /// retaining every other matching fact.
+        fn replace_terminal_frontier(&mut self, replacement: ContextFrontierId) {
+            let AcceptedInputTurnSchedulingRecordState::TerminalFailed {
+                terminal_frontier, ..
+            } = &mut self.turns[0].state
+            else {
+                panic!("matching failed-terminal facts retain a terminal scheduling record");
+            };
+            *terminal_frontier = replacement;
+        }
+
+        fn input(self) -> AcceptedInputSchedulingReconstitutionInput {
+            AcceptedInputSchedulingReconstitutionInput::new(
+                self.session,
+                self.turns,
+                self.semantic_entries,
+                self.snapshots,
+                self.acceptance_tail,
+            )
+        }
     }
 
     #[derive(Clone, Copy)]
@@ -2380,13 +2542,12 @@ mod tests {
         failure: String,
     }
 
-    /// Asserts one named perturbation rejects while retaining the complete
-    /// unchanged input, then returns its precise failure.
+    /// Asserts one perturbed complete input rejects while retaining every
+    /// supplied fact unchanged, then returns its precise failure.
     #[track_caller]
-    fn assert_reconstitution_rejects_unchanged(
-        facts: ActiveReconstitutionFacts,
+    fn assert_input_rejects_unchanged(
+        input: AcceptedInputSchedulingReconstitutionInput,
     ) -> AcceptedInputSchedulingReconstitutionFailure {
-        let input = facts.input();
         let error = input
             .clone()
             .reconstitute()
@@ -2395,6 +2556,37 @@ mod tests {
         assert_eq!(error.input(), &input);
         let (returned, returned_failure) = error.into_parts();
         assert_eq!(returned, input);
+        assert_eq!(returned_failure, failure);
+        failure
+    }
+
+    /// Asserts one named perturbation rejects while retaining the complete
+    /// unchanged input, then returns its precise failure.
+    #[track_caller]
+    fn assert_reconstitution_rejects_unchanged(
+        facts: ActiveReconstitutionFacts,
+    ) -> AcceptedInputSchedulingReconstitutionFailure {
+        assert_input_rejects_unchanged(facts.input())
+    }
+
+    /// Asserts eligibility preparation rejects while retaining the complete
+    /// projection and supplied identities unchanged, then returns the exact
+    /// failure.
+    #[track_caller]
+    fn assert_eligibility_rejects_unchanged(
+        projection: AcceptedInputSchedulingProjection,
+        identities: AcceptedInputTurnActivationIdentities,
+    ) -> AcceptedInputEligibilityFailure {
+        let error = projection
+            .clone()
+            .prepare_earliest_queued_activation(identities)
+            .expect_err("ineligible or colliding activation facts must fail closed");
+        let failure = error.failure();
+        assert_eq!(error.projection(), &projection);
+        assert_eq!(error.identities(), identities);
+        let (returned_projection, returned_identities, returned_failure) = error.into_parts();
+        assert_eq!(returned_projection, projection);
+        assert_eq!(returned_identities, identities);
         assert_eq!(returned_failure, failure);
         failure
     }
@@ -3452,6 +3644,912 @@ mod tests {
             &AcceptedInputSchedulingReconstitutionFailure::TerminalFrontierMismatch {
                 turn: predecessor.turn(),
             }
+        );
+    }
+
+    /// S03 / INV-009: this closed slice cannot resolve a first frontier from
+    /// session ancestry, so an otherwise-valid queued projection for an
+    /// ancestral session fails closed.
+    #[test]
+    fn s03_inv009_reconstitution_rejects_ancestral_session() {
+        let ancestral = session_id(1);
+        let version = SessionConfigurationDefaultsVersion::first();
+        let defaults = SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(direct(1)));
+        let session = SessionReconstitutionInput::new(
+            ancestral,
+            ancestral,
+            SessionCreationProvenance::new(
+                SessionCreationCause::OwnerInitiated,
+                TranscriptAncestry::SingleSource {
+                    source_session: session_id(9),
+                    source_frontier: transcript_frontier(9),
+                },
+            ),
+            ancestral,
+            version,
+            ancestral,
+            version,
+            defaults,
+        )
+        .reconstitute()
+        .expect("ancestral session facts are fully correlated");
+        let queued = accepted_origin(1);
+
+        let failure = assert_input_rejects_unchanged(queued_input(&session, queued));
+
+        assert_eq!(
+            failure,
+            AcceptedInputSchedulingReconstitutionFailure::UnsupportedSessionAncestry
+        );
+    }
+
+    /// S03 / INV-009: every stored session and turn correlation on one
+    /// scheduling record must repeat the owning identities exactly; each
+    /// cross-wired stored identity fails closed with its own failure.
+    #[test]
+    fn s03_inv009_reconstitution_rejects_cross_wired_record_identities() {
+        let session = current_session();
+        let queued = accepted_origin(1);
+        let other_session = session_id(2);
+        let other_turn = turn_id(99);
+
+        let mut turn_session_facts = queued_input(&session, queued);
+        turn_session_facts.turns[0].stored_session = other_session;
+        let turn_session = assert_input_rejects_unchanged(turn_session_facts);
+        assert_eq!(
+            turn_session,
+            AcceptedInputSchedulingReconstitutionFailure::TurnSessionMismatch {
+                turn: queued.turn(),
+            }
+        );
+
+        let mut accepted_input_session_facts = queued_input(&session, queued);
+        accepted_input_session_facts.turns[0].accepted_input_session = other_session;
+        let accepted_input_session = assert_input_rejects_unchanged(accepted_input_session_facts);
+        assert_eq!(
+            accepted_input_session,
+            AcceptedInputSchedulingReconstitutionFailure::AcceptedInputSessionMismatch {
+                turn: queued.turn(),
+            }
+        );
+
+        let mut queue_session_facts = queued_input(&session, queued);
+        queue_session_facts.turns[0].queue_session = other_session;
+        let queue_session = assert_input_rejects_unchanged(queue_session_facts);
+        assert_eq!(
+            queue_session,
+            AcceptedInputSchedulingReconstitutionFailure::QueueSessionMismatch {
+                turn: queued.turn(),
+            }
+        );
+
+        let mut queue_turn_facts = queued_input(&session, queued);
+        queue_turn_facts.turns[0].queue_turn = other_turn;
+        let queue_turn = assert_input_rejects_unchanged(queue_turn_facts);
+        assert_eq!(
+            queue_turn,
+            AcceptedInputSchedulingReconstitutionFailure::QueueTurnMismatch {
+                turn: queued.turn(),
+            }
+        );
+
+        expect![[r#"
+            ┌───────────────────────────────────────────┬─────────────────────────────────────────────────────────────────────────────────────┐
+            │ perturbed_stored_fact                     │ failure                                                                             │
+            ├───────────────────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────┤
+            │ turn record session cross-wired           │ TurnSessionMismatch { turn: TurnId(00000000-0000-0000-ffff-fffffffffffe) }          │
+            │ accepted-input record session cross-wired │ AcceptedInputSessionMismatch { turn: TurnId(00000000-0000-0000-ffff-fffffffffffe) } │
+            │ queue record session cross-wired          │ QueueSessionMismatch { turn: TurnId(00000000-0000-0000-ffff-fffffffffffe) }         │
+            │ queue record turn cross-wired             │ QueueTurnMismatch { turn: TurnId(00000000-0000-0000-ffff-fffffffffffe) }            │
+            └───────────────────────────────────────────┴─────────────────────────────────────────────────────────────────────────────────────┘
+        "#]]
+        .assert_eq(&table([
+            ReconstitutionFailureRow {
+                perturbed_stored_fact: "turn record session cross-wired",
+                failure: format!("{turn_session:?}"),
+            },
+            ReconstitutionFailureRow {
+                perturbed_stored_fact: "accepted-input record session cross-wired",
+                failure: format!("{accepted_input_session:?}"),
+            },
+            ReconstitutionFailureRow {
+                perturbed_stored_fact: "queue record session cross-wired",
+                failure: format!("{queue_session:?}"),
+            },
+            ReconstitutionFailureRow {
+                perturbed_stored_fact: "queue record turn cross-wired",
+                failure: format!("{queue_turn:?}"),
+            },
+        ]));
+    }
+
+    /// S03 / INV-004 / INV-009: two turn records cannot both claim one
+    /// accepted input as their typed durable origin.
+    #[test]
+    fn s03_inv009_reconstitution_rejects_shared_accepted_input_identity() {
+        let session = current_session();
+        let first = accepted_origin(1);
+        let second = accepted_origin(2);
+        let mut input = queued_input(&session, first);
+        input
+            .turns
+            .push(second.record(&session, AcceptedInputTurnSchedulingRecordState::Queued));
+        input.turns[1].accepted_input = AcceptedInputLifecycle::new(
+            first.accepted_input(),
+            AcceptedInputDisposition::OriginOf(second.turn()),
+        );
+
+        let failure = assert_input_rejects_unchanged(input);
+
+        assert_eq!(
+            failure,
+            AcceptedInputSchedulingReconstitutionFailure::DuplicateAcceptedInput {
+                accepted_input: first.accepted_input(),
+            }
+        );
+    }
+
+    /// S03 / INV-007 / INV-009: immutable queue facts that cannot form one
+    /// durable total order fail closed with the exact derivation error.
+    #[test]
+    fn s03_inv009_reconstitution_rejects_underivable_queue_order() {
+        let session = current_session();
+        let first = accepted_origin(1);
+        let second = accepted_origin(2);
+        let mut input = queued_input(&session, first);
+        input
+            .turns
+            .push(second.record(&session, AcceptedInputTurnSchedulingRecordState::Queued));
+        input.turns[1].order = AcceptedInputQueueOrder::ordinary(first.position());
+
+        let failure = assert_input_rejects_unchanged(input);
+
+        // Turn identities descend as acceptance ordinals ascend, so the
+        // second fixture holds the lower canonical turn identity.
+        assert_eq!(
+            failure,
+            AcceptedInputSchedulingReconstitutionFailure::InvalidQueueOrder {
+                error: AcceptedInputQueueOrderError::DuplicateAcceptancePosition {
+                    position: first.position(),
+                    first_turn: second.turn(),
+                    second_turn: first.turn(),
+                },
+            }
+        );
+    }
+
+    /// S03 / INV-009: a stored semantic entry must name the scheduling
+    /// session as its source session.
+    #[test]
+    fn s03_inv009_reconstitution_rejects_cross_session_semantic_entry() {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let other_session = session_id(2);
+        let origin_entry = ActiveReconstitutionFacts::matching_origin_entry();
+        let mut facts = ActiveReconstitutionFacts::matching(&session, active);
+        facts.semantic_entries[0] = SemanticTranscriptEntryReconstitutionInput::new(
+            origin_entry.id(),
+            other_session,
+            InitialSemanticTranscriptEntryPayload::OriginAcceptedInput {
+                accepted_input: active.accepted_input(),
+            },
+        );
+
+        let failure = assert_reconstitution_rejects_unchanged(facts);
+
+        assert_eq!(
+            failure,
+            AcceptedInputSchedulingReconstitutionFailure::SemanticEntrySourceSessionMismatch {
+                entry: origin_entry.id(),
+            }
+        );
+    }
+
+    /// S03 / INV-009: the same source-qualified semantic entry cannot appear
+    /// twice in the complete entry collection.
+    #[test]
+    fn s03_inv009_reconstitution_rejects_duplicate_semantic_entry() {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let origin_entry = ActiveReconstitutionFacts::matching_origin_entry();
+        let mut facts = ActiveReconstitutionFacts::matching(&session, active);
+        facts
+            .semantic_entries
+            .push(active.entry(&session, origin_entry));
+
+        let failure = assert_reconstitution_rejects_unchanged(facts);
+
+        assert_eq!(
+            failure,
+            AcceptedInputSchedulingReconstitutionFailure::DuplicateSemanticEntry {
+                entry: origin_entry.reference(&session),
+            }
+        );
+    }
+
+    /// S03 / INV-009: a failed marker naming a turn absent from the complete
+    /// scheduling inventory fails closed.
+    #[test]
+    fn s03_inv009_reconstitution_rejects_semantic_entry_without_subject() {
+        let session = current_session();
+        let queued = accepted_origin(1);
+        let unknown_turn = turn_id(99);
+        let stray_entry = semantic_entry(31);
+        let mut input = queued_input(&session, queued);
+        input
+            .semantic_entries
+            .push(SemanticTranscriptEntryReconstitutionInput::new(
+                stray_entry.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::TurnFailed { turn: unknown_turn },
+            ));
+
+        let failure = assert_input_rejects_unchanged(input);
+
+        assert_eq!(
+            failure,
+            AcceptedInputSchedulingReconstitutionFailure::SemanticEntrySubjectMissing {
+                entry: stray_entry.id(),
+            }
+        );
+    }
+
+    /// S03 / INV-009: an origin entry for a turn whose stored lifecycle is
+    /// still queued contradicts that turn's state and fails closed.
+    #[test]
+    fn s03_inv009_reconstitution_rejects_origin_entry_for_queued_turn() {
+        let session = current_session();
+        let queued = accepted_origin(1);
+        let origin_entry = semantic_entry(30);
+        let mut input = queued_input(&session, queued);
+        input
+            .semantic_entries
+            .push(queued.entry(&session, origin_entry));
+
+        let failure = assert_input_rejects_unchanged(input);
+
+        assert_eq!(
+            failure,
+            AcceptedInputSchedulingReconstitutionFailure::SemanticEntryStateMismatch {
+                entry: origin_entry.id(),
+            }
+        );
+    }
+
+    /// S03 / INV-009: one started turn owns exactly one origin entry; a
+    /// second origin entry naming the same accepted input fails closed.
+    #[test]
+    fn s03_inv009_reconstitution_rejects_second_origin_entry_for_one_turn() {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let second_origin_entry = semantic_entry(31);
+        let mut facts = ActiveReconstitutionFacts::matching(&session, active);
+        facts
+            .semantic_entries
+            .push(active.entry(&session, second_origin_entry));
+
+        let failure = assert_reconstitution_rejects_unchanged(facts);
+
+        assert_eq!(
+            failure,
+            AcceptedInputSchedulingReconstitutionFailure::DuplicateSemanticEntryForSubject {
+                entry: second_origin_entry.id(),
+            }
+        );
+    }
+
+    /// S03 / INV-009: a started turn requires its exact origin entry; an
+    /// absent origin fails closed instead of deriving a start without one.
+    #[test]
+    fn s03_inv009_reconstitution_rejects_started_turn_without_origin_entry() {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let mut facts = ActiveReconstitutionFacts::matching(&session, active);
+        // The starting snapshot must stop referencing the removed entry, or
+        // the snapshot-reference check would mask the origin-entry check.
+        facts.semantic_entries.clear();
+        facts.snapshots =
+            vec![ActiveReconstitutionFacts::matching_starting_frontier().snapshot(&session, &[])];
+
+        let failure = assert_reconstitution_rejects_unchanged(facts);
+
+        assert_eq!(
+            failure,
+            AcceptedInputSchedulingReconstitutionFailure::MissingOriginEntry {
+                turn: active.turn(),
+            }
+        );
+    }
+
+    /// S09 / INV-009 / INV-015: a failed turn requires its exact failed
+    /// marker; an absent marker fails closed instead of accepting the
+    /// stored terminal frontier on faith.
+    #[test]
+    fn s09_reconstitution_rejects_failed_turn_without_failure_marker() {
+        let session = current_session();
+        let failed = accepted_origin(1);
+        let origin_entry = FailedTerminalReconstitutionFacts::matching_origin_entry();
+        let mut facts = FailedTerminalReconstitutionFacts::matching(&session, failed);
+        // The terminal snapshot must stop referencing the removed marker, or
+        // the snapshot-reference check would mask the failed-marker check.
+        facts.semantic_entries = vec![failed.entry(&session, origin_entry)];
+        facts.snapshots = vec![
+            FailedTerminalReconstitutionFacts::matching_starting_frontier()
+                .snapshot(&session, &[origin_entry]),
+            FailedTerminalReconstitutionFacts::matching_terminal_frontier()
+                .snapshot(&session, &[origin_entry]),
+        ];
+
+        let failure = assert_input_rejects_unchanged(facts.input());
+
+        assert_eq!(
+            failure,
+            AcceptedInputSchedulingReconstitutionFailure::MissingFailureEntry {
+                turn: failed.turn(),
+            }
+        );
+    }
+
+    /// S03 / INV-016: a supplied acceptance tail requires an active turn; a
+    /// tail alongside a queued-only projection fails closed.
+    #[test]
+    fn s03_inv016_reconstitution_rejects_tail_without_active_turn() {
+        let session = current_session();
+        let queued = accepted_origin(1);
+        let mut input = queued_input(&session, queued);
+        input.active_acceptance_tail = Some(queued.active_tail(&session));
+
+        let failure = assert_input_rejects_unchanged(input);
+
+        assert_eq!(
+            failure,
+            AcceptedInputSchedulingReconstitutionFailure::UnexpectedActiveAcceptanceTail
+        );
+    }
+
+    /// S03 / S08 / INV-016 / ADR-0041: every tail entry belongs to the
+    /// scheduling session and appears exactly once; a cross-session entry or
+    /// a repeated accepted-input identity fails closed.
+    #[test]
+    fn active_reconstitution_rejects_cross_session_or_repeated_tail_entries() {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let second = accepted_origin(2);
+
+        let other_session = session_id(2);
+        let mut cross_session_facts = ActiveReconstitutionFacts::matching(&session, active);
+        cross_session_facts
+            .acceptance_tail
+            .as_mut()
+            .expect("matching facts include the acceptance tail")
+            .entries[0]
+            .session = other_session;
+        let cross_session = assert_reconstitution_rejects_unchanged(cross_session_facts);
+        assert_eq!(
+            cross_session,
+            AcceptedInputSchedulingReconstitutionFailure::AcceptanceTailEntrySessionMismatch {
+                accepted_input: active.accepted_input(),
+            }
+        );
+
+        let mut repeated_facts = ActiveReconstitutionFacts::matching(&session, active);
+        let repeated_tail = repeated_facts
+            .acceptance_tail
+            .as_mut()
+            .expect("matching facts include the acceptance tail");
+        repeated_tail.observed_last_position = second.position();
+        repeated_tail
+            .entries
+            .push(SessionAcceptanceTailEntryReconstitutionInput::new(
+                session.id(),
+                AcceptedInputLifecycle::new(
+                    active.accepted_input(),
+                    AcceptedInputDisposition::PendingSteering {
+                        binding: crate::SteeringBinding::new(active.turn()),
+                    },
+                ),
+                second.position(),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: active.turn(),
+                },
+            ));
+        let repeated = assert_reconstitution_rejects_unchanged(repeated_facts);
+        assert_eq!(
+            repeated,
+            AcceptedInputSchedulingReconstitutionFailure::DuplicateAcceptanceTailEntry {
+                accepted_input: active.accepted_input(),
+            }
+        );
+
+        expect![[r#"
+            ┌────────────────────────────────┬──────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+            │ perturbed_stored_fact          │ failure                                                                                                      │
+            ├────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+            │ tail entry session cross-wired │ AcceptanceTailEntrySessionMismatch { accepted_input: AcceptedInputId(00000000-0000-0000-7fff-fffffffffffe) } │
+            │ tail entry identity repeated   │ DuplicateAcceptanceTailEntry { accepted_input: AcceptedInputId(00000000-0000-0000-7fff-fffffffffffe) }       │
+            └────────────────────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+        "#]]
+        .assert_eq(&table([
+            ReconstitutionFailureRow {
+                perturbed_stored_fact: "tail entry session cross-wired",
+                failure: format!("{cross_session:?}"),
+            },
+            ReconstitutionFailureRow {
+                perturbed_stored_fact: "tail entry identity repeated",
+                failure: format!("{repeated:?}"),
+            },
+        ]));
+    }
+
+    /// S03 / INV-009 / INV-015: every stored snapshot is owned by the
+    /// scheduling session, unique, duplicate-free, and backed by supplied
+    /// entries; each malformed snapshot collection fails closed.
+    #[test]
+    fn s03_inv015_reconstitution_rejects_malformed_snapshot_collection() {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let origin_entry = ActiveReconstitutionFacts::matching_origin_entry();
+        let starting_frontier = ActiveReconstitutionFacts::matching_starting_frontier();
+
+        let other_session = session_id(2);
+        let mut cross_session_facts = ActiveReconstitutionFacts::matching(&session, active);
+        cross_session_facts.snapshots[0] = ResolvedContextFrontierReconstitutionInput::new(
+            other_session,
+            starting_frontier.id(),
+            vec![origin_entry.reference(&session)],
+        );
+        let cross_session = assert_reconstitution_rejects_unchanged(cross_session_facts);
+        assert_eq!(
+            cross_session,
+            AcceptedInputSchedulingReconstitutionFailure::SnapshotOwningSessionMismatch {
+                snapshot: starting_frontier.id(),
+            }
+        );
+
+        let mut duplicate_facts = ActiveReconstitutionFacts::matching(&session, active);
+        duplicate_facts
+            .snapshots
+            .push(starting_frontier.snapshot(&session, &[origin_entry]));
+        let duplicate = assert_reconstitution_rejects_unchanged(duplicate_facts);
+        assert_eq!(
+            duplicate,
+            AcceptedInputSchedulingReconstitutionFailure::DuplicateSnapshot {
+                snapshot: starting_frontier.id(),
+            }
+        );
+
+        let mut membership_facts = ActiveReconstitutionFacts::matching(&session, active);
+        membership_facts.snapshots[0] =
+            starting_frontier.snapshot(&session, &[origin_entry, origin_entry]);
+        let membership = assert_reconstitution_rejects_unchanged(membership_facts);
+        assert_eq!(
+            membership,
+            AcceptedInputSchedulingReconstitutionFailure::InvalidSnapshotMembership {
+                snapshot: starting_frontier.id(),
+            }
+        );
+
+        let absent_entry = semantic_entry(99);
+        let mut unbacked_facts = ActiveReconstitutionFacts::matching(&session, active);
+        unbacked_facts.snapshots[0] = starting_frontier.snapshot(&session, &[absent_entry]);
+        let unbacked = assert_reconstitution_rejects_unchanged(unbacked_facts);
+        assert_eq!(
+            unbacked,
+            AcceptedInputSchedulingReconstitutionFailure::SnapshotEntryMissing {
+                snapshot: starting_frontier.id(),
+                entry: absent_entry.reference(&session),
+            }
+        );
+
+        expect![[r#"
+            ┌────────────────────────────────────┬───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+            │ perturbed_stored_fact              │ failure                                                                                                                                                                                                                                                                   │
+            ├────────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+            │ snapshot owner cross-wired         │ SnapshotOwningSessionMismatch { snapshot: ContextFrontierId(00000000-0000-0000-0000-000000000028) }                                                                                                                                                                       │
+            │ snapshot identity repeated         │ DuplicateSnapshot { snapshot: ContextFrontierId(00000000-0000-0000-0000-000000000028) }                                                                                                                                                                                   │
+            │ snapshot membership entry repeated │ InvalidSnapshotMembership { snapshot: ContextFrontierId(00000000-0000-0000-0000-000000000028) }                                                                                                                                                                           │
+            │ snapshot entry unsupplied          │ SnapshotEntryMissing { snapshot: ContextFrontierId(00000000-0000-0000-0000-000000000028), entry: SemanticTranscriptEntryRef { source_session: SessionId(00000000-0000-0000-0000-000000000001), entry: SemanticTranscriptEntryId(00000000-0000-0000-0000-000000000063) } } │
+            └────────────────────────────────────┴───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+        "#]]
+        .assert_eq(&table([
+            ReconstitutionFailureRow {
+                perturbed_stored_fact: "snapshot owner cross-wired",
+                failure: format!("{cross_session:?}"),
+            },
+            ReconstitutionFailureRow {
+                perturbed_stored_fact: "snapshot identity repeated",
+                failure: format!("{duplicate:?}"),
+            },
+            ReconstitutionFailureRow {
+                perturbed_stored_fact: "snapshot membership entry repeated",
+                failure: format!("{membership:?}"),
+            },
+            ReconstitutionFailureRow {
+                perturbed_stored_fact: "snapshot entry unsupplied",
+                failure: format!("{unbacked:?}"),
+            },
+        ]));
+    }
+
+    /// S03 / S09 / INV-009 / INV-015: a stored start or failed terminal must
+    /// name a snapshot present in the complete supplied set; an absent
+    /// snapshot fails closed. Together with the frontier-exactness
+    /// rejections, this validated precondition backs eligibility's
+    /// failed-terminal-prefix expectation when preparing a successor.
+    #[test]
+    fn reconstitution_rejects_absent_starting_or_terminal_snapshot() {
+        let session = current_session();
+        let absent_frontier = frontier(99);
+
+        let active = accepted_origin(1);
+        let mut starting_facts = ActiveReconstitutionFacts::matching(&session, active);
+        starting_facts.replace_starting_frontier(absent_frontier.id());
+        let starting = assert_reconstitution_rejects_unchanged(starting_facts);
+        assert_eq!(
+            starting,
+            AcceptedInputSchedulingReconstitutionFailure::StartingSnapshotMissing {
+                turn: active.turn(),
+            }
+        );
+
+        let failed = accepted_origin(1);
+        let mut terminal_facts = FailedTerminalReconstitutionFacts::matching(&session, failed);
+        terminal_facts.replace_terminal_frontier(absent_frontier.id());
+        let terminal = assert_input_rejects_unchanged(terminal_facts.input());
+        assert_eq!(
+            terminal,
+            AcceptedInputSchedulingReconstitutionFailure::TerminalSnapshotMissing {
+                turn: failed.turn(),
+            }
+        );
+
+        expect![[r#"
+            ┌─────────────────────────────────┬────────────────────────────────────────────────────────────────────────────────┐
+            │ perturbed_stored_fact           │ failure                                                                        │
+            ├─────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────┤
+            │ stored starting snapshot absent │ StartingSnapshotMissing { turn: TurnId(00000000-0000-0000-ffff-fffffffffffe) } │
+            │ stored terminal snapshot absent │ TerminalSnapshotMissing { turn: TurnId(00000000-0000-0000-ffff-fffffffffffe) } │
+            └─────────────────────────────────┴────────────────────────────────────────────────────────────────────────────────┘
+        "#]]
+        .assert_eq(&table([
+            ReconstitutionFailureRow {
+                perturbed_stored_fact: "stored starting snapshot absent",
+                failure: format!("{starting:?}"),
+            },
+            ReconstitutionFailureRow {
+                perturbed_stored_fact: "stored terminal snapshot absent",
+                failure: format!("{terminal:?}"),
+            },
+        ]));
+    }
+
+    /// S03 / INV-009 / INV-015: a supplied snapshot that no stored lifecycle
+    /// fact references cannot ride along; the complete collection fails
+    /// closed. This is the read-side rejection recorded for orphan committed
+    /// snapshot headers.
+    #[test]
+    fn s03_inv015_reconstitution_rejects_unreferenced_snapshot() {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let stray_frontier = frontier(90);
+        let mut facts = ActiveReconstitutionFacts::matching(&session, active);
+        facts.snapshots.push(stray_frontier.snapshot(
+            &session,
+            &[ActiveReconstitutionFacts::matching_origin_entry()],
+        ));
+
+        let failure = assert_reconstitution_rejects_unchanged(facts);
+
+        assert_eq!(
+            failure,
+            AcceptedInputSchedulingReconstitutionFailure::UnreferencedSnapshot {
+                snapshot: stray_frontier.id(),
+            }
+        );
+    }
+
+    /// S03 / INV-009: durable total order admits only a failed-terminal
+    /// prefix, at most one active slot, and a queued suffix; every
+    /// out-of-order stored lifecycle fails closed on the first offending
+    /// turn.
+    #[test]
+    fn s03_inv009_reconstitution_rejects_out_of_order_lifecycle_states() {
+        let session = current_session();
+        let earlier = accepted_origin(1);
+        let later = accepted_origin(2);
+
+        let mut active_after_queued_facts = ActiveReconstitutionFacts::matching(&session, later);
+        active_after_queued_facts
+            .turns
+            .push(earlier.record(&session, AcceptedInputTurnSchedulingRecordState::Queued));
+        let active_after_queued =
+            assert_reconstitution_rejects_unchanged(active_after_queued_facts);
+        assert_eq!(
+            active_after_queued,
+            AcceptedInputSchedulingReconstitutionFailure::InvalidLifecycleOrder {
+                turn: later.turn(),
+            }
+        );
+
+        let mut terminal_after_queued_facts =
+            FailedTerminalReconstitutionFacts::matching(&session, later);
+        terminal_after_queued_facts
+            .turns
+            .push(earlier.record(&session, AcceptedInputTurnSchedulingRecordState::Queued));
+        let terminal_after_queued =
+            assert_input_rejects_unchanged(terminal_after_queued_facts.input());
+        assert_eq!(
+            terminal_after_queued,
+            AcceptedInputSchedulingReconstitutionFailure::InvalidLifecycleOrder {
+                turn: later.turn(),
+            }
+        );
+
+        // The ordering check rejects a second active slot before any
+        // duplicate current-attempt bookkeeping, which is why the stored
+        // attempt identity may repeat here: DuplicateCurrentAttempt is
+        // unreachable behind this rejection.
+        let mut second_active_facts = ActiveReconstitutionFacts::matching(&session, earlier);
+        second_active_facts.turns.push(later.record(
+            &session,
+            AcceptedInputTurnSchedulingRecordState::Active {
+                starting_lineage: AcceptedInputStartingLineage::FirstInSession,
+                starting_frontier: ActiveReconstitutionFacts::matching_starting_frontier().id(),
+                phase: ActiveTurnSchedulingReconstitutionInput::prepared(
+                    later.turn(),
+                    matching_active_attempt(),
+                ),
+            },
+        ));
+        let second_active = assert_reconstitution_rejects_unchanged(second_active_facts);
+        assert_eq!(
+            second_active,
+            AcceptedInputSchedulingReconstitutionFailure::InvalidLifecycleOrder {
+                turn: later.turn(),
+            }
+        );
+
+        // The ordering check rejects the record before consulting its
+        // frontier facts, so the claimed snapshots need not be supplied.
+        let mut terminal_after_active_facts =
+            ActiveReconstitutionFacts::matching(&session, earlier);
+        terminal_after_active_facts.turns.push(later.record(
+            &session,
+            AcceptedInputTurnSchedulingRecordState::TerminalFailed {
+                starting_lineage: AcceptedInputStartingLineage::After {
+                    immediate_predecessor: earlier.turn(),
+                },
+                starting_frontier: frontier(98).id(),
+                terminal_frontier: frontier(99).id(),
+            },
+        ));
+        let terminal_after_active =
+            assert_reconstitution_rejects_unchanged(terminal_after_active_facts);
+        assert_eq!(
+            terminal_after_active,
+            AcceptedInputSchedulingReconstitutionFailure::InvalidLifecycleOrder {
+                turn: later.turn(),
+            }
+        );
+
+        expect![[r#"
+            ┌───────────────────────────────────────┬──────────────────────────────────────────────────────────────────────────────┐
+            │ perturbed_stored_fact                 │ failure                                                                      │
+            ├───────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+            │ active slot after queued work         │ InvalidLifecycleOrder { turn: TurnId(00000000-0000-0000-ffff-fffffffffffd) } │
+            │ failed terminal after queued work     │ InvalidLifecycleOrder { turn: TurnId(00000000-0000-0000-ffff-fffffffffffd) } │
+            │ second active slot                    │ InvalidLifecycleOrder { turn: TurnId(00000000-0000-0000-ffff-fffffffffffd) } │
+            │ failed terminal after the active slot │ InvalidLifecycleOrder { turn: TurnId(00000000-0000-0000-ffff-fffffffffffd) } │
+            └───────────────────────────────────────┴──────────────────────────────────────────────────────────────────────────────┘
+        "#]]
+        .assert_eq(&table([
+            ReconstitutionFailureRow {
+                perturbed_stored_fact: "active slot after queued work",
+                failure: format!("{active_after_queued:?}"),
+            },
+            ReconstitutionFailureRow {
+                perturbed_stored_fact: "failed terminal after queued work",
+                failure: format!("{terminal_after_queued:?}"),
+            },
+            ReconstitutionFailureRow {
+                perturbed_stored_fact: "second active slot",
+                failure: format!("{second_active:?}"),
+            },
+            ReconstitutionFailureRow {
+                perturbed_stored_fact: "failed terminal after the active slot",
+                failure: format!("{terminal_after_active:?}"),
+            },
+        ]));
+    }
+
+    /// S03 / INV-009 / INV-015: the stored starting lineage must equal the
+    /// lineage derived from durable total order; a first-in-session active
+    /// turn cannot claim a predecessor.
+    #[test]
+    fn s03_inv009_reconstitution_rejects_stored_lineage_disagreeing_with_order() {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let claimed_lineage = AcceptedInputStartingLineage::After {
+            immediate_predecessor: turn_id(99),
+        };
+        let mut facts = ActiveReconstitutionFacts::matching(&session, active);
+        facts.replace_starting_lineage(claimed_lineage);
+
+        let failure = assert_reconstitution_rejects_unchanged(facts);
+
+        assert_eq!(
+            failure,
+            AcceptedInputSchedulingReconstitutionFailure::StartingLineageMismatch {
+                turn: active.turn(),
+                expected: AcceptedInputStartingLineage::FirstInSession,
+                actual: claimed_lineage,
+            }
+        );
+    }
+
+    /// S03 / INV-009 / INV-015: the stored starting snapshot must be exactly
+    /// the predecessor prefix plus the turn's origin entry; a snapshot
+    /// omitting the origin fails closed.
+    #[test]
+    fn s03_inv015_reconstitution_rejects_starting_snapshot_omitting_origin() {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let mut facts = ActiveReconstitutionFacts::matching(&session, active);
+        facts.snapshots =
+            vec![ActiveReconstitutionFacts::matching_starting_frontier().snapshot(&session, &[])];
+
+        let failure = assert_reconstitution_rejects_unchanged(facts);
+
+        assert_eq!(
+            failure,
+            AcceptedInputSchedulingReconstitutionFailure::StartingFrontierMismatch {
+                turn: active.turn(),
+            }
+        );
+    }
+
+    /// S03 / S09 / INV-009 / INV-015: each start owns a distinct snapshot; a
+    /// successor start naming its predecessor's already-referenced starting
+    /// snapshot fails closed. With the content-exactness rejection, this
+    /// backs eligibility's expectation that fresh snapshot identities
+    /// preserve the validated prefix.
+    #[test]
+    fn s09_reconstitution_rejects_starting_frontier_reused_from_predecessor() {
+        let session = current_session();
+        let predecessor = accepted_origin(1);
+        let active = accepted_origin(2);
+        let active_origin_entry = semantic_entry(32);
+        let active_delivery = DeliveryRequest::AfterCurrentTurn {
+            expected_active_turn: predecessor.turn(),
+            configuration: PerInputConfigurationChoices::new(
+                SessionConfigurationDefaultsVersion::first(),
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+        };
+        let mut facts = FailedTerminalReconstitutionFacts::matching(&session, predecessor);
+        facts.turns.push(active.record_with(
+            &session,
+            OriginRecordFacts {
+                order: active.ordinary_order(),
+                delivery: active_delivery,
+                state: AcceptedInputTurnSchedulingRecordState::Active {
+                    starting_lineage: AcceptedInputStartingLineage::After {
+                        immediate_predecessor: predecessor.turn(),
+                    },
+                    // The perturbation: the successor claims its
+                    // predecessor's starting snapshot instead of a distinct
+                    // successor prefix snapshot.
+                    starting_frontier:
+                        FailedTerminalReconstitutionFacts::matching_starting_frontier().id(),
+                    phase: ActiveTurnSchedulingReconstitutionInput::prepared(
+                        active.turn(),
+                        matching_active_attempt(),
+                    ),
+                },
+            },
+        ));
+        facts
+            .semantic_entries
+            .push(active.entry(&session, active_origin_entry));
+        facts.acceptance_tail = Some(SessionAcceptanceTailReconstitutionInput::new(
+            session.id(),
+            active.accepted_input(),
+            active.position(),
+            vec![SessionAcceptanceTailEntryReconstitutionInput::new(
+                session.id(),
+                AcceptedInputLifecycle::new(
+                    active.accepted_input(),
+                    AcceptedInputDisposition::OriginOf(active.turn()),
+                ),
+                active.position(),
+                active_delivery,
+            )],
+        ));
+
+        let failure = assert_input_rejects_unchanged(facts.input());
+
+        assert_eq!(
+            failure,
+            AcceptedInputSchedulingReconstitutionFailure::StartingFrontierMismatch {
+                turn: active.turn(),
+            }
+        );
+    }
+
+    /// S09 / INV-009: an all-terminal projection holds no queued work;
+    /// eligibility rejects instead of manufacturing a candidate.
+    #[test]
+    fn s09_eligibility_rejects_projection_without_queued_work() {
+        let session = current_session();
+        let failed = accepted_origin(1);
+        let activation = activation(1);
+        let projection = FailedTerminalReconstitutionFacts::matching(&session, failed)
+            .input()
+            .reconstitute()
+            .expect("the complete failed-terminal record is valid");
+
+        let failure = assert_eligibility_rejects_unchanged(projection, activation.identities());
+
+        assert_eq!(failure, AcceptedInputEligibilityFailure::NoQueuedTurn);
+    }
+
+    /// S01 / S09 / INV-009: a proposed origin-entry identity colliding with
+    /// a committed semantic entry fails closed before any candidate is
+    /// prepared.
+    #[test]
+    fn eligibility_rejects_committed_origin_entry_identity() {
+        let session = current_session();
+        let failed = accepted_origin(1);
+        let queued = accepted_origin(2);
+        let activation = activation(1);
+        let mut facts = FailedTerminalReconstitutionFacts::matching(&session, failed);
+        facts
+            .turns
+            .push(queued.record(&session, AcceptedInputTurnSchedulingRecordState::Queued));
+        let projection = facts
+            .input()
+            .reconstitute()
+            .expect("a failed-terminal prefix with one queued successor is valid");
+        let committed_origin_entry = FailedTerminalReconstitutionFacts::matching_origin_entry();
+
+        let failure = assert_eligibility_rejects_unchanged(
+            projection,
+            activation.identities_with_origin_entry(committed_origin_entry.id()),
+        );
+
+        assert_eq!(
+            failure,
+            AcceptedInputEligibilityFailure::OriginEntryIdentityAlreadyExists
+        );
+    }
+
+    /// S01 / S09 / INV-009 / INV-015: a proposed starting-snapshot identity
+    /// colliding with a committed session-scoped snapshot fails closed
+    /// before any candidate is prepared.
+    #[test]
+    fn eligibility_rejects_committed_starting_frontier_identity() {
+        let session = current_session();
+        let failed = accepted_origin(1);
+        let queued = accepted_origin(2);
+        let activation = activation(1);
+        let mut facts = FailedTerminalReconstitutionFacts::matching(&session, failed);
+        facts
+            .turns
+            .push(queued.record(&session, AcceptedInputTurnSchedulingRecordState::Queued));
+        let projection = facts
+            .input()
+            .reconstitute()
+            .expect("a failed-terminal prefix with one queued successor is valid");
+        let committed_frontier = FailedTerminalReconstitutionFacts::matching_terminal_frontier();
+
+        let failure = assert_eligibility_rejects_unchanged(
+            projection,
+            activation.identities_with_starting_frontier(committed_frontier.id()),
+        );
+
+        assert_eq!(
+            failure,
+            AcceptedInputEligibilityFailure::StartingFrontierIdentityAlreadyExists
         );
     }
 }
