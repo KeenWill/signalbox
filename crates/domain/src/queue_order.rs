@@ -786,7 +786,11 @@ mod tests {
         let mut facts = vec![first, second, interrupt, nested];
         let expected = vec![first.turn(), interrupt.turn(), nested.turn(), second.turn()];
 
-        assert_all_permutations_derive(&mut facts, 0, &expected);
+        assert_eq!(
+            assert_all_permutations_derive(&mut facts, &expected),
+            24,
+            "four facts have 24 permutations"
+        );
     }
 
     /// S03 / INV-009: the empty and singleton currently-known fact sets each
@@ -833,7 +837,11 @@ mod tests {
             ordinary(2, position[1]),
         ];
         let duplicate_turn = AcceptedInputQueueOrderError::DuplicateTurn { turn: turn_id(2) };
-        assert_all_permutations_reject(&mut overlapping_duplicates, 0, &duplicate_turn);
+        assert_eq!(
+            assert_all_permutations_reject(&mut overlapping_duplicates, &duplicate_turn),
+            6,
+            "three facts have six permutations"
+        );
         let mut duplicate_positions = vec![
             ordinary(3, position[0]),
             ordinary(1, position[0]),
@@ -845,7 +853,11 @@ mod tests {
             second_turn: turn_id(2),
         };
 
-        assert_all_permutations_reject(&mut duplicate_positions, 0, &expected);
+        assert_eq!(
+            assert_all_permutations_reject(&mut duplicate_positions, &expected),
+            6,
+            "three facts have six permutations"
+        );
     }
 
     /// S07 / INV-009: every interrupt priority fact names one different,
@@ -974,43 +986,65 @@ mod tests {
         );
     }
 
+    #[track_caller]
     fn assert_all_permutations_derive(
+        facts: &mut [AcceptedInputQueueWork],
+        expected: &[TurnId],
+    ) -> usize {
+        assert_permutations_derive_from(facts, 0, expected)
+    }
+
+    #[track_caller]
+    fn assert_permutations_derive_from(
         facts: &mut [AcceptedInputQueueWork],
         index: usize,
         expected: &[TurnId],
-    ) {
+    ) -> usize {
         if index == facts.len() {
             assert_eq!(
                 derive_accepted_input_total_order(facts.iter().copied()),
                 Ok(expected.to_vec())
             );
-            return;
+            return 1;
         }
 
+        let mut permutations_checked = 0;
         for swap_index in index..facts.len() {
             facts.swap(index, swap_index);
-            assert_all_permutations_derive(facts, index + 1, expected);
+            permutations_checked += assert_permutations_derive_from(facts, index + 1, expected);
             facts.swap(index, swap_index);
         }
+        permutations_checked
     }
 
+    #[track_caller]
     fn assert_all_permutations_reject(
+        facts: &mut [AcceptedInputQueueWork],
+        expected: &AcceptedInputQueueOrderError,
+    ) -> usize {
+        assert_permutations_reject_from(facts, 0, expected)
+    }
+
+    #[track_caller]
+    fn assert_permutations_reject_from(
         facts: &mut [AcceptedInputQueueWork],
         index: usize,
         expected: &AcceptedInputQueueOrderError,
-    ) {
+    ) -> usize {
         if index == facts.len() {
             assert_eq!(
                 derive_accepted_input_total_order(facts.iter().copied()),
                 Err(expected.clone())
             );
-            return;
+            return 1;
         }
 
+        let mut permutations_checked = 0;
         for swap_index in index..facts.len() {
             facts.swap(index, swap_index);
-            assert_all_permutations_reject(facts, index + 1, expected);
+            permutations_checked += assert_permutations_reject_from(facts, index + 1, expected);
             facts.swap(index, swap_index);
         }
+        permutations_checked
     }
 }
