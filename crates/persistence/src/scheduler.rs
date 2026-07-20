@@ -95,8 +95,13 @@ impl PostgresEligibilitySweep {
                    )
                  GROUP BY queued.session_id
              ), bounded AS (
-                SELECT COALESCE($2::uuid, max(session_id)) AS scan_through
-                  FROM candidates
+                SELECT COALESCE(
+                    $2::uuid,
+                    (SELECT session_id
+                       FROM candidates
+                      ORDER BY session_id DESC
+                      LIMIT 1)
+                ) AS scan_through
              )
              SELECT candidates.session_id, bounded.scan_through
                FROM candidates
