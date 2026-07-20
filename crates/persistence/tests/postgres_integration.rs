@@ -3130,6 +3130,59 @@ async fn blocked_backends_reached(pool: &PgPool, expected: i64) -> Result<bool, 
     Ok(false)
 }
 
+/// Focused coverage for the interleave tests' blocked-backend poll: an idle
+/// database reports zero blocked backends, one queued scheduler-row waiter is
+/// detected once its lock wait forms, a count that never forms exhausts the
+/// polling budget and reports false, and releasing the held row returns the
+/// count to zero.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn blocked_backends_poll_detects_lock_waits_and_reports_absence() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0x4e1, 0x8e1, direct(0xce1)))
+        .await?;
+    assert!(
+        blocked_backends_reached(&pool, 0).await?,
+        "an idle database has no lock-blocked backend"
+    );
+
+    let mut holder = pool.begin().await?;
+    sqlx::query("SELECT session_id FROM session_scheduler WHERE session_id = $1 FOR UPDATE")
+        .bind(Uuid::from_u128(0x8e1))
+        .execute(&mut *holder)
+        .await?;
+    let waiter = tokio::spawn({
+        let pool = pool.clone();
+        async move {
+            sqlx::query("SELECT session_id FROM session_scheduler WHERE session_id = $1 FOR UPDATE")
+                .bind(Uuid::from_u128(0x8e1))
+                .execute(&pool)
+                .await
+        }
+    });
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "one queued scheduler-row waiter must be detected"
+    );
+    assert!(
+        !blocked_backends_reached(&pool, 2).await?,
+        "a second waiter never forms, so the poll must exhaust its budget and report false"
+    );
+
+    holder.rollback().await?;
+    waiter.await??;
+    assert!(
+        blocked_backends_reached(&pool, 0).await?,
+        "the released waiter leaves no blocked backend"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-007 / INV-008 / INV-009 / INV-012: submit orders the session row
 /// (`FOR NO KEY UPDATE`) before the scheduler row (`FOR UPDATE`), while
 /// activation orders the scheduler row first and then requests `FOR KEY
@@ -4437,6 +4490,8 @@ async fn occupied_slot_after_and_safe_point_apply_replay_and_restart() -> Result
     CreateSessionRepository::new(pool.clone())
         .handle(prepared(0x431, 0x831, direct(0xc31)))
         .await?;
+    let active_origin_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x931));
+    let active_origin_turn = TurnId::from_uuid(Uuid::from_u128(0xa31));
     let repository = SubmitInputRepository::new(pool.clone());
     repository
         .handle(
@@ -4447,8 +4502,8 @@ async fn occupied_slot_after_and_safe_point_apply_replay_and_restart() -> Result
                 1,
                 ModelSelectionOverride::UseSessionDefault,
             ),
-            AcceptedInputId::from_uuid(Uuid::from_u128(0x931)),
-            Some(TurnId::from_uuid(Uuid::from_u128(0xa31))),
+            active_origin_input,
+            Some(active_origin_turn),
         )
         .await?;
     let activated = activate_earliest_queued_turn(
@@ -4461,11 +4516,8 @@ async fn occupied_slot_after_and_safe_point_apply_replay_and_restart() -> Result
         },
     )
     .await?;
-    assert_eq!(
-        activated.accepted_input().id(),
-        AcceptedInputId::from_uuid(Uuid::from_u128(0x931))
-    );
-    assert_eq!(activated.turn(), TurnId::from_uuid(Uuid::from_u128(0xa31)));
+    assert_eq!(activated.accepted_input().id(), active_origin_input);
+    assert_eq!(activated.turn(), active_origin_turn);
     let mut unrelated_frontier = pool.begin().await?;
     insert_frontier(
         &mut unrelated_frontier,
@@ -5196,6 +5248,8 @@ async fn occupied_slot_mixed_acceptances_serialize_positions_and_effects()
     CreateSessionRepository::new(pool.clone())
         .handle(prepared(0x451, 0x851, direct(0xc51)))
         .await?;
+    let active_origin_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x951));
+    let active_origin_turn = TurnId::from_uuid(Uuid::from_u128(0xa51));
     let repository = SubmitInputRepository::new(pool.clone());
     repository
         .handle(
@@ -5206,8 +5260,8 @@ async fn occupied_slot_mixed_acceptances_serialize_positions_and_effects()
                 1,
                 ModelSelectionOverride::UseSessionDefault,
             ),
-            AcceptedInputId::from_uuid(Uuid::from_u128(0x951)),
-            Some(TurnId::from_uuid(Uuid::from_u128(0xa51))),
+            active_origin_input,
+            Some(active_origin_turn),
         )
         .await?;
     let activated = activate_earliest_queued_turn(
@@ -5220,11 +5274,8 @@ async fn occupied_slot_mixed_acceptances_serialize_positions_and_effects()
         },
     )
     .await?;
-    assert_eq!(
-        activated.accepted_input().id(),
-        AcceptedInputId::from_uuid(Uuid::from_u128(0x951))
-    );
-    assert_eq!(activated.turn(), TurnId::from_uuid(Uuid::from_u128(0xa51)));
+    assert_eq!(activated.accepted_input().id(), active_origin_input);
+    assert_eq!(activated.turn(), active_origin_turn);
 
     let (positions, turn_origins, pending_steering) =
         run_mixed_occupied_acceptances(repository).await?;
@@ -5271,6 +5322,8 @@ async fn occupied_slot_schema_constraints_and_checked_decode_fail_closed()
     CreateSessionRepository::new(pool.clone())
         .handle(prepared(0x461, 0x861, direct(0xc61)))
         .await?;
+    let active_origin_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x961));
+    let active_origin_turn = TurnId::from_uuid(Uuid::from_u128(0xa61));
     let repository = SubmitInputRepository::new(pool.clone());
     repository
         .handle(
@@ -5281,8 +5334,8 @@ async fn occupied_slot_schema_constraints_and_checked_decode_fail_closed()
                 1,
                 ModelSelectionOverride::UseSessionDefault,
             ),
-            AcceptedInputId::from_uuid(Uuid::from_u128(0x961)),
-            Some(TurnId::from_uuid(Uuid::from_u128(0xa61))),
+            active_origin_input,
+            Some(active_origin_turn),
         )
         .await?;
     let activated = activate_earliest_queued_turn(
@@ -5295,11 +5348,8 @@ async fn occupied_slot_schema_constraints_and_checked_decode_fail_closed()
         },
     )
     .await?;
-    assert_eq!(
-        activated.accepted_input().id(),
-        AcceptedInputId::from_uuid(Uuid::from_u128(0x961))
-    );
-    assert_eq!(activated.turn(), TurnId::from_uuid(Uuid::from_u128(0xa61)));
+    assert_eq!(activated.accepted_input().id(), active_origin_input);
+    assert_eq!(activated.turn(), active_origin_turn);
     let safe_source = input_with_delivery(
         0x463,
         0x861,
@@ -5696,6 +5746,8 @@ async fn inv016_pending_steering_and_source_terminalization_serialize() -> Resul
     CreateSessionRepository::new(pool.clone())
         .handle(prepared(0x471, 0x871, direct(0xc71)))
         .await?;
+    let active_origin_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x971));
+    let active_origin_turn = TurnId::from_uuid(Uuid::from_u128(0xa71));
     let repository = SubmitInputRepository::new(pool.clone());
     repository
         .handle(
@@ -5706,8 +5758,8 @@ async fn inv016_pending_steering_and_source_terminalization_serialize() -> Resul
                 1,
                 ModelSelectionOverride::UseSessionDefault,
             ),
-            AcceptedInputId::from_uuid(Uuid::from_u128(0x971)),
-            Some(TurnId::from_uuid(Uuid::from_u128(0xa71))),
+            active_origin_input,
+            Some(active_origin_turn),
         )
         .await?;
     let activated = activate_earliest_queued_turn(
@@ -5720,11 +5772,8 @@ async fn inv016_pending_steering_and_source_terminalization_serialize() -> Resul
         },
     )
     .await?;
-    assert_eq!(
-        activated.accepted_input().id(),
-        AcceptedInputId::from_uuid(Uuid::from_u128(0x971))
-    );
-    assert_eq!(activated.turn(), TurnId::from_uuid(Uuid::from_u128(0xa71)));
+    assert_eq!(activated.accepted_input().id(), active_origin_input);
+    assert_eq!(activated.turn(), active_origin_turn);
 
     let mut terminalize_source = pool.begin().await?;
     sqlx::query(
@@ -5849,6 +5898,8 @@ async fn occupied_slot_rejections_and_matching_interrupt_rollback_are_exact()
     CreateSessionRepository::new(pool.clone())
         .handle(prepared(0x441, 0x841, direct(0xc41)))
         .await?;
+    let active_origin_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x941));
+    let active_origin_turn = TurnId::from_uuid(Uuid::from_u128(0xa41));
     let repository = SubmitInputRepository::new(pool.clone());
     repository
         .handle(
@@ -5859,8 +5910,8 @@ async fn occupied_slot_rejections_and_matching_interrupt_rollback_are_exact()
                 1,
                 ModelSelectionOverride::UseSessionDefault,
             ),
-            AcceptedInputId::from_uuid(Uuid::from_u128(0x941)),
-            Some(TurnId::from_uuid(Uuid::from_u128(0xa41))),
+            active_origin_input,
+            Some(active_origin_turn),
         )
         .await?;
     let activated = activate_earliest_queued_turn(
@@ -5873,11 +5924,8 @@ async fn occupied_slot_rejections_and_matching_interrupt_rollback_are_exact()
         },
     )
     .await?;
-    assert_eq!(
-        activated.accepted_input().id(),
-        AcceptedInputId::from_uuid(Uuid::from_u128(0x941))
-    );
-    assert_eq!(activated.turn(), TurnId::from_uuid(Uuid::from_u128(0xa41)));
+    assert_eq!(activated.accepted_input().id(), active_origin_input);
+    assert_eq!(activated.turn(), active_origin_turn);
 
     let active_start = start_input(
         0x443,
