@@ -988,19 +988,22 @@ mod tests {
 
     #[test]
     fn permutation_traversal_visits_each_arrangement_once() {
-        let mut sentinels = ["first", "second", "third"];
+        let first_sentinel = "first";
+        let second_sentinel = "second";
+        let third_sentinel = "third";
+        let mut sentinels = [first_sentinel, second_sentinel, third_sentinel];
         let observed = all_permutations(&mut sentinels);
 
         assert_eq!(observed.len(), 6);
         assert_eq!(
             observed.into_iter().collect::<BTreeSet<_>>(),
             BTreeSet::from([
-                vec!["first", "second", "third"],
-                vec!["first", "third", "second"],
-                vec!["second", "first", "third"],
-                vec!["second", "third", "first"],
-                vec!["third", "first", "second"],
-                vec!["third", "second", "first"],
+                vec![first_sentinel, second_sentinel, third_sentinel],
+                vec![first_sentinel, third_sentinel, second_sentinel],
+                vec![second_sentinel, first_sentinel, third_sentinel],
+                vec![second_sentinel, third_sentinel, first_sentinel],
+                vec![third_sentinel, first_sentinel, second_sentinel],
+                vec![third_sentinel, second_sentinel, first_sentinel],
             ])
         );
     }
