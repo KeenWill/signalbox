@@ -1856,11 +1856,12 @@ impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass> {
     ) -> Self;
     pub fn into_parts(self) -> (WorkSource, Pass);
 }
-impl<
+impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass>
+where
     WorkSource: EligibilityWorkSource,
     Pass: EligibilityPass + Clone + Send + 'static,
->
-    SchedulerLoop<WorkSource, Pass>
+    WorkSource::Error: ClassifyOperatorFailure,
+    Pass::Error: ClassifyOperatorFailure + Send + 'static,
 {
     pub async fn run_until<Shutdown>(
         &mut self,

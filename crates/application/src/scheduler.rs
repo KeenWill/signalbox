@@ -8,7 +8,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     error::Error,
     fmt,
-    future::Future,
+    future::{Future, ready},
     num::NonZeroUsize,
     time::Duration,
 };
@@ -16,7 +16,10 @@ use std::{
 use signalbox_domain::SessionId;
 use tokio::{
     pin, select,
-    sync::mpsc::{self, error::TrySendError},
+    sync::mpsc::{
+        self,
+        error::{TryRecvError, TrySendError},
+    },
     task::{Id, JoinError, JoinSet},
     time::{self, Instant, Interval, MissedTickBehavior},
 };
@@ -156,6 +159,7 @@ pub struct InProcessEligibilityWorkSource<Sweep> {
     sweep_interval: Interval,
     initial_sweep_due: bool,
     pending_sweep_hints: VecDeque<SessionId>,
+    nudge_preferred_over_sweep_hint: bool,
 }
 
 impl<Sweep> InProcessEligibilityWorkSource<Sweep> {
@@ -199,6 +203,7 @@ impl<Sweep> InProcessEligibilityWorkSource<Sweep> {
             sweep_interval: interval,
             initial_sweep_due: true,
             pending_sweep_hints: VecDeque::new(),
+            nudge_preferred_over_sweep_hint: true,
         };
         (nudge, source)
     }
@@ -212,13 +217,37 @@ where
 
     async fn next(&mut self) -> Result<SessionId, Self::Error> {
         loop {
-            if let Some(session) = self.pending_sweep_hints.pop_front() {
-                return Ok(session);
-            }
             if self.initial_sweep_due {
                 self.initial_sweep_due = false;
                 self.pending_sweep_hints
                     .extend(self.sweep.find_sessions().await?);
+                continue;
+            }
+            if !self.pending_sweep_hints.is_empty() {
+                select! {
+                    biased;
+
+                    _ = self.sweep_interval.tick() => {
+                        self.pending_sweep_hints
+                            .extend(self.sweep.find_sessions().await?);
+                    }
+                    () = ready(()) => {
+                        if self.nudge_preferred_over_sweep_hint {
+                            match self.nudges.try_recv() {
+                                Ok(session) => {
+                                    self.nudge_preferred_over_sweep_hint = false;
+                                    return Ok(session);
+                                }
+                                Err(TryRecvError::Empty | TryRecvError::Disconnected) => {}
+                            }
+                        }
+                        self.nudge_preferred_over_sweep_hint = true;
+                        return Ok(self
+                            .pending_sweep_hints
+                            .pop_front()
+                            .expect("the pending sweep backlog is nonempty"));
+                    }
+                }
                 continue;
             }
 
@@ -502,6 +531,29 @@ mod tests {
         assert_eq!(nudge.nudge(nudged), EligibilityNudgeOutcome::Enqueued);
         assert_eq!(source.next().await, Ok(nudged));
         assert_eq!(source.next().await, Ok(swept));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn inv007_nudge_interleaves_with_pending_sweep_backlog() {
+        let first_swept = session(37);
+        let second_swept = session(38);
+        let first_nudged = session(39);
+        let second_nudged = session(40);
+        let (nudge, mut source) =
+            InProcessEligibilityWorkSource::new(FakeSweep::returning([Ok(vec![
+                first_swept,
+                second_swept,
+            ])]));
+
+        assert_eq!(source.next().await, Ok(first_swept));
+        assert_eq!(nudge.nudge(first_nudged), EligibilityNudgeOutcome::Enqueued);
+        assert_eq!(
+            nudge.nudge(second_nudged),
+            EligibilityNudgeOutcome::Enqueued
+        );
+        assert_eq!(source.next().await, Ok(first_nudged));
+        assert_eq!(source.next().await, Ok(second_swept));
+        assert_eq!(source.next().await, Ok(second_nudged));
     }
 
     #[tokio::test(start_paused = true)]

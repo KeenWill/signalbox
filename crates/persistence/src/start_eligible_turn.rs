@@ -189,7 +189,8 @@ impl StartEligibleTurnRepository {
         match decision {
             Ok(TransactionDecision::Commit(outcome)) => {
                 transaction.commit().await.map_err(|error| {
-                    StartEligibleTurnRepositoryError::from_database(error, true)
+                    let commit_ambiguous = commit_failure_is_ambiguous(&error);
+                    StartEligibleTurnRepositoryError::from_database(error, commit_ambiguous)
                 })?;
                 Ok(outcome)
             }
@@ -519,11 +520,51 @@ fn identity_collision(error: &sqlx::Error) -> Option<StartEligibleTurnIdentityCo
     }
 }
 
+fn commit_failure_is_ambiguous(error: &sqlx::Error) -> bool {
+    !matches!(error, sqlx::Error::Database(_))
+}
+
 #[cfg(test)]
 mod tests {
-    use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
+    use std::{error::Error, fmt, io};
 
-    use super::StartEligibleTurnRepositoryError;
+    use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
+    use sqlx::error::{DatabaseError, ErrorKind};
+
+    use super::{StartEligibleTurnRepositoryError, commit_failure_is_ambiguous};
+
+    #[derive(Debug)]
+    struct DefiniteCommitRejection;
+
+    impl fmt::Display for DefiniteCommitRejection {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("deferred constraint rejected commit")
+        }
+    }
+
+    impl Error for DefiniteCommitRejection {}
+
+    impl DatabaseError for DefiniteCommitRejection {
+        fn message(&self) -> &str {
+            "deferred constraint rejected commit"
+        }
+
+        fn as_error(&self) -> &(dyn Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn as_error_mut(&mut self) -> &mut (dyn Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn into_error(self: Box<Self>) -> Box<dyn Error + Send + Sync + 'static> {
+            self
+        }
+
+        fn kind(&self) -> ErrorKind {
+            ErrorKind::Other
+        }
+    }
 
     #[test]
     fn precommit_database_failure_is_not_commit_ambiguous() {
@@ -538,13 +579,34 @@ mod tests {
     }
 
     #[test]
-    fn commit_database_failure_is_commit_ambiguous() {
-        let error = StartEligibleTurnRepositoryError::from_database(sqlx::Error::PoolClosed, true);
+    fn lost_commit_response_is_commit_ambiguous() {
+        let error = sqlx::Error::Io(io::Error::new(
+            io::ErrorKind::ConnectionReset,
+            "commit response was lost",
+        ));
+        let commit_ambiguous = commit_failure_is_ambiguous(&error);
+        assert!(commit_ambiguous);
+        let error = StartEligibleTurnRepositoryError::from_database(error, commit_ambiguous);
 
         assert_eq!(
             error.operator_failure_class(),
             OperatorFailureClass::Infrastructure {
                 commit_ambiguous: true
+            }
+        );
+    }
+
+    #[test]
+    fn server_rejected_commit_is_not_ambiguous() {
+        let error = sqlx::Error::Database(Box::new(DefiniteCommitRejection));
+        let commit_ambiguous = commit_failure_is_ambiguous(&error);
+
+        assert!(!commit_ambiguous);
+        let classified = StartEligibleTurnRepositoryError::from_database(error, commit_ambiguous);
+        assert_eq!(
+            classified.operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false
             }
         );
     }
