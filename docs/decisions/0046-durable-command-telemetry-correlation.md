@@ -72,22 +72,26 @@ retirement. This key is an observability secret, not a provider or integration
 credential; it does not enter ADR-0017's credential-reference mapping or
 credential access port.
 
-The deployment supplies the active key and its `key-id` to hubd as a read-only,
-volume-mounted secret file pair. They never arrive in command-line arguments,
+The deployment supplies the active key and its `key-id` to hubd together in one
+read-only, volume-mounted epoch document. One open and complete read must yield
+both values from the same atomic secret projection; independently mounted or
+independently read key and identifier files are prohibited. The serialization
+format is not fixed here, but it must be unambiguous and reject missing,
+duplicate, or trailing fields. Neither value arrives in command-line arguments,
 ordinary configuration files, process environment variables, Postgres, domain
 values, protocol messages, or logs. Only hubd's correlation-token component
-reads the files. Library code receives an opaque token-derivation capability,
-never key bytes. The upstream secret manager and Kubernetes manifest shape
-remain deployment mechanics, preserving
+reads the epoch document. Library code receives an opaque token-derivation
+capability, never key bytes. The upstream secret manager and Kubernetes manifest
+shape remain deployment mechanics, preserving
 [ADR-0017](0017-credential-lifecycle.md)'s ownership of its credential classes
 and [ADR-0032](0032-postgres-implementation-dependencies.md)'s open
 database-credential delivery question.
 
-Hubd reads and validates exactly one epoch during startup and keeps it for that
-process lifetime. Updating mounted files does not change a running process's
-epoch. Rotation activates only through a deliberate hub restart or rollout, so
-one process never emits two tokens for the same command because files changed
-between reads.
+Hubd opens, completely reads, and validates exactly one epoch document during
+startup, then keeps the resulting epoch for that process lifetime. Updating the
+mounted document does not change a running process's epoch. Rotation activates
+only through a deliberate hub restart or rollout, so one process never emits two
+tokens for the same command because a mount changed between reads.
 
 ### Stability is explicit across restart and rotation
 
@@ -126,12 +130,12 @@ aggregate identifiers alongside it. Token derivation does not relax
 [ADR-0017](0017-credential-lifecycle.md)'s credential redaction or ADR-0044's
 user-content and payload redaction.
 
-Missing, unreadable, malformed, non-32-byte, or inconsistent key files fail hubd
-startup before migrations, recovery, scheduling, protocol admission, or worker
-startup. An empty, longer-than-32-byte, or otherwise invalid `key-id` is
-likewise a configuration failure. There is no fallback to a raw identifier,
-unkeyed digest, process-random key, or fixed default key. If the
-already-validated in-memory derivation capability becomes unavailable at
+Missing, unreadable, malformed, incomplete, or non-32-byte epoch key material
+fails hubd startup before migrations, recovery, scheduling, protocol admission,
+or worker startup. An empty, longer-than-32-byte, or otherwise invalid `key-id`
+in that same document is likewise a configuration failure. There is no fallback
+to a raw identifier, unkeyed digest, process-random key, or fixed default key.
+If the already-validated in-memory derivation capability becomes unavailable at
 runtime, the event may retain its fixed taxonomy and safe hub-minted keys but
 omits command correlation; it must not substitute raw or reversible material.
 The failure is itself reported without the command ID or key.
@@ -187,8 +191,9 @@ nor adds one.
 - **Routine rotation:** a rollout activates a fresh epoch. New events use the
   new `key-id`; an authorized investigator with a known command ID may derive
   both epoch tokens offline while the running hub knows only the current key.
-- **Invalid deployment:** hubd cannot validate the mounted key pair and exits
-  before migrations or work admission. It never downgrades to raw logging.
+- **Invalid deployment:** hubd cannot completely read and validate one coherent
+  mounted epoch document and exits before migrations or work admission. It never
+  combines separate reads or downgrades to raw logging.
 
 ## Open questions
 
