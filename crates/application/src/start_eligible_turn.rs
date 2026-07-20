@@ -120,7 +120,7 @@ where
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::{HashSet, VecDeque},
+        collections::VecDeque,
         future::{Future, ready},
         pin::pin,
         task::{Context, Poll, Waker},
@@ -225,12 +225,15 @@ mod tests {
             configuration(&session),
             AcceptedInputTurnSchedulingRecordState::Queued,
         );
+        let no_semantic_entries = Vec::new();
+        let no_context_snapshots = Vec::new();
+        let no_active_acceptance_tail = None;
         let candidate = AcceptedInputSchedulingReconstitutionInput::new(
             session,
             vec![record],
-            vec![],
-            vec![],
-            None,
+            no_semantic_entries,
+            no_context_snapshots,
+            no_active_acceptance_tail,
         )
         .reconstitute()
         .expect("the test queued projection is complete")
@@ -278,6 +281,12 @@ mod tests {
                 frontier_calls: 0,
                 attempt_calls: 0,
             }
+        }
+
+        /// Supplies one canonical candidate of each kind for tests that care
+        /// only that one complete identity set is consumed.
+        fn supplying_one_candidate_set() -> Self {
+            Self::new([origin_entry_id(2)], [frontier_id(3)], [attempt_id(4)])
         }
     }
 
@@ -343,28 +352,55 @@ mod tests {
         }
     }
 
+    #[track_caller]
+    fn assert_uuid_v7_candidate(value: Uuid) {
+        assert_eq!(value.get_variant(), Variant::RFC4122);
+        assert_eq!(value.get_version(), Some(Version::SortRand));
+        assert!(!value.is_nil());
+        assert!(!value.is_max());
+    }
+
     /// INV-001 / INV-002: each production activation identity is a fresh
     /// UUIDv7 value of its distinct domain kind without using UUID order as
     /// authority.
     #[test]
     fn inv001_inv002_production_generator_supplies_fresh_uuid_v7_candidates() {
         let mut generator = UuidV7StartEligibleTurnIdGenerator;
-        let values = [
-            generator.next_origin_entry_id().into_uuid(),
-            generator.next_starting_frontier_id().into_uuid(),
-            generator.next_initial_attempt_id().into_uuid(),
-            generator.next_origin_entry_id().into_uuid(),
-            generator.next_starting_frontier_id().into_uuid(),
-            generator.next_initial_attempt_id().into_uuid(),
-        ];
+        let first_origin = generator.next_origin_entry_id();
+        let first_frontier = generator.next_starting_frontier_id();
+        let first_attempt = generator.next_initial_attempt_id();
+        let second_origin = generator.next_origin_entry_id();
+        let second_frontier = generator.next_starting_frontier_id();
+        let second_attempt = generator.next_initial_attempt_id();
 
-        assert_eq!(values.iter().copied().collect::<HashSet<_>>().len(), 6);
-        for value in values {
-            assert_eq!(value.get_variant(), Variant::RFC4122);
-            assert_eq!(value.get_version(), Some(Version::SortRand));
-            assert!(!value.is_nil());
-            assert!(!value.is_max());
-        }
+        let first_origin_uuid = first_origin.into_uuid();
+        let first_frontier_uuid = first_frontier.into_uuid();
+        let first_attempt_uuid = first_attempt.into_uuid();
+        let second_origin_uuid = second_origin.into_uuid();
+        let second_frontier_uuid = second_frontier.into_uuid();
+        let second_attempt_uuid = second_attempt.into_uuid();
+
+        assert_ne!(first_origin, second_origin);
+        assert_ne!(first_frontier, second_frontier);
+        assert_ne!(first_attempt, second_attempt);
+        assert_ne!(first_origin_uuid, first_frontier_uuid);
+        assert_ne!(first_origin_uuid, first_attempt_uuid);
+        assert_ne!(first_origin_uuid, second_frontier_uuid);
+        assert_ne!(first_origin_uuid, second_attempt_uuid);
+        assert_ne!(first_frontier_uuid, first_attempt_uuid);
+        assert_ne!(first_frontier_uuid, second_origin_uuid);
+        assert_ne!(first_frontier_uuid, second_attempt_uuid);
+        assert_ne!(first_attempt_uuid, second_origin_uuid);
+        assert_ne!(first_attempt_uuid, second_frontier_uuid);
+        assert_ne!(second_origin_uuid, second_frontier_uuid);
+        assert_ne!(second_origin_uuid, second_attempt_uuid);
+        assert_ne!(second_frontier_uuid, second_attempt_uuid);
+        assert_uuid_v7_candidate(first_origin_uuid);
+        assert_uuid_v7_candidate(first_frontier_uuid);
+        assert_uuid_v7_candidate(first_attempt_uuid);
+        assert_uuid_v7_candidate(second_origin_uuid);
+        assert_uuid_v7_candidate(second_frontier_uuid);
+        assert_uuid_v7_candidate(second_attempt_uuid);
     }
 
     /// S01 / INV-002 / INV-009: orchestration forwards one exact session and
@@ -405,7 +441,7 @@ mod tests {
         let activated = activated_turn();
         let expected = StartEligibleTurnOutcome::Activated(Box::new(activated));
         let mut service = StartEligibleTurnService::new(
-            FakeIds::new([origin_entry_id(8)], [frontier_id(9)], [attempt_id(10)]),
+            FakeIds::supplying_one_candidate_set(),
             FakeTransaction::returning([Ok(expected.clone())]),
         );
 
@@ -421,7 +457,7 @@ mod tests {
     #[test]
     fn s03_inv009_transaction_failure_is_returned_without_retry() {
         let mut service = StartEligibleTurnService::new(
-            FakeIds::new([origin_entry_id(2)], [frontier_id(3)], [attempt_id(4)]),
+            FakeIds::supplying_one_candidate_set(),
             FakeTransaction::returning([Err(FakeTransactionError::Unavailable)]),
         );
 
