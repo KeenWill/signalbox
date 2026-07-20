@@ -34,7 +34,9 @@ jobs:
       # FOR UPDATE, until the designated lock-acquisition helper lands.
       - name: Check session-lock protocol
         run: |
-          if grep -rn "FROM session\b" crates/persistence/src | grep "FOR UPDATE"; then
+          if rg --line-number --multiline --pcre2 \
+            '(?s)"(?:(?!").)*\bFROM\s+session\b(?:(?!\bFROM\b|").)*\bFOR\s+UPDATE\b' \
+            crates/persistence/src; then
             echo "session table locked FOR UPDATE outside the designated helper; see the 2026-07-20 decision-log entry" >&2
             exit 1
           fi
