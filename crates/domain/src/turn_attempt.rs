@@ -1652,18 +1652,51 @@ mod tests {
     /// cancellation authority.
     #[test]
     fn distinct_second_interrupt_is_rejected_unchanged() {
-        for current in [
-            TurnAttemptStopCauses::cancellation_only(proof(1)),
-            TurnAttemptStopCauses::fatal_mismatch(failure(1))
-                .add_interrupt(proof(1))
-                .unwrap(),
-        ] {
-            assert_eq!(current.clone().add_interrupt(proof(1)).unwrap(), current);
-            let error = current.clone().add_interrupt(proof(2)).unwrap_err();
-            assert_eq!(error.current(), &current);
-            assert_eq!(error.requested(), proof(2));
-            assert_eq!(error.into_parts(), (current, proof(2)));
-        }
+        let retained = proof(1);
+        let requested = proof(2);
+        let cancellation_only = TurnAttemptStopCauses::cancellation_only(retained);
+        assert_distinct_second_interrupt_rejected_unchanged(cancellation_only, retained, requested);
+
+        let fatal_mismatch = TurnAttemptStopCauses::fatal_mismatch(failure(1))
+            .add_interrupt(retained)
+            .expect("first interrupt may be retained with fatal mismatch causes");
+        assert_distinct_second_interrupt_rejected_unchanged(fatal_mismatch, retained, requested);
+    }
+
+    #[track_caller]
+    fn assert_distinct_second_interrupt_rejected_unchanged(
+        current: TurnAttemptStopCauses,
+        retained: AppliedInterruptProof,
+        requested: AppliedInterruptProof,
+    ) {
+        let replayed = current
+            .clone()
+            .add_interrupt(retained)
+            .expect("equal retained interrupt replay must remain idempotent");
+        assert_eq!(
+            replayed, current,
+            "equal retained interrupt replay must return unchanged causes"
+        );
+
+        let error = current
+            .clone()
+            .add_interrupt(requested)
+            .expect_err("distinct second interrupt must be rejected");
+        assert_eq!(
+            error.current(),
+            &current,
+            "rejection must retain the current causes unchanged"
+        );
+        assert_eq!(
+            error.requested(),
+            requested,
+            "rejection must retain the requested proof"
+        );
+        assert_eq!(
+            error.into_parts(),
+            (current, requested),
+            "consuming the rejection must return the passed fixtures unchanged"
+        );
     }
 
     /// ADR-0005 / INV-006: the three accepted fatal-reference kinds remain
