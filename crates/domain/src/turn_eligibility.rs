@@ -1884,6 +1884,9 @@ fn prepare_earliest_queued_activation(
 
 #[cfg(test)]
 mod tests {
+    use expect_test::expect;
+    use signalbox_expect_table::table;
+
     use super::*;
     use crate::{
         AcceptedInputDisposition, CurrentTurnAttemptState, ModelSelectionOverride,
@@ -1938,291 +1941,462 @@ mod tests {
         }
     }
 
-    fn record(
-        session: &Session,
-        turn_value: u128,
-        accepted_input_value: u128,
-        position: u64,
-        state: AcceptedInputTurnSchedulingRecordState,
-    ) -> AcceptedInputTurnSchedulingRecord {
-        record_with_order(
-            session,
-            turn_value,
-            accepted_input_value,
-            AcceptedInputQueueOrder::ordinary(
-                crate::SessionInputPosition::try_from_u64(position)
-                    .expect("test positions are positive"),
-            ),
-            default_origin_delivery(),
-            state,
-        )
+    /// One accepted turn origin whose sole identity/order knob is its
+    /// acceptance ordinal. Turn and accepted-input identities descend as the
+    /// ordinal ascends, so identity order cannot accidentally stand in for
+    /// durable acceptance order (`docs/testing-style.md`, rule 4).
+    #[derive(Clone, Copy)]
+    struct OriginFixture {
+        acceptance: u64,
     }
 
-    fn record_with_order(
-        session: &Session,
-        turn_value: u128,
-        accepted_input_value: u128,
-        order: AcceptedInputQueueOrder,
-        origin_delivery: DeliveryRequest,
-        state: AcceptedInputTurnSchedulingRecordState,
-    ) -> AcceptedInputTurnSchedulingRecord {
-        let turn = turn_id(turn_value);
-        let accepted_input = AcceptedInputLifecycle::new(
-            accepted_input_id(accepted_input_value),
-            AcceptedInputDisposition::OriginOf(turn),
-        );
-        AcceptedInputTurnSchedulingRecord::new(
-            session.id(),
-            turn,
-            session.id(),
-            accepted_input,
-            session.id(),
-            turn,
-            order,
-            origin_delivery,
-            configuration(session),
-            state,
-        )
+    fn accepted_origin(acceptance: u64) -> OriginFixture {
+        OriginFixture { acceptance }
     }
 
-    fn origin_entry(
-        session: &Session,
-        entry: u128,
-        accepted_input: u128,
-    ) -> SemanticTranscriptEntryReconstitutionInput {
-        SemanticTranscriptEntryReconstitutionInput::new(
-            semantic_transcript_entry_id(entry),
-            session.id(),
-            InitialSemanticTranscriptEntryPayload::OriginAcceptedInput {
-                accepted_input: accepted_input_id(accepted_input),
-            },
-        )
-    }
+    impl OriginFixture {
+        fn turn(self) -> TurnId {
+            turn_id(u128::from(u64::MAX - self.acceptance))
+        }
 
-    fn failed_entry(
-        session: &Session,
-        entry: u128,
-        turn: u128,
-    ) -> SemanticTranscriptEntryReconstitutionInput {
-        SemanticTranscriptEntryReconstitutionInput::new(
-            semantic_transcript_entry_id(entry),
-            session.id(),
-            InitialSemanticTranscriptEntryPayload::TurnFailed {
-                turn: turn_id(turn),
-            },
-        )
-    }
+        fn accepted_input(self) -> AcceptedInputId {
+            accepted_input_id(u128::from(u64::MAX / 2 - self.acceptance))
+        }
 
-    fn entry_ref(session: &Session, entry: u128) -> SemanticTranscriptEntryRef {
-        SemanticTranscriptEntryRef::from_source(session.id(), semantic_transcript_entry_id(entry))
-    }
+        fn position(self) -> SessionInputPosition {
+            SessionInputPosition::try_from_u64(self.acceptance)
+                .expect("test acceptance ordinals are positive")
+        }
 
-    fn snapshot(
-        session: &Session,
-        identity: u128,
-        entries: &[u128],
-    ) -> ResolvedContextFrontierReconstitutionInput {
-        ResolvedContextFrontierReconstitutionInput::new(
-            session.id(),
-            context_frontier_id(identity),
-            entries
-                .iter()
-                .map(|entry| entry_ref(session, *entry))
-                .collect(),
-        )
-    }
+        fn ordinary_order(self) -> AcceptedInputQueueOrder {
+            AcceptedInputQueueOrder::ordinary(self.position())
+        }
 
-    fn identities(
-        entry: u128,
-        snapshot: u128,
-        attempt: u128,
-    ) -> AcceptedInputTurnActivationIdentities {
-        AcceptedInputTurnActivationIdentities::new(
-            semantic_transcript_entry_id(entry),
-            context_frontier_id(snapshot),
-            turn_attempt_id(attempt),
-        )
-    }
+        fn record(
+            self,
+            session: &Session,
+            state: AcceptedInputTurnSchedulingRecordState,
+        ) -> AcceptedInputTurnSchedulingRecord {
+            self.record_with(
+                session,
+                OriginRecordFacts {
+                    order: self.ordinary_order(),
+                    delivery: default_origin_delivery(),
+                    state,
+                },
+            )
+        }
 
-    fn active_tail(
-        session: &Session,
-        turn_value: u128,
-        accepted_input_value: u128,
-        position: u64,
-    ) -> Option<SessionAcceptanceTailReconstitutionInput> {
-        let accepted_input = accepted_input_id(accepted_input_value);
-        let position =
-            SessionInputPosition::try_from_u64(position).expect("test positions are positive");
-        Some(SessionAcceptanceTailReconstitutionInput::new(
-            session.id(),
-            accepted_input,
-            position,
-            vec![SessionAcceptanceTailEntryReconstitutionInput::new(
+        fn record_with(
+            self,
+            session: &Session,
+            facts: OriginRecordFacts,
+        ) -> AcceptedInputTurnSchedulingRecord {
+            let turn = self.turn();
+            AcceptedInputTurnSchedulingRecord::new(
+                session.id(),
+                turn,
                 session.id(),
                 AcceptedInputLifecycle::new(
-                    accepted_input,
-                    AcceptedInputDisposition::OriginOf(turn_id(turn_value)),
+                    self.accepted_input(),
+                    AcceptedInputDisposition::OriginOf(turn),
                 ),
-                position,
-                DeliveryRequest::StartWhenNoActiveTurn {
-                    configuration: PerInputConfigurationChoices::new(
-                        SessionConfigurationDefaultsVersion::first(),
-                        ModelSelectionOverride::UseSessionDefault,
-                    ),
+                session.id(),
+                turn,
+                facts.order,
+                facts.delivery,
+                configuration(session),
+                facts.state,
+            )
+        }
+
+        fn entry(
+            self,
+            session: &Session,
+            entry: SemanticEntryFixture,
+        ) -> SemanticTranscriptEntryReconstitutionInput {
+            SemanticTranscriptEntryReconstitutionInput::new(
+                entry.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::OriginAcceptedInput {
+                    accepted_input: self.accepted_input(),
                 },
-            )],
-        ))
+            )
+        }
+
+        fn active_tail(self, session: &Session) -> SessionAcceptanceTailReconstitutionInput {
+            SessionAcceptanceTailReconstitutionInput::new(
+                session.id(),
+                self.accepted_input(),
+                self.position(),
+                vec![SessionAcceptanceTailEntryReconstitutionInput::new(
+                    session.id(),
+                    AcceptedInputLifecycle::new(
+                        self.accepted_input(),
+                        AcceptedInputDisposition::OriginOf(self.turn()),
+                    ),
+                    self.position(),
+                    default_origin_delivery(),
+                )],
+            )
+        }
+    }
+
+    struct OriginRecordFacts {
+        order: AcceptedInputQueueOrder,
+        delivery: DeliveryRequest,
+        state: AcceptedInputTurnSchedulingRecordState,
+    }
+
+    #[derive(Clone, Copy)]
+    struct SemanticEntryFixture {
+        seed: u128,
+    }
+
+    fn semantic_entry(seed: u128) -> SemanticEntryFixture {
+        SemanticEntryFixture { seed }
+    }
+
+    impl SemanticEntryFixture {
+        fn id(self) -> SemanticTranscriptEntryId {
+            semantic_transcript_entry_id(self.seed)
+        }
+
+        fn reference(self, session: &Session) -> SemanticTranscriptEntryRef {
+            SemanticTranscriptEntryRef::from_source(session.id(), self.id())
+        }
+
+        fn failed_turn(
+            self,
+            session: &Session,
+            turn: OriginFixture,
+        ) -> SemanticTranscriptEntryReconstitutionInput {
+            SemanticTranscriptEntryReconstitutionInput::new(
+                self.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::TurnFailed { turn: turn.turn() },
+            )
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct FrontierFixture {
+        seed: u128,
+    }
+
+    fn frontier(seed: u128) -> FrontierFixture {
+        FrontierFixture { seed }
+    }
+
+    impl FrontierFixture {
+        fn id(self) -> ContextFrontierId {
+            context_frontier_id(self.seed)
+        }
+
+        fn snapshot(
+            self,
+            session: &Session,
+            entries: &[SemanticEntryFixture],
+        ) -> ResolvedContextFrontierReconstitutionInput {
+            ResolvedContextFrontierReconstitutionInput::new(
+                session.id(),
+                self.id(),
+                entries
+                    .iter()
+                    .map(|entry| entry.reference(session))
+                    .collect(),
+            )
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct ActivationFixture {
+        seed: u128,
+    }
+
+    fn activation(seed: u128) -> ActivationFixture {
+        ActivationFixture { seed }
+    }
+
+    fn matching_active_attempt() -> TurnAttemptId {
+        turn_attempt_id(50)
+    }
+
+    impl ActivationFixture {
+        fn origin_entry(self) -> SemanticEntryFixture {
+            semantic_entry(100 + self.seed)
+        }
+
+        fn starting_frontier(self) -> FrontierFixture {
+            frontier(200 + self.seed)
+        }
+
+        fn initial_attempt(self) -> TurnAttemptId {
+            turn_attempt_id(300 + self.seed)
+        }
+
+        fn identities(self) -> AcceptedInputTurnActivationIdentities {
+            AcceptedInputTurnActivationIdentities::new(
+                self.origin_entry().id(),
+                self.starting_frontier().id(),
+                self.initial_attempt(),
+            )
+        }
+
+        fn identities_with_attempt(
+            self,
+            initial_attempt: TurnAttemptId,
+        ) -> AcceptedInputTurnActivationIdentities {
+            AcceptedInputTurnActivationIdentities::new(
+                self.origin_entry().id(),
+                self.starting_frontier().id(),
+                initial_attempt,
+            )
+        }
+    }
+
+    #[derive(Clone)]
+    struct ActiveReconstitutionFacts {
+        session: Session,
+        turns: Vec<AcceptedInputTurnSchedulingRecord>,
+        semantic_entries: Vec<SemanticTranscriptEntryReconstitutionInput>,
+        snapshots: Vec<ResolvedContextFrontierReconstitutionInput>,
+        acceptance_tail: Option<SessionAcceptanceTailReconstitutionInput>,
+    }
+
+    impl ActiveReconstitutionFacts {
+        fn matching(session: &Session, active: OriginFixture) -> Self {
+            let origin_entry = semantic_entry(30);
+            let starting_frontier = frontier(40);
+            Self {
+                session: session.clone(),
+                turns: vec![active.record(
+                    session,
+                    AcceptedInputTurnSchedulingRecordState::Active {
+                        starting_lineage: AcceptedInputStartingLineage::FirstInSession,
+                        starting_frontier: starting_frontier.id(),
+                        phase: ActiveTurnSchedulingReconstitutionInput::prepared(
+                            active.turn(),
+                            matching_active_attempt(),
+                        ),
+                    },
+                )],
+                semantic_entries: vec![active.entry(session, origin_entry)],
+                snapshots: vec![starting_frontier.snapshot(session, &[origin_entry])],
+                acceptance_tail: Some(active.active_tail(session)),
+            }
+        }
+
+        /// Replaces only the behavior-relevant stored active phase while
+        /// retaining every matching identity, lineage, frontier, origin,
+        /// configuration, and acceptance-tail fact.
+        fn replace_active_phase(&mut self, replacement: ActiveTurnSchedulingReconstitutionInput) {
+            let AcceptedInputTurnSchedulingRecordState::Active { phase, .. } =
+                &mut self.turns[0].state
+            else {
+                panic!("matching active facts retain an active scheduling record");
+            };
+            *phase = replacement;
+        }
+
+        fn input(self) -> AcceptedInputSchedulingReconstitutionInput {
+            AcceptedInputSchedulingReconstitutionInput::new(
+                self.session,
+                self.turns,
+                self.semantic_entries,
+                self.snapshots,
+                self.acceptance_tail,
+            )
+        }
     }
 
     fn active_input(
         session: &Session,
-        tail: Option<SessionAcceptanceTailReconstitutionInput>,
+        active: OriginFixture,
+        acceptance_tail: Option<SessionAcceptanceTailReconstitutionInput>,
     ) -> AcceptedInputSchedulingReconstitutionInput {
-        AcceptedInputSchedulingReconstitutionInput::new(
-            session.clone(),
-            vec![record(
-                session,
-                10,
-                20,
-                1,
-                AcceptedInputTurnSchedulingRecordState::Active {
-                    starting_lineage: AcceptedInputStartingLineage::FirstInSession,
-                    starting_frontier: context_frontier_id(40),
-                    phase: ActiveTurnSchedulingReconstitutionInput::prepared(
-                        turn_id(10),
-                        turn_attempt_id(50),
-                    ),
-                },
-            )],
-            vec![origin_entry(session, 30, 20)],
-            vec![snapshot(session, 40, &[30])],
-            tail,
-        )
+        ActiveReconstitutionFacts {
+            acceptance_tail,
+            ..ActiveReconstitutionFacts::matching(session, active)
+        }
+        .input()
+    }
+
+    #[derive(Clone, Copy)]
+    struct PostAnchorOrigins {
+        active: OriginFixture,
+        queued: OriginFixture,
     }
 
     fn active_input_with_post_anchor_origin(
         session: &Session,
+        origins: PostAnchorOrigins,
         delivery: DeliveryRequest,
     ) -> AcceptedInputSchedulingReconstitutionInput {
-        let mut tail =
-            active_tail(session, 10, 20, 1).expect("the helper constructs an active tail");
-        tail.observed_last_position =
-            SessionInputPosition::try_from_u64(2).expect("positive test position");
+        let mut facts = ActiveReconstitutionFacts::matching(session, origins.active);
+        let tail = facts
+            .acceptance_tail
+            .as_mut()
+            .expect("matching active facts include the acceptance tail");
+        tail.observed_last_position = origins.queued.position();
         tail.entries
             .push(SessionAcceptanceTailEntryReconstitutionInput::new(
                 session.id(),
                 AcceptedInputLifecycle::new(
-                    accepted_input_id(21),
-                    AcceptedInputDisposition::OriginOf(turn_id(11)),
+                    origins.queued.accepted_input(),
+                    AcceptedInputDisposition::OriginOf(origins.queued.turn()),
                 ),
-                SessionInputPosition::try_from_u64(2).expect("positive test position"),
+                origins.queued.position(),
                 delivery,
             ));
-        let mut input = active_input(session, Some(tail));
-        input.turns.push(record_with_order(
+        facts.turns.push(origins.queued.record_with(
             session,
-            11,
-            21,
-            AcceptedInputQueueOrder::ordinary(
-                SessionInputPosition::try_from_u64(2).expect("positive test position"),
-            ),
-            delivery,
-            AcceptedInputTurnSchedulingRecordState::Queued,
+            OriginRecordFacts {
+                order: origins.queued.ordinary_order(),
+                delivery,
+                state: AcceptedInputTurnSchedulingRecordState::Queued,
+            },
         ));
-        input
+        facts.input()
+    }
+
+    #[derive(Clone, Copy)]
+    struct FailedPredecessorPostAnchorOrigins {
+        predecessor: OriginFixture,
+        active: OriginFixture,
+        queued: OriginFixture,
     }
 
     fn active_input_after_failed_predecessor_with_post_anchor_origin(
         session: &Session,
+        origins: FailedPredecessorPostAnchorOrigins,
         delivery: DeliveryRequest,
     ) -> AcceptedInputSchedulingReconstitutionInput {
-        let predecessor = record(
+        let predecessor_origin_entry = semantic_entry(29);
+        let predecessor_failure_entry = semantic_entry(30);
+        let active_origin_entry = semantic_entry(31);
+        let predecessor_starting_frontier = frontier(39);
+        let predecessor_terminal_frontier = frontier(40);
+        let active_starting_frontier = frontier(41);
+        let predecessor_record = origins.predecessor.record(
             session,
-            9,
-            19,
-            1,
             AcceptedInputTurnSchedulingRecordState::TerminalFailed {
                 starting_lineage: AcceptedInputStartingLineage::FirstInSession,
-                starting_frontier: context_frontier_id(39),
-                terminal_frontier: context_frontier_id(40),
+                starting_frontier: predecessor_starting_frontier.id(),
+                terminal_frontier: predecessor_terminal_frontier.id(),
             },
         );
         let active_delivery = DeliveryRequest::AfterCurrentTurn {
-            expected_active_turn: turn_id(9),
+            expected_active_turn: origins.predecessor.turn(),
             configuration: PerInputConfigurationChoices::new(
                 SessionConfigurationDefaultsVersion::first(),
                 ModelSelectionOverride::UseSessionDefault,
             ),
         };
-        let active = record_with_order(
+        let active_record = origins.active.record_with(
             session,
-            10,
-            20,
-            AcceptedInputQueueOrder::ordinary(
-                SessionInputPosition::try_from_u64(2).expect("positive test position"),
-            ),
-            active_delivery,
-            AcceptedInputTurnSchedulingRecordState::Active {
-                starting_lineage: AcceptedInputStartingLineage::After {
-                    immediate_predecessor: turn_id(9),
+            OriginRecordFacts {
+                order: origins.active.ordinary_order(),
+                delivery: active_delivery,
+                state: AcceptedInputTurnSchedulingRecordState::Active {
+                    starting_lineage: AcceptedInputStartingLineage::After {
+                        immediate_predecessor: origins.predecessor.turn(),
+                    },
+                    starting_frontier: active_starting_frontier.id(),
+                    phase: ActiveTurnSchedulingReconstitutionInput::prepared(
+                        origins.active.turn(),
+                        turn_attempt_id(50),
+                    ),
                 },
-                starting_frontier: context_frontier_id(41),
-                phase: ActiveTurnSchedulingReconstitutionInput::prepared(
-                    turn_id(10),
-                    turn_attempt_id(50),
-                ),
             },
         );
-        let queued = record_with_order(
+        let queued_record = origins.queued.record_with(
             session,
-            11,
-            21,
-            AcceptedInputQueueOrder::ordinary(
-                SessionInputPosition::try_from_u64(3).expect("positive test position"),
-            ),
-            delivery,
-            AcceptedInputTurnSchedulingRecordState::Queued,
+            OriginRecordFacts {
+                order: origins.queued.ordinary_order(),
+                delivery,
+                state: AcceptedInputTurnSchedulingRecordState::Queued,
+            },
         );
         let tail = SessionAcceptanceTailReconstitutionInput::new(
             session.id(),
-            accepted_input_id(20),
-            SessionInputPosition::try_from_u64(3).expect("positive test position"),
+            origins.active.accepted_input(),
+            origins.queued.position(),
             vec![
                 SessionAcceptanceTailEntryReconstitutionInput::new(
                     session.id(),
                     AcceptedInputLifecycle::new(
-                        accepted_input_id(20),
-                        AcceptedInputDisposition::OriginOf(turn_id(10)),
+                        origins.active.accepted_input(),
+                        AcceptedInputDisposition::OriginOf(origins.active.turn()),
                     ),
-                    SessionInputPosition::try_from_u64(2).expect("positive test position"),
+                    origins.active.position(),
                     active_delivery,
                 ),
                 SessionAcceptanceTailEntryReconstitutionInput::new(
                     session.id(),
                     AcceptedInputLifecycle::new(
-                        accepted_input_id(21),
-                        AcceptedInputDisposition::OriginOf(turn_id(11)),
+                        origins.queued.accepted_input(),
+                        AcceptedInputDisposition::OriginOf(origins.queued.turn()),
                     ),
-                    SessionInputPosition::try_from_u64(3).expect("positive test position"),
+                    origins.queued.position(),
                     delivery,
                 ),
             ],
         );
         AcceptedInputSchedulingReconstitutionInput::new(
             session.clone(),
-            vec![predecessor, active, queued],
+            vec![predecessor_record, active_record, queued_record],
             vec![
-                origin_entry(session, 29, 19),
-                failed_entry(session, 30, 9),
-                origin_entry(session, 31, 20),
+                origins.predecessor.entry(session, predecessor_origin_entry),
+                predecessor_failure_entry.failed_turn(session, origins.predecessor),
+                origins.active.entry(session, active_origin_entry),
             ],
             vec![
-                snapshot(session, 39, &[29]),
-                snapshot(session, 40, &[29, 30]),
-                snapshot(session, 41, &[29, 30, 31]),
+                predecessor_starting_frontier.snapshot(session, &[predecessor_origin_entry]),
+                predecessor_terminal_frontier.snapshot(
+                    session,
+                    &[predecessor_origin_entry, predecessor_failure_entry],
+                ),
+                active_starting_frontier.snapshot(
+                    session,
+                    &[
+                        predecessor_origin_entry,
+                        predecessor_failure_entry,
+                        active_origin_entry,
+                    ],
+                ),
             ],
             Some(tail),
         )
+    }
+
+    #[derive(Debug)]
+    #[allow(
+        dead_code,
+        reason = "the table renderer reads every field through the Debug derive"
+    )]
+    struct ReconstitutionFailureRow {
+        perturbed_stored_fact: &'static str,
+        failure: String,
+    }
+
+    /// Asserts one named perturbation rejects while retaining the complete
+    /// unchanged input, then returns its precise failure.
+    #[track_caller]
+    fn assert_reconstitution_rejects_unchanged(
+        facts: ActiveReconstitutionFacts,
+    ) -> AcceptedInputSchedulingReconstitutionFailure {
+        let input = facts.input();
+        let error = input
+            .clone()
+            .reconstitute()
+            .expect_err("perturbed scheduling facts must fail closed");
+        let failure = error.failure().clone();
+        assert_eq!(error.input(), &input);
+        let (returned, returned_failure) = error.into_parts();
+        assert_eq!(returned, input);
+        assert_eq!(returned_failure, failure);
+        failure
     }
 
     /// S01 / INV-009 / INV-015: ancestry-free first eligibility fixes the
@@ -2231,35 +2405,34 @@ mod tests {
     #[test]
     fn s01_first_eligibility_prepares_one_atomic_activation_candidate() {
         let session = current_session();
+        let queued = accepted_origin(1);
+        let activation = activation(1);
+        let no_semantic_entries = Vec::new();
+        let no_snapshots = Vec::new();
+        let no_active_acceptance_tail = None;
         let input = AcceptedInputSchedulingReconstitutionInput::new(
             session.clone(),
-            vec![record(
-                &session,
-                10,
-                20,
-                1,
-                AcceptedInputTurnSchedulingRecordState::Queued,
-            )],
-            vec![],
-            vec![],
-            None,
+            vec![queued.record(&session, AcceptedInputTurnSchedulingRecordState::Queued)],
+            no_semantic_entries,
+            no_snapshots,
+            no_active_acceptance_tail,
         );
 
         let candidate = input
             .reconstitute()
             .expect("a complete queued projection is valid")
-            .prepare_earliest_queued_activation(identities(30, 40, 50))
+            .prepare_earliest_queued_activation(activation.identities())
             .expect("the sole queued turn is eligible with no active slot");
 
-        assert_eq!(candidate.turn().turn(), turn_id(10));
+        assert_eq!(candidate.turn().turn(), queued.turn());
         assert_eq!(
             candidate.turn().accepted_input().id(),
-            accepted_input_id(20)
+            queued.accepted_input()
         );
         assert_eq!(
             candidate.origin_entry().payload(),
             InitialSemanticTranscriptEntryPayload::OriginAcceptedInput {
-                accepted_input: accepted_input_id(20),
+                accepted_input: queued.accepted_input(),
             }
         );
         assert_eq!(
@@ -2271,12 +2444,12 @@ mod tests {
                 .starting_snapshot()
                 .ordered_entries()
                 .collect::<Vec<_>>(),
-            vec![entry_ref(&session, 30)]
+            vec![activation.origin_entry().reference(&session)]
         );
         assert!(matches!(
             candidate.turn().phase(),
             ActiveTurnPhase::Running { current_attempt }
-                if current_attempt.id() == turn_attempt_id(50)
+                if current_attempt.id() == activation.initial_attempt()
                     && current_attempt.state() == &crate::CurrentTurnAttemptState::Prepared
         ));
     }
@@ -2286,24 +2459,22 @@ mod tests {
     #[test]
     fn s03_checked_reconstitution_preserves_queued_state_and_exact_origin() {
         let session = current_session();
-        let queued = record(
-            &session,
-            10,
-            20,
-            1,
-            AcceptedInputTurnSchedulingRecordState::Queued,
-        );
+        let origin = accepted_origin(1);
+        let queued = origin.record(&session, AcceptedInputTurnSchedulingRecordState::Queued);
+        let no_semantic_entries = Vec::new();
+        let no_snapshots = Vec::new();
+        let no_active_acceptance_tail = None;
         let projection = AcceptedInputSchedulingReconstitutionInput::new(
             session.clone(),
             vec![queued.clone()],
-            vec![],
-            vec![],
-            None,
+            no_semantic_entries,
+            no_snapshots,
+            no_active_acceptance_tail,
         )
         .reconstitute()
         .expect("the complete queued record is valid");
         let reconstituted = projection
-            .turn(turn_id(10))
+            .turn(origin.turn())
             .expect("the stored queued turn remains present");
         assert_eq!(
             reconstituted.status(),
@@ -2327,19 +2498,22 @@ mod tests {
             queued.origin_configuration().clone(),
             queued.state().clone(),
         );
+        let no_semantic_entries = Vec::new();
+        let no_snapshots = Vec::new();
+        let no_active_acceptance_tail = None;
         let error = AcceptedInputSchedulingReconstitutionInput::new(
             session,
             vec![cross_wired],
-            vec![],
-            vec![],
-            None,
+            no_semantic_entries,
+            no_snapshots,
+            no_active_acceptance_tail,
         )
         .reconstitute()
         .expect_err("the exact OriginOf(turn) correlation is required");
         assert_eq!(
             error.failure(),
             &AcceptedInputSchedulingReconstitutionFailure::AcceptedInputOriginMismatch {
-                turn: turn_id(10),
+                turn: origin.turn(),
             }
         );
     }
@@ -2350,53 +2524,43 @@ mod tests {
     #[test]
     fn s03_active_reconstitution_requires_and_exposes_exact_prepared_attempt() {
         let session = current_session();
-        let active = record(
-            &session,
-            10,
-            20,
-            1,
-            AcceptedInputTurnSchedulingRecordState::Active {
-                starting_lineage: AcceptedInputStartingLineage::FirstInSession,
-                starting_frontier: context_frontier_id(40),
-                phase: ActiveTurnSchedulingReconstitutionInput::prepared(
-                    turn_id(10),
-                    turn_attempt_id(50),
-                ),
-            },
-        );
-        let projection = AcceptedInputSchedulingReconstitutionInput::new(
-            session.clone(),
-            vec![active],
-            vec![origin_entry(&session, 30, 20)],
-            vec![snapshot(&session, 40, &[30])],
-            active_tail(&session, 10, 20, 1),
-        )
-        .reconstitute()
-        .expect("the active turn has its exact prepared attempt");
+        let active_origin = accepted_origin(1);
+        let stored_attempt = matching_active_attempt();
+        let facts = ActiveReconstitutionFacts::matching(&session, active_origin);
+        let projection = facts
+            .input()
+            .reconstitute()
+            .expect("the active turn has its exact prepared attempt");
         let active = projection
             .active_turn()
             .expect("the reconstructed turn owns the active slot");
         assert!(matches!(
             active.active_phase(),
             Some(ActiveTurnPhase::Running { current_attempt })
-                if current_attempt.id() == turn_attempt_id(50)
+                if current_attempt.id() == stored_attempt
                     && current_attempt.state() == &CurrentTurnAttemptState::Prepared
         ));
 
+        let colliding_activation = activation(1);
         let collision = projection
             .clone()
-            .prepare_earliest_queued_activation(identities(31, 41, 50))
+            .prepare_earliest_queued_activation(
+                colliding_activation.identities_with_attempt(stored_attempt),
+            )
             .expect_err("a current attempt identity cannot be proposed again");
         assert_eq!(
             collision.failure(),
             AcceptedInputEligibilityFailure::InitialAttemptIdentityAlreadyExists
         );
+        let occupied_activation = activation(2);
         let occupied = projection
-            .prepare_earliest_queued_activation(identities(31, 41, 51))
+            .prepare_earliest_queued_activation(occupied_activation.identities())
             .expect_err("an active slot blocks every queued activation");
         assert_eq!(
             occupied.failure(),
-            AcceptedInputEligibilityFailure::ActiveTurnPresent { turn: turn_id(10) }
+            AcceptedInputEligibilityFailure::ActiveTurnPresent {
+                turn: active_origin.turn(),
+            }
         );
     }
 
@@ -2405,28 +2569,13 @@ mod tests {
     #[test]
     fn active_reconstitution_derives_prepared_attempt_after_validation() {
         let session = current_session();
-        let projection = AcceptedInputSchedulingReconstitutionInput::new(
-            session.clone(),
-            vec![record(
-                &session,
-                10,
-                20,
-                1,
-                AcceptedInputTurnSchedulingRecordState::Active {
-                    starting_lineage: AcceptedInputStartingLineage::FirstInSession,
-                    starting_frontier: context_frontier_id(40),
-                    phase: ActiveTurnSchedulingReconstitutionInput::prepared(
-                        turn_id(10),
-                        turn_attempt_id(50),
-                    ),
-                },
-            )],
-            vec![origin_entry(&session, 30, 20)],
-            vec![snapshot(&session, 40, &[30])],
-            active_tail(&session, 10, 20, 1),
-        )
-        .reconstitute()
-        .expect("the complete owner projection derives the prepared attempt");
+        let active = accepted_origin(1);
+        let expected_attempt = matching_active_attempt();
+        let facts = ActiveReconstitutionFacts::matching(&session, active);
+        let projection = facts
+            .input()
+            .reconstitute()
+            .expect("the complete owner projection derives the prepared attempt");
         let phase = projection
             .active_turn()
             .expect("the turn owns the active slot")
@@ -2434,7 +2583,7 @@ mod tests {
         assert!(matches!(
             phase,
             Some(ActiveTurnPhase::Running { current_attempt })
-                if current_attempt.id() == turn_attempt_id(50)
+                if current_attempt.id() == expected_attempt
                     && current_attempt.state() == &CurrentTurnAttemptState::Prepared
         ));
     }
@@ -2445,28 +2594,17 @@ mod tests {
     #[test]
     fn active_reconstitution_derives_running_attempt_after_validation() {
         let session = current_session();
-        let projection = AcceptedInputSchedulingReconstitutionInput::new(
-            session.clone(),
-            vec![record(
-                &session,
-                10,
-                20,
-                1,
-                AcceptedInputTurnSchedulingRecordState::Active {
-                    starting_lineage: AcceptedInputStartingLineage::FirstInSession,
-                    starting_frontier: context_frontier_id(40),
-                    phase: ActiveTurnSchedulingReconstitutionInput::running(
-                        turn_id(10),
-                        turn_attempt_id(51),
-                    ),
-                },
-            )],
-            vec![origin_entry(&session, 30, 20)],
-            vec![snapshot(&session, 40, &[30])],
-            active_tail(&session, 10, 20, 1),
-        )
-        .reconstitute()
-        .expect("the complete owner projection derives the running attempt");
+        let active = accepted_origin(1);
+        let expected_attempt = turn_attempt_id(51);
+        let mut facts = ActiveReconstitutionFacts::matching(&session, active);
+        facts.replace_active_phase(ActiveTurnSchedulingReconstitutionInput::running(
+            active.turn(),
+            expected_attempt,
+        ));
+        let projection = facts
+            .input()
+            .reconstitute()
+            .expect("the complete owner projection derives the running attempt");
         let phase = projection
             .active_turn()
             .expect("the turn owns the active slot")
@@ -2474,7 +2612,7 @@ mod tests {
         assert!(matches!(
             phase,
             Some(ActiveTurnPhase::Running { current_attempt })
-                if current_attempt.id() == turn_attempt_id(51)
+                if current_attempt.id() == expected_attempt
                     && current_attempt.state() == &CurrentTurnAttemptState::Running
         ));
     }
@@ -2486,44 +2624,75 @@ mod tests {
     #[test]
     fn active_reconstitution_requires_exact_session_acceptance_tail_identity() {
         let session = current_session();
-        let missing = active_input(&session, None)
-            .reconstitute()
-            .expect_err("an active turn requires its complete acceptance tail");
+        let active = accepted_origin(1);
+
+        let missing = assert_reconstitution_rejects_unchanged(ActiveReconstitutionFacts {
+            acceptance_tail: None,
+            ..ActiveReconstitutionFacts::matching(&session, active)
+        });
         assert_eq!(
-            missing.failure(),
-            &AcceptedInputSchedulingReconstitutionFailure::MissingActiveAcceptanceTail {
-                turn: turn_id(10),
+            missing,
+            AcceptedInputSchedulingReconstitutionFailure::MissingActiveAcceptanceTail {
+                turn: active.turn(),
             }
         );
 
-        let mut wrong_session =
-            active_tail(&session, 10, 20, 1).expect("the helper constructs an active tail");
-        wrong_session.session = session_id(2);
-        let wrong_session = active_input(&session, Some(wrong_session))
-            .reconstitute()
-            .expect_err("a tail from another session cannot authorize reconstitution");
+        let other_session = session_id(2);
+        let mut wrong_session_facts = ActiveReconstitutionFacts::matching(&session, active);
+        wrong_session_facts
+            .acceptance_tail
+            .as_mut()
+            .expect("matching facts include the acceptance tail")
+            .session = other_session;
+        let wrong_session = assert_reconstitution_rejects_unchanged(wrong_session_facts);
         assert_eq!(
-            wrong_session.failure(),
-            &AcceptedInputSchedulingReconstitutionFailure::AcceptanceTailSessionMismatch {
-                expected: session_id(1),
-                actual: session_id(2),
+            wrong_session,
+            AcceptedInputSchedulingReconstitutionFailure::AcceptanceTailSessionMismatch {
+                expected: session.id(),
+                actual: other_session,
             }
         );
 
-        let mut wrong_anchor =
-            active_tail(&session, 10, 20, 1).expect("the helper constructs an active tail");
-        wrong_anchor.anchor = accepted_input_id(99);
-        let wrong_anchor = active_input(&session, Some(wrong_anchor))
-            .reconstitute()
-            .expect_err("the interval must be anchored at the active origin");
+        let other_anchor = accepted_input_id(99);
+        let mut wrong_anchor_facts = ActiveReconstitutionFacts::matching(&session, active);
+        wrong_anchor_facts
+            .acceptance_tail
+            .as_mut()
+            .expect("matching facts include the acceptance tail")
+            .anchor = other_anchor;
+        let wrong_anchor = assert_reconstitution_rejects_unchanged(wrong_anchor_facts);
         assert_eq!(
-            wrong_anchor.failure(),
-            &AcceptedInputSchedulingReconstitutionFailure::AcceptanceTailAnchorMismatch {
-                turn: turn_id(10),
-                expected: accepted_input_id(20),
-                actual: accepted_input_id(99),
+            wrong_anchor,
+            AcceptedInputSchedulingReconstitutionFailure::AcceptanceTailAnchorMismatch {
+                turn: active.turn(),
+                expected: active.accepted_input(),
+                actual: other_anchor,
             }
         );
+
+        expect![[r#"
+            ┌──────────────────────────┬─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+            │ perturbed_stored_fact    │ failure                                                                                                                                                                                                             │
+            ├──────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+            │ active tail omitted      │ MissingActiveAcceptanceTail { turn: TurnId(00000000-0000-0000-ffff-fffffffffffe) }                                                                                                                                  │
+            │ tail session cross-wired │ AcceptanceTailSessionMismatch { expected: SessionId(00000000-0000-0000-0000-000000000001), actual: SessionId(00000000-0000-0000-0000-000000000002) }                                                                │
+            │ tail anchor cross-wired  │ AcceptanceTailAnchorMismatch { turn: TurnId(00000000-0000-0000-ffff-fffffffffffe), expected: AcceptedInputId(00000000-0000-0000-7fff-fffffffffffe), actual: AcceptedInputId(00000000-0000-0000-0000-000000000063) } │
+            └──────────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+        "#]]
+        .assert_eq(&table([
+            ReconstitutionFailureRow {
+                perturbed_stored_fact: "active tail omitted",
+                failure: format!("{missing:?}"),
+            },
+            ReconstitutionFailureRow {
+                perturbed_stored_fact: "tail session cross-wired",
+                failure: format!("{wrong_session:?}"),
+            },
+            ReconstitutionFailureRow {
+                perturbed_stored_fact: "tail anchor cross-wired",
+                failure: format!("{wrong_anchor:?}"),
+            },
+        ]));
     }
 
     /// S03 / S08 / INV-016 / ADR-0041: every position
@@ -2533,119 +2702,149 @@ mod tests {
     #[test]
     fn active_reconstitution_rejects_gapped_or_misbound_acceptance_tail() {
         let session = current_session();
-        let mut gapped =
-            active_tail(&session, 10, 20, 1).expect("the helper constructs an active tail");
-        gapped.observed_last_position =
-            SessionInputPosition::try_from_u64(3).expect("positive test position");
-        gapped
+        let active = accepted_origin(1);
+        let second = accepted_origin(2);
+        let third = accepted_origin(3);
+
+        let mut gapped_facts = ActiveReconstitutionFacts::matching(&session, active);
+        let gapped_tail = gapped_facts
+            .acceptance_tail
+            .as_mut()
+            .expect("matching facts include the acceptance tail");
+        gapped_tail.observed_last_position = third.position();
+        gapped_tail
             .entries
             .push(SessionAcceptanceTailEntryReconstitutionInput::new(
                 session.id(),
                 AcceptedInputLifecycle::new(
-                    accepted_input_id(21),
+                    second.accepted_input(),
                     AcceptedInputDisposition::PendingSteering {
-                        binding: crate::SteeringBinding::new(turn_id(10)),
+                        binding: crate::SteeringBinding::new(active.turn()),
                     },
                 ),
-                SessionInputPosition::try_from_u64(3).expect("positive test position"),
+                third.position(),
                 DeliveryRequest::NextSafePoint {
-                    expected_active_turn: turn_id(10),
+                    expected_active_turn: active.turn(),
                 },
             ));
-        let gapped = active_input(&session, Some(gapped))
-            .reconstitute()
-            .expect_err("the complete tail cannot omit an interior position");
+        let gapped = assert_reconstitution_rejects_unchanged(gapped_facts);
         assert_eq!(
-            gapped.failure(),
-            &AcceptedInputSchedulingReconstitutionFailure::AcceptanceTailPositionMismatch {
-                accepted_input: accepted_input_id(21),
-                expected: SessionInputPosition::try_from_u64(2).expect("positive test position"),
-                actual: SessionInputPosition::try_from_u64(3).expect("positive test position"),
+            gapped,
+            AcceptedInputSchedulingReconstitutionFailure::AcceptanceTailPositionMismatch {
+                accepted_input: second.accepted_input(),
+                expected: second.position(),
+                actual: third.position(),
             }
         );
 
-        let mut misbound =
-            active_tail(&session, 10, 20, 1).expect("the helper constructs an active tail");
-        misbound.observed_last_position =
-            SessionInputPosition::try_from_u64(2).expect("positive test position");
-        misbound
+        let other_turn = turn_id(99);
+        let mut misbound_facts = ActiveReconstitutionFacts::matching(&session, active);
+        let misbound_tail = misbound_facts
+            .acceptance_tail
+            .as_mut()
+            .expect("matching facts include the acceptance tail");
+        misbound_tail.observed_last_position = second.position();
+        misbound_tail
             .entries
             .push(SessionAcceptanceTailEntryReconstitutionInput::new(
                 session.id(),
                 AcceptedInputLifecycle::new(
-                    accepted_input_id(21),
+                    second.accepted_input(),
                     AcceptedInputDisposition::PendingSteering {
-                        binding: crate::SteeringBinding::new(turn_id(99)),
+                        binding: crate::SteeringBinding::new(other_turn),
                     },
                 ),
-                SessionInputPosition::try_from_u64(2).expect("positive test position"),
+                second.position(),
                 DeliveryRequest::NextSafePoint {
-                    expected_active_turn: turn_id(99),
+                    expected_active_turn: other_turn,
                 },
             ));
-        let misbound = active_input(&session, Some(misbound))
-            .reconstitute()
-            .expect_err("pending steering must bind to the exact active owner");
+        let misbound = assert_reconstitution_rejects_unchanged(misbound_facts);
         assert_eq!(
-            misbound.failure(),
-            &AcceptedInputSchedulingReconstitutionFailure::AcceptanceTailDispositionMismatch {
-                accepted_input: accepted_input_id(21),
+            misbound,
+            AcceptedInputSchedulingReconstitutionFailure::AcceptanceTailDispositionMismatch {
+                accepted_input: second.accepted_input(),
             }
         );
 
-        let mut cross_wired =
-            active_tail(&session, 10, 20, 1).expect("the helper constructs an active tail");
-        cross_wired.observed_last_position =
-            SessionInputPosition::try_from_u64(3).expect("positive test position");
-        cross_wired
+        let after_active_delivery = DeliveryRequest::AfterCurrentTurn {
+            expected_active_turn: active.turn(),
+            configuration: PerInputConfigurationChoices::new(
+                SessionConfigurationDefaultsVersion::first(),
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+        };
+        let mut cross_wired_facts = ActiveReconstitutionFacts::matching(&session, active);
+        let cross_wired_tail = cross_wired_facts
+            .acceptance_tail
+            .as_mut()
+            .expect("matching facts include the acceptance tail");
+        cross_wired_tail.observed_last_position = third.position();
+        cross_wired_tail
             .entries
             .push(SessionAcceptanceTailEntryReconstitutionInput::new(
                 session.id(),
                 AcceptedInputLifecycle::new(
-                    accepted_input_id(21),
-                    AcceptedInputDisposition::OriginOf(turn_id(11)),
+                    second.accepted_input(),
+                    AcceptedInputDisposition::OriginOf(second.turn()),
                 ),
-                SessionInputPosition::try_from_u64(2).expect("positive test position"),
-                DeliveryRequest::AfterCurrentTurn {
-                    expected_active_turn: turn_id(10),
-                    configuration: PerInputConfigurationChoices::new(
-                        SessionConfigurationDefaultsVersion::first(),
-                        ModelSelectionOverride::UseSessionDefault,
-                    ),
-                },
+                second.position(),
+                after_active_delivery,
             ));
-        cross_wired
+        cross_wired_tail
             .entries
             .push(SessionAcceptanceTailEntryReconstitutionInput::new(
                 session.id(),
                 AcceptedInputLifecycle::new(
-                    accepted_input_id(22),
+                    third.accepted_input(),
                     AcceptedInputDisposition::PendingSteering {
-                        binding: crate::SteeringBinding::new(turn_id(10)),
+                        binding: crate::SteeringBinding::new(active.turn()),
                     },
                 ),
-                SessionInputPosition::try_from_u64(3).expect("positive test position"),
+                third.position(),
                 DeliveryRequest::NextSafePoint {
-                    expected_active_turn: turn_id(10),
+                    expected_active_turn: active.turn(),
                 },
             ));
-        let mut cross_wired_input = active_input(&session, Some(cross_wired));
-        cross_wired_input.turns.push(record(
+        cross_wired_facts.turns.push(second.record_with(
             &session,
-            11,
-            21,
-            3,
-            AcceptedInputTurnSchedulingRecordState::Queued,
+            OriginRecordFacts {
+                order: AcceptedInputQueueOrder::ordinary(third.position()),
+                delivery: after_active_delivery,
+                state: AcceptedInputTurnSchedulingRecordState::Queued,
+            },
         ));
-        let cross_wired = cross_wired_input
-            .reconstitute()
-            .expect_err("an origin disposition must retain its exact immutable position");
+        let cross_wired = assert_reconstitution_rejects_unchanged(cross_wired_facts);
         assert_eq!(
-            cross_wired.failure(),
-            &AcceptedInputSchedulingReconstitutionFailure::AcceptanceTailDispositionMismatch {
-                accepted_input: accepted_input_id(21),
+            cross_wired,
+            AcceptedInputSchedulingReconstitutionFailure::AcceptanceTailDispositionMismatch {
+                accepted_input: second.accepted_input(),
             }
         );
+
+        expect![[r#"
+            ┌────────────────────────────────────┬──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+            │ perturbed_stored_fact              │ failure                                                                                                                                                                      │
+            ├────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+            │ interior position omitted          │ AcceptanceTailPositionMismatch { accepted_input: AcceptedInputId(00000000-0000-0000-7fff-fffffffffffd), expected: SessionInputPosition(2), actual: SessionInputPosition(3) } │
+            │ pending steering owner cross-wired │ AcceptanceTailDispositionMismatch { accepted_input: AcceptedInputId(00000000-0000-0000-7fff-fffffffffffd) }                                                                  │
+            │ origin position cross-wired        │ AcceptanceTailDispositionMismatch { accepted_input: AcceptedInputId(00000000-0000-0000-7fff-fffffffffffd) }                                                                  │
+            └────────────────────────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+        "#]]
+        .assert_eq(&table([
+            ReconstitutionFailureRow {
+                perturbed_stored_fact: "interior position omitted",
+                failure: format!("{gapped:?}"),
+            },
+            ReconstitutionFailureRow {
+                perturbed_stored_fact: "pending steering owner cross-wired",
+                failure: format!("{misbound:?}"),
+            },
+            ReconstitutionFailureRow {
+                perturbed_stored_fact: "origin position cross-wired",
+                failure: format!("{cross_wired:?}"),
+            },
+        ]));
     }
 
     /// S03 / S09 / INV-009 / INV-016 / ADR-0041: a scheduler-gap start remains
@@ -2653,8 +2852,14 @@ mod tests {
     #[test]
     fn active_reconstitution_preserves_post_anchor_scheduler_gap_start() {
         let session = current_session();
+        let origins = FailedPredecessorPostAnchorOrigins {
+            predecessor: accepted_origin(1),
+            active: accepted_origin(2),
+            queued: accepted_origin(3),
+        };
         active_input_after_failed_predecessor_with_post_anchor_origin(
             &session,
+            origins,
             DeliveryRequest::StartWhenNoActiveTurn {
                 configuration: PerInputConfigurationChoices::new(
                     SessionConfigurationDefaultsVersion::first(),
@@ -2671,10 +2876,16 @@ mod tests {
     #[test]
     fn active_reconstitution_preserves_post_anchor_historical_target() {
         let session = current_session();
+        let origins = FailedPredecessorPostAnchorOrigins {
+            predecessor: accepted_origin(1),
+            active: accepted_origin(2),
+            queued: accepted_origin(3),
+        };
         active_input_after_failed_predecessor_with_post_anchor_origin(
             &session,
+            origins,
             DeliveryRequest::AfterCurrentTurn {
-                expected_active_turn: turn_id(9),
+                expected_active_turn: origins.predecessor.turn(),
                 configuration: PerInputConfigurationChoices::new(
                     SessionConfigurationDefaultsVersion::first(),
                     ModelSelectionOverride::UseSessionDefault,
@@ -2690,10 +2901,16 @@ mod tests {
     #[test]
     fn active_reconstitution_rejects_missing_historical_delivery_target() {
         let session = current_session();
+        let origins = PostAnchorOrigins {
+            active: accepted_origin(1),
+            queued: accepted_origin(2),
+        };
+        let missing_target_turn = turn_id(99);
         let missing_target = active_input_with_post_anchor_origin(
             &session,
+            origins,
             DeliveryRequest::AfterCurrentTurn {
-                expected_active_turn: turn_id(99),
+                expected_active_turn: missing_target_turn,
                 configuration: PerInputConfigurationChoices::new(
                     SessionConfigurationDefaultsVersion::first(),
                     ModelSelectionOverride::UseSessionDefault,
@@ -2705,7 +2922,7 @@ mod tests {
         assert_eq!(
             missing_target.failure(),
             &AcceptedInputSchedulingReconstitutionFailure::OriginDeliveryMismatch {
-                turn: turn_id(11),
+                turn: origins.queued.turn(),
             }
         );
     }
@@ -2715,10 +2932,15 @@ mod tests {
     #[test]
     fn active_reconstitution_rejects_delivery_priority_mismatch() {
         let session = current_session();
+        let origins = PostAnchorOrigins {
+            active: accepted_origin(1),
+            queued: accepted_origin(2),
+        };
         let wrong_priority = active_input_with_post_anchor_origin(
             &session,
+            origins,
             DeliveryRequest::Interrupt {
-                expected_active_turn: turn_id(10),
+                expected_active_turn: origins.active.turn(),
                 configuration: PerInputConfigurationChoices::new(
                     SessionConfigurationDefaultsVersion::first(),
                     ModelSelectionOverride::UseSessionDefault,
@@ -2730,7 +2952,7 @@ mod tests {
         assert_eq!(
             wrong_priority.failure(),
             &AcceptedInputSchedulingReconstitutionFailure::OriginDeliveryMismatch {
-                turn: turn_id(11),
+                turn: origins.queued.turn(),
             }
         );
     }
@@ -2740,21 +2962,25 @@ mod tests {
     #[test]
     fn s01_inv009_inv016_queued_reconstitution_rejects_delivery_order_mismatch() {
         let session = current_session();
+        let queued = accepted_origin(1);
+        let no_semantic_entries = Vec::new();
+        let no_snapshots = Vec::new();
+        let no_active_acceptance_tail = None;
         let input = AcceptedInputSchedulingReconstitutionInput::new(
             session.clone(),
-            vec![record_with_order(
+            vec![queued.record_with(
                 &session,
-                10,
-                20,
-                AcceptedInputQueueOrder::ordinary(SessionInputPosition::first()),
-                DeliveryRequest::NextSafePoint {
-                    expected_active_turn: turn_id(99),
+                OriginRecordFacts {
+                    order: queued.ordinary_order(),
+                    delivery: DeliveryRequest::NextSafePoint {
+                        expected_active_turn: turn_id(99),
+                    },
+                    state: AcceptedInputTurnSchedulingRecordState::Queued,
                 },
-                AcceptedInputTurnSchedulingRecordState::Queued,
             )],
-            vec![],
-            vec![],
-            None,
+            no_semantic_entries,
+            no_snapshots,
+            no_active_acceptance_tail,
         );
 
         let error = input
@@ -2763,7 +2989,7 @@ mod tests {
         assert_eq!(
             error.failure(),
             &AcceptedInputSchedulingReconstitutionFailure::OriginDeliveryMismatch {
-                turn: turn_id(10),
+                turn: queued.turn(),
             }
         );
     }
@@ -2773,26 +2999,30 @@ mod tests {
     #[test]
     fn s01_inv008_inv009_inv016_queued_origin_rejects_defaults_version_mismatch() {
         let session = current_session();
+        let queued = accepted_origin(1);
         let mismatched_version = SessionConfigurationDefaultsVersion::try_from_u64(2)
             .expect("the mismatched test version is positive");
+        let no_semantic_entries = Vec::new();
+        let no_snapshots = Vec::new();
+        let no_active_acceptance_tail = None;
         let input = AcceptedInputSchedulingReconstitutionInput::new(
             session.clone(),
-            vec![record_with_order(
+            vec![queued.record_with(
                 &session,
-                10,
-                20,
-                AcceptedInputQueueOrder::ordinary(SessionInputPosition::first()),
-                DeliveryRequest::StartWhenNoActiveTurn {
-                    configuration: PerInputConfigurationChoices::new(
-                        mismatched_version,
-                        ModelSelectionOverride::UseSessionDefault,
-                    ),
+                OriginRecordFacts {
+                    order: queued.ordinary_order(),
+                    delivery: DeliveryRequest::StartWhenNoActiveTurn {
+                        configuration: PerInputConfigurationChoices::new(
+                            mismatched_version,
+                            ModelSelectionOverride::UseSessionDefault,
+                        ),
+                    },
+                    state: AcceptedInputTurnSchedulingRecordState::Queued,
                 },
-                AcceptedInputTurnSchedulingRecordState::Queued,
             )],
-            vec![],
-            vec![],
-            None,
+            no_semantic_entries,
+            no_snapshots,
+            no_active_acceptance_tail,
         );
 
         let error = input
@@ -2801,7 +3031,7 @@ mod tests {
         assert_eq!(
             error.failure(),
             &AcceptedInputSchedulingReconstitutionFailure::OriginDeliveryMismatch {
-                turn: turn_id(10),
+                turn: queued.turn(),
             }
         );
     }
@@ -2811,25 +3041,29 @@ mod tests {
     #[test]
     fn s01_inv008_inv009_inv016_queued_origin_rejects_explicit_request_mismatch() {
         let session = current_session();
+        let queued = accepted_origin(1);
         let requested = ModelSelectionRequest::Direct(direct(99));
+        let no_semantic_entries = Vec::new();
+        let no_snapshots = Vec::new();
+        let no_active_acceptance_tail = None;
         let input = AcceptedInputSchedulingReconstitutionInput::new(
             session.clone(),
-            vec![record_with_order(
+            vec![queued.record_with(
                 &session,
-                10,
-                20,
-                AcceptedInputQueueOrder::ordinary(SessionInputPosition::first()),
-                DeliveryRequest::StartWhenNoActiveTurn {
-                    configuration: PerInputConfigurationChoices::new(
-                        SessionConfigurationDefaultsVersion::first(),
-                        ModelSelectionOverride::ReplaceWith(requested),
-                    ),
+                OriginRecordFacts {
+                    order: queued.ordinary_order(),
+                    delivery: DeliveryRequest::StartWhenNoActiveTurn {
+                        configuration: PerInputConfigurationChoices::new(
+                            SessionConfigurationDefaultsVersion::first(),
+                            ModelSelectionOverride::ReplaceWith(requested),
+                        ),
+                    },
+                    state: AcceptedInputTurnSchedulingRecordState::Queued,
                 },
-                AcceptedInputTurnSchedulingRecordState::Queued,
             )],
-            vec![],
-            vec![],
-            None,
+            no_semantic_entries,
+            no_snapshots,
+            no_active_acceptance_tail,
         );
 
         let error = input
@@ -2838,7 +3072,7 @@ mod tests {
         assert_eq!(
             error.failure(),
             &AcceptedInputSchedulingReconstitutionFailure::OriginDeliveryMismatch {
-                turn: turn_id(10),
+                turn: queued.turn(),
             }
         );
     }
@@ -2849,12 +3083,12 @@ mod tests {
     #[test]
     fn active_reconstitution_rejects_origin_delivery_configuration_mismatch() {
         let session = current_session();
-        let tail = active_tail(&session, 10, 20, 1);
-        let mut input = active_input(&session, tail);
-        input
-            .active_acceptance_tail
+        let active = accepted_origin(1);
+        let mut facts = ActiveReconstitutionFacts::matching(&session, active);
+        facts
+            .acceptance_tail
             .as_mut()
-            .expect("the helper supplies an active tail")
+            .expect("matching facts include the active tail")
             .entries[0]
             .delivery = DeliveryRequest::StartWhenNoActiveTurn {
             configuration: PerInputConfigurationChoices::new(
@@ -2864,13 +3098,11 @@ mod tests {
             ),
         };
 
-        let error = input
-            .reconstitute()
-            .expect_err("tail delivery must equal the origin record's accepted delivery");
+        let error = assert_reconstitution_rejects_unchanged(facts);
         assert_eq!(
-            error.failure(),
-            &AcceptedInputSchedulingReconstitutionFailure::AcceptanceTailDispositionMismatch {
-                accepted_input: accepted_input_id(20),
+            error,
+            AcceptedInputSchedulingReconstitutionFailure::AcceptanceTailDispositionMismatch {
+                accepted_input: active.accepted_input(),
             }
         );
     }
@@ -2880,24 +3112,28 @@ mod tests {
     #[test]
     fn active_reconstitution_rejects_interrupt_evidence_for_evidence_free_phase() {
         let session = current_session();
+        let origins = PostAnchorOrigins {
+            active: accepted_origin(1),
+            queued: accepted_origin(2),
+        };
         let delivery = DeliveryRequest::Interrupt {
-            expected_active_turn: turn_id(10),
+            expected_active_turn: origins.active.turn(),
             configuration: PerInputConfigurationChoices::new(
                 SessionConfigurationDefaultsVersion::first(),
                 ModelSelectionOverride::UseSessionDefault,
             ),
         };
-        let mut input = active_input_with_post_anchor_origin(&session, delivery);
-        input.turns[1] = record_with_order(
+        let mut input = active_input_with_post_anchor_origin(&session, origins, delivery);
+        input.turns[1] = origins.queued.record_with(
             &session,
-            11,
-            21,
-            AcceptedInputQueueOrder::interrupt_immediately_after(
-                SessionInputPosition::try_from_u64(2).expect("positive test position"),
-                turn_id(10),
-            ),
-            delivery,
-            AcceptedInputTurnSchedulingRecordState::Queued,
+            OriginRecordFacts {
+                order: AcceptedInputQueueOrder::interrupt_immediately_after(
+                    origins.queued.position(),
+                    origins.active.turn(),
+                ),
+                delivery,
+                state: AcceptedInputTurnSchedulingRecordState::Queued,
+            },
         );
 
         let error = input
@@ -2906,8 +3142,8 @@ mod tests {
         assert_eq!(
             error.failure(),
             &AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
-                turn: turn_id(10),
-                accepted_input: accepted_input_id(21),
+                turn: origins.active.turn(),
+                accepted_input: origins.queued.accepted_input(),
             }
         );
     }
@@ -2917,44 +3153,40 @@ mod tests {
     #[test]
     fn active_reconstitution_rejects_pending_identity_that_is_also_an_origin() {
         let session = current_session();
-        let mut tail =
-            active_tail(&session, 10, 20, 1).expect("the helper constructs an active tail");
-        tail.observed_last_position =
-            SessionInputPosition::try_from_u64(2).expect("positive test position");
+        let active = accepted_origin(1);
+        let pending = accepted_origin(2);
+        let mut tail = active.active_tail(&session);
+        tail.observed_last_position = pending.position();
         tail.entries
             .push(SessionAcceptanceTailEntryReconstitutionInput::new(
                 session.id(),
                 AcceptedInputLifecycle::new(
-                    accepted_input_id(21),
+                    pending.accepted_input(),
                     AcceptedInputDisposition::PendingSteering {
-                        binding: crate::SteeringBinding::new(turn_id(10)),
+                        binding: crate::SteeringBinding::new(active.turn()),
                     },
                 ),
-                SessionInputPosition::try_from_u64(2).expect("positive test position"),
+                pending.position(),
                 DeliveryRequest::NextSafePoint {
-                    expected_active_turn: turn_id(10),
+                    expected_active_turn: active.turn(),
                 },
             ));
 
-        active_input(&session, Some(tail.clone()))
+        active_input(&session, active, Some(tail.clone()))
             .reconstitute()
             .expect("pending steering remains distinct from every origin");
 
-        let mut aliased = active_input(&session, Some(tail));
-        aliased.turns.push(record(
-            &session,
-            11,
-            21,
-            2,
-            AcceptedInputTurnSchedulingRecordState::Queued,
-        ));
+        let mut aliased = active_input(&session, active, Some(tail));
+        aliased
+            .turns
+            .push(pending.record(&session, AcceptedInputTurnSchedulingRecordState::Queued));
         let aliased = aliased
             .reconstitute()
             .expect_err("pending steering cannot reuse a turn-origin identity");
         assert_eq!(
             aliased.failure(),
             &AcceptedInputSchedulingReconstitutionFailure::AcceptanceTailDispositionMismatch {
-                accepted_input: accepted_input_id(21),
+                accepted_input: pending.accepted_input(),
             }
         );
     }
@@ -2964,32 +3196,29 @@ mod tests {
     #[test]
     fn active_reconstitution_rejects_pending_position_owned_by_an_origin() {
         let session = current_session();
-        let mut tail =
-            active_tail(&session, 10, 20, 1).expect("the helper constructs an active tail");
-        tail.observed_last_position =
-            SessionInputPosition::try_from_u64(2).expect("positive test position");
+        let active = accepted_origin(1);
+        let origin = accepted_origin(2);
+        let pending = accepted_origin(3);
+        let mut tail = active.active_tail(&session);
+        tail.observed_last_position = origin.position();
         tail.entries
             .push(SessionAcceptanceTailEntryReconstitutionInput::new(
                 session.id(),
                 AcceptedInputLifecycle::new(
-                    accepted_input_id(22),
+                    pending.accepted_input(),
                     AcceptedInputDisposition::PendingSteering {
-                        binding: crate::SteeringBinding::new(turn_id(10)),
+                        binding: crate::SteeringBinding::new(active.turn()),
                     },
                 ),
-                SessionInputPosition::try_from_u64(2).expect("positive test position"),
+                origin.position(),
                 DeliveryRequest::NextSafePoint {
-                    expected_active_turn: turn_id(10),
+                    expected_active_turn: active.turn(),
                 },
             ));
-        let mut input = active_input(&session, Some(tail));
-        input.turns.push(record(
-            &session,
-            11,
-            21,
-            2,
-            AcceptedInputTurnSchedulingRecordState::Queued,
-        ));
+        let mut input = active_input(&session, active, Some(tail));
+        input
+            .turns
+            .push(origin.record(&session, AcceptedInputTurnSchedulingRecordState::Queued));
 
         let error = input
             .reconstitute()
@@ -2997,7 +3226,7 @@ mod tests {
         assert_eq!(
             error.failure(),
             &AcceptedInputSchedulingReconstitutionFailure::AcceptanceTailDispositionMismatch {
-                accepted_input: accepted_input_id(22),
+                accepted_input: pending.accepted_input(),
             }
         );
     }
@@ -3007,18 +3236,18 @@ mod tests {
     #[test]
     fn active_reconstitution_rejects_incomplete_claimed_acceptance_tail() {
         let session = current_session();
-        let mut incomplete =
-            active_tail(&session, 10, 20, 1).expect("the helper constructs an active tail");
-        incomplete.observed_last_position =
-            SessionInputPosition::try_from_u64(2).expect("positive test position");
-        let incomplete = active_input(&session, Some(incomplete))
+        let active = accepted_origin(1);
+        let next = accepted_origin(2);
+        let mut incomplete = active.active_tail(&session);
+        incomplete.observed_last_position = next.position();
+        let incomplete = active_input(&session, active, Some(incomplete))
             .reconstitute()
             .expect_err("the represented interval must reach the claimed session tail");
         assert_eq!(
             incomplete.failure(),
             &AcceptedInputSchedulingReconstitutionFailure::AcceptanceTailLastPositionMismatch {
-                expected: SessionInputPosition::try_from_u64(2).expect("positive test position"),
-                actual: Some(SessionInputPosition::first()),
+                expected: next.position(),
+                actual: Some(active.position()),
             }
         );
     }
@@ -3028,8 +3257,13 @@ mod tests {
     #[test]
     fn s03_inv009_inv016_active_tail_reaches_every_known_origin() {
         let session = current_session();
+        let origins = PostAnchorOrigins {
+            active: accepted_origin(1),
+            queued: accepted_origin(2),
+        };
         let mut input = active_input_with_post_anchor_origin(
             &session,
+            origins,
             DeliveryRequest::StartWhenNoActiveTurn {
                 configuration: PerInputConfigurationChoices::new(
                     SessionConfigurationDefaultsVersion::first(),
@@ -3041,7 +3275,7 @@ mod tests {
             .active_acceptance_tail
             .as_mut()
             .expect("the helper supplies an active tail");
-        tail.observed_last_position = SessionInputPosition::first();
+        tail.observed_last_position = origins.active.position();
         tail.entries.truncate(1);
 
         let error = input
@@ -3050,11 +3284,8 @@ mod tests {
         assert_eq!(
             error.failure(),
             &AcceptedInputSchedulingReconstitutionFailure::AcceptanceTailLastPositionMismatch {
-                expected: SessionInputPosition::first(),
-                actual: Some(
-                    SessionInputPosition::try_from_u64(2)
-                        .expect("the known origin position is positive"),
-                ),
+                expected: origins.active.position(),
+                actual: Some(origins.queued.position()),
             }
         );
     }
@@ -3064,33 +3295,19 @@ mod tests {
     #[test]
     fn s03_active_reconstitution_rejects_cross_wired_attempt_owner() {
         let session = current_session();
-        let error = AcceptedInputSchedulingReconstitutionInput::new(
-            session.clone(),
-            vec![record(
-                &session,
-                10,
-                20,
-                1,
-                AcceptedInputTurnSchedulingRecordState::Active {
-                    starting_lineage: AcceptedInputStartingLineage::FirstInSession,
-                    starting_frontier: context_frontier_id(40),
-                    phase: ActiveTurnSchedulingReconstitutionInput::prepared(
-                        turn_id(99),
-                        turn_attempt_id(50),
-                    ),
-                },
-            )],
-            vec![origin_entry(&session, 30, 20)],
-            vec![snapshot(&session, 40, &[30])],
-            active_tail(&session, 10, 20, 1),
-        )
-        .reconstitute()
-        .expect_err("attempt ownership must match the exact active turn");
+        let active = accepted_origin(1);
+        let other_turn = turn_id(99);
+        let attempt = matching_active_attempt();
+        let mut facts = ActiveReconstitutionFacts::matching(&session, active);
+        facts.replace_active_phase(ActiveTurnSchedulingReconstitutionInput::prepared(
+            other_turn, attempt,
+        ));
+        let error = assert_reconstitution_rejects_unchanged(facts);
         assert_eq!(
-            error.failure(),
-            &AcceptedInputSchedulingReconstitutionFailure::CurrentAttemptOwnershipMismatch {
-                turn: turn_id(10),
-                attempt: turn_attempt_id(50),
+            error,
+            AcceptedInputSchedulingReconstitutionFailure::CurrentAttemptOwnershipMismatch {
+                turn: active.turn(),
+                attempt,
             }
         );
     }
@@ -3100,36 +3317,31 @@ mod tests {
     #[test]
     fn s03_eligibility_consumes_the_earliest_queued_origin() {
         let session = current_session();
-        let later = record(
-            &session,
-            11,
-            21,
-            2,
-            AcceptedInputTurnSchedulingRecordState::Queued,
-        );
-        let earlier = record(
-            &session,
-            10,
-            20,
-            1,
-            AcceptedInputTurnSchedulingRecordState::Queued,
-        );
+        let later = accepted_origin(2);
+        let earlier = accepted_origin(1);
+        let later_record = later.record(&session, AcceptedInputTurnSchedulingRecordState::Queued);
+        let earlier_record =
+            earlier.record(&session, AcceptedInputTurnSchedulingRecordState::Queued);
+        let no_semantic_entries = Vec::new();
+        let no_snapshots = Vec::new();
+        let activation = activation(1);
+        let no_active_acceptance_tail = None;
         let candidate = AcceptedInputSchedulingReconstitutionInput::new(
             session,
-            vec![later, earlier],
-            vec![],
-            vec![],
-            None,
+            vec![later_record, earlier_record],
+            no_semantic_entries,
+            no_snapshots,
+            no_active_acceptance_tail,
         )
         .reconstitute()
         .expect("the complete queue order is valid")
-        .prepare_earliest_queued_activation(identities(30, 40, 50))
+        .prepare_earliest_queued_activation(activation.identities())
         .expect("no active slot blocks the earliest queued work");
 
-        assert_eq!(candidate.turn().turn(), turn_id(10));
+        assert_eq!(candidate.turn().turn(), earlier.turn());
         assert_eq!(
             candidate.turn().accepted_input().id(),
-            accepted_input_id(20)
+            earlier.accepted_input()
         );
     }
 
@@ -3140,49 +3352,52 @@ mod tests {
     #[test]
     fn s09_successor_uses_exact_failed_predecessor_terminal_frontier() {
         let session = current_session();
-        let predecessor = record(
+        let predecessor = accepted_origin(1);
+        let successor = accepted_origin(2);
+        let predecessor_origin_entry = semantic_entry(30);
+        let predecessor_failure_entry = semantic_entry(31);
+        let predecessor_starting_frontier = frontier(40);
+        let predecessor_terminal_frontier = frontier(41);
+        let activation = activation(1);
+        let no_active_acceptance_tail = None;
+        let predecessor_record = predecessor.record(
             &session,
-            10,
-            20,
-            1,
             AcceptedInputTurnSchedulingRecordState::TerminalFailed {
                 starting_lineage: AcceptedInputStartingLineage::FirstInSession,
-                starting_frontier: context_frontier_id(40),
-                terminal_frontier: context_frontier_id(41),
+                starting_frontier: predecessor_starting_frontier.id(),
+                terminal_frontier: predecessor_terminal_frontier.id(),
             },
         );
-        let successor = record(
-            &session,
-            11,
-            21,
-            2,
-            AcceptedInputTurnSchedulingRecordState::Queued,
-        );
+        let successor_record =
+            successor.record(&session, AcceptedInputTurnSchedulingRecordState::Queued);
         let projection = AcceptedInputSchedulingReconstitutionInput::new(
             session.clone(),
-            vec![successor, predecessor],
+            vec![successor_record, predecessor_record],
             vec![
-                failed_entry(&session, 31, 10),
-                origin_entry(&session, 30, 20),
+                predecessor_failure_entry.failed_turn(&session, predecessor),
+                predecessor.entry(&session, predecessor_origin_entry),
             ],
             vec![
-                snapshot(&session, 41, &[30, 31]),
-                snapshot(&session, 40, &[30]),
+                predecessor_terminal_frontier.snapshot(
+                    &session,
+                    &[predecessor_origin_entry, predecessor_failure_entry],
+                ),
+                predecessor_starting_frontier.snapshot(&session, &[predecessor_origin_entry]),
             ],
-            None,
+            no_active_acceptance_tail,
         )
         .reconstitute()
         .expect("the failed predecessor has a complete validated frontier");
 
         let candidate = projection
-            .prepare_earliest_queued_activation(identities(32, 42, 50))
+            .prepare_earliest_queued_activation(activation.identities())
             .expect("the successor is the earliest queued turn with no active slot");
 
-        assert_eq!(candidate.turn().turn(), turn_id(11));
+        assert_eq!(candidate.turn().turn(), successor.turn());
         assert_eq!(
             candidate.start().lineage(),
             AcceptedInputStartingLineage::After {
-                immediate_predecessor: turn_id(10),
+                immediate_predecessor: predecessor.turn(),
             }
         );
         assert_eq!(
@@ -3191,9 +3406,9 @@ mod tests {
                 .ordered_entries()
                 .collect::<Vec<_>>(),
             vec![
-                entry_ref(&session, 30),
-                entry_ref(&session, 31),
-                entry_ref(&session, 32),
+                predecessor_origin_entry.reference(&session),
+                predecessor_failure_entry.reference(&session),
+                activation.origin_entry().reference(&session),
             ]
         );
     }
@@ -3203,25 +3418,31 @@ mod tests {
     #[test]
     fn s09_incomplete_failed_terminal_frontier_fails_closed() {
         let session = current_session();
+        let predecessor = accepted_origin(1);
+        let origin_entry = semantic_entry(30);
+        let failure_entry = semantic_entry(31);
+        let starting_frontier = frontier(40);
+        let terminal_frontier = frontier(41);
+        let no_active_acceptance_tail = None;
         let error = AcceptedInputSchedulingReconstitutionInput::new(
             session.clone(),
-            vec![record(
+            vec![predecessor.record(
                 &session,
-                10,
-                20,
-                1,
                 AcceptedInputTurnSchedulingRecordState::TerminalFailed {
                     starting_lineage: AcceptedInputStartingLineage::FirstInSession,
-                    starting_frontier: context_frontier_id(40),
-                    terminal_frontier: context_frontier_id(41),
+                    starting_frontier: starting_frontier.id(),
+                    terminal_frontier: terminal_frontier.id(),
                 },
             )],
             vec![
-                origin_entry(&session, 30, 20),
-                failed_entry(&session, 31, 10),
+                predecessor.entry(&session, origin_entry),
+                failure_entry.failed_turn(&session, predecessor),
             ],
-            vec![snapshot(&session, 40, &[30]), snapshot(&session, 41, &[30])],
-            None,
+            vec![
+                starting_frontier.snapshot(&session, &[origin_entry]),
+                terminal_frontier.snapshot(&session, &[origin_entry]),
+            ],
+            no_active_acceptance_tail,
         )
         .reconstitute()
         .expect_err("the failed marker must follow the exact starting prefix");
@@ -3229,7 +3450,7 @@ mod tests {
         assert_eq!(
             error.failure(),
             &AcceptedInputSchedulingReconstitutionFailure::TerminalFrontierMismatch {
-                turn: turn_id(10),
+                turn: predecessor.turn(),
             }
         );
     }
