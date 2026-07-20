@@ -298,44 +298,66 @@ where
         let mut task_sessions = HashMap::new();
         let mut in_flight_sessions = HashSet::new();
 
-        loop {
-            select! {
-                biased;
+        'scheduler: loop {
+            if task_sessions.len() == self.max_in_flight_passes {
+                select! {
+                    biased;
 
-                () = &mut shutdown => break,
-                completed = passes.join_next_with_id(),
-                    if !task_sessions.is_empty() =>
-                {
-                    if let Some(completed) = completed {
-                        observe_pass_completion(
-                            completed,
-                            &mut task_sessions,
-                            &mut in_flight_sessions,
-                        );
-                    }
-                }
-                hint = self.work_source.next(),
-                    if task_sessions.len() < self.max_in_flight_passes =>
-                {
-                    match hint {
-                        Ok(session) => {
-                            if in_flight_sessions.insert(session) {
-                                let mut pass = self.pass.clone();
-                                let task = passes.spawn(async move {
-                                    pass.run(session).await
-                                });
-                                task_sessions.insert(task.id(), session);
-                            }
-                        }
-                        Err(error) => {
-                            let failure_class = error.operator_failure_class();
-                            tracing::error!(
-                                ?failure_class,
-                                "eligibility reconciliation sweep failed; \
-                                 the next interval will retry"
+                    () = &mut shutdown => break,
+                    completed = passes.join_next_with_id() => {
+                        if let Some(completed) = completed {
+                            observe_pass_completion(
+                                completed,
+                                &mut task_sessions,
+                                &mut in_flight_sessions,
                             );
                         }
                     }
+                }
+                continue;
+            }
+
+            // A completion may win this select many times, but it must not
+            // cancel an in-progress reconciliation read after that read has
+            // consumed its interval tick. Keep the same next-hint future
+            // pinned until it yields a hint, a visible failure, or shutdown.
+            let next_hint = self.work_source.next();
+            pin!(next_hint);
+            let hint = loop {
+                select! {
+                    biased;
+
+                    () = &mut shutdown => break 'scheduler,
+                    completed = passes.join_next_with_id(),
+                        if !task_sessions.is_empty() =>
+                    {
+                        if let Some(completed) = completed {
+                            observe_pass_completion(
+                                completed,
+                                &mut task_sessions,
+                                &mut in_flight_sessions,
+                            );
+                        }
+                    }
+                    hint = &mut next_hint => break hint,
+                }
+            };
+
+            match hint {
+                Ok(session) => {
+                    if in_flight_sessions.insert(session) {
+                        let mut pass = self.pass.clone();
+                        let task = passes.spawn(async move { pass.run(session).await });
+                        task_sessions.insert(task.id(), session);
+                    }
+                }
+                Err(error) => {
+                    let failure_class = error.operator_failure_class();
+                    tracing::error!(
+                        ?failure_class,
+                        "eligibility reconciliation sweep failed; \
+                         the next interval will retry"
+                    );
                 }
             }
         }
@@ -728,6 +750,108 @@ mod tests {
             .send(())
             .expect("the scheduler still listens for shutdown");
         release_blocked.notify_one();
+
+        assert_eq!(
+            runtime.await.expect("scheduler task completes"),
+            SchedulerLoopExit::Shutdown
+        );
+    }
+
+    #[derive(Debug)]
+    struct CancellationSensitiveWorkSource {
+        calls: usize,
+        first: SessionId,
+        second: SessionId,
+        reconciliation_started: Arc<Notify>,
+        release_reconciliation: Arc<Notify>,
+    }
+
+    impl EligibilityWorkSource for CancellationSensitiveWorkSource {
+        type Error = FakeSweepError;
+
+        async fn next(&mut self) -> Result<SessionId, Self::Error> {
+            self.calls += 1;
+            match self.calls {
+                1 => Ok(self.first),
+                2 => {
+                    self.reconciliation_started.notify_one();
+                    self.release_reconciliation.notified().await;
+                    Ok(self.second)
+                }
+                _ => pending().await,
+            }
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct CompletionDuringReconciliationPass {
+        first: SessionId,
+        first_started: Arc<Notify>,
+        release_first: Arc<Notify>,
+        second_seen: Arc<Notify>,
+    }
+
+    impl EligibilityPass for CompletionDuringReconciliationPass {
+        type Error = FakeSweepError;
+
+        async fn run(&mut self, session: SessionId) -> Result<(), Self::Error> {
+            if session == self.first {
+                self.first_started.notify_one();
+                self.release_first.notified().await;
+            } else {
+                self.second_seen.notify_one();
+            }
+            Ok(())
+        }
+    }
+
+    /// INV-007: a pass completion cannot cancel a reconciliation read after
+    /// its interval tick has been consumed.
+    #[tokio::test]
+    async fn inv007_pass_completion_preserves_in_progress_reconciliation() {
+        let first = session(37);
+        let second = session(38);
+        let first_started = Arc::new(Notify::new());
+        let release_first = Arc::new(Notify::new());
+        let reconciliation_started = Arc::new(Notify::new());
+        let release_reconciliation = Arc::new(Notify::new());
+        let second_seen = Arc::new(Notify::new());
+        let (shutdown_sender, shutdown_receiver) = oneshot::channel();
+        let scheduler = SchedulerLoop::new(
+            CancellationSensitiveWorkSource {
+                calls: 0,
+                first,
+                second,
+                reconciliation_started: Arc::clone(&reconciliation_started),
+                release_reconciliation: Arc::clone(&release_reconciliation),
+            },
+            CompletionDuringReconciliationPass {
+                first,
+                first_started: Arc::clone(&first_started),
+                release_first: Arc::clone(&release_first),
+                second_seen: Arc::clone(&second_seen),
+            },
+        );
+        let runtime = tokio::spawn(async move {
+            let mut scheduler = scheduler;
+            scheduler
+                .run_until(async {
+                    shutdown_receiver.await.expect("the test requests shutdown");
+                })
+                .await
+        });
+
+        first_started.notified().await;
+        reconciliation_started.notified().await;
+        release_first.notify_one();
+        tokio::task::yield_now().await;
+        release_reconciliation.notify_one();
+        timeout(Duration::from_secs(1), second_seen.notified())
+            .await
+            .expect("the same in-progress reconciliation yields its hint");
+        shutdown_sender
+            .send(())
+            .expect("the scheduler still listens for shutdown");
 
         assert_eq!(
             runtime.await.expect("scheduler task completes"),
