@@ -77,25 +77,9 @@ makes rustup select the pinned minimal stable toolchain with rustfmt and Clippy.
 The workspace contains the dependency chain `apps/hubd` → `crates/application` →
 `crates/domain`, with `crates/persistence` depending on both
 `crates/application` and `crates/domain`, and the dev-only `crates/expect-table`
-consumed by the domain crate's tests. Run the full local validation sequence
-from the repository root:
-
-```bash
-python3 scripts/check_domain_spine.py
-cargo fmt --all -- --check
-mdformat --check *.md docs/
-cargo check --workspace --all-targets --all-features
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-targets --all-features
-cargo test --workspace --all-features --doc
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
-cargo metadata --no-deps --format-version 1
-git diff --check
-```
-
-The Markdown check needs `pip install mdformat==0.7.22 mdformat-gfm==0.4.1` (the
-versions CI pins); drop `--check` to rewrap in place. Wrapping rules live in
-`.mdformat.toml`.
+consumed by the domain crate's tests. Before finishing any change, run the
+repository-wide validation sequence in [AGENTS.md](AGENTS.md) — the canonical
+list of required commands and their setup notes — from the repository root.
 
 ## License
 
