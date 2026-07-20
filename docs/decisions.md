@@ -41,10 +41,12 @@ session/scheduler lock-ordering protocol lives only in comments in
   `crates/persistence/src/submit_input.rs` 649, 1034, 1046, and 2058. A clippy
   `expect_used`/`unwrap_used` deny gate is commissioned as an ordinary slice
   once the conversions land.
-- *Lock protocol.* Commissioned: one lock-acquisition helper in the persistence
-  crate becomes the only path to session and scheduler row locks. Until it
-  lands, the tripwire added to CI in this pull request fails the build if any
-  query locks the session table `FOR UPDATE`.
+- *Lock protocol.* The persistence crate's small `lock_inventory` module is the
+  only production Rust location for explicit strongest-mode row-lock SQL. CI
+  verifies its exact reviewed contents by checksum and rejects that clause in
+  every other production Rust file. This is a conservative textual boundary, not
+  Rust or SQL semantic analysis. A later lock-acquisition helper may replace the
+  inventory when it can own all session and scheduler row locks.
 - *Application punch list.* Commissioned as ordinary slices: delete the
   isomorphic persistence `*HandlingOutcome` mirrors of application outcomes;
   extract the `run_ready` and scripted-fake plumbing duplicated across the five
@@ -64,14 +66,16 @@ session/scheduler lock-ordering protocol lives only in comments in
 model-call milestone the owner prioritized against a load only sessions with
 hundreds of turns produce. Converting the thirteen panic sites in this package:
 each conversion needs its owning slice's tests, and this package is docs,
-configuration, and CI with zero Rust runtime behavior changes. Enforcing the
-lock protocol by comments and review alone: that is the state the audit found
-insufficient. Tiered rigor now: no measurement yet shows uniform rigor is the
-constraint.
+configuration, and CI; moving the existing SQL strings into one private module
+does not alter their runtime statements. Enforcing the lock protocol by comments
+and review alone: that is the state the audit found insufficient. Building a
+Rust/SQL parser for the tripwire: its complexity and inevitable syntax gaps
+would outweigh this narrow guard. Tiered rigor now: no measurement yet shows
+uniform rigor is the constraint.
 
 **Affects.** This entry; new provider-security, scaling, and reconciliation
 entries in [open-questions.md](open-questions.md); `.github/workflows/rust.yml`
-(session-lock tripwire, `validate` timeout); `.github/workflows/deny.yml`,
+(exact lock inventory, `validate` timeout); `.github/workflows/deny.yml`,
 `deny.toml`, and `.gitignore` (new supply-chain gate); the commissioned slices
 bind future work. Rust runtime behavior, schema, API, and accepted semantics do
 not change; the documented tripwire, timeout, and supply-chain gates change CI
