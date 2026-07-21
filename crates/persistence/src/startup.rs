@@ -271,24 +271,7 @@ async fn recover_in_transaction(
     let session_uuid = session_id_to_uuid(requested_session);
     let (session_exists, scheduler_session, active_turn) =
         sqlx::query_as::<_, (bool, Option<Uuid>, Option<Uuid>)>(
-            "SELECT
-            EXISTS (
-                SELECT 1
-                  FROM session
-                 WHERE session_id = $1
-            ),
-            (
-                SELECT session_id
-                  FROM session_scheduler
-                 WHERE session_id = $1
-                 FOR UPDATE
-            ),
-            (
-                SELECT turn_id
-                  FROM turn_lifecycle
-                 WHERE session_id = $1
-                   AND state_kind = 'active'
-            )",
+            crate::lock_inventory::STARTUP_RECOVERY,
         )
         .bind(session_uuid)
         .fetch_one(&mut *connection)
