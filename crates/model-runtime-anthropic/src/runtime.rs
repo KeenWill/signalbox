@@ -18,7 +18,7 @@ use signalbox_model_runtime::{
     TokenUsage, TransportFacts, UnsentCause,
 };
 
-use crate::config::AnthropicConfig;
+use crate::config::{AnthropicConfig, ApiKey, ApiKeySource};
 use crate::response::decode_buffered_response;
 use crate::status::{classify_error_status, classify_error_token};
 use crate::stream::{StreamDecoder, StreamStep};
@@ -35,7 +35,7 @@ use crate::wire::ErrorEnvelope;
 pub struct AnthropicRuntime {
     client: Client,
     messages_url: Url,
-    api_key_header: HeaderValue,
+    credentials: std::sync::Arc<dyn ApiKeySource>,
     version_header: HeaderValue,
     sse_record_limit: usize,
 }
@@ -51,9 +51,6 @@ pub enum AnthropicConstructionError {
         /// The parser's rendered description.
         detail: String,
     },
-    /// The API key contains bytes that cannot form an HTTP header value.
-    /// The value itself is deliberately not rendered.
-    InvalidApiKey,
     /// The configured `anthropic-version` cannot form an HTTP header value.
     InvalidVersion,
     /// The HTTP client could not be constructed.
@@ -67,7 +64,6 @@ impl std::fmt::Display for AnthropicConstructionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidBaseUrl { detail } => write!(f, "invalid base URL: {detail}"),
-            Self::InvalidApiKey => f.write_str("API key cannot form an HTTP header value"),
             Self::InvalidVersion => {
                 f.write_str("anthropic-version cannot form an HTTP header value")
             }
@@ -113,9 +109,14 @@ impl AnthropicRuntime {
         .map_err(|error| AnthropicConstructionError::InvalidBaseUrl {
             detail: error.to_string(),
         })?;
-        let mut api_key_header = HeaderValue::from_str(config.api_key.value())
-            .map_err(|_| AnthropicConstructionError::InvalidApiKey)?;
-        api_key_header.set_sensitive(true);
+        if !matches!(messages_url.scheme(), "http" | "https") {
+            // A non-HTTP scheme would fail only inside send(), after
+            // SendCommenced, and read as ambiguous transport loss; it is an
+            // invalid configuration, caught here.
+            return Err(AnthropicConstructionError::InvalidBaseUrl {
+                detail: format!("unsupported scheme {:?}", messages_url.scheme()),
+            });
+        }
         let version_header = HeaderValue::from_str(&config.anthropic_version)
             .map_err(|_| AnthropicConstructionError::InvalidVersion)?;
         let mut builder = Client::builder()
@@ -136,7 +137,7 @@ impl AnthropicRuntime {
         Ok(Self {
             client,
             messages_url,
-            api_key_header,
+            credentials: config.credentials,
             version_header,
             sse_record_limit: config.sse_record_limit,
         })
@@ -163,6 +164,28 @@ impl AnthropicRuntime {
                 ));
             }
         };
+        // ADR-0017: the key is read during send preparation of exactly this
+        // operation and scoped to this request; nothing is cached, so a
+        // rotated credential is picked up by the next operation.
+        let api_key_header = match self.credentials.current() {
+            Ok(api_key) => match sensitive_header(&api_key) {
+                Some(header) => header,
+                None => {
+                    return proven_unsent(UnsentCause::PreparationFailed(
+                        PreparationFailure::CredentialUnavailable {
+                            detail: "API key cannot form an HTTP header value".to_string(),
+                        },
+                    ));
+                }
+            },
+            Err(failure) => {
+                return proven_unsent(UnsentCause::PreparationFailed(
+                    PreparationFailure::CredentialUnavailable {
+                        detail: failure.detail,
+                    },
+                ));
+            }
+        };
         emit(correlation, sink, ObservationFact::RequestPrepared);
         if already_fired(cancellation) {
             return proven_unsent(UnsentCause::CancelledBeforeSend);
@@ -171,7 +194,7 @@ impl AnthropicRuntime {
         let send = self
             .client
             .post(self.messages_url.clone())
-            .header("x-api-key", self.api_key_header.clone())
+            .header("x-api-key", api_key_header)
             .header("anthropic-version", self.version_header.clone())
             .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
             .body(body)
@@ -191,7 +214,9 @@ impl AnthropicRuntime {
             sink,
             ObservationFact::ExchangeEstablished(exchange.clone()),
         );
-        if status.is_success() {
+        // The Messages success contract is specifically HTTP 200; another
+        // 2xx is not recognized terminal-success evidence.
+        if status.as_u16() == 200 {
             match operation.delivery {
                 signalbox_model_runtime::DeliveryMode::Buffered => {
                     self.finish_buffered(response, exchange, correlation, sink, cancellation)
@@ -205,9 +230,10 @@ impl AnthropicRuntime {
         } else if status.is_client_error() || status.is_server_error() {
             finish_error(response, exchange, status.as_u16(), cancellation).await
         } else {
-            // With redirects disabled a redirect (or any other non-success,
-            // non-error status) surfaces as evidence rather than a silent
-            // second send; see `new` for the rationale.
+            // With redirects disabled a redirect (or any other status
+            // outside the provider's documented contract) surfaces as
+            // evidence rather than a silent second send; see `new` for the
+            // rationale.
             TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
                 cause: LossCause::UnexpectedHttpStatus,
                 exchange,
@@ -431,14 +457,27 @@ fn already_fired(cancellation: &mut CancellationSignal) -> bool {
     Pin::new(cancellation).poll(&mut context).is_ready()
 }
 
-/// Runs `work` unless the cancellation signal fires first.
+/// Runs `work` unless the cancellation signal fires while it is pending.
+///
+/// The work future is polled first, so provider evidence that is already
+/// available wins a same-poll race against cancellation: a ready definitive
+/// response is never discarded in favor of ambiguous cancellation loss
+/// (ADR-0043's definitive-response precedence).
 async fn with_cancellation<F: Future>(
     cancellation: &mut CancellationSignal,
     work: F,
 ) -> Option<F::Output> {
     let work = std::pin::pin!(work);
-    match select(cancellation, work).await {
-        Either::Left(((), _)) => None,
-        Either::Right((output, _)) => Some(output),
+    match select(work, cancellation).await {
+        Either::Left((output, _)) => Some(output),
+        Either::Right(((), _)) => None,
     }
+}
+
+/// The key as a sensitivity-marked header value, or `None` when its bytes
+/// cannot form one. The value never appears in errors or logs.
+fn sensitive_header(api_key: &ApiKey) -> Option<HeaderValue> {
+    let mut header = HeaderValue::from_str(api_key.value()).ok()?;
+    header.set_sensitive(true);
+    Some(header)
 }

@@ -56,8 +56,11 @@ fn tools_and_choice<C>(
                 description: contract.description.clone(),
                 input_schema: contract.schema.clone(),
             }]),
+            // The contract promises exactly one value; parallel tool use
+            // could return several proposals for the forced tool.
             Some(WireToolChoice::Tool {
                 name: contract.name.as_str().to_string(),
+                disable_parallel_tool_use: Some(true),
             }),
         ));
     }
@@ -78,6 +81,7 @@ fn tools_and_choice<C>(
         ToolChoice::AnyTool => WireToolChoice::Any,
         ToolChoice::Named(name) => WireToolChoice::Tool {
             name: name.as_str().to_string(),
+            disable_parallel_tool_use: None,
         },
     };
     Ok((Some(tools), Some(choice)))
@@ -313,7 +317,11 @@ mod tests {
 
         assert_eq!(
             value["tool_choice"],
-            serde_json::json!({"type": "tool", "name": "verdict"})
+            serde_json::json!({
+                "type": "tool",
+                "name": "verdict",
+                "disable_parallel_tool_use": true
+            })
         );
         assert_eq!(value["tools"][0]["name"], serde_json::json!("verdict"));
     }

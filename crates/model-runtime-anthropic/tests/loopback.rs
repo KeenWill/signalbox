@@ -430,3 +430,45 @@ async fn a_signal_cancelled_before_send_proves_the_request_unsent() {
             .any(|observation| matches!(observation.fact, ObservationFact::SendCommenced))
     );
 }
+
+/// A key source whose value the test rotates between operations.
+#[derive(Debug)]
+struct RotatingKey(Mutex<String>);
+
+impl signalbox_model_runtime_anthropic::ApiKeySource for RotatingKey {
+    fn current(
+        &self,
+    ) -> Result<
+        signalbox_model_runtime_anthropic::ApiKey,
+        signalbox_model_runtime_anthropic::CredentialUnavailable,
+    > {
+        Ok(signalbox_model_runtime_anthropic::ApiKey::new(
+            self.0.lock().expect("key lock").clone(),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn the_api_key_is_resolved_at_each_send_so_rotation_takes_effect() {
+    // ADR-0017: the credential is read during send preparation of each
+    // physical request; a rotated value must reach the next request without
+    // reconstructing the runtime.
+    let server = CannedServer::serving(vec![
+        http_response("200 OK", &[], b"{}"),
+        http_response("200 OK", &[], b"{}"),
+    ])
+    .await;
+    let source = Arc::new(RotatingKey(Mutex::new("key_before".to_string())));
+    let mut config = signalbox_model_runtime_anthropic::AnthropicConfig::new(ApiKey::new("unused"));
+    config.base_url = server.base_url.clone();
+    config.credentials = source.clone();
+    let runtime = AnthropicRuntime::new(config).expect("loopback configuration constructs");
+
+    execute(&runtime, operation("call-9"), CancellationSignal::never()).await;
+    *source.0.lock().expect("key lock") = "key_after".to_string();
+    execute(&runtime, operation("call-10"), CancellationSignal::never()).await;
+
+    let requests = server.recorded_requests();
+    assert!(requests[0].contains("x-api-key: key_before\r\n"));
+    assert!(requests[1].contains("x-api-key: key_after\r\n"));
+}

@@ -13,7 +13,7 @@
 //! protocol-violation evidence: later records about material this adapter
 //! cannot interpret would not be trustworthy.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use signalbox_model_runtime::{
     AssistantPart, BoundaryLossEvidence, CompletionEvidence, ExchangeFacts, FinishReason,
@@ -63,8 +63,7 @@ pub(crate) struct StreamDecoder {
     usage: TokenUsage,
     finish: Option<FinishReason>,
     open_blocks: BTreeMap<u32, BlockBuilder>,
-    closed_blocks: BTreeSet<u32>,
-    content: Vec<AssistantPart>,
+    closed: BTreeMap<u32, AssistantPart>,
 }
 
 impl StreamDecoder {
@@ -77,8 +76,7 @@ impl StreamDecoder {
             usage: TokenUsage::unreported(),
             finish: None,
             open_blocks: BTreeMap::new(),
-            closed_blocks: BTreeSet::new(),
-            content: Vec::new(),
+            closed: BTreeMap::new(),
         }
     }
 
@@ -100,7 +98,7 @@ impl StreamDecoder {
             "content_block_delta" => self.apply_block_delta(record, correlation, sink),
             "content_block_stop" => self.apply_block_stop(record, correlation, sink),
             "message_delta" => self.apply_message_delta(record, correlation, sink),
-            "message_stop" => self.apply_message_stop(),
+            "message_stop" => self.apply_message_stop(record),
             // The provider documents that new event types may be added and
             // must be tolerated.
             _ => StreamStep::Continue,
@@ -227,8 +225,7 @@ impl StreamDecoder {
             Ok(event) => event,
             Err(step) => return *step,
         };
-        if self.open_blocks.contains_key(&event.index) || self.closed_blocks.contains(&event.index)
-        {
+        if self.open_blocks.contains_key(&event.index) || self.closed.contains_key(&event.index) {
             return self.violation(format!("content_block_start reopens index {}", event.index));
         }
         let builder = match event.content_block {
@@ -382,8 +379,9 @@ impl StreamDecoder {
                 AssistantPart::ToolCall(proposal)
             }
         };
-        self.closed_blocks.insert(event.index);
-        self.content.push(part);
+        // Retained by index: the indices define part positions in the final
+        // message, so assembly is by index order, not stop-event order.
+        self.closed.insert(event.index, part);
         StreamStep::Continue
     }
 
@@ -415,9 +413,14 @@ impl StreamDecoder {
         StreamStep::Continue
     }
 
-    fn apply_message_stop(&mut self) -> StreamStep {
+    fn apply_message_stop(&mut self, record: &SseRecord) -> StreamStep {
         if !self.started {
             return self.violation("message_stop before message_start");
+        }
+        // The terminal record's payload is validated like every other known
+        // event: a malformed terminal must not cross the integrity gate.
+        if let Err(step) = self.parse::<serde_json::Value>(record, "message_stop") {
+            return *step;
         }
         if !self.open_blocks.is_empty() {
             return self.violation("message_stop with open content blocks");
@@ -430,7 +433,7 @@ impl StreamDecoder {
                 exchange: self.exchange.clone(),
                 message_id: self.message_id.clone(),
                 reported_model: self.reported_model.clone(),
-                content: std::mem::take(&mut self.content),
+                content: std::mem::take(&mut self.closed).into_values().collect(),
                 usage: self.usage,
             }),
             Some(finish) => TerminalEvidence::Completed(CompletionEvidence {
@@ -438,7 +441,7 @@ impl StreamDecoder {
                 message_id: self.message_id.clone(),
                 reported_model: self.reported_model.clone(),
                 finish,
-                content: std::mem::take(&mut self.content),
+                content: std::mem::take(&mut self.closed).into_values().collect(),
                 usage: self.usage,
             }),
         };
@@ -938,6 +941,55 @@ mod tests {
             loss.cause,
             LossCause::StreamProtocolViolation { .. }
         ));
+    }
+
+    #[test]
+    fn malformed_message_stop_payload_is_a_protocol_violation() {
+        let (terminal, _) = drive(&[
+            message_start(),
+            b"event: message_delta\n\
+              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+            b"event: message_stop\ndata: {\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("a malformed terminal payload must not cross the integrity gate");
+        };
+        assert!(matches!(
+            loss.cause,
+            LossCause::StreamProtocolViolation { .. }
+        ));
+    }
+
+    #[test]
+    fn blocks_closing_out_of_index_order_assemble_in_index_order() {
+        let (terminal, _) = drive(&[
+            message_start(),
+            b"event: content_block_start\n\
+              data: {\"type\":\"content_block_start\",\"index\":0,\
+              \"content_block\":{\"type\":\"text\",\"text\":\"first\"}}\n\n",
+            b"event: content_block_start\n\
+              data: {\"type\":\"content_block_start\",\"index\":1,\
+              \"content_block\":{\"type\":\"text\",\"text\":\"second\"}}\n\n",
+            b"event: content_block_stop\n\
+              data: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+            b"event: content_block_stop\n\
+              data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            b"event: message_delta\n\
+              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::Completed(completion)) = terminal else {
+            panic!("out-of-order closes with a clean terminal still complete");
+        };
+        assert_eq!(
+            completion.content,
+            vec![
+                AssistantPart::Text("first".to_string()),
+                AssistantPart::Text("second".to_string()),
+            ]
+        );
     }
 
     #[test]

@@ -79,13 +79,20 @@ pub(crate) enum WireToolChoice {
     #[serde(rename = "any")]
     Any,
     #[serde(rename = "tool")]
-    Tool { name: String },
+    Tool {
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        disable_parallel_tool_use: Option<bool>,
+    },
 }
 
 // --- Response ---
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct MessagesResponse {
+    #[serde(rename = "type")]
+    pub response_type: Option<String>,
+    pub role: Option<String>,
     pub id: Option<String>,
     pub model: Option<String>,
     #[serde(default)]

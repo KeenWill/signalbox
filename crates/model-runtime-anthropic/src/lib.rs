@@ -16,9 +16,10 @@
 //!
 //! # Credential discipline (ADR-0017)
 //!
-//! The API key is consumed inside this adapter boundary only: it is attached
-//! as a sensitivity-marked header, its debug rendering is redacted, and this
-//! crate performs no logging.
+//! The API key is consumed inside this adapter boundary only: it is resolved
+//! through an [`ApiKeySource`] during send preparation of each operation and
+//! scoped to that request, it is attached as a sensitivity-marked header,
+//! its debug rendering is redacted, and this crate performs no logging.
 
 mod config;
 mod response;
@@ -28,5 +29,5 @@ mod stream;
 mod translate;
 mod wire;
 
-pub use config::{AnthropicConfig, ApiKey};
+pub use config::{AnthropicConfig, ApiKey, ApiKeySource, CredentialUnavailable, StaticApiKey};
 pub use runtime::{AnthropicConstructionError, AnthropicRuntime};

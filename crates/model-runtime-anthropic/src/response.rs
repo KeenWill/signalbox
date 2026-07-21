@@ -70,10 +70,11 @@ pub(crate) fn convert_block(block: WireResponseBlock) -> Option<AssistantPart> {
 /// emitting the facts it learns as observations along the way.
 ///
 /// A body that is not the documented completion material — unparseable,
-/// carrying an unrecognized content-block type, or missing its stop reason —
-/// is boundary-loss evidence (ADR-0043: a success status without valid
-/// completion material is not definitive), with the facts observed before
-/// the defect retained.
+/// missing the envelope's required fields (`type: "message"`,
+/// `role: "assistant"`, `id`, `model`, `usage`), carrying an unrecognized
+/// content-block type, or missing its stop reason — is boundary-loss
+/// evidence (ADR-0043: a success status without valid completion material
+/// is not definitive), with the facts observed before the defect retained.
 pub(crate) fn decode_buffered_response<C: Clone>(
     body: &[u8],
     exchange: ExchangeFacts,
@@ -94,6 +95,21 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             });
         }
     };
+    if response.response_type.as_deref() != Some("message")
+        || response.role.as_deref() != Some("assistant")
+    {
+        return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            cause: LossCause::ResponseUnintelligible {
+                detail: "success response is missing its message/assistant envelope \
+                         discriminators"
+                    .to_string(),
+            },
+            exchange,
+            reported_model: None,
+            finish_reported: None,
+            usage: TokenUsage::unreported(),
+        });
+    }
     let reported_model = response.model.map(ProviderReportedModel::new);
     if let Some(model) = &reported_model {
         sink.observe(Observation {
@@ -107,6 +123,21 @@ pub(crate) fn decode_buffered_response<C: Clone>(
         .map(convert_usage)
         .unwrap_or_default();
     let message_id = response.id.map(ProviderMessageId::new);
+    if reported_model.is_none() || message_id.is_none() || response.usage.is_none() {
+        // The documented completion envelope always carries id, model, and
+        // usage; their absence means this is not valid completion material.
+        return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            cause: LossCause::ResponseUnintelligible {
+                detail: "success response is missing required completion fields \
+                         (id, model, usage)"
+                    .to_string(),
+            },
+            exchange,
+            reported_model,
+            finish_reported: None,
+            usage,
+        });
+    }
     let mut content = Vec::new();
     for block in response.content {
         match convert_block(block) {
@@ -265,6 +296,8 @@ mod tests {
         let (_, observations) = decode(
             r#"{
                 "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
                 "model": "model-exact-1",
                 "content": [{"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {}}],
                 "stop_reason": "tool_use",
@@ -311,6 +344,8 @@ mod tests {
         let (evidence, _) = decode(
             r#"{
                 "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
                 "model": "model-exact-1",
                 "content": [{"type": "text", "text": "I cannot help with that."}],
                 "stop_reason": "refusal",
@@ -336,6 +371,8 @@ mod tests {
         let (evidence, _) = decode(
             r#"{
                 "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
                 "model": "model-exact-1",
                 "content": [{"type": "text", "text": "partial"}],
                 "usage": {"input_tokens": 3}
@@ -361,10 +398,13 @@ mod tests {
         let (evidence, _) = decode(
             r#"{
                 "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
                 "model": "model-exact-1",
                 "content": [{"type": "text", "text": "ok"},
                             {"type": "server_tool_use", "id": "srvtoolu_1"}],
-                "stop_reason": "end_turn"
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1}
             }"#,
         );
 
@@ -379,6 +419,36 @@ mod tests {
             loss.reported_model,
             Some(ProviderReportedModel::new("model-exact-1"))
         );
+    }
+
+    #[test]
+    fn bare_envelope_without_required_fields_is_boundary_loss_not_completion() {
+        let (evidence, _) =
+            decode(r#"{"type": "message", "role": "assistant", "stop_reason": "end_turn"}"#);
+
+        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
+            panic!("an envelope missing id, model, and usage is not valid completion material");
+        };
+        assert!(matches!(
+            loss.cause,
+            LossCause::ResponseUnintelligible { .. }
+        ));
+    }
+
+    #[test]
+    fn envelope_without_discriminators_is_boundary_loss_not_completion() {
+        let (evidence, _) = decode(
+            r#"{"id": "msg_1", "model": "model-exact-1", "content": [],
+                "stop_reason": "end_turn", "usage": {"input_tokens": 1}}"#,
+        );
+
+        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
+            panic!("an envelope without message/assistant discriminators must not complete");
+        };
+        assert!(matches!(
+            loss.cause,
+            LossCause::ResponseUnintelligible { .. }
+        ));
     }
 
     #[test]
