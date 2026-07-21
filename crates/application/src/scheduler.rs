@@ -236,8 +236,7 @@ where
         Self::with_options(
             sweep,
             ReconciliationSweepInterval::baseline(),
-            NonZeroUsize::new(BASELINE_NUDGE_BUFFER_CAPACITY)
-                .expect("the baseline nudge capacity is nonzero"),
+            NonZeroUsize::new(BASELINE_NUDGE_BUFFER_CAPACITY).unwrap_or(NonZeroUsize::MIN),
         )
     }
 
@@ -249,8 +248,7 @@ where
         Self::with_options(
             sweep,
             sweep_interval,
-            NonZeroUsize::new(BASELINE_NUDGE_BUFFER_CAPACITY)
-                .expect("the baseline nudge capacity is nonzero"),
+            NonZeroUsize::new(BASELINE_NUDGE_BUFFER_CAPACITY).unwrap_or(NonZeroUsize::MIN),
         )
     }
 
@@ -262,9 +260,8 @@ where
     ) -> (InProcessEligibilityNudge, Self) {
         let (sender, nudges) = mpsc::channel(nudge_buffer_capacity.get());
         let nudge = InProcessEligibilityNudge { sender };
-        let first_sweep_deadline = Instant::now()
-            .checked_add(sweep_interval.get())
-            .expect("validated reconciliation interval fits the timer range");
+        let now = Instant::now();
+        let first_sweep_deadline = now.checked_add(sweep_interval.get()).unwrap_or(now);
         let mut interval = time::interval_at(first_sweep_deadline, sweep_interval.get());
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let source = Self {
@@ -294,20 +291,18 @@ where
         }
     }
 
-    fn take_interleaved_pending_hint(&mut self) -> SessionId {
+    fn take_interleaved_pending_hint(&mut self) -> Option<SessionId> {
         if self.nudge_preferred_over_sweep_hint {
             match self.nudges.try_recv() {
                 Ok(session) => {
                     self.nudge_preferred_over_sweep_hint = false;
-                    return session;
+                    return Some(session);
                 }
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => {}
             }
         }
         self.nudge_preferred_over_sweep_hint = true;
-        self.pending_sweep_hints
-            .pop_front()
-            .expect("the pending sweep backlog is nonempty")
+        self.pending_sweep_hints.pop_front()
     }
 }
 
@@ -316,10 +311,9 @@ where
     Sweep: EligibilitySweep + Send + 'static,
 {
     fn start_sweep(&mut self) {
-        let mut sweep = self
-            .sweep
-            .take()
-            .expect("a sweep starts only when none is already in progress");
+        let Some(mut sweep) = self.sweep.take() else {
+            return;
+        };
         self.sweep_in_progress = Some(Box::pin(async move {
             let result = sweep.find_sessions().await;
             (sweep, result)
@@ -356,7 +350,10 @@ where
             if !self.pending_sweep_hints.is_empty() {
                 if !self.sweep_preferred_over_pending_hint {
                     self.sweep_preferred_over_pending_hint = true;
-                    return Ok(self.take_interleaved_pending_hint());
+                    if let Some(session) = self.take_interleaved_pending_hint() {
+                        return Ok(session);
+                    }
+                    continue;
                 }
                 if let Some(sweep_in_progress) = self.sweep_in_progress.as_mut() {
                     let completion = select! {
@@ -369,7 +366,10 @@ where
                         self.complete_sweep(completion)?;
                         continue;
                     }
-                    return Ok(self.take_interleaved_pending_hint());
+                    if let Some(session) = self.take_interleaved_pending_hint() {
+                        return Ok(session);
+                    }
+                    continue;
                 }
                 select! {
                     biased;
@@ -378,7 +378,9 @@ where
                         self.start_sweep();
                     }
                     () = ready(()) => {
-                        return Ok(self.take_interleaved_pending_hint());
+                        if let Some(session) = self.take_interleaved_pending_hint() {
+                            return Ok(session);
+                        }
                     }
                 }
                 continue;

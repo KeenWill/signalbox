@@ -523,37 +523,31 @@ async fn prepare_against_locked_state(
     accepted_input: AcceptedInputId,
     turn: Option<TurnId>,
 ) -> Result<PreparedSubmitInput, SubmitInputRepositoryError> {
-    // Lock-mode constraint: this session-row lock must be `FOR NO KEY
-    // UPDATE`, not `FOR UPDATE`. Submit orders the session row before the
+    // Lock-mode constraint: this session-row lock must use the no-key-update
+    // mode, not PostgreSQL's strongest row-lock mode. Submit orders the session row before the
     // scheduler row and current-defaults pointer row, while a concurrent
     // defaults replacement holds the pointer row (its compare-and-set) when its
     // `session_defaults_version` insert requests `FOR KEY SHARE` on this
     // session row through the non-deferrable session foreign key.
-    // `FOR UPDATE` conflicts with `FOR KEY SHARE` and closes that lock-order
+    // The stronger mode conflicts with `FOR KEY SHARE` and closes that lock-order
     // cycle into a deadlock (40P01); `FOR NO KEY UPDATE` does not conflict
     // with referential-integrity `KEY SHARE` locks while remaining
     // self-exclusive, so per-session position assignment stays serialized.
-    let session_exists = sqlx::query_scalar::<_, Uuid>(
-        "SELECT session_id FROM session WHERE session_id = $1 FOR NO KEY UPDATE",
-    )
-    .bind(session_id_to_uuid(command.session()))
-    .fetch_optional(&mut *connection)
-    .await?
-    .is_some();
+    let session_exists = sqlx::query_scalar::<_, Uuid>(crate::lock_inventory::SUBMIT_INPUT_SESSION)
+        .bind(session_id_to_uuid(command.session()))
+        .fetch_optional(&mut *connection)
+        .await?
+        .is_some();
     if !session_exists {
         return Ok(command.prepare_session_not_found());
     }
 
-    let scheduler_exists = sqlx::query_scalar::<_, Uuid>(
-        "SELECT session_id
-           FROM session_scheduler
-          WHERE session_id = $1
-          FOR UPDATE",
-    )
-    .bind(session_id_to_uuid(command.session()))
-    .fetch_optional(&mut *connection)
-    .await?
-    .is_some();
+    let scheduler_exists =
+        sqlx::query_scalar::<_, Uuid>(crate::lock_inventory::SUBMIT_INPUT_SCHEDULER)
+            .bind(session_id_to_uuid(command.session()))
+            .fetch_optional(&mut *connection)
+            .await?
+            .is_some();
     if !scheduler_exists {
         return Err(
             SubmitInputCorruption::CurrentSession(SessionCorruption::Missing("scheduler row"))
@@ -561,16 +555,12 @@ async fn prepare_against_locked_state(
         );
     }
 
-    let pointer_exists = sqlx::query_scalar::<_, Decimal>(
-        "SELECT current_version
-           FROM session_current_defaults
-          WHERE session_id = $1
-          FOR UPDATE",
-    )
-    .bind(session_id_to_uuid(command.session()))
-    .fetch_optional(&mut *connection)
-    .await?
-    .is_some();
+    let pointer_exists =
+        sqlx::query_scalar::<_, Decimal>(crate::lock_inventory::SUBMIT_INPUT_DEFAULTS)
+            .bind(session_id_to_uuid(command.session()))
+            .fetch_optional(&mut *connection)
+            .await?
+            .is_some();
     if !pointer_exists {
         return Err(
             SubmitInputCorruption::CurrentSession(SessionCorruption::Missing(
@@ -643,10 +633,15 @@ async fn prepare_against_locked_state(
             SubmitInputCorruption::Inconsistent("selected active scheduling state").into()
         }
         SubmitInputPreparationFailure::InterruptApplicationUnavailable => {
+            #[expect(
+                clippy::expect_used,
+                reason = "temporary ledger site: this failure is produced only from a checked active projection; typed conversion is commissioned by the 2026-07-20 audit"
+            )]
+            let active_turn = active_turn_id
+                .expect("interrupt unavailability requires a checked active projection");
             SubmitInputRepositoryError::InterruptApplicationUnavailable {
                 command_id: error.command().command_id(),
-                active_turn: active_turn_id
-                    .expect("interrupt unavailability requires a checked active projection"),
+                active_turn,
             }
         }
     })
@@ -1030,6 +1025,10 @@ pub(crate) async fn load_scheduling_projection(
         let member_rows = members_by_frontier
             .remove(&frontier_uuid)
             .unwrap_or_default();
+        #[expect(
+            clippy::expect_used,
+            reason = "temporary ledger site: PostgreSQL result cardinality cannot exceed the stored u64 bound on supported targets; typed conversion is commissioned by the 2026-07-20 audit"
+        )]
         let actual_count = u64::try_from(member_rows.len())
             .expect("PostgreSQL result cardinality fits the u64 schema bound");
         if declared_count != Decimal::from(actual_count) {
@@ -1042,6 +1041,10 @@ pub(crate) async fn load_scheduling_projection(
         for (index, (position, source_session, semantic_entry)) in
             member_rows.into_iter().enumerate()
         {
+            #[expect(
+                clippy::expect_used,
+                reason = "temporary ledger site: PostgreSQL result cardinality cannot exceed the stored u64 bound on supported targets; typed conversion is commissioned by the 2026-07-20 audit"
+            )]
             let expected_position = u64::try_from(index + 1)
                 .expect("PostgreSQL result cardinality fits the u64 schema bound");
             if position != Decimal::from(expected_position) {
@@ -2053,6 +2056,10 @@ async fn load_turn_origin_graph(
             ))?;
     let mut decoded = BTreeMap::new();
     for ready in decode_order {
+        #[expect(
+            clippy::expect_used,
+            reason = "temporary ledger site: the dependency-order output is derived from these exact remaining links; typed conversion is commissioned by the 2026-07-20 audit"
+        )]
         let link = links
             .remove(&ready)
             .expect("the selected turn origin link remains present");
