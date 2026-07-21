@@ -456,8 +456,9 @@ struct RotatingKey(Arc<Mutex<String>>);
 impl CredentialAccess for RotatingKey {
     async fn resolve(
         &self,
-        _reference: &CredentialReference,
+        reference: &CredentialReference,
     ) -> Result<CredentialValue, CredentialAccessError> {
+        assert_eq!(reference.as_str(), "anthropic-primary");
         Ok(CredentialValue::new(
             self.0.lock().expect("key lock").clone().into_bytes(),
         ))
@@ -465,7 +466,7 @@ impl CredentialAccess for RotatingKey {
 }
 
 #[tokio::test]
-async fn the_api_key_is_resolved_at_each_send_so_rotation_takes_effect() {
+async fn inv_035_api_key_is_resolved_at_each_send_so_rotation_takes_effect() {
     // ADR-0017: the credential is read during send preparation of each
     // physical request; a rotated value must reach the next request without
     // reconstructing the runtime.
@@ -517,7 +518,7 @@ async fn a_401_with_an_unrecognized_error_token_still_classifies_by_status() {
 }
 
 #[tokio::test]
-async fn provider_error_text_reflecting_the_key_is_redacted() {
+async fn inv_035_provider_error_text_reflecting_the_key_is_redacted() {
     // ADR-0017: evidence carries typed classes and rendered detail, never
     // credential values — even when an endpoint reflects the key.
     let body = br#"{"type":"error","error":{"type":"authentication_error",
