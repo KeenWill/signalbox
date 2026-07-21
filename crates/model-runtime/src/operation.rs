@@ -20,6 +20,11 @@ pub enum ModelOperationValidationError {
         /// The name used by both declarations.
         name: ToolName,
     },
+    /// A named tool choice does not match any declared tool.
+    UndeclaredToolChoice {
+        /// The name the choice requires.
+        name: ToolName,
+    },
 }
 
 impl std::fmt::Display for ModelOperationValidationError {
@@ -29,6 +34,13 @@ impl std::fmt::Display for ModelOperationValidationError {
                 write!(
                     f,
                     "ordinary tool name `{}` is declared more than once",
+                    name.as_str()
+                )
+            }
+            Self::UndeclaredToolChoice { name } => {
+                write!(
+                    f,
+                    "tool choice names `{}`, which no declared tool carries",
                     name.as_str()
                 )
             }
@@ -152,6 +164,14 @@ impl<C> ModelOperation<C> {
                 });
             }
         }
+        if let ToolChoice::Named(name) = &self.tool_choice
+            && !self.tools.iter().any(|tool| &tool.name == name)
+        {
+            // An impossible choice is a locally knowable declaration error;
+            // sending it would only surface as a post-boundary provider
+            // rejection.
+            return Err(ModelOperationValidationError::UndeclaredToolChoice { name: name.clone() });
+        }
         let Some(contract) = &self.output_contract else {
             return Ok(());
         };
@@ -221,6 +241,27 @@ mod tests {
             error,
             ModelOperationValidationError::OutputContractToolNameCollision {
                 name: colliding_name,
+            }
+        );
+    }
+
+    #[test]
+    fn a_named_choice_for_an_undeclared_tool_is_rejected() {
+        let mut operation = operation();
+        operation.tools = vec![ToolDefinition::of_type::<Arguments>(
+            "ordinary",
+            "ordinary tool",
+        )];
+        operation.tool_choice = crate::ToolChoice::Named(crate::ToolName::new("missing"));
+
+        let error = operation
+            .validate()
+            .expect_err("an impossible choice must fail before any send");
+
+        assert_eq!(
+            error,
+            ModelOperationValidationError::UndeclaredToolChoice {
+                name: crate::ToolName::new("missing"),
             }
         );
     }

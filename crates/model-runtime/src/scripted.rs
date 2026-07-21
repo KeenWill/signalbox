@@ -103,35 +103,44 @@ impl<C: Clone + Send + Sync> ModelRuntime<C> for ScriptedModel<C> {
         sink: &mut (dyn ObservationSink<C> + Send),
         _cancellation: CancellationSignal,
     ) -> impl Future<Output = TerminalReport<C>> + Send {
-        let correlation = operation.correlation.clone();
-        let script = {
-            // One lock for dequeue and receipt: recorded order is
-            // script-consumption order even under concurrent executions.
-            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-            let script = state.scripts.pop_front();
-            state.received.push(operation);
-            script
-        };
-        let evidence = match script {
-            Some(script) => {
-                for fact in script.observations {
-                    sink.observe(Observation {
-                        correlation: correlation.clone(),
-                        fact,
-                    });
+        // All work happens inside the future: a created-but-never-polled
+        // execution consumes no script, records no operation, and emits no
+        // observation, matching how a real adapter behaves when its future
+        // is dropped before first poll.
+        async move {
+            let correlation = operation.correlation.clone();
+            let script = {
+                // One lock for dequeue and receipt: recorded order is
+                // script-consumption order even under concurrent executions.
+                let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+                let script = state.scripts.pop_front();
+                state.received.push(operation);
+                script
+            };
+            let evidence = match script {
+                Some(script) => {
+                    for fact in script.observations {
+                        sink.observe(Observation {
+                            correlation: correlation.clone(),
+                            fact,
+                        });
+                    }
+                    script.terminal
                 }
-                script.terminal
-            }
-            None => TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence {
-                cause: UnsentCause::PreparationFailed(PreparationFailure::UnsupportedOperation {
-                    detail: "scripted model has no remaining script for this execution".to_string(),
+                None => TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence {
+                    cause: UnsentCause::PreparationFailed(
+                        PreparationFailure::UnsupportedOperation {
+                            detail: "scripted model has no remaining script for this execution"
+                                .to_string(),
+                        },
+                    ),
                 }),
-            }),
-        };
-        std::future::ready(TerminalReport {
-            correlation,
-            evidence,
-        })
+            };
+            TerminalReport {
+                correlation,
+                evidence,
+            }
+        }
     }
 }
 
@@ -154,7 +163,7 @@ mod tests {
     use crate::target::{ProviderReportedModel, RequestedTarget, ResolvedTarget};
     use crate::usage::TokenUsage;
 
-    /// Resolves a scripted execution, which is always immediately ready.
+    /// Resolves a scripted execution, which is ready on its first poll.
     fn run_now<F: Future>(future: F) -> F::Output {
         let mut future = std::pin::pin!(future);
         let mut context = Context::from_waker(Waker::noop());
@@ -162,6 +171,27 @@ mod tests {
             Poll::Ready(output) => output,
             Poll::Pending => panic!("scripted execution never pends"),
         }
+    }
+
+    #[test]
+    fn an_unpolled_execution_consumes_nothing() {
+        let model = ScriptedModel::single(Script::delivering(completed_terminal()));
+        let mut observations: Vec<Observation<String>> = Vec::new();
+
+        drop(model.execute(
+            operation("call-0"),
+            &mut observations,
+            CancellationSignal::never(),
+        ));
+
+        assert_eq!(model.received_operations(), vec![]);
+        assert_eq!(observations, vec![]);
+        let report = run_now(model.execute(
+            operation("call-1"),
+            &mut observations,
+            CancellationSignal::never(),
+        ));
+        assert!(matches!(report.evidence, TerminalEvidence::Completed(_)));
     }
 
     /// An operation whose correlation seed is the one knob; other facts are

@@ -6,6 +6,7 @@
 //! detail inside an already-classified variant, never as the thing that
 //! decides the variant.
 
+use crate::credential::CredentialAccessError;
 use crate::message::AssistantPart;
 use crate::target::ProviderReportedModel;
 use crate::usage::TokenUsage;
@@ -231,6 +232,10 @@ pub struct RefusalEvidence {
 pub struct ProviderErrorEvidence {
     /// Correlated exchange facts.
     pub exchange: ExchangeFacts,
+    /// The model identity the provider reported before or with the error,
+    /// when observed — retained here so ADR-0005's mismatch precedence can
+    /// be applied from the authoritative terminal report alone.
+    pub reported_model: Option<ProviderReportedModel>,
     /// The adapter's exhaustive classification of the provider's native
     /// error (ADR-0043: each adapter owns an exhaustive, mutually exclusive
     /// native mapping).
@@ -340,9 +345,16 @@ pub enum PreparationFailure {
     /// The provider credential could not be read during send preparation
     /// (ADR-0017: a failed credential read at send preparation means
     /// preparation cannot proceed — a known failure, never a retry). The
-    /// detail never carries the credential value.
+    /// typed reference-only access error is preserved so the caller keeps
+    /// the failed reference and failure class without parsing text.
     CredentialUnavailable {
-        /// Why the credential could not be read.
+        /// The reference-only access failure.
+        error: CredentialAccessError,
+    },
+    /// A credential value was read but cannot authenticate a request (for
+    /// example, its bytes cannot form a header). Never carries the value.
+    CredentialUnusable {
+        /// Why the value cannot be used.
         detail: String,
     },
 }
