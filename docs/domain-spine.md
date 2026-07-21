@@ -1150,6 +1150,9 @@ pub enum AcceptedInputEligibilityFailure {
     OriginEntryIdentityAlreadyExists,
     StartingFrontierIdentityAlreadyExists,
     InitialAttemptIdentityAlreadyExists,
+    InternalOriginFrontierConstructionFailed,
+    InternalPredecessorTerminalFrontierMissing { predecessor: TurnId },
+    InternalStartingFrontierDerivationFailed,
 }
 
 pub struct AcceptedInputEligibilityError { /* private */ }

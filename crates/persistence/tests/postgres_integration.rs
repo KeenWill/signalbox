@@ -1,3 +1,10 @@
+#![allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unwrap_used,
+    reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
+)]
+
 use std::{collections::VecDeque, error::Error, future::Future, sync::Arc};
 
 use rust_decimal::Decimal;
@@ -4018,6 +4025,100 @@ async fn s03_inv009_start_eligible_turn_false_wakeups_are_noops() -> Result<(), 
     .fetch_one(&pool)
     .await?;
     assert_eq!(effects, (0, 0, 0, 0));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S01 / INV-009 / ADR-0035: once the scheduler lock admits and prepares one
+/// exact queued candidate, a guarded activation that matches no row is durable
+/// divergence, not a stale wake-up, and rolls back every preceding write.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s01_inv009_start_eligible_turn_zero_row_guard_is_inconsistent()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0x3a2, 0x7a2, direct(0x8a2)))
+        .await?;
+    let session = SessionId::from_uuid(Uuid::from_u128(0x7a2));
+    let turn = TurnId::from_uuid(Uuid::from_u128(0xaa2));
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                0x3a3,
+                0x7a2,
+                "guarded update divergence",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x9a2)),
+            Some(turn),
+        )
+        .await?;
+
+    sqlx::query(
+        "CREATE FUNCTION suppress_guarded_activation()
+         RETURNS trigger
+         LANGUAGE plpgsql
+         AS $$
+         BEGIN
+             RETURN NULL;
+         END
+         $$",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "CREATE TRIGGER suppress_guarded_activation
+         BEFORE UPDATE OF state_kind ON turn_lifecycle
+         FOR EACH ROW
+         WHEN (OLD.state_kind = 'queued' AND NEW.state_kind = 'active')
+         EXECUTE FUNCTION suppress_guarded_activation()",
+    )
+    .execute(&pool)
+    .await?;
+
+    let mut service = StartEligibleTurnService::new(
+        FixedStartEligibleTurnIds::new(
+            [SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xda2))],
+            [ContextFrontierId::from_uuid(Uuid::from_u128(0xea2))],
+            [TurnAttemptId::from_uuid(Uuid::from_u128(0xba2))],
+        ),
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    let error = service
+        .execute(session)
+        .await
+        .expect_err("zero-row guarded activation must surface durable divergence");
+    assert!(matches!(
+        error,
+        StartEligibleTurnRepositoryError::Corruption(StartEligibleTurnCorruption::Inconsistent(
+            "guarded activation matched no row"
+        ))
+    ));
+
+    let unchanged: (String, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            state_kind,
+            (SELECT count(*)
+               FROM semantic_transcript_entry
+              WHERE source_session_id = $2),
+            (SELECT count(*)
+               FROM context_frontier
+              WHERE owning_session_id = $2),
+            (SELECT count(*)
+               FROM turn_attempt
+              WHERE session_id = $2)
+         FROM turn_lifecycle
+        WHERE turn_id = $1",
+    )
+    .bind(turn.into_uuid())
+    .bind(session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(unchanged, ("queued".into(), 0, 0, 0));
 
     pool.close().await;
     drop(container);

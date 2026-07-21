@@ -1,0 +1,30 @@
+# Supply-chain policy checked by cargo-deny in CI
+# (.github/workflows/deny.yml) on pull requests and a weekly schedule.
+# Adopted by the 2026-07-20 decision-log entry.
+
+[graph]
+all-features = true
+
+[advisories]
+# Version-2 defaults: vulnerabilities, unmaintained crates, unsound crates,
+# and yanked releases are all errors. Every ignore added here must carry a
+# comment stating the advisory ID and the reason it is acceptable.
+ignore = []
+
+[licenses]
+# Exact allow-list for the current dependency tree (every dependency is
+# MIT, Apache-2.0, or an OR-expression satisfiable by this list, plus the
+# listed single-license crates). Extend deliberately when a new dependency
+# introduces a new license, in the same pull request that adds it.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "ISC",
+  "BSD-3-Clause",
+  "Unicode-3.0",
+  "Zlib",
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

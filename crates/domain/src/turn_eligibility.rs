@@ -127,6 +127,10 @@ impl ActiveTurnSchedulingReconstitutionInput {
 
     fn canonical_phase(&self) -> ActiveTurnPhase {
         let current_attempt = CurrentTurnAttempt::prepared(self.current_attempt);
+        #[expect(
+            clippy::expect_used,
+            reason = "temporary ledger site: reconstitution validates the stored attempt transition; typed conversion is commissioned by the 2026-07-20 audit"
+        )]
         let current_attempt = match self.state {
             EvidenceFreeCurrentAttemptState::Prepared => current_attempt,
             EvidenceFreeCurrentAttemptState::Running => current_attempt
@@ -1026,6 +1030,18 @@ pub enum AcceptedInputEligibilityFailure {
     /// The proposed initial-attempt identity is already current in the
     /// complete scheduling projection.
     InitialAttemptIdentityAlreadyExists,
+    /// Internal preparation could not construct the origin-only first
+    /// frontier from the already-validated projection.
+    InternalOriginFrontierConstructionFailed,
+    /// Internal preparation found earliest queued work after a predecessor
+    /// without the terminal frontier guaranteed by scheduling reconstitution.
+    InternalPredecessorTerminalFrontierMissing {
+        /// The predecessor whose validated terminal frontier was absent.
+        predecessor: TurnId,
+    },
+    /// Internal preparation could not append the fresh origin entry to the
+    /// predecessor frontier guaranteed by scheduling reconstitution.
+    InternalStartingFrontierDerivationFailed,
 }
 
 /// Rejected eligibility preparation retaining the complete projection and
@@ -1623,6 +1639,10 @@ fn reconstitute_active_acceptance_tail(
         );
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "temporary ledger site: the active record is inserted before tail validation; typed conversion is commissioned by the 2026-07-20 audit"
+    )]
     let latest_known_origin_position = records_by_turn
         .values()
         .map(|record| record.order.acceptance_position())
@@ -2144,24 +2164,43 @@ fn prepare_earliest_queued_activation(
         },
     );
     let (lineage, starting_snapshot) = if index == 0 {
-        let snapshot = ResolvedContextFrontierSnapshot::try_from_candidate(
+        let snapshot = match ResolvedContextFrontierSnapshot::try_from_candidate(
             source_session,
             identities.starting_frontier,
             vec![origin_entry.reference()],
-        )
-        .expect("one fresh exact origin reference is ordered and distinct");
+        ) {
+            Ok(snapshot) => snapshot,
+            Err(_) => {
+                return Err(fail(
+                    projection,
+                    AcceptedInputEligibilityFailure::InternalOriginFrontierConstructionFailed,
+                ));
+            }
+        };
         (AcceptedInputStartingLineage::FirstInSession, snapshot)
     } else {
         let predecessor = &projection.turns[index - 1];
-        let terminal_frontier = predecessor
-            .failed_terminal_frontier()
-            .expect("validated earliest queued work follows a failed-terminal prefix");
-        let snapshot = terminal_frontier
-            .derive_appending_candidate(
-                identities.starting_frontier,
-                vec![origin_entry.reference()],
-            )
-            .expect("fresh entry and snapshot identities preserve the validated prefix");
+        let predecessor_turn = predecessor.turn;
+        let Some(terminal_frontier) = predecessor.failed_terminal_frontier() else {
+            return Err(fail(
+                projection,
+                AcceptedInputEligibilityFailure::InternalPredecessorTerminalFrontierMissing {
+                    predecessor: predecessor_turn,
+                },
+            ));
+        };
+        let snapshot = match terminal_frontier.derive_appending_candidate(
+            identities.starting_frontier,
+            vec![origin_entry.reference()],
+        ) {
+            Ok(snapshot) => snapshot,
+            Err(_) => {
+                return Err(fail(
+                    projection,
+                    AcceptedInputEligibilityFailure::InternalStartingFrontierDerivationFailed,
+                ));
+            }
+        };
         (
             AcceptedInputStartingLineage::After {
                 immediate_predecessor: predecessor.turn,
