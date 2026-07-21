@@ -101,6 +101,21 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             );
         }
     };
+    if completion.object.as_deref() != Some("chat.completion") {
+        return unintelligible(
+            format!(
+                "success response carries object {:?}; chat.completion is required",
+                completion.object.as_deref().unwrap_or("<absent>")
+            ),
+            exchange,
+            completion.model.map(ProviderReportedModel::new),
+            completion
+                .usage
+                .as_ref()
+                .map(convert_usage)
+                .unwrap_or_default(),
+        );
+    }
     let reported_model = completion.model.map(ProviderReportedModel::new);
     if let Some(model) = &reported_model {
         sink.observe(Observation {
@@ -164,10 +179,6 @@ pub(crate) fn decode_buffered_response<C: Clone>(
     for call in &message.tool_calls {
         match convert_tool_call(call) {
             Ok(proposal) => {
-                sink.observe(Observation {
-                    correlation: correlation.clone(),
-                    fact: ObservationFact::ToolCallProposed(proposal.clone()),
-                });
                 content.push(AssistantPart::ToolCall(proposal));
             }
             Err(detail) => return unintelligible(detail, exchange, reported_model, usage),
@@ -196,6 +207,25 @@ pub(crate) fn decode_buffered_response<C: Clone>(
         .filter(|refusal| !refusal.is_empty());
     if refusal_payload.is_some() {
         finish = FinishReason::Refusal;
+    }
+    let has_tool_calls = content
+        .iter()
+        .any(|part| matches!(part, AssistantPart::ToolCall(_)));
+    if has_tool_calls != matches!(finish, FinishReason::ToolUse) {
+        return unintelligible(
+            "tool-call content does not match the reported finish_reason".to_string(),
+            exchange,
+            reported_model,
+            usage,
+        );
+    }
+    for part in &content {
+        if let AssistantPart::ToolCall(proposal) = part {
+            sink.observe(Observation {
+                correlation: correlation.clone(),
+                fact: ObservationFact::ToolCallProposed(proposal.clone()),
+            });
+        }
     }
     sink.observe(Observation {
         correlation: correlation.clone(),
@@ -277,6 +307,7 @@ mod tests {
         let (evidence, observations) = decode(
             r#"{
                 "id": "chatcmpl_1",
+                "object": "chat.completion",
                 "model": "model-exact-1",
                 "choices": [{
                     "index": 0,
@@ -349,6 +380,7 @@ mod tests {
         let (evidence, _) = decode(
             r#"{
                 "id": "chatcmpl_1",
+                "object": "chat.completion",
                 "model": "model-exact-1",
                 "choices": [{
                     "index": 0,
@@ -378,6 +410,7 @@ mod tests {
         let (evidence, _) = decode(
             r#"{
                 "id": "chatcmpl_1",
+                "object": "chat.completion",
                 "model": "model-exact-1",
                 "choices": [{
                     "index": 0,
@@ -401,6 +434,7 @@ mod tests {
         let (evidence, _) = decode(
             r#"{
                 "id": "chatcmpl_1",
+                "object": "chat.completion",
                 "model": "model-exact-1",
                 "choices": [{"message": {"role": "assistant", "content": "partial"}}],
                 "usage": {"prompt_tokens": 3}
@@ -432,6 +466,38 @@ mod tests {
         assert!(matches!(
             loss.cause,
             LossCause::ResponseUnintelligible { .. }
+        ));
+    }
+
+    #[test]
+    fn a_wrong_completion_object_is_boundary_loss() {
+        let (evidence, _) = decode(
+            r#"{"id":"chatcmpl_1","object":"response","model":"model-exact-1",
+                "choices":[{"index":0,"message":{"role":"assistant","content":"hi"},
+                "finish_reason":"stop"}]}"#,
+        );
+
+        assert!(matches!(evidence, TerminalEvidence::BoundaryLoss(_)));
+    }
+
+    #[test]
+    fn tool_content_and_finish_reason_must_agree() {
+        let (tool_with_stop, _) = decode(
+            r#"{"object":"chat.completion","choices":[{"index":0,
+                "message":{"role":"assistant","tool_calls":[{"id":"call_1",
+                "type":"function","function":{"name":"ping","arguments":"{}"}}]},
+                "finish_reason":"stop"}]}"#,
+        );
+        let (tool_finish_without_tool, _) = decode(
+            r#"{"object":"chat.completion","choices":[{"index":0,
+                "message":{"role":"assistant","content":"hi"},
+                "finish_reason":"tool_calls"}]}"#,
+        );
+
+        assert!(matches!(tool_with_stop, TerminalEvidence::BoundaryLoss(_)));
+        assert!(matches!(
+            tool_finish_without_tool,
+            TerminalEvidence::BoundaryLoss(_)
         ));
     }
 
@@ -539,6 +605,7 @@ mod tests {
         let (evidence, observations) = decode(
             r#"{
                 "id": "chatcmpl_1",
+                "object": "chat.completion",
                 "model": "model-exact-1",
                 "choices": [{
                     "index": 0,

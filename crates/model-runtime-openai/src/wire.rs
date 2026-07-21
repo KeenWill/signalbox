@@ -82,6 +82,7 @@ pub(crate) struct WireFunctionDefinition {
 #[derive(Debug, Deserialize)]
 pub(crate) struct ChatCompletion {
     pub id: Option<String>,
+    pub object: Option<String>,
     pub model: Option<String>,
     #[serde(default)]
     pub choices: Vec<ChatChoice>,
@@ -197,8 +198,7 @@ pub(crate) struct ChunkDelta {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ChunkToolCall {
-    #[serde(default)]
-    pub index: u32,
+    pub index: Option<u32>,
     pub id: Option<String>,
     #[serde(rename = "type")]
     pub kind: Option<String>,

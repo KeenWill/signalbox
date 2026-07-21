@@ -601,10 +601,18 @@ fn redact_evidence(evidence: TerminalEvidence, api_key: &CredentialValue) -> Ter
         |facts: TransportFacts| -> TransportFacts { TransportFacts::new(redact(facts.detail)) };
     match evidence {
         TerminalEvidence::ProviderError(mut error) => {
+            error.exchange = redact_exchange(error.exchange, api_key);
+            error.reported_model = error.reported_model.map(|model| {
+                ProviderReportedModel::new(redact_text(model.as_str().to_string(), api_key))
+            });
             error.native = redact_native(error.native);
             TerminalEvidence::ProviderError(error)
         }
         TerminalEvidence::CancellationConfirmed(mut confirmed) => {
+            confirmed.exchange = redact_exchange(confirmed.exchange, api_key);
+            confirmed.reported_model = confirmed.reported_model.map(|model| {
+                ProviderReportedModel::new(redact_text(model.as_str().to_string(), api_key))
+            });
             confirmed.native = redact_native(confirmed.native);
             TerminalEvidence::CancellationConfirmed(confirmed)
         }
@@ -623,6 +631,16 @@ fn redact_evidence(evidence: TerminalEvidence, api_key: &CredentialValue) -> Ter
             TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence { cause })
         }
         TerminalEvidence::BoundaryLoss(mut loss) => {
+            loss.exchange = redact_exchange(loss.exchange, api_key);
+            loss.reported_model = loss.reported_model.map(|model| {
+                ProviderReportedModel::new(redact_text(model.as_str().to_string(), api_key))
+            });
+            loss.finish_reported = loss.finish_reported.map(|finish| match finish {
+                FinishReason::Unrecognized { provider_token } => FinishReason::Unrecognized {
+                    provider_token: redact_text(provider_token, api_key),
+                },
+                finish => finish,
+            });
             loss.cause = match loss.cause {
                 LossCause::TimedOut(facts) => LossCause::TimedOut(redact_transport(facts)),
                 LossCause::TransportFailed(facts) => {
@@ -738,6 +756,9 @@ fn redact_assistant_part(part: AssistantPart, credential: &CredentialValue) -> A
 /// when its bytes cannot form one. The value never appears in errors or
 /// logs.
 fn sensitive_bearer(api_key: &CredentialValue) -> Option<HeaderValue> {
+    if api_key.expose_bytes().is_empty() {
+        return None;
+    }
     let mut bytes = b"Bearer ".to_vec();
     bytes.extend_from_slice(api_key.expose_bytes());
     let mut header = HeaderValue::from_bytes(&bytes).ok()?;

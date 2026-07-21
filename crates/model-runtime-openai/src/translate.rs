@@ -198,6 +198,13 @@ fn wire_messages(
                 })
             }
             MessagePart::ToolResult(result) => {
+                if role != "user" {
+                    return Err(PreparationFailure::UnsupportedOperation {
+                        detail: "the Chat Completions wire contract permits tool results only \
+                                 in user history"
+                            .to_string(),
+                    });
+                }
                 if result.is_error {
                     // The tool message has no native failure flag; encoding
                     // one would alter the caller's payload, and dropping the
@@ -541,6 +548,26 @@ mod tests {
         let failure = build_request(&operation)
             .expect_err("a failed-tool fact this wire contract cannot carry must not vanish");
 
+        assert!(matches!(
+            failure,
+            PreparationFailure::UnsupportedOperation { .. }
+        ));
+    }
+
+    #[test]
+    fn an_assistant_role_tool_result_is_rejected_before_any_send() {
+        let mut operation = operation("call-assistant-result");
+        operation.messages = vec![ConversationMessage {
+            role: ConversationRole::Assistant,
+            parts: vec![MessagePart::ToolResult(ToolResultRecord {
+                tool_call_id: ToolCallId::new("call_a1"),
+                content: "result".to_string(),
+                is_error: false,
+            })],
+        }];
+
+        let failure = build_request(&operation)
+            .expect_err("rewriting assistant-authored material as a tool role changes history");
         assert!(matches!(
             failure,
             PreparationFailure::UnsupportedOperation { .. }

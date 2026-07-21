@@ -129,6 +129,18 @@ impl CredentialAccess for FixedKey {
     }
 }
 
+#[derive(Debug)]
+struct EmptyKey;
+
+impl CredentialAccess for EmptyKey {
+    async fn resolve(
+        &self,
+        _reference: &CredentialReference,
+    ) -> Result<CredentialValue, CredentialAccessError> {
+        Ok(CredentialValue::new(Vec::new()))
+    }
+}
+
 fn runtime_for(server_base_url: &str) -> OpenAiRuntime<FixedKey> {
     let mut config = OpenAiConfig::new();
     config.base_url = server_base_url.to_string();
@@ -302,13 +314,40 @@ async fn credential_rejection_is_typed_provider_error_evidence() {
 }
 
 #[tokio::test]
+async fn an_empty_credential_is_rejected_before_send() {
+    let mut config = OpenAiConfig::new();
+    config.base_url = "http://127.0.0.1:1".to_string();
+    let runtime = OpenAiRuntime::new(config, EmptyKey).expect("configuration constructs");
+
+    let (report, observations) = execute(
+        &runtime,
+        operation("call-empty-key"),
+        CancellationSignal::never(),
+    )
+    .await;
+
+    let TerminalEvidence::ProvenUnsent(unsent) = report.evidence else {
+        panic!("an empty credential is locally unusable before send");
+    };
+    assert!(matches!(unsent.cause, UnsentCause::PreparationFailed(_)));
+    assert!(
+        !observations
+            .iter()
+            .any(|observation| matches!(observation.fact, ObservationFact::SendCommenced))
+    );
+}
+
+#[tokio::test]
 async fn a_redirect_is_never_followed_and_surfaces_as_evidence() {
     // The response's Location points back at the same server: a client that
     // followed redirects would replay the POST as a second request.
     let server = CannedServer::serving(vec![
         http_response(
             "307 Temporary Redirect",
-            &[("location", "/v1/chat/completions")],
+            &[
+                ("location", "/v1/chat/completions"),
+                ("x-request-id", "redirect-key_loop"),
+            ],
             b"",
         ),
         http_response("200 OK", &[("content-type", "application/json")], b"{}"),
@@ -323,6 +362,7 @@ async fn a_redirect_is_never_followed_and_surfaces_as_evidence() {
     };
     assert_eq!(loss.cause, LossCause::UnexpectedHttpStatus);
     assert_eq!(loss.exchange.http_status, Some(307));
+    assert!(!format!("{loss:?}").contains("key_loop"));
     assert_eq!(
         server.recorded_requests().len(),
         1,
@@ -428,7 +468,10 @@ async fn provider_error_text_reflecting_the_key_is_redacted() {
                     "code":"invalid_api_key"}}"#;
     let server = CannedServer::serving(vec![http_response(
         "401 Unauthorized",
-        &[("content-type", "application/json")],
+        &[
+            ("content-type", "application/json"),
+            ("x-request-id", "request-key_loop"),
+        ],
         body,
     )])
     .await;
@@ -439,6 +482,7 @@ async fn provider_error_text_reflecting_the_key_is_redacted() {
     let TerminalEvidence::ProviderError(error) = report.evidence else {
         panic!("a definitive error response must classify as provider error");
     };
+    assert!(!format!("{error:?}").contains("key_loop"));
     let message = error
         .native
         .message
@@ -452,7 +496,8 @@ async fn provider_error_text_reflecting_the_key_is_redacted() {
 
 #[tokio::test]
 async fn successful_content_reflecting_the_key_is_redacted() {
-    let body = br#"{"id":"chatcmpl_key_loop","model":"model-key_loop","choices":[{
+    let body = br#"{"id":"chatcmpl_key_loop","object":"chat.completion",
+        "model":"model-key_loop","choices":[{
         "index":0,"message":{"role":"assistant","content":"reflected key_loop"},
         "finish_reason":"stop"}]}"#;
     let server = CannedServer::serving(vec![http_response(

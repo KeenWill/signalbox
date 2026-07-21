@@ -174,10 +174,13 @@ impl StreamDecoder {
                     self.refusal_text.push_str(&refusal);
                 }
                 for call in delta.tool_calls {
+                    let Some(call_index) = call.index else {
+                        return self.violation("streamed tool call carries no index");
+                    };
                     match call.kind.as_deref() {
                         Some("function") => {
                             self.tool_builders
-                                .entry(call.index)
+                                .entry(call_index)
                                 .or_default()
                                 .saw_function_type = true;
                         }
@@ -187,19 +190,19 @@ impl StreamDecoder {
                             // it into an ordinary proposal either.
                             return self.violation(format!(
                                 "tool call at index {} carries unrecognized type {kind:?}",
-                                call.index
+                                call_index
                             ));
                         }
                         None => {}
                     }
-                    let builder = self.tool_builders.entry(call.index).or_default();
+                    let builder = self.tool_builders.entry(call_index).or_default();
                     if let Some(id) = call.id {
                         match &builder.id {
                             None => builder.id = Some(id),
                             Some(existing) if *existing != id => {
                                 return self.violation(format!(
                                     "tool call at index {} reports conflicting ids",
-                                    call.index
+                                    call_index
                                 ));
                             }
                             Some(_) => {}
@@ -212,14 +215,14 @@ impl StreamDecoder {
                                 Some(existing) if *existing != name => {
                                     return self.violation(format!(
                                         "tool call at index {} reports conflicting names",
-                                        call.index
+                                        call_index
                                     ));
                                 }
                                 Some(_) => {}
                             }
                         }
                         if let Some(fragment) = function.arguments {
-                            let builder = self.tool_builders.entry(call.index).or_default();
+                            let builder = self.tool_builders.entry(call_index).or_default();
                             builder.saw_arguments = true;
                             builder.arguments.push_str(&fragment);
                             if !fragment.is_empty() {
@@ -232,7 +235,7 @@ impl StreamDecoder {
                                         // exists) at 0, then tool call k. Stable
                                         // because content cannot arrive after
                                         // tool fragments (violation above).
-                                        index: text_parts + call.index,
+                                        index: text_parts + call_index,
                                         fragment,
                                     },
                                 );
@@ -248,6 +251,11 @@ impl StreamDecoder {
                     // outcome; the observation must match the terminal
                     // evidence (the buffered path normalizes identically).
                     finish = FinishReason::Refusal;
+                }
+                let has_tool_calls = !self.tool_builders.is_empty();
+                if has_tool_calls != matches!(finish, FinishReason::ToolUse) {
+                    return self
+                        .violation("tool-call content does not match the reported finish_reason");
                 }
                 // The choice is complete here, so its proposals are final:
                 // emit them before announcing the finish, in index order.
@@ -983,6 +991,43 @@ mod tests {
         assert!(matches!(
             loss.cause,
             LossCause::StreamProtocolViolation { .. }
+        ));
+    }
+
+    #[test]
+    fn a_streamed_tool_call_without_an_index_is_a_protocol_violation() {
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\
+              \"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"ping\",\
+              \"arguments\":\"{}\"}}]}}]}\n\n",
+        ]);
+
+        assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
+    }
+
+    #[test]
+    fn streamed_tool_content_and_finish_reason_must_agree() {
+        let (tool_with_stop, _) = drive(&[
+            first_chunk(),
+            b"data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
+              \"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"ping\",\
+              \"arguments\":\"{}\"}}]}}]}\n\n",
+            b"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        ]);
+        let (tool_finish_without_tool, _) = drive(&[
+            first_chunk(),
+            b"data: {\"choices\":[{\"index\":0,\"delta\":{},\
+              \"finish_reason\":\"tool_calls\"}]}\n\n",
+        ]);
+
+        assert!(matches!(
+            tool_with_stop,
+            Some(TerminalEvidence::BoundaryLoss(_))
+        ));
+        assert!(matches!(
+            tool_finish_without_tool,
+            Some(TerminalEvidence::BoundaryLoss(_))
         ));
     }
 
