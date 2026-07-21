@@ -2413,6 +2413,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-model-runtime-openai"
+version = "0.0.0"
+dependencies = [
+ "expect-test",
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "signalbox-expect-table",
+ "signalbox-model-runtime",
+ "tokio",
+]
+
+[[package]]
 name = "signalbox-persistence"
 version = "0.0.0"
 dependencies = [

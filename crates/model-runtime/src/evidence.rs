@@ -283,6 +283,9 @@ pub enum ProviderErrorKind {
 pub struct NativeErrorFacts {
     /// The provider's native error-type token, when the payload carried one.
     pub error_token: Option<String>,
+    /// The provider's native error code, when the payload carried one
+    /// distinct from the type token.
+    pub error_code: Option<String>,
     /// The provider's rendered error message, when the payload carried one.
     pub message: Option<String>,
 }

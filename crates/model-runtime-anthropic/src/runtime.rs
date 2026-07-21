@@ -444,6 +444,7 @@ async fn finish_error(
         kind: classify_error_status(status),
         native: NativeErrorFacts {
             error_token: None,
+            error_code: None,
             message: Some(lossy_truncated(&body)),
         },
     })
