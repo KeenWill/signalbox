@@ -1,0 +1,71 @@
+// Conservative dependency-update policy, executed by Renovate.
+//
+// Why this repository deliberately delays adopting newly published versions:
+// supply-chain compromises of legitimate packages are typically discovered
+// and yanked within days of the malicious publish, so the highest-risk moment
+// to adopt a release is immediately after it appears. Waiting out that window
+// (7 days for patch and minor updates, 14 days for major updates), combined
+// with strict internal checks, trades a little freshness for integrity.
+// Security advisories bypass the delay: vulnerability-alert pull requests
+// keep Renovate's default behavior, which applies no minimum release age, so
+// known-vulnerable versions are replaced promptly.
+//
+// This file is inert until the Mend Renovate GitHub App is enabled for the
+// repository, which only the owner can do. Because a valid configuration
+// already exists at a default location, first activation skips the
+// onboarding pull request and applies this policy directly.
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  // Renovate's maintained baseline: monorepo groupings, replacement rules for
+  // renamed packages, and workarounds for known upstream oddities. Every
+  // policy choice below is explicit and overrides it where they overlap.
+  "extends": ["config:recommended"],
+  // One always-current issue listing every open, pending, and rate-limited
+  // update — including versions still waiting out their release age — so
+  // delayed updates stay visible instead of silently deferred.
+  "dependencyDashboard": true,
+  // With minimumReleaseAge set, "strict" excludes releases still inside
+  // their window from consideration entirely, rather than offering them
+  // early. (This is Renovate's default; stated here because the policy
+  // depends on it.)
+  "internalChecksFilter": "strict",
+  // The cargo manager's default file pattern ((^|/)Cargo\.toml$) already
+  // covers the root manifest and every workspace member under crates/ and
+  // apps/, so no path configuration is needed for full workspace coverage.
+  "packageRules": [
+    {
+      // Patch and minor crate updates: adopt only after the release has
+      // been public for a week.
+      "matchManagers": ["cargo"],
+      "matchUpdateTypes": ["patch", "minor"],
+      "minimumReleaseAge": "7 days",
+      // Require a trustworthy release timestamp; a release whose age cannot
+      // be established does not get the benefit of the doubt. (Renovate's
+      // default, restated because the age gates above rely on it.)
+      "minimumReleaseAgeBehaviour": "timestamp-required",
+    },
+    {
+      // Major crate updates carry the most behavioral and supply-chain
+      // risk: wait two weeks, and never automerge — the owner reviews and
+      // merges every major update personally.
+      "matchManagers": ["cargo"],
+      "matchUpdateTypes": ["major"],
+      "minimumReleaseAge": "14 days",
+      "minimumReleaseAgeBehaviour": "timestamp-required",
+      "automerge": false,
+    },
+    {
+      // Patch updates that survive the 7-day window may automerge, but only
+      // once CI passes: platform automerge (GitHub native auto-merge) merges
+      // only after all required status checks succeed, and Renovate's
+      // fallback automerge likewise requires a green branch. This is a
+      // deliberate, narrow exception to the owner-merges-every-PR norm,
+      // recorded in docs/decisions.md.
+      "matchManagers": ["cargo"],
+      "matchUpdateTypes": ["patch"],
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": true,
+    },
+  ],
+}

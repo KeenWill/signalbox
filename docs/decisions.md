@@ -9,6 +9,39 @@ that constrains several components — require a full record under
 [decisions/](decisions/README.md) instead. Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-20 — Conservative Renovate policy with release-age gates
+
+**Context.** Dependency versions currently move only when a slice hand-bumps
+them, and newly published crate versions are riskiest in their first days, when
+compromised releases of legitimate crates are typically discovered and yanked.
+The
+[adversarial-audit corrective package](#2026-07-20--adversarial-audit-corrective-package)
+added the cargo-deny gate but nothing schedules updates.
+
+**Decision.** Adopt Renovate through a commented root `renovate.json5`: the
+cargo manager waits 7 days before patch and minor updates and 14 days before
+major ones, requires trustworthy release timestamps
+(`minimumReleaseAgeBehaviour: "timestamp-required"`), filters pending versions
+strictly, and maintains a dependency-dashboard issue. Vulnerability-alert pull
+requests keep Renovate defaults and bypass the age gates. Major updates never
+automerge. Patch updates automerge once CI passes — a deliberate, narrow
+exception to the owner-merges-every-pull-request norm, applying only to Renovate
+patch pull requests with green CI. The configuration is inert until the owner
+enables the Mend Renovate GitHub App. The cargo-deny gate gains its missing
+`bans` check (`deny.toml` `[bans]` plus the workflow invocation), completing the
+advisories/bans/licenses/sources set.
+
+**Rejected alternatives.** Adopting new versions immediately: maximizes exposure
+inside the post-publish compromise window. Applying the same delay to security
+fixes: leaves known-vulnerable versions in place precisely when speed matters.
+Automerging minor updates too: pre-1.0 crates routinely change behavior in minor
+releases. Waiving the age gate when a registry lacks release timestamps: an
+unverifiable age is not evidence of maturity.
+
+**Affects.** `renovate.json5` (new), `deny.toml`, `.github/workflows/deny.yml`,
+and this log; no crate code, manifests, or runtime behavior. Renovate acts only
+after the owner installs the app.
+
 ## 2026-07-20 — ADR-0044 post-merge review corrections
 
 **Context.** Post-merge review of the pull request that introduced
