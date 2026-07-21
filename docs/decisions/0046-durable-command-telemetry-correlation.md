@@ -135,8 +135,17 @@ Existing domain, application, or persistence error `Debug` and `Display`
 representations may contain a raw identifier and are therefore sensitive
 internal values, not telemetry-safe renderings. Observability code translates
 the typed error and derives the token from its typed identifier; it does not log
-the formatted error. This record does not redefine general-purpose error or
-panic formatting outside the operational telemetry boundary.
+the formatted error. This record does not redefine general-purpose error
+formatting outside the operational telemetry boundary.
+
+Hubd installs a sanitized panic hook before configuration loading, migrations,
+recovery, task spawning, or work admission. The hook replaces rather than chains
+to the default hook, never renders the panic payload or a dynamically formatted
+error, and emits only a fixed panic classification plus an optional static
+source location. It must not emit a raw command identifier, user content,
+credential, epoch key, or other free-form runtime value. The merged repository
+panic discipline still requires expected failures to use typed errors; the hook
+is the last-resort redaction boundary, not normal error reporting or recovery.
 
 Registry-level and pre-claim events required by
 [ADR-0044](0044-hub-runtime-foundations.md) use the token without inventing a
@@ -150,11 +159,14 @@ fails hubd startup before migrations, recovery, scheduling, protocol admission,
 or worker startup. An empty, longer-than-32-byte, or otherwise invalid `key-id`
 in that same document is likewise a configuration failure. There is no fallback
 to a raw identifier, unkeyed digest, process-random key, or fixed default key.
-If the already-validated in-memory derivation capability becomes unavailable at
-runtime, the event may retain its fixed taxonomy and only the hub-minted
-aggregate identifiers permitted by [ADR-0044](0044-hub-runtime-foundations.md),
-but omits command correlation; it must not substitute raw or reversible
-material. The failure is itself reported without the command ID or secret key.
+
+Successful startup constructs one immutable in-memory capability that owns the
+validated key epoch. It performs no later file read, refresh, lookup, or other
+fallible external operation: derivation is total for every valid
+`DurableCommandId`, and the capability remains available for the process
+lifetime. Every command-scoped corruption event therefore carries the required
+token. A derivation implementation defect is a process-fatal bug handled by the
+sanitized panic boundary, never an event-level omission or raw-ID fallback.
 
 ## Invariants
 
