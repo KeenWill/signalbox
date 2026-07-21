@@ -331,16 +331,25 @@ From the pinned clone's history: 104 commits (88 non-merge) between 2025-12-27
 and 2026-07-17; authors: Jan Feddersen 73 (two identities), acoliver 17, Sewer56
 2, dependabot 12. Maintenance is concentrated: Jan Feddersen and acoliver
 account for 90 of 92 human-authored commits, with 73 attributed to Jan
-Feddersen. Repo-health facts from the handoff (checked 2026-07-20, not
-re-verified here): 20 stars, 4 forks, crates.io `serdes-ai` 0.2.6 published
-2026-02-20 — five months behind repo activity — with 2,105 lifetime downloads.
-In-repo signals verified directly: README quick-start pins `serdes-ai = "0.1"`
-while the workspace is 0.2.6; no integration-test binaries; no live-provider
-tests; per-adapter unit coverage averages roughly seven tests across 15
-adapters; `serdes-ai-macros` has zero unit tests; the Anthropic streaming path
-received recent integrity-hardening work (the pinned commit is that merge) that
-was not mirrored to the OpenAI chat path. No API-stability policy or deprecation
-process is documented.
+Feddersen. This full-history clone count differs from ADR-0047's earlier
+repository-health snapshot of roughly 43 commits and two human contributors;
+that record does not preserve its query or counting method, so the figures
+cannot be normalized after the fact. ADR-0047 remains authoritative for its
+accepted substrate posture, while these commands document this audit's
+reproducible pinned-clone measurement; the discrepancy does not change the
+shared concentration signal or reopen the later recorded hand-roll decision in
+the
+[decision log](../decisions.md#2026-07-20--hand-roll-the-typed-model-runtime-substrate).
+Repo-health facts from the handoff (checked 2026-07-20, not re-verified here):
+20 stars, 4 forks, crates.io `serdes-ai` 0.2.6 published 2026-02-20 — five
+months behind repo activity — with 2,105 lifetime downloads. In-repo signals
+verified directly: README quick-start pins `serdes-ai = "0.1"` while the
+workspace is 0.2.6; no integration-test binaries; no live-provider tests;
+per-adapter unit coverage averages roughly seven tests across 15 adapters;
+`serdes-ai-macros` has zero unit tests; the Anthropic streaming path received
+recent integrity-hardening work (the pinned commit is that merge) that was not
+mirrored to the OpenAI chat path. No API-stability policy or deprecation process
+is documented.
 
 ### Q10 — PydanticAI-derived behaviors: valuable vs conflicting
 
@@ -445,26 +454,28 @@ its stream integrity is the stronger audited design. OpenAI and schema/tool work
 remain in the table to record Phase-0 audit coverage, but are not part of that
 smoke gate. Names are illustrative.
 
-| Module               | Milestone scope | Content                                                                                                                                                                                                                                                        | Design reference                                                                                                                 |
-| -------------------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `provider-core`      | Smoke minimum   | Request/response message and part types, settings, usage incl. cache tokens, typed terminal evidence carrying [ADR-0043](../decisions/0043-provider-failure-classification.md) disposition + native status + `vendor_id` + reported model; caller-supplied IDs | `serdes-ai-core/src/messages/`, `serdes-ai-core/src/settings.rs`, `serdes-ai-core/src/usage.rs`                                  |
-| shared SSE framing   | Smoke minimum   | Provider-agnostic SSE record parser with UTF-8/overflow/incomplete-record errors                                                                                                                                                                               | `serdes-ai-streaming/src/sse.rs`                                                                                                 |
-| `provider-anthropic` | One adapter     | Request builder, exhaustive native-status classification, SSE parser with full-send observation, `message_start` identity surfacing, `message_stop`-gated terminal event, refusal handling                                                                     | `serdes-ai-models/src/anthropic/types.rs`, `serdes-ai-models/src/anthropic/stream.rs`, `serdes-ai-models/src/anthropic/error.rs` |
-| `provider-openai`    | Later adapter   | Equivalent chat-completions shape: `[DONE]`/EOF distinction, finish-reason + usage surfacing, refusal payload as first-class evidence                                                                                                                          | `serdes-ai-models/src/openai/types.rs`, `serdes-ai-models/src/openai/stream.rs`, `serdes-ai-models/src/openai/chat.rs`           |
-| `provider-schema`    | Later tool work | JSON-schema generation for output contracts and tools (evaluate `schemars` before writing derives), output parse/validation failure classes, application-validator hook                                                                                        | `serdes-ai-output/src/`, `serdes-ai-tools/src/definition.rs`, `serdes-ai-macros/src/lib.rs`                                      |
+| Module               | Milestone scope | Content                                                                                                                                                                                                                                                                                  | Design reference                                                                                                                 |
+| -------------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `provider-core`      | Smoke minimum   | Request/response message and part types, settings, usage incl. cache tokens, and typed terminal evidence carrying native status, send-boundary facts, refusal/cancellation/completion facts, `vendor_id`, and reported model; caller-supplied IDs — Layer 2 derives ADR-0043 disposition | `serdes-ai-core/src/messages/`, `serdes-ai-core/src/settings.rs`, `serdes-ai-core/src/usage.rs`                                  |
+| shared SSE framing   | Smoke minimum   | Provider-agnostic SSE record parser with UTF-8/overflow/incomplete-record errors                                                                                                                                                                                                         | `serdes-ai-streaming/src/sse.rs`                                                                                                 |
+| `provider-anthropic` | One adapter     | Request builder, native-response parsing into typed evidence, SSE parser with full-send observation, `message_start` identity surfacing, `message_stop`-gated terminal event, refusal handling                                                                                           | `serdes-ai-models/src/anthropic/types.rs`, `serdes-ai-models/src/anthropic/stream.rs`, `serdes-ai-models/src/anthropic/error.rs` |
+| `provider-openai`    | Later adapter   | Equivalent chat-completions shape: `[DONE]`/EOF distinction, finish-reason + usage surfacing, refusal payload as first-class evidence                                                                                                                                                    | `serdes-ai-models/src/openai/types.rs`, `serdes-ai-models/src/openai/stream.rs`, `serdes-ai-models/src/openai/chat.rs`           |
+| `provider-schema`    | Later tool work | JSON-schema generation for output contracts and tools (evaluate `schemars` before writing derives), output parse/validation failure classes, application-validator hook                                                                                                                  | `serdes-ai-output/src/`, `serdes-ai-tools/src/definition.rs`, `serdes-ai-macros/src/lib.rs`                                      |
 
 The smoke minimum is three modules and one provider. Full audited coverage is
 four to five modules; neither set includes retry, fallback, agent-loop,
 registry, or execution machinery. Every provider module builds its HTTP client
-with redirect following disabled and reqwest protocol retries set to `never`, so
-one authorized send remains one physical request as required by
-[ADR-0005](../decisions/0005-model-call-retry-semantics.md). Separately, it
-classifies only complete, correlated responses with recognized provider-native
-mappings as definitive; unrecognized statuses and truncated bodies follow
-ADR-0043's non-definitive evidence fallback. Rough size anchor (inference): the
-full corresponding SerdesAI source is about 4–5k lines including tests, and the
-smoke subset drops schema/tool work, media inputs, caching betas, and 14 of 15
-providers.
+with redirect following disabled and reqwest protocol retries set to `never`, as
+this audit's conservative implementation recommendation under
+[ADR-0047's](../decisions/0047-typed-model-runtime-substrate.md)
+one-provider-interaction runtime contract. ADR-0005 separately permits
+continuing a same-call low-level operation proven not to have crossed its
+acceptance boundary. Each module classifies only complete, correlated responses
+with recognized provider-native mappings as definitive; unrecognized statuses
+and truncated bodies follow ADR-0043's non-definitive evidence fallback. Rough
+size anchor (inference): the full corresponding SerdesAI source is about 4–5k
+lines including tests, and the smoke subset drops schema/tool work, media
+inputs, caching betas, and 14 of 15 providers.
 
 ## Sources
 
