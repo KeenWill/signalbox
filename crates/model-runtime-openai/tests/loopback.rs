@@ -401,3 +401,61 @@ async fn a_signal_cancelled_before_send_proves_the_request_unsent() {
             .any(|observation| matches!(observation.fact, ObservationFact::SendCommenced))
     );
 }
+
+#[tokio::test]
+async fn provider_error_text_reflecting_the_key_is_redacted() {
+    // ADR-0017: evidence carries typed classes and rendered detail, never
+    // credential values — even when an endpoint reflects the key.
+    let body = br#"{"error":{"message":"invalid bearer key_loop","type":"invalid_request_error",
+                    "code":"invalid_api_key"}}"#;
+    let server = CannedServer::serving(vec![http_response(
+        "401 Unauthorized",
+        &[("content-type", "application/json")],
+        body,
+    )])
+    .await;
+    let runtime = runtime_for(&server.base_url);
+
+    let (report, _) = execute(&runtime, operation("call-8"), CancellationSignal::never()).await;
+
+    let TerminalEvidence::ProviderError(error) = report.evidence else {
+        panic!("a definitive error response must classify as provider error");
+    };
+    let message = error
+        .native
+        .message
+        .expect("the rendered message is retained");
+    assert!(
+        !message.contains("key_loop"),
+        "the key value must never leave the adapter"
+    );
+    assert!(message.contains("[redacted]"));
+}
+
+#[test]
+fn a_base_url_with_query_or_fragment_fails_construction() {
+    let mut config = signalbox_model_runtime_openai::OpenAiConfig::new(ApiKey::new("k"));
+    config.base_url = "http://127.0.0.1:1/api?tenant=x".to_string();
+
+    let error =
+        OpenAiRuntime::new(config).expect_err("a query component would corrupt the endpoint path");
+
+    assert!(matches!(
+        error,
+        signalbox_model_runtime_openai::OpenAiConstructionError::InvalidBaseUrl { .. }
+    ));
+}
+
+#[test]
+fn a_non_http_base_url_scheme_fails_construction() {
+    let mut config = signalbox_model_runtime_openai::OpenAiConfig::new(ApiKey::new("k"));
+    config.base_url = "file:///tmp".to_string();
+
+    let error =
+        OpenAiRuntime::new(config).expect_err("a non-HTTP scheme can never reach the provider");
+
+    assert!(matches!(
+        error,
+        signalbox_model_runtime_openai::OpenAiConstructionError::InvalidBaseUrl { .. }
+    ));
+}

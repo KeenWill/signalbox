@@ -29,6 +29,20 @@ use crate::wire::{
 pub(crate) fn build_request<C>(
     operation: &ModelOperation<C>,
 ) -> Result<ChatRequest, PreparationFailure> {
+    // serde_json serializes a non-finite f64 as null, which would silently
+    // drop the caller's stated setting; reject during preparation instead.
+    for (name, value) in [
+        ("temperature", operation.settings.temperature),
+        ("top_p", operation.settings.top_p),
+    ] {
+        if let Some(value) = value
+            && !value.is_finite()
+        {
+            return Err(PreparationFailure::UnsupportedOperation {
+                detail: format!("{name} must be a finite number"),
+            });
+        }
+    }
     let (tools, tool_choice, parallel_tool_calls) = tools_and_choice(operation)?;
     let mut messages = Vec::new();
     if let Some(system) = &operation.system {
@@ -488,6 +502,20 @@ mod tests {
             value["messages"][1]["content"],
             serde_json::json!("after the call")
         );
+    }
+
+    #[test]
+    fn non_finite_temperature_is_rejected_not_silently_nulled() {
+        let mut operation = operation("call-10");
+        operation.settings.temperature = Some(f64::INFINITY);
+
+        let failure = build_request(&operation)
+            .expect_err("serde_json would serialize a non-finite setting as null");
+
+        assert!(matches!(
+            failure,
+            PreparationFailure::UnsupportedOperation { .. }
+        ));
     }
 
     #[test]

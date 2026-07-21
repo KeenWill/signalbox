@@ -89,6 +89,11 @@ impl OpenAiRuntime {
     ///   acceptance-boundary evidence ADR-0043 classification consumes. With
     ///   redirects disabled, a redirect status surfaces as
     ///   [`LossCause::UnexpectedHttpStatus`] evidence instead.
+    /// - **Protocol-level retries are disabled** (`reqwest::retry::never()`).
+    ///   reqwest's default retry policy resends requests rejected by
+    ///   protocol NACKs; a second physical POST for one authorized
+    ///   operation is exactly what ADR-0005 prohibits, so the never-retry
+    ///   policy is set explicitly.
     /// - **Idle-connection reuse is disabled** (`pool_max_idle_per_host(0)`).
     ///   The underlying HTTP client can transparently resend a request when
     ///   a *reused* idle connection turns out to be closed before the
@@ -107,6 +112,13 @@ impl OpenAiRuntime {
         .map_err(|error| OpenAiConstructionError::InvalidBaseUrl {
             detail: error.to_string(),
         })?;
+        if completions_url.query().is_some() || completions_url.fragment().is_some() {
+            // Concatenating the endpoint path onto a base with a query or
+            // fragment would route the request somewhere else entirely.
+            return Err(OpenAiConstructionError::InvalidBaseUrl {
+                detail: "base URL must not carry a query or fragment".to_string(),
+            });
+        }
         if !matches!(completions_url.scheme(), "http" | "https") {
             // A non-HTTP scheme would fail only inside send(), after
             // SendCommenced, and read as ambiguous transport loss; it is an
@@ -117,6 +129,7 @@ impl OpenAiRuntime {
         }
         let mut builder = Client::builder()
             .redirect(Policy::none())
+            .retry(reqwest::retry::never())
             .pool_max_idle_per_host(0);
         if let Some(timeout) = config.connect_timeout {
             builder = builder.connect_timeout(timeout);
@@ -162,17 +175,8 @@ impl OpenAiRuntime {
         // ADR-0017: the key is read during send preparation of exactly this
         // operation and scoped to this request; nothing is cached, so a
         // rotated credential is picked up by the next operation.
-        let authorization_header = match self.credentials.current() {
-            Ok(api_key) => match sensitive_bearer(&api_key) {
-                Some(header) => header,
-                None => {
-                    return proven_unsent(UnsentCause::PreparationFailed(
-                        PreparationFailure::CredentialUnavailable {
-                            detail: "API key cannot form an HTTP header value".to_string(),
-                        },
-                    ));
-                }
-            },
+        let api_key = match self.credentials.current() {
+            Ok(api_key) => api_key,
             Err(failure) => {
                 return proven_unsent(UnsentCause::PreparationFailed(
                     PreparationFailure::CredentialUnavailable {
@@ -181,6 +185,42 @@ impl OpenAiRuntime {
                 ));
             }
         };
+        let Some(authorization_header) = sensitive_bearer(&api_key) else {
+            return proven_unsent(UnsentCause::PreparationFailed(
+                PreparationFailure::CredentialUnavailable {
+                    detail: "API key cannot form an HTTP header value".to_string(),
+                },
+            ));
+        };
+        let evidence = self
+            .exchange(
+                operation.delivery,
+                body,
+                authorization_header,
+                correlation,
+                sink,
+                cancellation,
+            )
+            .await;
+        // ADR-0017: provider-controlled text in the evidence (error
+        // messages, raw bodies, transport detail) is credential-sanitized
+        // before it leaves the adapter boundary.
+        redact_evidence(evidence, &api_key)
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the exchange carries exactly the facts of one prepared send"
+    )]
+    async fn exchange<C: Clone + Send + Sync>(
+        &self,
+        delivery: signalbox_model_runtime::DeliveryMode,
+        body: Vec<u8>,
+        authorization_header: HeaderValue,
+        correlation: &C,
+        sink: &mut (dyn ObservationSink<C> + Send),
+        cancellation: &mut CancellationSignal,
+    ) -> TerminalEvidence {
         emit(correlation, sink, ObservationFact::RequestPrepared);
         if already_fired(cancellation) {
             return proven_unsent(UnsentCause::CancelledBeforeSend);
@@ -211,7 +251,7 @@ impl OpenAiRuntime {
         // The Chat Completions success contract is specifically HTTP 200;
         // another 2xx is not recognized terminal-success evidence.
         if status.as_u16() == 200 {
-            match operation.delivery {
+            match delivery {
                 signalbox_model_runtime::DeliveryMode::Buffered => {
                     self.finish_buffered(response, exchange, correlation, sink, cancellation)
                         .await
@@ -462,6 +502,86 @@ async fn with_cancellation<F: Future>(
     match select(work, cancellation).await {
         Either::Left((output, _)) => Some(output),
         Either::Right(((), _)) => None,
+    }
+}
+
+/// Credential-sanitizes every provider-controlled or transport-rendered
+/// text in the evidence (ADR-0017): a reflected key value in an error
+/// message, raw body, or rendered detail is replaced before the evidence
+/// leaves the adapter boundary. Typed facts are untouched.
+fn redact_evidence(evidence: TerminalEvidence, api_key: &ApiKey) -> TerminalEvidence {
+    let redact = |text: String| -> String {
+        if api_key.value().is_empty() {
+            text
+        } else {
+            text.replace(api_key.value(), "[redacted]")
+        }
+    };
+    let redact_native = |mut native: NativeErrorFacts| -> NativeErrorFacts {
+        native.error_token = native.error_token.map(redact);
+        native.error_code = native.error_code.map(redact);
+        native.message = native.message.map(redact);
+        native
+    };
+    let redact_transport =
+        |facts: TransportFacts| -> TransportFacts { TransportFacts::new(redact(facts.detail)) };
+    match evidence {
+        TerminalEvidence::ProviderError(mut error) => {
+            error.native = redact_native(error.native);
+            TerminalEvidence::ProviderError(error)
+        }
+        TerminalEvidence::CancellationConfirmed(mut confirmed) => {
+            confirmed.native = redact_native(confirmed.native);
+            TerminalEvidence::CancellationConfirmed(confirmed)
+        }
+        TerminalEvidence::ProvenUnsent(unsent) => {
+            let cause = match unsent.cause {
+                UnsentCause::ConnectFailed(facts) => {
+                    UnsentCause::ConnectFailed(redact_transport(facts))
+                }
+                UnsentCause::SendIncompleteProvenUnacceptable(facts) => {
+                    UnsentCause::SendIncompleteProvenUnacceptable(redact_transport(facts))
+                }
+                cause @ (UnsentCause::PreparationFailed(_) | UnsentCause::CancelledBeforeSend) => {
+                    cause
+                }
+            };
+            TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence { cause })
+        }
+        TerminalEvidence::BoundaryLoss(mut loss) => {
+            loss.cause = match loss.cause {
+                LossCause::TimedOut(facts) => LossCause::TimedOut(redact_transport(facts)),
+                LossCause::TransportFailed(facts) => {
+                    LossCause::TransportFailed(redact_transport(facts))
+                }
+                LossCause::ResponseBodyLost(facts) => {
+                    LossCause::ResponseBodyLost(redact_transport(facts))
+                }
+                LossCause::ResponseUnintelligible { detail } => LossCause::ResponseUnintelligible {
+                    detail: redact(detail),
+                },
+                LossCause::StreamProtocolViolation { detail } => {
+                    LossCause::StreamProtocolViolation {
+                        detail: redact(detail),
+                    }
+                }
+                LossCause::StreamEndedWithoutTerminalMarker { interruption } => {
+                    LossCause::StreamEndedWithoutTerminalMarker {
+                        interruption: match interruption {
+                            StreamInterruption::TransportFailure(facts) => {
+                                StreamInterruption::TransportFailure(redact_transport(facts))
+                            }
+                            StreamInterruption::EndOfStream => StreamInterruption::EndOfStream,
+                        },
+                    }
+                }
+                cause @ (LossCause::CancellationRequested | LossCause::UnexpectedHttpStatus) => {
+                    cause
+                }
+            };
+            TerminalEvidence::BoundaryLoss(loss)
+        }
+        evidence @ (TerminalEvidence::Completed(_) | TerminalEvidence::Refused(_)) => evidence,
     }
 }
 
