@@ -300,16 +300,18 @@ to Signalbox's ToolRequest-decode-without-execute contract.
 
 From the pinned clone's history: 104 commits (88 non-merge) between 2025-12-27
 and 2026-07-17; authors: Jan Feddersen 73 (two identities), acoliver 17, Sewer56
-2, dependabot 12 — effectively two humans, one dominant. Repo-health facts from
-the handoff (checked 2026-07-20, not re-verified here): 20 stars, 4 forks,
-crates.io `serdes-ai` 0.2.6 published 2026-02-20 — five months behind repo
-activity — with 2,105 lifetime downloads. In-repo signals verified directly:
-README quick-start pins `serdes-ai = "0.1"` while the workspace is 0.2.6; no
-integration-test binaries; no live-provider tests; per-adapter unit coverage
-averages roughly seven tests across 15 adapters; `serdes-ai-macros` has zero
-unit tests; the Anthropic streaming path received recent integrity-hardening
-work (the pinned commit is that merge) that was not mirrored to the OpenAI chat
-path. No API-stability policy or deprecation process is documented.
+2, dependabot 12. Maintenance is concentrated: Jan Feddersen and acoliver
+account for 90 of 92 human-authored commits, with 73 attributed to Jan
+Feddersen. Repo-health facts from the handoff (checked 2026-07-20, not
+re-verified here): 20 stars, 4 forks, crates.io `serdes-ai` 0.2.6 published
+2026-02-20 — five months behind repo activity — with 2,105 lifetime downloads.
+In-repo signals verified directly: README quick-start pins `serdes-ai = "0.1"`
+while the workspace is 0.2.6; no integration-test binaries; no live-provider
+tests; per-adapter unit coverage averages roughly seven tests across 15
+adapters; `serdes-ai-macros` has zero unit tests; the Anthropic streaming path
+received recent integrity-hardening work (the pinned commit is that merge) that
+was not mirrored to the OpenAI chat path. No API-stability policy or deprecation
+process is documented.
 
 ### Q10 — PydanticAI-derived behaviors: valuable vs conflicting
 
@@ -343,11 +345,12 @@ than durable budgets.
   error paths, and `serdes-ai-models/src/error.rs`) are the same files a
   from-scratch thin layer would consist of.
 - **Upstreamability.** The changes Signalbox needs are semantic reversals
-  (retryability polarity, ambiguity-first classification), not additions; with
-  effectively one dominant maintainer and PydanticAI parity as the stated goal,
-  upstream acceptance is unlikely, so vendored crates should be assumed to
-  hard-fork immediately. Inference from Q9 signals; receptivity was not tested
-  by filing an issue.
+  (retryability polarity, ambiguity-first classification), not additions. Q9's
+  commit counts show concentrated maintenance: two people account for 90 of 92
+  human-authored commits, 73 of them attributed to Jan Feddersen. Together with
+  PydanticAI parity as the stated goal, that makes upstream acceptance unlikely,
+  so vendored crates should be assumed to hard-fork immediately. Inference from
+  Q9 signals; receptivity was not tested by filing an issue.
 - **What is genuinely reusable.** Wire types
   (`serdes-ai-models/src/anthropic/types.rs`,
   `serdes-ai-models/src/openai/types.rs`), the SSE record parser
@@ -362,11 +365,12 @@ reference and transplanting selected MIT-licensed fragments (wire types, SSE
 record parsing, streaming-integrity pattern) with attribution — rather than
 vendoring SerdesAI crates wholesale.**
 
-"Depend on upstream releases" stays out on the maintenance signals (Q9:
-effectively two contributors, stale crates.io release, no stability policy);
-nothing in this audit rebuts that presumption, and the semantic-reversal
-inference above makes it worse: Signalbox would need upstream to accept changes
-that contradict the library's own retry/fallback design.
+"Depend on upstream releases" stays out on the maintenance signals (Q9: 90 of 92
+human-authored commits concentrated in two contributors, stale crates.io
+release, no stability policy); nothing in this audit rebuts that presumption,
+and the semantic-reversal inference above makes it worse: Signalbox would need
+upstream to accept changes that contradict the library's own retry/fallback
+design.
 
 Why hand-roll beats vendoring selected crates:
 
