@@ -10,6 +10,11 @@ use crate::tool::{ToolDefinition, ToolName};
 /// Why an operation cannot be translated into one provider interaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelOperationValidationError {
+    /// Two ordinary tools use the same proposal/dispatch name.
+    DuplicateToolName {
+        /// The repeated ordinary-tool name.
+        name: ToolName,
+    },
     /// An ordinary tool uses the name reserved for structured output.
     OutputContractToolNameCollision {
         /// The name used by both declarations.
@@ -20,6 +25,13 @@ pub enum ModelOperationValidationError {
 impl std::fmt::Display for ModelOperationValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::DuplicateToolName { name } => {
+                write!(
+                    f,
+                    "ordinary tool name `{}` is declared more than once",
+                    name.as_str()
+                )
+            }
             Self::OutputContractToolNameCollision { name } => write!(
                 f,
                 "structured-output name `{}` is also declared as an ordinary tool",
@@ -132,6 +144,14 @@ impl<C> ModelOperation<C> {
     /// call. Provider adapters call this during preparation and report a
     /// failure without crossing the request boundary when it returns an error.
     pub fn validate(&self) -> Result<(), ModelOperationValidationError> {
+        let mut names = std::collections::HashSet::with_capacity(self.tools.len());
+        for tool in &self.tools {
+            if !names.insert(&tool.name) {
+                return Err(ModelOperationValidationError::DuplicateToolName {
+                    name: tool.name.clone(),
+                });
+            }
+        }
         let Some(contract) = &self.output_contract else {
             return Ok(());
         };
@@ -217,5 +237,26 @@ mod tests {
         ));
 
         assert_eq!(operation.validate(), Ok(()));
+    }
+
+    #[test]
+    fn duplicate_ordinary_tool_names_are_rejected() {
+        let duplicate_name = "ordinary";
+        let mut operation = operation();
+        operation.tools = vec![
+            ToolDefinition::of_type::<Arguments>(duplicate_name, "first declaration"),
+            ToolDefinition::of_type::<Arguments>(duplicate_name, "second declaration"),
+        ];
+
+        let error = operation
+            .validate()
+            .expect_err("duplicate ordinary names must be rejected");
+
+        assert_eq!(
+            error,
+            ModelOperationValidationError::DuplicateToolName {
+                name: crate::ToolName::new(duplicate_name),
+            }
+        );
     }
 }
