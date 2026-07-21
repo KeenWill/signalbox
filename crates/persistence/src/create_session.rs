@@ -360,7 +360,13 @@ async fn insert_prepared(
     .execute(&mut *connection)
     .await?;
 
-    outbox::append_session_created(connection, session.id()).await?;
+    outbox::append(
+        connection,
+        outbox::OutboxEvent::SessionCreated {
+            session: session.id(),
+        },
+    )
+    .await?;
 
     Ok(())
 }

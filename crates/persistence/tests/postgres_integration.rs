@@ -6579,31 +6579,64 @@ async fn s03_s04_inv034_restart_scan_recovers_lost_attempt_once_and_unblocks_suc
     .fetch_all(&restarted_pool)
     .await?;
     assert_eq!(terminal_entries, ["origin_accepted_input", "turn_failed"]);
-    let committed_counts_before_replay: (i64, i64, i64) = sqlx::query_as(
+    let recovery_events: Vec<(String, i16, Uuid, Uuid, Uuid, Uuid)> = sqlx::query_as(
+        "SELECT header.event_kind,
+                header.storage_version,
+                header.session_id,
+                failed.turn_id,
+                failed.failure_entry_id,
+                failed.terminal_frontier_id
+           FROM outbox_event AS header
+           JOIN turn_failed_outbox_event AS failed
+             ON failed.event_sequence = header.event_sequence
+          ORDER BY header.event_sequence",
+    )
+    .fetch_all(&restarted_pool)
+    .await?;
+    assert_eq!(
+        recovery_events,
+        vec![(
+            "turn_failed".into(),
+            1,
+            session_uuid,
+            first_turn_uuid,
+            failure_entry_uuid,
+            terminal_frontier_uuid,
+        )]
+    );
+    let committed_counts_before_replay: (i64, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
             (SELECT count(*) FROM semantic_transcript_entry
               WHERE payload_kind = 'turn_failed' AND failed_turn_id = $1),
             (SELECT count(*) FROM context_frontier
               WHERE owning_session_id = $2),
             (SELECT count(*) FROM turn_attempt
+              WHERE turn_id = $1),
+            (SELECT count(*) FROM outbox_event
+              WHERE event_kind = 'turn_failed' AND session_id = $2),
+            (SELECT count(*) FROM turn_failed_outbox_event
               WHERE turn_id = $1)",
     )
     .bind(first_turn_uuid)
     .bind(session_uuid)
     .fetch_one(&restarted_pool)
     .await?;
-    assert_eq!(committed_counts_before_replay, (1, 2, 1));
+    assert_eq!(committed_counts_before_replay, (1, 2, 1, 1, 1));
 
     let replay = scan.execute().await?;
     assert!(replay.is_complete());
     assert_eq!(replay.recovered_turn_count(), 0);
-    let committed_counts_after_replay: (i64, i64, i64) = sqlx::query_as(
+    let committed_counts_after_replay: (i64, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
             (SELECT count(*) FROM semantic_transcript_entry
               WHERE payload_kind = 'turn_failed' AND failed_turn_id = $1),
             (SELECT count(*) FROM context_frontier
               WHERE owning_session_id = $2),
             (SELECT count(*) FROM turn_attempt
+              WHERE turn_id = $1),
+            (SELECT count(*) FROM outbox_event
+              WHERE event_kind = 'turn_failed' AND session_id = $2),
+            (SELECT count(*) FROM turn_failed_outbox_event
               WHERE turn_id = $1)",
     )
     .bind(first_turn_uuid)
@@ -6640,6 +6673,140 @@ async fn s03_s04_inv034_restart_scan_recovers_lost_attempt_once_and_unblocks_suc
     );
 
     restarted_pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S03 / INV-032 / INV-034: failure after the typed outbox append rolls the
+/// complete Lost recovery back; retry then commits the state and event once.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s03_inv032_inv034_startup_recovery_and_outbox_commit_or_roll_back_together()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session_uuid = Uuid::from_u128(0x7d1);
+    let turn_uuid = Uuid::from_u128(0xad1);
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0x3d0, 0x7d1, direct(0x8d1)))
+        .await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                0x3d1,
+                0x7d1,
+                "active before failed recovery",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x9d1)),
+            Some(TurnId::from_uuid(turn_uuid)),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: session_uuid,
+            origin_entry: Uuid::from_u128(0xcd1),
+            starting_frontier: Uuid::from_u128(0xdd1),
+            initial_attempt: Uuid::from_u128(0xbd1),
+        },
+    )
+    .await?;
+    sqlx::query(
+        "CREATE FUNCTION fail_test_turn_failed_outbox_commit()
+         RETURNS trigger
+         LANGUAGE plpgsql
+         AS $$
+         BEGIN
+             RAISE EXCEPTION 'injected failure after recovery outbox append'
+                 USING ERRCODE = '40001';
+         END;
+         $$",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "CREATE CONSTRAINT TRIGGER zz_test_fail_turn_failed_outbox_commit
+         AFTER INSERT ON turn_failed_outbox_event
+         DEFERRABLE INITIALLY DEFERRED
+         FOR EACH ROW
+         EXECUTE FUNCTION fail_test_turn_failed_outbox_commit()",
+    )
+    .execute(&pool)
+    .await?;
+
+    let failure_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xed1));
+    let terminal_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0xfd1));
+    let mut failing_scan = StartupScanService::new(
+        FixedStartupScanIds::new([failure_entry], [terminal_frontier]),
+        PostgresStartupScanRepository::new(pool.clone()),
+    );
+    failing_scan
+        .execute()
+        .await
+        .expect_err("the deferred outbox fixture must abort recovery commit");
+
+    let rolled_back: (String, String, i64, i64, Decimal) = sqlx::query_as(
+        "SELECT turn.state_kind,
+                attempt.state_kind,
+                (SELECT count(*) FROM semantic_transcript_entry
+                  WHERE failed_turn_id = $1),
+                (SELECT count(*) FROM turn_failed_outbox_event
+                  WHERE turn_id = $1),
+                (SELECT last_sequence FROM outbox_sequence_state
+                  WHERE singleton)
+           FROM turn_lifecycle AS turn
+           JOIN turn_attempt AS attempt
+             ON attempt.turn_attempt_id = turn.current_attempt_id
+          WHERE turn.turn_id = $1",
+    )
+    .bind(turn_uuid)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        rolled_back,
+        ("active".into(), "prepared".into(), 0, 0, Decimal::ONE)
+    );
+
+    sqlx::query(
+        "DROP TRIGGER zz_test_fail_turn_failed_outbox_commit
+            ON turn_failed_outbox_event",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query("DROP FUNCTION fail_test_turn_failed_outbox_commit()")
+        .execute(&pool)
+        .await?;
+
+    let mut retry_scan = StartupScanService::new(
+        FixedStartupScanIds::new([failure_entry], [terminal_frontier]),
+        PostgresStartupScanRepository::new(pool.clone()),
+    );
+    assert_eq!(retry_scan.execute().await?.recovered_turn_count(), 1);
+    let committed: (String, String, i64, i64, Decimal) = sqlx::query_as(
+        "SELECT turn.state_kind,
+                attempt.state_kind,
+                (SELECT count(*) FROM semantic_transcript_entry
+                  WHERE failed_turn_id = $1),
+                (SELECT count(*) FROM turn_failed_outbox_event
+                  WHERE turn_id = $1),
+                (SELECT last_sequence FROM outbox_sequence_state
+                  WHERE singleton)
+           FROM turn_lifecycle AS turn
+           JOIN turn_attempt AS attempt
+             ON attempt.turn_attempt_id = $2
+          WHERE turn.turn_id = $1",
+    )
+    .bind(turn_uuid)
+    .bind(Uuid::from_u128(0xbd1))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        committed,
+        ("terminal".into(), "ended".into(), 1, 1, Decimal::from(2))
+    );
+
+    pool.close().await;
     drop(container);
     Ok(())
 }
@@ -6753,6 +6920,18 @@ async fn s08_inv016_inv034_restart_scan_visibly_defers_pending_steering_unchange
     let session = SessionId::from_uuid(session_uuid);
     assert_restart_scan_visibly_defers_pending_steering(&mut scan, session).await?;
     assert_restart_scan_visibly_defers_pending_steering(&mut scan, session).await?;
+
+    let recovery_events: (i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM outbox_event
+              WHERE event_kind = 'turn_failed' AND session_id = $1),
+            (SELECT count(*) FROM turn_failed_outbox_event
+              WHERE session_id = $1)",
+    )
+    .bind(session_uuid)
+    .fetch_one(&restarted_pool)
+    .await?;
+    assert_eq!(recovery_events, (0, 0));
 
     let unchanged: (String, String, i64, i64, i64) = sqlx::query_as(
         "SELECT turn.state_kind,
@@ -8866,6 +9045,8 @@ async fn inv032_outbox_storage_rejects_truncate() -> Result<(), Box<dyn Error>> 
     assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE outbox_delivery_state CASCADE").await?;
     assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE outbox_event CASCADE").await?;
     assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE session_created_outbox_event CASCADE")
+        .await?;
+    assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE turn_failed_outbox_event CASCADE")
         .await?;
 
     pool.close().await;

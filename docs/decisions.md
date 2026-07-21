@@ -27,17 +27,26 @@ the starting frontier plus that marker, and selects `Terminal(Failed)`.
 Application orchestration inventories active sessions once, retries only fresh
 identity collisions, and commits each session independently. Pending steering
 instead returns the exact unchanged projection as a visible session blocker;
-hubd fails startup with the blocker count and never starts scheduling.
+hubd fails startup with the blocker count and never starts scheduling. Project
+each committed recovery as one closed `turn_failed` version-1 outbox record
+carrying the session, failed turn, failure semantic-entry, and terminal frontier
+identities. The persistence-owned closed event enum appends that typed record
+after the guarded lifecycle transition on the same transaction; replay,
+no-active-turn, pending-steering, and rollback paths append nothing.
 
 **Rejected alternatives.** Raw SQL selecting terminal meaning bypasses domain
 authority. Treating steering as a stop cause, deleting it, or terminalizing its
 source contradicts its recorded assignment. A replacement attempt, provider
-classification, or fatal-surface widening exceeds this evidence-free slice.
+classification, or fatal-surface widening exceeds this evidence-free slice. An
+open string/JSON event payload would evade the versioned storage boundary;
+exposing the operational startup scan or prior process as event semantics would
+confuse the producer with the durable client-visible outcome.
 
 **Affects.** `crates/domain/src/turn_eligibility.rs`, the application startup
 scan, its PostgreSQL adapter, hubd startup wiring, restart integration tests,
-the public spine, and INV-034 enforcement. No migration or frozen fatal/provider
-surface changes.
+the closed outbox append seam and `turn_failed` typed-record migration, the
+public spine, and INV-032/INV-034 enforcement. Frozen fatal/provider surfaces do
+not change.
 
 ## 2026-07-20 — Compact INFO telemetry and a 30-second shutdown window
 

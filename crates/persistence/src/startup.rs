@@ -18,6 +18,7 @@ use crate::{
         input_position_to_numeric, session_id_from_uuid, session_id_to_uuid, turn_id_from_uuid,
         turn_id_to_uuid,
     },
+    outbox,
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
     submit_input::{SubmitInputCorruption, SubmitInputRepositoryError, load_scheduling_projection},
 };
@@ -479,6 +480,17 @@ async fn insert_prepared_failure(
             StartupScanCorruption::Inconsistent("guarded lifecycle terminalization").into(),
         );
     }
+
+    outbox::append(
+        connection,
+        outbox::OutboxEvent::TurnFailed {
+            session,
+            turn,
+            failure_entry: failure_entry.identity(),
+            terminal_frontier: terminal_snapshot.frontier().snapshot(),
+        },
+    )
+    .await?;
 
     Ok(failed)
 }
