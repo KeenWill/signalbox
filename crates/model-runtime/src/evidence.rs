@@ -419,6 +419,10 @@ pub enum StreamInterruption {
     EndOfStream,
     /// The transport failed mid-stream.
     TransportFailure(TransportFacts),
+    /// A caller-configured local deadline elapsed mid-stream, keeping the
+    /// typed timeout cause visible inside the incomplete-stream fact
+    /// (ADR-0043: a timeout after full send is ambiguous).
+    TimedOut(TransportFacts),
 }
 
 /// Rendered transport detail, retained as evidence only.
