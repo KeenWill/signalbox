@@ -388,19 +388,21 @@ than durable budgets.
   PydanticAI parity as the stated goal, that makes upstream acceptance unlikely,
   so vendored crates should be assumed to hard-fork immediately. Inference from
   Q9 signals; receptivity was not tested by filing an issue.
-- **What is genuinely reusable.** Wire types
+- **What is genuinely useful as a design reference.** Wire types
   (`serdes-ai-models/src/anthropic/types.rs`,
   `serdes-ai-models/src/openai/types.rs`), the SSE record parser
   (`serdes-ai-streaming/src/sse.rs`), the message/part vocabulary, and the
-  profile/schema-transform design would transplant with little modification. The
-  error, retry, and agent layers would not survive contact with the ADRs.
+  profile/schema-transform design contain patterns worth studying. The error,
+  retry, and agent layers would not survive contact with the ADRs. The recorded
+  hand-roll decision permits design reference only and copies no SerdesAI code.
 
 ## (c) Recommendation
 
-**Hand-roll a thin provider layer inside Signalbox, using SerdesAI as a design
-reference and transplanting selected MIT-licensed fragments (wire types, SSE
-record parsing, streaming-integrity pattern) with attribution — rather than
-vendoring SerdesAI crates wholesale.**
+**Hand-roll a thin provider layer inside Signalbox, using SerdesAI strictly as a
+design reference and copying no code, rather than vendoring SerdesAI crates
+wholesale.** This audit recommendation is now recorded by the
+[hand-roll decision](../decisions.md#2026-07-20--hand-roll-the-typed-model-runtime-substrate),
+which is authoritative.
 
 "Depend on upstream releases" stays out on the maintenance signals (Q9: 90 of 92
 human-authored commits concentrated in two contributors, stale crates.io
@@ -424,13 +426,12 @@ Why hand-roll beats vendoring selected crates:
    Keeping prohibited-but-present API surface (`is_retryable()`,
    `RetryingModel`, `FallbackModel`) inside the repo invites accidental use;
    deleting it is a fork with extra steps.
-3. The parts worth keeping are small and stable. Wire structs, SSE framing, and
-   the part vocabulary are a minority of the code and change slowly;
-   transplanting them into Signalbox-owned modules captures most of the leverage
-   at a fraction of the surface. The Anthropic stream parser's integrity
-   discipline (`message_stop` gating, open-block validation, `IncompleteStream`
-   on EOF) is the single best artifact to copy — as a pattern applied to both
-   providers.
+3. The useful design patterns are small and stable. Wire structs, SSE framing,
+   and the part vocabulary are a minority of the code and change slowly; they
+   can guide clean-room Signalbox-owned types at a fraction of the inherited
+   surface. The Anthropic stream parser's integrity discipline (`message_stop`
+   gating, open-block validation, `IncompleteStream` on EOF) is the strongest
+   pattern to apply independently to both providers.
 
 The models layer passed the make-or-break Q4 test (correlation by construction),
 so vendoring `serdes-ai-core` + `serdes-ai-models` and rewriting in place is
@@ -448,34 +449,32 @@ one provider adapter, not both audited adapters or the later tool loop. After
 the provider-identity normalization/provenance decision reserved by ADR-0007 and
 the outbound TLS, response-size, and parsing-hardening questions in
 [Provider call security](../open-questions.md#provider-call-security) are
-resolved, the implementation minimum is `provider-core`, shared SSE framing, and
-one adapter; `provider-anthropic` is the illustrative first choice below because
-its stream integrity is the stronger audited design. OpenAI and schema/tool work
-remain in the table to record Phase-0 audit coverage, but are not part of that
-smoke gate. Names are illustrative.
+resolved, the remaining implementation minimum is one provider adapter;
+`signalbox-model-runtime` already supplies the provider-neutral core, shared SSE
+framing, structured-output schema generation, and tool decoding selected by the
+recorded hand-roll decision. `provider-anthropic` is the illustrative first
+adapter below because its stream integrity is the stronger audited design.
+OpenAI remains later audit coverage, not part of that smoke gate.
 
-| Module               | Milestone scope | Content                                                                                                                                                                                                                                                                                  | Design reference                                                                                                                 |
-| -------------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `provider-core`      | Smoke minimum   | Request/response message and part types, settings, usage incl. cache tokens, and typed terminal evidence carrying native status, send-boundary facts, refusal/cancellation/completion facts, `vendor_id`, and reported model; caller-supplied IDs — Layer 2 derives ADR-0043 disposition | `serdes-ai-core/src/messages/`, `serdes-ai-core/src/settings.rs`, `serdes-ai-core/src/usage.rs`                                  |
-| shared SSE framing   | Smoke minimum   | Provider-agnostic SSE record parser with UTF-8/overflow/incomplete-record errors                                                                                                                                                                                                         | `serdes-ai-streaming/src/sse.rs`                                                                                                 |
-| `provider-anthropic` | One adapter     | Request builder, native-response parsing into typed evidence, SSE parser with full-send observation, `message_start` identity surfacing, `message_stop`-gated terminal event, refusal handling                                                                                           | `serdes-ai-models/src/anthropic/types.rs`, `serdes-ai-models/src/anthropic/stream.rs`, `serdes-ai-models/src/anthropic/error.rs` |
-| `provider-openai`    | Later adapter   | Equivalent chat-completions shape: `[DONE]`/EOF distinction, finish-reason + usage surfacing, refusal payload as first-class evidence                                                                                                                                                    | `serdes-ai-models/src/openai/types.rs`, `serdes-ai-models/src/openai/stream.rs`, `serdes-ai-models/src/openai/chat.rs`           |
-| `provider-schema`    | Later tool work | JSON-schema generation for output contracts and tools (evaluate `schemars` before writing derives), output parse/validation failure classes, application-validator hook                                                                                                                  | `serdes-ai-output/src/`, `serdes-ai-tools/src/definition.rs`, `serdes-ai-macros/src/lib.rs`                                      |
+| Module                    | Milestone scope  | Content                                                                                                                                                                                                                                   | Design reference                                                                                                                                                                                |
+| ------------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `signalbox-model-runtime` | Implemented core | Request/response parts, settings, usage, typed terminal evidence, caller IDs, shared SSE framing, `schemars`-generated output/tool schemas, decode failure classes, and application-validator hook — Layer 2 derives ADR-0043 disposition | `serdes-ai-core/src/messages/`, `serdes-ai-core/src/settings.rs`, `serdes-ai-core/src/usage.rs`, `serdes-ai-streaming/src/sse.rs`, `serdes-ai-output/src/`, `serdes-ai-tools/src/definition.rs` |
+| `provider-anthropic`      | Smoke adapter    | Request builder, native-response parsing into typed evidence, SSE parser with full-send observation, `message_start` identity surfacing, `message_stop`-gated terminal event, refusal handling                                            | `serdes-ai-models/src/anthropic/types.rs`, `serdes-ai-models/src/anthropic/stream.rs`, `serdes-ai-models/src/anthropic/error.rs`                                                                |
+| `provider-openai`         | Later adapter    | Equivalent chat-completions shape: `[DONE]`/EOF distinction, finish-reason + usage surfacing, refusal payload as first-class evidence                                                                                                     | `serdes-ai-models/src/openai/types.rs`, `serdes-ai-models/src/openai/stream.rs`, `serdes-ai-models/src/openai/chat.rs`                                                                          |
 
-The smoke minimum is three modules and one provider. Full audited coverage is
-four to five modules; neither set includes retry, fallback, agent-loop,
-registry, or execution machinery. Every provider module builds its HTTP client
-with redirect following disabled and reqwest protocol retries set to `never`, as
-this audit's conservative implementation recommendation under
-[ADR-0047's](../decisions/0047-typed-model-runtime-substrate.md)
-one-provider-interaction runtime contract. ADR-0005 separately permits
-continuing a same-call low-level operation proven not to have crossed its
-acceptance boundary. Each module classifies only complete, correlated responses
-with recognized provider-native mappings as definitive; unrecognized statuses
-and truncated bodies follow ADR-0043's non-definitive evidence fallback. Rough
-size anchor (inference): the full corresponding SerdesAI source is about 4–5k
-lines including tests, and the smoke subset drops schema/tool work, media
-inputs, caching betas, and 14 of 15 providers.
+The remaining smoke minimum is one provider adapter over the implemented core;
+neither it nor later adapters include retry, fallback, agent-loop, registry, or
+execution machinery. An adapter must configure whichever HTTP client its own
+slice selects to prohibit hidden redirect and protocol retries. If that slice
+selects reqwest, disabling redirects and setting protocol retries to `never` is
+the audited configuration; this document does not select reqwest for every
+adapter. The runtime reports only complete, correlated responses with recognized
+provider-native mappings as definitive evidence; unrecognized statuses and
+truncated bodies follow ADR-0043's non-definitive evidence fallback, and Layer 2
+performs disposition classification. Rough size anchor (inference): the full
+corresponding SerdesAI source is about 4–5k lines including tests, while the
+smoke adapter drops schema/tool work, media inputs, caching betas, and 14 of 15
+providers.
 
 ## Sources
 
