@@ -74,6 +74,18 @@ coding agents in [AGENTS.md](AGENTS.md).
 Install [rustup](https://rustup.rs/). The repository's `rust-toolchain.toml`
 makes rustup select the pinned minimal stable toolchain with rustfmt and Clippy.
 
+Non-cargo tooling (currently the pinned mdformat toolchain from
+`tooling/requirements-mdformat.txt`) comes from the [devenv](https://devenv.sh/)
+environment defined in `devenv.nix`, so local tool versions match CI exactly.
+With Nix installed, `nix profile install nixpkgs#devenv` adds the devenv CLI;
+`devenv shell` then enters the environment, and
+`devenv shell -- mdformat --check *.md docs/` runs a single command in it
+without entering. Alternatively, `nix run nixpkgs#devenv -- shell` works without
+installing anything, and direnv users can run a one-time `direnv allow` to
+auto-load the environment from the committed `.envrc`. The Postgres integration
+suite is separate from this environment: it starts its own ephemeral database
+via testcontainers and needs a running Docker daemon.
+
 The workspace contains the dependency chain `apps/hubd` → `crates/application` →
 `crates/domain`, with `crates/persistence` depending on both
 `crates/application` and `crates/domain`, and the dev-only `crates/expect-table`

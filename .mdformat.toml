@@ -1,5 +1,6 @@
 # Markdown formatting for repository docs; CI runs the same check.
-# Requires mdformat==0.7.22 with mdformat-gfm==0.4.1 (GFM tables pass
-# through unwrapped; fenced code blocks are untouched).
+# Requires the pinned toolchain in tooling/requirements-mdformat.txt,
+# provided by the devenv environment (GFM tables pass through unwrapped;
+# fenced code blocks are untouched).
 wrap = 80     # wrap prose at 80 columns; long unbreakable tokens may exceed
 number = true # keep consecutive ordered-list numbering
