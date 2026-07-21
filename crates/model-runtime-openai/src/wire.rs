@@ -98,6 +98,7 @@ pub(crate) struct ChatChoice {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ChatResponseMessage {
+    pub role: Option<String>,
     pub content: Option<String>,
     pub refusal: Option<String>,
     #[serde(default)]
@@ -189,6 +190,7 @@ pub(crate) struct ChunkChoice {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ChunkDelta {
+    pub role: Option<String>,
     pub content: Option<String>,
     pub refusal: Option<String>,
     #[serde(default)]

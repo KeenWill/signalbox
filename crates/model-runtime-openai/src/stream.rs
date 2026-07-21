@@ -94,8 +94,15 @@ impl StreamDecoder {
                 native: error.into_native_facts(),
             }));
         }
-        if self.message_id.is_none() {
-            self.message_id = chunk.id.map(ProviderMessageId::new);
+        if let Some(id) = chunk.id {
+            let id = ProviderMessageId::new(id);
+            match &self.message_id {
+                None => self.message_id = Some(id),
+                Some(existing) if *existing != id => {
+                    return self.violation("stream chunks report conflicting completion ids");
+                }
+                Some(_) => {}
+            }
         }
         if let Some(model) = chunk.model {
             let model = ProviderReportedModel::new(model);
@@ -137,6 +144,13 @@ impl StreamDecoder {
                 ));
             }
             if let Some(delta) = choice.delta {
+                if let Some(role) = delta.role
+                    && role != "assistant"
+                {
+                    return self.violation(format!(
+                        "stream delta carries role {role:?}; assistant is required"
+                    ));
+                }
                 if let Some(text) = delta.content
                     && !text.is_empty()
                 {
@@ -807,6 +821,38 @@ mod tests {
 
         let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
             panic!("a second model identity must not complete under the first");
+        };
+        assert!(matches!(
+            loss.cause,
+            LossCause::StreamProtocolViolation { .. }
+        ));
+    }
+
+    #[test]
+    fn conflicting_streamed_completion_ids_are_a_protocol_violation() {
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"id\":\"chatcmpl_other\",\"choices\":[]}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("a second completion id must not complete under the first");
+        };
+        assert!(matches!(
+            loss.cause,
+            LossCause::StreamProtocolViolation { .. }
+        ));
+    }
+
+    #[test]
+    fn a_non_assistant_streamed_role_is_a_protocol_violation() {
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"user\"}}]}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("a non-assistant streamed role must not become completion evidence");
         };
         assert!(matches!(
             loss.cause,

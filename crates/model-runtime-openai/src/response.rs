@@ -144,6 +144,17 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             usage,
         );
     };
+    if message.role.as_deref() != Some("assistant") {
+        return unintelligible(
+            format!(
+                "success response message carries role {:?}; assistant is required",
+                message.role.as_deref().unwrap_or("<absent>")
+            ),
+            exchange,
+            reported_model,
+            usage,
+        );
+    }
     let mut content = Vec::new();
     if let Some(text) = &message.content
         && !text.is_empty()
@@ -415,6 +426,23 @@ mod tests {
 
         let TerminalEvidence::BoundaryLoss(loss) = evidence else {
             panic!("a response without the one requested choice is not definitive");
+        };
+        assert!(matches!(
+            loss.cause,
+            LossCause::ResponseUnintelligible { .. }
+        ));
+    }
+
+    #[test]
+    fn a_non_assistant_buffered_message_is_boundary_loss() {
+        let (evidence, _) = decode(
+            r#"{"id":"chatcmpl_1","model":"model-exact-1","choices":[{
+                "index":0,"message":{"role":"user","content":"not assistant output"},
+                "finish_reason":"stop"}]}"#,
+        );
+
+        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
+            panic!("a non-assistant response message must not become completion evidence");
         };
         assert!(matches!(
             loss.cause,
