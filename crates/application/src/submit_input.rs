@@ -9,10 +9,13 @@ use std::{error::Error, fmt, future::Future};
 
 use signalbox_domain::{
     AcceptedInputId, DeliveryRequest, DurableCommandId, SessionId,
-    SubmitInput as DomainSubmitInput, SubmitInputResult, TurnId, UserContent,
+    SubmitInput as DomainSubmitInput, SubmitInputAppliedResult, SubmitInputResult, TurnId,
+    UserContent,
 };
 
-use crate::InvalidDurableCommandId;
+use crate::{
+    EligibilityNudge, EligibilityNudgeOutcome, InvalidDurableCommandId, OperatorFailureClass,
+};
 
 /// Why caller input cannot enter canonical `SubmitInput` construction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -177,27 +180,33 @@ pub trait SubmitInputTransaction {
 
 /// Coordinates the durable input-submission use case.
 #[derive(Debug)]
-pub struct SubmitInputService<Generator, Transaction> {
+pub struct SubmitInputService<Generator, Transaction, Nudge> {
     ids: Generator,
     transaction: Transaction,
+    nudge: Nudge,
 }
 
-impl<Generator, Transaction> SubmitInputService<Generator, Transaction> {
-    /// Composes the application identity and atomic transaction ports.
-    pub const fn new(ids: Generator, transaction: Transaction) -> Self {
-        Self { ids, transaction }
+impl<Generator, Transaction, Nudge> SubmitInputService<Generator, Transaction, Nudge> {
+    /// Composes the application identity, transaction, and nudge ports.
+    pub const fn new(ids: Generator, transaction: Transaction, nudge: Nudge) -> Self {
+        Self {
+            ids,
+            transaction,
+            nudge,
+        }
     }
 
-    /// Returns both ports, primarily for explicit ownership handoff.
-    pub fn into_parts(self) -> (Generator, Transaction) {
-        (self.ids, self.transaction)
+    /// Returns all three ports, primarily for explicit ownership handoff.
+    pub fn into_parts(self) -> (Generator, Transaction, Nudge) {
+        (self.ids, self.transaction, self.nudge)
     }
 }
 
-impl<Generator, Transaction> SubmitInputService<Generator, Transaction>
+impl<Generator, Transaction, Nudge> SubmitInputService<Generator, Transaction, Nudge>
 where
     Generator: SubmitInputIdGenerator,
     Transaction: SubmitInputTransaction,
+    Nudge: EligibilityNudge,
 {
     /// Constructs and handles one owner-attributed input command.
     ///
@@ -209,6 +218,7 @@ where
         &mut self,
         request: SubmitInputRequest,
     ) -> Result<SubmitInputOutcome, Transaction::Error> {
+        let session = request.session;
         let turn = match request.delivery {
             DeliveryRequest::NextSafePoint { .. } => None,
             DeliveryRequest::StartWhenNoActiveTurn { .. }
@@ -223,13 +233,33 @@ where
         );
         let accepted_input = self.ids.next_accepted_input_id();
 
-        self.transaction.handle(command, accepted_input, turn).await
+        let outcome = self.transaction.handle(command, accepted_input, turn).await;
+        if matches!(
+            &outcome,
+            Ok(SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
+                SubmitInputAppliedResult::TurnOrigin(_)
+            )))
+        ) {
+            let nudge_outcome = self.nudge.nudge(session);
+            if nudge_outcome != EligibilityNudgeOutcome::Enqueued {
+                tracing::warn!(
+                    failure_class = ?OperatorFailureClass::Infrastructure {
+                        commit_ambiguous: false,
+                    },
+                    ?nudge_outcome,
+                    "eligibility nudge was lost after command handling; \
+                     the reconciliation sweep will recover it"
+                );
+            }
+        }
+        outcome
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::{
+        cell::RefCell,
         collections::VecDeque,
         future::{Future, ready},
         pin::pin,
@@ -246,10 +276,11 @@ mod tests {
     use uuid::{Uuid, Variant, Version};
 
     use super::{
-        AcceptedInputId, DeliveryRequest, DomainSubmitInput, DurableCommandId,
-        InvalidDurableCommandId, SessionId, SubmitInputIdGenerator, SubmitInputOutcome,
-        SubmitInputRequest, SubmitInputRequestError, SubmitInputResult, SubmitInputService,
-        SubmitInputTransaction, TurnId, UserContent, UuidV7SubmitInputIdGenerator,
+        AcceptedInputId, DeliveryRequest, DomainSubmitInput, DurableCommandId, EligibilityNudge,
+        EligibilityNudgeOutcome, InvalidDurableCommandId, SessionId, SubmitInputAppliedResult,
+        SubmitInputIdGenerator, SubmitInputOutcome, SubmitInputRequest, SubmitInputRequestError,
+        SubmitInputResult, SubmitInputService, SubmitInputTransaction, TurnId, UserContent,
+        UuidV7SubmitInputIdGenerator,
     };
 
     fn command_id(value: u128) -> DurableCommandId {
@@ -455,6 +486,18 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct FakeNudge {
+        observed: RefCell<Vec<SessionId>>,
+    }
+
+    impl EligibilityNudge for FakeNudge {
+        fn nudge(&self, session: SessionId) -> EligibilityNudgeOutcome {
+            self.observed.borrow_mut().push(session);
+            EligibilityNudgeOutcome::Enqueued
+        }
+    }
+
     /// S01 / INV-001 / INV-012: reserved command identities fail before
     /// canonical command construction or any application effect.
     #[test]
@@ -485,11 +528,13 @@ mod tests {
         let service = SubmitInputService::new(
             FakeIds::expecting_no_calls(),
             FakeTransaction::expecting_no_calls(),
+            FakeNudge::default(),
         );
-        let (ids, transaction) = service.into_parts();
+        let (ids, transaction, nudge) = service.into_parts();
         assert_eq!(ids.accepted_input_calls, 0);
         assert_eq!(ids.turn_calls, 0);
         assert!(transaction.observed.is_empty());
+        assert!(nudge.observed.into_inner().is_empty());
     }
 
     /// Decision log 2026-07-20: exact-bound text remains admissible before
@@ -566,13 +611,14 @@ mod tests {
         let mut service = SubmitInputService::new(
             FakeIds::new([accepted_input], [turn]),
             FakeTransaction::returning([Ok(expected.clone())]),
+            FakeNudge::default(),
         );
 
         let actual =
             run_ready(service.execute(request.clone())).expect("fake transaction succeeds");
 
         assert_eq!(actual, expected);
-        let (ids, transaction) = service.into_parts();
+        let (ids, transaction, nudge) = service.into_parts();
         assert_eq!(ids.accepted_input_calls, 1);
         assert_eq!(ids.turn_calls, 1);
         assert_eq!(transaction.observed.len(), 1);
@@ -584,15 +630,17 @@ mod tests {
         assert_eq!(command.delivery(), request.delivery());
         assert_eq!(*observed_input, accepted_input);
         assert_eq!(*observed_turn, Some(turn));
+        assert_eq!(nudge.observed.into_inner(), vec![request.session()]);
     }
 
     /// S08 / INV-002 / INV-028: safe-point steering supplies no turn
     /// candidate because successful acceptance initially creates no turn.
     #[test]
     fn s08_inv002_inv028_next_safe_point_mints_no_turn() {
+        let requested_session = session_id(2);
         let request = SubmitInputRequest::try_new(
             command_id(1),
-            session_id(2),
+            requested_session,
             content("steer"),
             DeliveryRequest::NextSafePoint {
                 expected_active_turn: turn_id(3),
@@ -601,23 +649,25 @@ mod tests {
         .expect("ordinary command identity is admitted");
         let expected = SubmitInputOutcome::Recorded(SubmitInputResult::Rejected(
             SubmitInputRejectedResult::NoActiveTurn {
-                session: session_id(2),
+                session: requested_session,
                 expected_active_turn: turn_id(3),
             },
         ));
         let mut service = SubmitInputService::new(
             FakeIds::new([accepted_input_id(4)], NO_TURN_CANDIDATES),
             FakeTransaction::returning([Ok(expected.clone())]),
+            FakeNudge::default(),
         );
 
         assert_eq!(
             run_ready(service.execute(request)).expect("fake transaction succeeds"),
             expected
         );
-        let (ids, transaction) = service.into_parts();
+        let (ids, transaction, nudge) = service.into_parts();
         assert_eq!(ids.accepted_input_calls, 1);
         assert_eq!(ids.turn_calls, 0);
         assert_eq!(transaction.observed[0].2, None);
+        assert!(nudge.observed.into_inner().is_empty());
     }
 
     /// Asserts that one recorded terminal result shape passes through the
@@ -625,17 +675,31 @@ mod tests {
     /// call, reporting a failure at the shape's call site.
     #[track_caller]
     fn assert_recorded_result_passes_through(result: SubmitInputResult) {
+        let eligibility_affecting = matches!(
+            &result,
+            SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(_))
+        );
         let expected = SubmitInputOutcome::Recorded(result);
         let mut service = SubmitInputService::new(
             FakeIds::new([accepted_input_id(8)], [turn_id(9)]),
             FakeTransaction::returning([Ok(expected.clone())]),
+            FakeNudge::default(),
         );
 
         assert_eq!(
             run_ready(service.execute(request(1))).expect("recorded terminal result is returned"),
             expected
         );
-        assert_eq!(service.into_parts().1.observed.len(), 1);
+        let (_, transaction, nudge) = service.into_parts();
+        assert_eq!(transaction.observed.len(), 1);
+        assert_eq!(
+            nudge.observed.into_inner(),
+            if eligibility_affecting {
+                vec![session_id(2)]
+            } else {
+                Vec::new()
+            }
+        );
     }
 
     /// S01 / INV-012: a recorded applied result passes through unchanged
@@ -690,6 +754,7 @@ mod tests {
     #[test]
     fn s01_inv012_equal_replay_returns_the_recorded_result() {
         let request = request(1);
+        let session = request.session();
         let winner_input = accepted_input_id(4);
         let winner_turn = turn_id(5);
         let recorded = applied_result(&request, winner_input, winner_turn);
@@ -700,6 +765,7 @@ mod tests {
                 [turn_id(8), turn_id(9)],
             ),
             FakeTransaction::returning([Ok(expected.clone()), Ok(expected.clone())]),
+            FakeNudge::default(),
         );
 
         let first = run_ready(service.execute(request.clone())).expect("first invocation succeeds");
@@ -707,10 +773,11 @@ mod tests {
 
         assert_eq!(first, expected);
         assert_eq!(replay, expected);
-        let (ids, transaction) = service.into_parts();
+        let (ids, transaction, nudge) = service.into_parts();
         assert_eq!(ids.accepted_input_calls, 2);
         assert_eq!(ids.turn_calls, 2);
         assert_eq!(transaction.observed.len(), 2);
+        assert_eq!(nudge.observed.into_inner(), vec![session, session]);
         let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
             signalbox_domain::SubmitInputAppliedResult::TurnOrigin(applied),
         )) = replay
@@ -731,12 +798,15 @@ mod tests {
         let mut service = SubmitInputService::new(
             FakeIds::new([accepted_input_id(4)], [turn_id(5)]),
             FakeTransaction::returning([Ok(expected.clone())]),
+            FakeNudge::default(),
         );
 
         let actual = run_ready(service.execute(request)).expect("conflict is terminal");
 
         assert_eq!(actual, expected);
-        assert_eq!(service.into_parts().1.observed.len(), 1);
+        let (_, transaction, nudge) = service.into_parts();
+        assert_eq!(transaction.observed.len(), 1);
+        assert!(nudge.observed.into_inner().is_empty());
     }
 
     /// S01 / INV-012: a transaction failure remains nonterminal after exactly
@@ -747,15 +817,20 @@ mod tests {
         let mut service = SubmitInputService::new(
             FakeIds::new([accepted_input_id(4)], [turn_id(5)]),
             FakeTransaction::returning([Err(FakeTransactionError::Unavailable)]),
+            FakeNudge::default(),
         );
 
         let error = run_ready(service.execute(request(1)))
             .expect_err("infrastructure failure remains nonterminal");
 
         assert_eq!(error, FakeTransactionError::Unavailable);
-        let (ids, transaction) = service.into_parts();
+        let (ids, transaction, nudge) = service.into_parts();
         assert_eq!(ids.accepted_input_calls, 1);
         assert_eq!(ids.turn_calls, 1);
         assert_eq!(transaction.observed.len(), 1);
+        assert!(
+            nudge.observed.into_inner().is_empty(),
+            "a failed transaction has no committed eligibility change to nudge"
+        );
     }
 }

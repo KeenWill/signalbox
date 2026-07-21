@@ -9,6 +9,208 @@ that constrains several components — require a full record under
 [decisions/](decisions/README.md) instead. Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-20 — Startup failure seam and pending-steering blocker
+
+**Context.** INV-034 commissions the first startup producer for ADR-0036's
+failed-side semantic closure. The evidence-free scheduling projection can prove
+Prepared or Running prior-process attempts, while the
+[occupied-slot storage decision](#2026-07-19--atomic-postgres-occupied-slot-input-handling)
+requires an active source until its accepted pending steering is closed. The
+[post-milestone-2 audit](#2026-07-19--post-milestone-2-audit-corrections-and-tracked-obligations)
+assigns that closure and replay widening to the later reclassification slice.
+
+**Decision.** Let the complete domain scheduling projection prepare the sealed
+failed-terminal candidate. For evidence-free Prepared or Running state, its
+complete stop-cause set is empty, so startup ends the exact attempt as
+`WithoutStop(Lost)`, appends one `TurnFailed`, derives the terminal frontier as
+the starting frontier plus that marker, and selects `Terminal(Failed)`.
+Application orchestration inventories active sessions once, retries only fresh
+identity collisions, and commits each session independently. Pending steering
+instead returns the exact unchanged projection as a visible session blocker;
+hubd fails startup with the blocker count and never starts scheduling. Project
+each committed recovery as one closed `turn_failed` version-1 outbox record
+carrying the session, failed turn, failure semantic-entry, and terminal frontier
+identities. The persistence-owned closed event enum appends that typed record
+after the guarded lifecycle transition on the same transaction; replay,
+no-active-turn, pending-steering, and rollback paths append nothing.
+
+**Rejected alternatives.** Raw SQL selecting terminal meaning bypasses domain
+authority. Treating steering as a stop cause, deleting it, or terminalizing its
+source contradicts its recorded assignment. A replacement attempt, provider
+classification, or fatal-surface widening exceeds this evidence-free slice. An
+open string/JSON event payload would evade the versioned storage boundary;
+exposing the operational startup scan or prior process as event semantics would
+confuse the producer with the durable client-visible outcome.
+
+**Affects.** `crates/domain/src/turn_eligibility.rs`, the application startup
+scan, its PostgreSQL adapter, hubd startup wiring, restart integration tests,
+the closed outbox append seam and `turn_failed` typed-record migration, the
+public spine, and INV-032/INV-034 enforcement. Frozen fatal/provider surfaces do
+not change.
+
+## 2026-07-20 — ADR-0044 post-merge review corrections
+
+**Context.** Post-merge review of the pull request that introduced
+[ADR-0044](decisions/0044-hub-runtime-foundations.md) found defects in its
+configuration, telemetry, corruption-key, and failure-classification wording.
+
+**Decision.** Record that [ADR-0044](decisions/0044-hub-runtime-foundations.md)
+was corrected on 2026-07-20 and that
+[ADR-0046](decisions/0046-durable-command-telemetry-correlation.md) supersedes
+its incomplete caller-command telemetry clause. The linked ADRs are the sole
+statements of the resulting semantics.
+
+**Rejected alternatives.** Restating the corrections here: that would create a
+second normative owner. Leaving the correlation clause as an in-place
+correction: its key lifecycle changes accepted foundation semantics and needs a
+superseding record.
+
+**Affects.** The linked ADR history only; no code or schema.
+
+## 2026-07-20 — Compact INFO telemetry and a 30-second shutdown window
+
+**Context.** ADR-0044 assigns tracing-subscriber selection, formatting,
+filtering, and the bounded graceful-shutdown window to the hubd wiring slice.
+The hub currently has no protocol listener, so the scheduler is its only work
+admission loop.
+
+**Decision.** Install hubd's private compact text subscriber at INFO and keep
+library crates on the `tracing` facade. Read only `DATABASE_URL` from deployment
+configuration, connect with verify-full options, migrate, complete the startup
+scan, and only then construct and run scheduling. SIGINT and SIGTERM stop new
+scheduler passes; an in-flight transaction receives 30 seconds before its future
+is abandoned and durable startup recovery regains authority. Until the
+immediately stacked INV-034 slice supplies that recovery, a persistence barrier
+visibly fails startup when any active turn exists rather than scheduling around
+it. Pool sizing stays at SQLx's baseline pending measurements.
+
+**Rejected alternatives.** Environment-selectable formatting or filters add
+deployment surface without a current need. An unbounded drain can hang process
+shutdown. Immediate cancellation adds avoidable recovery latency. A no-op
+startup scan would violate ADR-0004/ADR-0010 ordering.
+
+**Affects.** `apps/hubd`, its direct narrowly featured Tokio, `tracing`, and
+`tracing-subscriber` dependencies, production pool construction and the
+temporary fail-closed startup barrier in `crates/persistence`, and ADR-0044
+composition-order and shutdown tests. It adds no protocol server, storage DDL,
+runtime credential lookup, metrics, or OpenTelemetry.
+
+## 2026-07-20 — One-second baseline scheduler reconciliation
+
+**Context.** ADR-0010 makes same-process nudges the primary scheduler wake-up
+and an indexed Postgres sweep the correctness backstop, while leaving the
+interval to the implementation slice. The application already has one
+authoritative per-session activation transaction, but no typed hint source or
+runtime loop.
+
+**Decision.** Put a typed best-effort nudge, reconciliation-sweep port, combined
+work source, and scheduler loop in the application crate; implement the first
+sweep adapter with one Postgres query for sessions containing queued work and no
+active turn backed by a partial queued-session index. The loop runs one full
+sweep immediately, keeps consuming nudges while that query is in progress and
+between sweeps, delays rather than bursts missed ticks, sweeps every second
+without nudge starvation, and continues after visible sweep or eligibility-pass
+failures classified through ADR-0044's shared operator taxonomy. A bounded
+1,024-hint channel drops excess hints to reconciliation, and at most 16 cloned
+per-invocation passes run concurrently while duplicate in-flight session hints
+coalesce. One second is the baseline lost-wake-up latency; the composition root
+may supply another validated, nonzero, timer-representable duration. Hints
+remain nonauthoritative and every pass revalidates its session.
+
+**Rejected alternatives.** Polling without nudges imposes the interval on every
+commit. A nudge-only loop loses liveness at a commit/crash boundary. Retrying a
+failed transaction inside the loop hides commit ambiguity; a later nudge or
+sweep must re-read durable state instead. Unbounded nudges or pass tasks turn
+overload into process-memory growth, while one serial pass lets a contended
+session delay unrelated sessions. Replaying missed interval ticks amplifies
+backend stalls. A zero or hard-coded unchangeable interval prevents safe timer
+construction or operational tuning.
+
+**Affects.** `crates/application/src/scheduler.rs`,
+`crates/application/src/operator_failure.rs`, their public spine,
+`crates/persistence/src/scheduler.rs`, the touched activation-error mapping, the
+queued-session index migration, direct application dependencies on Tokio and the
+`tracing` facade selected by ADR-0032/ADR-0044, and INV-007/INV-009 scheduler
+tests. It adds no queue authority, dispatch transport, startup scan, provider
+behavior, or lifecycle storage representation.
+
+## 2026-07-20 — Adversarial-audit corrective package
+
+**Context.** A six-agent adversarial audit of the merged stack examined scaling
+limits, panic discipline, lock ordering, dead surface area, and process rigor.
+Its load-bearing finding: the
+[first frontier layout](#2026-07-17--materialize-complete-membership-for-first-context-frontier-storage)
+materializes complete membership per snapshot — order S² member rows across a
+session's life — while the submit path loads the complete scheduling projection,
+content included per submission, inside the session-row lock, so sessions
+degrade at hundreds of turns. The
+[2026-07-19 audit entry](#2026-07-19--post-milestone-2-audit-corrections-and-tracked-obligations)
+tracks a typed-error obligation for three panic sites; ten more non-test
+`expect()`/`unreachable!` sites carry no recorded obligation. The
+session/scheduler lock-ordering protocol lives only in comments in
+`crates/persistence/src/submit_input.rs` and
+`crates/persistence/src/start_eligible_turn.rs`.
+
+**Decision.** Owner-decided dispositions, recorded together:
+
+- *Scaling timing.* Record now; fix after the model-call milestone. The remedy
+  requires a still-undesigned representation that keeps complete scheduling
+  reads bounded, together with a frontier storage change (prefix sharing or
+  deltas) the 2026-07-17 layout entry already permits under
+  [ADR-0030](decisions/0030-context-frontier-snapshots.md). Accepted cost: that
+  fix reopens model-call storage after the milestone lands.
+- *Panic ledger.* The typed-error obligation extends from the three
+  `prepare_earliest_queued_activation` sites to all thirteen non-test sites.
+  Stable enclosing identifiers are `SubmitInput::prepare_when_no_active_turn`
+  (one) and `SubmitInput::prepare_with_active_turn` (three) in domain
+  `submit_input`; `EvidenceFreeCurrentAttempt::canonical_phase` (one),
+  `reconstitute_active_acceptance_tail` (one), and
+  `prepare_earliest_queued_activation` (three) in `turn_eligibility`; and
+  `prepare_against_locked_state` (one), `load_scheduling_projection` (two), and
+  `load_turn_origin_graph` (one) in persistence `submit_input`. A clippy
+  `expect_used`/`unwrap_used`/`unreachable` deny gate, covering every panic form
+  in this ledger, is commissioned as an ordinary slice once the conversions
+  land.
+- *Lock protocol.* The persistence crate's small `lock_inventory` module is the
+  only production Rust location for explicit strongest-mode row-lock SQL. CI
+  verifies its exact reviewed contents by checksum and rejects that clause in
+  every other production Rust file. This is a conservative textual boundary, not
+  Rust or SQL semantic analysis. A later lock-acquisition helper may replace the
+  inventory when it can own all session and scheduler row locks.
+- *Application punch list.* Commissioned as ordinary slices: delete the
+  isomorphic persistence `*HandlingOutcome` mirrors of application outcomes;
+  extract the `run_ready` and scripted-fake plumbing duplicated across the five
+  application test modules into shared test support (testing-style rule 3:
+  plumbing irrelevant to the behavior under test); normalize the
+  `CreateSessionError` asymmetry and delete its unreachable `Preparation`
+  variant as remaining implementation work under accepted
+  [ADR-0044](decisions/0044-hub-runtime-foundations.md).
+- *Rigor tier.* Uniform rigor stays; the model-call milestone's time-to-land is
+  the canary that reopens this decision.
+- *Supply chain.* `cargo-deny` (advisories, an exact license allow-list,
+  registry sources) gates pull requests and a weekly schedule via `deny.toml`
+  and `.github/workflows/deny.yml`; `.gitignore` adds local secret and key
+  patterns.
+
+**Rejected alternatives.** Fixing the scaling pair now: it would delay the
+model-call milestone the owner prioritized against a load only sessions with
+hundreds of turns produce. Converting the thirteen panic sites in this package:
+each conversion needs its owning slice's tests, and this package is docs,
+configuration, and CI; moving the existing SQL strings into one private module
+does not alter their runtime statements. Enforcing the lock protocol by comments
+and review alone: that is the state the audit found insufficient. Building a
+Rust/SQL parser for the tripwire: its complexity and inevitable syntax gaps
+would outweigh this narrow guard. Tiered rigor now: no measurement yet shows
+uniform rigor is the constraint.
+
+**Affects.** This entry; new provider-security, scaling, and reconciliation
+entries in [open-questions.md](open-questions.md); `.github/workflows/rust.yml`
+(exact lock inventory, `validate` timeout); `.github/workflows/deny.yml`,
+`deny.toml`, and `.gitignore` (new supply-chain gate); the commissioned slices
+bind future work. Rust runtime behavior, schema, API, and accepted semantics do
+not change; the documented tripwire, timeout, and supply-chain gates change CI
+and configuration behavior.
+
 ## 2026-07-20 — First outbox append is scoped to CreateSession
 
 **Context.** ADR-0040 makes in-transaction event append a standing obligation

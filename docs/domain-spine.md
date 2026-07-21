@@ -1107,6 +1107,10 @@ impl AcceptedInputSchedulingProjection {
         self,
         identities: AcceptedInputTurnActivationIdentities,
     ) -> Result<PreparedAcceptedInputTurnActivation, AcceptedInputEligibilityError>;
+    pub fn prepare_active_turn_lost_failure(
+        self,
+        identities: AcceptedInputTurnFailureIdentities,
+    ) -> Result<PreparedAcceptedInputTurnFailure, AcceptedInputTurnFailureError>;
     // accessor: session()
 }
 
@@ -1146,6 +1150,9 @@ pub enum AcceptedInputEligibilityFailure {
     OriginEntryIdentityAlreadyExists,
     StartingFrontierIdentityAlreadyExists,
     InitialAttemptIdentityAlreadyExists,
+    InternalOriginFrontierConstructionFailed,
+    InternalPredecessorTerminalFrontierMissing { predecessor: TurnId },
+    InternalStartingFrontierDerivationFailed,
 }
 
 pub struct AcceptedInputEligibilityError { /* private */ }
@@ -1157,6 +1164,59 @@ impl AcceptedInputEligibilityError {
         AcceptedInputSchedulingProjection,
         AcceptedInputTurnActivationIdentities,
         AcceptedInputEligibilityFailure,
+    );
+    // accessors: projection(), identities(), failure()
+}
+
+pub struct AcceptedInputTurnFailureIdentities { /* private */ }
+impl AcceptedInputTurnFailureIdentities {
+    pub const fn new(
+        failure_entry: SemanticTranscriptEntryId,
+        terminal_frontier: ContextFrontierId,
+    ) -> Self;
+    // accessors: failure_entry(), terminal_frontier()
+}
+
+pub struct FailedAcceptedInputTurn { /* private */ }
+// sealed: PreparedAcceptedInputTurnFailure
+impl FailedAcceptedInputTurn {
+    // accessors: session(), turn(), accepted_input(), order(), start(),
+    // ended_attempt(), disposition(), terminal_frontier()
+}
+
+pub struct PreparedAcceptedInputTurnFailure { /* private */ }
+// sealed: AcceptedInputSchedulingProjection::prepare_active_turn_lost_failure
+impl PreparedAcceptedInputTurnFailure {
+    pub fn into_parts(
+        self,
+    ) -> (
+        FailedAcceptedInputTurn,
+        SemanticTranscriptEntry,
+        ResolvedContextFrontierSnapshot,
+    );
+    // accessors: turn(), failure_entry(), terminal_snapshot()
+}
+
+pub enum AcceptedInputTurnFailureFailure {
+    NoActiveTurn,
+    PendingSteering { accepted_input: AcceptedInputId },
+    FailureEntryIdentityAlreadyExists,
+    TerminalFrontierIdentityAlreadyExists,
+    ActiveAttemptCannotEndLost,
+    ActiveStartMissing,
+    StartingSnapshotMissing,
+    TerminalFrontierCannotAppend,
+}
+
+pub struct AcceptedInputTurnFailureError { /* private */ }
+// sealed: Err of prepare_active_turn_lost_failure
+impl AcceptedInputTurnFailureError {
+    pub fn into_parts(
+        self,
+    ) -> (
+        AcceptedInputSchedulingProjection,
+        AcceptedInputTurnFailureIdentities,
+        AcceptedInputTurnFailureFailure,
     );
     // accessors: projection(), identities(), failure()
 }
@@ -1717,6 +1777,21 @@ impl<Transaction: ReplaceSessionDefaultsTransaction> ReplaceSessionDefaultsServi
 }
 ```
 
+## application: operator_failure
+
+```rust
+pub enum OperatorFailureClass {
+    Infrastructure { commit_ambiguous: bool },
+    FailClosedCorruption,
+    IdentityCollision,
+    CallerOrHubBug,
+}
+
+pub trait ClassifyOperatorFailure {
+    fn operator_failure_class(&self) -> OperatorFailureClass;
+}
+```
+
 ## application: start_eligible_turn
 
 ```rust
@@ -1745,6 +1820,7 @@ pub trait StartEligibleTurnTransaction {
 }
 
 pub struct StartEligibleTurnService<Generator, Transaction> { /* private */ }
+// Clone when both ports are Clone
 impl<Generator, Transaction> StartEligibleTurnService<Generator, Transaction> {
     pub const fn new(ids: Generator, transaction: Transaction) -> Self;
     pub fn into_parts(self) -> (Generator, Transaction);
@@ -1757,6 +1833,171 @@ impl<
         &mut self,
         session: SessionId,
     ) -> Result<StartEligibleTurnOutcome, Transaction::Error>;
+}
+```
+
+## application: scheduler
+
+```rust
+pub struct ReconciliationSweepInterval(/* private */);
+impl ReconciliationSweepInterval {
+    pub const fn baseline() -> Self;
+    pub fn try_new(
+        interval: Duration,
+    ) -> Result<Self, InvalidReconciliationSweepInterval>;
+    pub const fn get(self) -> Duration;
+}
+
+pub struct InvalidReconciliationSweepInterval;
+// impl Display + std::error::Error
+
+pub enum EligibilityNudgeOutcome {
+    Enqueued,
+    DroppedAtCapacity,
+    WorkSourceClosed,
+}
+
+pub trait EligibilityNudge {
+    fn nudge(&self, session: SessionId) -> EligibilityNudgeOutcome;
+}
+
+pub trait EligibilitySweep {
+    type Error;
+
+    fn find_sessions(
+        &mut self,
+    ) -> impl Future<Output = Result<EligibilitySweepBatch, Self::Error>> + Send;
+}
+
+pub struct EligibilitySweepBatch { /* private */ }
+impl EligibilitySweepBatch {
+    pub fn new(sessions: Vec<SessionId>, continuation: bool) -> Self;
+    pub fn into_parts(self) -> (Vec<SessionId>, bool);
+}
+
+pub trait EligibilityWorkSource {
+    type Error;
+
+    fn next(&mut self) -> impl Future<Output = Result<SessionId, Self::Error>> + Send;
+}
+
+pub trait EligibilityPass {
+    type Error;
+
+    fn run(
+        &mut self,
+        session: SessionId,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static;
+}
+
+pub struct InProcessEligibilityNudge { /* private */ }
+// Clone; impl EligibilityNudge
+
+pub struct InProcessEligibilityWorkSource<Sweep>
+where
+    Sweep: EligibilitySweep,
+{ /* private */ }
+// impl EligibilityWorkSource when Sweep: EligibilitySweep + Send + 'static
+impl<Sweep: EligibilitySweep> InProcessEligibilityWorkSource<Sweep> {
+    pub fn new(sweep: Sweep) -> (InProcessEligibilityNudge, Self);
+    pub fn with_interval(
+        sweep: Sweep,
+        sweep_interval: ReconciliationSweepInterval,
+    ) -> (InProcessEligibilityNudge, Self);
+    pub fn with_options(
+        sweep: Sweep,
+        sweep_interval: ReconciliationSweepInterval,
+        nudge_buffer_capacity: NonZeroUsize,
+    ) -> (InProcessEligibilityNudge, Self);
+}
+
+pub enum SchedulerLoopExit {
+    Shutdown,
+}
+
+pub struct SchedulerLoop<WorkSource, Pass> { /* private */ }
+impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass> {
+    pub const fn new(work_source: WorkSource, pass: Pass) -> Self;
+    pub const fn with_max_in_flight(
+        work_source: WorkSource,
+        pass: Pass,
+        max_in_flight_passes: NonZeroUsize,
+    ) -> Self;
+    pub fn into_parts(self) -> (WorkSource, Pass);
+}
+impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass>
+where
+    WorkSource: EligibilityWorkSource,
+    Pass: EligibilityPass + Send,
+    WorkSource::Error: ClassifyOperatorFailure,
+    Pass::Error: ClassifyOperatorFailure + Send + 'static,
+{
+    pub async fn run_until<Shutdown>(
+        &mut self,
+        shutdown: Shutdown,
+    ) -> SchedulerLoopExit
+    where
+        Shutdown: Future<Output = ()> + Send;
+}
+```
+
+## application: startup_scan
+
+```rust
+pub trait StartupScanIdGenerator {
+    fn next_failure_entry_id(&mut self) -> SemanticTranscriptEntryId;
+    fn next_terminal_frontier_id(&mut self) -> ContextFrontierId;
+}
+
+pub struct UuidV7StartupScanIdGenerator;
+// Default; impl StartupScanIdGenerator
+
+pub enum StartupScanSessionOutcome {
+    NoActiveTurn,
+    Recovered(Box<FailedAcceptedInputTurn>),
+    DeferredPendingSteering { accepted_input: AcceptedInputId },
+}
+
+pub trait StartupScanRepository {
+    type Error: ClassifyOperatorFailure;
+
+    fn active_sessions(
+        &mut self,
+    ) -> impl Future<Output = Result<Box<[SessionId]>, Self::Error>> + Send;
+    fn recover(
+        &mut self,
+        session: SessionId,
+        identities: AcceptedInputTurnFailureIdentities,
+    ) -> impl Future<Output = Result<StartupScanSessionOutcome, Self::Error>> + Send;
+}
+
+pub struct StartupScanOutcome { /* private */ }
+// sealed: StartupScanService::execute
+impl StartupScanOutcome {
+    // accessors: recovered_turn_count(), pending_steering_sessions(),
+    // is_complete()
+}
+
+pub struct StartupScanError<RepositoryError> { /* private */ }
+// sealed: StartupScanService::execute
+// impl Clone, Debug, Eq, PartialEq, Display, Error, ClassifyOperatorFailure
+impl<RepositoryError> StartupScanError<RepositoryError> {
+    // accessors: session(), repository_error(), into_repository_error()
+}
+
+pub struct StartupScanService<Generator, Repository> { /* private */ }
+impl<Generator, Repository> StartupScanService<Generator, Repository> {
+    pub const fn new(ids: Generator, repository: Repository) -> Self;
+    pub fn into_parts(self) -> (Generator, Repository);
+}
+impl<
+    Generator: StartupScanIdGenerator,
+    Repository: StartupScanRepository,
+> StartupScanService<Generator, Repository>
+{
+    pub async fn execute(
+        &mut self,
+    ) -> Result<StartupScanOutcome, StartupScanError<Repository::Error>>;
 }
 ```
 
@@ -1803,13 +2044,16 @@ pub trait SubmitInputTransaction {
     ) -> impl Future<Output = Result<SubmitInputOutcome, Self::Error>> + Send;
 }
 
-pub struct SubmitInputService<Generator, Transaction> { /* private */ }
-impl<Generator, Transaction> SubmitInputService<Generator, Transaction> {
-    pub const fn new(ids: Generator, transaction: Transaction) -> Self;
-    pub fn into_parts(self) -> (Generator, Transaction);
+pub struct SubmitInputService<Generator, Transaction, Nudge> { /* private */ }
+impl<Generator, Transaction, Nudge> SubmitInputService<Generator, Transaction, Nudge> {
+    pub const fn new(ids: Generator, transaction: Transaction, nudge: Nudge) -> Self;
+    pub fn into_parts(self) -> (Generator, Transaction, Nudge);
 }
-impl<Generator: SubmitInputIdGenerator, Transaction: SubmitInputTransaction>
-    SubmitInputService<Generator, Transaction>
+impl<
+    Generator: SubmitInputIdGenerator,
+    Transaction: SubmitInputTransaction,
+    Nudge: EligibilityNudge,
+> SubmitInputService<Generator, Transaction, Nudge>
 {
     pub async fn execute(
         &mut self,
@@ -1832,7 +2076,7 @@ impl<Generator: SubmitInputIdGenerator, Transaction: SubmitInputTransaction>
 | domain: submit_input                  | 15                   |
 | domain: queue_order                   | 5 (+1 free fn)       |
 | domain: turn_lifecycle                | 10                   |
-| domain: turn_eligibility              | 16                   |
+| domain: turn_eligibility              | 21                   |
 | domain: turn_attempt                  | 13                   |
 | domain: model_call                    | 7                    |
 | domain: context_frontier              | 6                    |
@@ -1841,10 +2085,13 @@ impl<Generator: SubmitInputIdGenerator, Transaction: SubmitInputTransaction>
 | domain: applied_interrupt             | 2                    |
 | domain: fatal_mismatch                | 0                    |
 | domain: replace_session_defaults      | 13                   |
-| **signalbox-domain total**            | **153 (+1 free fn)** |
+| **signalbox-domain total**            | **158 (+1 free fn)** |
 | application: create_session           | 8 (incl. 2 traits)   |
 | application: load_session             | 2 (incl. 1 trait)    |
+| application: operator_failure         | 2 (incl. 1 trait)    |
 | application: replace_session_defaults | 4 (incl. 1 trait)    |
+| application: scheduler                | 12 (incl. 4 traits)  |
 | application: start_eligible_turn      | 5 (incl. 2 traits)   |
+| application: startup_scan             | 7 (incl. 2 traits)   |
 | application: submit_input             | 7 (incl. 2 traits)   |
-| **signalbox-application total**       | **26**               |
+| **signalbox-application total**       | **47**               |

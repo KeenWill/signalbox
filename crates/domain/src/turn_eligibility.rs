@@ -19,12 +19,12 @@ use crate::{
     AcceptedInputDisposition, AcceptedInputId, AcceptedInputLifecycle, AcceptedInputQueueOrder,
     AcceptedInputQueueOrderError, AcceptedInputQueuePriority, AcceptedInputQueueWork,
     AcceptedInputStartingLineage, AcceptedInputTurnStart, ActiveTurnPhase, ContextFrontierId,
-    CurrentTurnAttempt, DeliveryRequest, InitialSemanticTranscriptEntryPayload,
+    CurrentTurnAttempt, DeliveryRequest, EndedTurnAttempt, InitialSemanticTranscriptEntryPayload,
     OriginConfiguration, ResolvedContextFrontierReconstitutionInput,
     ResolvedContextFrontierSnapshot, SemanticTranscriptEntry, SemanticTranscriptEntryId,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session, SessionId,
-    SessionInputPosition, TranscriptAncestry, TurnAttemptId, TurnId,
-    derive_accepted_input_total_order,
+    SessionInputPosition, TranscriptAncestry, TurnAttemptId, TurnDisposition, TurnId,
+    UnstoppedAttemptDisposition, derive_accepted_input_total_order,
 };
 
 /// The lifecycle fact stored for one accepted-input scheduling record.
@@ -127,6 +127,10 @@ impl ActiveTurnSchedulingReconstitutionInput {
 
     fn canonical_phase(&self) -> ActiveTurnPhase {
         let current_attempt = CurrentTurnAttempt::prepared(self.current_attempt);
+        #[expect(
+            clippy::expect_used,
+            reason = "temporary ledger site: reconstitution validates the stored attempt transition; typed conversion is commissioned by the 2026-07-20 audit"
+        )]
         let current_attempt = match self.state {
             EvidenceFreeCurrentAttemptState::Prepared => current_attempt,
             EvidenceFreeCurrentAttemptState::Running => current_attempt
@@ -838,6 +842,15 @@ impl AcceptedInputSchedulingProjection {
     ) -> Result<PreparedAcceptedInputTurnActivation, AcceptedInputEligibilityError> {
         prepare_earliest_queued_activation(self, identities)
     }
+
+    /// Consumes this complete projection and prepares the active prior-process
+    /// attempt as one failed-terminal startup-recovery candidate.
+    pub fn prepare_active_turn_lost_failure(
+        self,
+        identities: AcceptedInputTurnFailureIdentities,
+    ) -> Result<PreparedAcceptedInputTurnFailure, AcceptedInputTurnFailureError> {
+        prepare_active_turn_lost_failure(self, identities)
+    }
 }
 
 /// Fresh identities supplied for one eligibility-time activation candidate.
@@ -1017,6 +1030,18 @@ pub enum AcceptedInputEligibilityFailure {
     /// The proposed initial-attempt identity is already current in the
     /// complete scheduling projection.
     InitialAttemptIdentityAlreadyExists,
+    /// Internal preparation could not construct the origin-only first
+    /// frontier from the already-validated projection.
+    InternalOriginFrontierConstructionFailed,
+    /// Internal preparation found earliest queued work after a predecessor
+    /// without the terminal frontier guaranteed by scheduling reconstitution.
+    InternalPredecessorTerminalFrontierMissing {
+        /// The predecessor whose validated terminal frontier was absent.
+        predecessor: TurnId,
+    },
+    /// Internal preparation could not append the fresh origin entry to the
+    /// predecessor frontier guaranteed by scheduling reconstitution.
+    InternalStartingFrontierDerivationFailed,
 }
 
 /// Rejected eligibility preparation retaining the complete projection and
@@ -1051,6 +1076,187 @@ impl AcceptedInputEligibilityError {
         AcceptedInputSchedulingProjection,
         AcceptedInputTurnActivationIdentities,
         AcceptedInputEligibilityFailure,
+    ) {
+        (*self.projection, self.identities, self.failure)
+    }
+}
+
+/// Fresh identities supplied for one failed-terminal startup candidate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AcceptedInputTurnFailureIdentities {
+    failure_entry: SemanticTranscriptEntryId,
+    terminal_frontier: ContextFrontierId,
+}
+
+impl AcceptedInputTurnFailureIdentities {
+    /// Supplies the semantic failure-entry and terminal-frontier identities.
+    pub const fn new(
+        failure_entry: SemanticTranscriptEntryId,
+        terminal_frontier: ContextFrontierId,
+    ) -> Self {
+        Self {
+            failure_entry,
+            terminal_frontier,
+        }
+    }
+
+    /// Returns the proposed failed-marker identity.
+    pub const fn failure_entry(&self) -> SemanticTranscriptEntryId {
+        self.failure_entry
+    }
+
+    /// Returns the proposed terminal-frontier identity.
+    pub const fn terminal_frontier(&self) -> ContextFrontierId {
+        self.terminal_frontier
+    }
+}
+
+/// Exact failed turn state prepared by the startup scan.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FailedAcceptedInputTurn {
+    session: SessionId,
+    turn: TurnId,
+    accepted_input: AcceptedInputLifecycle,
+    order: AcceptedInputQueueOrder,
+    start: AcceptedInputTurnStart,
+    ended_attempt: EndedTurnAttempt,
+    disposition: TurnDisposition,
+    terminal_frontier: ContextFrontierId,
+}
+
+impl FailedAcceptedInputTurn {
+    /// Returns the owning session.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    /// Returns the failed logical turn.
+    pub const fn turn(&self) -> TurnId {
+        self.turn
+    }
+
+    /// Borrows the exact accepted origin input.
+    pub const fn accepted_input(&self) -> &AcceptedInputLifecycle {
+        &self.accepted_input
+    }
+
+    /// Returns the immutable accepted-input queue order.
+    pub const fn order(&self) -> AcceptedInputQueueOrder {
+        self.order
+    }
+
+    /// Returns the eligibility-fixed lineage and starting frontier.
+    pub const fn start(&self) -> AcceptedInputTurnStart {
+        self.start
+    }
+
+    /// Borrows the exact Lost physical-attempt history.
+    pub const fn ended_attempt(&self) -> &EndedTurnAttempt {
+        &self.ended_attempt
+    }
+
+    /// Borrows the failed logical-turn disposition.
+    pub const fn disposition(&self) -> &TurnDisposition {
+        &self.disposition
+    }
+
+    /// Returns the complete terminal-frontier identity.
+    pub const fn terminal_frontier(&self) -> ContextFrontierId {
+        self.terminal_frontier
+    }
+}
+
+/// One sealed atomic failed-terminal startup-recovery candidate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreparedAcceptedInputTurnFailure {
+    turn: FailedAcceptedInputTurn,
+    failure_entry: SemanticTranscriptEntry,
+    terminal_snapshot: ResolvedContextFrontierSnapshot,
+}
+
+impl PreparedAcceptedInputTurnFailure {
+    /// Borrows the exact failed logical turn and ended physical attempt.
+    pub const fn turn(&self) -> &FailedAcceptedInputTurn {
+        &self.turn
+    }
+
+    /// Returns the newly created `TurnFailed` semantic entry.
+    pub const fn failure_entry(&self) -> SemanticTranscriptEntry {
+        self.failure_entry
+    }
+
+    /// Borrows the start-prefix-preserving terminal snapshot.
+    pub const fn terminal_snapshot(&self) -> &ResolvedContextFrontierSnapshot {
+        &self.terminal_snapshot
+    }
+
+    /// Returns all atomic commit values.
+    pub fn into_parts(
+        self,
+    ) -> (
+        FailedAcceptedInputTurn,
+        SemanticTranscriptEntry,
+        ResolvedContextFrontierSnapshot,
+    ) {
+        (self.turn, self.failure_entry, self.terminal_snapshot)
+    }
+}
+
+/// Why the complete scheduling projection cannot prepare startup failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AcceptedInputTurnFailureFailure {
+    /// No turn currently owns the session's progressing slot.
+    NoActiveTurn,
+    /// A pending steering input keeps the active source turn live.
+    PendingSteering {
+        /// The exact pending accepted input.
+        accepted_input: AcceptedInputId,
+    },
+    /// The proposed failed-marker identity is already present.
+    FailureEntryIdentityAlreadyExists,
+    /// The proposed terminal-frontier identity is already present.
+    TerminalFrontierIdentityAlreadyExists,
+    /// Canonical active attempt facts unexpectedly rejected a Lost end.
+    ActiveAttemptCannotEndLost,
+    /// Canonical active scheduling facts unexpectedly omitted their start.
+    ActiveStartMissing,
+    /// Canonical scheduling facts unexpectedly omitted the starting snapshot.
+    StartingSnapshotMissing,
+    /// Canonical fresh failure facts unexpectedly could not append.
+    TerminalFrontierCannotAppend,
+}
+
+/// Rejected startup-failure preparation retaining every input unchanged.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AcceptedInputTurnFailureError {
+    projection: Box<AcceptedInputSchedulingProjection>,
+    identities: AcceptedInputTurnFailureIdentities,
+    failure: AcceptedInputTurnFailureFailure,
+}
+
+impl AcceptedInputTurnFailureError {
+    /// Borrows the unchanged complete scheduling projection.
+    pub const fn projection(&self) -> &AcceptedInputSchedulingProjection {
+        &self.projection
+    }
+
+    /// Returns the unchanged supplied identities.
+    pub const fn identities(&self) -> AcceptedInputTurnFailureIdentities {
+        self.identities
+    }
+
+    /// Returns the exact preparation failure.
+    pub const fn failure(&self) -> AcceptedInputTurnFailureFailure {
+        self.failure
+    }
+
+    /// Returns every unchanged input and the exact failure.
+    pub fn into_parts(
+        self,
+    ) -> (
+        AcceptedInputSchedulingProjection,
+        AcceptedInputTurnFailureIdentities,
+        AcceptedInputTurnFailureFailure,
     ) {
         (*self.projection, self.identities, self.failure)
     }
@@ -1433,6 +1639,10 @@ fn reconstitute_active_acceptance_tail(
         );
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "temporary ledger site: the active record is inserted before tail validation; typed conversion is commissioned by the 2026-07-20 audit"
+    )]
     let latest_known_origin_position = records_by_turn
         .values()
         .map(|record| record.order.acceptance_position())
@@ -1771,6 +1981,124 @@ fn start_snapshot_entries(
         .collect()
 }
 
+fn prepare_active_turn_lost_failure(
+    projection: AcceptedInputSchedulingProjection,
+    identities: AcceptedInputTurnFailureIdentities,
+) -> Result<PreparedAcceptedInputTurnFailure, AcceptedInputTurnFailureError> {
+    let fail = |projection, failure| AcceptedInputTurnFailureError {
+        projection: Box::new(projection),
+        identities,
+        failure,
+    };
+
+    let Some(active) = projection.active_turn() else {
+        return Err(fail(
+            projection,
+            AcceptedInputTurnFailureFailure::NoActiveTurn,
+        ));
+    };
+    let active = active.clone();
+
+    if let Some(pending) = projection.active_acceptance_tail.as_ref().and_then(|tail| {
+        tail.entries.iter().find_map(|entry| {
+            matches!(
+                entry.accepted_input.disposition(),
+                AcceptedInputDisposition::PendingSteering { .. }
+            )
+            .then_some(entry.accepted_input.id())
+        })
+    }) {
+        return Err(fail(
+            projection,
+            AcceptedInputTurnFailureFailure::PendingSteering {
+                accepted_input: pending,
+            },
+        ));
+    }
+
+    let failure_ref =
+        SemanticTranscriptEntryRef::from_source(active.session, identities.failure_entry);
+    if projection.semantic_entries.contains_key(&failure_ref) {
+        return Err(fail(
+            projection,
+            AcceptedInputTurnFailureFailure::FailureEntryIdentityAlreadyExists,
+        ));
+    }
+    if projection
+        .snapshots
+        .contains_key(&identities.terminal_frontier)
+    {
+        return Err(fail(
+            projection,
+            AcceptedInputTurnFailureFailure::TerminalFrontierIdentityAlreadyExists,
+        ));
+    }
+
+    let current_attempt = match active.active_phase() {
+        Some(ActiveTurnPhase::Running { current_attempt }) => current_attempt.clone(),
+        Some(
+            ActiveTurnPhase::AwaitingApproval { .. }
+            | ActiveTurnPhase::AwaitingRecoveryDecision { .. },
+        )
+        | None => {
+            return Err(fail(
+                projection,
+                AcceptedInputTurnFailureFailure::ActiveAttemptCannotEndLost,
+            ));
+        }
+    };
+    let Ok(ended_attempt) = current_attempt.end_without_stop(UnstoppedAttemptDisposition::Lost)
+    else {
+        return Err(fail(
+            projection,
+            AcceptedInputTurnFailureFailure::ActiveAttemptCannotEndLost,
+        ));
+    };
+
+    let Some(start) = active.start() else {
+        return Err(fail(
+            projection,
+            AcceptedInputTurnFailureFailure::ActiveStartMissing,
+        ));
+    };
+    let failure_entry = SemanticTranscriptEntry::from_validated_parts(
+        identities.failure_entry,
+        active.session,
+        InitialSemanticTranscriptEntryPayload::TurnFailed { turn: active.turn },
+    );
+    let Some(starting_snapshot) = projection.snapshots.get(&start.frontier().snapshot()) else {
+        return Err(fail(
+            projection,
+            AcceptedInputTurnFailureFailure::StartingSnapshotMissing,
+        ));
+    };
+    let Ok(terminal_snapshot) = starting_snapshot.derive_appending_candidate(
+        identities.terminal_frontier,
+        vec![failure_entry.reference()],
+    ) else {
+        return Err(fail(
+            projection,
+            AcceptedInputTurnFailureFailure::TerminalFrontierCannotAppend,
+        ));
+    };
+    let turn = FailedAcceptedInputTurn {
+        session: active.session,
+        turn: active.turn,
+        accepted_input: active.accepted_input,
+        order: active.order,
+        start,
+        ended_attempt,
+        disposition: TurnDisposition::Failed,
+        terminal_frontier: identities.terminal_frontier,
+    };
+
+    Ok(PreparedAcceptedInputTurnFailure {
+        turn,
+        failure_entry,
+        terminal_snapshot,
+    })
+}
+
 fn prepare_earliest_queued_activation(
     projection: AcceptedInputSchedulingProjection,
     identities: AcceptedInputTurnActivationIdentities,
@@ -1836,24 +2164,43 @@ fn prepare_earliest_queued_activation(
         },
     );
     let (lineage, starting_snapshot) = if index == 0 {
-        let snapshot = ResolvedContextFrontierSnapshot::try_from_candidate(
+        let snapshot = match ResolvedContextFrontierSnapshot::try_from_candidate(
             source_session,
             identities.starting_frontier,
             vec![origin_entry.reference()],
-        )
-        .expect("one fresh exact origin reference is ordered and distinct");
+        ) {
+            Ok(snapshot) => snapshot,
+            Err(_) => {
+                return Err(fail(
+                    projection,
+                    AcceptedInputEligibilityFailure::InternalOriginFrontierConstructionFailed,
+                ));
+            }
+        };
         (AcceptedInputStartingLineage::FirstInSession, snapshot)
     } else {
         let predecessor = &projection.turns[index - 1];
-        let terminal_frontier = predecessor
-            .failed_terminal_frontier()
-            .expect("validated earliest queued work follows a failed-terminal prefix");
-        let snapshot = terminal_frontier
-            .derive_appending_candidate(
-                identities.starting_frontier,
-                vec![origin_entry.reference()],
-            )
-            .expect("fresh entry and snapshot identities preserve the validated prefix");
+        let predecessor_turn = predecessor.turn;
+        let Some(terminal_frontier) = predecessor.failed_terminal_frontier() else {
+            return Err(fail(
+                projection,
+                AcceptedInputEligibilityFailure::InternalPredecessorTerminalFrontierMissing {
+                    predecessor: predecessor_turn,
+                },
+            ));
+        };
+        let snapshot = match terminal_frontier.derive_appending_candidate(
+            identities.starting_frontier,
+            vec![origin_entry.reference()],
+        ) {
+            Ok(snapshot) => snapshot,
+            Err(_) => {
+                return Err(fail(
+                    projection,
+                    AcceptedInputEligibilityFailure::InternalStartingFrontierDerivationFailed,
+                ));
+            }
+        };
         (
             AcceptedInputStartingLineage::After {
                 immediate_predecessor: predecessor.turn,
@@ -1889,7 +2236,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        AcceptedInputDisposition, CurrentTurnAttemptState, ModelSelectionOverride,
+        AcceptedInputDisposition, AttemptEnd, CurrentTurnAttemptState, ModelSelectionOverride,
         ModelSelectionRequest, PerInputConfigurationChoices, SessionConfigurationDefaults,
         SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
         SessionReconstitutionInput,
@@ -2807,6 +3154,176 @@ mod tests {
                 if current_attempt.id() == expected_attempt
                     && current_attempt.state() == &CurrentTurnAttemptState::Running
         ));
+    }
+
+    /// S03 / INV-034: startup recovery consumes the complete active
+    /// projection, ends its exact evidence-free attempt as Lost, and appends
+    /// one `TurnFailed` marker to the starting frontier.
+    #[test]
+    fn s03_inv034_prepares_atomic_lost_failed_terminal_candidate() {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let failure_entry = semantic_entry(500);
+        let terminal_frontier = frontier(600);
+        let identities =
+            AcceptedInputTurnFailureIdentities::new(failure_entry.id(), terminal_frontier.id());
+        let projection = ActiveReconstitutionFacts::matching(&session, active)
+            .input()
+            .reconstitute()
+            .expect("the complete active projection is valid");
+
+        let candidate = projection
+            .prepare_active_turn_lost_failure(identities)
+            .expect("evidence-free prior-process work can end Lost");
+
+        assert_eq!(candidate.turn().turn(), active.turn());
+        assert_eq!(
+            candidate.turn().ended_attempt().id(),
+            matching_active_attempt()
+        );
+        assert_eq!(
+            candidate.turn().ended_attempt().end(),
+            &AttemptEnd::WithoutStop {
+                disposition: UnstoppedAttemptDisposition::Lost,
+            }
+        );
+        assert_eq!(candidate.turn().disposition(), &TurnDisposition::Failed);
+        assert_eq!(
+            candidate.failure_entry().payload(),
+            InitialSemanticTranscriptEntryPayload::TurnFailed {
+                turn: active.turn(),
+            }
+        );
+        assert_eq!(
+            candidate
+                .terminal_snapshot()
+                .ordered_entries()
+                .collect::<Vec<_>>(),
+            vec![
+                ActiveReconstitutionFacts::matching_origin_entry().reference(&session),
+                failure_entry.reference(&session),
+            ]
+        );
+        assert_eq!(
+            candidate.terminal_snapshot().frontier().snapshot(),
+            terminal_frontier.id()
+        );
+    }
+
+    /// INV-034: the same Lost failure transition is valid for a stored
+    /// Running attempt, without inventing a stop cause.
+    #[test]
+    fn inv034_running_attempt_also_prepares_without_stop_lost() {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let running_attempt = turn_attempt_id(51);
+        let mut facts = ActiveReconstitutionFacts::matching(&session, active);
+        facts.replace_active_phase(ActiveTurnSchedulingReconstitutionInput::running(
+            active.turn(),
+            running_attempt,
+        ));
+
+        let candidate = facts
+            .input()
+            .reconstitute()
+            .expect("the complete running projection is valid")
+            .prepare_active_turn_lost_failure(AcceptedInputTurnFailureIdentities::new(
+                semantic_entry(500).id(),
+                frontier(600).id(),
+            ))
+            .expect("running prior-process work can end Lost");
+
+        assert_eq!(candidate.turn().ended_attempt().id(), running_attempt);
+        assert_eq!(
+            candidate.turn().ended_attempt().end(),
+            &AttemptEnd::WithoutStop {
+                disposition: UnstoppedAttemptDisposition::Lost,
+            }
+        );
+    }
+
+    /// INV-016 / INV-034: pending steering is not a stop cause and keeps the
+    /// complete projection unchanged while startup reports deferral.
+    #[test]
+    fn inv016_inv034_pending_steering_defers_lost_failure_unchanged() {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let pending = accepted_origin(2);
+        let mut facts = ActiveReconstitutionFacts::matching(&session, active);
+        let tail = facts
+            .acceptance_tail
+            .as_mut()
+            .expect("matching facts contain the active tail");
+        tail.observed_last_position = pending.position();
+        tail.entries
+            .push(SessionAcceptanceTailEntryReconstitutionInput::new(
+                session.id(),
+                AcceptedInputLifecycle::new(
+                    pending.accepted_input(),
+                    AcceptedInputDisposition::PendingSteering {
+                        binding: crate::SteeringBinding::new(active.turn()),
+                    },
+                ),
+                pending.position(),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: active.turn(),
+                },
+            ));
+        let projection = facts
+            .input()
+            .reconstitute()
+            .expect("the pending-steering tail is complete");
+        let identities =
+            AcceptedInputTurnFailureIdentities::new(semantic_entry(500).id(), frontier(600).id());
+
+        let error = projection
+            .clone()
+            .prepare_active_turn_lost_failure(identities)
+            .expect_err("pending steering keeps its source active");
+
+        assert_eq!(error.projection(), &projection);
+        assert_eq!(error.identities(), identities);
+        assert_eq!(
+            error.failure(),
+            AcceptedInputTurnFailureFailure::PendingSteering {
+                accepted_input: pending.accepted_input(),
+            }
+        );
+    }
+
+    /// INV-001 / INV-034: startup failure preparation rejects each committed
+    /// identity before constructing a candidate.
+    #[test]
+    fn inv001_inv034_rejects_committed_failure_identities() {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let projection = ActiveReconstitutionFacts::matching(&session, active)
+            .input()
+            .reconstitute()
+            .expect("the complete active projection is valid");
+
+        let entry_collision = projection
+            .clone()
+            .prepare_active_turn_lost_failure(AcceptedInputTurnFailureIdentities::new(
+                ActiveReconstitutionFacts::matching_origin_entry().id(),
+                frontier(600).id(),
+            ))
+            .expect_err("the semantic identity is already committed");
+        assert_eq!(
+            entry_collision.failure(),
+            AcceptedInputTurnFailureFailure::FailureEntryIdentityAlreadyExists
+        );
+
+        let frontier_collision = projection
+            .prepare_active_turn_lost_failure(AcceptedInputTurnFailureIdentities::new(
+                semantic_entry(500).id(),
+                ActiveReconstitutionFacts::matching_starting_frontier().id(),
+            ))
+            .expect_err("the frontier identity is already committed");
+        assert_eq!(
+            frontier_collision.failure(),
+            AcceptedInputTurnFailureFailure::TerminalFrontierIdentityAlreadyExists
+        );
     }
 
     /// S03 / S08 / INV-009 / INV-016 / ADR-0041: an active
