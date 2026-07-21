@@ -26,7 +26,7 @@ use crate::response::{convert_usage, map_finish};
 use crate::status::classify_error_token;
 use crate::wire::{
     ContentBlockDeltaEvent, ContentBlockStartEvent, ContentBlockStopEvent, ErrorEnvelope,
-    MessageDeltaEvent, MessageStartEvent, WireDelta, WireResponseBlock,
+    MessageDeltaEvent, MessageStartEvent, WireDelta, WireResponseBlock, parse_response_block,
 };
 
 /// The decoder's verdict on one record.
@@ -49,7 +49,7 @@ enum BlockBuilder {
     ToolUse {
         id: String,
         name: String,
-        start_input: serde_json::Value,
+        start_input: String,
         accumulated: String,
     },
 }
@@ -228,12 +228,18 @@ impl StreamDecoder {
         if self.open_blocks.contains_key(&event.index) || self.closed.contains_key(&event.index) {
             return self.violation(format!("content_block_start reopens index {}", event.index));
         }
-        let builder = match event.content_block {
+        let content_block = match parse_response_block(&event.content_block) {
+            Ok(block) => block,
+            Err(error) => {
+                return self.violation(format!("malformed content_block_start payload: {error}"));
+            }
+        };
+        let builder = match content_block {
             WireResponseBlock::Text { text } => BlockBuilder::Text(text),
             WireResponseBlock::ToolUse { id, name, input } => BlockBuilder::ToolUse {
                 id,
                 name,
-                start_input: input,
+                start_input: input.get().to_string(),
                 accumulated: String::new(),
             },
             WireResponseBlock::Thinking {
@@ -356,7 +362,7 @@ impl StreamDecoder {
                 accumulated,
             } => {
                 let arguments_json = if accumulated.is_empty() {
-                    start_input.to_string()
+                    start_input
                 } else {
                     accumulated
                 };
@@ -401,6 +407,11 @@ impl StreamDecoder {
         if let Some(delta) = event.delta
             && let Some(stop_reason) = delta.stop_reason
         {
+            if self.finish.is_some() {
+                // The stop reason is terminal outcome metadata; a second
+                // report must not silently replace the first disposition.
+                return self.violation("message_delta reports a second stop_reason");
+            }
             let finish = map_finish(&stop_reason, delta.stop_sequence);
             self.finish = Some(finish.clone());
             Self::emit(correlation, sink, ObservationFact::FinishReported(finish));
@@ -936,6 +947,25 @@ mod tests {
 
         let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
             panic!("truncated tool-argument JSON at block close must surface as a violation");
+        };
+        assert!(matches!(
+            loss.cause,
+            LossCause::StreamProtocolViolation { .. }
+        ));
+    }
+
+    #[test]
+    fn a_second_stop_reason_is_a_protocol_violation() {
+        let (terminal, _) = drive(&[
+            message_start(),
+            b"event: message_delta\n\
+              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\"}}\n\n",
+            b"event: message_delta\n\
+              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("a replayed stop reason must not rewrite the terminal disposition");
         };
         assert!(matches!(
             loss.cause,

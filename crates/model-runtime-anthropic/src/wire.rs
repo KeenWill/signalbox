@@ -55,11 +55,7 @@ pub(crate) enum WireRequestBlock {
         is_error: bool,
     },
     #[serde(rename = "thinking")]
-    Thinking {
-        thinking: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        signature: Option<String>,
-    },
+    Thinking { thinking: String, signature: String },
     #[serde(rename = "redacted_thinking")]
     RedactedThinking { data: String },
 }
@@ -96,35 +92,97 @@ pub(crate) struct MessagesResponse {
     pub id: Option<String>,
     pub model: Option<String>,
     #[serde(default)]
-    pub content: Vec<WireResponseBlock>,
+    pub content: Vec<Box<serde_json::value::RawValue>>,
     pub stop_reason: Option<String>,
     pub stop_sequence: Option<String>,
     pub usage: Option<WireUsage>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
+/// A parsed response content block.
+///
+/// Blocks are hand-dispatched on their `type` tag from raw JSON slices —
+/// rather than via an internally tagged serde enum — so a `tool_use`
+/// block's `input` stays the provider's verbatim raw JSON: serde's tagged
+/// representation buffers content and cannot expose raw slices.
+#[derive(Debug)]
 pub(crate) enum WireResponseBlock {
-    #[serde(rename = "text")]
-    Text { text: String },
-    #[serde(rename = "tool_use")]
+    Text {
+        text: String,
+    },
     ToolUse {
         id: String,
         name: String,
-        input: serde_json::Value,
+        /// The provider's raw JSON slice, verbatim.
+        input: Box<serde_json::value::RawValue>,
     },
-    #[serde(rename = "thinking")]
     Thinking {
         thinking: String,
         signature: Option<String>,
     },
-    #[serde(rename = "redacted_thinking")]
-    RedactedThinking { data: String },
+    RedactedThinking {
+        data: String,
+    },
     /// A content-block type this adapter does not recognize. Surfaced as
     /// evidence rather than silently dropped: response material containing
     /// unknown parts is not valid completion material.
-    #[serde(other)]
     Unrecognized,
+}
+
+/// Parses one content block from its raw JSON slice.
+pub(crate) fn parse_response_block(
+    raw: &serde_json::value::RawValue,
+) -> Result<WireResponseBlock, serde_json::Error> {
+    #[derive(Deserialize)]
+    struct Tag {
+        #[serde(rename = "type")]
+        kind: String,
+    }
+    #[derive(Deserialize)]
+    struct TextBlock {
+        text: String,
+    }
+    #[derive(Deserialize)]
+    struct ToolUseBlock {
+        id: String,
+        name: String,
+        input: Box<serde_json::value::RawValue>,
+    }
+    #[derive(Deserialize)]
+    struct ThinkingBlock {
+        thinking: String,
+        signature: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct RedactedThinkingBlock {
+        data: String,
+    }
+    let tag: Tag = serde_json::from_str(raw.get())?;
+    Ok(match tag.kind.as_str() {
+        "text" => {
+            let block: TextBlock = serde_json::from_str(raw.get())?;
+            WireResponseBlock::Text { text: block.text }
+        }
+        "tool_use" => {
+            let block: ToolUseBlock = serde_json::from_str(raw.get())?;
+            WireResponseBlock::ToolUse {
+                id: block.id,
+                name: block.name,
+                input: block.input,
+            }
+        }
+        "thinking" => {
+            let block: ThinkingBlock = serde_json::from_str(raw.get())?;
+            WireResponseBlock::Thinking {
+                thinking: block.thinking,
+                signature: block.signature,
+            }
+        }
+        "redacted_thinking" => {
+            let block: RedactedThinkingBlock = serde_json::from_str(raw.get())?;
+            WireResponseBlock::RedactedThinking { data: block.data }
+        }
+        _ => WireResponseBlock::Unrecognized,
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -167,7 +225,7 @@ pub(crate) struct MessageStartEvent {
 #[derive(Debug, Deserialize)]
 pub(crate) struct ContentBlockStartEvent {
     pub index: u32,
-    pub content_block: WireResponseBlock,
+    pub content_block: Box<serde_json::value::RawValue>,
 }
 
 #[derive(Debug, Deserialize)]

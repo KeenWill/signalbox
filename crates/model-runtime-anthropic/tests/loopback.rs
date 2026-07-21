@@ -472,3 +472,88 @@ async fn the_api_key_is_resolved_at_each_send_so_rotation_takes_effect() {
     assert!(requests[0].contains("x-api-key: key_before\r\n"));
     assert!(requests[1].contains("x-api-key: key_after\r\n"));
 }
+
+#[tokio::test]
+async fn a_401_with_an_unrecognized_error_token_still_classifies_by_status() {
+    let body = br#"{"type":"error","error":{"type":"brand_new_error","message":"no such key"}}"#;
+    let server = CannedServer::serving(vec![http_response(
+        "401 Unauthorized",
+        &[("content-type", "application/json")],
+        body,
+    )])
+    .await;
+    let runtime = runtime_for(&server.base_url);
+
+    let (report, _) = execute(&runtime, operation("call-11"), CancellationSignal::never()).await;
+
+    let TerminalEvidence::ProviderError(error) = report.evidence else {
+        panic!("a definitive error response must classify as provider error");
+    };
+    assert_eq!(
+        error.kind,
+        signalbox_model_runtime::ProviderErrorKind::CredentialRejected,
+        "classification must not depend on incidental body shape"
+    );
+    assert_eq!(
+        error.native.error_token,
+        Some("brand_new_error".to_string())
+    );
+}
+
+#[tokio::test]
+async fn provider_error_text_reflecting_the_key_is_redacted() {
+    // ADR-0017: evidence carries typed classes and rendered detail, never
+    // credential values — even when an endpoint reflects the key.
+    let body = br#"{"type":"error","error":{"type":"authentication_error",
+                    "message":"invalid x-api-key: key_loop"}}"#;
+    let server = CannedServer::serving(vec![http_response(
+        "401 Unauthorized",
+        &[("content-type", "application/json")],
+        body,
+    )])
+    .await;
+    let runtime = runtime_for(&server.base_url);
+
+    let (report, _) = execute(&runtime, operation("call-12"), CancellationSignal::never()).await;
+
+    let TerminalEvidence::ProviderError(error) = report.evidence else {
+        panic!("a definitive error response must classify as provider error");
+    };
+    let message = error
+        .native
+        .message
+        .expect("the rendered message is retained");
+    assert!(
+        !message.contains("key_loop"),
+        "the key value must never leave the adapter"
+    );
+    assert!(message.contains("[redacted]"));
+}
+
+#[test]
+fn a_base_url_with_query_or_fragment_fails_construction() {
+    let mut config = signalbox_model_runtime_anthropic::AnthropicConfig::new(ApiKey::new("k"));
+    config.base_url = "http://127.0.0.1:1/api?tenant=x".to_string();
+
+    let error = AnthropicRuntime::new(config)
+        .expect_err("a query component would corrupt the endpoint path");
+
+    assert!(matches!(
+        error,
+        signalbox_model_runtime_anthropic::AnthropicConstructionError::InvalidBaseUrl { .. }
+    ));
+}
+
+#[test]
+fn a_non_http_base_url_scheme_fails_construction() {
+    let mut config = signalbox_model_runtime_anthropic::AnthropicConfig::new(ApiKey::new("k"));
+    config.base_url = "file:///tmp".to_string();
+
+    let error = AnthropicRuntime::new(config)
+        .expect_err("a non-HTTP scheme can never reach the provider");
+
+    assert!(matches!(
+        error,
+        signalbox_model_runtime_anthropic::AnthropicConstructionError::InvalidBaseUrl { .. }
+    ));
+}

@@ -7,7 +7,7 @@ use signalbox_model_runtime::{
     ToolCallProposal, ToolName,
 };
 
-use crate::wire::{MessagesResponse, WireResponseBlock, WireUsage};
+use crate::wire::{MessagesResponse, WireResponseBlock, WireUsage, parse_response_block};
 
 /// Maps the provider's `stop_reason` token to the normalized vocabulary.
 ///
@@ -49,7 +49,9 @@ pub(crate) fn convert_block(block: WireResponseBlock) -> Option<AssistantPart> {
             Some(AssistantPart::ToolCall(ToolCallProposal {
                 id: ToolCallId::new(id),
                 name: ToolName::new(name),
-                arguments_json: input.to_string(),
+                // The provider's raw JSON slice, verbatim — never
+                // re-serialized, so key order and lexemes survive.
+                arguments_json: input.get().to_string(),
             }))
         }
         WireResponseBlock::Thinking {
@@ -139,7 +141,23 @@ pub(crate) fn decode_buffered_response<C: Clone>(
         });
     }
     let mut content = Vec::new();
-    for block in response.content {
+    for raw_block in response.content {
+        let block = match parse_response_block(&raw_block) {
+            Ok(block) => block,
+            Err(error) => {
+                return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                    cause: LossCause::ResponseUnintelligible {
+                        detail: format!(
+                            "success response carries a malformed content block: {error}"
+                        ),
+                    },
+                    exchange,
+                    reported_model,
+                    finish_reported: None,
+                    usage,
+                });
+            }
+        };
         match convert_block(block) {
             Some(part) => {
                 if let AssistantPart::ToolCall(proposal) = &part {
@@ -276,7 +294,9 @@ mod tests {
                 AssistantPart::ToolCall(ToolCallProposal {
                     id: ToolCallId::new("toolu_1"),
                     name: ToolName::new("lookup"),
-                    arguments_json: r#"{"city":"Oslo"}"#.to_string(),
+                    // The provider's raw slice verbatim — the fixture's
+                    // interior space survives, proving no re-serialization.
+                    arguments_json: r#"{"city": "Oslo"}"#.to_string(),
                 }),
             ]
         );

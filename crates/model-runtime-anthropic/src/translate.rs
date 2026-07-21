@@ -19,6 +19,20 @@ use crate::wire::{MessagesRequest, WireMessage, WireRequestBlock, WireTool, Wire
 pub(crate) fn build_request<C>(
     operation: &ModelOperation<C>,
 ) -> Result<MessagesRequest, PreparationFailure> {
+    // serde_json serializes a non-finite f64 as null, which would silently
+    // drop the caller's stated setting; reject during preparation instead.
+    for (name, value) in [
+        ("temperature", operation.settings.temperature),
+        ("top_p", operation.settings.top_p),
+    ] {
+        if let Some(value) = value
+            && !value.is_finite()
+        {
+            return Err(PreparationFailure::UnsupportedOperation {
+                detail: format!("{name} must be a finite number"),
+            });
+        }
+    }
     let (tools, tool_choice) = tools_and_choice(operation)?;
     Ok(MessagesRequest {
         model: operation.resolved_target.as_str().to_string(),
@@ -117,10 +131,20 @@ fn wire_message(message: &ConversationMessage) -> Result<WireMessage, Preparatio
                 content: result.content.clone(),
                 is_error: result.is_error,
             }),
-            MessagePart::Thinking { text, signature } => Ok(WireRequestBlock::Thinking {
-                thinking: text.clone(),
-                signature: signature.clone(),
-            }),
+            MessagePart::Thinking { text, signature } => match signature {
+                // The provider requires replayed thinking blocks to carry
+                // their integrity signature; sending one without it would
+                // only be rejected after the acceptance boundary.
+                None => Err(PreparationFailure::UnsupportedOperation {
+                    detail: "a replayed thinking block without its integrity signature \
+                             cannot be sent"
+                        .to_string(),
+                }),
+                Some(signature) => Ok(WireRequestBlock::Thinking {
+                    thinking: text.clone(),
+                    signature: signature.clone(),
+                }),
+            },
             MessagePart::RedactedThinking { data } => {
                 Ok(WireRequestBlock::RedactedThinking { data: data.clone() })
             }
@@ -367,6 +391,40 @@ mod tests {
         assert!(matches!(
             failure,
             PreparationFailure::SerializationFailed { .. }
+        ));
+    }
+
+    #[test]
+    fn unsigned_replayed_thinking_is_rejected_before_any_send() {
+        let mut operation = operation("call-9");
+        operation.messages = vec![ConversationMessage {
+            role: ConversationRole::Assistant,
+            parts: vec![MessagePart::Thinking {
+                text: "step one".to_string(),
+                signature: None,
+            }],
+        }];
+
+        let failure = build_request(&operation)
+            .expect_err("an unsigned thinking block would only be rejected after the boundary");
+
+        assert!(matches!(
+            failure,
+            PreparationFailure::UnsupportedOperation { .. }
+        ));
+    }
+
+    #[test]
+    fn non_finite_temperature_is_rejected_not_silently_nulled() {
+        let mut operation = operation("call-10");
+        operation.settings.temperature = Some(f64::NAN);
+
+        let failure = build_request(&operation)
+            .expect_err("serde_json would serialize a non-finite setting as null");
+
+        assert!(matches!(
+            failure,
+            PreparationFailure::UnsupportedOperation { .. }
         ));
     }
 
