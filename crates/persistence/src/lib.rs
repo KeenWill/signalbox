@@ -13,6 +13,7 @@ pub mod replace_session_defaults;
 pub mod scheduler;
 pub mod session;
 pub mod start_eligible_turn;
+pub mod startup;
 pub mod submit_input;
 
 use std::str::FromStr;
@@ -20,7 +21,7 @@ use std::str::FromStr;
 use sqlx::{
     Error, PgPool,
     migrate::{MigrateError, Migrator},
-    postgres::{PgConnectOptions, PgSslMode},
+    postgres::{PgConnectOptions, PgPoolOptions, PgSslMode},
 };
 
 /// The reviewed, forward-only migration set embedded in this crate.
@@ -29,6 +30,16 @@ pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 /// Applies all pending embedded migrations to `pool`.
 pub async fn migrate(pool: &PgPool) -> Result<(), MigrateError> {
     MIGRATOR.run(pool).await
+}
+
+/// Opens the shared production pool with certificate and hostname checks.
+///
+/// Pool sizing remains at SQLx's baseline until an operational slice selects
+/// measured limits; callers receive a cheap-clone handle for composition.
+pub async fn connect_production(database_url: &str) -> Result<PgPool, Error> {
+    PgPoolOptions::new()
+        .connect_with(production_connection_options(database_url)?)
+        .await
 }
 
 /// Parses production connection options with certificate and hostname checks.

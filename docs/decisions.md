@@ -9,6 +9,34 @@ that constrains several components — require a full record under
 [decisions/](decisions/README.md) instead. Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-20 — Compact INFO telemetry and a 30-second shutdown window
+
+**Context.** ADR-0044 assigns tracing-subscriber selection, formatting,
+filtering, and the bounded graceful-shutdown window to the hubd wiring slice.
+The hub currently has no protocol listener, so the scheduler is its only work
+admission loop.
+
+**Decision.** Install hubd's private compact text subscriber at INFO and keep
+library crates on the `tracing` facade. Read only `DATABASE_URL` from deployment
+configuration, connect with verify-full options, migrate, complete the startup
+scan, and only then construct and run scheduling. SIGINT and SIGTERM stop new
+scheduler passes; an in-flight transaction receives 30 seconds before its future
+is abandoned and durable startup recovery regains authority. Until the
+immediately stacked INV-034 slice supplies that recovery, a persistence barrier
+visibly fails startup when any active turn exists rather than scheduling around
+it. Pool sizing stays at SQLx's baseline pending measurements.
+
+**Rejected alternatives.** Environment-selectable formatting or filters add
+deployment surface without a current need. An unbounded drain can hang process
+shutdown. Immediate cancellation adds avoidable recovery latency. A no-op
+startup scan would violate ADR-0004/ADR-0010 ordering.
+
+**Affects.** `apps/hubd`, its direct narrowly featured Tokio, `tracing`, and
+`tracing-subscriber` dependencies, production pool construction and the
+temporary fail-closed startup barrier in `crates/persistence`, and ADR-0044
+composition-order and shutdown tests. It adds no protocol server, storage DDL,
+runtime credential lookup, metrics, or OpenTelemetry.
+
 ## 2026-07-20 — One-second baseline scheduler reconciliation
 
 **Context.** ADR-0010 makes same-process nudges the primary scheduler wake-up
