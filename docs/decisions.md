@@ -14,9 +14,9 @@ that constrains several components — require a full record under
 **Context.** INV-034 commissions the first startup producer for ADR-0036's
 failed-side semantic closure. The evidence-free scheduling projection can prove
 Prepared or Running prior-process attempts, while the
-[occupied-slot storage decision](#atomic-postgres-occupied-slot-input-handling)
+[occupied-slot storage decision](#2026-07-19--atomic-postgres-occupied-slot-input-handling)
 requires an active source until its accepted pending steering is closed. The
-[post-milestone-2 audit](#post-milestone-2-audit-corrections-and-tracked-obligations)
+[post-milestone-2 audit](#2026-07-19--post-milestone-2-audit-corrections-and-tracked-obligations)
 assigns that closure and replay widening to the later reclassification slice.
 
 **Decision.** Let the complete domain scheduling projection prepare the sealed

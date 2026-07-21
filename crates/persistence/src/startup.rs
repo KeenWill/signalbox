@@ -646,19 +646,32 @@ mod tests {
     }
 
     #[test]
-    fn server_reported_unknown_commit_outcomes_are_ambiguous() {
-        for code in ["08007", "40003"] {
-            let error = sqlx::Error::Database(Box::new(ServerCommitFailure { code }));
-            let commit_ambiguous = commit_failure_is_ambiguous(&error);
+    fn server_reported_transaction_resolution_unknown_is_ambiguous() {
+        let error = sqlx::Error::Database(Box::new(ServerCommitFailure { code: "08007" }));
+        let commit_ambiguous = commit_failure_is_ambiguous(&error);
 
-            assert!(commit_ambiguous);
-            let classified = StartupScanRepositoryError::from_database(error, commit_ambiguous);
-            assert_eq!(
-                classified.operator_failure_class(),
-                OperatorFailureClass::Infrastructure {
-                    commit_ambiguous: true
-                }
-            );
-        }
+        assert!(commit_ambiguous);
+        let classified = StartupScanRepositoryError::from_database(error, commit_ambiguous);
+        assert_eq!(
+            classified.operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true
+            }
+        );
+    }
+
+    #[test]
+    fn server_reported_statement_completion_unknown_is_ambiguous() {
+        let error = sqlx::Error::Database(Box::new(ServerCommitFailure { code: "40003" }));
+        let commit_ambiguous = commit_failure_is_ambiguous(&error);
+
+        assert!(commit_ambiguous);
+        let classified = StartupScanRepositoryError::from_database(error, commit_ambiguous);
+        assert_eq!(
+            classified.operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true
+            }
+        );
     }
 }
