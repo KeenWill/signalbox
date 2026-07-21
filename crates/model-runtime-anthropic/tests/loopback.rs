@@ -229,7 +229,7 @@ async fn buffered_completion_end_to_end_sends_the_documented_request_shape() {
 #[tokio::test]
 async fn streamed_completion_end_to_end_emits_deltas_and_gates_on_message_stop() {
     let sse: &[u8] = b"event: message_start\n\
-        data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_loop_2\",\
+        data: {\"type\":\"message_start\",\"message\":{\"type\":\"message\",\"role\":\"assistant\",\"id\":\"msg_loop_2\",\
         \"model\":\"model-exact-1\",\"content\":[],\"usage\":{\"input_tokens\":4}}}\n\n\
         event: content_block_start\n\
         data: {\"type\":\"content_block_start\",\"index\":0,\
@@ -386,7 +386,7 @@ async fn stream_cut_before_message_stop_is_explicit_incomplete_stream_evidence()
         b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n".to_vec();
     response.extend_from_slice(
         b"event: message_start\n\
-          data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_cut\",\
+          data: {\"type\":\"message_start\",\"message\":{\"type\":\"message\",\"role\":\"assistant\",\"id\":\"msg_cut\",\
           \"model\":\"model-exact-1\",\"content\":[],\"usage\":{\"input_tokens\":4}}}\n\n\
           event: content_block_start\n\
           data: {\"type\":\"content_block_start\",\"index\":0,\

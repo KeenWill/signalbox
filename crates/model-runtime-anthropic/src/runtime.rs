@@ -185,24 +185,22 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
         // ADR-0017: the pinned reference is resolved during send preparation
         // of exactly this operation and the value is scoped to this request;
         // nothing is cached, so a rotated credential is picked up by the
-        // next operation. The access error is reference-only, never bytes.
-        let api_key = match self
-            .credentials
-            .resolve(&operation.credential_reference)
-            .await
-        {
-            Ok(value) => value,
-            Err(error) => {
+        // next operation. The typed reference-only error is preserved, and
+        // resolution races the cancellation signal so a blocked credential
+        // read cannot hold a cancelled operation.
+        let resolve = self.credentials.resolve(&operation.credential_reference);
+        let api_key = match with_cancellation(cancellation, resolve).await {
+            None => return proven_unsent(UnsentCause::CancelledBeforeSend),
+            Some(Err(error)) => {
                 return proven_unsent(UnsentCause::PreparationFailed(
-                    PreparationFailure::CredentialUnavailable {
-                        detail: error.to_string(),
-                    },
+                    PreparationFailure::CredentialUnavailable { error },
                 ));
             }
+            Some(Ok(value)) => value,
         };
         let Some(api_key_header) = sensitive_header(&api_key) else {
             return proven_unsent(UnsentCause::PreparationFailed(
-                PreparationFailure::CredentialUnavailable {
+                PreparationFailure::CredentialUnusable {
                     detail: "credential value cannot form an HTTP header value".to_string(),
                 },
             ));
@@ -398,6 +396,8 @@ async fn finish_error(
         };
         return TerminalEvidence::ProviderError(ProviderErrorEvidence {
             exchange,
+            // The Messages error envelope reports no model identity.
+            reported_model: None,
             kind,
             native: error.into_native_facts(),
         });
@@ -407,6 +407,7 @@ async fn finish_error(
     // retain the raw body as native material.
     TerminalEvidence::ProviderError(ProviderErrorEvidence {
         exchange,
+        reported_model: None,
         kind: classify_error_status(status),
         native: NativeErrorFacts {
             error_token: None,

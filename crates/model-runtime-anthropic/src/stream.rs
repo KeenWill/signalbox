@@ -180,6 +180,7 @@ impl StreamDecoder {
             .unwrap_or(signalbox_model_runtime::ProviderErrorKind::Unrecognized);
         StreamStep::Terminal(TerminalEvidence::ProviderError(ProviderErrorEvidence {
             exchange: self.exchange.clone(),
+            reported_model: self.reported_model.clone(),
             kind,
             native: error.into_native_facts(),
         }))
@@ -198,22 +199,35 @@ impl StreamDecoder {
             Ok(event) => event,
             Err(step) => return *step,
         };
-        self.started = true;
-        self.message_id = event.message.id.map(ProviderMessageId::new);
-        if let Some(model) = event.message.model {
-            let model = ProviderReportedModel::new(model);
-            self.reported_model = Some(model.clone());
-            Self::emit(
-                correlation,
-                sink,
-                ObservationFact::ProviderModelReported(model),
+        // The stream's opening envelope is held to the same documented
+        // shape as a buffered success: discriminators, id, model, and
+        // usage must all be present.
+        if event.message.response_type.as_deref() != Some("message")
+            || event.message.role.as_deref() != Some("assistant")
+        {
+            return self.violation(
+                "message_start is missing its message/assistant envelope discriminators",
             );
         }
-        if let Some(usage) = event.message.usage.as_ref() {
-            let usage = convert_usage(usage);
-            self.usage.absorb(usage);
-            Self::emit(correlation, sink, ObservationFact::UsageReported(usage));
-        }
+        let (Some(id), Some(model), Some(usage)) = (
+            event.message.id,
+            event.message.model,
+            event.message.usage.as_ref(),
+        ) else {
+            return self.violation("message_start is missing required fields (id, model, usage)");
+        };
+        self.started = true;
+        self.message_id = Some(ProviderMessageId::new(id));
+        let model = ProviderReportedModel::new(model);
+        self.reported_model = Some(model.clone());
+        Self::emit(
+            correlation,
+            sink,
+            ObservationFact::ProviderModelReported(model),
+        );
+        let usage = convert_usage(usage);
+        self.usage.absorb(usage);
+        Self::emit(correlation, sink, ObservationFact::UsageReported(usage));
         StreamStep::Continue
     }
 
@@ -352,7 +366,19 @@ impl StreamDecoder {
         let part = match builder {
             BlockBuilder::Text(text) => AssistantPart::Text(text),
             BlockBuilder::Thinking { text, signature } => {
-                AssistantPart::Thinking { text, signature }
+                let Some(signature) = signature else {
+                    // The provider requires the integrity signature for any
+                    // replay; a thinking block closing without one is not
+                    // trustworthy completion material.
+                    return self.violation(format!(
+                        "thinking block {} closed without its integrity signature",
+                        event.index
+                    ));
+                };
+                AssistantPart::Thinking {
+                    text,
+                    signature: Some(signature),
+                }
             }
             BlockBuilder::RedactedThinking { data } => AssistantPart::RedactedThinking { data },
             BlockBuilder::ToolUse {
@@ -537,7 +563,8 @@ mod tests {
 
     fn message_start() -> &'static [u8] {
         b"event: message_start\n\
-          data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\
+          data: {\"type\":\"message_start\",\"message\":{\"type\":\"message\",\
+          \"role\":\"assistant\",\"id\":\"msg_1\",\
           \"model\":\"model-exact-1\",\"content\":[],\"usage\":{\"input_tokens\":25}}}\n\n"
     }
 
@@ -947,6 +974,21 @@ mod tests {
 
         let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
             panic!("truncated tool-argument JSON at block close must surface as a violation");
+        };
+        assert!(matches!(
+            loss.cause,
+            LossCause::StreamProtocolViolation { .. }
+        ));
+    }
+
+    #[test]
+    fn message_start_without_the_documented_envelope_is_a_protocol_violation() {
+        let (terminal, _) = drive(&[b"event: message_start\n\
+              data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\
+              \"model\":\"model-exact-1\",\"content\":[],\"usage\":{\"input_tokens\":1}}}\n\n"]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("an opening envelope missing its discriminators must not start the stream");
         };
         assert!(matches!(
             loss.cause,

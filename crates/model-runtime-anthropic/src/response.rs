@@ -159,6 +159,23 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             }
         };
         match convert_block(block) {
+            Some(AssistantPart::Thinking {
+                signature: None, ..
+            }) => {
+                // The provider requires the integrity signature for any
+                // replay; completion material without it is not usable.
+                return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                    cause: LossCause::ResponseUnintelligible {
+                        detail: "success response carries a thinking block without its \
+                                 integrity signature"
+                            .to_string(),
+                    },
+                    exchange,
+                    reported_model,
+                    finish_reported: None,
+                    usage,
+                });
+            }
             Some(part) => {
                 if let AssistantPart::ToolCall(proposal) = &part {
                     sink.observe(Observation {
