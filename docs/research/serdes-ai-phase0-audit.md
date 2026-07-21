@@ -54,9 +54,12 @@ both target adapters, built a tool definition with schema, and set
 structured-output request parameters. It compiled and ran; `cargo tree` on the
 consumer shows eight SerdesAI workspace crates in the closure: `serdes-ai-core`,
 `serdes-ai-macros`, `serdes-ai-models`, `serdes-ai-output`, `serdes-ai-retries`,
-`serdes-ai-streaming`, `serdes-ai-tools`, `serdes-ai-toolsets`. The full cargo
-closure also contains third-party dependencies; they were not enumerated for
-this agent-independence question. Neither `serdes-ai-agent` nor
+`serdes-ai-streaming`, `serdes-ai-tools`, `serdes-ai-toolsets`. The same
+`cargo tree` run puts 132 distinct third-party crates in the full closure (134
+entries counting `getrandom` and `syn` at two versions each; normal-dependency
+edges, resolved on the audited macOS/aarch64 host), dominated by the
+`reqwest`/`tokio` HTTP stack — the external surface a vendoring decision would
+carry alongside the workspace crates. Neither `serdes-ai-agent` nor
 `serdes-ai-providers` appears.
 
 Two consequences:
@@ -135,8 +138,11 @@ There is no explicit boundary observation anywhere. What exists:
   out-of-band, but correlating that side channel to a specific logical call from
   outside the adapter is fragile.
 
-**Answer:** acceptance is provable on the success path only. A trustworthy
-boundary signal on failure paths is per-adapter surgery on the send/error code.
+**Answer:** acceptance is provable on the success path only, and only with
+redirect following disabled on the injected client — under the default client
+one `.send()` can fold a redirect replay into a second physical request (see the
+retry-wrapper finding). A trustworthy boundary signal on failure paths is
+per-adapter surgery on the send/error code.
 
 ### Q3 — error evidence vs ADR-0043's categories
 
@@ -168,14 +174,21 @@ never authorize repetition.
 
 `RetryingModel` (`serdes-ai-models/src/retry.rs`) is a decorator; the adapter
 source performs one `.send()` per call
-(`serdes-ai-models/src/anthropic/model.rs:616,659`), and nothing wraps models in
-it implicitly. That establishes only the source-level wrapper behavior, not one
-physical HTTP interaction. The injectable `reqwest::Client` may follow redirects
-or carry other transport policy beneath `.send()`, and this audit did not verify
-those lower layers. Signalbox compliance therefore requires a client built with
-redirects disabled and an audit of any lower transport retry policy; omitting
-`RetryingModel` alone does not satisfy
-[ADR-0005](../decisions/0005-model-call-retry-semantics.md). If used:
+(`serdes-ai-models/src/anthropic/model.rs:616,659`,
+`serdes-ai-models/src/openai/chat.rs:516,557`), and nothing wraps models in it
+implicitly. That establishes only the source-level wrapper behavior, not one
+physical HTTP interaction: both adapters construct their client as
+`Client::new()` (`serdes-ai-models/src/anthropic/model.rs:51`,
+`serdes-ai-models/src/openai/chat.rs:44`), nothing in the workspace configures a
+redirect policy, and the lockfile pins reqwest 0.12.28, whose default policy
+follows up to ten redirects and, on a 307/308 response, replays the buffered
+POST body inside that one `.send()` — a hidden second physical provider
+interaction, invisible at the source level. Signalbox compliance therefore
+requires a client built with redirects disabled (injected via `with_client`,
+`serdes-ai-models/src/anthropic/model.rs:79`,
+`serdes-ai-models/src/openai/chat.rs:85`); omitting `RetryingModel` alone does
+not satisfy [ADR-0005](../decisions/0005-model-call-retry-semantics.md). If
+used:
 
 - **Is every physical attempt observable?** No. The executor
   (`serdes-ai-retries/src/executor.rs:34-106`) exposes no per-attempt hook,
@@ -423,9 +436,11 @@ Names are illustrative.
 
 The smoke minimum is three modules and one provider. Full audited coverage is
 four to five modules; neither set includes retry, fallback, agent-loop,
-registry, or execution machinery. Rough size anchor (inference): the full
-corresponding SerdesAI source is about 4–5k lines including tests, and the smoke
-subset drops schema/tool work, media inputs, caching betas, and 14 of 15
+registry, or execution machinery, and every provider module builds its HTTP
+client with redirect following disabled so that one authorized send is one
+physical request (the retry-wrapper finding). Rough size anchor (inference): the
+full corresponding SerdesAI source is about 4–5k lines including tests, and the
+smoke subset drops schema/tool work, media inputs, caching betas, and 14 of 15
 providers.
 
 ## Sources
