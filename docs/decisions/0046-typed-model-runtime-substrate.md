@@ -151,8 +151,11 @@ these rules; each names its governing record:
    [ADR-0043](0043-provider-failure-classification.md)).** Runtime evidence must
    distinguish "request prepared and provably never able to be accepted" from
    "the provider-acceptance boundary was or may have been crossed." ADR-0043's
-   full-request-send classification consumes exactly this distinction; a runtime
-   that cannot make it forces every failure into the ambiguous branch.
+   full-request-send classification consumes exactly this distinction. Even
+   without exposed boundary evidence, a complete, correlated definitive provider
+   response retains its ADR-0043 disposition. Absent such a response, a runtime
+   that supplies neither boundary evidence nor proof that acceptance was
+   impossible forces the failure into the ambiguous branch.
 4. **Typed outcome classification
    ([ADR-0043](0043-provider-failure-classification.md)).** Outcome evidence is
    typed and sufficient to classify `Completed`, `KnownFailed`, `Refused`,
