@@ -10,10 +10,11 @@ use std::{collections::VecDeque, error::Error, sync::Arc};
 use rust_decimal::Decimal;
 use signalbox_application::{
     CreateSessionError, CreateSessionOutcome, CreateSessionRequest, CreateSessionService,
-    LoadSessionService, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
-    ReplaceSessionDefaultsService, SessionIdGenerator, StartEligibleTurnIdGenerator,
-    StartEligibleTurnOutcome, StartEligibleTurnService, SubmitInputIdGenerator, SubmitInputOutcome,
-    SubmitInputRequest, SubmitInputRequestError, SubmitInputService,
+    EligibilityNudge, EligibilityNudgeOutcome, EligibilitySweep, LoadSessionService,
+    ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest, ReplaceSessionDefaultsService,
+    SessionIdGenerator, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
+    StartEligibleTurnService, SubmitInputIdGenerator, SubmitInputOutcome, SubmitInputRequest,
+    SubmitInputRequestError, SubmitInputService,
 };
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputStartingLineage, ActivatedAcceptedInputTurn, ActiveTurnPhase,
@@ -37,6 +38,7 @@ use signalbox_persistence::{
         ReplaceSessionDefaultsCorruption, ReplaceSessionDefaultsHandlingOutcome,
         ReplaceSessionDefaultsRepository, ReplaceSessionDefaultsRepositoryError,
     },
+    scheduler::PostgresEligibilitySweep,
     session::{SessionCorruption, SessionRepository, SessionRepositoryError},
     start_eligible_turn::{
         StartEligibleTurnCorruption, StartEligibleTurnIdentityCollision,
@@ -57,6 +59,15 @@ const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_NAME: &str = "signalbox_integration";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
+
+#[derive(Clone, Copy, Debug, Default)]
+struct AcceptingEligibilityNudge;
+
+impl EligibilityNudge for AcceptingEligibilityNudge {
+    fn nudge(&self, _session: SessionId) -> EligibilityNudgeOutcome {
+        EligibilityNudgeOutcome::Enqueued
+    }
+}
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>> {
     let (container, pool, database_url) = unmigrated_postgres().await?;
@@ -3075,6 +3086,7 @@ async fn s01_inv005_inv008_inv010_inv012_inv028_submit_apply_replay_conflict_and
             ],
         ),
         SubmitInputRepository::new(pool.clone()),
+        AcceptingEligibilityNudge,
     );
 
     let first = service.execute(request.clone()).await?;
@@ -3142,6 +3154,7 @@ async fn s01_inv005_inv008_inv010_inv012_inv028_submit_apply_replay_conflict_and
             [TurnId::from_uuid(Uuid::from_u128(0xa04))],
         ),
         restarted.clone(),
+        AcceptingEligibilityNudge,
     );
     let loaded = restarted
         .load(command.command_id())
@@ -3304,6 +3317,83 @@ async fn s01_s03_inv002_inv009_inv015_start_eligible_turn_survives_restart()
 
     drop(restarted_service);
     restarted_pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S03 / INV-007 / INV-009: the Postgres safety-net sweep finds durable queued
+/// work without an active slot and excludes sessions already being progressed.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s03_inv007_inv009_postgres_sweep_reconstructs_only_candidate_sessions()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0x389, 0x789, direct(0x889)))
+        .await?;
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0x38a, 0x78a, direct(0x88a)))
+        .await?;
+    let queued_session = SessionId::from_uuid(Uuid::from_u128(0x789));
+    let active_session = SessionId::from_uuid(Uuid::from_u128(0x78a));
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                0x38b,
+                0x789,
+                "queued sweep candidate",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x989)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xa89))),
+        )
+        .await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                0x38c,
+                0x78a,
+                "active sweep exclusion",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x98a)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xa8a))),
+        )
+        .await?;
+    let mut activation = StartEligibleTurnService::new(
+        FixedStartEligibleTurnIds::new(
+            [SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xd8a))],
+            [ContextFrontierId::from_uuid(Uuid::from_u128(0xe8a))],
+            [TurnAttemptId::from_uuid(Uuid::from_u128(0xb8a))],
+        ),
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    assert!(matches!(
+        activation.execute(active_session).await?,
+        StartEligibleTurnOutcome::Activated(_)
+    ));
+
+    let mut sweep = PostgresEligibilitySweep::new(pool.clone());
+    let (candidates, continuation) = EligibilitySweep::find_sessions(&mut sweep)
+        .await?
+        .into_parts();
+    assert!(!continuation);
+    let queued_index_count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)
+           FROM pg_indexes
+          WHERE schemaname = current_schema()
+            AND tablename = 'turn_lifecycle'
+            AND indexname = 'turn_lifecycle_queued_by_session'",
+    )
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(candidates, vec![queued_session]);
+    assert_eq!(queued_index_count, 1);
+
+    pool.close().await;
     drop(container);
     Ok(())
 }
@@ -5057,6 +5147,7 @@ async fn occupied_slot_after_and_safe_point_apply_replay_and_restart() -> Result
             [TurnId::from_uuid(Uuid::from_u128(0xafb))],
         ),
         repository.clone(),
+        AcceptingEligibilityNudge,
     );
     let after_request = SubmitInputRequest::try_new(
         after.command_id(),
@@ -5234,6 +5325,7 @@ async fn occupied_slot_handling_composes_with_service_activated_first_turn()
             ],
         ),
         SubmitInputRepository::new(pool.clone()),
+        AcceptingEligibilityNudge,
     );
     let start = start_input(
         0x4a2,
@@ -5440,6 +5532,7 @@ async fn occupied_slot_handling_composes_with_service_activated_after_lineage_tu
             ],
         ),
         SubmitInputRepository::new(pool.clone()),
+        AcceptingEligibilityNudge,
     );
     let first_start = start_input(
         0x4c2,

@@ -3,7 +3,10 @@
 use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
-use signalbox_application::{StartEligibleTurnOutcome, StartEligibleTurnTransaction};
+use signalbox_application::{
+    ClassifyOperatorFailure, OperatorFailureClass, StartEligibleTurnOutcome,
+    StartEligibleTurnTransaction,
+};
 use signalbox_domain::{
     AcceptedInputEligibilityFailure, AcceptedInputStartingLineage,
     AcceptedInputTurnActivationIdentities, ActiveTurnPhase, CurrentTurnAttemptState,
@@ -83,21 +86,34 @@ impl Error for StartEligibleTurnCorruption {}
 #[derive(Debug)]
 pub enum StartEligibleTurnRepositoryError {
     /// PostgreSQL could not complete the transaction.
-    Database(sqlx::Error),
+    Database {
+        /// The underlying SQLx failure.
+        source: sqlx::Error,
+        /// Whether the failure occurred while awaiting commit.
+        commit_ambiguous: bool,
+    },
     /// Durable records cannot reconstruct or commit the accepted domain shape.
     Corruption(StartEligibleTurnCorruption),
     /// A supplied fresh identity already names a durable record.
     IdentityCollision(StartEligibleTurnIdentityCollision),
+    /// Checked activation output violated an internal hub invariant.
+    HubInvariant(&'static str),
 }
 
 impl fmt::Display for StartEligibleTurnRepositoryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Database(error) => {
-                write!(formatter, "StartEligibleTurn database failure: {error}")
+            Self::Database { source, .. } => {
+                write!(formatter, "StartEligibleTurn database failure: {source}")
             }
             Self::Corruption(error) => error.fmt(formatter),
             Self::IdentityCollision(error) => error.fmt(formatter),
+            Self::HubInvariant(invariant) => {
+                write!(
+                    formatter,
+                    "StartEligibleTurn hub invariant failed: {invariant}"
+                )
+            }
         }
     }
 }
@@ -105,9 +121,25 @@ impl fmt::Display for StartEligibleTurnRepositoryError {
 impl Error for StartEligibleTurnRepositoryError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Database(error) => Some(error),
+            Self::Database { source, .. } => Some(source),
             Self::Corruption(error) => Some(error),
             Self::IdentityCollision(error) => Some(error),
+            Self::HubInvariant(_) => None,
+        }
+    }
+}
+
+impl ClassifyOperatorFailure for StartEligibleTurnRepositoryError {
+    fn operator_failure_class(&self) -> OperatorFailureClass {
+        match self {
+            Self::Database {
+                commit_ambiguous, ..
+            } => OperatorFailureClass::Infrastructure {
+                commit_ambiguous: *commit_ambiguous,
+            },
+            Self::Corruption(_) => OperatorFailureClass::FailClosedCorruption,
+            Self::IdentityCollision(_) => OperatorFailureClass::IdentityCollision,
+            Self::HubInvariant(_) => OperatorFailureClass::CallerOrHubBug,
         }
     }
 }
@@ -120,10 +152,19 @@ impl From<StartEligibleTurnCorruption> for StartEligibleTurnRepositoryError {
 
 impl From<sqlx::Error> for StartEligibleTurnRepositoryError {
     fn from(error: sqlx::Error) -> Self {
+        Self::from_database(error, false)
+    }
+}
+
+impl StartEligibleTurnRepositoryError {
+    fn from_database(error: sqlx::Error, commit_ambiguous: bool) -> Self {
         if let Some(collision) = identity_collision(&error) {
             Self::IdentityCollision(collision)
         } else {
-            Self::Database(error)
+            Self::Database {
+                source: error,
+                commit_ambiguous,
+            }
         }
     }
 }
@@ -157,7 +198,10 @@ impl StartEligibleTurnRepository {
 
         match decision {
             Ok(TransactionDecision::Commit(outcome)) => {
-                transaction.commit().await?;
+                transaction.commit().await.map_err(|error| {
+                    let commit_ambiguous = commit_failure_is_ambiguous(&error);
+                    StartEligibleTurnRepositoryError::from_database(error, commit_ambiguous)
+                })?;
                 Ok(outcome)
             }
             Ok(TransactionDecision::Rollback(outcome)) => {
@@ -294,18 +338,18 @@ async fn insert_prepared_activation(
             accepted_input
         }
         InitialSemanticTranscriptEntryPayload::TurnFailed { .. } => {
-            return Err(
-                StartEligibleTurnCorruption::Inconsistent("prepared origin-entry payload").into(),
-            );
+            return Err(StartEligibleTurnRepositoryError::HubInvariant(
+                "prepared origin-entry payload",
+            ));
         }
     };
     let session = activated.session();
     if origin_entry.source_session() != session
         || starting_snapshot.frontier().owning_session() != session
     {
-        return Err(
-            StartEligibleTurnCorruption::Inconsistent("prepared activation ownership").into(),
-        );
+        return Err(StartEligibleTurnRepositoryError::HubInvariant(
+            "prepared activation ownership",
+        ));
     }
 
     sqlx::query(
@@ -320,8 +364,9 @@ async fn insert_prepared_activation(
     .execute(&mut *connection)
     .await?;
 
-    let member_count = u64::try_from(starting_snapshot.entry_count())
-        .map_err(|_| StartEligibleTurnCorruption::Inconsistent("starting frontier member count"))?;
+    let member_count = u64::try_from(starting_snapshot.entry_count()).map_err(|_| {
+        StartEligibleTurnRepositoryError::HubInvariant("starting frontier member count")
+    })?;
     sqlx::query(
         "INSERT INTO context_frontier
             (owning_session_id, context_frontier_id, member_count)
@@ -334,7 +379,7 @@ async fn insert_prepared_activation(
     .await?;
     for (index, entry) in starting_snapshot.ordered_entries().enumerate() {
         let position = u64::try_from(index + 1).map_err(|_| {
-            StartEligibleTurnCorruption::Inconsistent("starting frontier member position")
+            StartEligibleTurnRepositoryError::HubInvariant("starting frontier member position")
         })?;
         sqlx::query(
             "INSERT INTO context_frontier_member
@@ -360,9 +405,9 @@ async fn insert_prepared_activation(
         ActiveTurnPhase::Running { .. }
         | ActiveTurnPhase::AwaitingApproval { .. }
         | ActiveTurnPhase::AwaitingRecoveryDecision { .. } => {
-            return Err(
-                StartEligibleTurnCorruption::Inconsistent("prepared initial active phase").into(),
-            );
+            return Err(StartEligibleTurnRepositoryError::HubInvariant(
+                "prepared initial active phase",
+            ));
         }
     };
     sqlx::query(
@@ -453,9 +498,9 @@ async fn insert_prepared_activation(
         0 => Err(
             StartEligibleTurnCorruption::Inconsistent("guarded activation matched no row").into(),
         ),
-        _ => {
-            Err(StartEligibleTurnCorruption::Inconsistent("guarded activation cardinality").into())
-        }
+        _ => Err(StartEligibleTurnRepositoryError::HubInvariant(
+            "guarded activation cardinality",
+        )),
     }
 }
 
@@ -490,5 +535,139 @@ fn identity_collision(error: &sqlx::Error) -> Option<StartEligibleTurnIdentityCo
         }
         Some("turn_attempt_pkey") => Some(StartEligibleTurnIdentityCollision::InitialAttempt),
         _ => None,
+    }
+}
+
+fn commit_failure_is_ambiguous(error: &sqlx::Error) -> bool {
+    match error {
+        sqlx::Error::Database(database) => {
+            matches!(database.code().as_deref(), Some("08007" | "40003"))
+        }
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{borrow::Cow, error::Error, fmt, io};
+
+    use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
+    use sqlx::error::{DatabaseError, ErrorKind};
+
+    use super::{StartEligibleTurnRepositoryError, commit_failure_is_ambiguous};
+
+    #[derive(Debug)]
+    struct ServerCommitFailure {
+        code: &'static str,
+    }
+
+    impl fmt::Display for ServerCommitFailure {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("server reported commit failure")
+        }
+    }
+
+    impl Error for ServerCommitFailure {}
+
+    impl DatabaseError for ServerCommitFailure {
+        fn message(&self) -> &str {
+            "server reported commit failure"
+        }
+
+        fn as_error(&self) -> &(dyn Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn as_error_mut(&mut self) -> &mut (dyn Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn into_error(self: Box<Self>) -> Box<dyn Error + Send + Sync + 'static> {
+            self
+        }
+
+        fn kind(&self) -> ErrorKind {
+            ErrorKind::Other
+        }
+
+        fn code(&self) -> Option<Cow<'_, str>> {
+            Some(Cow::Borrowed(self.code))
+        }
+    }
+
+    #[test]
+    fn precommit_database_failure_is_not_commit_ambiguous() {
+        let error = StartEligibleTurnRepositoryError::from_database(sqlx::Error::PoolClosed, false);
+
+        assert_eq!(
+            error.operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false
+            }
+        );
+    }
+
+    #[test]
+    fn impossible_prepared_activation_shape_is_a_hub_bug() {
+        let error = StartEligibleTurnRepositoryError::HubInvariant("prepared origin-entry payload");
+
+        assert_eq!(
+            error.operator_failure_class(),
+            OperatorFailureClass::CallerOrHubBug
+        );
+    }
+
+    #[test]
+    fn lost_commit_response_is_commit_ambiguous() {
+        let error = sqlx::Error::Io(io::Error::new(
+            io::ErrorKind::ConnectionReset,
+            "commit response was lost",
+        ));
+        let commit_ambiguous = commit_failure_is_ambiguous(&error);
+        assert!(commit_ambiguous);
+        let error = StartEligibleTurnRepositoryError::from_database(error, commit_ambiguous);
+
+        assert_eq!(
+            error.operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true
+            }
+        );
+    }
+
+    #[test]
+    fn server_rejected_commit_is_not_ambiguous() {
+        let error = sqlx::Error::Database(Box::new(ServerCommitFailure { code: "23514" }));
+        let commit_ambiguous = commit_failure_is_ambiguous(&error);
+
+        assert!(!commit_ambiguous);
+        let classified = StartEligibleTurnRepositoryError::from_database(error, commit_ambiguous);
+        assert_eq!(
+            classified.operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false
+            }
+        );
+    }
+
+    #[test]
+    fn server_reported_unknown_commit_outcomes_are_ambiguous() {
+        assert_server_reported_unknown_commit_outcome_is_ambiguous("08007");
+        assert_server_reported_unknown_commit_outcome_is_ambiguous("40003");
+    }
+
+    #[track_caller]
+    fn assert_server_reported_unknown_commit_outcome_is_ambiguous(code: &'static str) {
+        let error = sqlx::Error::Database(Box::new(ServerCommitFailure { code }));
+        let commit_ambiguous = commit_failure_is_ambiguous(&error);
+
+        assert!(commit_ambiguous);
+        let classified = StartEligibleTurnRepositoryError::from_database(error, commit_ambiguous);
+        assert_eq!(
+            classified.operator_failure_class(),
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true
+            }
+        );
     }
 }

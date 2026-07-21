@@ -10,6 +10,7 @@ mod outbox;
 pub mod create_session;
 pub mod mapping;
 pub mod replace_session_defaults;
+pub mod scheduler;
 pub mod session;
 pub mod start_eligible_turn;
 pub mod submit_input;
