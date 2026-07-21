@@ -1107,6 +1107,10 @@ impl AcceptedInputSchedulingProjection {
         self,
         identities: AcceptedInputTurnActivationIdentities,
     ) -> Result<PreparedAcceptedInputTurnActivation, AcceptedInputEligibilityError>;
+    pub fn prepare_active_turn_lost_failure(
+        self,
+        identities: AcceptedInputTurnFailureIdentities,
+    ) -> Result<PreparedAcceptedInputTurnFailure, AcceptedInputTurnFailureError>;
     // accessor: session()
 }
 
@@ -1160,6 +1164,59 @@ impl AcceptedInputEligibilityError {
         AcceptedInputSchedulingProjection,
         AcceptedInputTurnActivationIdentities,
         AcceptedInputEligibilityFailure,
+    );
+    // accessors: projection(), identities(), failure()
+}
+
+pub struct AcceptedInputTurnFailureIdentities { /* private */ }
+impl AcceptedInputTurnFailureIdentities {
+    pub const fn new(
+        failure_entry: SemanticTranscriptEntryId,
+        terminal_frontier: ContextFrontierId,
+    ) -> Self;
+    // accessors: failure_entry(), terminal_frontier()
+}
+
+pub struct FailedAcceptedInputTurn { /* private */ }
+// sealed: PreparedAcceptedInputTurnFailure
+impl FailedAcceptedInputTurn {
+    // accessors: session(), turn(), accepted_input(), order(), start(),
+    // ended_attempt(), disposition(), terminal_frontier()
+}
+
+pub struct PreparedAcceptedInputTurnFailure { /* private */ }
+// sealed: AcceptedInputSchedulingProjection::prepare_active_turn_lost_failure
+impl PreparedAcceptedInputTurnFailure {
+    pub fn into_parts(
+        self,
+    ) -> (
+        FailedAcceptedInputTurn,
+        SemanticTranscriptEntry,
+        ResolvedContextFrontierSnapshot,
+    );
+    // accessors: turn(), failure_entry(), terminal_snapshot()
+}
+
+pub enum AcceptedInputTurnFailureFailure {
+    NoActiveTurn,
+    PendingSteering { accepted_input: AcceptedInputId },
+    FailureEntryIdentityAlreadyExists,
+    TerminalFrontierIdentityAlreadyExists,
+    ActiveAttemptCannotEndLost,
+    ActiveStartMissing,
+    StartingSnapshotMissing,
+    TerminalFrontierCannotAppend,
+}
+
+pub struct AcceptedInputTurnFailureError { /* private */ }
+// sealed: Err of prepare_active_turn_lost_failure
+impl AcceptedInputTurnFailureError {
+    pub fn into_parts(
+        self,
+    ) -> (
+        AcceptedInputSchedulingProjection,
+        AcceptedInputTurnFailureIdentities,
+        AcceptedInputTurnFailureFailure,
     );
     // accessors: projection(), identities(), failure()
 }
@@ -1884,6 +1941,66 @@ where
 }
 ```
 
+## application: startup_scan
+
+```rust
+pub trait StartupScanIdGenerator {
+    fn next_failure_entry_id(&mut self) -> SemanticTranscriptEntryId;
+    fn next_terminal_frontier_id(&mut self) -> ContextFrontierId;
+}
+
+pub struct UuidV7StartupScanIdGenerator;
+// Default; impl StartupScanIdGenerator
+
+pub enum StartupScanSessionOutcome {
+    NoActiveTurn,
+    Recovered(Box<FailedAcceptedInputTurn>),
+    DeferredPendingSteering { accepted_input: AcceptedInputId },
+}
+
+pub trait StartupScanRepository {
+    type Error: ClassifyOperatorFailure;
+
+    fn active_sessions(
+        &mut self,
+    ) -> impl Future<Output = Result<Box<[SessionId]>, Self::Error>> + Send;
+    fn recover(
+        &mut self,
+        session: SessionId,
+        identities: AcceptedInputTurnFailureIdentities,
+    ) -> impl Future<Output = Result<StartupScanSessionOutcome, Self::Error>> + Send;
+}
+
+pub struct StartupScanOutcome { /* private */ }
+// sealed: StartupScanService::execute
+impl StartupScanOutcome {
+    // accessors: recovered_turn_count(), pending_steering_sessions(),
+    // is_complete()
+}
+
+pub struct StartupScanError<RepositoryError> { /* private */ }
+// sealed: StartupScanService::execute
+// impl Clone, Debug, Eq, PartialEq, Display, Error, ClassifyOperatorFailure
+impl<RepositoryError> StartupScanError<RepositoryError> {
+    // accessors: session(), repository_error(), into_repository_error()
+}
+
+pub struct StartupScanService<Generator, Repository> { /* private */ }
+impl<Generator, Repository> StartupScanService<Generator, Repository> {
+    pub const fn new(ids: Generator, repository: Repository) -> Self;
+    pub fn into_parts(self) -> (Generator, Repository);
+}
+impl<
+    Generator: StartupScanIdGenerator,
+    Repository: StartupScanRepository,
+> StartupScanService<Generator, Repository>
+{
+    pub async fn execute(
+        &mut self,
+    ) -> Result<StartupScanOutcome, StartupScanError<Repository::Error>>;
+}
+```
+
 ## application: submit_input
 
 ```rust
@@ -1959,7 +2076,7 @@ impl<
 | domain: submit_input                  | 15                   |
 | domain: queue_order                   | 5 (+1 free fn)       |
 | domain: turn_lifecycle                | 10                   |
-| domain: turn_eligibility              | 16                   |
+| domain: turn_eligibility              | 21                   |
 | domain: turn_attempt                  | 13                   |
 | domain: model_call                    | 7                    |
 | domain: context_frontier              | 6                    |
@@ -1968,12 +2085,13 @@ impl<
 | domain: applied_interrupt             | 2                    |
 | domain: fatal_mismatch                | 0                    |
 | domain: replace_session_defaults      | 13                   |
-| **signalbox-domain total**            | **153 (+1 free fn)** |
+| **signalbox-domain total**            | **158 (+1 free fn)** |
 | application: create_session           | 8 (incl. 2 traits)   |
 | application: load_session             | 2 (incl. 1 trait)    |
 | application: operator_failure         | 2 (incl. 1 trait)    |
 | application: replace_session_defaults | 4 (incl. 1 trait)    |
 | application: scheduler                | 12 (incl. 4 traits)  |
 | application: start_eligible_turn      | 5 (incl. 2 traits)   |
+| application: startup_scan             | 7 (incl. 2 traits)   |
 | application: submit_input             | 7 (incl. 2 traits)   |
-| **signalbox-application total**       | **40**               |
+| **signalbox-application total**       | **47**               |

@@ -26,10 +26,11 @@ strictly, and maintains a dependency-dashboard issue. Vulnerability-alert pull
 requests keep Renovate defaults and bypass the age gates. Major updates never
 automerge. Patch updates automerge once CI passes — a deliberate, narrow
 exception to the owner-merges-every-pull-request norm, applying only to Renovate
-patch pull requests with green CI. The configuration is inert until the owner
-enables the Mend Renovate GitHub App. The cargo-deny gate gains its missing
-`bans` check (`deny.toml` `[bans]` plus the workflow invocation), completing the
-advisories/bans/licenses/sources set.
+patch pull requests with green CI. Before enabling the inert Mend Renovate
+GitHub App, the owner must require the Rust and supply-chain status checks in
+branch protection so platform automerge cannot bypass them. The cargo-deny gate
+gains its missing `bans` check (`deny.toml` `[bans]` plus the workflow
+invocation), completing the advisories/bans/licenses/sources set.
 
 **Rejected alternatives.** Adopting new versions immediately: maximizes exposure
 inside the post-publish compromise window. Applying the same delay to security
@@ -41,6 +42,45 @@ unverifiable age is not evidence of maturity.
 **Affects.** `renovate.json5` (new), `deny.toml`, `.github/workflows/deny.yml`,
 and this log; no crate code, manifests, or runtime behavior. Renovate acts only
 after the owner installs the app.
+
+## 2026-07-20 — Startup failure seam and pending-steering blocker
+
+**Context.** INV-034 commissions the first startup producer for ADR-0036's
+failed-side semantic closure. The evidence-free scheduling projection can prove
+Prepared or Running prior-process attempts, while the
+[occupied-slot storage decision](#2026-07-19--atomic-postgres-occupied-slot-input-handling)
+requires an active source until its accepted pending steering is closed. The
+[post-milestone-2 audit](#2026-07-19--post-milestone-2-audit-corrections-and-tracked-obligations)
+assigns that closure and replay widening to the later reclassification slice.
+
+**Decision.** Let the complete domain scheduling projection prepare the sealed
+failed-terminal candidate. For evidence-free Prepared or Running state, its
+complete stop-cause set is empty, so startup ends the exact attempt as
+`WithoutStop(Lost)`, appends one `TurnFailed`, derives the terminal frontier as
+the starting frontier plus that marker, and selects `Terminal(Failed)`.
+Application orchestration inventories active sessions once, retries only fresh
+identity collisions, and commits each session independently. Pending steering
+instead returns the exact unchanged projection as a visible session blocker;
+hubd fails startup with the blocker count and never starts scheduling. Project
+each committed recovery as one closed `turn_failed` version-1 outbox record
+carrying the session, failed turn, failure semantic-entry, and terminal frontier
+identities. The persistence-owned closed event enum appends that typed record
+after the guarded lifecycle transition on the same transaction; replay,
+no-active-turn, pending-steering, and rollback paths append nothing.
+
+**Rejected alternatives.** Raw SQL selecting terminal meaning bypasses domain
+authority. Treating steering as a stop cause, deleting it, or terminalizing its
+source contradicts its recorded assignment. A replacement attempt, provider
+classification, or fatal-surface widening exceeds this evidence-free slice. An
+open string/JSON event payload would evade the versioned storage boundary;
+exposing the operational startup scan or prior process as event semantics would
+confuse the producer with the durable client-visible outcome.
+
+**Affects.** `crates/domain/src/turn_eligibility.rs`, the application startup
+scan, its PostgreSQL adapter, hubd startup wiring, restart integration tests,
+the closed outbox append seam and `turn_failed` typed-record migration, the
+public spine, and INV-032/INV-034 enforcement. Frozen fatal/provider surfaces do
+not change.
 
 ## 2026-07-20 — ADR-0044 post-merge review corrections
 

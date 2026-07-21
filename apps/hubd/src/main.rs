@@ -8,13 +8,12 @@ use std::{env, ffi::OsString, future::Future, process::ExitCode, time::Duration}
 use signalbox_application::{
     ClassifyOperatorFailure, EligibilityPass, EligibilityWorkSource,
     InProcessEligibilityWorkSource, OperatorFailureClass, SchedulerLoop, StartEligibleTurnService,
-    UuidV7StartEligibleTurnIdGenerator,
+    StartupScanService, UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
 };
+use signalbox_domain::{SessionId, TurnId};
 use signalbox_persistence::{
-    connect_production, migrate,
-    scheduler::PostgresEligibilitySweep,
-    start_eligible_turn::StartEligibleTurnRepository,
-    startup::{PostgresStartupRecoveryBarrier, StartupRecoveryBarrierOutcome},
+    connect_production, migrate, scheduler::PostgresEligibilitySweep,
+    start_eligible_turn::StartEligibleTurnRepository, startup::PostgresStartupScanRepository,
 };
 use tokio::{pin, select, sync::oneshot, time::timeout};
 
@@ -34,6 +33,8 @@ struct HubRuntimeError {
     phase: RuntimePhase,
     failure_class: OperatorFailureClass,
     blocker_count: Option<u64>,
+    session: Option<SessionId>,
+    turn: Option<TurnId>,
 }
 
 impl HubRuntimeError {
@@ -44,6 +45,8 @@ impl HubRuntimeError {
                 commit_ambiguous: false,
             },
             blocker_count: None,
+            session: None,
+            turn: None,
         }
     }
 
@@ -52,16 +55,34 @@ impl HubRuntimeError {
             phase,
             failure_class,
             blocker_count: None,
+            session: None,
+            turn: None,
         }
     }
 
-    const fn recovery_blocked(active_turn_count: u64) -> Self {
+    const fn startup_scan(
+        failure_class: OperatorFailureClass,
+        session: Option<SessionId>,
+        turn: Option<TurnId>,
+    ) -> Self {
+        Self {
+            phase: RuntimePhase::StartupScan,
+            failure_class,
+            blocker_count: None,
+            session,
+            turn,
+        }
+    }
+
+    const fn recovery_blocked(pending_steering_count: u64) -> Self {
         Self {
             phase: RuntimePhase::StartupScan,
             failure_class: OperatorFailureClass::Infrastructure {
                 commit_ambiguous: false,
             },
-            blocker_count: Some(active_turn_count),
+            blocker_count: Some(pending_steering_count),
+            session: None,
+            turn: None,
         }
     }
 }
@@ -191,24 +212,33 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
             Ok(())
         },
         async move {
-            let barrier = PostgresStartupRecoveryBarrier::new(scan_pool);
-            let outcome = barrier.inspect().await.map_err(|error| {
-                HubRuntimeError::classified(
-                    RuntimePhase::StartupScan,
+            let mut scan = StartupScanService::new(
+                UuidV7StartupScanIdGenerator,
+                PostgresStartupScanRepository::new(scan_pool),
+            );
+            let outcome = scan.execute().await.map_err(|error| {
+                HubRuntimeError::startup_scan(
                     error.operator_failure_class(),
+                    error.session(),
+                    error.repository_error().corruption_turn(),
                 )
             })?;
-            match outcome {
-                StartupRecoveryBarrierOutcome::Clean => {
-                    tracing::info!(
-                        phase = ?RuntimePhase::StartupScan,
-                        "hub startup phase completed"
-                    );
-                    Ok(())
-                }
-                StartupRecoveryBarrierOutcome::RecoveryRequired { active_turn_count } => {
-                    Err(HubRuntimeError::recovery_blocked(active_turn_count))
-                }
+            if outcome.is_complete() {
+                tracing::info!(
+                    phase = ?RuntimePhase::StartupScan,
+                    recovered_turn_count = outcome.recovered_turn_count(),
+                    "hub startup phase completed"
+                );
+                Ok(())
+            } else {
+                let blocker_count = u64::try_from(outcome.pending_steering_sessions().len())
+                    .map_err(|_| {
+                        HubRuntimeError::classified(
+                            RuntimePhase::StartupScan,
+                            OperatorFailureClass::CallerOrHubBug,
+                        )
+                    })?;
+                Err(HubRuntimeError::recovery_blocked(blocker_count))
             }
         },
         || async move {
@@ -282,6 +312,8 @@ async fn main() -> ExitCode {
                 phase = ?error.phase,
                 failure_class = ?error.failure_class,
                 blocker_count = error.blocker_count,
+                session_id = ?error.session,
+                turn_id = ?error.turn,
                 "hub startup failed"
             );
             ExitCode::FAILURE
@@ -305,7 +337,7 @@ mod tests {
         ClassifyOperatorFailure, EligibilityPass, EligibilityWorkSource, OperatorFailureClass,
         SchedulerLoop,
     };
-    use signalbox_domain::SessionId;
+    use signalbox_domain::{SessionId, TurnId};
     use tokio::sync::oneshot;
     use uuid::Uuid;
 
@@ -386,6 +418,27 @@ mod tests {
             HubConfiguration::from_database_url(Some(OsString::from("postgres://secret")))
                 .expect("nonempty deployment value is accepted before SQLx parsing");
         assert_eq!(configuration.database_url(), "postgres://secret");
+    }
+
+    #[test]
+    fn adr0044_startup_corruption_retains_safe_aggregate_context() {
+        let session = SessionId::from_uuid(Uuid::from_u128(1));
+        let turn = TurnId::from_uuid(Uuid::from_u128(2));
+
+        assert_eq!(
+            HubRuntimeError::startup_scan(
+                OperatorFailureClass::FailClosedCorruption,
+                Some(session),
+                Some(turn),
+            ),
+            HubRuntimeError {
+                phase: RuntimePhase::StartupScan,
+                failure_class: OperatorFailureClass::FailClosedCorruption,
+                blocker_count: None,
+                session: Some(session),
+                turn: Some(turn),
+            }
+        );
     }
 
     #[derive(Clone, Copy, Debug)]

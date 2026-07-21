@@ -95,10 +95,12 @@ pub use turn_eligibility::{
     AcceptedInputEligibilityError, AcceptedInputEligibilityFailure,
     AcceptedInputSchedulingProjection, AcceptedInputSchedulingReconstitutionError,
     AcceptedInputSchedulingReconstitutionFailure, AcceptedInputSchedulingReconstitutionInput,
-    AcceptedInputTurnActivationIdentities, AcceptedInputTurnSchedulingProjection,
-    AcceptedInputTurnSchedulingRecord, AcceptedInputTurnSchedulingRecordState,
-    AcceptedInputTurnSchedulingStatus, ActivatedAcceptedInputTurn,
-    ActiveTurnSchedulingReconstitutionInput, PreparedAcceptedInputTurnActivation,
+    AcceptedInputTurnActivationIdentities, AcceptedInputTurnFailureError,
+    AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities,
+    AcceptedInputTurnSchedulingProjection, AcceptedInputTurnSchedulingRecord,
+    AcceptedInputTurnSchedulingRecordState, AcceptedInputTurnSchedulingStatus,
+    ActivatedAcceptedInputTurn, ActiveTurnSchedulingReconstitutionInput, FailedAcceptedInputTurn,
+    PreparedAcceptedInputTurnActivation, PreparedAcceptedInputTurnFailure,
     SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
 };
 pub use turn_lifecycle::{
