@@ -26,8 +26,8 @@ pub struct SseRecord {
 /// pushes frame nothing, and the same failure is reported again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SseFramingError {
-    /// One line, or one record's retained content (its data plus its event
-    /// value), exceeded the configured size limit.
+    /// One line, or one record's retained content (its joined data plus its
+    /// retained event value), exceeded the configured size limit.
     RecordTooLarge {
         /// The configured limit, in bytes.
         limit: usize,
@@ -90,16 +90,21 @@ pub struct SseFraming {
     line_buffer: Vec<u8>,
     current_event: Option<String>,
     data_lines: Vec<String>,
-    accumulated_content: usize,
+    joined_data_len: usize,
 }
 
 impl SseFraming {
-    /// A framer bounding every line and every record's retained content
-    /// (data plus event value) at `record_limit` bytes.
+    /// A framer enforcing two independent `record_limit` bounds: no line may
+    /// exceed it (checked as bytes are copied, so an unterminated line never
+    /// buffers past the limit), and no record's retained content — its
+    /// joined data including separators, plus its retained event value — may
+    /// exceed it. The bounds depend only on complete lines and retained
+    /// content, so transport fragmentation never changes framing results.
     ///
     /// Comment and ignored-field lines are bounded per line but never
     /// accumulate, so keep-alive comments on a long-lived stream cannot
-    /// exhaust the bound.
+    /// exhaust the bound; a replaced `event:` value stops counting when it
+    /// is overwritten.
     pub fn new(record_limit: usize) -> Self {
         Self {
             record_limit,
@@ -109,7 +114,7 @@ impl SseFraming {
             line_buffer: Vec::new(),
             current_event: None,
             data_lines: Vec::new(),
-            accumulated_content: 0,
+            joined_data_len: 0,
         }
     }
 
@@ -158,9 +163,18 @@ impl SseFraming {
                     self.finish_line(&mut records)
                 }
                 byte => {
+                    // The line bound is enforced while copying, so an
+                    // unterminated line never buffers past the limit no
+                    // matter how the transport chunks it.
                     self.line_buffer.push(byte);
                     index += 1;
-                    Ok(())
+                    if self.line_buffer.len() > self.record_limit {
+                        Err(SseFramingError::RecordTooLarge {
+                            limit: self.record_limit,
+                        })
+                    } else {
+                        Ok(())
+                    }
                 }
             };
             if let Err(error) = step {
@@ -170,13 +184,6 @@ impl SseFraming {
                     error: Some(error),
                 };
             }
-        }
-        if let Err(error) = self.check_limit() {
-            self.failed = Some(error.clone());
-            return SsePushOutcome {
-                records,
-                error: Some(error),
-            };
         }
         SsePushOutcome {
             records,
@@ -205,11 +212,6 @@ impl SseFraming {
             }
             self.at_stream_start = false;
         }
-        if line.len() > self.record_limit {
-            return Err(SseFramingError::RecordTooLarge {
-                limit: self.record_limit,
-            });
-        }
         let line = String::from_utf8(line).map_err(|error| SseFramingError::InvalidUtf8 {
             detail: error.to_string(),
         })?;
@@ -222,7 +224,7 @@ impl SseFraming {
             } else {
                 self.current_event = None;
             }
-            self.accumulated_content = 0;
+            self.joined_data_len = 0;
             return Ok(());
         }
         if line.starts_with(':') {
@@ -234,11 +236,17 @@ impl SseFraming {
         };
         match field {
             "event" => {
-                self.accumulated_content += value.len();
+                // Replacement semantics: only the retained (last) value
+                // counts toward the record bound.
                 self.current_event = Some(value.to_string());
             }
             "data" => {
-                self.accumulated_content += value.len();
+                // Exact joined length: each line beyond the first also
+                // contributes the newline separator `join` inserts, so
+                // arbitrarily many empty data lines cannot grow the record
+                // unaccounted.
+                let separator = usize::from(!self.data_lines.is_empty());
+                self.joined_data_len += value.len() + separator;
                 self.data_lines.push(value.to_string());
             }
             // `id` and `retry` support stream resumption, which would be a
@@ -246,11 +254,12 @@ impl SseFraming {
             // fields are ignored per the event-stream grammar.
             _ => {}
         }
-        self.check_limit()
+        self.check_record_bound()
     }
 
-    fn check_limit(&self) -> Result<(), SseFramingError> {
-        if self.line_buffer.len() + self.accumulated_content > self.record_limit {
+    fn check_record_bound(&self) -> Result<(), SseFramingError> {
+        let event_len = self.current_event.as_ref().map_or(0, String::len);
+        if self.joined_data_len + event_len > self.record_limit {
             return Err(SseFramingError::RecordTooLarge {
                 limit: self.record_limit,
             });
@@ -443,6 +452,63 @@ mod tests {
 
         assert_eq!(first, vec![]);
         assert_eq!(second, vec![record(None, "kept")]);
+    }
+
+    #[test]
+    fn empty_data_lines_count_their_separators_toward_the_limit() {
+        let mut framing = SseFraming::new(4);
+
+        let outcome = framing.push(b"data:\ndata:\ndata:\ndata:\ndata:\ndata:\n");
+
+        assert_eq!(outcome.records, vec![]);
+        assert_eq!(
+            outcome.error,
+            Some(SseFramingError::RecordTooLarge { limit: 4 })
+        );
+    }
+
+    #[test]
+    fn transport_fragmentation_never_changes_framing_results() {
+        let bytes: &[u8] = b"data: 1234567890\ndata: x\n\n";
+        let mut whole = SseFraming::new(16);
+        let mut split = SseFraming::new(16);
+
+        let from_whole = push_ok(&mut whole, bytes);
+        let first = push_ok(&mut split, &bytes[..20]);
+        let second = push_ok(&mut split, &bytes[20..]);
+
+        assert_eq!(first, vec![]);
+        assert_eq!(from_whole, second);
+        assert_eq!(from_whole, vec![record(None, "1234567890\nx")]);
+    }
+
+    #[test]
+    fn a_replaced_event_value_stops_counting_toward_the_limit() {
+        // Each event line is within the limit, and the retained record
+        // (event 10 + data 1) is too; only accounting that kept counting
+        // the overwritten first value (10 + 10 + 1 = 21) would reject.
+        let mut framing = SseFraming::new(18);
+
+        let records = push_ok(
+            &mut framing,
+            b"event: aaaaaaaaaa\nevent: bbbbbbbbbb\ndata: x\n\n",
+        );
+
+        assert_eq!(records, vec![record(Some("bbbbbbbbbb"), "x")]);
+    }
+
+    #[test]
+    fn an_unterminated_line_is_rejected_at_the_limit_across_chunks() {
+        let mut framing = SseFraming::new(8);
+
+        let first = framing.push(b"data: 12");
+        let second = framing.push(b"3456789");
+
+        assert_eq!(first.error, None);
+        assert_eq!(
+            second.error,
+            Some(SseFramingError::RecordTooLarge { limit: 8 })
+        );
     }
 
     #[test]
