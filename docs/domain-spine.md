@@ -1720,6 +1720,21 @@ impl<Transaction: ReplaceSessionDefaultsTransaction> ReplaceSessionDefaultsServi
 }
 ```
 
+## application: operator_failure
+
+```rust
+pub enum OperatorFailureClass {
+    Infrastructure { commit_ambiguous: bool },
+    FailClosedCorruption,
+    IdentityCollision,
+    CallerOrHubBug,
+}
+
+pub trait ClassifyOperatorFailure {
+    fn operator_failure_class(&self) -> OperatorFailureClass;
+}
+```
+
 ## application: start_eligible_turn
 
 ```rust
@@ -1748,6 +1763,7 @@ pub trait StartEligibleTurnTransaction {
 }
 
 pub struct StartEligibleTurnService<Generator, Transaction> { /* private */ }
+// Clone when both ports are Clone
 impl<Generator, Transaction> StartEligibleTurnService<Generator, Transaction> {
     pub const fn new(ids: Generator, transaction: Transaction) -> Self;
     pub fn into_parts(self) -> (Generator, Transaction);
@@ -1760,6 +1776,111 @@ impl<
         &mut self,
         session: SessionId,
     ) -> Result<StartEligibleTurnOutcome, Transaction::Error>;
+}
+```
+
+## application: scheduler
+
+```rust
+pub struct ReconciliationSweepInterval(/* private */);
+impl ReconciliationSweepInterval {
+    pub const fn baseline() -> Self;
+    pub fn try_new(
+        interval: Duration,
+    ) -> Result<Self, InvalidReconciliationSweepInterval>;
+    pub const fn get(self) -> Duration;
+}
+
+pub struct InvalidReconciliationSweepInterval;
+// impl Display + std::error::Error
+
+pub enum EligibilityNudgeOutcome {
+    Enqueued,
+    DroppedAtCapacity,
+    WorkSourceClosed,
+}
+
+pub trait EligibilityNudge {
+    fn nudge(&self, session: SessionId) -> EligibilityNudgeOutcome;
+}
+
+pub trait EligibilitySweep {
+    type Error;
+
+    fn find_sessions(
+        &mut self,
+    ) -> impl Future<Output = Result<EligibilitySweepBatch, Self::Error>> + Send;
+}
+
+pub struct EligibilitySweepBatch { /* private */ }
+impl EligibilitySweepBatch {
+    pub fn new(sessions: Vec<SessionId>, continuation: bool) -> Self;
+    pub fn into_parts(self) -> (Vec<SessionId>, bool);
+}
+
+pub trait EligibilityWorkSource {
+    type Error;
+
+    fn next(&mut self) -> impl Future<Output = Result<SessionId, Self::Error>> + Send;
+}
+
+pub trait EligibilityPass {
+    type Error;
+
+    fn run(
+        &mut self,
+        session: SessionId,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static;
+}
+
+pub struct InProcessEligibilityNudge { /* private */ }
+// Clone; impl EligibilityNudge
+
+pub struct InProcessEligibilityWorkSource<Sweep>
+where
+    Sweep: EligibilitySweep,
+{ /* private */ }
+// impl EligibilityWorkSource when Sweep: EligibilitySweep + Send + 'static
+impl<Sweep: EligibilitySweep> InProcessEligibilityWorkSource<Sweep> {
+    pub fn new(sweep: Sweep) -> (InProcessEligibilityNudge, Self);
+    pub fn with_interval(
+        sweep: Sweep,
+        sweep_interval: ReconciliationSweepInterval,
+    ) -> (InProcessEligibilityNudge, Self);
+    pub fn with_options(
+        sweep: Sweep,
+        sweep_interval: ReconciliationSweepInterval,
+        nudge_buffer_capacity: NonZeroUsize,
+    ) -> (InProcessEligibilityNudge, Self);
+}
+
+pub enum SchedulerLoopExit {
+    Shutdown,
+}
+
+pub struct SchedulerLoop<WorkSource, Pass> { /* private */ }
+impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass> {
+    pub const fn new(work_source: WorkSource, pass: Pass) -> Self;
+    pub const fn with_max_in_flight(
+        work_source: WorkSource,
+        pass: Pass,
+        max_in_flight_passes: NonZeroUsize,
+    ) -> Self;
+    pub fn into_parts(self) -> (WorkSource, Pass);
+}
+impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass>
+where
+    WorkSource: EligibilityWorkSource,
+    Pass: EligibilityPass + Send,
+    WorkSource::Error: ClassifyOperatorFailure,
+    Pass::Error: ClassifyOperatorFailure + Send + 'static,
+{
+    pub async fn run_until<Shutdown>(
+        &mut self,
+        shutdown: Shutdown,
+    ) -> SchedulerLoopExit
+    where
+        Shutdown: Future<Output = ()> + Send;
 }
 ```
 
@@ -1806,13 +1927,16 @@ pub trait SubmitInputTransaction {
     ) -> impl Future<Output = Result<SubmitInputOutcome, Self::Error>> + Send;
 }
 
-pub struct SubmitInputService<Generator, Transaction> { /* private */ }
-impl<Generator, Transaction> SubmitInputService<Generator, Transaction> {
-    pub const fn new(ids: Generator, transaction: Transaction) -> Self;
-    pub fn into_parts(self) -> (Generator, Transaction);
+pub struct SubmitInputService<Generator, Transaction, Nudge> { /* private */ }
+impl<Generator, Transaction, Nudge> SubmitInputService<Generator, Transaction, Nudge> {
+    pub const fn new(ids: Generator, transaction: Transaction, nudge: Nudge) -> Self;
+    pub fn into_parts(self) -> (Generator, Transaction, Nudge);
 }
-impl<Generator: SubmitInputIdGenerator, Transaction: SubmitInputTransaction>
-    SubmitInputService<Generator, Transaction>
+impl<
+    Generator: SubmitInputIdGenerator,
+    Transaction: SubmitInputTransaction,
+    Nudge: EligibilityNudge,
+> SubmitInputService<Generator, Transaction, Nudge>
 {
     pub async fn execute(
         &mut self,
@@ -1847,7 +1971,9 @@ impl<Generator: SubmitInputIdGenerator, Transaction: SubmitInputTransaction>
 | **signalbox-domain total**            | **153 (+1 free fn)** |
 | application: create_session           | 8 (incl. 2 traits)   |
 | application: load_session             | 2 (incl. 1 trait)    |
+| application: operator_failure         | 2 (incl. 1 trait)    |
 | application: replace_session_defaults | 4 (incl. 1 trait)    |
+| application: scheduler                | 12 (incl. 4 traits)  |
 | application: start_eligible_turn      | 5 (incl. 2 traits)   |
 | application: submit_input             | 7 (incl. 2 traits)   |
-| **signalbox-application total**       | **26**               |
+| **signalbox-application total**       | **40**               |
