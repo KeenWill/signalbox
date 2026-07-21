@@ -9,7 +9,20 @@ publish.workspace = true
 
 [dependencies]
 signalbox-domain = { path = "../domain" }
+tokio = { version = "1.53.0", default-features = false, features = [
+    "macros",
+    "rt",
+    "sync",
+    "time",
+] }
+tracing = { version = "0.1.41", default-features = false }
 uuid = { version = "1.24.0", default-features = false, features = ["std", "v7"] }
+
+[dev-dependencies]
+tokio = { version = "1.53.0", default-features = false, features = [
+    "rt",
+    "test-util",
+] }
 
 [lints]
 workspace = true

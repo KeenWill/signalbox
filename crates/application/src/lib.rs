@@ -5,8 +5,11 @@
 
 mod create_session;
 mod load_session;
+mod operator_failure;
 mod replace_session_defaults;
+mod scheduler;
 mod start_eligible_turn;
+mod startup_scan;
 mod submit_input;
 
 pub use create_session::{
@@ -15,13 +18,24 @@ pub use create_session::{
     UuidV7SessionIdGenerator,
 };
 pub use load_session::{LoadSessionService, SessionReader};
+pub use operator_failure::{ClassifyOperatorFailure, OperatorFailureClass};
 pub use replace_session_defaults::{
     ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest, ReplaceSessionDefaultsService,
     ReplaceSessionDefaultsTransaction,
 };
+pub use scheduler::{
+    EligibilityNudge, EligibilityNudgeOutcome, EligibilityPass, EligibilitySweep,
+    EligibilitySweepBatch, EligibilityWorkSource, InProcessEligibilityNudge,
+    InProcessEligibilityWorkSource, InvalidReconciliationSweepInterval,
+    ReconciliationSweepInterval, SchedulerLoop, SchedulerLoopExit,
+};
 pub use start_eligible_turn::{
     StartEligibleTurnIdGenerator, StartEligibleTurnOutcome, StartEligibleTurnService,
     StartEligibleTurnTransaction, UuidV7StartEligibleTurnIdGenerator,
+};
+pub use startup_scan::{
+    StartupScanError, StartupScanIdGenerator, StartupScanOutcome, StartupScanRepository,
+    StartupScanService, StartupScanSessionOutcome, UuidV7StartupScanIdGenerator,
 };
 pub use submit_input::{
     SubmitInputIdGenerator, SubmitInputOutcome, SubmitInputRequest, SubmitInputRequestError,
