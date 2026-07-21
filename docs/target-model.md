@@ -403,7 +403,7 @@ events into session input, recorded under [decisions/](decisions/README.md).
 
 The app-facing SDK remains a directional target only. Its deferral gate and
 non-decisions are owned by
-[ADR-0046](decisions/0046-typed-model-runtime-substrate.md#anti-goals).
+[ADR-0047](decisions/0047-typed-model-runtime-substrate.md#anti-goals).
 
 ## Concept status map
 

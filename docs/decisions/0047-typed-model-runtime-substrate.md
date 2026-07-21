@@ -1,4 +1,4 @@
-# ADR-0046: Typed model-runtime substrate boundary
+# ADR-0047: Typed model-runtime substrate boundary
 
 - Date: 2026-07-20
 - Supersedes: none
@@ -93,18 +93,18 @@ other manifest dependency is the policy gate for this consumer restriction.
 
 Enforcement is the same mechanism that keeps the domain crate free of SQLx and
 serde today: the Cargo manifest is the boundary. `crates/domain/Cargo.toml`
-declares exactly one dependency (`uuid`) and `crates/application/Cargo.toml`
-declares exactly two (`signalbox-domain` and `uuid`); a crate cannot name a
-dependency its manifest does not declare, so an attempted runtime import there
-fails the workspace build that CI runs on every pull request. Relaxing that
-boundary requires a visible manifest diff governed by review and the repository
-dependency guidance. Cargo does not enforce the two-consumer policy above; that
-restriction remains a review-time contract until a later slice adds an explicit
-allowlist check. The current manifest contents describe today's code for
-falsifiability, not a frozen dependency set — accepted records may add
-dependencies there (ADR-0044's `tracing` facade, for example) — while the rule
-this record fixes is that no Layer-1 crate ever appears in the domain or
-application manifests.
+declares exactly one normal dependency (`uuid`) and
+`crates/application/Cargo.toml` declares exactly four (`signalbox-domain`,
+`tokio`, `tracing`, and `uuid`); a crate cannot name a dependency its manifest
+does not declare, so an attempted runtime import there fails the workspace build
+that CI runs on every pull request. Relaxing that boundary requires a visible
+manifest diff governed by review and the repository dependency guidance. Cargo
+does not enforce the two-consumer policy above; that restriction remains a
+review-time contract until a later slice adds an explicit allowlist check. The
+current manifest contents describe today's code for falsifiability, not a frozen
+dependency set — accepted records may add dependencies there (ADR-0044's
+`tracing` facade, for example) — while the rule this record fixes is that no
+Layer-1 crate ever appears in the domain or application manifests.
 
 Layer-1 crates follow ADR-0044's library discipline: they may emit through the
 `tracing` facade but never install a subscriber, never select the hub's runtime,
