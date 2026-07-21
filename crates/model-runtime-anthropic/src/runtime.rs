@@ -18,7 +18,9 @@ use signalbox_model_runtime::{
     TokenUsage, TransportFacts, UnsentCause,
 };
 
-use crate::config::{AnthropicConfig, ApiKey, ApiKeySource};
+use signalbox_model_runtime::{CredentialAccess, CredentialValue};
+
+use crate::config::AnthropicConfig;
 use crate::response::decode_buffered_response;
 use crate::status::{classify_error_status, classify_error_token};
 use crate::stream::{StreamDecoder, StreamStep};
@@ -32,10 +34,10 @@ use crate::wire::ErrorEnvelope;
 /// holds no state between operations, retries nothing, and never issues a
 /// second request for one operation.
 #[derive(Debug)]
-pub struct AnthropicRuntime {
+pub struct AnthropicRuntime<A> {
     client: Client,
     messages_url: Url,
-    credentials: std::sync::Arc<dyn ApiKeySource>,
+    credentials: A,
     version_header: HeaderValue,
     sse_record_limit: usize,
 }
@@ -76,7 +78,7 @@ impl std::fmt::Display for AnthropicConstructionError {
 
 impl std::error::Error for AnthropicConstructionError {}
 
-impl AnthropicRuntime {
+impl<A: CredentialAccess> AnthropicRuntime<A> {
     /// Builds the adapter and its HTTP client.
     ///
     /// # Transport discipline: one send is one physical request (ADR-0005)
@@ -106,7 +108,10 @@ impl AnthropicRuntime {
     ///
     /// ADR-0043 selects no timeout budget: both timeouts default to none and
     /// are caller-owned configuration.
-    pub fn new(config: AnthropicConfig) -> Result<Self, AnthropicConstructionError> {
+    pub fn new(
+        config: AnthropicConfig,
+        credentials: A,
+    ) -> Result<Self, AnthropicConstructionError> {
         let messages_url = Url::parse(&format!(
             "{}/v1/messages",
             config.base_url.trim_end_matches('/')
@@ -150,7 +155,7 @@ impl AnthropicRuntime {
         Ok(Self {
             client,
             messages_url,
-            credentials: config.credentials,
+            credentials,
             version_header,
             sse_record_limit: config.sse_record_limit,
         })
@@ -177,15 +182,20 @@ impl AnthropicRuntime {
                 ));
             }
         };
-        // ADR-0017: the key is read during send preparation of exactly this
-        // operation and scoped to this request; nothing is cached, so a
-        // rotated credential is picked up by the next operation.
-        let api_key = match self.credentials.current() {
-            Ok(api_key) => api_key,
-            Err(failure) => {
+        // ADR-0017: the pinned reference is resolved during send preparation
+        // of exactly this operation and the value is scoped to this request;
+        // nothing is cached, so a rotated credential is picked up by the
+        // next operation. The access error is reference-only, never bytes.
+        let api_key = match self
+            .credentials
+            .resolve(&operation.credential_reference)
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => {
                 return proven_unsent(UnsentCause::PreparationFailed(
                     PreparationFailure::CredentialUnavailable {
-                        detail: failure.detail,
+                        detail: error.to_string(),
                     },
                 ));
             }
@@ -193,7 +203,7 @@ impl AnthropicRuntime {
         let Some(api_key_header) = sensitive_header(&api_key) else {
             return proven_unsent(UnsentCause::PreparationFailed(
                 PreparationFailure::CredentialUnavailable {
-                    detail: "API key cannot form an HTTP header value".to_string(),
+                    detail: "credential value cannot form an HTTP header value".to_string(),
                 },
             ));
         };
@@ -295,10 +305,7 @@ impl AnthropicRuntime {
         let body = match with_cancellation(cancellation, response.bytes()).await {
             None => return exchange_loss(LossCause::CancellationRequested, exchange),
             Some(Err(error)) => {
-                return exchange_loss(
-                    LossCause::ResponseBodyLost(transport_facts(&error)),
-                    exchange,
-                );
+                return exchange_loss(classify_body_error(&error), exchange);
             }
             Some(Ok(bytes)) => bytes,
         };
@@ -350,7 +357,7 @@ impl AnthropicRuntime {
     }
 }
 
-impl<C: Clone + Send + Sync> ModelRuntime<C> for AnthropicRuntime {
+impl<C: Clone + Send + Sync, A: CredentialAccess> ModelRuntime<C> for AnthropicRuntime<A> {
     async fn execute(
         &self,
         operation: ModelOperation<C>,
@@ -471,6 +478,18 @@ fn transport_facts(error: &reqwest::Error) -> TransportFacts {
     TransportFacts::new(detail)
 }
 
+/// Classifies a body-phase read failure: a caller-configured deadline keeps
+/// its typed timeout cause; anything else is a lost response body. Either
+/// way the exchange lacks a definitive response (ADR-0043's ambiguous
+/// branch).
+fn classify_body_error(error: &reqwest::Error) -> LossCause {
+    if error.is_timeout() {
+        LossCause::TimedOut(transport_facts(error))
+    } else {
+        LossCause::ResponseBodyLost(transport_facts(error))
+    }
+}
+
 fn request_id_from(headers: &HeaderMap) -> Option<ProviderRequestId> {
     headers
         .get("request-id")
@@ -516,10 +535,10 @@ async fn with_cancellation<F: Future>(
     }
 }
 
-/// The key as a sensitivity-marked header value, or `None` when its bytes
-/// cannot form one. The value never appears in errors or logs.
-fn sensitive_header(api_key: &ApiKey) -> Option<HeaderValue> {
-    let mut header = HeaderValue::from_str(api_key.value()).ok()?;
+/// The credential as a sensitivity-marked header value, or `None` when its
+/// bytes cannot form one. The value never appears in errors or logs.
+fn sensitive_header(api_key: &CredentialValue) -> Option<HeaderValue> {
+    let mut header = HeaderValue::from_bytes(api_key.expose_bytes()).ok()?;
     header.set_sensitive(true);
     Some(header)
 }
@@ -528,12 +547,13 @@ fn sensitive_header(api_key: &ApiKey) -> Option<HeaderValue> {
 /// text in the evidence (ADR-0017): a reflected key value in an error
 /// message, raw body, or rendered detail is replaced before the evidence
 /// leaves the adapter boundary. Typed facts are untouched.
-fn redact_evidence(evidence: TerminalEvidence, api_key: &ApiKey) -> TerminalEvidence {
-    let redact = |text: String| -> String {
-        if api_key.value().is_empty() {
+fn redact_evidence(evidence: TerminalEvidence, api_key: &CredentialValue) -> TerminalEvidence {
+    let key_text = std::str::from_utf8(api_key.expose_bytes()).unwrap_or_default();
+    let redact = move |text: String| -> String {
+        if key_text.is_empty() {
             text
         } else {
-            text.replace(api_key.value(), "[redacted]")
+            text.replace(key_text, "[redacted]")
         }
     };
     let redact_native = |mut native: NativeErrorFacts| -> NativeErrorFacts {
@@ -588,6 +608,9 @@ fn redact_evidence(evidence: TerminalEvidence, api_key: &ApiKey) -> TerminalEvid
                         interruption: match interruption {
                             StreamInterruption::TransportFailure(facts) => {
                                 StreamInterruption::TransportFailure(redact_transport(facts))
+                            }
+                            StreamInterruption::TimedOut(facts) => {
+                                StreamInterruption::TimedOut(redact_transport(facts))
                             }
                             StreamInterruption::EndOfStream => StreamInterruption::EndOfStream,
                         },

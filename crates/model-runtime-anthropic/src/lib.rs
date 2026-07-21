@@ -1,4 +1,4 @@
-//! Anthropic Messages API adapter for the Layer-1 model runtime (ADR-0046).
+//! Anthropic Messages API adapter for the Layer-1 model runtime (ADR-0047).
 //!
 //! Translates one authorized [`signalbox_model_runtime::ModelOperation`] into
 //! at most one `POST /v1/messages` interaction — buffered or SSE-streamed —
@@ -16,10 +16,12 @@
 //!
 //! # Credential discipline (ADR-0017)
 //!
-//! The API key is consumed inside this adapter boundary only: it is resolved
-//! through an [`ApiKeySource`] during send preparation of each operation and
-//! scoped to that request, it is attached as a sensitivity-marked header,
-//! its debug rendering is redacted, and this crate performs no logging.
+//! The credential value is consumed inside this adapter boundary only: the
+//! operation pins a non-secret reference, the runtime resolves its current
+//! value through the caller's `CredentialAccess` implementation during send
+//! preparation of each operation and scopes it to that request, the value is
+//! attached as a sensitivity-marked header, provider-controlled evidence
+//! text is credential-sanitized, and this crate performs no logging.
 
 mod config;
 mod response;
@@ -29,5 +31,5 @@ mod stream;
 mod translate;
 mod wire;
 
-pub use config::{AnthropicConfig, ApiKey, ApiKeySource, CredentialUnavailable, StaticApiKey};
+pub use config::AnthropicConfig;
 pub use runtime::{AnthropicConstructionError, AnthropicRuntime};

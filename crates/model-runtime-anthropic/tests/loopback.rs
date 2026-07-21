@@ -20,7 +20,10 @@ use signalbox_model_runtime::{
     ProviderErrorKind, ProviderRequestId, RequestedTarget, ResolvedTarget, StreamInterruption,
     TerminalEvidence, TerminalReport, UnsentCause,
 };
-use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime, ApiKey};
+use signalbox_model_runtime::{
+    CredentialAccess, CredentialAccessError, CredentialReference, CredentialValue,
+};
+use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -112,10 +115,24 @@ fn http_response(status_line: &str, extra_headers: &[(&str, &str)], body: &[u8])
     bytes
 }
 
-fn runtime_for(server_base_url: &str) -> AnthropicRuntime {
-    let mut config = AnthropicConfig::new(ApiKey::new("key_loop"));
+/// A fixed loopback credential source: every reference resolves to
+/// `key_loop`.
+#[derive(Debug)]
+struct FixedKey;
+
+impl CredentialAccess for FixedKey {
+    async fn resolve(
+        &self,
+        _reference: &CredentialReference,
+    ) -> Result<CredentialValue, CredentialAccessError> {
+        Ok(CredentialValue::new(b"key_loop".to_vec()))
+    }
+}
+
+fn runtime_for(server_base_url: &str) -> AnthropicRuntime<FixedKey> {
+    let mut config = AnthropicConfig::new();
     config.base_url = server_base_url.to_string();
-    AnthropicRuntime::new(config).expect("loopback configuration constructs")
+    AnthropicRuntime::new(config, FixedKey).expect("loopback configuration constructs")
 }
 
 /// An operation whose correlation seed is the one knob; targets, one user
@@ -123,6 +140,7 @@ fn runtime_for(server_base_url: &str) -> AnthropicRuntime {
 fn operation(correlation: &str) -> ModelOperation<String> {
     ModelOperation::new(
         correlation.to_string(),
+        CredentialReference::new("anthropic-primary"),
         RequestedTarget::new("fast-alias"),
         ResolvedTarget::new("model-exact-1"),
         vec![ConversationMessage::user_text("hello")],
@@ -130,8 +148,8 @@ fn operation(correlation: &str) -> ModelOperation<String> {
     )
 }
 
-async fn execute(
-    runtime: &AnthropicRuntime,
+async fn execute<A: CredentialAccess>(
+    runtime: &AnthropicRuntime<A>,
     operation: ModelOperation<String>,
     cancellation: CancellationSignal,
 ) -> (TerminalReport<String>, Vec<Observation<String>>) {
@@ -433,17 +451,15 @@ async fn a_signal_cancelled_before_send_proves_the_request_unsent() {
 
 /// A key source whose value the test rotates between operations.
 #[derive(Debug)]
-struct RotatingKey(Mutex<String>);
+struct RotatingKey(Arc<Mutex<String>>);
 
-impl signalbox_model_runtime_anthropic::ApiKeySource for RotatingKey {
-    fn current(
+impl CredentialAccess for RotatingKey {
+    async fn resolve(
         &self,
-    ) -> Result<
-        signalbox_model_runtime_anthropic::ApiKey,
-        signalbox_model_runtime_anthropic::CredentialUnavailable,
-    > {
-        Ok(signalbox_model_runtime_anthropic::ApiKey::new(
-            self.0.lock().expect("key lock").clone(),
+        _reference: &CredentialReference,
+    ) -> Result<CredentialValue, CredentialAccessError> {
+        Ok(CredentialValue::new(
+            self.0.lock().expect("key lock").clone().into_bytes(),
         ))
     }
 }
@@ -458,14 +474,14 @@ async fn the_api_key_is_resolved_at_each_send_so_rotation_takes_effect() {
         http_response("200 OK", &[], b"{}"),
     ])
     .await;
-    let source = Arc::new(RotatingKey(Mutex::new("key_before".to_string())));
-    let mut config = signalbox_model_runtime_anthropic::AnthropicConfig::new(ApiKey::new("unused"));
+    let value = Arc::new(Mutex::new("key_before".to_string()));
+    let mut config = AnthropicConfig::new();
     config.base_url = server.base_url.clone();
-    config.credentials = source.clone();
-    let runtime = AnthropicRuntime::new(config).expect("loopback configuration constructs");
+    let runtime = AnthropicRuntime::new(config, RotatingKey(Arc::clone(&value)))
+        .expect("loopback configuration constructs");
 
     execute(&runtime, operation("call-9"), CancellationSignal::never()).await;
-    *source.0.lock().expect("key lock") = "key_after".to_string();
+    *value.lock().expect("key lock") = "key_after".to_string();
     execute(&runtime, operation("call-10"), CancellationSignal::never()).await;
 
     let requests = server.recorded_requests();
@@ -532,10 +548,10 @@ async fn provider_error_text_reflecting_the_key_is_redacted() {
 
 #[test]
 fn a_base_url_with_query_or_fragment_fails_construction() {
-    let mut config = signalbox_model_runtime_anthropic::AnthropicConfig::new(ApiKey::new("k"));
+    let mut config = AnthropicConfig::new();
     config.base_url = "http://127.0.0.1:1/api?tenant=x".to_string();
 
-    let error = AnthropicRuntime::new(config)
+    let error = AnthropicRuntime::new(config, FixedKey)
         .expect_err("a query component would corrupt the endpoint path");
 
     assert!(matches!(
@@ -546,10 +562,10 @@ fn a_base_url_with_query_or_fragment_fails_construction() {
 
 #[test]
 fn a_non_http_base_url_scheme_fails_construction() {
-    let mut config = signalbox_model_runtime_anthropic::AnthropicConfig::new(ApiKey::new("k"));
+    let mut config = AnthropicConfig::new();
     config.base_url = "file:///tmp".to_string();
 
-    let error = AnthropicRuntime::new(config)
+    let error = AnthropicRuntime::new(config, FixedKey)
         .expect_err("a non-HTTP scheme can never reach the provider");
 
     assert!(matches!(

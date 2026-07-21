@@ -13,12 +13,18 @@ use crate::wire::{MessagesRequest, WireMessage, WireRequestBlock, WireTool, Wire
 /// reports as proven-unsent evidence — nothing has touched the network.
 ///
 /// A structured-output contract is realized as a forced tool call: the
-/// contract becomes the request's only tool and `tool_choice` forces it.
-/// Combining a contract with caller tools is rejected as unsupported rather
-/// than silently overriding the caller's tool choice.
+/// contract joins the declared tools and `tool_choice` forces it with
+/// parallel tool use disabled, so exactly one contract value returns.
+/// [`ModelOperation::validate`] reserves the contract name from ordinary
+/// tools before anything is sent.
 pub(crate) fn build_request<C>(
     operation: &ModelOperation<C>,
 ) -> Result<MessagesRequest, PreparationFailure> {
+    if let Err(error) = operation.validate() {
+        return Err(PreparationFailure::UnsupportedOperation {
+            detail: error.to_string(),
+        });
+    }
     // serde_json serializes a non-finite f64 as null, which would silently
     // drop the caller's stated setting; reject during preparation instead.
     for (name, value) in [
@@ -55,33 +61,7 @@ pub(crate) fn build_request<C>(
 fn tools_and_choice<C>(
     operation: &ModelOperation<C>,
 ) -> Result<(Option<Vec<WireTool>>, Option<WireToolChoice>), PreparationFailure> {
-    if let Some(contract) = &operation.output_contract {
-        if !operation.tools.is_empty() {
-            return Err(PreparationFailure::UnsupportedOperation {
-                detail: "an operation cannot combine caller tools with a structured-output \
-                         contract: the contract is realized as a forced tool call, which would \
-                         suppress the caller's tools"
-                    .to_string(),
-            });
-        }
-        return Ok((
-            Some(vec![WireTool {
-                name: contract.name.as_str().to_string(),
-                description: contract.description.clone(),
-                input_schema: contract.schema.clone(),
-            }]),
-            // The contract promises exactly one value; parallel tool use
-            // could return several proposals for the forced tool.
-            Some(WireToolChoice::Tool {
-                name: contract.name.as_str().to_string(),
-                disable_parallel_tool_use: Some(true),
-            }),
-        ));
-    }
-    if operation.tools.is_empty() {
-        return Ok((None, None));
-    }
-    let tools = operation
+    let mut tools: Vec<WireTool> = operation
         .tools
         .iter()
         .map(|tool| WireTool {
@@ -90,6 +70,25 @@ fn tools_and_choice<C>(
             input_schema: tool.input_schema.clone(),
         })
         .collect();
+    if let Some(contract) = &operation.output_contract {
+        tools.push(WireTool {
+            name: contract.name.as_str().to_string(),
+            description: contract.description.clone(),
+            input_schema: contract.schema.clone(),
+        });
+        return Ok((
+            Some(tools),
+            // The contract promises exactly one value; parallel tool use
+            // could return several proposals for the forced tool.
+            Some(WireToolChoice::Tool {
+                name: contract.name.as_str().to_string(),
+                disable_parallel_tool_use: Some(true),
+            }),
+        ));
+    }
+    if tools.is_empty() {
+        return Ok((None, None));
+    }
     let choice = match &operation.tool_choice {
         ToolChoice::Automatic => WireToolChoice::Auto,
         ToolChoice::AnyTool => WireToolChoice::Any,
@@ -156,6 +155,7 @@ fn wire_message(message: &ConversationMessage) -> Result<WireMessage, Preparatio
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
+    use signalbox_model_runtime::CredentialReference;
     use signalbox_model_runtime::{
         ConversationMessage, ConversationRole, DeliveryMode, MessagePart, ModelOperation,
         ModelSettings, PreparationFailure, RequestedTarget, ResolvedTarget,
@@ -170,6 +170,7 @@ mod tests {
     fn operation(correlation: &str) -> ModelOperation<String> {
         ModelOperation::new(
             correlation.to_string(),
+            CredentialReference::new("anthropic-primary"),
             RequestedTarget::new("fast-alias"),
             ResolvedTarget::new("model-exact-1"),
             vec![ConversationMessage::user_text("hello")],
@@ -351,7 +352,7 @@ mod tests {
     }
 
     #[test]
-    fn contract_combined_with_caller_tools_is_rejected_as_unsupported() {
+    fn contract_combined_with_caller_tools_declares_both_and_forces_the_contract() {
         let mut operation = operation("call-6");
         operation.output_contract = Some(StructuredOutputContract {
             name: ToolName::new("verdict"),
@@ -364,8 +365,37 @@ mod tests {
             serde_json::json!({"type": "object"}),
         )];
 
+        let request = build_request(&operation).expect("distinct names translate");
+        let value = serde_json::to_value(&request).expect("wire request serializes");
+
+        assert_eq!(value["tools"][0]["name"], serde_json::json!("lookup"));
+        assert_eq!(value["tools"][1]["name"], serde_json::json!("verdict"));
+        assert_eq!(
+            value["tool_choice"],
+            serde_json::json!({
+                "type": "tool",
+                "name": "verdict",
+                "disable_parallel_tool_use": true
+            })
+        );
+    }
+
+    #[test]
+    fn contract_name_colliding_with_a_tool_is_rejected_before_any_send() {
+        let mut operation = operation("call-11");
+        operation.output_contract = Some(StructuredOutputContract {
+            name: ToolName::new("verdict"),
+            description: "The verdict.".to_string(),
+            schema: serde_json::json!({"type": "object"}),
+        });
+        operation.tools = vec![ToolDefinition::with_schema(
+            "verdict",
+            "An ordinary tool under the reserved name.",
+            serde_json::json!({"type": "object"}),
+        )];
+
         let failure = build_request(&operation)
-            .expect_err("a contract combined with caller tools must not silently translate");
+            .expect_err("a proposal under a colliding name would be indistinguishable");
 
         assert!(matches!(
             failure,
