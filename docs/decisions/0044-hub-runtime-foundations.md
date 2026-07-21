@@ -1,8 +1,25 @@
 # ADR-0044: Hub runtime foundations
 
 - Date: 2026-07-20
+- Amended: 2026-07-20 — post-merge review corrections: (1) the configuration
+  clause no longer places the database credential under
+  [ADR-0017](0017-credential-lifecycle.md), whose scope is provider and
+  integration credentials — the original sentence silently closed the
+  database-credential delivery decision
+  [ADR-0032](0032-postgres-implementation-dependencies.md) reserves, and the
+  correction restores that accepted open reservation, with the hubd slice's
+  environment read explicitly provisional; (2) the original telemetry clause is
+  preserved below and superseded for caller-supplied command identifiers by
+  [ADR-0046](0046-durable-command-telemetry-correlation.md); (3) the mandatory
+  session corruption key is conditional on session-scoped operations; (4)
+  [ADR-0035](0035-domain-owned-persistence-reconstitution.md) concurrent
+  staleness is explicitly consumed inside adapters, outside the operator
+  taxonomy; (5) an incoming command identifier reused for a different kind is
+  classified consistently as a caller or hub bug, while a persisted cross-kind
+  relationship that cannot be reconstituted remains corruption
 - Supersedes: none
-- Superseded by: none
+- Superseded by: [ADR-0046](0046-durable-command-telemetry-correlation.md) for
+  telemetry correlation of caller-supplied `DurableCommandId` values
 - Depends on: [ADR-0010](0010-initial-scheduler-mechanics.md),
   [ADR-0017](0017-credential-lifecycle.md),
   [ADR-0032](0032-postgres-implementation-dependencies.md),
@@ -76,53 +93,73 @@ The hubd wiring slice must add `tracing` as a new dependency crossing the
 repository's large-dependency gate; the owner approved its adoption when
 commissioning this record, and merging the record is the recorded acceptance.
 Explicit non-goals: metrics and OpenTelemetry are deferred, and no log-content
-policy exists beyond ADR-0017's credential redaction plus one rule this record
-adds — full user content never appears in logs. Non-secret opaque aggregate
-correlation keys — session, durable-command, and turn identities — plus lengths
-and taxonomy classifications may appear. These named keys remain allowable when
-caller-supplied or user-associated because they are required to correlate
-durable failures; no other caller-provided or user-associated identifier may
-appear, and secret-associated identifiers may not.
+policy exists beyond [ADR-0017](0017-credential-lifecycle.md)'s credential
+redaction plus one rule this record adds — full user content never appears in
+logs. Non-secret opaque aggregate correlation keys — session, durable-command,
+and turn identities — plus lengths and taxonomy classifications may appear.
+These named keys remain allowable when caller-supplied or user-associated
+because they are required to correlate durable failures; no other
+caller-provided or user-associated identifier may appear, and secret-associated
+identifiers may not.
 
 ### One shared operator failure taxonomy
 
 The application crate owns one closed operator-facing failure classification,
-and every adapter error family maps into it:
+and every adapter error family maps into it. Concurrent staleness per
+[ADR-0035](0035-domain-owned-persistence-reconstitution.md) is consumed inside
+adapters by reload-and-rederive and is never surfaced through the operator
+taxonomy; the four categories classify only genuine failures after staleness
+handling:
 
 - **Infrastructure** — the operation could not complete; carries a
   commit-ambiguous flag for failures (a connection lost around commit) where the
   transaction's fate is unknown and recovery must re-read durable state rather
   than assume either outcome.
-- **Fail-closed corruption** — ADR-0035's durable corruption: committed rows
-  cannot construct the accepted domain value; no effect, no repair.
+- **Fail-closed corruption** —
+  [ADR-0035](0035-domain-owned-persistence-reconstitution.md)'s durable
+  corruption: committed rows cannot construct the accepted domain value; no
+  effect, no repair.
 - **Identity collision** — a hub-minted candidate identity collided; the
   operation retries with fresh candidates rather than failing the work.
 - **Caller or hub bug** — a request that can only be a defect (for example
-  ADR-0034's conflicting command-id reuse, or an activation guard that cannot
-  fail honestly), distinct from corruption. This is the typed caller-error
-  family the tracked conflation awaits; slices migrate the
-  `Corruption::Inconsistent` conflations as they touch them.
+  [ADR-0034](0034-durable-command-storage-and-equality.md)'s conflicting
+  command-id reuse, or an activation guard that cannot fail honestly), distinct
+  from corruption. This is the typed caller-error family the tracked conflation
+  awaits; slices migrate the `Corruption::Inconsistent` conflations as they
+  touch them.
 
-Domain rejections stay recorded applied-or-rejected results under ADR-0001 and
-ADR-0034 — never errors, never taxonomy members. ADR-0035 concurrent staleness
-also stays outside this operator taxonomy: an adapter must consume it by
-reloading and rederiving before mapping a terminal failure. Diagnostics attach
-aggregate keys at the adapter/runtime boundary. Every corruption-classified
-event names the authoritative session, durable-command, and/or turn identities
-known to the failing operation; an owner-global command-registry failure before
-a trustworthy session is known requires the command identity but not a session
-candidate. Diagnostics never include a credential value or user content.
+Domain rejections stay recorded applied-or-rejected results under
+[ADR-0001](0001-domain-terminology-and-identity.md) and
+[ADR-0034](0034-durable-command-storage-and-equality.md) — never errors, never
+taxonomy members. Diagnostics attach aggregate keys at the adapter/runtime
+boundary, and for corruption events the discipline is mandatory: every
+corruption-classified event names the session identity when the failing
+operation is session-scoped, plus the durable command and/or turn identity when
+the failing operation is scoped to one — and never a credential value or user
+content. Registry-level and pre-claim corruption events carry the
+durable-command identity without a session key. Reuse of an incoming command
+identifier for a different kind remains the caller-or-hub-bug classification
+above. A persisted cross-kind relationship discovered while reconstituting
+accepted state is fail-closed corruption under
+[ADR-0035](0035-domain-owned-persistence-reconstitution.md).
 
 ### Composition-root contract
 
 hubd is the composition root and owns construction:
 
-- **Configuration.** `DATABASE_URL` arrives as deployment configuration supplied
-  to the process environment. This record decides the configuration interface,
-  not the database credential's source or delivery channel: that remains
-  ADR-0032's open credential-management question and is outside ADR-0017's
-  provider/integration credential scope. The value is never a durable record.
-  Production connections use the persistence crate's verify-full options.
+- **Configuration.** The database connection configuration reaches hubd through
+  deployment configuration, but this record does not require a complete
+  `DATABASE_URL`, a process-environment channel, or any particular split between
+  non-secret connection parameters and credential material. The delivery channel
+  for database credentials remains open per
+  [ADR-0032](0032-postgres-implementation-dependencies.md), which reserves that
+  decision for a separate future record;
+  [ADR-0017](0017-credential-lifecycle.md)'s channel split governs provider and
+  integration credentials, not this one. The currently commissioned hubd slice
+  may read a complete `DATABASE_URL` from the process environment only as an
+  explicitly provisional implementation choice that the later credential
+  decision may replace or split; it is never a durable record. Production
+  connections use the persistence crate's verify-full options.
 - **Migration at startup.** The baseline resolves ADR-0032's open wiring: the
   hub process itself runs the embedded migrations at startup, before ADR-0004's
   recovery scan, which completes before ADR-0010 permits scheduling. A failed
