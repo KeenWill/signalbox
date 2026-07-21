@@ -97,17 +97,17 @@ impl<C> ScriptedModel<C> {
 }
 
 impl<C: Clone + Send + Sync> ModelRuntime<C> for ScriptedModel<C> {
-    fn execute(
+    // All work happens inside the future: a created-but-never-polled
+    // execution consumes no script, records no operation, and emits no
+    // observation, matching how a real adapter behaves when its future is
+    // dropped before first poll.
+    async fn execute(
         &self,
         operation: ModelOperation<C>,
         sink: &mut (dyn ObservationSink<C> + Send),
         _cancellation: CancellationSignal,
-    ) -> impl Future<Output = TerminalReport<C>> + Send {
-        // All work happens inside the future: a created-but-never-polled
-        // execution consumes no script, records no operation, and emits no
-        // observation, matching how a real adapter behaves when its future
-        // is dropped before first poll.
-        async move {
+    ) -> TerminalReport<C> {
+        {
             let correlation = operation.correlation.clone();
             let script = {
                 // One lock for dequeue and receipt: recorded order is
