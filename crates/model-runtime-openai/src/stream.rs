@@ -288,26 +288,27 @@ impl StreamDecoder {
         if refusal_payload.is_some() {
             finish = FinishReason::Refusal;
         }
-        let evidence = if finish == FinishReason::Refusal {
-            if let Some(refusal) = refusal_payload {
-                content.push(AssistantPart::Text(refusal));
+        let evidence = match finish.completion_finish() {
+            None => {
+                if let Some(refusal) = refusal_payload {
+                    content.push(AssistantPart::Text(refusal));
+                }
+                TerminalEvidence::Refused(RefusalEvidence {
+                    exchange: self.exchange.clone(),
+                    message_id: self.message_id.clone(),
+                    reported_model: self.reported_model.clone(),
+                    content,
+                    usage: self.usage,
+                })
             }
-            TerminalEvidence::Refused(RefusalEvidence {
-                exchange: self.exchange.clone(),
-                message_id: self.message_id.clone(),
-                reported_model: self.reported_model.clone(),
-                content,
-                usage: self.usage,
-            })
-        } else {
-            TerminalEvidence::Completed(CompletionEvidence {
+            Some(finish) => TerminalEvidence::Completed(CompletionEvidence {
                 exchange: self.exchange.clone(),
                 message_id: self.message_id.clone(),
                 reported_model: self.reported_model.clone(),
                 finish,
                 content,
                 usage: self.usage,
-            })
+            }),
         };
         StreamStep::Terminal(evidence)
     }
@@ -316,12 +317,22 @@ impl StreamDecoder {
 #[cfg(test)]
 mod tests {
     use signalbox_model_runtime::{
-        AssistantPart, ExchangeFacts, FinishReason, LossCause, Observation, ObservationFact,
-        ProviderErrorKind, ProviderMessageId, ProviderReportedModel, ProviderRequestId, SseFraming,
-        StreamInterruption, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
+        AssistantPart, CompletionFinish, ExchangeFacts, FinishReason, LossCause, Observation,
+        ObservationFact, ProviderErrorKind, ProviderMessageId, ProviderReportedModel,
+        ProviderRequestId, SseFraming, SseRecord, StreamInterruption, TerminalEvidence, TokenUsage,
+        ToolCallId, ToolCallProposal, ToolName,
     };
 
     use super::{StreamDecoder, StreamStep};
+
+    /// Pushes one chunk that must frame without a failure and returns its
+    /// completed records.
+    #[track_caller]
+    fn push_ok(framing: &mut SseFraming, chunk: &[u8]) -> Vec<SseRecord> {
+        let outcome = framing.push(chunk);
+        assert_eq!(outcome.error, None, "test fixtures frame cleanly");
+        outcome.records
+    }
 
     fn exchange() -> ExchangeFacts {
         ExchangeFacts {
@@ -339,7 +350,7 @@ mod tests {
         let correlation = "call-1".to_string();
         let mut terminal = None;
         for chunk in chunks {
-            let records = framing.push(chunk).expect("test fixtures frame cleanly");
+            let records = push_ok(&mut framing, chunk);
             for record in records {
                 assert!(
                     terminal.is_none(),
@@ -362,7 +373,7 @@ mod tests {
         let mut observations: Vec<Observation<String>> = Vec::new();
         let correlation = "call-1".to_string();
         for chunk in chunks {
-            let records = framing.push(chunk).expect("test fixtures frame cleanly");
+            let records = push_ok(&mut framing, chunk);
             for record in records {
                 match decoder.apply(&record, &correlation, &mut observations) {
                     StreamStep::Continue => {}
@@ -403,7 +414,7 @@ mod tests {
             completion.reported_model,
             Some(ProviderReportedModel::new("model-exact-1"))
         );
-        assert_eq!(completion.finish, FinishReason::EndTurn);
+        assert_eq!(completion.finish, CompletionFinish::EndTurn);
         assert_eq!(
             completion.content,
             vec![AssistantPart::Text("Hello".to_string())]
@@ -485,7 +496,7 @@ mod tests {
             completion.content,
             vec![AssistantPart::ToolCall(proposal.clone())]
         );
-        assert_eq!(completion.finish, FinishReason::ToolUse);
+        assert_eq!(completion.finish, CompletionFinish::ToolUse);
         assert!(observations.contains(&Observation {
             correlation: "call-1".to_string(),
             fact: ObservationFact::ToolCallProposed(proposal),

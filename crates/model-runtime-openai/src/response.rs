@@ -172,26 +172,28 @@ pub(crate) fn decode_buffered_response<C: Clone>(
         correlation: correlation.clone(),
         fact: ObservationFact::FinishReported(finish.clone()),
     });
-    if finish == FinishReason::Refusal {
-        if let Some(refusal) = refusal_payload {
-            content.push(AssistantPart::Text(refusal));
+    match finish.completion_finish() {
+        None => {
+            if let Some(refusal) = refusal_payload {
+                content.push(AssistantPart::Text(refusal));
+            }
+            TerminalEvidence::Refused(RefusalEvidence {
+                exchange,
+                message_id,
+                reported_model,
+                content,
+                usage,
+            })
         }
-        return TerminalEvidence::Refused(RefusalEvidence {
+        Some(finish) => TerminalEvidence::Completed(CompletionEvidence {
             exchange,
             message_id,
             reported_model,
+            finish,
             content,
             usage,
-        });
+        }),
     }
-    TerminalEvidence::Completed(CompletionEvidence {
-        exchange,
-        message_id,
-        reported_model,
-        finish,
-        content,
-        usage,
-    })
 }
 
 fn unintelligible(
@@ -214,7 +216,7 @@ mod tests {
     use expect_test::expect;
     use signalbox_expect_table::table;
     use signalbox_model_runtime::{
-        AssistantPart, ExchangeFacts, FinishReason, LossCause, Observation, ObservationFact,
+        AssistantPart, CompletionFinish, ExchangeFacts, LossCause, Observation, ObservationFact,
         ProviderMessageId, ProviderReportedModel, ProviderRequestId, TerminalEvidence, TokenUsage,
         ToolCallId, ToolCallProposal, ToolName,
     };
@@ -281,7 +283,7 @@ mod tests {
             completion.reported_model,
             Some(ProviderReportedModel::new("model-exact-1"))
         );
-        assert_eq!(completion.finish, FinishReason::ToolUse);
+        assert_eq!(completion.finish, CompletionFinish::ToolUse);
         assert_eq!(
             completion.content,
             vec![

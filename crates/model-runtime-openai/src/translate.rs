@@ -40,7 +40,7 @@ pub(crate) fn build_request<C>(
         });
     }
     for message in &operation.messages {
-        wire_messages(message, &mut messages);
+        wire_messages(message, &mut messages)?;
     }
     let streamed = operation.delivery == DeliveryMode::Streamed;
     Ok(ChatRequest {
@@ -119,7 +119,10 @@ fn tools_and_choice<C>(
 /// several wire messages: consecutive text parts group into one message,
 /// assistant tool calls attach to the preceding assistant text (or form
 /// their own message), and each tool result becomes its own message.
-fn wire_messages(message: &ConversationMessage, out: &mut Vec<WireChatMessage>) {
+fn wire_messages(
+    message: &ConversationMessage,
+    out: &mut Vec<WireChatMessage>,
+) -> Result<(), PreparationFailure> {
     let role = match message.role {
         ConversationRole::User => "user",
         ConversationRole::Assistant => "assistant",
@@ -149,9 +152,22 @@ fn wire_messages(message: &ConversationMessage, out: &mut Vec<WireChatMessage>) 
                     tool_call_id: Some(result.tool_call_id.as_str().to_string()),
                 });
             }
+            // Chat Completions has no representation for replayed reasoning;
+            // dropping caller-stated history silently would misstate the
+            // conversation, so it is a preparation failure the caller can
+            // act on (strip the parts or route to a reasoning-capable
+            // provider).
+            MessagePart::Thinking { .. } | MessagePart::RedactedThinking { .. } => {
+                return Err(PreparationFailure::UnsupportedOperation {
+                    detail: "the Chat Completions wire contract cannot represent replayed \
+                             reasoning history"
+                        .to_string(),
+                });
+            }
         }
     }
     flush(role, &mut pending_text, &mut pending_tool_calls, out);
+    Ok(())
 }
 
 fn flush(
@@ -386,6 +402,26 @@ mod tests {
 
         let failure = build_request(&operation)
             .expect_err("a contract combined with caller tools must not silently translate");
+
+        assert!(matches!(
+            failure,
+            PreparationFailure::UnsupportedOperation { .. }
+        ));
+    }
+
+    #[test]
+    fn replayed_reasoning_history_is_rejected_not_silently_dropped() {
+        let mut operation = operation("call-7");
+        operation.messages = vec![ConversationMessage {
+            role: ConversationRole::Assistant,
+            parts: vec![MessagePart::Thinking {
+                text: "step one".to_string(),
+                signature: Some("sig_1".to_string()),
+            }],
+        }];
+
+        let failure = build_request(&operation)
+            .expect_err("reasoning history this wire contract cannot represent must not vanish");
 
         assert!(matches!(
             failure,
