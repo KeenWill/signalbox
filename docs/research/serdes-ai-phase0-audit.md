@@ -101,24 +101,29 @@ at every entry point — `serdes-ai-agent/src/run.rs:198,284`,
 search: the only `with_run_id` setters are on an error type and on the tools
 `RunContext` used for tool execution, not on any agent entry point).
 
-**Answer:** fails at the agent layer, moot at the models layer. The handoff's
-fork trigger "runtime cannot accept caller-owned durable operation IDs on every
-event" is real for the agent loop, so the agent loop is unusable for Signalbox
-regardless of other findings; the models layer does not block.
+**Answer:** neither layer fails correlation on the evidence audited here. In
+both cases the caller exclusively owns the stream returned by one invocation and
+can tag every observation with its durable operation identity. The agent's
+internally generated run ID cannot become authoritative Signalbox correlation,
+but the audit found no multiplexing or event escape that prevents the same
+stream-ownership rule used at the model layer. Q7 independently rules out the
+agent loop because it owns hidden model repair and tool execution.
 
 ### Q2 — provider-boundary-crossed / request-accepted signal
 
 There is no explicit boundary observation anywhere. What exists:
 
-- **Success path (insufficient implicit signal):** both adapters build and send
-  the HTTP request inside the method and call reqwest's `error_for_status()`
-  before returning (`serdes-ai-models/src/anthropic/model.rs:598-623`
-  non-streaming, `serdes-ai-models/src/anthropic/model.rs:643-671` streaming;
-  equivalent structure in `serdes-ai-models/src/openai/chat.rs`). That check
-  rejects only 4xx and 5xx; with redirect following disabled, a 3xx can still
-  produce `Ok(StreamedResponse)`. The adapter must explicitly require a 2xx
-  status before treating construction as acceptance. In streaming, Anthropic's
-  `message_start` then confirms provider-side message creation
+- **Definitive-response path (insufficient send-progress signal):** both
+  adapters build and send the HTTP request inside the method and call reqwest's
+  `error_for_status()` before returning
+  (`serdes-ai-models/src/anthropic/model.rs:598-623` non-streaming,
+  `serdes-ai-models/src/anthropic/model.rs:643-671` streaming; equivalent
+  structure in `serdes-ai-models/src/openai/chat.rs`). Receiving any HTTP
+  response proves that the provider boundary was crossed; response class then
+  determines outcome classification, not send cardinality. The adapter must
+  preserve and exhaustively classify 3xx, 4xx, and 5xx native responses, while
+  only 2xx continues on the success path. In streaming, Anthropic's
+  `message_start` additionally confirms provider-side message creation
   (`serdes-ai-models/src/anthropic/stream.rs:236-242`).
 - **Failure path (no signal):** every transport failure funnels through
   `From<reqwest::Error> for ModelError`
@@ -139,13 +144,15 @@ There is no explicit boundary observation anywhere. What exists:
   out-of-band, but correlating that side channel to a specific logical call from
   outside the adapter is fragile.
 
-**Answer:** acceptance is provable on the success path only after the adapter
-explicitly requires 2xx and redirect following is disabled on the injected
-client, as required by
-[ADR-0005](../decisions/0005-model-call-retry-semantics.md) — under the default
-client one `.send()` can fold a redirect replay into a second physical request
-(see the retry-wrapper finding). A trustworthy boundary signal on failure paths
-is per-adapter surgery on the send/error code.
+**Answer:** one authorized send remains one physical request only when redirect
+following is disabled on the injected client and no retry wrapper is used, as
+required by [ADR-0005](../decisions/0005-model-call-retry-semantics.md) — under
+the default client one `.send()` can fold a redirect replay into a second
+physical request (see the retry-wrapper finding). Separately, every received
+status must be mapped exhaustively: 2xx may proceed as success, while 3xx, 4xx,
+and 5xx are definitive native responses rather than evidence of another send. A
+trustworthy send-progress signal when no response arrives still requires
+per-adapter surgery on the send/error code.
 
 ### Q3 — error evidence vs ADR-0043's categories
 
@@ -341,9 +348,8 @@ failure classes (Q6); tool schema and decode-only tool calls (Q8); the Anthropic
 streaming-integrity pattern (`StreamComplete` + premature-EOF rejection) as a
 design template; provider wire types and SSE parsing structure.
 
-Conflicting with durable semantics: internal run-ID generation (Q4); the
-retry/fallback wrappers' post-send repetition
-([ADR-0005](../decisions/0005-model-call-retry-semantics.md));
+Conflicting with durable semantics: the retry/fallback wrappers' post-send
+repetition ([ADR-0005](../decisions/0005-model-call-retry-semantics.md));
 retryability-first error taxonomy including `IncompleteStream`-is-transient
 ([ADR-0043](../decisions/0043-provider-failure-classification.md)); the agent
 loop's hidden model repair and tool auto-retry (Q7); refusal collapsed into
@@ -415,11 +421,12 @@ Why hand-roll beats vendoring selected crates:
 
 The models layer passed the make-or-break Q4 test (correlation by construction),
 so vendoring `serdes-ai-core` + `serdes-ai-models` and rewriting in place is
-*viable*; it is rejected on points 1–2, not on feasibility. If M3 implementation
-reveals the hand-rolled wire layer ballooning past roughly the size of the
-vendored closure's relevant code, revisit this choice — the audit evidence
-supports either direction of that trade, and the decision belongs to the ADR
-process.
+*viable*; it is rejected on points 1–2, not on feasibility. When the
+[real-provider smoke milestone](../target-model.md#priority-order) (priority
+item 4) is implemented, compare the hand-rolled wire layer with the roughly
+sized relevant vendored code. If the former has ballooned past the latter,
+revisit this choice through the ADR process; the audit evidence supports either
+direction of that trade.
 
 ### Implementation minimum and later audit coverage
 
@@ -444,13 +451,15 @@ smoke gate. Names are illustrative.
 
 The smoke minimum is three modules and one provider. Full audited coverage is
 four to five modules; neither set includes retry, fallback, agent-loop,
-registry, or execution machinery, and every provider module builds its HTTP
-client with redirect following disabled and explicitly requires a 2xx status so
-that one authorized send is one accepted physical request, as required by
-[ADR-0005](../decisions/0005-model-call-retry-semantics.md) (the retry-wrapper
-finding). Rough size anchor (inference): the full corresponding SerdesAI source
-is about 4–5k lines including tests, and the smoke subset drops schema/tool
-work, media inputs, caching betas, and 14 of 15 providers.
+registry, or execution machinery. Every provider module builds its HTTP client
+with redirect following disabled so one authorized send remains one physical
+request, as required by
+[ADR-0005](../decisions/0005-model-call-retry-semantics.md), and separately
+classifies every HTTP status: 2xx on the success path and 3xx/4xx/5xx as
+definitive native responses. Rough size anchor (inference): the full
+corresponding SerdesAI source is about 4–5k lines including tests, and the smoke
+subset drops schema/tool work, media inputs, caching betas, and 14 of 15
+providers.
 
 ## Sources
 
