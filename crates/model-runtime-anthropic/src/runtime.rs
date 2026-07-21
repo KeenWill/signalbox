@@ -725,6 +725,9 @@ fn redact_evidence(evidence: TerminalEvidence, api_key: &CredentialValue) -> Ter
         }
         TerminalEvidence::CancellationConfirmed(mut confirmed) => {
             confirmed.exchange = redact_exchange(confirmed.exchange, key_text);
+            confirmed.reported_model = confirmed
+                .reported_model
+                .map(|model| redact_reported_model(model, key_text));
             confirmed.native = redact_native(confirmed.native);
             TerminalEvidence::CancellationConfirmed(confirmed)
         }

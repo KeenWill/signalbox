@@ -38,6 +38,35 @@ retry policy, fallback behavior, provider outcome semantics, or live credential
 source beyond the contracts already owned by ADR-0005, ADR-0017, ADR-0043, and
 ADR-0047.
 
+## 2026-07-20 — Hand-roll the typed model-runtime substrate
+
+**Context.** [ADR-0047](decisions/0047-typed-model-runtime-substrate.md) fixes
+the isolation and dependency rules for a provider-neutral runtime but leaves the
+Phase-0 audit outcome, replacement strategy, and exact crate decomposition to a
+later recorded decision. The audit found that the trustworthy send, error, and
+stream-terminal paths require semantic reversal, while the useful wire and
+framing ideas are small enough to reproduce directly.
+
+**Decision.** Hand-roll `signalbox-model-runtime` as the provider-neutral core
+crate, with one separately named workspace crate per provider adapter. Use
+SerdesAI only as a design reference; copy no code. Keep retry, fallback,
+agent-loop, registry, and tool-execution machinery out. Use `serde` and
+`serde_json` for typed JSON decoding and `schemars` for Rust-derived JSON
+Schema; provider HTTP clients and wire dependencies remain decisions of their
+adapter slices.
+
+**Rejected alternatives.** Vendoring the eight-crate SerdesAI closure imports
+retry and agent semantics Signalbox would immediately replace. Depending on
+upstream releases makes accepted behavior contingent on those conflicting
+semantics. Combining every provider in the core crate weakens ADR-0047's
+dependency isolation and feature accounting.
+
+**Affects.** The workspace member `crates/model-runtime`, its typed operation,
+observation, evidence, tool, structured-output, and SSE APIs, and the separate
+provider-adapter crates stacked above it. This closes ADR-0047's audit-outcome
+and decomposition question; application-side port shape remains owned by
+ADR-0045 and its implementation slices.
+
 ## 2026-07-20 — Startup failure seam and pending-steering blocker
 
 **Context.** INV-034 commissions the first startup producer for ADR-0036's

@@ -293,6 +293,9 @@ pub struct NativeErrorFacts {
 pub struct CancellationConfirmedEvidence {
     /// Correlated exchange facts.
     pub exchange: ExchangeFacts,
+    /// The model identity reported by the definitive cancellation response,
+    /// when present; retained for ADR-0005 target-mismatch precedence.
+    pub reported_model: Option<ProviderReportedModel>,
     /// The provider's native confirmation material, retained verbatim.
     pub native: NativeErrorFacts,
 }

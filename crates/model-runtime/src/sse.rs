@@ -237,8 +237,9 @@ impl SseFraming {
         match field {
             "event" => {
                 // Replacement semantics: only the retained (last) value
-                // counts toward the record bound.
-                self.current_event = Some(value.to_string());
+                // counts toward the record bound. An empty event value resets
+                // the event type to the default, represented here as `None`.
+                self.current_event = (!value.is_empty()).then(|| value.to_string());
             }
             "data" => {
                 // Exact joined length: each line beyond the first also
@@ -395,6 +396,15 @@ mod tests {
 
         assert_eq!(records, vec![record(None, "later")]);
         assert_eq!(framing.finish(), SseTermination::Clean);
+    }
+
+    #[test]
+    fn empty_event_value_uses_the_default_event_type() {
+        let mut framing = framer();
+
+        let records = push_ok(&mut framing, b"event:\ndata: value\n\n");
+
+        assert_eq!(records, vec![record(None, "value")]);
     }
 
     #[test]
