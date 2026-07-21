@@ -9,6 +9,35 @@ that constrains several components — require a full record under
 [decisions/](decisions/README.md) instead. Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-21 — Anthropic adapter HTTP and codec dependencies
+
+**Context.** ADR-0047 authorizes provider adapters but deliberately leaves each
+provider SDK or HTTP-client choice to a later dependency-gate decision. The
+smoke-critical Anthropic Messages adapter needs one physical buffered or SSE
+request, strict wire decoding, cancellation-aware byte streaming, and tests that
+exercise the real transport without live provider calls.
+
+**Decision.** Use narrowly featured `reqwest` with rustls native roots and
+streaming as the HTTP transport, with redirects, protocol retries, and idle
+connection reuse explicitly disabled to preserve ADR-0005's one-send boundary.
+Use `futures-util` for cancellation/stream combinators and `serde` plus
+`serde_json` (including raw JSON values) for the provider wire codec. Test-only
+Tokio supplies the loopback runtime and socket server; existing workspace test
+helpers `expect-test`, `schemars`, and `signalbox-expect-table` cover request
+fixtures and structured-output schemas.
+
+**Rejected alternatives.** Anthropic's official SDK adds provider-owned
+abstractions and transitive surface the adapter does not need, while a
+hand-rolled HTTP/TLS/SSE stack would make Signalbox own mature transport and
+codec machinery. Reqwest's default redirect, retry, and pooling policies are
+also rejected because they can obscure or repeat the physical send.
+
+**Affects.** `crates/model-runtime-anthropic`, the root workspace lockfile and
+supply-chain checks, and the adapter's loopback transport tests. It selects no
+retry policy, fallback behavior, provider outcome semantics, or live credential
+source beyond the contracts already owned by ADR-0005, ADR-0017, ADR-0043, and
+ADR-0047.
+
 ## 2026-07-20 — Startup failure seam and pending-steering blocker
 
 **Context.** INV-034 commissions the first startup producer for ADR-0036's

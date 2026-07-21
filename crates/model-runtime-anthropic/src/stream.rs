@@ -26,7 +26,8 @@ use crate::response::{convert_usage, map_finish};
 use crate::status::classify_error_token;
 use crate::wire::{
     ContentBlockDeltaEvent, ContentBlockStartEvent, ContentBlockStopEvent, ErrorEnvelope,
-    MessageDeltaEvent, MessageStartEvent, WireDelta, WireResponseBlock, parse_response_block,
+    MessageDeltaEvent, MessageStartEvent, MessageStopEvent, WireDelta, WireResponseBlock,
+    parse_response_block,
 };
 
 /// The decoder's verdict on one record.
@@ -456,7 +457,7 @@ impl StreamDecoder {
         }
         // The terminal record's payload is validated like every other known
         // event: a malformed terminal must not cross the integrity gate.
-        if let Err(step) = self.parse::<serde_json::Value>(record, "message_stop") {
+        if let Err(step) = self.parse::<MessageStopEvent>(record, "message_stop") {
             return *step;
         }
         if !self.open_blocks.is_empty() {
@@ -465,6 +466,9 @@ impl StreamDecoder {
         let Some(finish) = self.finish.clone() else {
             return self.violation("message_stop without a reported stop_reason");
         };
+        if self.closed.keys().copied().ne(0..self.closed.len() as u32) {
+            return self.violation("message_stop with sparse content-block indices");
+        }
         let evidence = match finish.completion_finish() {
             None => TerminalEvidence::Refused(RefusalEvidence {
                 exchange: self.exchange.clone(),
@@ -1026,6 +1030,47 @@ mod tests {
 
         let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
             panic!("a malformed terminal payload must not cross the integrity gate");
+        };
+        assert!(matches!(
+            loss.cause,
+            LossCause::StreamProtocolViolation { .. }
+        ));
+    }
+
+    #[test]
+    fn message_stop_with_the_wrong_discriminator_is_a_protocol_violation() {
+        let (terminal, _) = drive(&[
+            message_start(),
+            b"event: message_delta\n\
+              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+            b"event: message_stop\ndata: {\"type\":\"ping\"}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("a mismatched terminal discriminator must not cross the integrity gate");
+        };
+        assert!(matches!(
+            loss.cause,
+            LossCause::StreamProtocolViolation { .. }
+        ));
+    }
+
+    #[test]
+    fn sparse_content_block_indices_are_a_protocol_violation() {
+        let (terminal, _) = drive(&[
+            message_start(),
+            b"event: content_block_start\n\
+              data: {\"type\":\"content_block_start\",\"index\":1,\
+              \"content_block\":{\"type\":\"text\",\"text\":\"second\"}}\n\n",
+            b"event: content_block_stop\n\
+              data: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+            b"event: message_delta\n\
+              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("sparse provider indices must not be compacted into completion content");
         };
         assert!(matches!(
             loss.cause,

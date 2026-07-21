@@ -11,11 +11,12 @@ use reqwest::redirect::Policy;
 use reqwest::{Client, Url};
 
 use signalbox_model_runtime::{
-    BoundaryLossEvidence, CancellationSignal, ExchangeFacts, LossCause, ModelOperation,
-    ModelRuntime, NativeErrorFacts, Observation, ObservationFact, ObservationSink,
-    PreparationFailure, ProvenUnsentEvidence, ProviderErrorEvidence, ProviderErrorKind,
+    AssistantPart, BoundaryLossEvidence, CancellationSignal, CompletionFinish, ExchangeFacts,
+    FinishReason, LossCause, ModelOperation, ModelRuntime, NativeErrorFacts, Observation,
+    ObservationFact, ObservationSink, PreparationFailure, ProvenUnsentEvidence,
+    ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId, ProviderReportedModel,
     ProviderRequestId, SseFraming, StreamInterruption, TerminalEvidence, TerminalReport,
-    TokenUsage, TransportFacts, UnsentCause,
+    TokenUsage, ToolCallId, ToolCallProposal, ToolName, TransportFacts, UnsentCause,
 };
 
 use signalbox_model_runtime::{CredentialAccess, CredentialValue};
@@ -211,7 +212,7 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
                 body,
                 api_key_header,
                 correlation,
-                sink,
+                &mut RedactingObservationSink::new(sink, &api_key),
                 cancellation,
             )
             .await;
@@ -331,9 +332,12 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
                 // incomplete-stream fact, never silent success.
                 None => return decoder.lost(StreamInterruption::EndOfStream),
                 Some(Err(error)) => {
-                    return decoder.lost(StreamInterruption::TransportFailure(transport_facts(
-                        &error,
-                    )));
+                    let interruption = if error.is_timeout() {
+                        StreamInterruption::TimedOut(transport_facts(&error))
+                    } else {
+                        StreamInterruption::TransportFailure(transport_facts(&error))
+                    };
+                    return decoder.lost(interruption);
                 }
                 Some(Ok(bytes)) => {
                     // Records completed before a framing failure are applied
@@ -541,19 +545,137 @@ fn sensitive_header(api_key: &CredentialValue) -> Option<HeaderValue> {
     Some(header)
 }
 
+struct RedactingObservationSink<'a, C> {
+    inner: &'a mut (dyn ObservationSink<C> + Send),
+    credential: &'a str,
+}
+
+impl<'a, C> RedactingObservationSink<'a, C> {
+    fn new(
+        inner: &'a mut (dyn ObservationSink<C> + Send),
+        credential: &'a CredentialValue,
+    ) -> Self {
+        Self {
+            inner,
+            credential: std::str::from_utf8(credential.expose_bytes()).unwrap_or_default(),
+        }
+    }
+}
+
+impl<C> ObservationSink<C> for RedactingObservationSink<'_, C> {
+    fn observe(&mut self, mut observation: Observation<C>) {
+        observation.fact = redact_observation_fact(observation.fact, self.credential);
+        self.inner.observe(observation);
+    }
+}
+
+fn redact_text(text: String, credential: &str) -> String {
+    if credential.is_empty() {
+        text
+    } else {
+        text.replace(credential, "[redacted]")
+    }
+}
+
+fn redact_exchange(mut exchange: ExchangeFacts, credential: &str) -> ExchangeFacts {
+    exchange.provider_request_id = exchange.provider_request_id.map(|request_id| {
+        ProviderRequestId::new(redact_text(request_id.as_str().to_string(), credential))
+    });
+    exchange
+}
+
+fn redact_reported_model(model: ProviderReportedModel, credential: &str) -> ProviderReportedModel {
+    ProviderReportedModel::new(redact_text(model.as_str().to_string(), credential))
+}
+
+fn redact_finish(finish: FinishReason, credential: &str) -> FinishReason {
+    match finish {
+        FinishReason::StopSequence { sequence } => FinishReason::StopSequence {
+            sequence: sequence.map(|value| redact_text(value, credential)),
+        },
+        FinishReason::Unrecognized { provider_token } => FinishReason::Unrecognized {
+            provider_token: redact_text(provider_token, credential),
+        },
+        finish => finish,
+    }
+}
+
+fn redact_completion_finish(finish: CompletionFinish, credential: &str) -> CompletionFinish {
+    match finish {
+        CompletionFinish::StopSequence { sequence } => CompletionFinish::StopSequence {
+            sequence: sequence.map(|value| redact_text(value, credential)),
+        },
+        CompletionFinish::Unrecognized { provider_token } => CompletionFinish::Unrecognized {
+            provider_token: redact_text(provider_token, credential),
+        },
+        finish => finish,
+    }
+}
+
+fn redact_proposal(mut proposal: ToolCallProposal, credential: &str) -> ToolCallProposal {
+    proposal.id = ToolCallId::new(redact_text(proposal.id.as_str().to_string(), credential));
+    proposal.name = ToolName::new(redact_text(proposal.name.as_str().to_string(), credential));
+    proposal.arguments_json = redact_text(proposal.arguments_json, credential);
+    proposal
+}
+
+fn redact_part(part: AssistantPart, credential: &str) -> AssistantPart {
+    match part {
+        AssistantPart::Text(text) => AssistantPart::Text(redact_text(text, credential)),
+        AssistantPart::Thinking { text, signature } => AssistantPart::Thinking {
+            text: redact_text(text, credential),
+            signature: signature.map(|value| redact_text(value, credential)),
+        },
+        AssistantPart::RedactedThinking { data } => AssistantPart::RedactedThinking {
+            data: redact_text(data, credential),
+        },
+        AssistantPart::ToolCall(proposal) => {
+            AssistantPart::ToolCall(redact_proposal(proposal, credential))
+        }
+    }
+}
+
+fn redact_observation_fact(fact: ObservationFact, credential: &str) -> ObservationFact {
+    match fact {
+        ObservationFact::ExchangeEstablished(exchange) => {
+            ObservationFact::ExchangeEstablished(redact_exchange(exchange, credential))
+        }
+        ObservationFact::ProviderModelReported(model) => {
+            ObservationFact::ProviderModelReported(redact_reported_model(model, credential))
+        }
+        ObservationFact::TextDelta { index, text } => ObservationFact::TextDelta {
+            index,
+            text: redact_text(text, credential),
+        },
+        ObservationFact::ThinkingDelta { index, text } => ObservationFact::ThinkingDelta {
+            index,
+            text: redact_text(text, credential),
+        },
+        ObservationFact::ToolArgumentsDelta { index, fragment } => {
+            ObservationFact::ToolArgumentsDelta {
+                index,
+                fragment: redact_text(fragment, credential),
+            }
+        }
+        ObservationFact::ToolCallProposed(proposal) => {
+            ObservationFact::ToolCallProposed(redact_proposal(proposal, credential))
+        }
+        ObservationFact::FinishReported(finish) => {
+            ObservationFact::FinishReported(redact_finish(finish, credential))
+        }
+        fact @ (ObservationFact::RequestPrepared
+        | ObservationFact::SendCommenced
+        | ObservationFact::UsageReported(_)) => fact,
+    }
+}
+
 /// Credential-sanitizes every provider-controlled or transport-rendered
 /// text in the evidence (ADR-0017): a reflected key value in an error
 /// message, raw body, or rendered detail is replaced before the evidence
 /// leaves the adapter boundary. Typed facts are untouched.
 fn redact_evidence(evidence: TerminalEvidence, api_key: &CredentialValue) -> TerminalEvidence {
     let key_text = std::str::from_utf8(api_key.expose_bytes()).unwrap_or_default();
-    let redact = move |text: String| -> String {
-        if key_text.is_empty() {
-            text
-        } else {
-            text.replace(key_text, "[redacted]")
-        }
-    };
+    let redact = move |text: String| -> String { redact_text(text, key_text) };
     let redact_native = |mut native: NativeErrorFacts| -> NativeErrorFacts {
         native.error_token = native.error_token.map(redact);
         native.message = native.message.map(redact);
@@ -562,11 +684,47 @@ fn redact_evidence(evidence: TerminalEvidence, api_key: &CredentialValue) -> Ter
     let redact_transport =
         |facts: TransportFacts| -> TransportFacts { TransportFacts::new(redact(facts.detail)) };
     match evidence {
+        TerminalEvidence::Completed(mut completion) => {
+            completion.exchange = redact_exchange(completion.exchange, key_text);
+            completion.message_id = completion
+                .message_id
+                .map(|message_id| ProviderMessageId::new(redact(message_id.as_str().to_string())));
+            completion.reported_model = completion
+                .reported_model
+                .map(|model| redact_reported_model(model, key_text));
+            completion.finish = redact_completion_finish(completion.finish, key_text);
+            completion.content = completion
+                .content
+                .into_iter()
+                .map(|part| redact_part(part, key_text))
+                .collect();
+            TerminalEvidence::Completed(completion)
+        }
+        TerminalEvidence::Refused(mut refusal) => {
+            refusal.exchange = redact_exchange(refusal.exchange, key_text);
+            refusal.message_id = refusal
+                .message_id
+                .map(|message_id| ProviderMessageId::new(redact(message_id.as_str().to_string())));
+            refusal.reported_model = refusal
+                .reported_model
+                .map(|model| redact_reported_model(model, key_text));
+            refusal.content = refusal
+                .content
+                .into_iter()
+                .map(|part| redact_part(part, key_text))
+                .collect();
+            TerminalEvidence::Refused(refusal)
+        }
         TerminalEvidence::ProviderError(mut error) => {
+            error.exchange = redact_exchange(error.exchange, key_text);
+            error.reported_model = error
+                .reported_model
+                .map(|model| redact_reported_model(model, key_text));
             error.native = redact_native(error.native);
             TerminalEvidence::ProviderError(error)
         }
         TerminalEvidence::CancellationConfirmed(mut confirmed) => {
+            confirmed.exchange = redact_exchange(confirmed.exchange, key_text);
             confirmed.native = redact_native(confirmed.native);
             TerminalEvidence::CancellationConfirmed(confirmed)
         }
@@ -585,6 +743,13 @@ fn redact_evidence(evidence: TerminalEvidence, api_key: &CredentialValue) -> Ter
             TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence { cause })
         }
         TerminalEvidence::BoundaryLoss(mut loss) => {
+            loss.exchange = redact_exchange(loss.exchange, key_text);
+            loss.reported_model = loss
+                .reported_model
+                .map(|model| redact_reported_model(model, key_text));
+            loss.finish_reported = loss
+                .finish_reported
+                .map(|finish| redact_finish(finish, key_text));
             loss.cause = match loss.cause {
                 LossCause::TimedOut(facts) => LossCause::TimedOut(redact_transport(facts)),
                 LossCause::TransportFailed(facts) => {
@@ -620,6 +785,5 @@ fn redact_evidence(evidence: TerminalEvidence, api_key: &CredentialValue) -> Ter
             };
             TerminalEvidence::BoundaryLoss(loss)
         }
-        evidence @ (TerminalEvidence::Completed(_) | TerminalEvidence::Refused(_)) => evidence,
     }
 }

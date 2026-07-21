@@ -101,6 +101,26 @@ fn tools_and_choice<C>(
 }
 
 fn wire_message(message: &ConversationMessage) -> Result<WireMessage, PreparationFailure> {
+    for part in &message.parts {
+        let valid_role = matches!(part, MessagePart::Text(_))
+            || matches!(
+                (message.role, part),
+                (ConversationRole::User, MessagePart::ToolResult(_))
+                    | (
+                        ConversationRole::Assistant,
+                        MessagePart::ToolCall(_)
+                            | MessagePart::Thinking { .. }
+                            | MessagePart::RedactedThinking { .. }
+                    )
+            );
+        if !valid_role {
+            return Err(PreparationFailure::UnsupportedOperation {
+                detail: "Anthropic requires tool results in user messages and tool calls or \
+                         thinking blocks in assistant messages"
+                    .to_string(),
+            });
+        }
+    }
     let role = match message.role {
         ConversationRole::User => "user",
         ConversationRole::Assistant => "assistant",
@@ -451,6 +471,48 @@ mod tests {
 
         let failure = build_request(&operation)
             .expect_err("serde_json would serialize a non-finite setting as null");
+
+        assert!(matches!(
+            failure,
+            PreparationFailure::UnsupportedOperation { .. }
+        ));
+    }
+
+    #[test]
+    fn assistant_tool_result_is_rejected_before_any_send() {
+        let mut operation = operation("call-12");
+        operation.messages = vec![ConversationMessage {
+            role: ConversationRole::Assistant,
+            parts: vec![MessagePart::ToolResult(ToolResultRecord {
+                tool_call_id: ToolCallId::new("toolu_1"),
+                content: "result".to_string(),
+                is_error: false,
+            })],
+        }];
+
+        let failure = build_request(&operation)
+            .expect_err("Anthropic accepts tool_result only in a user message");
+
+        assert!(matches!(
+            failure,
+            PreparationFailure::UnsupportedOperation { .. }
+        ));
+    }
+
+    #[test]
+    fn user_tool_call_is_rejected_before_any_send() {
+        let mut operation = operation("call-13");
+        operation.messages = vec![ConversationMessage {
+            role: ConversationRole::User,
+            parts: vec![MessagePart::ToolCall(ToolCallProposal {
+                id: ToolCallId::new("toolu_1"),
+                name: ToolName::new("lookup"),
+                arguments_json: "{}".to_string(),
+            })],
+        }];
+
+        let failure =
+            build_request(&operation).expect_err("Anthropic accepts tool_use only from assistant");
 
         assert!(matches!(
             failure,

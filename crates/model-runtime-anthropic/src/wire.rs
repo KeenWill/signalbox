@@ -267,3 +267,10 @@ pub(crate) struct MessageDeltaBody {
     pub stop_reason: Option<String>,
     pub stop_sequence: Option<String>,
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+pub(crate) enum MessageStopEvent {
+    #[serde(rename = "message_stop")]
+    MessageStop,
+}

@@ -547,6 +547,80 @@ async fn inv_035_provider_error_text_reflecting_the_key_is_redacted() {
     assert!(message.contains("[redacted]"));
 }
 
+#[tokio::test]
+async fn inv_035_success_content_reflecting_the_key_is_redacted() {
+    let body = br#"{
+        "id": "msg_key_loop",
+        "type": "message",
+        "role": "assistant",
+        "model": "model-key_loop",
+        "content": [{"type": "text", "text": "echo key_loop"}],
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 1, "output_tokens": 1}
+    }"#;
+    let server = CannedServer::serving(vec![http_response(
+        "200 OK",
+        &[("request-id", "req_key_loop")],
+        body,
+    )])
+    .await;
+    let runtime = runtime_for(&server.base_url);
+
+    let (report, observations) =
+        execute(&runtime, operation("call-13"), CancellationSignal::never()).await;
+
+    let TerminalEvidence::Completed(completion) = report.evidence else {
+        panic!("the complete response remains completion evidence after sanitization");
+    };
+    assert_eq!(
+        completion.content,
+        vec![AssistantPart::Text("echo [redacted]".to_string())]
+    );
+    assert!(
+        !format!("{completion:?}").contains("key_loop"),
+        "no successful terminal fact may expose the credential"
+    );
+    assert!(
+        !format!("{observations:?}").contains("key_loop"),
+        "no buffered observation may expose the credential"
+    );
+}
+
+#[tokio::test]
+async fn inv_035_streamed_delta_reflecting_the_key_is_redacted_before_observation() {
+    let sse: &[u8] = b"event: message_start\n\
+        data: {\"type\":\"message_start\",\"message\":{\"type\":\"message\",\
+        \"role\":\"assistant\",\"id\":\"msg_1\",\"model\":\"model-exact-1\",\
+        \"content\":[],\"usage\":{\"input_tokens\":1}}}\n\n\
+        event: content_block_start\n\
+        data: {\"type\":\"content_block_start\",\"index\":0,\
+        \"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n\
+        event: content_block_delta\n\
+        data: {\"type\":\"content_block_delta\",\"index\":0,\
+        \"delta\":{\"type\":\"text_delta\",\"text\":\"key_loop\"}}\n\n\
+        event: content_block_stop\n\
+        data: {\"type\":\"content_block_stop\",\"index\":0}\n\n\
+        event: message_delta\n\
+        data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n\
+        event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+    let server = CannedServer::serving(vec![http_response("200 OK", &[], sse)]).await;
+    let runtime = runtime_for(&server.base_url);
+    let mut streamed = operation("call-14");
+    streamed.delivery = DeliveryMode::Streamed;
+
+    let (report, observations) = execute(&runtime, streamed, CancellationSignal::never()).await;
+
+    assert!(matches!(report.evidence, TerminalEvidence::Completed(_)));
+    assert!(observations.iter().any(|observation| matches!(
+        observation.fact,
+        ObservationFact::TextDelta { ref text, .. } if text == "[redacted]"
+    )));
+    assert!(
+        !format!("{observations:?}").contains("key_loop"),
+        "streamed content must be sanitized before reaching the sink"
+    );
+}
+
 #[test]
 fn a_base_url_with_query_or_fragment_fails_construction() {
     let mut config = AnthropicConfig::new();
