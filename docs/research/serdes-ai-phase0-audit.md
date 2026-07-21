@@ -119,12 +119,14 @@ There is no explicit boundary observation anywhere. What exists:
   (`serdes-ai-models/src/anthropic/model.rs:598-623` non-streaming,
   `serdes-ai-models/src/anthropic/model.rs:643-671` streaming; equivalent
   structure in `serdes-ai-models/src/openai/chat.rs`). Receiving any HTTP
-  response proves that the provider boundary was crossed; response class then
-  determines outcome classification, not send cardinality. The adapter must
-  preserve and exhaustively classify 3xx, 4xx, and 5xx native responses, while
-  only 2xx continues on the success path. In streaming, Anthropic's
-  `message_start` additionally confirms provider-side message creation
-  (`serdes-ai-models/src/anthropic/stream.rs:236-242`).
+  response proves that the provider boundary was crossed; response evidence then
+  determines outcome classification, not send cardinality. A complete,
+  correlated response with a recognized provider-specific mapping is definitive.
+  Status alone is not: an unrecognized status or a body truncated after headers
+  remains non-definitive, and after a possible full send falls back to
+  `Ambiguous` unless other evidence proves non-acceptance. In streaming,
+  Anthropic's `message_start` additionally confirms provider-side message
+  creation (`serdes-ai-models/src/anthropic/stream.rs:236-242`).
 - **Failure path (no signal):** every transport failure funnels through
   `From<reqwest::Error> for ModelError`
   (`serdes-ai-models/src/error.rs:454-470`), which maps `is_timeout()` →
@@ -145,13 +147,15 @@ There is no explicit boundary observation anywhere. What exists:
   outside the adapter is fragile.
 
 **Answer:** one authorized send remains one physical request only when redirect
-following is disabled on the injected client and no retry wrapper is used, as
-required by [ADR-0005](../decisions/0005-model-call-retry-semantics.md) — under
-the default client one `.send()` can fold a redirect replay into a second
-physical request (see the retry-wrapper finding). Separately, every received
-status must be mapped exhaustively: 2xx may proceed as success, while 3xx, 4xx,
-and 5xx are definitive native responses rather than evidence of another send. A
-trustworthy send-progress signal when no response arrives still requires
+following is disabled, reqwest's default protocol-NACK retry is replaced with
+`reqwest::retry::never()` (or an equivalent explicit no-retry policy), and no
+retry wrapper is used, as required by
+[ADR-0005](../decisions/0005-model-call-retry-semantics.md). The default client
+can replay through either redirects or its protocol retry policy (see the
+retry-wrapper finding). Separately, response handling must map only complete,
+correlated, provider-recognized responses to definitive outcomes; unrecognized
+or truncated responses use ADR-0043's evidence fallback. A trustworthy
+send-progress signal when no complete response arrives still requires
 per-adapter surgery on the send/error code.
 
 ### Q3 — error evidence vs ADR-0043's categories
@@ -452,13 +456,14 @@ smoke gate. Names are illustrative.
 The smoke minimum is three modules and one provider. Full audited coverage is
 four to five modules; neither set includes retry, fallback, agent-loop,
 registry, or execution machinery. Every provider module builds its HTTP client
-with redirect following disabled so one authorized send remains one physical
-request, as required by
-[ADR-0005](../decisions/0005-model-call-retry-semantics.md), and separately
-classifies every HTTP status: 2xx on the success path and 3xx/4xx/5xx as
-definitive native responses. Rough size anchor (inference): the full
-corresponding SerdesAI source is about 4–5k lines including tests, and the smoke
-subset drops schema/tool work, media inputs, caching betas, and 14 of 15
+with redirect following disabled and reqwest protocol retries set to `never`, so
+one authorized send remains one physical request as required by
+[ADR-0005](../decisions/0005-model-call-retry-semantics.md). Separately, it
+classifies only complete, correlated responses with recognized provider-native
+mappings as definitive; unrecognized statuses and truncated bodies follow
+ADR-0043's non-definitive evidence fallback. Rough size anchor (inference): the
+full corresponding SerdesAI source is about 4–5k lines including tests, and the
+smoke subset drops schema/tool work, media inputs, caching betas, and 14 of 15
 providers.
 
 ## Sources
