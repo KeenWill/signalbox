@@ -20,7 +20,10 @@ use signalbox_model_runtime::{
     ProviderErrorKind, ProviderRequestId, RequestedTarget, ResolvedTarget, StreamInterruption,
     TerminalEvidence, TerminalReport, UnsentCause,
 };
-use signalbox_model_runtime_openai::{ApiKey, OpenAiConfig, OpenAiRuntime};
+use signalbox_model_runtime::{
+    CredentialAccess, CredentialAccessError, CredentialReference, CredentialValue,
+};
+use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiRuntime};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -112,10 +115,24 @@ fn http_response(status_line: &str, extra_headers: &[(&str, &str)], body: &[u8])
     bytes
 }
 
-fn runtime_for(server_base_url: &str) -> OpenAiRuntime {
-    let mut config = OpenAiConfig::new(ApiKey::new("key_loop"));
+/// A fixed loopback credential source: every reference resolves to
+/// `key_loop`.
+#[derive(Debug)]
+struct FixedKey;
+
+impl CredentialAccess for FixedKey {
+    async fn resolve(
+        &self,
+        _reference: &CredentialReference,
+    ) -> Result<CredentialValue, CredentialAccessError> {
+        Ok(CredentialValue::new(b"key_loop".to_vec()))
+    }
+}
+
+fn runtime_for(server_base_url: &str) -> OpenAiRuntime<FixedKey> {
+    let mut config = OpenAiConfig::new();
     config.base_url = server_base_url.to_string();
-    OpenAiRuntime::new(config).expect("loopback configuration constructs")
+    OpenAiRuntime::new(config, FixedKey).expect("loopback configuration constructs")
 }
 
 /// An operation whose correlation seed is the one knob; targets, one user
@@ -123,6 +140,7 @@ fn runtime_for(server_base_url: &str) -> OpenAiRuntime {
 fn operation(correlation: &str) -> ModelOperation<String> {
     ModelOperation::new(
         correlation.to_string(),
+        CredentialReference::new("openai-primary"),
         RequestedTarget::new("fast-alias"),
         ResolvedTarget::new("model-exact-1"),
         vec![ConversationMessage::user_text("hello")],
@@ -130,8 +148,8 @@ fn operation(correlation: &str) -> ModelOperation<String> {
     )
 }
 
-async fn execute(
-    runtime: &OpenAiRuntime,
+async fn execute<A: CredentialAccess>(
+    runtime: &OpenAiRuntime<A>,
     operation: ModelOperation<String>,
     cancellation: CancellationSignal,
 ) -> (TerminalReport<String>, Vec<Observation<String>>) {
@@ -434,11 +452,11 @@ async fn provider_error_text_reflecting_the_key_is_redacted() {
 
 #[test]
 fn a_base_url_with_query_or_fragment_fails_construction() {
-    let mut config = signalbox_model_runtime_openai::OpenAiConfig::new(ApiKey::new("k"));
+    let mut config = OpenAiConfig::new();
     config.base_url = "http://127.0.0.1:1/api?tenant=x".to_string();
 
-    let error =
-        OpenAiRuntime::new(config).expect_err("a query component would corrupt the endpoint path");
+    let error = OpenAiRuntime::new(config, FixedKey)
+        .expect_err("a query component would corrupt the endpoint path");
 
     assert!(matches!(
         error,
@@ -448,11 +466,11 @@ fn a_base_url_with_query_or_fragment_fails_construction() {
 
 #[test]
 fn a_non_http_base_url_scheme_fails_construction() {
-    let mut config = signalbox_model_runtime_openai::OpenAiConfig::new(ApiKey::new("k"));
+    let mut config = OpenAiConfig::new();
     config.base_url = "file:///tmp".to_string();
 
-    let error =
-        OpenAiRuntime::new(config).expect_err("a non-HTTP scheme can never reach the provider");
+    let error = OpenAiRuntime::new(config, FixedKey)
+        .expect_err("a non-HTTP scheme can never reach the provider");
 
     assert!(matches!(
         error,

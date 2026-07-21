@@ -50,6 +50,7 @@ pub(crate) struct StreamDecoder {
     content_text: String,
     refusal_text: String,
     tool_builders: BTreeMap<u32, ToolBuilder>,
+    completed_tools: Vec<ToolCallProposal>,
 }
 
 impl StreamDecoder {
@@ -63,6 +64,7 @@ impl StreamDecoder {
             content_text: String::new(),
             refusal_text: String::new(),
             tool_builders: BTreeMap::new(),
+            completed_tools: Vec::new(),
         }
     }
 
@@ -74,7 +76,7 @@ impl StreamDecoder {
         sink: &mut (dyn ObservationSink<C> + Send),
     ) -> StreamStep {
         if record.data.trim() == "[DONE]" {
-            return self.apply_done(correlation, sink);
+            return self.apply_done();
         }
         let chunk: ChatChunk = match serde_json::from_str(&record.data) {
             Ok(chunk) => chunk,
@@ -155,6 +157,17 @@ impl StreamDecoder {
                     self.refusal_text.push_str(&refusal);
                 }
                 for call in delta.tool_calls {
+                    if let Some(kind) = &call.kind
+                        && kind != "function"
+                    {
+                        // The buffered decoder rejects non-function tool
+                        // material; the streamed path must not assemble it
+                        // into an ordinary proposal either.
+                        return self.violation(format!(
+                            "tool call at index {} carries unrecognized type {kind:?}",
+                            call.index
+                        ));
+                    }
                     let builder = self.tool_builders.entry(call.index).or_default();
                     if let Some(id) = call.id {
                         match &builder.id {
@@ -204,7 +217,18 @@ impl StreamDecoder {
                 }
             }
             if let Some(token) = choice.finish_reason {
-                let finish = map_finish(&token);
+                let mut finish = map_finish(&token);
+                if !self.refusal_text.is_empty() {
+                    // Accumulated refusal material is the provider's refusal
+                    // outcome; the observation must match the terminal
+                    // evidence (the buffered path normalizes identically).
+                    finish = FinishReason::Refusal;
+                }
+                // The choice is complete here, so its proposals are final:
+                // emit them before announcing the finish, in index order.
+                if let Some(step) = self.finalize_tools(correlation, sink) {
+                    return step;
+                }
                 self.finish = Some(finish.clone());
                 Self::emit(correlation, sink, ObservationFact::FinishReported(finish));
             }
@@ -262,11 +286,41 @@ impl StreamDecoder {
         });
     }
 
-    fn apply_done<C: Clone>(
+    /// Finalizes accumulated tool builders into proposals when the choice
+    /// closes, emitting each in index order.
+    ///
+    /// The provider's raw argument bytes are preserved exactly — empty or
+    /// even malformed accumulations are the provider's own value, exposed
+    /// verbatim for typed decoding to judge (`decode_tool_arguments` owns
+    /// the JsonSyntax classification).
+    fn finalize_tools<C: Clone>(
         &mut self,
         correlation: &C,
         sink: &mut (dyn ObservationSink<C> + Send),
-    ) -> StreamStep {
+    ) -> Option<StreamStep> {
+        let builders = std::mem::take(&mut self.tool_builders);
+        for (index, builder) in builders {
+            let (Some(id), Some(name)) = (builder.id, builder.name) else {
+                return Some(self.violation(format!(
+                    "tool call at index {index} terminated without an id and name"
+                )));
+            };
+            let proposal = ToolCallProposal {
+                id: ToolCallId::new(id),
+                name: ToolName::new(name),
+                arguments_json: builder.arguments,
+            };
+            Self::emit(
+                correlation,
+                sink,
+                ObservationFact::ToolCallProposed(proposal.clone()),
+            );
+            self.completed_tools.push(proposal);
+        }
+        None
+    }
+
+    fn apply_done(&mut self) -> StreamStep {
         let Some(mut finish) = self.finish.clone() else {
             return self.violation("stream terminated without a reported finish_reason");
         };
@@ -274,36 +328,7 @@ impl StreamDecoder {
         if !self.content_text.is_empty() {
             content.push(AssistantPart::Text(std::mem::take(&mut self.content_text)));
         }
-        let builders = std::mem::take(&mut self.tool_builders);
-        for (index, builder) in builders {
-            let (Some(id), Some(name)) = (builder.id, builder.name) else {
-                return self.violation(format!(
-                    "tool call at index {index} terminated without an id and name"
-                ));
-            };
-            // The provider's raw argument bytes are preserved exactly —
-            // including an empty accumulation — so typed decoding sees what
-            // was actually produced. Only a non-empty accumulation is
-            // checked for JSON syntax: truncated fragments mean the stream
-            // lost data, while emptiness is the provider's own value.
-            let arguments_json = builder.arguments;
-            if !arguments_json.is_empty()
-                && serde_json::from_str::<serde_json::Value>(&arguments_json).is_err()
-            {
-                return self.violation(format!(
-                    "tool call at index {index} terminated with invalid accumulated argument JSON"
-                ));
-            }
-            let proposal = ToolCallProposal {
-                id: ToolCallId::new(id),
-                name: ToolName::new(name),
-                arguments_json,
-            };
-            Self::emit(
-                correlation,
-                sink,
-                ObservationFact::ToolCallProposed(proposal.clone()),
-            );
+        for proposal in std::mem::take(&mut self.completed_tools) {
             content.push(AssistantPart::ToolCall(proposal));
         }
         let refusal_payload =
@@ -676,7 +701,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_accumulated_tool_argument_json_at_done_is_a_protocol_violation() {
+    fn malformed_streamed_tool_arguments_are_preserved_for_typed_decoding() {
         let (terminal, _) = drive(&[
             first_chunk(),
             b"data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
@@ -687,13 +712,90 @@ mod tests {
             b"data: [DONE]\n\n",
         ]);
 
+        let proposal = ToolCallProposal {
+            id: ToolCallId::new("call_1"),
+            name: ToolName::new("lookup"),
+            arguments_json: "{\"city\":".to_string(),
+        };
+        let Some(TerminalEvidence::Completed(completion)) = terminal else {
+            panic!("the provider's authoritative proposal must be exposed, not suppressed");
+        };
+        assert_eq!(
+            completion.content,
+            vec![AssistantPart::ToolCall(proposal.clone())]
+        );
+        let failure =
+            signalbox_model_runtime::decode_tool_arguments::<serde_json::Value>(&proposal)
+                .expect_err("typed decoding owns the JsonSyntax classification");
+        assert!(matches!(
+            failure,
+            signalbox_model_runtime::ToolDecodeFailure::JsonSyntax { .. }
+        ));
+    }
+
+    #[test]
+    fn a_streamed_tool_call_with_an_unrecognized_type_is_a_protocol_violation() {
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
+              \"id\":\"call_1\",\"type\":\"custom\",\
+              \"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]}}]}\n\n",
+        ]);
+
         let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
-            panic!("truncated tool-argument JSON at [DONE] must surface as a violation");
+            panic!("non-function tool material must not assemble into an ordinary proposal");
         };
         assert!(matches!(
             loss.cause,
             LossCause::StreamProtocolViolation { .. }
         ));
+    }
+
+    #[test]
+    fn streamed_refusal_finish_observation_matches_the_terminal_outcome() {
+        let (terminal, observations) = drive(&[
+            first_chunk(),
+            b"data: {\"choices\":[{\"index\":0,\"delta\":{\"refusal\":\"No.\"}}]}\n\n",
+            b"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            b"data: [DONE]\n\n",
+        ]);
+
+        assert!(matches!(terminal, Some(TerminalEvidence::Refused(_))));
+        assert!(observations.contains(&Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::FinishReported(FinishReason::Refusal),
+        }));
+        assert!(!observations.contains(&Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::FinishReported(FinishReason::EndTurn),
+        }));
+    }
+
+    #[test]
+    fn tool_proposals_are_observed_before_the_finish_fact() {
+        let (_, observations) = drive(&[
+            first_chunk(),
+            b"data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
+              \"id\":\"call_1\",\"function\":{\"name\":\"ping\",\"arguments\":\"{}\"}}]}}]}\n\n",
+            b"data: {\"choices\":[{\"index\":0,\"delta\":{},\
+              \"finish_reason\":\"tool_calls\"}]}\n\n",
+            b"data: [DONE]\n\n",
+        ]);
+
+        let proposal_at = observations
+            .iter()
+            .position(|observation| {
+                matches!(observation.fact, ObservationFact::ToolCallProposed(_))
+            })
+            .expect("the completed proposal is observed");
+        let finish_at = observations
+            .iter()
+            .position(|observation| matches!(observation.fact, ObservationFact::FinishReported(_)))
+            .expect("the finish is observed");
+        assert!(
+            proposal_at < finish_at,
+            "a finished-generation fact must never precede its proposals"
+        );
     }
 
     #[test]

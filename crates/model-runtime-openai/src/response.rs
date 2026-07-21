@@ -62,12 +62,16 @@ pub(crate) fn convert_tool_call(call: &WireResponseToolCall) -> Result<ToolCallP
     let Some(name) = &function.name else {
         return Err("tool call is missing its function name".to_string());
     };
+    let Some(arguments) = &function.arguments else {
+        // The documented function payload always carries arguments;
+        // fabricating bytes the provider never produced could turn a
+        // malformed call into an executable zero-argument one.
+        return Err("tool call is missing its arguments".to_string());
+    };
     Ok(ToolCallProposal {
         id: ToolCallId::new(id.clone()),
         name: ToolName::new(name.clone()),
-        // Absent arguments stay empty rather than being fabricated into
-        // an empty object; typed decoding sees the provider's actual value.
-        arguments_json: function.arguments.clone().unwrap_or_default(),
+        arguments_json: arguments.clone(),
     })
 }
 
@@ -121,6 +125,17 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             usage,
         );
     };
+    if choice.index != 0 {
+        return unintelligible(
+            format!(
+                "success response carries choice index {}; index 0 is requested",
+                choice.index
+            ),
+            exchange,
+            reported_model,
+            usage,
+        );
+    }
     let Some(message) = &choice.message else {
         return unintelligible(
             "success response choice carries no message".to_string(),
@@ -147,10 +162,14 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             Err(detail) => return unintelligible(detail, exchange, reported_model, usage),
         }
     }
-    sink.observe(Observation {
-        correlation: correlation.clone(),
-        fact: ObservationFact::UsageReported(usage),
-    });
+    if completion.usage.is_some() {
+        // The observation claims a provider report; an absent usage member
+        // stays unreported rather than being announced as all-none.
+        sink.observe(Observation {
+            correlation: correlation.clone(),
+            fact: ObservationFact::UsageReported(usage),
+        });
+    }
     let Some(finish_token) = &choice.finish_reason else {
         return unintelligible(
             "success response carries no finish_reason".to_string(),
@@ -425,6 +444,76 @@ mod tests {
             loss.cause,
             LossCause::ResponseUnintelligible { .. }
         ));
+    }
+
+    #[test]
+    fn a_choice_with_an_unexpected_index_is_boundary_loss() {
+        let (evidence, _) = decode(
+            r#"{
+                "id": "chatcmpl_1",
+                "model": "model-exact-1",
+                "choices": [{
+                    "index": 1,
+                    "message": {"role": "assistant", "content": "hi"},
+                    "finish_reason": "stop"
+                }]
+            }"#,
+        );
+
+        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
+            panic!("an unrequested choice index must not become definitive completion");
+        };
+        assert!(matches!(
+            loss.cause,
+            LossCause::ResponseUnintelligible { .. }
+        ));
+    }
+
+    #[test]
+    fn a_tool_call_without_arguments_is_boundary_loss_not_a_fabricated_call() {
+        let (evidence, _) = decode(
+            r#"{
+                "id": "chatcmpl_1",
+                "model": "model-exact-1",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant",
+                                "tool_calls": [{"id": "call_1", "type": "function",
+                                                "function": {"name": "ping"}}]},
+                    "finish_reason": "tool_calls"
+                }]
+            }"#,
+        );
+
+        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
+            panic!("argument bytes the provider never produced must not be fabricated");
+        };
+        assert!(matches!(
+            loss.cause,
+            LossCause::ResponseUnintelligible { .. }
+        ));
+    }
+
+    #[test]
+    fn an_absent_usage_member_is_never_announced_as_a_usage_report() {
+        let (evidence, observations) = decode(
+            r#"{
+                "id": "chatcmpl_1",
+                "model": "model-exact-1",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "hi"},
+                    "finish_reason": "stop"
+                }]
+            }"#,
+        );
+
+        assert!(matches!(evidence, TerminalEvidence::Completed(_)));
+        assert!(
+            !observations
+                .iter()
+                .any(|observation| matches!(observation.fact, ObservationFact::UsageReported(_)))
+        );
     }
 
     #[test]

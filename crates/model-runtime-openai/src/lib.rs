@@ -1,4 +1,4 @@
-//! OpenAI Chat Completions adapter for the Layer-1 model runtime (ADR-0046).
+//! OpenAI Chat Completions adapter for the Layer-1 model runtime (ADR-0047).
 //!
 //! Translates one authorized [`signalbox_model_runtime::ModelOperation`] into
 //! at most one `POST /v1/chat/completions` interaction — buffered or
@@ -21,8 +21,11 @@
 //!
 //! # Credential discipline (ADR-0017)
 //!
-//! The API key is attached as a sensitivity-marked `Authorization` header,
-//! its debug rendering is redacted, and this crate performs no logging.
+//! The operation pins a non-secret reference; the runtime resolves its
+//! current value through the caller's `CredentialAccess` implementation
+//! during send preparation of each operation, scopes it to that request,
+//! attaches it as a sensitivity-marked `Authorization` header, sanitizes
+//! provider-controlled evidence text, and performs no logging.
 
 mod config;
 mod response;
@@ -32,5 +35,5 @@ mod stream;
 mod translate;
 mod wire;
 
-pub use config::{ApiKey, OpenAiConfig};
+pub use config::OpenAiConfig;
 pub use runtime::{OpenAiConstructionError, OpenAiRuntime};

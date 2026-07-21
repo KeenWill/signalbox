@@ -22,7 +22,9 @@ use signalbox_model_runtime::{
     StreamInterruption, TerminalEvidence, TerminalReport, TokenUsage, TransportFacts, UnsentCause,
 };
 
-use crate::config::{ApiKey, ApiKeySource, OpenAiConfig};
+use signalbox_model_runtime::{CredentialAccess, CredentialValue};
+
+use crate::config::OpenAiConfig;
 use crate::response::decode_buffered_response;
 use crate::status::classify_error;
 use crate::stream::{StreamDecoder, StreamStep};
@@ -36,10 +38,10 @@ use crate::wire::ErrorEnvelope;
 /// evidence. It holds no state between operations, retries nothing, and
 /// never issues a second request for one operation.
 #[derive(Debug)]
-pub struct OpenAiRuntime {
+pub struct OpenAiRuntime<A> {
     client: Client,
     completions_url: Url,
-    credentials: std::sync::Arc<dyn ApiKeySource>,
+    credentials: A,
     sse_record_limit: usize,
 }
 
@@ -74,7 +76,7 @@ impl std::fmt::Display for OpenAiConstructionError {
 
 impl std::error::Error for OpenAiConstructionError {}
 
-impl OpenAiRuntime {
+impl<A: CredentialAccess> OpenAiRuntime<A> {
     /// Builds the adapter and its HTTP client.
     ///
     /// # Transport discipline: one send is one physical request (ADR-0005)
@@ -104,7 +106,7 @@ impl OpenAiRuntime {
     ///
     /// ADR-0043 selects no timeout budget: both timeouts default to none and
     /// are caller-owned configuration.
-    pub fn new(config: OpenAiConfig) -> Result<Self, OpenAiConstructionError> {
+    pub fn new(config: OpenAiConfig, credentials: A) -> Result<Self, OpenAiConstructionError> {
         let completions_url = Url::parse(&format!(
             "{}/v1/chat/completions",
             config.base_url.trim_end_matches('/')
@@ -146,7 +148,7 @@ impl OpenAiRuntime {
         Ok(Self {
             client,
             completions_url,
-            credentials: config.credentials,
+            credentials,
             sse_record_limit: config.sse_record_limit,
         })
     }
@@ -172,15 +174,20 @@ impl OpenAiRuntime {
                 ));
             }
         };
-        // ADR-0017: the key is read during send preparation of exactly this
-        // operation and scoped to this request; nothing is cached, so a
-        // rotated credential is picked up by the next operation.
-        let api_key = match self.credentials.current() {
-            Ok(api_key) => api_key,
-            Err(failure) => {
+        // ADR-0017: the pinned reference is resolved during send preparation
+        // of exactly this operation and the value is scoped to this request;
+        // nothing is cached, so a rotated credential is picked up by the
+        // next operation. The access error is reference-only, never bytes.
+        let api_key = match self
+            .credentials
+            .resolve(&operation.credential_reference)
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => {
                 return proven_unsent(UnsentCause::PreparationFailed(
                     PreparationFailure::CredentialUnavailable {
-                        detail: failure.detail,
+                        detail: error.to_string(),
                     },
                 ));
             }
@@ -188,7 +195,7 @@ impl OpenAiRuntime {
         let Some(authorization_header) = sensitive_bearer(&api_key) else {
             return proven_unsent(UnsentCause::PreparationFailed(
                 PreparationFailure::CredentialUnavailable {
-                    detail: "API key cannot form an HTTP header value".to_string(),
+                    detail: "credential value cannot form an HTTP header value".to_string(),
                 },
             ));
         };
@@ -289,10 +296,7 @@ impl OpenAiRuntime {
         let body = match with_cancellation(cancellation, response.bytes()).await {
             None => return exchange_loss(LossCause::CancellationRequested, exchange),
             Some(Err(error)) => {
-                return exchange_loss(
-                    LossCause::ResponseBodyLost(transport_facts(&error)),
-                    exchange,
-                );
+                return exchange_loss(classify_body_error(&error), exchange);
             }
             Some(Ok(bytes)) => bytes,
         };
@@ -344,7 +348,7 @@ impl OpenAiRuntime {
     }
 }
 
-impl<C: Clone + Send + Sync> ModelRuntime<C> for OpenAiRuntime {
+impl<C: Clone + Send + Sync, A: CredentialAccess> ModelRuntime<C> for OpenAiRuntime<A> {
     async fn execute(
         &self,
         operation: ModelOperation<C>,
@@ -460,6 +464,18 @@ fn transport_facts(error: &reqwest::Error) -> TransportFacts {
     TransportFacts::new(detail)
 }
 
+/// Classifies a body-phase read failure: a caller-configured deadline keeps
+/// its typed timeout cause; anything else is a lost response body. Either
+/// way the exchange lacks a definitive response (ADR-0043's ambiguous
+/// branch).
+fn classify_body_error(error: &reqwest::Error) -> LossCause {
+    if error.is_timeout() {
+        LossCause::TimedOut(transport_facts(error))
+    } else {
+        LossCause::ResponseBodyLost(transport_facts(error))
+    }
+}
+
 fn request_id_from(headers: &HeaderMap) -> Option<ProviderRequestId> {
     headers
         .get("x-request-id")
@@ -509,12 +525,13 @@ async fn with_cancellation<F: Future>(
 /// text in the evidence (ADR-0017): a reflected key value in an error
 /// message, raw body, or rendered detail is replaced before the evidence
 /// leaves the adapter boundary. Typed facts are untouched.
-fn redact_evidence(evidence: TerminalEvidence, api_key: &ApiKey) -> TerminalEvidence {
-    let redact = |text: String| -> String {
-        if api_key.value().is_empty() {
+fn redact_evidence(evidence: TerminalEvidence, api_key: &CredentialValue) -> TerminalEvidence {
+    let key_text = std::str::from_utf8(api_key.expose_bytes()).unwrap_or_default();
+    let redact = move |text: String| -> String {
+        if key_text.is_empty() {
             text
         } else {
-            text.replace(api_key.value(), "[redacted]")
+            text.replace(key_text, "[redacted]")
         }
     };
     let redact_native = |mut native: NativeErrorFacts| -> NativeErrorFacts {
@@ -571,6 +588,9 @@ fn redact_evidence(evidence: TerminalEvidence, api_key: &ApiKey) -> TerminalEvid
                             StreamInterruption::TransportFailure(facts) => {
                                 StreamInterruption::TransportFailure(redact_transport(facts))
                             }
+                            StreamInterruption::TimedOut(facts) => {
+                                StreamInterruption::TimedOut(redact_transport(facts))
+                            }
                             StreamInterruption::EndOfStream => StreamInterruption::EndOfStream,
                         },
                     }
@@ -585,10 +605,13 @@ fn redact_evidence(evidence: TerminalEvidence, api_key: &ApiKey) -> TerminalEvid
     }
 }
 
-/// The key as a sensitivity-marked bearer header value, or `None` when its
-/// bytes cannot form one. The value never appears in errors or logs.
-fn sensitive_bearer(api_key: &ApiKey) -> Option<HeaderValue> {
-    let mut header = HeaderValue::from_str(&format!("Bearer {}", api_key.value())).ok()?;
+/// The credential as a sensitivity-marked bearer header value, or `None`
+/// when its bytes cannot form one. The value never appears in errors or
+/// logs.
+fn sensitive_bearer(api_key: &CredentialValue) -> Option<HeaderValue> {
+    let mut bytes = b"Bearer ".to_vec();
+    bytes.extend_from_slice(api_key.expose_bytes());
+    let mut header = HeaderValue::from_bytes(&bytes).ok()?;
     header.set_sensitive(true);
     Some(header)
 }

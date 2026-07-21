@@ -20,15 +20,20 @@ use crate::wire::{
 /// decode in the core crate applies unchanged. (The provider's native
 /// `response_format` mechanism would return the value as content text and
 /// require strict-mode schema transformation; a forced function keeps the
-/// contract uniform across adapters.) Combining a contract with caller
-/// tools is rejected as unsupported rather than silently overriding the
-/// caller's tool choice.
+/// contract uniform across adapters.) The contract joins the declared tools
+/// under its reserved name — [`ModelOperation::validate`] rejects
+/// collisions — and is forced with parallel tool calling disabled.
 ///
 /// Streamed delivery always requests `stream_options.include_usage`, so the
 /// stream carries a usage record before its terminal marker.
 pub(crate) fn build_request<C>(
     operation: &ModelOperation<C>,
 ) -> Result<ChatRequest, PreparationFailure> {
+    if let Err(error) = operation.validate() {
+        return Err(PreparationFailure::UnsupportedOperation {
+            detail: error.to_string(),
+        });
+    }
     // serde_json serializes a non-finite f64 as null, which would silently
     // drop the caller's stated setting; reject during preparation instead.
     for (name, value) in [
@@ -83,37 +88,7 @@ type ToolsAndChoice = (
 fn tools_and_choice<C>(
     operation: &ModelOperation<C>,
 ) -> Result<ToolsAndChoice, PreparationFailure> {
-    if let Some(contract) = &operation.output_contract {
-        if !operation.tools.is_empty() {
-            return Err(PreparationFailure::UnsupportedOperation {
-                detail: "an operation cannot combine caller tools with a structured-output \
-                         contract: the contract is realized as a forced function call, which \
-                         would suppress the caller's tools"
-                    .to_string(),
-            });
-        }
-        return Ok((
-            Some(vec![WireFunctionTool {
-                kind: "function",
-                function: WireFunctionDefinition {
-                    name: contract.name.as_str().to_string(),
-                    description: contract.description.clone(),
-                    parameters: contract.schema.clone(),
-                },
-            }]),
-            Some(serde_json::json!({
-                "type": "function",
-                "function": { "name": contract.name.as_str() }
-            })),
-            // The contract promises exactly one value; parallel tool
-            // calling could return several calls to the forced function.
-            Some(false),
-        ));
-    }
-    if operation.tools.is_empty() {
-        return Ok((None, None, None));
-    }
-    let tools = operation
+    let mut tools: Vec<WireFunctionTool> = operation
         .tools
         .iter()
         .map(|tool| WireFunctionTool {
@@ -125,6 +100,29 @@ fn tools_and_choice<C>(
             },
         })
         .collect();
+    if let Some(contract) = &operation.output_contract {
+        tools.push(WireFunctionTool {
+            kind: "function",
+            function: WireFunctionDefinition {
+                name: contract.name.as_str().to_string(),
+                description: contract.description.clone(),
+                parameters: contract.schema.clone(),
+            },
+        });
+        return Ok((
+            Some(tools),
+            Some(serde_json::json!({
+                "type": "function",
+                "function": { "name": contract.name.as_str() }
+            })),
+            // The contract promises exactly one value; parallel tool
+            // calling could return several calls to the forced function.
+            Some(false),
+        ));
+    }
+    if tools.is_empty() {
+        return Ok((None, None, None));
+    }
     let choice = match &operation.tool_choice {
         ToolChoice::Automatic => serde_json::json!("auto"),
         ToolChoice::AnyTool => serde_json::json!("required"),
@@ -237,6 +235,7 @@ fn flush(
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
+    use signalbox_model_runtime::CredentialReference;
     use signalbox_model_runtime::{
         ConversationMessage, ConversationRole, DeliveryMode, MessagePart, ModelOperation,
         ModelSettings, PreparationFailure, RequestedTarget, ResolvedTarget,
@@ -251,6 +250,7 @@ mod tests {
     fn operation(correlation: &str) -> ModelOperation<String> {
         ModelOperation::new(
             correlation.to_string(),
+            CredentialReference::new("openai-primary"),
             RequestedTarget::new("fast-alias"),
             ResolvedTarget::new("model-exact-1"),
             vec![ConversationMessage::user_text("hello")],
@@ -432,7 +432,7 @@ mod tests {
     }
 
     #[test]
-    fn contract_combined_with_caller_tools_is_rejected_as_unsupported() {
+    fn contract_combined_with_caller_tools_declares_both_and_forces_the_contract() {
         let mut operation = operation("call-6");
         operation.output_contract = Some(StructuredOutputContract {
             name: ToolName::new("verdict"),
@@ -445,8 +445,40 @@ mod tests {
             serde_json::json!({"type": "object"}),
         )];
 
+        let request = build_request(&operation).expect("distinct names translate");
+        let value = serde_json::to_value(&request).expect("wire request serializes");
+
+        assert_eq!(
+            value["tools"][0]["function"]["name"],
+            serde_json::json!("lookup")
+        );
+        assert_eq!(
+            value["tools"][1]["function"]["name"],
+            serde_json::json!("verdict")
+        );
+        assert_eq!(
+            value["tool_choice"],
+            serde_json::json!({"type": "function", "function": {"name": "verdict"}})
+        );
+        assert_eq!(value["parallel_tool_calls"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn contract_name_colliding_with_a_tool_is_rejected_before_any_send() {
+        let mut operation = operation("call-11");
+        operation.output_contract = Some(StructuredOutputContract {
+            name: ToolName::new("verdict"),
+            description: "The verdict.".to_string(),
+            schema: serde_json::json!({"type": "object"}),
+        });
+        operation.tools = vec![ToolDefinition::with_schema(
+            "verdict",
+            "An ordinary tool under the reserved name.",
+            serde_json::json!({"type": "object"}),
+        )];
+
         let failure = build_request(&operation)
-            .expect_err("a contract combined with caller tools must not silently translate");
+            .expect_err("a proposal under a colliding name would be indistinguishable");
 
         assert!(matches!(
             failure,
