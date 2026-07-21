@@ -155,24 +155,41 @@ fn wire_messages(
         match part {
             MessagePart::Text(text) => {
                 if !pending_tool_calls.is_empty() {
-                    // One wire message orders content before tool_calls, so
-                    // text following a tool call must start its own message
-                    // to preserve the stated part order.
-                    flush(role, &mut pending_text, &mut pending_tool_calls, out);
+                    // One wire message orders content before tool_calls, and
+                    // a split would separate the tool-call message from the
+                    // tool result that must follow it; the ordering is not
+                    // representable on this wire.
+                    return Err(PreparationFailure::UnsupportedOperation {
+                        detail: "the Chat Completions wire contract cannot represent \
+                                 assistant text after a tool call in one message"
+                            .to_string(),
+                    });
                 }
                 match &mut pending_text {
                     Some(pending) => pending.push_str(text),
                     None => pending_text = Some(text.clone()),
                 }
             }
-            MessagePart::ToolCall(proposal) => pending_tool_calls.push(WireRequestToolCall {
-                id: proposal.id.as_str().to_string(),
-                kind: "function",
-                function: WireRequestFunction {
-                    name: proposal.name.as_str().to_string(),
-                    arguments: proposal.arguments_json.clone(),
-                },
-            }),
+            MessagePart::ToolCall(proposal) => {
+                if role != "assistant" {
+                    // Chat Completions permits tool_calls only on assistant
+                    // messages; sending them elsewhere is a locally knowable
+                    // declaration error.
+                    return Err(PreparationFailure::UnsupportedOperation {
+                        detail: "the Chat Completions wire contract permits tool calls only \
+                                 in assistant history"
+                            .to_string(),
+                    });
+                }
+                pending_tool_calls.push(WireRequestToolCall {
+                    id: proposal.id.as_str().to_string(),
+                    kind: "function",
+                    function: WireRequestFunction {
+                        name: proposal.name.as_str().to_string(),
+                        arguments: proposal.arguments_json.clone(),
+                    },
+                })
+            }
             MessagePart::ToolResult(result) => {
                 if result.is_error {
                     // The tool message has no native failure flag; encoding
@@ -508,7 +525,7 @@ mod tests {
     }
 
     #[test]
-    fn text_after_a_tool_call_splits_messages_to_preserve_part_order() {
+    fn text_after_a_tool_call_is_rejected_as_unrepresentable() {
         let mut operation = operation("call-9");
         operation.messages = vec![ConversationMessage {
             role: ConversationRole::Assistant,
@@ -522,18 +539,13 @@ mod tests {
             ],
         }];
 
-        let request = build_request(&operation).expect("interleaved history translates");
-        let value = serde_json::to_value(&request).expect("wire request serializes");
+        let failure = build_request(&operation)
+            .expect_err("splitting would separate the tool call from its required result");
 
-        assert_eq!(
-            value["messages"][0]["tool_calls"][0]["id"],
-            serde_json::json!("call_a1")
-        );
-        assert_eq!(value["messages"][0].get("content"), None);
-        assert_eq!(
-            value["messages"][1]["content"],
-            serde_json::json!("after the call")
-        );
+        assert!(matches!(
+            failure,
+            PreparationFailure::UnsupportedOperation { .. }
+        ));
     }
 
     #[test]
@@ -543,6 +555,27 @@ mod tests {
 
         let failure = build_request(&operation)
             .expect_err("serde_json would serialize a non-finite setting as null");
+
+        assert!(matches!(
+            failure,
+            PreparationFailure::UnsupportedOperation { .. }
+        ));
+    }
+
+    #[test]
+    fn a_user_role_tool_call_is_rejected_before_any_send() {
+        let mut operation = operation("call-12");
+        operation.messages = vec![ConversationMessage {
+            role: ConversationRole::User,
+            parts: vec![MessagePart::ToolCall(ToolCallProposal {
+                id: ToolCallId::new("call_a1"),
+                name: ToolName::new("lookup"),
+                arguments_json: "{}".to_string(),
+            })],
+        }];
+
+        let failure =
+            build_request(&operation).expect_err("tool calls are assistant material on this wire");
 
         assert!(matches!(
             failure,

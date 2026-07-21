@@ -37,6 +37,7 @@ pub(crate) enum StreamStep {
 struct ToolBuilder {
     id: Option<String>,
     name: Option<String>,
+    saw_function_type: bool,
     arguments: String,
 }
 
@@ -90,6 +91,7 @@ impl StreamDecoder {
             let kind = classify_error(0, error.code_text().as_deref());
             return StreamStep::Terminal(TerminalEvidence::ProviderError(ProviderErrorEvidence {
                 exchange: self.exchange.clone(),
+                reported_model: self.reported_model.clone(),
                 kind,
                 native: error.into_native_facts(),
             }));
@@ -171,16 +173,23 @@ impl StreamDecoder {
                     self.refusal_text.push_str(&refusal);
                 }
                 for call in delta.tool_calls {
-                    if let Some(kind) = &call.kind
-                        && kind != "function"
-                    {
-                        // The buffered decoder rejects non-function tool
-                        // material; the streamed path must not assemble it
-                        // into an ordinary proposal either.
-                        return self.violation(format!(
-                            "tool call at index {} carries unrecognized type {kind:?}",
-                            call.index
-                        ));
+                    match call.kind.as_deref() {
+                        Some("function") => {
+                            self.tool_builders
+                                .entry(call.index)
+                                .or_default()
+                                .saw_function_type = true;
+                        }
+                        Some(kind) => {
+                            // The buffered decoder rejects non-function tool
+                            // material; the streamed path must not assemble
+                            // it into an ordinary proposal either.
+                            return self.violation(format!(
+                                "tool call at index {} carries unrecognized type {kind:?}",
+                                call.index
+                            ));
+                        }
+                        None => {}
                     }
                     let builder = self.tool_builders.entry(call.index).or_default();
                     if let Some(id) = call.id {
@@ -313,12 +322,29 @@ impl StreamDecoder {
         sink: &mut (dyn ObservationSink<C> + Send),
     ) -> Option<StreamStep> {
         let builders = std::mem::take(&mut self.tool_builders);
+        // Indices must be contiguous from zero: terminal content is
+        // assembled densely, so a sparse index would desynchronize the
+        // already-reported fragment positions from the final parts.
+        for (expected, actual) in builders.keys().enumerate() {
+            if *actual != expected as u32 {
+                return Some(self.violation(format!(
+                    "tool call indices are not contiguous from zero (found {actual})"
+                )));
+            }
+        }
         for (index, builder) in builders {
             let (Some(id), Some(name)) = (builder.id, builder.name) else {
                 return Some(self.violation(format!(
                     "tool call at index {index} terminated without an id and name"
                 )));
             };
+            if !builder.saw_function_type {
+                // Parity with the buffered decoder: material that never
+                // established the function type is not an ordinary proposal.
+                return Some(self.violation(format!(
+                    "tool call at index {index} terminated without establishing its type"
+                )));
+            }
             let proposal = ToolCallProposal {
                 id: ToolCallId::new(id),
                 name: ToolName::new(name),
@@ -719,7 +745,7 @@ mod tests {
         let (terminal, _) = drive(&[
             first_chunk(),
             b"data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
-              \"id\":\"call_1\",\"function\":{\"name\":\"lookup\",\
+              \"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\
               \"arguments\":\"{\\\"city\\\":\"}}]}}]}\n\n",
             b"data: {\"choices\":[{\"index\":0,\"delta\":{},\
               \"finish_reason\":\"tool_calls\"}]}\n\n",
@@ -790,7 +816,7 @@ mod tests {
         let (_, observations) = drive(&[
             first_chunk(),
             b"data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
-              \"id\":\"call_1\",\"function\":{\"name\":\"ping\",\"arguments\":\"{}\"}}]}}]}\n\n",
+              \"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"ping\",\"arguments\":\"{}\"}}]}}]}\n\n",
             b"data: {\"choices\":[{\"index\":0,\"delta\":{},\
               \"finish_reason\":\"tool_calls\"}]}\n\n",
             b"data: [DONE]\n\n",
@@ -882,7 +908,7 @@ mod tests {
         let (terminal, _) = drive(&[
             first_chunk(),
             b"data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
-              \"id\":\"call_1\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]}}]}\n\n",
+              \"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]}}]}\n\n",
             b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"late text\"}}]}\n\n",
         ]);
 
@@ -900,7 +926,7 @@ mod tests {
         let (terminal, _) = drive(&[
             first_chunk(),
             b"data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
-              \"id\":\"call_1\",\"function\":{\"name\":\"ping\",\"arguments\":\"\"}}]}}]}\n\n",
+              \"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"ping\",\"arguments\":\"\"}}]}}]}\n\n",
             b"data: {\"choices\":[{\"index\":0,\"delta\":{},\
               \"finish_reason\":\"tool_calls\"}]}\n\n",
             b"data: [DONE]\n\n",
