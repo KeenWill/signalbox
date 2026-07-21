@@ -375,10 +375,7 @@ async fn finish_error(
     let body = match with_cancellation(cancellation, response.bytes()).await {
         None => return exchange_loss(LossCause::CancellationRequested, exchange),
         Some(Err(error)) => {
-            return exchange_loss(
-                LossCause::ResponseBodyLost(transport_facts(&error)),
-                exchange,
-            );
+            return exchange_loss(classify_body_error(&error), exchange);
         }
         Some(Ok(bytes)) => bytes,
     };
