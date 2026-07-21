@@ -9,6 +9,25 @@ that constrains several components — require a full record under
 [decisions/](decisions/README.md) instead. Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-20 — ADR-0044 post-merge review corrections
+
+**Context.** Post-merge review of the pull request that introduced
+[ADR-0044](decisions/0044-hub-runtime-foundations.md) found defects in its
+configuration, telemetry, corruption-key, and failure-classification wording.
+
+**Decision.** Record that [ADR-0044](decisions/0044-hub-runtime-foundations.md)
+was corrected on 2026-07-20 and that
+[ADR-0046](decisions/0046-durable-command-telemetry-correlation.md) supersedes
+its incomplete caller-command telemetry clause. The linked ADRs are the sole
+statements of the resulting semantics.
+
+**Rejected alternatives.** Restating the corrections here: that would create a
+second normative owner. Leaving the correlation clause as an in-place
+correction: its key lifecycle changes accepted foundation semantics and needs a
+superseding record.
+
+**Affects.** The linked ADR history only; no code or schema.
+
 ## 2026-07-20 — Compact INFO telemetry and a 30-second shutdown window
 
 **Context.** ADR-0044 assigns tracing-subscriber selection, formatting,
