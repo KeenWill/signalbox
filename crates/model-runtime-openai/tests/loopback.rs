@@ -450,6 +450,56 @@ async fn provider_error_text_reflecting_the_key_is_redacted() {
     assert!(message.contains("[redacted]"));
 }
 
+#[tokio::test]
+async fn successful_content_reflecting_the_key_is_redacted() {
+    let body = br#"{"id":"chatcmpl_key_loop","model":"model-key_loop","choices":[{
+        "index":0,"message":{"role":"assistant","content":"reflected key_loop"},
+        "finish_reason":"stop"}]}"#;
+    let server = CannedServer::serving(vec![http_response(
+        "200 OK",
+        &[
+            ("content-type", "application/json"),
+            ("x-request-id", "req-key_loop"),
+        ],
+        body,
+    )])
+    .await;
+    let runtime = runtime_for(&server.base_url);
+
+    let (report, observations) = execute(
+        &runtime,
+        operation("call-redacted-success"),
+        CancellationSignal::never(),
+    )
+    .await;
+
+    assert!(!format!("{report:?}").contains("key_loop"));
+    assert!(!format!("{observations:?}").contains("key_loop"));
+    assert!(format!("{report:?}").contains("[redacted]"));
+}
+
+#[tokio::test]
+async fn streamed_observations_reflecting_the_key_are_redacted() {
+    let body: &[u8] = b"data: {\"id\":\"chatcmpl-key_loop\",\"model\":\"model-key_loop\",\
+        \"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"key_loop\"}}]}\n\n\
+        data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+        data: [DONE]\n\n";
+    let server = CannedServer::serving(vec![http_response(
+        "200 OK",
+        &[("content-type", "text/event-stream")],
+        body,
+    )])
+    .await;
+    let runtime = runtime_for(&server.base_url);
+    let mut operation = operation("call-redacted-stream");
+    operation.delivery = DeliveryMode::Streamed;
+
+    let (report, observations) = execute(&runtime, operation, CancellationSignal::never()).await;
+
+    assert!(!format!("{report:?}").contains("key_loop"));
+    assert!(!format!("{observations:?}").contains("key_loop"));
+}
+
 #[test]
 fn a_base_url_with_query_or_fragment_fails_construction() {
     let mut config = OpenAiConfig::new();

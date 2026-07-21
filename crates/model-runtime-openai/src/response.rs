@@ -125,10 +125,10 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             usage,
         );
     };
-    if choice.index != 0 {
+    if choice.index != Some(0) {
         return unintelligible(
             format!(
-                "success response carries choice index {}; index 0 is requested",
+                "success response carries choice index {:?}; index 0 is requested",
                 choice.index
             ),
             exchange,
@@ -351,6 +351,7 @@ mod tests {
                 "id": "chatcmpl_1",
                 "model": "model-exact-1",
                 "choices": [{
+                    "index": 0,
                     "message": {"role": "assistant", "content": null,
                                 "refusal": "I cannot help with that."},
                     "finish_reason": "stop"
@@ -379,6 +380,7 @@ mod tests {
                 "id": "chatcmpl_1",
                 "model": "model-exact-1",
                 "choices": [{
+                    "index": 0,
                     "message": {"role": "assistant", "content": "partial"},
                     "finish_reason": "content_filter"
                 }]
@@ -495,6 +497,16 @@ mod tests {
             loss.cause,
             LossCause::ResponseUnintelligible { .. }
         ));
+    }
+
+    #[test]
+    fn a_choice_without_an_index_is_boundary_loss() {
+        let (evidence, _) = decode(
+            r#"{"id":"chatcmpl_1","model":"model-exact-1","choices":[{
+                "message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}"#,
+        );
+
+        assert!(matches!(evidence, TerminalEvidence::BoundaryLoss(_)));
     }
 
     #[test]

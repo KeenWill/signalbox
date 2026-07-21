@@ -90,8 +90,7 @@ pub(crate) struct ChatCompletion {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ChatChoice {
-    #[serde(default)]
-    pub index: u32,
+    pub index: Option<u32>,
     pub message: Option<ChatResponseMessage>,
     pub finish_reason: Option<String>,
 }
@@ -182,8 +181,7 @@ pub(crate) struct ChatChunk {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ChunkChoice {
-    #[serde(default)]
-    pub index: u32,
+    pub index: Option<u32>,
     pub delta: Option<ChunkDelta>,
     pub finish_reason: Option<String>,
 }

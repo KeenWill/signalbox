@@ -145,6 +145,13 @@ fn wire_messages(
     message: &ConversationMessage,
     out: &mut Vec<WireChatMessage>,
 ) -> Result<(), PreparationFailure> {
+    if message.parts.is_empty() {
+        return Err(PreparationFailure::UnsupportedOperation {
+            detail: "the Chat Completions wire contract cannot preserve an empty conversation \
+                     message"
+                .to_string(),
+        });
+    }
     let role = match message.role {
         ConversationRole::User => "user",
         ConversationRole::Assistant => "assistant",
@@ -424,6 +431,22 @@ mod tests {
               "stream": false
             }"#]]
         .assert_eq(&request_json(&operation("call-4")));
+    }
+
+    #[test]
+    fn an_empty_conversation_message_is_rejected_before_any_send() {
+        let mut operation = operation("call-empty-message");
+        operation.messages = vec![ConversationMessage {
+            role: ConversationRole::User,
+            parts: Vec::new(),
+        }];
+
+        let error = build_request(&operation)
+            .expect_err("silently dropping a caller-stated role boundary changes history");
+        assert!(matches!(
+            error,
+            PreparationFailure::UnsupportedOperation { .. }
+        ));
     }
 
     #[test]

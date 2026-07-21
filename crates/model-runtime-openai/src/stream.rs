@@ -38,6 +38,7 @@ struct ToolBuilder {
     id: Option<String>,
     name: Option<String>,
     saw_function_type: bool,
+    saw_arguments: bool,
     arguments: String,
 }
 
@@ -139,9 +140,9 @@ impl StreamDecoder {
                 // FinishReported was emitted.
                 return self.violation("choice material after the reported finish_reason");
             }
-            if choice.index != 0 {
+            if choice.index != Some(0) {
                 return self.violation(format!(
-                    "stream chunk carries choice index {}; exactly one choice is requested",
+                    "stream chunk carries choice index {:?}; exactly one choice is requested",
                     choice.index
                 ));
             }
@@ -217,24 +218,25 @@ impl StreamDecoder {
                                 Some(_) => {}
                             }
                         }
-                        if let Some(fragment) = function.arguments
-                            && !fragment.is_empty()
-                        {
+                        if let Some(fragment) = function.arguments {
                             let builder = self.tool_builders.entry(call.index).or_default();
+                            builder.saw_arguments = true;
                             builder.arguments.push_str(&fragment);
-                            let text_parts = u32::from(!self.content_text.is_empty());
-                            Self::emit(
-                                correlation,
-                                sink,
-                                ObservationFact::ToolArgumentsDelta {
-                                    // Part order: the text part (when one
-                                    // exists) at 0, then tool call k. Stable
-                                    // because content cannot arrive after
-                                    // tool fragments (violation above).
-                                    index: text_parts + call.index,
-                                    fragment,
-                                },
-                            );
+                            if !fragment.is_empty() {
+                                let text_parts = u32::from(!self.content_text.is_empty());
+                                Self::emit(
+                                    correlation,
+                                    sink,
+                                    ObservationFact::ToolArgumentsDelta {
+                                        // Part order: the text part (when one
+                                        // exists) at 0, then tool call k. Stable
+                                        // because content cannot arrive after
+                                        // tool fragments (violation above).
+                                        index: text_parts + call.index,
+                                        fragment,
+                                    },
+                                );
+                            }
                         }
                     }
                 }
@@ -343,6 +345,11 @@ impl StreamDecoder {
                 // established the function type is not an ordinary proposal.
                 return Some(self.violation(format!(
                     "tool call at index {index} terminated without establishing its type"
+                )));
+            }
+            if !builder.saw_arguments {
+                return Some(self.violation(format!(
+                    "tool call at index {index} terminated without reporting arguments"
                 )));
             }
             let proposal = ToolCallProposal {
@@ -741,6 +748,22 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_choice_index_is_a_protocol_violation() {
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"ghost\"}}]}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("a missing choice index must surface as a protocol violation");
+        };
+        assert!(matches!(
+            loss.cause,
+            LossCause::StreamProtocolViolation { .. }
+        ));
+    }
+
+    #[test]
     fn malformed_streamed_tool_arguments_are_preserved_for_typed_decoding() {
         let (terminal, _) = drive(&[
             first_chunk(),
@@ -943,6 +966,24 @@ mod tests {
                 arguments_json: String::new(),
             })]
         );
+    }
+
+    #[test]
+    fn absent_streamed_tool_arguments_are_a_protocol_violation() {
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
+              \"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"ping\"}}]}}]}\n\n",
+            b"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("absent argument material must surface as a protocol violation");
+        };
+        assert!(matches!(
+            loss.cause,
+            LossCause::StreamProtocolViolation { .. }
+        ));
     }
 
     #[test]

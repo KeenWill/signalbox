@@ -16,10 +16,12 @@ use reqwest::redirect::Policy;
 use reqwest::{Client, Url};
 
 use signalbox_model_runtime::{
-    BoundaryLossEvidence, CancellationSignal, ExchangeFacts, LossCause, ModelOperation,
-    ModelRuntime, NativeErrorFacts, Observation, ObservationFact, ObservationSink,
-    PreparationFailure, ProvenUnsentEvidence, ProviderErrorEvidence, ProviderRequestId, SseFraming,
-    StreamInterruption, TerminalEvidence, TerminalReport, TokenUsage, TransportFacts, UnsentCause,
+    AssistantPart, BoundaryLossEvidence, CancellationSignal, ExchangeFacts, FinishReason,
+    LossCause, ModelOperation, ModelRuntime, NativeErrorFacts, Observation, ObservationFact,
+    ObservationSink, PreparationFailure, ProvenUnsentEvidence, ProviderErrorEvidence,
+    ProviderMessageId, ProviderReportedModel, ProviderRequestId, SseFraming, StreamInterruption,
+    TerminalEvidence, TerminalReport, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
+    TransportFacts, UnsentCause,
 };
 
 use signalbox_model_runtime::{CredentialAccess, CredentialValue};
@@ -197,19 +199,23 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
                 },
             ));
         };
+        let mut redacting_sink = RedactingSink {
+            inner: sink,
+            credential: &api_key,
+        };
         let evidence = self
             .exchange(
                 operation.delivery,
                 body,
                 authorization_header,
                 correlation,
-                sink,
+                &mut redacting_sink,
                 cancellation,
             )
             .await;
-        // ADR-0017: provider-controlled text in the evidence (error
-        // messages, raw bodies, transport detail) is credential-sanitized
-        // before it leaves the adapter boundary.
+        // ADR-0017: all provider-controlled text is credential-sanitized
+        // before it leaves the adapter boundary, including successful
+        // assistant material that may become semantic history.
         redact_evidence(evidence, &api_key)
     }
 
@@ -322,9 +328,13 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
                 // incomplete-stream fact, never silent success.
                 None => return decoder.lost(StreamInterruption::EndOfStream),
                 Some(Err(error)) => {
-                    return decoder.lost(StreamInterruption::TransportFailure(transport_facts(
-                        &error,
-                    )));
+                    let facts = transport_facts(&error);
+                    let interruption = if error.is_timeout() {
+                        StreamInterruption::TimedOut(facts)
+                    } else {
+                        StreamInterruption::TransportFailure(facts)
+                    };
+                    return decoder.lost(interruption);
                 }
                 Some(Ok(bytes)) => {
                     // Records completed before a framing failure are applied
@@ -519,6 +529,55 @@ async fn with_cancellation<F: Future>(
     }
 }
 
+struct RedactingSink<'a, C> {
+    inner: &'a mut (dyn ObservationSink<C> + Send),
+    credential: &'a CredentialValue,
+}
+
+impl<C> ObservationSink<C> for RedactingSink<'_, C> {
+    fn observe(&mut self, mut observation: Observation<C>) {
+        observation.fact = redact_observation_fact(observation.fact, self.credential);
+        self.inner.observe(observation);
+    }
+}
+
+fn redact_observation_fact(fact: ObservationFact, credential: &CredentialValue) -> ObservationFact {
+    match fact {
+        ObservationFact::ExchangeEstablished(exchange) => {
+            ObservationFact::ExchangeEstablished(redact_exchange(exchange, credential))
+        }
+        ObservationFact::ProviderModelReported(model) => ObservationFact::ProviderModelReported(
+            ProviderReportedModel::new(redact_text(model.as_str().to_string(), credential)),
+        ),
+        ObservationFact::TextDelta { index, text } => ObservationFact::TextDelta {
+            index,
+            text: redact_text(text, credential),
+        },
+        ObservationFact::ThinkingDelta { index, text } => ObservationFact::ThinkingDelta {
+            index,
+            text: redact_text(text, credential),
+        },
+        ObservationFact::ToolArgumentsDelta { index, fragment } => {
+            ObservationFact::ToolArgumentsDelta {
+                index,
+                fragment: redact_text(fragment, credential),
+            }
+        }
+        ObservationFact::ToolCallProposed(proposal) => {
+            ObservationFact::ToolCallProposed(redact_tool_proposal(proposal, credential))
+        }
+        ObservationFact::FinishReported(FinishReason::Unrecognized { provider_token }) => {
+            ObservationFact::FinishReported(FinishReason::Unrecognized {
+                provider_token: redact_text(provider_token, credential),
+            })
+        }
+        fact @ (ObservationFact::RequestPrepared
+        | ObservationFact::SendCommenced
+        | ObservationFact::UsageReported(_)
+        | ObservationFact::FinishReported(_)) => fact,
+    }
+}
+
 /// Credential-sanitizes every provider-controlled or transport-rendered
 /// text in the evidence (ADR-0017): a reflected key value in an error
 /// message, raw body, or rendered detail is replaced before the evidence
@@ -599,7 +658,79 @@ fn redact_evidence(evidence: TerminalEvidence, api_key: &CredentialValue) -> Ter
             };
             TerminalEvidence::BoundaryLoss(loss)
         }
-        evidence @ (TerminalEvidence::Completed(_) | TerminalEvidence::Refused(_)) => evidence,
+        TerminalEvidence::Completed(mut completion) => {
+            completion.exchange = redact_exchange(completion.exchange, api_key);
+            completion.message_id = completion
+                .message_id
+                .map(|id| ProviderMessageId::new(redact_text(id.as_str().to_string(), api_key)));
+            completion.reported_model = completion.reported_model.map(|model| {
+                ProviderReportedModel::new(redact_text(model.as_str().to_string(), api_key))
+            });
+            completion.content = completion
+                .content
+                .into_iter()
+                .map(|part| redact_assistant_part(part, api_key))
+                .collect();
+            TerminalEvidence::Completed(completion)
+        }
+        TerminalEvidence::Refused(mut refusal) => {
+            refusal.exchange = redact_exchange(refusal.exchange, api_key);
+            refusal.message_id = refusal
+                .message_id
+                .map(|id| ProviderMessageId::new(redact_text(id.as_str().to_string(), api_key)));
+            refusal.reported_model = refusal.reported_model.map(|model| {
+                ProviderReportedModel::new(redact_text(model.as_str().to_string(), api_key))
+            });
+            refusal.content = refusal
+                .content
+                .into_iter()
+                .map(|part| redact_assistant_part(part, api_key))
+                .collect();
+            TerminalEvidence::Refused(refusal)
+        }
+    }
+}
+
+fn redact_text(text: String, credential: &CredentialValue) -> String {
+    let key = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
+    if key.is_empty() {
+        text
+    } else {
+        text.replace(key, "[redacted]")
+    }
+}
+
+fn redact_exchange(mut exchange: ExchangeFacts, credential: &CredentialValue) -> ExchangeFacts {
+    exchange.provider_request_id = exchange
+        .provider_request_id
+        .map(|id| ProviderRequestId::new(redact_text(id.as_str().to_string(), credential)));
+    exchange
+}
+
+fn redact_tool_proposal(
+    proposal: ToolCallProposal,
+    credential: &CredentialValue,
+) -> ToolCallProposal {
+    ToolCallProposal {
+        id: ToolCallId::new(redact_text(proposal.id.as_str().to_string(), credential)),
+        name: ToolName::new(redact_text(proposal.name.as_str().to_string(), credential)),
+        arguments_json: redact_text(proposal.arguments_json, credential),
+    }
+}
+
+fn redact_assistant_part(part: AssistantPart, credential: &CredentialValue) -> AssistantPart {
+    match part {
+        AssistantPart::Text(text) => AssistantPart::Text(redact_text(text, credential)),
+        AssistantPart::Thinking { text, signature } => AssistantPart::Thinking {
+            text: redact_text(text, credential),
+            signature: signature.map(|value| redact_text(value, credential)),
+        },
+        AssistantPart::RedactedThinking { data } => AssistantPart::RedactedThinking {
+            data: redact_text(data, credential),
+        },
+        AssistantPart::ToolCall(proposal) => {
+            AssistantPart::ToolCall(redact_tool_proposal(proposal, credential))
+        }
     }
 }
 
