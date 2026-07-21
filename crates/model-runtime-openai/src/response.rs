@@ -65,10 +65,9 @@ pub(crate) fn convert_tool_call(call: &WireResponseToolCall) -> Result<ToolCallP
     Ok(ToolCallProposal {
         id: ToolCallId::new(id.clone()),
         name: ToolName::new(name.clone()),
-        arguments_json: function
-            .arguments
-            .clone()
-            .unwrap_or_else(|| "{}".to_string()),
+        // Absent arguments stay empty rather than being fabricated into
+        // an empty object; typed decoding sees the provider's actual value.
+        arguments_json: function.arguments.clone().unwrap_or_default(),
     })
 }
 

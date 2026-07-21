@@ -29,7 +29,7 @@ use crate::wire::{
 pub(crate) fn build_request<C>(
     operation: &ModelOperation<C>,
 ) -> Result<ChatRequest, PreparationFailure> {
-    let (tools, tool_choice) = tools_and_choice(operation)?;
+    let (tools, tool_choice, parallel_tool_calls) = tools_and_choice(operation)?;
     let mut messages = Vec::new();
     if let Some(system) = &operation.system {
         messages.push(WireChatMessage {
@@ -52,6 +52,7 @@ pub(crate) fn build_request<C>(
         stop: operation.settings.stop_sequences.clone(),
         tools,
         tool_choice,
+        parallel_tool_calls,
         stream: streamed,
         stream_options: streamed.then_some(StreamOptions {
             include_usage: true,
@@ -59,9 +60,15 @@ pub(crate) fn build_request<C>(
     })
 }
 
+type ToolsAndChoice = (
+    Option<Vec<WireFunctionTool>>,
+    Option<serde_json::Value>,
+    Option<bool>,
+);
+
 fn tools_and_choice<C>(
     operation: &ModelOperation<C>,
-) -> Result<(Option<Vec<WireFunctionTool>>, Option<serde_json::Value>), PreparationFailure> {
+) -> Result<ToolsAndChoice, PreparationFailure> {
     if let Some(contract) = &operation.output_contract {
         if !operation.tools.is_empty() {
             return Err(PreparationFailure::UnsupportedOperation {
@@ -84,10 +91,13 @@ fn tools_and_choice<C>(
                 "type": "function",
                 "function": { "name": contract.name.as_str() }
             })),
+            // The contract promises exactly one value; parallel tool
+            // calling could return several calls to the forced function.
+            Some(false),
         ));
     }
     if operation.tools.is_empty() {
-        return Ok((None, None));
+        return Ok((None, None, None));
     }
     let tools = operation
         .tools
@@ -109,7 +119,7 @@ fn tools_and_choice<C>(
             "function": { "name": name.as_str() }
         }),
     };
-    Ok((Some(tools), Some(choice)))
+    Ok((Some(tools), Some(choice), None))
 }
 
 /// Translates one conversation message into wire messages, in part order.
@@ -131,10 +141,18 @@ fn wire_messages(
     let mut pending_tool_calls: Vec<WireRequestToolCall> = Vec::new();
     for part in &message.parts {
         match part {
-            MessagePart::Text(text) => match &mut pending_text {
-                Some(pending) => pending.push_str(text),
-                None => pending_text = Some(text.clone()),
-            },
+            MessagePart::Text(text) => {
+                if !pending_tool_calls.is_empty() {
+                    // One wire message orders content before tool_calls, so
+                    // text following a tool call must start its own message
+                    // to preserve the stated part order.
+                    flush(role, &mut pending_text, &mut pending_tool_calls, out);
+                }
+                match &mut pending_text {
+                    Some(pending) => pending.push_str(text),
+                    None => pending_text = Some(text.clone()),
+                }
+            }
             MessagePart::ToolCall(proposal) => pending_tool_calls.push(WireRequestToolCall {
                 id: proposal.id.as_str().to_string(),
                 kind: "function",
@@ -144,6 +162,19 @@ fn wire_messages(
                 },
             }),
             MessagePart::ToolResult(result) => {
+                if result.is_error {
+                    // The tool message has no native failure flag; encoding
+                    // one would alter the caller's payload, and dropping the
+                    // fact would misstate the conversation. The caller
+                    // states the failure in the result content explicitly
+                    // for this provider.
+                    return Err(PreparationFailure::UnsupportedOperation {
+                        detail: "the Chat Completions wire contract cannot mark a replayed \
+                                 tool result as failed; state the failure in the result \
+                                 content"
+                            .to_string(),
+                    });
+                }
                 flush(role, &mut pending_text, &mut pending_tool_calls, out);
                 out.push(WireChatMessage {
                     role: "tool",
@@ -407,6 +438,56 @@ mod tests {
             failure,
             PreparationFailure::UnsupportedOperation { .. }
         ));
+    }
+
+    #[test]
+    fn failed_tool_result_replay_is_rejected_not_silently_flattened() {
+        let mut operation = operation("call-8");
+        operation.messages = vec![ConversationMessage {
+            role: ConversationRole::User,
+            parts: vec![MessagePart::ToolResult(ToolResultRecord {
+                tool_call_id: ToolCallId::new("call_a1"),
+                content: "disk full".to_string(),
+                is_error: true,
+            })],
+        }];
+
+        let failure = build_request(&operation)
+            .expect_err("a failed-tool fact this wire contract cannot carry must not vanish");
+
+        assert!(matches!(
+            failure,
+            PreparationFailure::UnsupportedOperation { .. }
+        ));
+    }
+
+    #[test]
+    fn text_after_a_tool_call_splits_messages_to_preserve_part_order() {
+        let mut operation = operation("call-9");
+        operation.messages = vec![ConversationMessage {
+            role: ConversationRole::Assistant,
+            parts: vec![
+                MessagePart::ToolCall(ToolCallProposal {
+                    id: ToolCallId::new("call_a1"),
+                    name: ToolName::new("lookup"),
+                    arguments_json: "{}".to_string(),
+                }),
+                MessagePart::Text("after the call".to_string()),
+            ],
+        }];
+
+        let request = build_request(&operation).expect("interleaved history translates");
+        let value = serde_json::to_value(&request).expect("wire request serializes");
+
+        assert_eq!(
+            value["messages"][0]["tool_calls"][0]["id"],
+            serde_json::json!("call_a1")
+        );
+        assert_eq!(value["messages"][0].get("content"), None);
+        assert_eq!(
+            value["messages"][1]["content"],
+            serde_json::json!("after the call")
+        );
     }
 
     #[test]

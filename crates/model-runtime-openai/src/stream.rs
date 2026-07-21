@@ -95,16 +95,25 @@ impl StreamDecoder {
         if self.message_id.is_none() {
             self.message_id = chunk.id.map(ProviderMessageId::new);
         }
-        if self.reported_model.is_none()
-            && let Some(model) = chunk.model
-        {
+        if let Some(model) = chunk.model {
             let model = ProviderReportedModel::new(model);
-            self.reported_model = Some(model.clone());
-            Self::emit(
-                correlation,
-                sink,
-                ObservationFact::ProviderModelReported(model),
-            );
+            match &self.reported_model {
+                None => {
+                    self.reported_model = Some(model.clone());
+                    Self::emit(
+                        correlation,
+                        sink,
+                        ObservationFact::ProviderModelReported(model),
+                    );
+                }
+                Some(existing) if *existing != model => {
+                    // A spliced or corrupted stream reporting a second
+                    // identity must not complete under the first one
+                    // (ADR-0005's mismatch evidence relies on this fact).
+                    return self.violation("stream chunks report conflicting model identities");
+                }
+                Some(_) => {}
+            }
         }
         if let Some(usage) = chunk.usage.as_ref() {
             let usage = convert_usage(usage);
@@ -112,6 +121,13 @@ impl StreamDecoder {
             Self::emit(correlation, sink, ObservationFact::UsageReported(usage));
         }
         for choice in chunk.choices {
+            if self.finish.is_some() {
+                // After the finish reason, the only valid remaining records
+                // are the usage-only chunk (empty choices) and [DONE];
+                // further choice material could alter the completion after
+                // FinishReported was emitted.
+                return self.violation("choice material after the reported finish_reason");
+            }
             if choice.index != 0 {
                 return self.violation(format!(
                     "stream chunk carries choice index {}; exactly one choice is requested",
@@ -122,6 +138,12 @@ impl StreamDecoder {
                 if let Some(text) = delta.content
                     && !text.is_empty()
                 {
+                    if !self.tool_builders.is_empty() {
+                        // The protocol streams content before tool calls;
+                        // content arriving afterwards would shift the part
+                        // positions already reported on tool fragments.
+                        return self.violation("content delta after tool-call fragments began");
+                    }
                     self.content_text.push_str(&text);
                     Self::emit(
                         correlation,
@@ -164,13 +186,16 @@ impl StreamDecoder {
                         {
                             let builder = self.tool_builders.entry(call.index).or_default();
                             builder.arguments.push_str(&fragment);
+                            let text_parts = u32::from(!self.content_text.is_empty());
                             Self::emit(
                                 correlation,
                                 sink,
                                 ObservationFact::ToolArgumentsDelta {
-                                    // Part order: content at 0, tool call k at
-                                    // k + 1 (see the module docs of `response`).
-                                    index: call.index + 1,
+                                    // Part order: the text part (when one
+                                    // exists) at 0, then tool call k. Stable
+                                    // because content cannot arrive after
+                                    // tool fragments (violation above).
+                                    index: text_parts + call.index,
                                     fragment,
                                 },
                             );
@@ -180,11 +205,6 @@ impl StreamDecoder {
             }
             if let Some(token) = choice.finish_reason {
                 let finish = map_finish(&token);
-                if let Some(existing) = &self.finish
-                    && *existing != finish
-                {
-                    return self.violation("stream reports conflicting finish reasons");
-                }
                 self.finish = Some(finish.clone());
                 Self::emit(correlation, sink, ObservationFact::FinishReported(finish));
             }
@@ -261,12 +281,15 @@ impl StreamDecoder {
                     "tool call at index {index} terminated without an id and name"
                 ));
             };
-            let arguments_json = if builder.arguments.is_empty() {
-                "{}".to_string()
-            } else {
-                builder.arguments
-            };
-            if serde_json::from_str::<serde_json::Value>(&arguments_json).is_err() {
+            // The provider's raw argument bytes are preserved exactly —
+            // including an empty accumulation — so typed decoding sees what
+            // was actually produced. Only a non-empty accumulation is
+            // checked for JSON syntax: truncated fragments mean the stream
+            // lost data, while emptiness is the provider's own value.
+            let arguments_json = builder.arguments;
+            if !arguments_json.is_empty()
+                && serde_json::from_str::<serde_json::Value>(&arguments_json).is_err()
+            {
                 return self.violation(format!(
                     "tool call at index {index} terminated with invalid accumulated argument JSON"
                 ));
@@ -504,7 +527,7 @@ mod tests {
         assert!(observations.contains(&Observation {
             correlation: "call-1".to_string(),
             fact: ObservationFact::ToolArgumentsDelta {
-                index: 1,
+                index: 0,
                 fragment: "{\"city\":".to_string(),
             },
         }));
@@ -629,7 +652,7 @@ mod tests {
         let Some(TerminalEvidence::ProviderError(error)) = terminal else {
             panic!("a mid-stream error record is a definitive provider error");
         };
-        assert_eq!(error.kind, ProviderErrorKind::RateLimited);
+        assert_eq!(error.kind, ProviderErrorKind::QuotaExhausted);
         assert_eq!(
             error.native.error_code,
             Some("insufficient_quota".to_string())
@@ -671,6 +694,81 @@ mod tests {
             loss.cause,
             LossCause::StreamProtocolViolation { .. }
         ));
+    }
+
+    #[test]
+    fn conflicting_streamed_model_identities_are_a_protocol_violation() {
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"model\":\"other-model\",\"choices\":[]}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("a second model identity must not complete under the first");
+        };
+        assert!(matches!(
+            loss.cause,
+            LossCause::StreamProtocolViolation { .. }
+        ));
+    }
+
+    #[test]
+    fn choice_material_after_the_finish_reason_is_a_protocol_violation() {
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"late\"}}]}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("material after the finish reason must not alter the completion");
+        };
+        assert!(matches!(
+            loss.cause,
+            LossCause::StreamProtocolViolation { .. }
+        ));
+    }
+
+    #[test]
+    fn content_after_tool_fragments_is_a_protocol_violation() {
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
+              \"id\":\"call_1\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]}}]}\n\n",
+            b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"late text\"}}]}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("content after tool fragments would shift already-reported part positions");
+        };
+        assert!(matches!(
+            loss.cause,
+            LossCause::StreamProtocolViolation { .. }
+        ));
+    }
+
+    #[test]
+    fn empty_streamed_tool_arguments_are_preserved_raw_for_typed_decoding() {
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
+              \"id\":\"call_1\",\"function\":{\"name\":\"ping\",\"arguments\":\"\"}}]}}]}\n\n",
+            b"data: {\"choices\":[{\"index\":0,\"delta\":{},\
+              \"finish_reason\":\"tool_calls\"}]}\n\n",
+            b"data: [DONE]\n\n",
+        ]);
+
+        let Some(TerminalEvidence::Completed(completion)) = terminal else {
+            panic!("an empty argument accumulation is the provider's value, not corruption");
+        };
+        assert_eq!(
+            completion.content,
+            vec![AssistantPart::ToolCall(ToolCallProposal {
+                id: ToolCallId::new("call_1"),
+                name: ToolName::new("ping"),
+                arguments_json: String::new(),
+            })]
+        );
     }
 
     #[test]
