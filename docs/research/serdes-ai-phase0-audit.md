@@ -10,10 +10,11 @@
   [ADR-0043](../decisions/0043-provider-failure-classification.md)
   (failure-classification vocabulary)
 - Scope: the ten research questions from the external exploration handoff,
-  prioritized Q4, Q2, Q3, Q8, Q1, plus a retry-wrapper assessment. Scoped to
-  what M3 and a real-provider smoke test need: Anthropic + OpenAI adapters,
-  streaming, typed structured output, tool-call decoding. Embeddings, graphs,
-  MCP, evals, and A2A were not audited.
+  prioritized Q4, Q2, Q3, Q8, Q1, plus a retry-wrapper assessment. Audit
+  coverage includes Anthropic + OpenAI adapters, streaming, typed structured
+  output, and tool-call decoding; the smaller one-provider smoke implementation
+  set is identified below. Embeddings, graphs, MCP, evals, and A2A were not
+  audited.
 
 File references below are `crate/path:line` at the pinned commit. Everything in
 part (a) was read or executed directly in a local clone pinned to that commit.
@@ -22,8 +23,10 @@ part (a) was read or executed directly in a local clone pinned to that commit.
 
 ### Build and test run
 
-Toolchain: the repository pins `channel = "stable"` with
-`rust-version = "1.75.0"`; the run used rustc 1.97.1 on macOS (aarch64).
+Toolchain: `rust-toolchain.toml` selects the moving `stable` channel; for this
+audit that resolved to rustc 1.97.1 on macOS (aarch64). The manifests separately
+declare MSRV `rust-version = "1.75.0"`. This run verifies the audited compiler,
+not MSRV compatibility; Rust 1.75.0 was not tested.
 
 `cargo test --workspace --no-fail-fast` compiled all 17 workspace crates and
 exited 0:
@@ -49,18 +52,20 @@ outside the workspace was compiled and run against path dependencies
 `serdes-ai-output`, `serdes-ai-tools`, and `serdes-ai-streaming`. It constructed
 both target adapters, built a tool definition with schema, and set
 structured-output request parameters. It compiled and ran; `cargo tree` on the
-consumer shows the full closure is exactly: `serdes-ai-core`,
+consumer shows eight SerdesAI workspace crates in the closure: `serdes-ai-core`,
 `serdes-ai-macros`, `serdes-ai-models`, `serdes-ai-output`, `serdes-ai-retries`,
-`serdes-ai-streaming`, `serdes-ai-tools`, `serdes-ai-toolsets`. Neither
-`serdes-ai-agent` nor `serdes-ai-providers` appears.
+`serdes-ai-streaming`, `serdes-ai-tools`, `serdes-ai-toolsets`. The full cargo
+closure also contains third-party dependencies; they were not enumerated for
+this agent-independence question. Neither `serdes-ai-agent` nor
+`serdes-ai-providers` appears.
 
 Two consequences:
 
 - The provider adapters live in `serdes-ai-models` (per-provider cargo features,
   `serdes-ai-models/Cargo.toml:14-33`), not in `serdes-ai-providers`, which is a
   separate registry/abstraction crate that is not required.
-- The minimum usable closure is still eight crates, because `serdes-ai-models`
-  hard-depends on `serdes-ai-output`, `serdes-ai-retries`,
+- The minimum usable SerdesAI workspace closure is still eight crates, because
+  `serdes-ai-models` hard-depends on `serdes-ai-output`, `serdes-ai-retries`,
   `serdes-ai-streaming`, and `serdes-ai-tools` (which drags `toolsets` and
   `macros`) via `serdes-ai-models/Cargo.toml:36-40`. The retries crate is in the
   mandatory compile closure even when retry behavior is unused.
@@ -77,7 +82,8 @@ are `ModelResponseStreamEvent` =
 content but no run, operation, or request identifier
 (`serdes-ai-core/src/messages/events.rs:17-31`). So no caller ID can appear *on*
 events — but none is needed for correlation at this layer, because the caller
-invokes one request and exclusively owns the returned stream. Under ADR-0005's
+invokes one request and exclusively owns the returned stream. Under
+[ADR-0005's](../decisions/0005-model-call-retry-semantics.md)
 one-authorization-one-call model, Signalbox holds the stream for exactly one
 `ModelCallId` and can tag every observation itself. Correlation is by
 construction, not by field.
@@ -103,25 +109,28 @@ There is no explicit boundary observation anywhere. What exists:
 
 - **Success path (usable implicit signal):** both adapters build and send the
   HTTP request inside the method and check status before returning
-  (`serdes-ai-models/src/anthropic/model.rs:598-623` non-streaming, `:643-671`
-  streaming; equivalent structure in `openai/chat.rs`). A returned
+  (`serdes-ai-models/src/anthropic/model.rs:598-623` non-streaming,
+  `serdes-ai-models/src/anthropic/model.rs:643-671` streaming; equivalent
+  structure in `serdes-ai-models/src/openai/chat.rs`). A returned
   `Ok(StreamedResponse)` therefore proves a success-status HTTP response header
   was received — the provider accepted the request. In streaming, Anthropic's
   `message_start` then confirms provider-side message creation
-  (`anthropic/stream.rs:236-242`).
+  (`serdes-ai-models/src/anthropic/stream.rs:236-242`).
 - **Failure path (no signal):** every transport failure funnels through
   `From<reqwest::Error> for ModelError`
   (`serdes-ai-models/src/error.rs:454-470`), which maps `is_timeout()` →
   `Timeout(30s hardcoded)`, `is_connect()` → `Connection`, else `Other`. Nothing
-  records whether the request body write completed — ADR-0043's decisive
+  records whether the request body write completed —
+  [ADR-0043's](../decisions/0043-provider-failure-classification.md) decisive
   full-request-send boundary is not observed. A pre-connect failure (provably
-  unsent under ADR-0043) and a post-send connection loss (must be `Ambiguous`)
+  unsent under that ADR) and a post-send connection loss (must be `Ambiguous`)
   can surface as the same `ModelError::Connection` / `ModelError::Timeout`
   values.
 - The `RequestPrepared` vs `ProviderBoundaryCrossed` distinction the handoff
   sketches does not exist and cannot be added by wrapping: request construction
   and `send()` are fused inside each adapter method. The HTTP client is
-  injectable (`anthropic/model.rs:79`, `openai/chat.rs:85` `with_client`), so a
+  injectable (`serdes-ai-models/src/anthropic/model.rs:79`,
+  `serdes-ai-models/src/openai/chat.rs:85` `with_client`), so a
   middleware-instrumented `reqwest::Client` could observe connect/write phases
   out-of-band, but correlating that side channel to a specific logical call from
   outside the adapter is fragile.
@@ -135,82 +144,101 @@ The canonical classification is `ModelFailureKind`
 (`serdes-ai-core/src/errors.rs:13-46`) reached via
 `ClassifyModelFailure::model_failure()`
 (`serdes-ai-models/src/error.rs:332-451`). It is a *retryability* taxonomy, not
-an *evidence* taxonomy. Mapping against ADR-0043's dispositions:
+an *evidence* taxonomy. Mapping against
+[ADR-0043's](../decisions/0043-provider-failure-classification.md) dispositions:
 
-| ADR-0043 category                         | SerdesAI representation                                                                                                                                                                                                                                                                                                                                                                                               | Evidence preserved?                                                                                    |
-| ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `Completed`                               | `ModelResponse` with `finish_reason`, `usage`, `vendor_id` (`core/src/messages/response.rs:14-37`); streaming `StreamComplete` only on provider-confirmed terminal (`core/src/messages/events.rs:673-687`)                                                                                                                                                                                                            | Yes on the Anthropic path; OpenAI chat streaming cannot distinguish completion from truncation (below) |
-| `KnownFailed` (proven unsent)             | Not distinguishable. `Connection`/`Timeout`/`Network` variants do not record send progress (`models/src/error.rs:454-470`)                                                                                                                                                                                                                                                                                            | No — the load-bearing gap                                                                              |
-| `KnownFailed` (definitive provider error) | Good: `ModelError::Provider { provider, code, message, kind, status, retry_after }` retains native code and status (`models/src/error.rs:37-50`); Anthropic native-code table at `models/src/anthropic/error.rs:14-27`                                                                                                                                                                                                | Yes for typed HTTP/SSE error responses                                                                 |
-| `Refused`                                 | Absent as a category. OpenAI refusal payloads become `ModelError::ContentFiltered` (`openai/chat.rs:380-382`, `openai/responses.rs:1015-1016`), which classifies as `ModelFailureKind::Other` (`models/src/error.rs:441-443`). An Anthropic `refusal` stop reason falls through `_ => FinishReason::Stop` and is silently reported as normal completion (`anthropic/model.rs:516-522`, `anthropic/stream.rs:413-421`) | No; the Anthropic case is actively misleading                                                          |
-| `Cancelled`                               | `ModelError::Cancelled` and `ModelFailureKind::Cancelled` exist (`models/src/error.rs:84-85`), but no adapter constructs them from provider evidence; there is no cancellation-token input on the `Model` trait                                                                                                                                                                                                       | Type exists, evidence path does not                                                                    |
-| Premature EOF                             | Anthropic: excellent — EOF before `message_stop` → `IncompleteStream` (`anthropic/stream.rs:174-188`), `message_stop` with open blocks → error (`:371-380`), malformed event → error (`:224-233`). OpenAI chat: absent — EOF without `[DONE]` ends the stream silently as if successful (`openai/stream.rs:125-146`), malformed chunks are logged and dropped (`:323-326`)                                            | Anthropic yes, OpenAI no                                                                               |
-| `Ambiguous`                               | No representation. Worse, the conditions ADR-0043 classifies `Ambiguous` (timeout after send, connection loss, incomplete stream) are exactly what `is_transient()` marks retryable (`core/src/errors.rs:57-72`: `Timeout`, `Connection`, `IncompleteStream` are all transient)                                                                                                                                       | No — the taxonomy's polarity is inverted relative to ADR-0043                                          |
+| ADR-0043 category                         | SerdesAI representation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | Evidence preserved?                                                                                    |
+| ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `Completed`                               | `ModelResponse` with `finish_reason`, `usage`, `vendor_id` (`serdes-ai-core/src/messages/response.rs:14-37`); streaming `StreamComplete` only on provider-confirmed terminal (`serdes-ai-core/src/messages/events.rs:673-687`)                                                                                                                                                                                                                                                                                                            | Yes on the Anthropic path; OpenAI chat streaming cannot distinguish completion from truncation (below) |
+| `KnownFailed` (proven unsent)             | Not distinguishable. `Connection`/`Timeout`/`Network` variants do not record send progress (`serdes-ai-models/src/error.rs:454-470`)                                                                                                                                                                                                                                                                                                                                                                                                      | No — the load-bearing gap                                                                              |
+| `KnownFailed` (definitive provider error) | Good: `ModelError::Provider { provider, code, message, kind, status, retry_after }` retains native code and status (`serdes-ai-models/src/error.rs:37-50`); Anthropic native-code table at `serdes-ai-models/src/anthropic/error.rs:14-27`                                                                                                                                                                                                                                                                                                | Yes for typed HTTP/SSE error responses                                                                 |
+| `Refused`                                 | Absent as a category. OpenAI refusal payloads become `ModelError::ContentFiltered` (`serdes-ai-models/src/openai/chat.rs:380-382`, `serdes-ai-models/src/openai/responses.rs:1015-1016`), which classifies as `ModelFailureKind::Other` (`serdes-ai-models/src/error.rs:441-443`). An Anthropic `refusal` stop reason falls through `_ => FinishReason::Stop` and is silently reported as normal completion (`serdes-ai-models/src/anthropic/model.rs:516-522`, `serdes-ai-models/src/anthropic/stream.rs:413-421`)                       | No; the Anthropic case is actively misleading                                                          |
+| `Cancelled`                               | `ModelError::Cancelled` and `ModelFailureKind::Cancelled` exist (`serdes-ai-models/src/error.rs:84-85`), but no adapter constructs them from provider evidence; there is no cancellation-token input on the `Model` trait                                                                                                                                                                                                                                                                                                                 | Type exists, evidence path does not                                                                    |
+| Premature EOF                             | Anthropic: excellent — EOF before `message_stop` → `IncompleteStream` (`serdes-ai-models/src/anthropic/stream.rs:174-188`), `message_stop` with open blocks → error (`serdes-ai-models/src/anthropic/stream.rs:371-380`), malformed event → error (`serdes-ai-models/src/anthropic/stream.rs:224-233`). OpenAI chat: absent — EOF without `[DONE]` ends the stream silently as if successful (`serdes-ai-models/src/openai/stream.rs:125-146`), malformed chunks are logged and dropped (`serdes-ai-models/src/openai/stream.rs:323-326`) | Anthropic yes, OpenAI no                                                                               |
+| `Ambiguous`                               | No representation. Worse, the conditions [ADR-0043](../decisions/0043-provider-failure-classification.md) classifies as `Ambiguous` (timeout after send, connection loss, incomplete stream) are precisely what `is_transient()` marks retryable (`serdes-ai-core/src/errors.rs:57-72`: `Timeout`, `Connection`, `IncompleteStream` are all transient)                                                                                                                                                                                    | No — the taxonomy's polarity is inverted relative to ADR-0043                                          |
 
 **Answer:** definitive provider error responses preserve enough typed evidence
-to build ADR-0043's native-status mapping on top. Proven-unsent vs ambiguous is
-not recoverable from the error types, refusal is collapsed or mislabeled, and
-the built-in retryability semantics contradict ADR-0043's rule that SDK
-"transient" labels never authorize repetition.
+to build [ADR-0043's](../decisions/0043-provider-failure-classification.md)
+native-status mapping on top. Proven-unsent vs ambiguous is not recoverable from
+the error types, refusal is collapsed or mislabeled, and the built-in
+retryability semantics contradict that ADR's rule that SDK "transient" labels
+never authorize repetition.
 
 ### Retry wrapper vs ADR-0005
 
-`RetryingModel` (`serdes-ai-models/src/retry.rs`) is a decorator; adapters
-perform no hidden retries themselves (single `send()` per call,
-`anthropic/model.rs:616,659`), and nothing wraps models in it implicitly. Simply
-not using it satisfies ADR-0005's no-hidden-retry rule. If used:
+`RetryingModel` (`serdes-ai-models/src/retry.rs`) is a decorator; the adapter
+source performs one `.send()` per call
+(`serdes-ai-models/src/anthropic/model.rs:616,659`), and nothing wraps models in
+it implicitly. That establishes only the source-level wrapper behavior, not one
+physical HTTP interaction. The injectable `reqwest::Client` may follow redirects
+or carry other transport policy beneath `.send()`, and this audit did not verify
+those lower layers. Signalbox compliance therefore requires a client built with
+redirects disabled and an audit of any lower transport retry policy; omitting
+`RetryingModel` alone does not satisfy
+[ADR-0005](../decisions/0005-model-call-retry-semantics.md). If used:
 
 - **Is every physical attempt observable?** No. The executor
   (`serdes-ai-retries/src/executor.rs:34-106`) exposes no per-attempt hook,
   callback, or event — only `tracing` debug/warn lines and a final attempt count
   inside `RetryExhausted` / `RetryDeadlineExceeded`
-  (`models/src/error.rs:127-148`). A successful second attempt is
+  (`serdes-ai-models/src/error.rs:127-148`). A successful second attempt is
   indistinguishable from a first-attempt success at the API surface. This fails
-  ADR-0005's requirement that every authorization to attempt a provider
-  interaction be a distinct durable call.
+  [ADR-0005's](../decisions/0005-model-call-retry-semantics.md) requirement that
+  every authorization to attempt a provider interaction be a distinct durable
+  call.
 - **Can retries be provably confined to a pre-send boundary?** No. The
-  classifier retries anything `is_retryable()` (`retry.rs:61-69`), which
-  includes post-send evidence classes (`Server` 5xx responses, `Timeout`,
-  `Connection`, `IncompleteStream`). For streams it retries when the *first
-  stream item* is an error (`retry.rs:133-153`) — "no caller-visible output yet"
-  is a delivery fact, not proof the provider never accepted the request. A
-  first-event connection reset after a fully sent request is ADR-0043
-  `Ambiguous`, and `RetryingModel` would silently re-send it — precisely
-  ADR-0005's prohibited duplicate-risk path. The suppression guard after visible
-  output (`retry.rs:461-496` test) limits duplication of *observed* output only.
+  classifier retries anything `is_retryable()`
+  (`serdes-ai-models/src/retry.rs:61-69`), which includes post-send evidence
+  classes (`Server` 5xx responses, `Timeout`, `Connection`, `IncompleteStream`).
+  For streams it retries when the *first stream item* is an error
+  (`serdes-ai-models/src/retry.rs:133-153`) — "no caller-visible output yet" is
+  a delivery fact, not proof the provider never accepted the request. A
+  first-event connection reset after a fully sent request is
+  [ADR-0043](../decisions/0043-provider-failure-classification.md) `Ambiguous`,
+  and `RetryingModel` would silently re-send it — precisely
+  [ADR-0005's](../decisions/0005-model-call-retry-semantics.md) prohibited
+  duplicate-risk path. The suppression guard after visible output
+  (`serdes-ai-models/src/retry.rs:461-496` test) limits duplication of
+  *observed* output only.
 
 The separate `FallbackModel` has the same shape: it stops falling back only
-after a caller-visible stream event (`models/src/fallback.rs:64`), which is also
-not an acceptance boundary. Both wrappers must stay out of Signalbox provider
-paths; because both are opt-in, that is a usage rule, not a fork requirement.
+after a caller-visible stream event (`serdes-ai-models/src/fallback.rs:64`),
+which is also not an acceptance boundary. Both wrappers must stay out of
+Signalbox provider paths; because both are opt-in, that is a usage rule, not a
+fork requirement.
 
 ### Q5 — where provider evidence lives
 
 - Non-streaming:
   `ModelResponse { model_name, finish_reason, usage, vendor_id, vendor_details }`
-  (`core/src/messages/response.rs:14-37`). Both target adapters populate
-  `vendor_id` from the provider message/completion ID (`anthropic/model.rs:539`,
-  `openai/chat.rs:433`) and `model_name` from the provider-reported model — the
-  raw material for ADR-0005's `ProviderTargetObservation`.
+  (`serdes-ai-core/src/messages/response.rs:14-37`). Both target adapters
+  populate `vendor_id` from the provider message/completion ID
+  (`serdes-ai-models/src/anthropic/model.rs:539`,
+  `serdes-ai-models/src/openai/chat.rs:433`) and `model_name` from the
+  provider-reported model — the raw material for
+  [ADR-0005's](../decisions/0005-model-call-retry-semantics.md)
+  `ProviderTargetObservation`.
 - Usage: `RequestUsage` includes cache-creation/read token fields, populated by
-  Anthropic (`anthropic/model.rs:524-531`).
+  Anthropic (`serdes-ai-models/src/anthropic/model.rs:524-531`).
 - Streaming (Anthropic): terminal `StreamComplete` carries finish reason plus
-  input/output/cache token counts (`anthropic/stream.rs:385-398`). But
-  `message_id` and provider-reported `model` from `message_start` are stored in
-  private parser fields with no accessor (`anthropic/stream.rs:30-31`) and the
-  parser is boxed into the type-erased `StreamedResponse`
-  (`anthropic/model.rs:668-671`), so in streaming mode the provider message ID
-  and reported model identity are unobservable by any consumer. Target-mismatch
-  detection during streaming — ADR-0005's timing-sensitive rule — is currently
-  impossible without modifying the parser.
+  input/output/cache token counts
+  (`serdes-ai-models/src/anthropic/stream.rs:385-398`). But `message_id` and
+  provider-reported `model` from `message_start` are stored in private parser
+  fields with no accessor (`serdes-ai-models/src/anthropic/stream.rs:30-31`) and
+  the parser is boxed into the type-erased `StreamedResponse`
+  (`serdes-ai-models/src/anthropic/model.rs:668-671`), so in streaming mode the
+  provider message ID and reported model identity are unobservable by any
+  consumer. Target-mismatch detection during streaming —
+  [ADR-0005's](../decisions/0005-model-call-retry-semantics.md) timing-sensitive
+  rule — is currently impossible without modifying the parser.
 - Streaming (OpenAI chat): `finish_reason` is consumed only to emit `PartEnd`
-  events (`openai/stream.rs:292-320`); usage is requested
-  (`include_usage: true`, `openai/chat.rs:360`) but the parser never reads chunk
-  usage, and no `StreamComplete` is emitted (zero references in
-  `openai/stream.rs`). Finish reason, usage, and terminal confirmation are all
-  dropped on the floor.
+  events (`serdes-ai-models/src/openai/stream.rs:292-320`); usage is requested
+  (`include_usage: true`, `serdes-ai-models/src/openai/chat.rs:360`) but the
+  parser never reads chunk usage, and no `StreamComplete` is emitted (zero
+  references in `serdes-ai-models/src/openai/stream.rs`). Finish reason, usage,
+  and terminal confirmation are all dropped on the floor.
 - HTTP `request-id` response headers are read nowhere in either adapter (only
-  `retry-after` is parsed, `anthropic/model.rs:545-551`).
+  `retry-after` is parsed, `serdes-ai-models/src/anthropic/model.rs:545-551`).
 
 ### Q6 — extending structured-output validation
 
@@ -218,46 +246,55 @@ paths; because both are opt-in, that is a usage rule, not a fork requirement.
 classes are typed and roughly match the handoff's sketch: `OutputParseError`
 distinguishes JSON-syntax (`JsonParse`/`NotJson`/`NoJsonFound`) from
 schema-shape (`MissingField`/`InvalidField`/`UnexpectedTool`)
-(`output/src/error.rs:7-67`); `OutputValidationError` adds the domain layer with
-an explicit retry-request channel (`Failed { retry } | ModelRetry | Parse`,
-`output/src/error.rs:117-134`). Application validators are a public extension
-point: `OutputValidator<T, Deps>` trait plus `ValidatorChain`
-(`output/src/validator.rs:17,67`). Parsing/validation itself performs no model
-call; repair-by-re-prompt happens only in the agent loop (below), so using this
-crate directly keeps repair a separate, explicitly authorized call as the
-handoff's contract requires. Derives exist for schema generation
+(`serdes-ai-output/src/error.rs:7-67`); `OutputValidationError` adds the domain
+layer with an explicit retry-request channel
+(`Failed { retry } | ModelRetry | Parse`,
+`serdes-ai-output/src/error.rs:117-134`). Application validators are a public
+extension point: `OutputValidator<T, Deps>` trait plus `ValidatorChain`
+(`serdes-ai-output/src/validator.rs:17,67`). Parsing/validation itself performs
+no model call; repair-by-re-prompt happens only in the agent loop (below), so
+using this crate directly keeps repair a separate, explicitly authorized call as
+the handoff's contract requires. Derives exist for schema generation
 (`#[derive(OutputSchema)]`, `serdes-ai-macros/src/lib.rs:116`).
 
 ### Q7 — agent-loop continuation decisions
 
 For completeness (Signalbox would not use this loop): each `step()` issues a
-model request (`agent/src/run.rs:388-392`); tool calls are executed immediately
-and take priority over text output (`run.rs:476-481`); output validation failure
-appends a retry prompt and re-enters the loop up to `max_output_retries`
-(`run.rs:495-503`) — i.e., hidden repair model calls with no external
-authorization; failed tools are retried in an inner loop up to a per-tool
-`max_retries` (`run.rs:594-601`); an OpenAI refusal surfaces as a
-`ContentFiltered` error that aborts the run, and an Anthropic refusal is
-invisible (Q3). Every one of these auto-continuations conflicts with ADR-0005's
-one-authorization-one-call rule, which is the expected result: the loop is the
-layer Signalbox replaces.
+model request (`serdes-ai-agent/src/run.rs:388-392`); tool calls are executed
+immediately and take priority over text output
+(`serdes-ai-agent/src/run.rs:476-481`); output validation failure appends a
+retry prompt and re-enters the loop up to `max_output_retries`
+(`serdes-ai-agent/src/run.rs:495-503`) — i.e., hidden repair model calls with no
+external authorization, conflicting with
+[ADR-0005](../decisions/0005-model-call-retry-semantics.md). Failed tools are
+retried in an inner loop up to a per-tool `max_retries`
+(`serdes-ai-agent/src/run.rs:594-601`); that is a tool-lifecycle issue, not a
+model-call retry. The loop exposes no Signalbox `ToolAttemptId` or independently
+authorized, fenced dispatch for each execution as required by
+[ADR-0009](../decisions/0009-dispatch-fencing.md). An OpenAI refusal surfaces as
+a `ContentFiltered` error that aborts the run, and an Anthropic refusal is
+invisible (Q3). The hidden model repair conflicts with
+[ADR-0005](../decisions/0005-model-call-retry-semantics.md); tool re-execution
+conflicts with the separate durable tool-attempt and dispatch lifecycle. This is
+the expected result: the loop is the layer Signalbox replaces.
 
 ### Q8 — tool execution disabled, decoding and schemas retained
 
 Yes, cleanly, by layer choice rather than by flag. Tool schema types and
 definitions live in `serdes-ai-tools` (`ObjectJsonSchema`,
-`tools/src/definition.rs:16`; `ToolDefinition`, `:152-215`); definitions are
-passed to adapters via `ModelRequestParameters.tools`
-(`models/src/model.rs:22-23`); adapters translate schemas outbound and decode
-provider tool-call payloads inbound into
-`ToolCallPart { tool_name, args, tool_call_id }` parts and streaming deltas
-(`anthropic/stream.rs:256-264, 299-313`; Anthropic additionally validates
-accumulated tool-argument JSON at block end, `:340-359`). No execution machinery
+`serdes-ai-tools/src/definition.rs:16`; `ToolDefinition`,
+`serdes-ai-tools/src/definition.rs:152-215`); definitions are passed to adapters
+via `ModelRequestParameters.tools` (`serdes-ai-models/src/model.rs:22-23`);
+adapters translate schemas outbound and decode provider tool-call payloads
+inbound into `ToolCallPart { tool_name, args, tool_call_id }` parts and
+streaming deltas (`serdes-ai-models/src/anthropic/stream.rs:256-264,299-313`;
+Anthropic additionally validates accumulated tool-argument JSON at block end,
+`serdes-ai-models/src/anthropic/stream.rs:340-359`). No execution machinery
 exists at this layer — the executor lives in the agent crate and toolsets. The
 Q1 consumer build proves the decode/schema path compiles and runs with the agent
 crate absent. The tools crate also ships approval-flow types
-(`DeferredToolCall`, `tools/src/deferred.rs`) that are close in spirit to
-Signalbox's ToolRequest-decode-without-execute contract.
+(`DeferredToolCall`, `serdes-ai-tools/src/deferred.rs`) that are close in spirit
+to Signalbox's ToolRequest-decode-without-execute contract.
 
 ### Q9 — stability and maintenance signals
 
@@ -277,19 +314,21 @@ path. No API-stability policy or deprecation process is documented.
 ### Q10 — PydanticAI-derived behaviors: valuable vs conflicting
 
 Valuable for Signalbox: the provider-neutral message/part vocabulary including
-thinking, signatures, and redacted thinking (`core/src/messages/`); capability
-profiles with schema-transformer hooks (`models/src/profile.rs:40-83`);
-structured-output modes and typed failure classes (Q6); tool schema and
-decode-only tool calls (Q8); the Anthropic streaming-integrity pattern
-(`StreamComplete` + premature-EOF rejection) as a design template; provider wire
-types and SSE parsing structure.
+thinking, signatures, and redacted thinking (`serdes-ai-core/src/messages/`);
+capability profiles with schema-transformer hooks
+(`serdes-ai-models/src/profile.rs:40-83`); structured-output modes and typed
+failure classes (Q6); tool schema and decode-only tool calls (Q8); the Anthropic
+streaming-integrity pattern (`StreamComplete` + premature-EOF rejection) as a
+design template; provider wire types and SSE parsing structure.
 
 Conflicting with durable semantics: internal run-ID generation (Q4); the
-retry/fallback wrappers' post-send repetition (ADR-0005); retryability-first
-error taxonomy including `IncompleteStream`-is-transient (ADR-0043); the agent
-loop's hidden repair and tool auto-retry (Q7); refusal collapsed into errors or
-silence (Q3); usage-limit enforcement via in-process counters rather than
-durable budgets.
+retry/fallback wrappers' post-send repetition
+([ADR-0005](../decisions/0005-model-call-retry-semantics.md));
+retryability-first error taxonomy including `IncompleteStream`-is-transient
+([ADR-0043](../decisions/0043-provider-failure-classification.md)); the agent
+loop's hidden model repair and tool auto-retry (Q7); refusal collapsed into
+errors or silence (Q3); usage-limit enforcement via in-process counters rather
+than durable budgets.
 
 ## (b) Inferences (labeled as such)
 
@@ -298,20 +337,23 @@ durable budgets.
   rejection), adding refusal and cancellation evidence, exposing streaming
   message ID/model identity, and re-basing error construction on a full-send
   boundary would rewrite most of the transport/error core of both adapters.
-  Judgment, not measurement — but the affected regions (`openai/stream.rs`,
-  `openai/chat.rs`, `anthropic` error paths, `models/src/error.rs`) are the same
-  files a from-scratch thin layer would consist of.
+  Judgment, not measurement — but the affected regions
+  (`serdes-ai-models/src/openai/stream.rs`,
+  `serdes-ai-models/src/openai/chat.rs`, the `serdes-ai-models/src/anthropic/`
+  error paths, and `serdes-ai-models/src/error.rs`) are the same files a
+  from-scratch thin layer would consist of.
 - **Upstreamability.** The changes Signalbox needs are semantic reversals
   (retryability polarity, ambiguity-first classification), not additions; with
   effectively one dominant maintainer and PydanticAI parity as the stated goal,
   upstream acceptance is unlikely, so vendored crates should be assumed to
   hard-fork immediately. Inference from Q9 signals; receptivity was not tested
   by filing an issue.
-- **What is genuinely reusable.** Wire types (`anthropic/types.rs`,
-  `openai/types.rs`), the SSE record parser (`streaming/src/sse.rs`), the
-  message/part vocabulary, and the profile/schema-transform design would
-  transplant with little modification. The error, retry, and agent layers would
-  not survive contact with the ADRs.
+- **What is genuinely reusable.** Wire types
+  (`serdes-ai-models/src/anthropic/types.rs`,
+  `serdes-ai-models/src/openai/types.rs`), the SSE record parser
+  (`serdes-ai-streaming/src/sse.rs`), the message/part vocabulary, and the
+  profile/schema-transform design would transplant with little modification. The
+  error, retry, and agent layers would not survive contact with the ADRs.
 
 ## (c) Recommendation
 
@@ -329,16 +371,18 @@ that contradict the library's own retry/fallback design.
 Why hand-roll beats vendoring selected crates:
 
 1. The code Signalbox must trust most is exactly the code that needs rewriting.
-   ADR-0043 compliance lives in the send/error/stream-terminal paths; those are
-   deficient (Q2's unobservable boundary, Q3's inverted taxonomy, OpenAI's
-   silent-truncation streaming) and rewriting them in a vendored tree is the
-   same work as writing them in a Signalbox-owned module, minus the inherited
-   surface.
+   [ADR-0043](../decisions/0043-provider-failure-classification.md) compliance
+   lives in the send/error/stream-terminal paths; those are deficient (Q2's
+   unobservable boundary, Q3's inverted taxonomy, OpenAI's silent-truncation
+   streaming) and rewriting them in a vendored tree is the same work as writing
+   them in a Signalbox-owned module, minus the inherited surface.
 2. Vendoring cannot be surgical. The minimum compiling closure is eight crates
    (Q1), importing the retry/fallback wrappers and retryability helpers whose
-   semantics ADR-0005/0043 prohibit. Keeping prohibited-but-present API surface
-   (`is_retryable()`, `RetryingModel`, `FallbackModel`) inside the repo invites
-   accidental use; deleting it is a fork with extra steps.
+   semantics [ADR-0005](../decisions/0005-model-call-retry-semantics.md) and
+   [ADR-0043](../decisions/0043-provider-failure-classification.md) prohibit.
+   Keeping prohibited-but-present API surface (`is_retryable()`,
+   `RetryingModel`, `FallbackModel`) inside the repo invites accidental use;
+   deleting it is a fork with extra steps.
 3. The parts worth keeping are small and stable. Wire structs, SSE framing, and
    the part vocabulary are a minority of the code and change slowly;
    transplanting them into Signalbox-owned modules captures most of the leverage
@@ -355,23 +399,30 @@ vendored closure's relevant code, revisit this choice — the audit evidence
 supports either direction of that trade, and the decision belongs to the ADR
 process.
 
-### Smallest hand-rolled module set for M3 + real-provider smoke test
+### Implementation minimum and later audit coverage
 
-Estimated as Signalbox-owned modules (names illustrative), referencing SerdesAI
-files as the design source:
+The [real-provider smoke milestone](../target-model.md#priority-order) requires
+one provider adapter, not both audited adapters or the later tool loop. The
+actual minimum is `provider-core`, shared SSE framing, and one adapter;
+`provider-anthropic` is the illustrative first choice below because its stream
+integrity is the stronger audited design. OpenAI and schema/tool work remain in
+the table to record Phase-0 audit coverage, but are not part of that smoke gate.
+Names are illustrative.
 
-| Module               | Content                                                                                                                                                                                                                                              | Design reference                                                                 |
-| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| `provider-core`      | request/response message and part types (text, thinking, tool call), settings, usage incl. cache tokens, typed terminal evidence carrying ADR-0043 disposition + native status + `vendor_id` + reported model; IDs remain caller-supplied parameters | `serdes-ai-core/src/messages/`, `settings.rs`, `usage.rs`                        |
-| `provider-anthropic` | request builder, exhaustive native-status classification table, SSE stream parser with full-send observation, `message_start` identity surfacing, `message_stop`-gated terminal event, refusal stop-reason handling                                  | `anthropic/types.rs`, `anthropic/stream.rs`, `anthropic/error.rs`                |
-| `provider-openai`    | same shape for chat completions: `[DONE]`/EOF distinction, finish-reason + usage surfacing, refusal payload as first-class refusal evidence                                                                                                          | `openai/types.rs`, `openai/stream.rs`, `openai/chat.rs`                          |
-| `provider-schema`    | JSON-schema generation for output contracts and tools (evaluate the `schemars` crate before writing derives), output parse/validation failure classes, application-validator hook                                                                    | `serdes-ai-output/src/`, `serdes-ai-tools/src/definition.rs`, `serdes-ai-macros` |
-| shared SSE framing   | provider-agnostic SSE record parser with UTF-8/overflow/incomplete-record errors                                                                                                                                                                     | `serdes-ai-streaming/src/sse.rs`                                                 |
+| Module               | Milestone scope | Content                                                                                                                                                                                                                                                        | Design reference                                                                                                                 |
+| -------------------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `provider-core`      | Smoke minimum   | Request/response message and part types, settings, usage incl. cache tokens, typed terminal evidence carrying [ADR-0043](../decisions/0043-provider-failure-classification.md) disposition + native status + `vendor_id` + reported model; caller-supplied IDs | `serdes-ai-core/src/messages/`, `serdes-ai-core/src/settings.rs`, `serdes-ai-core/src/usage.rs`                                  |
+| shared SSE framing   | Smoke minimum   | Provider-agnostic SSE record parser with UTF-8/overflow/incomplete-record errors                                                                                                                                                                               | `serdes-ai-streaming/src/sse.rs`                                                                                                 |
+| `provider-anthropic` | One adapter     | Request builder, exhaustive native-status classification, SSE parser with full-send observation, `message_start` identity surfacing, `message_stop`-gated terminal event, refusal handling                                                                     | `serdes-ai-models/src/anthropic/types.rs`, `serdes-ai-models/src/anthropic/stream.rs`, `serdes-ai-models/src/anthropic/error.rs` |
+| `provider-openai`    | Later adapter   | Equivalent chat-completions shape: `[DONE]`/EOF distinction, finish-reason + usage surfacing, refusal payload as first-class evidence                                                                                                                          | `serdes-ai-models/src/openai/types.rs`, `serdes-ai-models/src/openai/stream.rs`, `serdes-ai-models/src/openai/chat.rs`           |
+| `provider-schema`    | Later tool work | JSON-schema generation for output contracts and tools (evaluate `schemars` before writing derives), output parse/validation failure classes, application-validator hook                                                                                        | `serdes-ai-output/src/`, `serdes-ai-tools/src/definition.rs`, `serdes-ai-macros/src/lib.rs`                                      |
 
-Four to five modules; no retry, fallback, agent-loop, registry, or execution
-machinery. Rough size anchor (inference): the corresponding SerdesAI source is
-about 4–5k lines including its tests, and the M3 subset drops media inputs,
-caching betas, and 13 of 15 providers.
+The smoke minimum is three modules and one provider. Full audited coverage is
+four to five modules; neither set includes retry, fallback, agent-loop,
+registry, or execution machinery. Rough size anchor (inference): the full
+corresponding SerdesAI source is about 4–5k lines including tests, and the smoke
+subset drops schema/tool work, media inputs, caching betas, and 14 of 15
+providers.
 
 ## Sources
 
@@ -382,4 +433,5 @@ caching betas, and 13 of 15 providers.
   (2026-07-20): research-question charter and repo-health facts noted as
   unverified where used
 - [ADR-0005](../decisions/0005-model-call-retry-semantics.md),
+  [ADR-0009](../decisions/0009-dispatch-fencing.md), and
   [ADR-0043](../decisions/0043-provider-failure-classification.md)
