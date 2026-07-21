@@ -75,7 +75,7 @@ pub trait StartEligibleTurnTransaction {
 }
 
 /// Coordinates one session's eligibility-time activation pass.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct StartEligibleTurnService<Generator, Transaction> {
     ids: Generator,
     transaction: Transaction,
@@ -114,6 +114,23 @@ where
         );
 
         self.transaction.handle(session, identities).await
+    }
+
+    pub(crate) fn execute_with_cloned_transaction(
+        &mut self,
+        session: SessionId,
+    ) -> impl Future<Output = Result<StartEligibleTurnOutcome, Transaction::Error>> + Send + 'static
+    where
+        Transaction: Clone + Send + 'static,
+        Transaction::Error: Send + 'static,
+    {
+        let identities = AcceptedInputTurnActivationIdentities::new(
+            self.ids.next_origin_entry_id(),
+            self.ids.next_starting_frontier_id(),
+            self.ids.next_initial_attempt_id(),
+        );
+        let mut transaction = self.transaction.clone();
+        async move { transaction.handle(session, identities).await }
     }
 }
 
