@@ -1,5 +1,6 @@
 //! The adapter runtime: one operation, at most one HTTP interaction.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Waker};
@@ -28,19 +29,34 @@ use crate::stream::{StreamDecoder, StreamStep};
 use crate::translate::build_request;
 use crate::wire::ErrorEnvelope;
 
+/// A response body is provider-controlled input. Keep complete buffered
+/// responses bounded independently of the requested output-token ceiling.
+const MAX_BUFFERED_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+
 /// The Anthropic Messages adapter.
 ///
 /// Implements [`ModelRuntime`]: executes exactly one authorized operation as
 /// at most one `POST /v1/messages` request and reports typed evidence. It
 /// holds no state between operations, retries nothing, and never issues a
 /// second request for one operation.
-#[derive(Debug)]
 pub struct AnthropicRuntime<A> {
     client: Client,
     messages_url: Url,
     credentials: A,
     version_header: HeaderValue,
     sse_record_limit: usize,
+}
+
+impl<A> std::fmt::Debug for AnthropicRuntime<A> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AnthropicRuntime")
+            .field("client", &self.client)
+            .field("messages_url", &self.messages_url)
+            .field("credentials", &"[redacted]")
+            .field("version_header", &"[sensitive]")
+            .field("sse_record_limit", &self.sse_record_limit)
+            .finish()
+    }
 }
 
 /// Why an [`AnthropicRuntime`] could not be constructed.
@@ -206,16 +222,18 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
                 },
             ));
         };
+        let mut redacting_sink = RedactingObservationSink::new(sink, &api_key);
         let evidence = self
             .exchange(
                 operation.delivery,
                 body,
                 api_key_header,
                 correlation,
-                &mut RedactingObservationSink::new(sink, &api_key),
+                &mut redacting_sink,
                 cancellation,
             )
             .await;
+        redacting_sink.flush();
         // ADR-0017: provider-controlled text in the evidence (error
         // messages, raw bodies, transport detail) is credential-sanitized
         // before it leaves the adapter boundary.
@@ -301,11 +319,9 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
         sink: &mut (dyn ObservationSink<C> + Send),
         cancellation: &mut CancellationSignal,
     ) -> TerminalEvidence {
-        let body = match with_cancellation(cancellation, response.bytes()).await {
+        let body = match collect_response_body(response, cancellation).await {
             None => return exchange_loss(LossCause::CancellationRequested, exchange),
-            Some(Err(error)) => {
-                return exchange_loss(classify_body_error(&error), exchange);
-            }
+            Some(Err(cause)) => return exchange_loss(cause, exchange),
             Some(Ok(bytes)) => bytes,
         };
         decode_buffered_response(&body, exchange, correlation, sink)
@@ -393,11 +409,9 @@ async fn finish_error(
     status: u16,
     cancellation: &mut CancellationSignal,
 ) -> TerminalEvidence {
-    let body = match with_cancellation(cancellation, response.bytes()).await {
+    let body = match collect_response_body(response, cancellation).await {
         None => return exchange_loss(LossCause::CancellationRequested, exchange),
-        Some(Err(error)) => {
-            return exchange_loss(classify_body_error(&error), exchange);
-        }
+        Some(Err(cause)) => return exchange_loss(cause, exchange),
         Some(Ok(bytes)) => bytes,
     };
     if let Ok(ErrorEnvelope {
@@ -433,6 +447,39 @@ async fn finish_error(
             message: Some(lossy_truncated(&body)),
         },
     })
+}
+
+/// Reads a non-streaming provider body without allowing it to grow without
+/// bound. `None` retains the caller-cancellation race used by both success
+/// and error paths.
+async fn collect_response_body(
+    response: reqwest::Response,
+    cancellation: &mut CancellationSignal,
+) -> Option<Result<Vec<u8>, LossCause>> {
+    let mut body = response.bytes_stream();
+    let mut collected = Vec::new();
+    loop {
+        match with_cancellation(cancellation, body.next()).await {
+            None => return None,
+            Some(None) => return Some(Ok(collected)),
+            Some(Some(Err(error))) => return Some(Err(classify_body_error(&error))),
+            Some(Some(Ok(chunk))) => {
+                let Some(next_len) = collected.len().checked_add(chunk.len()) else {
+                    return Some(Err(response_body_too_large()));
+                };
+                if next_len > MAX_BUFFERED_RESPONSE_BYTES {
+                    return Some(Err(response_body_too_large()));
+                }
+                collected.extend_from_slice(&chunk);
+            }
+        }
+    }
+}
+
+fn response_body_too_large() -> LossCause {
+    LossCause::ResponseBodyLost(TransportFacts::new(format!(
+        "response body exceeded the {MAX_BUFFERED_RESPONSE_BYTES}-byte adapter limit"
+    )))
 }
 
 fn emit<C: Clone>(
@@ -563,9 +610,22 @@ fn sensitive_header(api_key: &CredentialValue) -> Option<HeaderValue> {
 struct RedactingObservationSink<'a, C> {
     inner: &'a mut (dyn ObservationSink<C> + Send),
     credential: &'a str,
+    pending_stream_text: BTreeMap<(StreamField, u32), PendingStreamText<C>>,
 }
 
-impl<'a, C> RedactingObservationSink<'a, C> {
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum StreamField {
+    Text,
+    Thinking,
+    ToolArguments,
+}
+
+struct PendingStreamText<C> {
+    correlation: C,
+    text: String,
+}
+
+impl<'a, C: Clone> RedactingObservationSink<'a, C> {
     fn new(
         inner: &'a mut (dyn ObservationSink<C> + Send),
         credential: &'a CredentialValue,
@@ -573,14 +633,96 @@ impl<'a, C> RedactingObservationSink<'a, C> {
         Self {
             inner,
             credential: std::str::from_utf8(credential.expose_bytes()).unwrap_or_default(),
+            pending_stream_text: BTreeMap::new(),
+        }
+    }
+
+    fn flush(&mut self) {
+        for ((field, index), pending) in std::mem::take(&mut self.pending_stream_text) {
+            self.emit_stream_text(
+                field,
+                index,
+                pending.correlation,
+                redact_text(pending.text, self.credential),
+            );
+        }
+    }
+
+    fn emit_stream_text(&mut self, field: StreamField, index: u32, correlation: C, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        let fact = match field {
+            StreamField::Text => ObservationFact::TextDelta { index, text },
+            StreamField::Thinking => ObservationFact::ThinkingDelta { index, text },
+            StreamField::ToolArguments => ObservationFact::ToolArgumentsDelta {
+                index,
+                fragment: text,
+            },
+        };
+        self.inner.observe(Observation { correlation, fact });
+    }
+
+    fn redact_stream_delta(
+        &mut self,
+        field: StreamField,
+        index: u32,
+        correlation: C,
+        text: String,
+    ) {
+        let mut combined = self
+            .pending_stream_text
+            .remove(&(field, index))
+            .map_or_else(String::new, |pending| pending.text);
+        combined.push_str(&text);
+        let (emitted, pending) =
+            redact_complete_credentials_and_hold_prefix(combined, self.credential);
+        self.emit_stream_text(field, index, correlation.clone(), emitted);
+        if !pending.is_empty() {
+            self.pending_stream_text.insert(
+                (field, index),
+                PendingStreamText {
+                    correlation,
+                    text: pending,
+                },
+            );
         }
     }
 }
 
-impl<C> ObservationSink<C> for RedactingObservationSink<'_, C> {
-    fn observe(&mut self, mut observation: Observation<C>) {
-        observation.fact = redact_observation_fact(observation.fact, self.credential);
-        self.inner.observe(observation);
+impl<C: Clone> ObservationSink<C> for RedactingObservationSink<'_, C> {
+    fn observe(&mut self, observation: Observation<C>) {
+        match observation.fact {
+            ObservationFact::TextDelta { index, text } => {
+                self.redact_stream_delta(StreamField::Text, index, observation.correlation, text)
+            }
+            ObservationFact::ThinkingDelta { index, text } => self.redact_stream_delta(
+                StreamField::Thinking,
+                index,
+                observation.correlation,
+                text,
+            ),
+            ObservationFact::ToolArgumentsDelta { index, fragment } => self.redact_stream_delta(
+                StreamField::ToolArguments,
+                index,
+                observation.correlation,
+                fragment,
+            ),
+            ObservationFact::ToolCallProposed(proposal) => {
+                self.flush();
+                self.inner.observe(Observation {
+                    correlation: observation.correlation,
+                    fact: ObservationFact::ToolCallProposed(redact_proposal(
+                        proposal,
+                        self.credential,
+                    )),
+                });
+            }
+            fact => self.inner.observe(Observation {
+                correlation: observation.correlation,
+                fact: redact_observation_fact(fact, self.credential),
+            }),
+        }
     }
 }
 
@@ -596,20 +738,30 @@ fn redact_text(text: String, credential: &str) -> String {
 /// chunk boundaries are arbitrary: removing a credential prefix at the end
 /// of every emitted delta prevents a later delta from completing the secret
 /// without delaying synchronous observation delivery.
-fn redact_stream_fragment(text: String, credential: &str) -> String {
-    let mut text = redact_text(text, credential);
-    if credential.len() < 2 {
-        return text;
+fn redact_complete_credentials_and_hold_prefix(
+    mut text: String,
+    credential: &str,
+) -> (String, String) {
+    if credential.is_empty() {
+        return (text, String::new());
+    }
+    let mut redacted = String::new();
+    while let Some(position) = text.find(credential) {
+        redacted.push_str(&text[..position]);
+        redacted.push_str("[redacted]");
+        text = text[(position + credential.len())..].to_string();
     }
     let longest_prefix = (1..credential.len())
         .rev()
         .filter(|length| credential.is_char_boundary(*length))
         .find(|length| text.ends_with(&credential[..*length]));
     if let Some(length) = longest_prefix {
-        text.truncate(text.len() - length);
-        text.push_str("[redacted]");
+        let split = text.len() - length;
+        redacted.push_str(&text[..split]);
+        return (redacted, text[split..].to_string());
     }
-    text
+    redacted.push_str(&text);
+    (redacted, String::new())
 }
 
 fn redact_exchange(mut exchange: ExchangeFacts, credential: &str) -> ExchangeFacts {
@@ -680,16 +832,16 @@ fn redact_observation_fact(fact: ObservationFact, credential: &str) -> Observati
         }
         ObservationFact::TextDelta { index, text } => ObservationFact::TextDelta {
             index,
-            text: redact_stream_fragment(text, credential),
+            text: redact_text(text, credential),
         },
         ObservationFact::ThinkingDelta { index, text } => ObservationFact::ThinkingDelta {
             index,
-            text: redact_stream_fragment(text, credential),
+            text: redact_text(text, credential),
         },
         ObservationFact::ToolArgumentsDelta { index, fragment } => {
             ObservationFact::ToolArgumentsDelta {
                 index,
-                fragment: redact_stream_fragment(fragment, credential),
+                fragment: redact_text(fragment, credential),
             }
         }
         ObservationFact::ToolCallProposed(proposal) => {

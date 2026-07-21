@@ -216,6 +216,9 @@ impl StreamDecoder {
                 "message_start is missing its message/assistant envelope discriminators",
             );
         }
+        if !event.message.content.is_empty() {
+            return self.violation("message_start must not carry content blocks");
+        }
         let (Some(id), Some(model), Some(usage)) = (
             event.message.id,
             event.message.model,
@@ -459,6 +462,9 @@ impl StreamDecoder {
             }
             let finish = map_finish(&stop_reason, delta.stop_sequence);
             self.finish = Some(finish.clone());
+            if matches!(finish, FinishReason::Unrecognized { .. }) {
+                return self.violation("message_delta carries an unrecognized stop_reason");
+            }
             Self::emit(correlation, sink, ObservationFact::FinishReported(finish));
         }
         if let Some(usage) = event.usage.as_ref() {
@@ -1011,6 +1017,23 @@ mod tests {
 
         let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
             panic!("an opening envelope missing its discriminators must not start the stream");
+        };
+        assert!(matches!(
+            loss.cause,
+            LossCause::StreamProtocolViolation { .. }
+        ));
+    }
+
+    #[test]
+    fn message_start_with_embedded_content_is_a_protocol_violation() {
+        let (terminal, _) = drive(&[b"event: message_start\n\
+              data: {\"type\":\"message_start\",\"message\":{\"type\":\"message\",\
+              \"role\":\"assistant\",\"id\":\"msg_1\",\"model\":\"model-exact-1\",\
+              \"content\":[{\"type\":\"text\",\"text\":\"lost\"}],\
+              \"usage\":{\"input_tokens\":1}}}\n\n"]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("opening content must not be silently discarded");
         };
         assert!(matches!(
             loss.cause,

@@ -125,13 +125,20 @@ pub(crate) fn decode_buffered_response<C: Clone>(
         .map(convert_usage)
         .unwrap_or_default();
     let message_id = response.id.map(ProviderMessageId::new);
-    if reported_model.is_none() || message_id.is_none() || response.usage.is_none() {
+    if reported_model.is_none()
+        || message_id.is_none()
+        || response.usage.is_none()
+        || response
+            .usage
+            .as_ref()
+            .is_some_and(|usage| usage.input_tokens.is_none() || usage.output_tokens.is_none())
+    {
         // The documented completion envelope always carries id, model, and
         // usage; their absence means this is not valid completion material.
         return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
             cause: LossCause::ResponseUnintelligible {
                 detail: "success response is missing required completion fields \
-                         (id, model, usage)"
+                         (id, model, usage with input/output token counts)"
                     .to_string(),
             },
             exchange,
@@ -215,6 +222,17 @@ pub(crate) fn decode_buffered_response<C: Clone>(
         });
     };
     let finish = map_finish(&stop_reason, response.stop_sequence);
+    if matches!(finish, FinishReason::Unrecognized { .. }) {
+        return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            cause: LossCause::ResponseUnintelligible {
+                detail: "success response carries an unrecognized stop_reason".to_string(),
+            },
+            exchange,
+            reported_model,
+            finish_reported: Some(finish),
+            usage,
+        });
+    }
     sink.observe(Observation {
         correlation: correlation.clone(),
         fact: ObservationFact::FinishReported(finish.clone()),

@@ -101,6 +101,7 @@ fn tools_and_choice<C>(
 }
 
 fn wire_message(message: &ConversationMessage) -> Result<WireMessage, PreparationFailure> {
+    let mut user_text_seen = false;
     for part in &message.parts {
         let valid_role = matches!(part, MessagePart::Text(_))
             || matches!(
@@ -119,6 +120,19 @@ fn wire_message(message: &ConversationMessage) -> Result<WireMessage, Preparatio
                          thinking blocks in assistant messages"
                     .to_string(),
             });
+        }
+        if message.role == ConversationRole::User {
+            match part {
+                MessagePart::Text(_) => user_text_seen = true,
+                MessagePart::ToolResult(_) if user_text_seen => {
+                    return Err(PreparationFailure::UnsupportedOperation {
+                        detail: "Anthropic requires every tool result in a user message to \
+                                 precede text content"
+                            .to_string(),
+                    });
+                }
+                _ => {}
+            }
         }
     }
     let role = match message.role {
@@ -546,5 +560,26 @@ mod tests {
                 {"type": "redacted_thinking", "data": "opaque"}
             ])
         );
+    }
+
+    #[test]
+    fn user_tool_results_after_text_are_rejected_before_send() {
+        let mut operation = operation("call-14");
+        operation.messages = vec![ConversationMessage {
+            role: ConversationRole::User,
+            parts: vec![
+                MessagePart::Text("before".to_string()),
+                MessagePart::ToolResult(ToolResultRecord {
+                    tool_call_id: ToolCallId::new("toolu_1"),
+                    content: "result".to_string(),
+                    is_error: false,
+                }),
+            ],
+        }];
+
+        assert!(matches!(
+            build_request(&operation),
+            Err(PreparationFailure::UnsupportedOperation { .. })
+        ));
     }
 }
