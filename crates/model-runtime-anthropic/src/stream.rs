@@ -171,6 +171,9 @@ impl StreamDecoder {
             Ok(envelope) => envelope,
             Err(step) => return *step,
         };
+        if envelope.envelope_type != "error" {
+            return self.violation("error event payload has the wrong discriminator");
+        }
         let Some(error) = envelope.error else {
             return self.violation("error event without an error payload");
         };
@@ -200,6 +203,9 @@ impl StreamDecoder {
             Ok(event) => event,
             Err(step) => return *step,
         };
+        if event.event_type != "message_start" {
+            return self.violation("message_start payload has the wrong discriminator");
+        }
         // The stream's opening envelope is held to the same documented
         // shape as a buffered success: discriminators, id, model, and
         // usage must all be present.
@@ -240,6 +246,9 @@ impl StreamDecoder {
             Ok(event) => event,
             Err(step) => return *step,
         };
+        if event.event_type != "content_block_start" {
+            return self.violation("content_block_start payload has the wrong discriminator");
+        }
         if self.open_blocks.contains_key(&event.index) || self.closed.contains_key(&event.index) {
             return self.violation(format!("content_block_start reopens index {}", event.index));
         }
@@ -289,6 +298,9 @@ impl StreamDecoder {
             Ok(event) => event,
             Err(step) => return *step,
         };
+        if event.event_type != "content_block_delta" {
+            return self.violation("content_block_delta payload has the wrong discriminator");
+        }
         let index = event.index;
         let Some(builder) = self.open_blocks.get_mut(&index) else {
             return self.violation(format!("content_block_delta for unopened index {index}"));
@@ -358,6 +370,9 @@ impl StreamDecoder {
             Ok(event) => event,
             Err(step) => return *step,
         };
+        if event.event_type != "content_block_stop" {
+            return self.violation("content_block_stop payload has the wrong discriminator");
+        }
         let Some(builder) = self.open_blocks.remove(&event.index) else {
             return self.violation(format!(
                 "content_block_stop for unopened index {}",
@@ -431,6 +446,9 @@ impl StreamDecoder {
             Ok(event) => event,
             Err(step) => return *step,
         };
+        if event.event_type != "message_delta" {
+            return self.violation("message_delta payload has the wrong discriminator");
+        }
         if let Some(delta) = event.delta
             && let Some(stop_reason) = delta.stop_reason
         {
@@ -1048,6 +1066,23 @@ mod tests {
 
         let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
             panic!("a mismatched terminal discriminator must not cross the integrity gate");
+        };
+        assert!(matches!(
+            loss.cause,
+            LossCause::StreamProtocolViolation { .. }
+        ));
+    }
+
+    #[test]
+    fn non_terminal_event_with_the_wrong_discriminator_is_a_protocol_violation() {
+        let (terminal, _) = drive(&[
+            message_start(),
+            b"event: message_delta\n\
+              data: {\"type\":\"ping\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("a contradictory known-event discriminator must be a protocol violation");
         };
         assert!(matches!(
             loss.cause,

@@ -597,7 +597,10 @@ async fn inv_035_streamed_delta_reflecting_the_key_is_redacted_before_observatio
         \"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n\
         event: content_block_delta\n\
         data: {\"type\":\"content_block_delta\",\"index\":0,\
-        \"delta\":{\"type\":\"text_delta\",\"text\":\"key_loop\"}}\n\n\
+        \"delta\":{\"type\":\"text_delta\",\"text\":\"key_\"}}\n\n\
+        event: content_block_delta\n\
+        data: {\"type\":\"content_block_delta\",\"index\":0,\
+        \"delta\":{\"type\":\"text_delta\",\"text\":\"loop\"}}\n\n\
         event: content_block_stop\n\
         data: {\"type\":\"content_block_stop\",\"index\":0}\n\n\
         event: message_delta\n\
@@ -619,6 +622,55 @@ async fn inv_035_streamed_delta_reflecting_the_key_is_redacted_before_observatio
         !format!("{observations:?}").contains("key_loop"),
         "streamed content must be sanitized before reaching the sink"
     );
+}
+
+#[tokio::test]
+async fn truncated_sse_record_is_stream_integrity_loss() {
+    let sse: &[u8] = b"event: message_start\n\
+        data: {\"type\":\"message_start\",\"message\":{\"type\":\"message\",\
+        \"role\":\"assistant\",\"id\":\"msg_1\",\"model\":\"model-exact-1\",\
+        \"content\":[],\"usage\":{\"input_tokens\":1}}}\n\n\
+        event: content_block_delta\n\
+        data: {\"type\":\"content_block_delta\"";
+    let server = CannedServer::serving(vec![http_response("200 OK", &[], sse)]).await;
+    let runtime = runtime_for(&server.base_url);
+    let mut streamed = operation("call-truncated-record");
+    streamed.delivery = DeliveryMode::Streamed;
+
+    let (report, _) = execute(&runtime, streamed, CancellationSignal::never()).await;
+
+    let TerminalEvidence::BoundaryLoss(loss) = report.evidence else {
+        panic!("a truncated SSE record must be boundary-loss evidence");
+    };
+    assert!(matches!(
+        loss.cause,
+        LossCause::StreamProtocolViolation { .. }
+    ));
+}
+
+#[tokio::test]
+async fn wrong_error_envelope_discriminator_falls_back_to_http_status() {
+    let body = br#"{"type":"message","error":{"type":"authentication_error",
+                    "message":"incidental nested shape"}}"#;
+    let server = CannedServer::serving(vec![http_response(
+        "400 Bad Request",
+        &[("content-type", "application/json")],
+        body,
+    )])
+    .await;
+    let runtime = runtime_for(&server.base_url);
+
+    let (report, _) = execute(
+        &runtime,
+        operation("call-wrong-error-discriminator"),
+        CancellationSignal::never(),
+    )
+    .await;
+
+    let TerminalEvidence::ProviderError(error) = report.evidence else {
+        panic!("a documented error status remains definitive provider error evidence");
+    };
+    assert_eq!(error.kind, ProviderErrorKind::InvalidRequest);
 }
 
 #[test]

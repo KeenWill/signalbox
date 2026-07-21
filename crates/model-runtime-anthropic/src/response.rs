@@ -489,6 +489,17 @@ mod tests {
     }
 
     #[test]
+    fn envelope_without_content_is_boundary_loss_not_empty_completion() {
+        let (evidence, _) = decode(
+            r#"{"id":"msg_1","type":"message","role":"assistant",
+                "model":"model-exact-1","stop_reason":"end_turn",
+                "usage":{"input_tokens":1,"output_tokens":1}}"#,
+        );
+
+        assert!(matches!(evidence, TerminalEvidence::BoundaryLoss(_)));
+    }
+
+    #[test]
     fn unparseable_success_body_is_boundary_loss() {
         let (evidence, observations) = decode("<html>gateway</html>");
 

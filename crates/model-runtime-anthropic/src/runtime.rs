@@ -330,7 +330,17 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
             match chunk {
                 // End of transport without `message_stop`: the explicit
                 // incomplete-stream fact, never silent success.
-                None => return decoder.lost(StreamInterruption::EndOfStream),
+                None => {
+                    return match framing.finish() {
+                        signalbox_model_runtime::SseTermination::Clean => {
+                            decoder.lost(StreamInterruption::EndOfStream)
+                        }
+                        signalbox_model_runtime::SseTermination::TruncatedRecord => decoder
+                            .violation_evidence(
+                                "transport ended inside an incomplete SSE record".to_string(),
+                            ),
+                    };
+                }
                 Some(Err(error)) => {
                     let interruption = if error.is_timeout() {
                         StreamInterruption::TimedOut(transport_facts(&error))
@@ -390,7 +400,12 @@ async fn finish_error(
         }
         Some(Ok(bytes)) => bytes,
     };
-    if let Ok(ErrorEnvelope { error: Some(error) }) = serde_json::from_slice(&body) {
+    if let Ok(ErrorEnvelope {
+        envelope_type,
+        error: Some(error),
+    }) = serde_json::from_slice(&body)
+        && envelope_type == "error"
+    {
         // Token first; when the token is absent or unrecognized, the HTTP
         // status still carries the documented category, so classification
         // never depends on incidental body shape.
@@ -577,6 +592,26 @@ fn redact_text(text: String, credential: &str) -> String {
     }
 }
 
+/// Redacts a complete credential and any trailing prefix of it. Provider
+/// chunk boundaries are arbitrary: removing a credential prefix at the end
+/// of every emitted delta prevents a later delta from completing the secret
+/// without delaying synchronous observation delivery.
+fn redact_stream_fragment(text: String, credential: &str) -> String {
+    let mut text = redact_text(text, credential);
+    if credential.len() < 2 {
+        return text;
+    }
+    let longest_prefix = (1..credential.len())
+        .rev()
+        .filter(|length| credential.is_char_boundary(*length))
+        .find(|length| text.ends_with(&credential[..*length]));
+    if let Some(length) = longest_prefix {
+        text.truncate(text.len() - length);
+        text.push_str("[redacted]");
+    }
+    text
+}
+
 fn redact_exchange(mut exchange: ExchangeFacts, credential: &str) -> ExchangeFacts {
     exchange.provider_request_id = exchange.provider_request_id.map(|request_id| {
         ProviderRequestId::new(redact_text(request_id.as_str().to_string(), credential))
@@ -645,16 +680,16 @@ fn redact_observation_fact(fact: ObservationFact, credential: &str) -> Observati
         }
         ObservationFact::TextDelta { index, text } => ObservationFact::TextDelta {
             index,
-            text: redact_text(text, credential),
+            text: redact_stream_fragment(text, credential),
         },
         ObservationFact::ThinkingDelta { index, text } => ObservationFact::ThinkingDelta {
             index,
-            text: redact_text(text, credential),
+            text: redact_stream_fragment(text, credential),
         },
         ObservationFact::ToolArgumentsDelta { index, fragment } => {
             ObservationFact::ToolArgumentsDelta {
                 index,
-                fragment: redact_text(fragment, credential),
+                fragment: redact_stream_fragment(fragment, credential),
             }
         }
         ObservationFact::ToolCallProposed(proposal) => {

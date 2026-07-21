@@ -91,7 +91,6 @@ pub(crate) struct MessagesResponse {
     pub role: Option<String>,
     pub id: Option<String>,
     pub model: Option<String>,
-    #[serde(default)]
     pub content: Vec<Box<serde_json::value::RawValue>>,
     pub stop_reason: Option<String>,
     pub stop_sequence: Option<String>,
@@ -195,6 +194,8 @@ pub(crate) struct WireUsage {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ErrorEnvelope {
+    #[serde(rename = "type")]
+    pub envelope_type: String,
     pub error: Option<WireError>,
 }
 
@@ -219,17 +220,23 @@ impl WireError {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct MessageStartEvent {
+    #[serde(rename = "type")]
+    pub event_type: String,
     pub message: MessagesResponse,
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ContentBlockStartEvent {
+    #[serde(rename = "type")]
+    pub event_type: String,
     pub index: u32,
     pub content_block: Box<serde_json::value::RawValue>,
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ContentBlockDeltaEvent {
+    #[serde(rename = "type")]
+    pub event_type: String,
     pub index: u32,
     pub delta: WireDelta,
 }
@@ -253,11 +260,15 @@ pub(crate) enum WireDelta {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ContentBlockStopEvent {
+    #[serde(rename = "type")]
+    pub event_type: String,
     pub index: u32,
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct MessageDeltaEvent {
+    #[serde(rename = "type")]
+    pub event_type: String,
     pub delta: Option<MessageDeltaBody>,
     pub usage: Option<WireUsage>,
 }
