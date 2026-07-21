@@ -1,6 +1,6 @@
 # Markdown formatting for repository docs; CI runs the same check.
-# Requires the pinned toolchain in tooling/requirements-mdformat.txt,
-# provided by the devenv environment (GFM tables pass through unwrapped;
+# Requires the pinned toolchain in tooling/requirements-mdformat.txt, provided
+# through devenv locally and a CI venv (GFM tables pass through unwrapped;
 # fenced code blocks are untouched).
 wrap = 80     # wrap prose at 80 columns; long unbreakable tokens may exceed
 number = true # keep consecutive ordered-list numbering
