@@ -260,6 +260,10 @@ pub enum ProviderErrorKind {
     RequestTooLarge,
     /// The provider refused the request for rate-limit reasons.
     RateLimited,
+    /// The provider reported the account's available quota exhausted — a
+    /// billing condition, kept distinct from transient rate limiting so
+    /// caller backoff policy never treats it as retry-later.
+    QuotaExhausted,
     /// The provider reported itself overloaded.
     Overloaded,
     /// The provider reported an internal error.
@@ -331,6 +335,14 @@ pub enum PreparationFailure {
     /// The adapter's configuration cannot address the provider.
     InvalidConfiguration {
         /// What is invalid.
+        detail: String,
+    },
+    /// The provider credential could not be read during send preparation
+    /// (ADR-0017: a failed credential read at send preparation means
+    /// preparation cannot proceed — a known failure, never a retry). The
+    /// detail never carries the credential value.
+    CredentialUnavailable {
+        /// Why the credential could not be read.
         detail: String,
     },
 }
