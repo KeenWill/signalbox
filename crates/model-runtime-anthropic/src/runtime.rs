@@ -265,15 +265,18 @@ impl AnthropicRuntime {
                     )));
                 }
                 Some(Ok(bytes)) => {
-                    let records = match framing.push(&bytes) {
-                        Ok(records) => records,
-                        Err(error) => return decoder.violation_evidence(error.to_string()),
-                    };
-                    for record in records {
+                    // Records completed before a framing failure are applied
+                    // first, so evidence they carry is never lost to how the
+                    // transport batched bytes.
+                    let outcome = framing.push(&bytes);
+                    for record in outcome.records {
                         match decoder.apply(&record, correlation, sink) {
                             StreamStep::Continue => {}
                             StreamStep::Terminal(evidence) => return evidence,
                         }
+                    }
+                    if let Some(error) = outcome.error {
+                        return decoder.violation_evidence(error.to_string());
                     }
                 }
             }

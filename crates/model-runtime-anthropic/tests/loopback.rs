@@ -15,10 +15,10 @@
 use std::sync::{Arc, Mutex};
 
 use signalbox_model_runtime::{
-    AssistantPart, CancellationSignal, ConversationMessage, DeliveryMode, FinishReason, LossCause,
-    ModelOperation, ModelRuntime, ModelSettings, Observation, ObservationFact, ProviderErrorKind,
-    ProviderRequestId, RequestedTarget, ResolvedTarget, StreamInterruption, TerminalEvidence,
-    TerminalReport, UnsentCause,
+    AssistantPart, CancellationSignal, CompletionFinish, ConversationMessage, DeliveryMode,
+    LossCause, ModelOperation, ModelRuntime, ModelSettings, Observation, ObservationFact,
+    ProviderErrorKind, ProviderRequestId, RequestedTarget, ResolvedTarget, StreamInterruption,
+    TerminalEvidence, TerminalReport, UnsentCause,
 };
 use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime, ApiKey};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -171,7 +171,7 @@ async fn buffered_completion_end_to_end_sends_the_documented_request_shape() {
     let TerminalEvidence::Completed(completion) = report.evidence else {
         panic!("a canned success response must classify as completed");
     };
-    assert_eq!(completion.finish, FinishReason::EndTurn);
+    assert_eq!(completion.finish, CompletionFinish::EndTurn);
     assert_eq!(
         completion.content,
         vec![AssistantPart::Text("hi".to_string())]

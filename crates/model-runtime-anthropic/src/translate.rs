@@ -113,6 +113,13 @@ fn wire_message(message: &ConversationMessage) -> Result<WireMessage, Preparatio
                 content: result.content.clone(),
                 is_error: result.is_error,
             }),
+            MessagePart::Thinking { text, signature } => Ok(WireRequestBlock::Thinking {
+                thinking: text.clone(),
+                signature: signature.clone(),
+            }),
+            MessagePart::RedactedThinking { data } => {
+                Ok(WireRequestBlock::RedactedThinking { data: data.clone() })
+            }
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(WireMessage { role, content })
@@ -353,5 +360,33 @@ mod tests {
             failure,
             PreparationFailure::SerializationFailed { .. }
         ));
+    }
+
+    #[test]
+    fn replayed_reasoning_parts_serialize_as_thinking_blocks() {
+        let mut operation = operation("call-8");
+        operation.messages = vec![ConversationMessage {
+            role: ConversationRole::Assistant,
+            parts: vec![
+                MessagePart::Thinking {
+                    text: "step one".to_string(),
+                    signature: Some("sig_1".to_string()),
+                },
+                MessagePart::RedactedThinking {
+                    data: "opaque".to_string(),
+                },
+            ],
+        }];
+
+        let request = build_request(&operation).expect("reasoning history translates");
+        let value = serde_json::to_value(&request).expect("wire request serializes");
+
+        assert_eq!(
+            value["messages"][0]["content"],
+            serde_json::json!([
+                {"type": "thinking", "thinking": "step one", "signature": "sig_1"},
+                {"type": "redacted_thinking", "data": "opaque"}
+            ])
+        );
     }
 }
