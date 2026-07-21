@@ -50,10 +50,11 @@ mod tool;
 mod usage;
 
 pub use evidence::{
-    BoundaryLossEvidence, CompletionEvidence, ExchangeFacts, FinishReason, LossCause,
-    NativeErrorFacts, PreparationFailure, ProvenUnsentEvidence, ProviderErrorEvidence,
-    ProviderErrorKind, ProviderMessageId, ProviderRequestId, RefusalEvidence, StreamInterruption,
-    TerminalEvidence, TerminalReport, TransportFacts, UnsentCause,
+    BoundaryLossEvidence, CancellationConfirmedEvidence, CompletionEvidence, CompletionFinish,
+    ExchangeFacts, FinishReason, LossCause, NativeErrorFacts, PreparationFailure,
+    ProvenUnsentEvidence, ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId,
+    ProviderRequestId, RefusalEvidence, StreamInterruption, TerminalEvidence, TerminalReport,
+    TransportFacts, UnsentCause,
 };
 pub use message::{
     AssistantPart, ConversationMessage, ConversationRole, MessagePart, ToolResultRecord,
@@ -67,7 +68,7 @@ pub use output::{
 pub use runtime::{CancellationSignal, ModelRuntime};
 pub use scripted::{Script, ScriptedModel};
 pub use settings::ModelSettings;
-pub use sse::{SseFraming, SseFramingError, SseRecord, SseTermination};
+pub use sse::{SseFraming, SseFramingError, SsePushOutcome, SseRecord, SseTermination};
 pub use target::{ProviderReportedModel, RequestedTarget, ResolvedTarget};
 pub use tool::{
     ToolCallId, ToolCallProposal, ToolDecodeFailure, ToolDefinition, ToolName,

@@ -33,6 +33,7 @@ pub struct TerminalReport<C> {
 /// | [`Completed`](Self::Completed) | `Completed` |
 /// | [`Refused`](Self::Refused) | `Refused` |
 /// | [`ProviderError`](Self::ProviderError) | `KnownFailed` (a complete, correlated definitive provider error response; credential rejection stays distinguishable via [`ProviderErrorKind::CredentialRejected`]) |
+/// | [`CancellationConfirmed`](Self::CancellationConfirmed) | `Cancelled` — a complete, correlated response definitively confirming provider cancellation |
 /// | [`ProvenUnsent`](Self::ProvenUnsent) | `KnownFailed`, or `Cancelled` when the cause is [`UnsentCause::CancelledBeforeSend`] and the caller holds ADR-0005's applied-interrupt proof |
 /// | [`BoundaryLoss`](Self::BoundaryLoss) | `Ambiguous` — the request crossed or may have crossed the acceptance-capable boundary and no definitive response classifies it |
 ///
@@ -49,6 +50,12 @@ pub enum TerminalEvidence {
     Refused(RefusalEvidence),
     /// A complete, correlated definitive provider error response.
     ProviderError(ProviderErrorEvidence),
+    /// A complete, correlated provider response definitively confirming
+    /// provider-side cancellation (ADR-0043's cancellation-response
+    /// branch). Neither in-repository adapter's provider documents such a
+    /// response today; the variant keeps the vocabulary total so an adapter
+    /// that observes one is never forced to misclassify it.
+    CancellationConfirmed(CancellationConfirmedEvidence),
     /// The request provably never reached an acceptance-capable boundary.
     ProvenUnsent(ProvenUnsentEvidence),
     /// The request crossed or may have crossed the acceptance-capable
@@ -128,6 +135,64 @@ pub enum FinishReason {
     },
 }
 
+impl FinishReason {
+    /// This finish reason as a completion finish, or `None` for
+    /// [`Refusal`](Self::Refusal): a refusal outcome is
+    /// [`TerminalEvidence::Refused`], never completion.
+    pub fn completion_finish(self) -> Option<CompletionFinish> {
+        match self {
+            Self::EndTurn => Some(CompletionFinish::EndTurn),
+            Self::MaxOutputTokens => Some(CompletionFinish::MaxOutputTokens),
+            Self::StopSequence { sequence } => Some(CompletionFinish::StopSequence { sequence }),
+            Self::ToolUse => Some(CompletionFinish::ToolUse),
+            Self::Refusal => None,
+            Self::Unrecognized { provider_token } => {
+                Some(CompletionFinish::Unrecognized { provider_token })
+            }
+        }
+    }
+}
+
+/// Why a completed exchange stopped generating.
+///
+/// The refusal outcome is deliberately unrepresentable here: completion
+/// evidence carrying a refusal stop reason would contradict
+/// [`TerminalEvidence::Refused`], so the vocabulary excludes it by
+/// construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompletionFinish {
+    /// The model finished its turn.
+    EndTurn,
+    /// Generation hit the operation's output-token ceiling.
+    MaxOutputTokens,
+    /// Generation hit a caller-declared stop sequence.
+    StopSequence {
+        /// The sequence the provider reported hitting, when reported.
+        sequence: Option<String>,
+    },
+    /// The model stopped to propose tool calls.
+    ToolUse,
+    /// A stop reason this crate does not recognize, retained verbatim.
+    Unrecognized {
+        /// The provider's stop-reason token, exactly as observed.
+        provider_token: String,
+    },
+}
+
+impl From<CompletionFinish> for FinishReason {
+    fn from(finish: CompletionFinish) -> Self {
+        match finish {
+            CompletionFinish::EndTurn => Self::EndTurn,
+            CompletionFinish::MaxOutputTokens => Self::MaxOutputTokens,
+            CompletionFinish::StopSequence { sequence } => Self::StopSequence { sequence },
+            CompletionFinish::ToolUse => Self::ToolUse,
+            CompletionFinish::Unrecognized { provider_token } => {
+                Self::Unrecognized { provider_token }
+            }
+        }
+    }
+}
+
 /// Evidence for a completed exchange with valid completion material.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompletionEvidence {
@@ -138,9 +203,8 @@ pub struct CompletionEvidence {
     /// The model identity the provider reported, when reported. Comparing it
     /// with the resolved target is the caller's classification work.
     pub reported_model: Option<ProviderReportedModel>,
-    /// Why generation stopped. Never [`FinishReason::Refusal`]: a refusal
-    /// outcome is reported as [`TerminalEvidence::Refused`].
-    pub finish: FinishReason,
+    /// Why generation stopped; refusal is unrepresentable by construction.
+    pub finish: CompletionFinish,
     /// The assistant response parts, in provider order.
     pub content: Vec<AssistantPart>,
     /// Provider-reported usage.
@@ -214,15 +278,25 @@ pub struct NativeErrorFacts {
     pub message: Option<String>,
 }
 
-/// Evidence that the request provably never reached an acceptance-capable
-/// boundary.
+/// Evidence for a complete, correlated provider response that definitively
+/// confirms provider-side cancellation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CancellationConfirmedEvidence {
+    /// Correlated exchange facts.
+    pub exchange: ExchangeFacts,
+    /// The provider's native confirmation material, retained verbatim.
+    pub native: NativeErrorFacts,
+}
+
+/// Evidence that the provider provably could not have accepted or acted on
+/// the request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProvenUnsentEvidence {
-    /// Why the request was provably never sent.
+    /// Why acceptance was provably impossible.
     pub cause: UnsentCause,
 }
 
-/// Why a request was provably never sent.
+/// Why provider acceptance was provably impossible.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnsentCause {
     /// Local preparation failed before any send was attempted.
@@ -232,6 +306,13 @@ pub enum UnsentCause {
     /// Establishing the connection failed before any request byte could be
     /// written.
     ConnectFailed(TransportFacts),
+    /// The request write began but did not complete, and the selected
+    /// provider and transport contract proves partial input could not have
+    /// been accepted or acted on (ADR-0043's incomplete-write proof). The
+    /// in-repository HTTP adapters never construct this: an HTTP server can
+    /// begin acting before end-of-request framing, so their incomplete
+    /// writes are boundary-loss evidence instead.
+    SendIncompleteProvenUnacceptable(TransportFacts),
 }
 
 /// A local preparation failure, classified before any transport work.

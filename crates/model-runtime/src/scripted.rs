@@ -51,21 +51,30 @@ impl Script {
 /// [`ModelRuntime`] surface.
 ///
 /// Each execution consumes the next script in order and records the
-/// operation it received for later assertion. An execution beyond the last
-/// script reports a proven-unsent preparation failure naming the exhaustion,
-/// so a miscounted test fails on evidence rather than panicking.
+/// operation it received for later assertion; both live under one lock, so
+/// concurrent executions record operations in exactly their
+/// script-consumption order. An execution beyond the last script reports a
+/// proven-unsent preparation failure naming the exhaustion, so a miscounted
+/// test fails on evidence rather than panicking.
 #[derive(Debug)]
 pub struct ScriptedModel<C> {
-    scripts: Mutex<VecDeque<Script>>,
-    received: Mutex<Vec<ModelOperation<C>>>,
+    state: Mutex<ScriptedState<C>>,
+}
+
+#[derive(Debug)]
+struct ScriptedState<C> {
+    scripts: VecDeque<Script>,
+    received: Vec<ModelOperation<C>>,
 }
 
 impl<C> ScriptedModel<C> {
     /// A model that follows the given scripts, one per execution, in order.
     pub fn following(scripts: impl IntoIterator<Item = Script>) -> Self {
         Self {
-            scripts: Mutex::new(scripts.into_iter().collect()),
-            received: Mutex::new(Vec::new()),
+            state: Mutex::new(ScriptedState {
+                scripts: scripts.into_iter().collect(),
+                received: Vec::new(),
+            }),
         }
     }
 
@@ -79,9 +88,10 @@ impl<C> ScriptedModel<C> {
     where
         C: Clone,
     {
-        self.received
+        self.state
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+            .received
             .clone()
     }
 }
@@ -93,16 +103,15 @@ impl<C: Clone + Send + Sync> ModelRuntime<C> for ScriptedModel<C> {
         sink: &mut (dyn ObservationSink<C> + Send),
         _cancellation: CancellationSignal,
     ) -> impl Future<Output = TerminalReport<C>> + Send {
-        let script = self
-            .scripts
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .pop_front();
         let correlation = operation.correlation.clone();
-        self.received
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(operation);
+        let script = {
+            // One lock for dequeue and receipt: recorded order is
+            // script-consumption order even under concurrent executions.
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            let script = state.scripts.pop_front();
+            state.received.push(operation);
+            script
+        };
         let evidence = match script {
             Some(script) => {
                 for fact in script.observations {
@@ -133,8 +142,8 @@ mod tests {
 
     use super::{Script, ScriptedModel};
     use crate::evidence::{
-        CompletionEvidence, ExchangeFacts, FinishReason, PreparationFailure, ProvenUnsentEvidence,
-        TerminalEvidence, UnsentCause,
+        CompletionEvidence, CompletionFinish, ExchangeFacts, PreparationFailure,
+        ProvenUnsentEvidence, TerminalEvidence, UnsentCause,
     };
     use crate::message::AssistantPart;
     use crate::observation::{Observation, ObservationFact};
@@ -171,7 +180,7 @@ mod tests {
             exchange: ExchangeFacts::default(),
             message_id: None,
             reported_model: Some(ProviderReportedModel::new("model-x-exact")),
-            finish: FinishReason::EndTurn,
+            finish: CompletionFinish::EndTurn,
             content: vec![AssistantPart::Text("scripted".to_string())],
             usage: TokenUsage::unreported(),
         })

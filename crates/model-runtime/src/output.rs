@@ -66,12 +66,20 @@ impl<T> DomainValidator<T> for NoDomainConstraints {
 /// Why response material did not decode into the contracted type.
 ///
 /// The classes stay distinct so the caller can react differently to a
-/// response with no structured value, malformed JSON, well-formed JSON of
-/// the wrong shape, and a well-shaped value its domain rejects.
+/// response with no structured value, more than one, malformed JSON,
+/// well-formed JSON of the wrong shape, and a well-shaped value its domain
+/// rejects.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StructuredDecodeFailure<I> {
     /// The response carries no proposal for the contract.
     NoStructuredValue,
+    /// The response carries more than one proposal for the contract, which
+    /// promises exactly one value; picking one silently would let provider
+    /// part ordering choose the result.
+    MultipleStructuredValues {
+        /// How many proposals carried the contract's name.
+        count: usize,
+    },
     /// The proposed value is not syntactically valid JSON.
     JsonSyntax {
         /// The parser's rendered description.
@@ -92,8 +100,12 @@ pub enum StructuredDecodeFailure<I> {
 
 /// Decodes the contracted structured value from assistant response parts.
 ///
-/// Scans for the proposal carrying the contract's name, then decodes and
-/// validates it via [`decode_structured_json`].
+/// Finds the proposal carrying the contract's name — exactly one must be
+/// present — then decodes and validates it via [`decode_structured_json`].
+/// The adapters in this workspace reject an operation combining a contract
+/// with caller tools, so a contracted name cannot collide with an ordinary
+/// tool's proposals there; a caller wiring another adapter must keep the
+/// contract name reserved from its declared tool names itself.
 pub fn decode_structured<T, V>(
     content: &[AssistantPart],
     contract: &StructuredOutputContract,
@@ -103,18 +115,29 @@ where
     T: DeserializeOwned,
     V: DomainValidator<T>,
 {
-    let proposal = content.iter().find_map(|part| match part {
+    let mut matching = content.iter().filter_map(|part| match part {
         AssistantPart::ToolCall(proposal) if proposal.name == contract.name => Some(proposal),
         _ => None,
     });
-    match proposal {
-        Some(proposal) => decode_structured_json(&proposal.arguments_json, validator),
-        None => Err(StructuredDecodeFailure::NoStructuredValue),
+    let Some(first) = matching.next() else {
+        return Err(StructuredDecodeFailure::NoStructuredValue);
+    };
+    let extras = matching.count();
+    if extras > 0 {
+        return Err(StructuredDecodeFailure::MultipleStructuredValues { count: extras + 1 });
     }
+    decode_structured_json(&first.arguments_json, validator)
 }
 
 /// Decodes one JSON text into the contracted type, distinguishing syntax,
 /// schema, and domain failure classes.
+///
+/// The schema class is decided by deserialization into `T`: it catches
+/// missing fields, wrong types, and every other shape `T` rejects.
+/// Schema-annotation constraints that deserialization cannot see (string
+/// length bounds, numeric ranges) are the provider's wire contract to
+/// honor; a caller that must enforce them locally states them in its
+/// [`DomainValidator`], whose issues come back as the domain class.
 pub fn decode_structured_json<T, V>(
     json_text: &str,
     validator: &V,
@@ -210,6 +233,22 @@ mod tests {
             .expect_err("content without the contracted proposal must not decode");
 
         assert_eq!(failure, StructuredDecodeFailure::NoStructuredValue);
+    }
+
+    #[test]
+    fn two_proposals_for_the_contract_are_an_explicit_multiplicity_failure() {
+        let content = [
+            verdict_proposal(r#"{"approved":true,"score":7}"#),
+            verdict_proposal(r#"{"approved":false,"score":1}"#),
+        ];
+
+        let failure = decode_structured::<Verdict, _>(&content, &contract(), &NonNegativeScore)
+            .expect_err("a contract promising one value must not silently pick among two");
+
+        assert_eq!(
+            failure,
+            StructuredDecodeFailure::MultipleStructuredValues { count: 2 }
+        );
     }
 
     #[test]

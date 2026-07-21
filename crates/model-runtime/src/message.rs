@@ -55,6 +55,23 @@ pub enum MessagePart {
     ToolCall(ToolCallProposal),
     /// The caller-produced result of an earlier tool call.
     ToolResult(ToolResultRecord),
+    /// Reasoning from an earlier response, replayed as history. Providers
+    /// whose contract requires signed reasoning blocks to accompany a
+    /// replayed tool call need this part; a provider with no reasoning
+    /// representation reports replaying it as a preparation failure rather
+    /// than silently dropping caller-stated history.
+    Thinking {
+        /// The reasoning text.
+        text: String,
+        /// The provider integrity signature over the reasoning, when one
+        /// was reported.
+        signature: Option<String>,
+    },
+    /// Redacted reasoning from an earlier response, replayed verbatim.
+    RedactedThinking {
+        /// The opaque provider payload.
+        data: String,
+    },
 }
 
 /// The caller-produced result of one earlier tool call.
