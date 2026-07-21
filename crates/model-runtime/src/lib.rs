@@ -1,4 +1,4 @@
-//! Provider-neutral typed model-runtime core (ADR-0046 Layer 1).
+//! Provider-neutral typed model-runtime core (ADR-0047 Layer 1).
 //!
 //! This crate is the shared vocabulary of the model-runtime layer: the typed
 //! operation a caller authorizes, the observation stream an adapter emits
@@ -12,7 +12,7 @@
 //! explicitly authorized model operation against a provider and reports
 //! evidence about what happened.
 //!
-//! # Boundary rules (ADR-0046, binding)
+//! # Boundary rules (ADR-0047, binding)
 //!
 //! - This crate depends on no Signalbox domain, application, persistence, or
 //!   hub crate, and none of those crates may depend on it. Caller identity
@@ -32,10 +32,11 @@
 //!   authorized operation owned by the caller.
 //!
 //! Every trait and signature in this crate is draft scaffolding under
-//! ADR-0046: the application-side model-execution port is owned by the
+//! ADR-0047: the application-side model-execution port is owned by the
 //! orchestration ADR process, and this crate is rewritten to conform when
 //! that port lands.
 
+mod credential;
 mod evidence;
 mod message;
 mod observation;
@@ -49,6 +50,10 @@ mod target;
 mod tool;
 mod usage;
 
+pub use credential::{
+    CredentialAccess, CredentialAccessError, CredentialAccessFailure, CredentialReference,
+    CredentialValue,
+};
 pub use evidence::{
     BoundaryLossEvidence, CancellationConfirmedEvidence, CompletionEvidence, CompletionFinish,
     ExchangeFacts, FinishReason, LossCause, NativeErrorFacts, PreparationFailure,
@@ -60,7 +65,7 @@ pub use message::{
     AssistantPart, ConversationMessage, ConversationRole, MessagePart, ToolResultRecord,
 };
 pub use observation::{Observation, ObservationFact, ObservationSink};
-pub use operation::{DeliveryMode, ModelOperation, ToolChoice};
+pub use operation::{DeliveryMode, ModelOperation, ModelOperationValidationError, ToolChoice};
 pub use output::{
     DomainValidator, NoDomainConstraints, StructuredDecodeFailure, StructuredOutputContract,
     decode_structured, decode_structured_json,

@@ -1,10 +1,35 @@
 //! The one explicitly authorized model operation.
 
+use crate::credential::CredentialReference;
 use crate::message::ConversationMessage;
 use crate::output::StructuredOutputContract;
 use crate::settings::ModelSettings;
 use crate::target::{RequestedTarget, ResolvedTarget};
 use crate::tool::{ToolDefinition, ToolName};
+
+/// Why an operation cannot be translated into one provider interaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelOperationValidationError {
+    /// An ordinary tool uses the name reserved for structured output.
+    OutputContractToolNameCollision {
+        /// The name used by both declarations.
+        name: ToolName,
+    },
+}
+
+impl std::fmt::Display for ModelOperationValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OutputContractToolNameCollision { name } => write!(
+                f,
+                "structured-output name `{}` is also declared as an ordinary tool",
+                name.as_str()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ModelOperationValidationError {}
 
 /// Whether the caller wants the exchange delivered as one buffered response
 /// or as a provider event stream.
@@ -46,6 +71,10 @@ pub struct ModelOperation<C> {
     /// The caller's durable identity for this operation, threaded onto every
     /// observation and evidence record.
     pub correlation: C,
+    /// The non-secret credential reference pinned with this operation.
+    /// Adapters resolve its current value during preparation of each physical
+    /// request through [`crate::CredentialAccess`] (ADR-0017).
+    pub credential_reference: CredentialReference,
     /// The caller's original model selection, for provenance.
     pub requested_target: RequestedTarget,
     /// The exact hub-resolved model identifier this operation must use.
@@ -74,6 +103,7 @@ impl<C> ModelOperation<C> {
     /// contract, buffered delivery).
     pub fn new(
         correlation: C,
+        credential_reference: CredentialReference,
         requested_target: RequestedTarget,
         resolved_target: ResolvedTarget,
         messages: Vec<ConversationMessage>,
@@ -81,6 +111,7 @@ impl<C> ModelOperation<C> {
     ) -> Self {
         Self {
             correlation,
+            credential_reference,
             requested_target,
             resolved_target,
             system: None,
@@ -91,5 +122,100 @@ impl<C> ModelOperation<C> {
             output_contract: None,
             delivery: DeliveryMode::Buffered,
         }
+    }
+
+    /// Checks provider-neutral declaration rules before an adapter sends the
+    /// operation.
+    ///
+    /// A structured-output contract reserves its name: otherwise a returned
+    /// proposal with that name cannot be distinguished from an ordinary tool
+    /// call. Provider adapters call this during preparation and report a
+    /// failure without crossing the request boundary when it returns an error.
+    pub fn validate(&self) -> Result<(), ModelOperationValidationError> {
+        let Some(contract) = &self.output_contract else {
+            return Ok(());
+        };
+        if self.tools.iter().any(|tool| tool.name == contract.name) {
+            return Err(
+                ModelOperationValidationError::OutputContractToolNameCollision {
+                    name: contract.name.clone(),
+                },
+            );
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use schemars::JsonSchema;
+    use serde::Deserialize;
+
+    use super::{ModelOperation, ModelOperationValidationError};
+    use crate::credential::CredentialReference;
+    use crate::message::ConversationMessage;
+    use crate::output::StructuredOutputContract;
+    use crate::settings::ModelSettings;
+    use crate::target::{RequestedTarget, ResolvedTarget};
+    use crate::tool::ToolDefinition;
+
+    #[allow(dead_code)]
+    #[derive(JsonSchema)]
+    struct Arguments {
+        value: String,
+    }
+
+    #[allow(dead_code)]
+    #[derive(Deserialize, JsonSchema)]
+    struct Output {
+        value: String,
+    }
+
+    fn operation() -> ModelOperation<()> {
+        ModelOperation::new(
+            (),
+            CredentialReference::new("credential"),
+            RequestedTarget::new("requested"),
+            ResolvedTarget::new("resolved"),
+            Vec::<ConversationMessage>::new(),
+            ModelSettings::new(128),
+        )
+    }
+
+    #[test]
+    fn structured_output_name_is_reserved_from_ordinary_tools() {
+        let contract = StructuredOutputContract::of_type::<Output>("result", "result");
+        let colliding_name = contract.name.clone();
+        let mut operation = operation();
+        operation.tools = vec![ToolDefinition::of_type::<Arguments>(
+            colliding_name.as_str(),
+            "ordinary tool",
+        )];
+        operation.output_contract = Some(contract);
+
+        let error = operation
+            .validate()
+            .expect_err("collision must be rejected");
+
+        assert_eq!(
+            error,
+            ModelOperationValidationError::OutputContractToolNameCollision {
+                name: colliding_name,
+            }
+        );
+    }
+
+    #[test]
+    fn distinct_tool_and_structured_output_names_are_valid() {
+        let mut operation = operation();
+        operation.tools = vec![ToolDefinition::of_type::<Arguments>(
+            "ordinary",
+            "ordinary tool",
+        )];
+        operation.output_contract = Some(StructuredOutputContract::of_type::<Output>(
+            "result", "result",
+        ));
+
+        assert_eq!(operation.validate(), Ok(()));
     }
 }

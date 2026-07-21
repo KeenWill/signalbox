@@ -238,7 +238,9 @@ impl SseFraming {
                 self.current_event = Some(value.to_string());
             }
             "data" => {
-                self.accumulated_content += value.len();
+                // Joining retained data lines inserts one newline between
+                // each pair; count that allocation as part of the record.
+                self.accumulated_content += value.len() + usize::from(!self.data_lines.is_empty());
                 self.data_lines.push(value.to_string());
             }
             // `id` and `retry` support stream resumption, which would be a
@@ -311,6 +313,20 @@ mod tests {
         let records = push_ok(&mut framing, b"data: first\ndata: second\n\n");
 
         assert_eq!(records, vec![record(None, "first\nsecond")]);
+    }
+
+    #[test]
+    fn joined_data_separators_count_toward_the_record_limit() {
+        let mut framing = SseFraming::new(5);
+
+        let first = framing.push(b"data:\ndata:\ndata:\ndata:\ndata:\ndata:\n");
+        let second = framing.push(b"data:\n");
+
+        assert_eq!(first.error, None);
+        assert_eq!(
+            second.error,
+            Some(SseFramingError::RecordTooLarge { limit: 5 })
+        );
     }
 
     #[test]

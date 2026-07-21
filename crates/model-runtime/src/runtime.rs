@@ -17,7 +17,7 @@ use crate::operation::ModelOperation;
 /// retry, fall back, or issue a second request; uncertainty is reported as
 /// boundary-loss evidence, not resolved by repetition (ADR-0005).
 ///
-/// This trait is ADR-0046 draft scaffolding: the accepted application-side
+/// This trait is ADR-0047 draft scaffolding: the accepted application-side
 /// model-execution port is owned by the orchestration ADR process, and this
 /// signature is rewritten to conform when that port lands.
 pub trait ModelRuntime<C> {

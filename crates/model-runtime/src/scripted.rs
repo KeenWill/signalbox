@@ -141,6 +141,7 @@ mod tests {
     use std::task::{Context, Poll, Waker};
 
     use super::{Script, ScriptedModel};
+    use crate::credential::CredentialReference;
     use crate::evidence::{
         CompletionEvidence, CompletionFinish, ExchangeFacts, PreparationFailure,
         ProvenUnsentEvidence, TerminalEvidence, UnsentCause,
@@ -168,6 +169,7 @@ mod tests {
     fn operation(correlation: &str) -> ModelOperation<String> {
         ModelOperation::new(
             correlation.to_string(),
+            CredentialReference::new("scripted"),
             RequestedTarget::new("model-x"),
             ResolvedTarget::new("model-x-exact"),
             vec![crate::message::ConversationMessage::user_text("hello")],

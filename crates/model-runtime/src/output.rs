@@ -102,10 +102,8 @@ pub enum StructuredDecodeFailure<I> {
 ///
 /// Finds the proposal carrying the contract's name — exactly one must be
 /// present — then decodes and validates it via [`decode_structured_json`].
-/// The adapters in this workspace reject an operation combining a contract
-/// with caller tools, so a contracted name cannot collide with an ordinary
-/// tool's proposals there; a caller wiring another adapter must keep the
-/// contract name reserved from its declared tool names itself.
+/// [`crate::ModelOperation::validate`] reserves the contract name from
+/// ordinary declared tools before an adapter crosses the request boundary.
 pub fn decode_structured<T, V>(
     content: &[AssistantPart],
     contract: &StructuredOutputContract,
