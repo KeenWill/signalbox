@@ -2590,10 +2590,13 @@ mod tests {
 
     #[test]
     fn server_reported_unknown_commit_outcomes_are_ambiguous() {
-        for code in ["08007", "40003"] {
-            let error = sqlx::Error::Database(Box::new(ServerCommitFailure { code }));
-            assert!(commit_failure_is_ambiguous(&error));
-        }
+        let transaction_resolution_unknown =
+            sqlx::Error::Database(Box::new(ServerCommitFailure { code: "08007" }));
+        assert!(commit_failure_is_ambiguous(&transaction_resolution_unknown));
+
+        let statement_completion_unknown =
+            sqlx::Error::Database(Box::new(ServerCommitFailure { code: "40003" }));
+        assert!(commit_failure_is_ambiguous(&statement_completion_unknown));
     }
 
     /// ADR-0042: a retained completed observation is present only when the

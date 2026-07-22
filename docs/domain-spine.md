@@ -2099,20 +2099,7 @@ pub enum RetainedModelCallObservationStatus {
     AlreadyCommitted,
 }
 
-pub enum RetainedModelCallExecutionState {
-    CapabilityKnownFailure {
-        session: SessionId,
-        call: ModelCallId,
-    },
-    AuthorizationNonConsumption {
-        session: SessionId,
-        prepared: Box<PreparedModelCallRequest>,
-    },
-    TerminalObservation {
-        session: SessionId,
-        observation: CorrelatedModelCallTerminalObservation,
-    },
-}
+pub struct RetainedModelCallExecutionState { /* private */ }
 
 pub enum ModelCallCapabilityPreparation<Capability> {
     Ready(Capability),

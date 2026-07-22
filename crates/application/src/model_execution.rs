@@ -290,13 +290,35 @@ pub enum RetainedModelCallObservationStatus {
     AlreadyCommitted,
 }
 
-/// Same-incarnation evidence retained across a failed orchestration stage.
+/// Opaque same-incarnation evidence retained across a failed orchestration stage.
 ///
 /// This state prevents a later service invocation or explicit composition
 /// handoff from repeating credential work, losing proof that provider entry
-/// never occurred, or dropping an unchanged terminal observation.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum RetainedModelCallExecutionState {
+/// never occurred, or dropping an unchanged terminal observation. INV-014 and
+/// ADR-0045 require a linear handoff token: callers may move it between service
+/// `into_parts` and `from_parts` handoffs, but cannot construct or clone
+/// evidence.
+///
+/// ```compile_fail
+/// use signalbox_application::RetainedModelCallExecutionState;
+///
+/// let _forged = RetainedModelCallExecutionState {};
+/// ```
+///
+/// ```compile_fail
+/// use signalbox_application::RetainedModelCallExecutionState;
+///
+/// fn duplicate(state: RetainedModelCallExecutionState) {
+///     let _replayed: RetainedModelCallExecutionState = state.clone();
+/// }
+/// ```
+#[derive(Debug, Eq, PartialEq)]
+pub struct RetainedModelCallExecutionState {
+    state: RetainedModelCallExecutionStateKind,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum RetainedModelCallExecutionStateKind {
     /// Capability preparation proved an ordinary pre-send known failure.
     CapabilityKnownFailure {
         /// Session owning the exact prepared call.
@@ -705,13 +727,13 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
 
     /// Borrows the exact observation awaiting authoritative reconciliation.
     pub fn retained_observation(&self) -> Option<&CorrelatedModelCallTerminalObservation> {
-        match self.retained_state.as_ref() {
-            Some(RetainedModelCallExecutionState::TerminalObservation { observation, .. }) => {
-                Some(observation)
-            }
+        match self.retained_state.as_ref().map(|retained| &retained.state) {
+            Some(RetainedModelCallExecutionStateKind::TerminalObservation {
+                observation, ..
+            }) => Some(observation),
             Some(
-                RetainedModelCallExecutionState::CapabilityKnownFailure { .. }
-                | RetainedModelCallExecutionState::AuthorizationNonConsumption { .. },
+                RetainedModelCallExecutionStateKind::CapabilityKnownFailure { .. }
+                | RetainedModelCallExecutionStateKind::AuthorizationNonConsumption { .. },
             )
             | None => None,
         }
@@ -749,8 +771,8 @@ where
         >,
     > {
         if let Some(retained) = self.retained_state.take() {
-            match retained {
-                RetainedModelCallExecutionState::CapabilityKnownFailure { session, call } => {
+            match retained.state {
+                RetainedModelCallExecutionStateKind::CapabilityKnownFailure { session, call } => {
                     match self.failure.reread_failure(session, call).await {
                         Ok(RetainedCapabilityFailureStatus::Pending) => {
                             return self.commit_capability_known_failure(session, call).await;
@@ -761,16 +783,18 @@ where
                             );
                         }
                         Err(error) => {
-                            self.retained_state =
-                                Some(RetainedModelCallExecutionState::CapabilityKnownFailure {
-                                    session,
-                                    call,
-                                });
+                            self.retained_state = Some(RetainedModelCallExecutionState {
+                                state:
+                                    RetainedModelCallExecutionStateKind::CapabilityKnownFailure {
+                                        session,
+                                        call,
+                                    },
+                            });
                             return Err(ModelCallExecutionError::CapabilityFailureReread(error));
                         }
                     }
                 }
-                RetainedModelCallExecutionState::AuthorizationNonConsumption {
+                RetainedModelCallExecutionStateKind::AuthorizationNonConsumption {
                     session: retained_session,
                     prepared,
                 } => match self
@@ -790,16 +814,17 @@ where
                             .await;
                     }
                     Err(error) => {
-                        self.retained_state = Some(
-                            RetainedModelCallExecutionState::AuthorizationNonConsumption {
-                                session: retained_session,
-                                prepared,
-                            },
-                        );
+                        self.retained_state = Some(RetainedModelCallExecutionState {
+                            state:
+                                RetainedModelCallExecutionStateKind::AuthorizationNonConsumption {
+                                    session: retained_session,
+                                    prepared,
+                                },
+                        });
                         return Err(ModelCallExecutionError::AuthorizationReconciliation(error));
                     }
                 },
-                RetainedModelCallExecutionState::TerminalObservation {
+                RetainedModelCallExecutionStateKind::TerminalObservation {
                     session: retained_session,
                     observation: retained,
                 } => match self
@@ -818,11 +843,12 @@ where
                             .await;
                     }
                     Err(error) => {
-                        self.retained_state =
-                            Some(RetainedModelCallExecutionState::TerminalObservation {
+                        self.retained_state = Some(RetainedModelCallExecutionState {
+                            state: RetainedModelCallExecutionStateKind::TerminalObservation {
                                 session: retained_session,
                                 observation: retained.clone(),
-                            });
+                            },
+                        });
                         return Err(ModelCallExecutionError::ObservationCommit {
                             error,
                             retained_observation: retained,
@@ -917,12 +943,13 @@ where
                     Err(reread_error) => {
                         drop(capability);
                         drop(permit);
-                        self.retained_state = Some(
-                            RetainedModelCallExecutionState::AuthorizationNonConsumption {
-                                session,
-                                prepared: Box::new(prepared_request),
-                            },
-                        );
+                        self.retained_state = Some(RetainedModelCallExecutionState {
+                            state:
+                                RetainedModelCallExecutionStateKind::AuthorizationNonConsumption {
+                                    session,
+                                    prepared: Box::new(prepared_request),
+                                },
+                        });
                         return Err(ModelCallExecutionError::AuthorizationReread {
                             authorization_error: error,
                             reread_error,
@@ -977,11 +1004,12 @@ where
                     continue;
                 }
                 Err(error) => {
-                    self.retained_state =
-                        Some(RetainedModelCallExecutionState::CapabilityKnownFailure {
+                    self.retained_state = Some(RetainedModelCallExecutionState {
+                        state: RetainedModelCallExecutionStateKind::CapabilityKnownFailure {
                             session,
                             call,
-                        });
+                        },
+                    });
                     return Err(ModelCallExecutionError::CapabilityFailureCommit(error));
                 }
             }
@@ -1023,11 +1051,12 @@ where
                     continue;
                 }
                 Err(error) => {
-                    self.retained_state =
-                        Some(RetainedModelCallExecutionState::TerminalObservation {
+                    self.retained_state = Some(RetainedModelCallExecutionState {
+                        state: RetainedModelCallExecutionStateKind::TerminalObservation {
                             session,
                             observation: observation.clone(),
-                        });
+                        },
+                    });
                     return Err(ModelCallExecutionError::ObservationCommit {
                         error,
                         retained_observation: observation,
@@ -1919,9 +1948,11 @@ mod tests {
         ));
         assert!(matches!(
             service.retained_state(),
-            Some(RetainedModelCallExecutionState::CapabilityKnownFailure {
-                session: retained_session,
-                call: retained_call,
+            Some(RetainedModelCallExecutionState {
+                state: RetainedModelCallExecutionStateKind::CapabilityKnownFailure {
+                    session: retained_session,
+                    call: retained_call,
+                },
             }) if *retained_session == session && *retained_call == call
         ));
 
@@ -1954,9 +1985,11 @@ mod tests {
         assert_eq!(provider.capability_preparation_count(), 1);
         assert!(matches!(
             retained,
-            Some(RetainedModelCallExecutionState::CapabilityKnownFailure {
-                session: retained_session,
-                call: retained_call,
+            Some(RetainedModelCallExecutionState {
+                state: RetainedModelCallExecutionStateKind::CapabilityKnownFailure {
+                    session: retained_session,
+                    call: retained_call,
+                },
             }) if retained_session == session && retained_call == call
         ));
     }
@@ -2329,9 +2362,11 @@ mod tests {
         ));
         assert!(matches!(
             service.retained_state(),
-            Some(RetainedModelCallExecutionState::AuthorizationNonConsumption {
-                session: retained_session,
-                prepared,
+            Some(RetainedModelCallExecutionState {
+                state: RetainedModelCallExecutionStateKind::AuthorizationNonConsumption {
+                    session: retained_session,
+                    prepared,
+                },
             }) if *retained_session == session && **prepared == request
         ));
 
@@ -2373,8 +2408,12 @@ mod tests {
         assert_eq!(provider.interaction_count(), 0);
         assert!(matches!(
             retained,
-            Some(RetainedModelCallExecutionState::TerminalObservation { observation, .. })
-                if observation == retained_observation
+            Some(RetainedModelCallExecutionState {
+                state: RetainedModelCallExecutionStateKind::TerminalObservation {
+                    observation,
+                    ..
+                },
+            }) if observation == retained_observation
         ));
     }
 
