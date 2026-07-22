@@ -960,8 +960,10 @@ impl AcceptedInputTurnSchedulingProjection {
         }
     }
 
-    /// Reconstructs the sealed active-turn facts for an execution aggregate.
-    pub fn active_turn_execution(&self) -> Option<ActivatedAcceptedInputTurn> {
+    fn active_turn_execution_with_pending(
+        &self,
+        pending_steering: Box<[AcceptedInputId]>,
+    ) -> Option<ActivatedAcceptedInputTurn> {
         let ReconstitutedSchedulingState::Active { start, phase } = &self.state else {
             return None;
         };
@@ -973,6 +975,7 @@ impl AcceptedInputTurnSchedulingProjection {
             configuration: self.origin_configuration.clone(),
             start: *start,
             phase: phase.clone(),
+            pending_steering,
         })
     }
 
@@ -1045,6 +1048,26 @@ impl AcceptedInputSchedulingProjection {
         self.turns
             .iter()
             .find(|turn| turn.status() == AcceptedInputTurnSchedulingStatus::Active)
+    }
+
+    /// Reconstructs the sealed active-turn facts and complete pending-steering
+    /// inventory for an execution aggregate.
+    pub fn active_turn_execution(&self) -> Option<ActivatedAcceptedInputTurn> {
+        let active = self.active_turn()?;
+        let tail = self.active_acceptance_tail.as_ref()?;
+        let pending_steering = tail
+            .entries
+            .iter()
+            .filter_map(|entry| {
+                matches!(
+                    entry.accepted_input.disposition(),
+                    AcceptedInputDisposition::PendingSteering { .. }
+                )
+                .then_some(entry.accepted_input.id())
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        active.active_turn_execution_with_pending(pending_steering)
     }
 
     /// Returns the earliest queued work in durable total order.
@@ -1145,6 +1168,7 @@ impl AcceptedInputTurnActivationIdentities {
 ///     configuration: OriginConfiguration,
 ///     start: AcceptedInputTurnStart,
 ///     phase: ActiveTurnPhase,
+///     pending_steering: Box<[AcceptedInputId]>,
 /// ) {
 ///     let _ = ActivatedAcceptedInputTurn {
 ///         session,
@@ -1154,6 +1178,7 @@ impl AcceptedInputTurnActivationIdentities {
 ///         configuration,
 ///         start,
 ///         phase,
+///         pending_steering,
 ///     };
 /// }
 /// ```
@@ -1166,6 +1191,7 @@ pub struct ActivatedAcceptedInputTurn {
     configuration: OriginConfiguration,
     start: AcceptedInputTurnStart,
     phase: ActiveTurnPhase,
+    pending_steering: Box<[AcceptedInputId]>,
 }
 
 impl ActivatedAcceptedInputTurn {
@@ -1204,6 +1230,12 @@ impl ActivatedAcceptedInputTurn {
         &self.phase
     }
 
+    /// Returns the complete accepted-input identities that still await this
+    /// turn's next model-call safe point.
+    pub fn pending_steering(&self) -> &[AcceptedInputId] {
+        &self.pending_steering
+    }
+
     #[cfg(test)]
     pub(crate) fn with_phase_for_test(&self, phase: ActiveTurnPhase) -> Self {
         Self {
@@ -1214,6 +1246,7 @@ impl ActivatedAcceptedInputTurn {
             configuration: self.configuration.clone(),
             start: self.start,
             phase,
+            pending_steering: self.pending_steering.clone(),
         }
     }
 
@@ -1227,6 +1260,24 @@ impl ActivatedAcceptedInputTurn {
             configuration: self.configuration.clone(),
             start,
             phase: self.phase.clone(),
+            pending_steering: self.pending_steering.clone(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_pending_steering_for_test(
+        &self,
+        pending_steering: Box<[AcceptedInputId]>,
+    ) -> Self {
+        Self {
+            session: self.session,
+            turn: self.turn,
+            accepted_input: self.accepted_input.clone(),
+            order: self.order,
+            configuration: self.configuration.clone(),
+            start: self.start,
+            phase: self.phase.clone(),
+            pending_steering,
         }
     }
 }
@@ -2850,6 +2901,7 @@ fn prepare_earliest_queued_activation(
         phase: ActiveTurnPhase::Running {
             current_attempt: CurrentTurnAttempt::prepared(identities.initial_attempt),
         },
+        pending_steering: Box::new([]),
     };
 
     Ok(PreparedAcceptedInputTurnActivation {
@@ -3776,10 +3828,7 @@ mod tests {
             .input()
             .reconstitute()
             .expect("the complete owner projection derives the running attempt");
-        let active_projection = projection
-            .active_turn()
-            .expect("the turn owns the active slot");
-        let execution = active_projection
+        let execution = projection
             .active_turn_execution()
             .expect("active scheduling facts seal execution ownership");
         assert_eq!(execution.turn(), active.turn());
@@ -3910,6 +3959,10 @@ mod tests {
             .expect("the pending-steering tail is complete");
         let identities =
             AcceptedInputTurnFailureIdentities::new(semantic_entry(500).id(), frontier(600).id());
+        let execution = projection
+            .active_turn_execution()
+            .expect("the active execution retains its complete steering inventory");
+        assert_eq!(execution.pending_steering(), &[pending.accepted_input()]);
 
         let error = projection
             .clone()

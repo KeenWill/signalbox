@@ -52,15 +52,16 @@ pub use model_call::{
 };
 pub use model_execution::{
     AmbiguousModelCallTurn, AuthorizedModelCall, CompletedModelCallIdentities,
-    CompletedModelCallTurn, FailedModelCallTurn, FailedModelCallTurnIdentities,
-    ModelCallAuthorizationError, ModelCallAuthorizationFailure, ModelCallClosureError,
-    ModelCallExecution, ModelCallExecutionReconstitutionError,
-    ModelCallExecutionReconstitutionFailure, ModelCallExecutionReconstitutionInput,
-    ModelCallOriginContent, ModelCallPreparationError, ModelCallPreparationFailure,
-    ModelCallResumeFailure, ModelCallTerminalIdentities, ModelCallTerminalObservation,
-    ModelCallTerminalOutcome, ModelTargetCatalog, ModelTargetCatalogError, ModelTargetDefinition,
-    ModelTargetResolutionError, PreparedInitialModelCall, PreparedModelCallRequest,
-    RefusedModelCallTurn, RefusedModelCallTurnIdentities, ResolvedModelSelection,
+    CompletedModelCallTurn, CorrelatedModelCallTerminalObservation, FailedModelCallTurn,
+    FailedModelCallTurnIdentities, IssuedModelCallCorrelation, ModelCallAuthorizationError,
+    ModelCallAuthorizationFailure, ModelCallClosureError, ModelCallExecution,
+    ModelCallExecutionReconstitutionError, ModelCallExecutionReconstitutionFailure,
+    ModelCallExecutionReconstitutionInput, ModelCallOriginContent, ModelCallPreparationError,
+    ModelCallPreparationFailure, ModelCallResumeFailure, ModelCallTerminalIdentities,
+    ModelCallTerminalObservation, ModelCallTerminalOutcome, ModelTargetCatalog,
+    ModelTargetCatalogError, ModelTargetDefinition, ModelTargetResolutionError,
+    PreparedInitialModelCall, PreparedModelCallRequest, RefusedModelCallTurn,
+    RefusedModelCallTurnIdentities, ResolvedModelSelection,
 };
 pub use provider_evidence::{
     ProviderTargetEvidence, ProviderTargetEvidenceLog, ProviderTargetMismatchInvalidation,

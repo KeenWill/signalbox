@@ -1134,7 +1134,7 @@ pub struct AcceptedInputTurnSchedulingProjection { /* private */ }
 impl AcceptedInputTurnSchedulingProjection {
     // accessors: session(), turn(), accepted_input(), order(),
     // origin_configuration(), status(), start(), active_phase(),
-    // active_turn_execution(), failed_terminal_frontier(), terminal_frontier()
+    // failed_terminal_frontier(), terminal_frontier()
 }
 
 pub struct AcceptedInputSchedulingProjection { /* private */ }
@@ -1148,6 +1148,7 @@ impl AcceptedInputSchedulingProjection {
         turn: TurnId,
     ) -> Option<&AcceptedInputTurnSchedulingProjection>;
     pub fn active_turn(&self) -> Option<&AcceptedInputTurnSchedulingProjection>;
+    pub fn active_turn_execution(&self) -> Option<ActivatedAcceptedInputTurn>;
     pub fn earliest_queued_turn(&self)
         -> Option<&AcceptedInputTurnSchedulingProjection>;
     pub fn prepare_earliest_queued_activation(
@@ -1175,7 +1176,7 @@ pub struct ActivatedAcceptedInputTurn { /* private */ }
 // sealed: PreparedAcceptedInputTurnActivation or checked active scheduling projection
 impl ActivatedAcceptedInputTurn {
     // accessors: session(), turn(), accepted_input(), order(), configuration(),
-    // start(), phase()
+    // start(), phase(), pending_steering()
 }
 
 pub struct PreparedAcceptedInputTurnActivation { /* private */ }
@@ -1482,7 +1483,6 @@ pub enum ModelCallExecutionReconstitutionFailure {
     CallOwnershipMismatch,
     CallSelectionMismatch,
     CallTargetMismatch,
-    CallTargetUnavailable,
     InvalidCall,
     LifecycleMismatch,
 }
@@ -1493,6 +1493,7 @@ pub enum ModelCallPreparationFailure {
     TargetUnavailable,
     CallAlreadyExists,
     AttemptIsNotPrepared,
+    PendingSteering { accepted_input: AcceptedInputId },
 }
 pub struct ModelCallPreparationError { /* private */ }
 pub struct PreparedInitialModelCall { /* private */ }
@@ -1501,6 +1502,8 @@ pub enum ModelCallResumeFailure { CallMissing, CallIsNotPrepared, AttemptIsNotPr
 pub enum ModelCallAuthorizationFailure { CallMissing, CallIsNotPrepared, AttemptIsNotPrepared }
 pub struct ModelCallAuthorizationError { /* private */ }
 pub struct AuthorizedModelCall { /* private */ }
+pub struct IssuedModelCallCorrelation { /* private */ }
+pub struct CorrelatedModelCallTerminalObservation { /* private */ }
 
 pub enum ModelCallTerminalObservation {
     Completed { assistant_text: Vec<AssistantText> },
@@ -1531,6 +1534,7 @@ pub struct AmbiguousModelCallTurn { /* private */ }
 pub enum ModelCallClosureError {
     IdentityShapeMismatch,
     CallStateMismatch,
+    ObservationCorrelationMismatch,
     AttemptStateMismatch,
     TargetResolutionMismatch,
     AssistantIdentityCountMismatch,
@@ -2246,14 +2250,14 @@ impl<
 | domain: turn_eligibility              | 21                   |
 | domain: turn_attempt                  | 13                   |
 | domain: model_call                    | 11                   |
-| domain: model_execution               | 29                   |
+| domain: model_execution               | 31                   |
 | domain: context_frontier              | 6                    |
 | domain: semantic_entry                | 4                    |
 | domain: provider_evidence             | 5                    |
 | domain: applied_interrupt             | 2                    |
 | domain: fatal_mismatch                | 0                    |
 | domain: replace_session_defaults      | 13                   |
-| **signalbox-domain total**            | **192 (+1 free fn)** |
+| **signalbox-domain total**            | **194 (+1 free fn)** |
 | application: create_session           | 8 (incl. 2 traits)   |
 | application: load_session             | 2 (incl. 1 trait)    |
 | application: operator_failure         | 2 (incl. 1 trait)    |

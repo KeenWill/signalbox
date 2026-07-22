@@ -239,10 +239,8 @@ pub enum ModelCallExecutionReconstitutionFailure {
     CallOwnershipMismatch,
     /// A call records a different frozen selection.
     CallSelectionMismatch,
-    /// A stored call target differs from immutable configured resolution.
+    /// A stored call target contradicts an available immutable catalog entry.
     CallTargetMismatch,
-    /// The stored selection has no immutable configured target.
-    CallTargetUnavailable,
     /// Stored call facts cannot reconstruct the accepted call lifecycle.
     InvalidCall,
     /// Attempt and call states do not form one accepted execution phase.
@@ -346,12 +344,6 @@ impl ModelCallExecution {
         call: ModelCallId,
     ) -> Result<PreparedInitialModelCall, ModelCallPreparationError> {
         let frozen = *self.configuration.effective().model();
-        let resolution = match self.targets.resolve(frozen) {
-            Ok(resolution) => resolution,
-            Err(error) => {
-                return Err(ModelCallPreparationError::target_unavailable(self, error));
-            }
-        };
         if self.current_call.is_some() {
             return Err(ModelCallPreparationError::new(
                 self,
@@ -364,6 +356,18 @@ impl ModelCallExecution {
                 ModelCallPreparationFailure::AttemptIsNotPrepared,
             ));
         }
+        if let Some(accepted_input) = self.active_turn.pending_steering().first().copied() {
+            return Err(ModelCallPreparationError::new(
+                self,
+                ModelCallPreparationFailure::PendingSteering { accepted_input },
+            ));
+        }
+        let resolution = match self.targets.resolve(frozen) {
+            Ok(resolution) => resolution,
+            Err(error) => {
+                return Err(ModelCallPreparationError::target_unavailable(self, error));
+            }
+        };
         let pinned = PinnedProviderTarget::pinned(self.turn, resolution.target);
         let prepared = CurrentModelCall::prepared(
             call,
@@ -446,12 +450,24 @@ impl ModelCallExecution {
     /// authorization projection across that effect.
     pub fn apply_terminal_observation(
         self,
-        observation: ModelCallTerminalObservation,
+        observation: CorrelatedModelCallTerminalObservation,
         identities: ModelCallTerminalIdentities,
     ) -> Result<ModelCallTerminalOutcome, ModelCallClosureError> {
         let Some(call) = self.current_call else {
             return Err(ModelCallClosureError::CallStateMismatch);
         };
+        if observation.correlation
+            != (IssuedModelCallCorrelation {
+                session: self.session,
+                turn: self.turn,
+                attempt: self.current_attempt.id(),
+                call: call.id(),
+                target: call.target(),
+                frontier: call.frontier().snapshot(),
+            })
+        {
+            return Err(ModelCallClosureError::ObservationCorrelationMismatch);
+        }
         if call.state() != CurrentModelCallState::InFlight
             || self.current_attempt.state() != &CurrentTurnAttemptState::Running
         {
@@ -463,7 +479,7 @@ impl ModelCallExecution {
             self.current_attempt,
             call,
             self.frontier_entries,
-            observation,
+            observation.observation,
             identities,
         )
     }
@@ -580,6 +596,12 @@ pub enum ModelCallPreparationFailure {
     CallAlreadyExists,
     /// The current physical attempt is no longer prepared.
     AttemptIsNotPrepared,
+    /// Acknowledged steering must be consumed by a later decision-authorized
+    /// semantic projection before this call may be prepared.
+    PendingSteering {
+        /// The earliest accepted input proving the safe point is not empty.
+        accepted_input: AcceptedInputId,
+    },
 }
 
 /// Failed preparation retaining the unchanged live aggregate.
@@ -781,6 +803,97 @@ impl AuthorizedModelCall {
     /// Borrows the exact user content for a frontier origin.
     pub fn origin_content(&self, accepted_input: AcceptedInputId) -> Option<&UserContent> {
         self.origin_contents.get(&accepted_input)
+    }
+
+    /// Returns the sealed issued facts that bind later provider observations
+    /// to this exact authorization.
+    pub const fn observation_correlation(&self) -> IssuedModelCallCorrelation {
+        IssuedModelCallCorrelation {
+            session: self.session,
+            turn: self.turn,
+            attempt: self.attempt.id(),
+            call: self.call.id(),
+            target: self.call.target(),
+            frontier: self.call.frontier().snapshot(),
+        }
+    }
+}
+
+/// Sealed issued-call facts carried across one provider interaction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IssuedModelCallCorrelation {
+    session: SessionId,
+    turn: TurnId,
+    attempt: TurnAttemptId,
+    call: ModelCallId,
+    target: ResolvedProviderTarget,
+    frontier: ContextFrontierId,
+}
+
+impl IssuedModelCallCorrelation {
+    /// Returns the owning session.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    /// Returns the owning logical turn.
+    pub const fn turn(&self) -> TurnId {
+        self.turn
+    }
+
+    /// Returns the exact issued physical attempt.
+    pub const fn attempt(&self) -> TurnAttemptId {
+        self.attempt
+    }
+
+    /// Returns the exact issued model call.
+    pub const fn call(&self) -> ModelCallId {
+        self.call
+    }
+
+    /// Returns the exact pinned target used by the issued call.
+    pub const fn target(&self) -> ResolvedProviderTarget {
+        self.target
+    }
+
+    /// Returns the exact context frontier used by the issued call.
+    pub const fn frontier(&self) -> ContextFrontierId {
+        self.frontier
+    }
+
+    /// Binds one provider-neutral terminal observation to these issued facts.
+    pub fn bind_terminal_observation(
+        self,
+        observation: ModelCallTerminalObservation,
+    ) -> CorrelatedModelCallTerminalObservation {
+        CorrelatedModelCallTerminalObservation {
+            correlation: self,
+            observation,
+        }
+    }
+}
+
+/// One provider-neutral terminal observation bound to exact issued authority.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CorrelatedModelCallTerminalObservation {
+    correlation: IssuedModelCallCorrelation,
+    observation: ModelCallTerminalObservation,
+}
+
+impl CorrelatedModelCallTerminalObservation {
+    /// Returns the exact model call named by the issued correlation.
+    pub const fn call(&self) -> ModelCallId {
+        self.correlation.call
+    }
+
+    /// Borrows all exact issued facts carried with the observation.
+    pub const fn correlation(&self) -> &IssuedModelCallCorrelation {
+        &self.correlation
+    }
+
+    /// Borrows the provider-neutral physical outcome.
+    pub const fn observation(&self) -> &ModelCallTerminalObservation {
+        &self.observation
     }
 }
 
@@ -1175,6 +1288,8 @@ pub enum ModelCallClosureError {
     IdentityShapeMismatch,
     /// The call cannot take the requested terminal transition.
     CallStateMismatch,
+    /// The observation names different issued authority than fresh state.
+    ObservationCorrelationMismatch,
     /// The attempt cannot take the required terminal transition.
     AttemptStateMismatch,
     /// Claimed target-resolution failure does not match this execution's
@@ -1286,13 +1401,11 @@ fn reconstitute(
                 ModelCallExecutionReconstitutionFailure::CallSelectionMismatch,
             ));
         }
-        let resolution = input.targets.resolve(call.selection()).map_err(|_| {
-            fail(
-                input.clone(),
-                ModelCallExecutionReconstitutionFailure::CallTargetUnavailable,
-            )
-        })?;
-        if call.target() != resolution.target() {
+        if input
+            .targets
+            .resolve(call.selection())
+            .is_ok_and(|resolution| call.target() != resolution.target())
+        {
             return Err(fail(
                 input,
                 ModelCallExecutionReconstitutionFailure::CallTargetMismatch,
@@ -1657,6 +1770,26 @@ mod tests {
         )
     }
 
+    fn correlated_observation(
+        execution: &ModelCallExecution,
+        observation: ModelCallTerminalObservation,
+    ) -> CorrelatedModelCallTerminalObservation {
+        let call = execution
+            .current_call()
+            .expect("a correlated test observation requires one live call");
+        CorrelatedModelCallTerminalObservation {
+            correlation: IssuedModelCallCorrelation {
+                session: execution.session(),
+                turn: execution.turn(),
+                attempt: execution.current_attempt().id(),
+                call: call.id(),
+                target: call.target(),
+                frontier: call.frontier().snapshot(),
+            },
+            observation,
+        }
+    }
+
     /// S02 / INV-005 / INV-015: a complete frontier read must preserve exact
     /// semantic order, not merely the same entry membership.
     #[test]
@@ -1778,6 +1911,37 @@ mod tests {
         );
     }
 
+    /// S02 / INV-014: once a call has durably pinned its exact target, a later
+    /// deployment-availability change cannot retarget or strand that call.
+    #[test]
+    fn s02_inv014_prepared_call_reloads_after_target_becomes_unavailable() {
+        let execution = prepared_execution();
+        let expected_call = execution
+            .current_call()
+            .expect("prepared execution has one call")
+            .clone();
+        let mut input = reconstitution_input_with_calls(
+            &execution,
+            vec![ModelCallReconstitutionInput::new(
+                expected_call.id(),
+                expected_call.turn(),
+                expected_call.attempt(),
+                expected_call.selection(),
+                expected_call.target(),
+                expected_call.frontier().snapshot(),
+                ModelCallReconstitutionState::Prepared,
+            )],
+        );
+        input.targets = ModelTargetCatalog::try_from_definitions([])
+            .expect("an empty current-availability catalog is valid");
+
+        let reloaded = input
+            .reconstitute()
+            .expect("durable pinned authority survives current unavailability");
+
+        assert_eq!(reloaded.current_call(), Some(&expected_call));
+    }
+
     /// S02 / INV-014 / INV-015: target resolution records the frozen
     /// selection, target, and exact frontier before send authorization.
     #[test]
@@ -1799,6 +1963,28 @@ mod tests {
         assert_eq!(
             prepared.call().frontier().snapshot(),
             context_frontier_id(6)
+        );
+    }
+
+    /// S08 / INV-016: the initial-call slice cannot omit acknowledged pending
+    /// steering while its concrete semantic projection remains reserved.
+    #[test]
+    fn s08_inv016_preparation_requires_an_empty_checked_steering_inventory() {
+        let mut execution = active_execution();
+        let pending = accepted_input_id(20);
+        execution.active_turn = execution
+            .active_turn
+            .with_pending_steering_for_test(vec![pending].into_boxed_slice());
+
+        let error = execution
+            .prepare_initial_call(model_call_id(9))
+            .expect_err("pending steering blocks call preparation");
+
+        assert_eq!(
+            error.failure(),
+            ModelCallPreparationFailure::PendingSteering {
+                accepted_input: pending,
+            }
         );
     }
 
@@ -1901,6 +2087,47 @@ mod tests {
             authorized.call().frontier().snapshot(),
             context_frontier_id(6)
         );
+        let correlation = authorized.observation_correlation();
+        assert_eq!(correlation.session(), authorized.session());
+        assert_eq!(correlation.turn(), authorized.turn());
+        assert_eq!(correlation.attempt(), authorized.attempt().id());
+        assert_eq!(correlation.call(), authorized.call().id());
+        assert_eq!(correlation.target(), authorized.call().target());
+        assert_eq!(
+            correlation.frontier(),
+            authorized.call().frontier().snapshot()
+        );
+        let observation =
+            correlation.bind_terminal_observation(ModelCallTerminalObservation::KnownFailed);
+        assert_eq!(observation.call(), authorized.call().id());
+        assert_eq!(observation.correlation(), &correlation);
+        assert_eq!(
+            observation.observation(),
+            &ModelCallTerminalObservation::KnownFailed
+        );
+    }
+
+    /// S02 / INV-006 / INV-014: a provider observation remains bound to the
+    /// exact session, turn, attempt, call, target, and frontier that crossed
+    /// send authorization.
+    #[test]
+    fn s02_inv006_inv014_terminal_observation_rejects_cross_wired_call() {
+        let execution = in_flight_execution();
+        let mut observation =
+            correlated_observation(&execution, ModelCallTerminalObservation::KnownFailed);
+        observation.correlation.call = model_call_id(99);
+
+        let error = execution
+            .apply_terminal_observation(
+                observation,
+                ModelCallTerminalIdentities::Failed(FailedModelCallTurnIdentities::new(
+                    semantic_transcript_entry_id(10),
+                    context_frontier_id(11),
+                )),
+            )
+            .expect_err("another call's observation cannot close fresh authority");
+
+        assert_eq!(error, ModelCallClosureError::ObservationCorrelationMismatch);
     }
 
     /// S02 / INV-005 / INV-006 / INV-032: successful final text, physical
@@ -1908,14 +2135,19 @@ mod tests {
     /// prefix-preserving candidate.
     #[test]
     fn s02_inv005_inv006_inv032_completion_is_atomic_and_ordered() {
-        let outcome = in_flight_execution()
+        let execution = in_flight_execution();
+        let observation = correlated_observation(
+            &execution,
+            ModelCallTerminalObservation::Completed {
+                assistant_text: vec![
+                    AssistantText::try_new("first".to_string()).expect("nonempty text"),
+                    AssistantText::try_new(" second ".to_string()).expect("nonempty text"),
+                ],
+            },
+        );
+        let outcome = execution
             .apply_terminal_observation(
-                ModelCallTerminalObservation::Completed {
-                    assistant_text: vec![
-                        AssistantText::try_new("first".to_string()).expect("nonempty text"),
-                        AssistantText::try_new(" second ".to_string()).expect("nonempty text"),
-                    ],
-                },
+                observation,
                 ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
                     vec![
                         semantic_transcript_entry_id(10),
@@ -1970,11 +2202,11 @@ mod tests {
     /// attempt and retains the exact call in a durable recovery wait.
     #[test]
     fn s04_inv025_inv026_ambiguity_preserves_call_and_waits() {
-        let outcome = in_flight_execution()
-            .apply_terminal_observation(
-                ModelCallTerminalObservation::Ambiguous,
-                ModelCallTerminalIdentities::Ambiguous,
-            )
+        let execution = in_flight_execution();
+        let observation =
+            correlated_observation(&execution, ModelCallTerminalObservation::Ambiguous);
+        let outcome = execution
+            .apply_terminal_observation(observation, ModelCallTerminalIdentities::Ambiguous)
             .expect("ambiguous evidence is representable");
         let ModelCallTerminalOutcome::AwaitingRecovery(waiting) = outcome else {
             panic!("ambiguous evidence selects recovery wait");
@@ -2121,14 +2353,18 @@ mod tests {
         .reconstitute()
         .expect("cancellation-requested facts remain available for recovery");
 
+        let observation = correlated_observation(
+            &execution,
+            ModelCallTerminalObservation::Completed {
+                assistant_text: vec![
+                    AssistantText::try_new("late completion".to_owned())
+                        .expect("test assistant text is nonempty"),
+                ],
+            },
+        );
         let error = execution
             .apply_terminal_observation(
-                ModelCallTerminalObservation::Completed {
-                    assistant_text: vec![
-                        AssistantText::try_new("late completion".to_owned())
-                            .expect("test assistant text is nonempty"),
-                    ],
-                },
+                observation,
                 ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
                     vec![semantic_transcript_entry_id(10)],
                     semantic_transcript_entry_id(11),
@@ -2144,9 +2380,12 @@ mod tests {
     /// logical turn as failed in one candidate.
     #[test]
     fn s02_inv006_known_failure_closes_call_attempt_and_turn() {
-        let outcome = in_flight_execution()
+        let execution = in_flight_execution();
+        let observation =
+            correlated_observation(&execution, ModelCallTerminalObservation::KnownFailed);
+        let outcome = execution
             .apply_terminal_observation(
-                ModelCallTerminalObservation::KnownFailed,
+                observation,
                 ModelCallTerminalIdentities::Failed(FailedModelCallTurnIdentities::new(
                     semantic_transcript_entry_id(10),
                     context_frontier_id(11),
@@ -2171,9 +2410,12 @@ mod tests {
     /// cancellation and closes the logical turn as failed.
     #[test]
     fn s02_inv006_cause_free_physical_cancellation_fails_turn() {
-        let outcome = in_flight_execution()
+        let execution = in_flight_execution();
+        let observation =
+            correlated_observation(&execution, ModelCallTerminalObservation::Cancelled);
+        let outcome = execution
             .apply_terminal_observation(
-                ModelCallTerminalObservation::Cancelled,
+                observation,
                 ModelCallTerminalIdentities::Failed(FailedModelCallTurnIdentities::new(
                     semantic_transcript_entry_id(10),
                     context_frontier_id(11),
@@ -2198,9 +2440,11 @@ mod tests {
     /// logical classifications without manufacturing semantic response text.
     #[test]
     fn s02_inv006_refusal_closes_call_attempt_and_turn_without_content() {
-        let outcome = in_flight_execution()
+        let execution = in_flight_execution();
+        let observation = correlated_observation(&execution, ModelCallTerminalObservation::Refused);
+        let outcome = execution
             .apply_terminal_observation(
-                ModelCallTerminalObservation::Refused,
+                observation,
                 ModelCallTerminalIdentities::Refused(RefusedModelCallTurnIdentities::new(
                     context_frontier_id(11),
                 )),
