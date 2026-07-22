@@ -970,6 +970,76 @@ async fn embedded_migrator_connects_and_is_idempotent() -> Result<(), Box<dyn Er
     Ok(())
 }
 
+/// ADR-0017 / INV-014: the forward-only nullable credential-reference column
+/// remains compatible with historical rows, while a reference pinned on a new
+/// model call cannot be replaced or cleared.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv014_model_call_credential_reference_is_nullable_but_immutable()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = checkpoint_restart_model_call(&pool, 0x6f00, false).await?;
+
+    let is_nullable: String = sqlx::query_scalar(
+        "SELECT is_nullable
+           FROM information_schema.columns
+          WHERE table_schema = 'public'
+            AND table_name = 'model_call'
+            AND column_name = 'credential_reference'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(is_nullable, "YES");
+
+    let replacement = sqlx::query(
+        "UPDATE model_call
+            SET credential_reference = 'replacement-provider-reference'
+          WHERE model_call_id = $1",
+    )
+    .bind(fixture.call.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("a pinned credential reference cannot be replaced");
+    assert_eq!(
+        replacement
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into())
+    );
+
+    let clearing = sqlx::query(
+        "UPDATE model_call
+            SET credential_reference = NULL
+          WHERE model_call_id = $1",
+    )
+    .bind(fixture.call.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("a pinned credential reference cannot be cleared");
+    assert_eq!(
+        clearing.as_database_error().and_then(|error| error.code()),
+        Some("23514".into())
+    );
+
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT credential_reference
+           FROM model_call
+          WHERE model_call_id = $1",
+    )
+    .bind(fixture.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        stored.as_deref(),
+        Some(model_credential_reference().as_str())
+    );
+
+    pool.close().await;
+    drop(container);
+
+    Ok(())
+}
+
 /// ADR-0045 / INV-006: an uncertain capability-failure closure is reconciled
 /// from exact durable Prepared or complete known-failure state, including its
 /// terminal attempt and call provenance, before any resubmission.
