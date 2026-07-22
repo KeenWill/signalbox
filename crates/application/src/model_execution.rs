@@ -1953,6 +1953,10 @@ mod tests {
             UserContent::try_text(String::from("current user request")).expect("valid text");
         let assistant_text = AssistantText::try_new(String::from("inherited assistant reply"))
             .expect("valid assistant text");
+        let origin_contents = std::collections::HashMap::from([
+            (inherited_input, inherited_content.clone()),
+            (current_input, current_content.clone()),
+        ]);
         let entries = [
             (
                 SemanticTranscriptEntryRef::from_source(
@@ -1995,11 +1999,7 @@ mod tests {
 
         let messages = render_frontier_messages(
             entries.iter().map(|(source, payload)| (*source, payload)),
-            |accepted_input| match accepted_input {
-                value if value == inherited_input => Some(inherited_content.clone()),
-                value if value == current_input => Some(current_content.clone()),
-                _ => None,
-            },
+            |accepted_input| origin_contents.get(&accepted_input).cloned(),
         )
         .expect("the admitted mixed text frontier renders");
 
