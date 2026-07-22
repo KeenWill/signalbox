@@ -12,15 +12,20 @@ use std::{
 };
 
 use rust_decimal::Decimal;
-use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
+use signalbox_application::{
+    AuthorizeModelCallTransaction, ClassifyOperatorFailure, CommitModelCallObservationTransaction,
+    FailPreparedModelCallTransaction, ModelCallAuthorizationReread, OperatorFailureClass,
+    PrepareModelCallOutcome, PrepareModelCallTransaction, RetainedModelCallObservationStatus,
+};
 use signalbox_domain::{
-    AcceptedInputDisposition, AcceptedInputId, AmbiguousModelCallTurn, AuthorizedModelCall,
-    CompletedModelCallTurn, CorrelatedModelCallTerminalObservation, DirectModelSelection,
-    FailedModelCallTurn, FailedModelCallTurnIdentities, FrozenAliasDefinition,
-    FrozenModelSelection, ModelAlias, ModelCallDisposition, ModelCallExecution,
-    ModelCallExecutionReconstitutionFailure, ModelCallExecutionReconstitutionInput, ModelCallId,
-    ModelCallOriginContent, ModelCallPreparationFailure, ModelCallReconstitutionInput,
-    ModelCallReconstitutionState, ModelCallTerminalIdentities, ModelCallTerminalOutcome,
+    AcceptedInputDisposition, AcceptedInputId, AmbiguousModelCallTurn, AssistantText,
+    AuthorizedModelCall, CompletedModelCallTurn, CorrelatedModelCallTerminalObservation,
+    DirectModelSelection, FailedModelCallTurn, FailedModelCallTurnIdentities,
+    FrozenAliasDefinition, FrozenModelSelection, ModelAlias, ModelCallDisposition,
+    ModelCallExecution, ModelCallExecutionReconstitutionFailure,
+    ModelCallExecutionReconstitutionInput, ModelCallId, ModelCallOriginContent,
+    ModelCallPreparationFailure, ModelCallReconstitutionInput, ModelCallReconstitutionState,
+    ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
     ModelTargetCatalog, ModelTargetDefinition, PendingSteeringReclassificationIdentity,
     PinnedProviderTargetReconstitutionInput, PreparedModelCallRequest, ProviderModelIdentity,
     ReclassifiedPendingSteeringTurn, RefusedModelCallTurn, ResolvedProviderTarget,
@@ -188,15 +193,6 @@ impl ClassifyOperatorFailure for ModelCallRepositoryError {
     }
 }
 
-/// Authoritative durable state after an ambiguous send-authorization commit.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ModelCallAuthorizationReread {
-    /// The authorization rolled back and the exact call remains Prepared.
-    Prepared,
-    /// The authorization committed; this exact issued call was not consumed.
-    InFlight(Box<AuthorizedModelCall>),
-}
-
 impl From<ModelCallCorruption> for ModelCallRepositoryError {
     fn from(error: ModelCallCorruption) -> Self {
         Self::Corruption(error)
@@ -222,23 +218,8 @@ impl ModelCallRepositoryError {
     }
 }
 
-/// Result of the load-and-prepare transaction.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum PrepareInitialModelCallOutcome {
-    /// The scheduling hint no longer identifies runnable work.
-    NoWork,
-    /// A new exact Prepared call was committed; this invocation must stop.
-    Checkpointed(ModelCallId),
-    /// A previously committed Prepared request is safe for capability setup.
-    Ready(Box<PreparedModelCallRequest>),
-    /// Immutable target resolution failed and the turn closed atomically.
-    TargetUnavailable(Box<FailedModelCallTurn>),
-    /// Acknowledged steering remains pending, so no call was prepared.
-    PendingSteering {
-        /// The earliest accepted input proving the safe point is not empty.
-        accepted_input: AcceptedInputId,
-    },
-}
+/// Compatibility spelling for the application-owned prepare result.
+pub use signalbox_application::PrepareModelCallOutcome as PrepareInitialModelCallOutcome;
 
 /// PostgreSQL adapter for the initial model-call execution transactions.
 #[derive(Clone, Debug)]
@@ -361,58 +342,6 @@ impl PostgresModelCallRepository {
         finish_commit(transaction, result).await
     }
 
-    /// Rereads exact durable authority after an ambiguous authorization commit.
-    pub async fn reread_ambiguous_authorization(
-        &self,
-        session: SessionId,
-        prepared: &PreparedModelCallRequest,
-    ) -> Result<ModelCallAuthorizationReread, ModelCallRepositoryError> {
-        let mut transaction = self.pool.begin().await?;
-        let result = async {
-            lock_session(&mut transaction, session).await?;
-            let execution = require_exact_call(
-                require_live_execution(&mut transaction, session, &self.targets).await?,
-                prepared.call().id(),
-            )?;
-            match execution.current_call().map(|call| call.state()) {
-                Some(signalbox_domain::CurrentModelCallState::Prepared) => {
-                    let reloaded = execution.resume_prepared_call().map_err(|_| {
-                        ModelCallRepositoryError::InvalidTransition(
-                            "ambiguous authorization reread could not resume Prepared",
-                        )
-                    })?;
-                    if &reloaded != prepared {
-                        return Err(ModelCallRepositoryError::InvalidTransition(
-                            "ambiguous authorization reread changed Prepared request",
-                        ));
-                    }
-                    Ok(ModelCallAuthorizationReread::Prepared)
-                }
-                Some(signalbox_domain::CurrentModelCallState::InFlight) => {
-                    let authorized = execution.resume_in_flight_call().ok_or(
-                        ModelCallRepositoryError::InvalidTransition(
-                            "ambiguous authorization reread could not resume InFlight",
-                        ),
-                    )?;
-                    if !prepared_matches_authorized(prepared, &authorized) {
-                        return Err(ModelCallRepositoryError::InvalidTransition(
-                            "ambiguous authorization reread changed issued request",
-                        ));
-                    }
-                    Ok(ModelCallAuthorizationReread::InFlight(Box::new(authorized)))
-                }
-                Some(signalbox_domain::CurrentModelCallState::CancellationRequested) | None => {
-                    Err(ModelCallRepositoryError::InvalidTransition(
-                        "ambiguous authorization reread found no resumable call",
-                    ))
-                }
-            }
-        }
-        .await;
-        transaction.rollback().await?;
-        result
-    }
-
     /// Freshly reloads issued authority and commits one terminal observation.
     pub async fn apply_terminal_observation<NextTurn>(
         &self,
@@ -486,6 +415,140 @@ impl PostgresModelCallRepository {
         finish_commit(transaction, result).await
     }
 
+    /// Rereads exact durable authority after an ambiguous authorization commit.
+    pub async fn reread_ambiguous_authorization(
+        &self,
+        session: SessionId,
+        prepared: &signalbox_domain::PreparedModelCallRequest,
+    ) -> Result<ModelCallAuthorizationReread, ModelCallRepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        let result = async {
+            lock_session(&mut transaction, session).await?;
+            let execution = require_exact_call(
+                require_live_execution(&mut transaction, session, &self.targets).await?,
+                prepared.call().id(),
+            )?;
+            match execution
+                .current_call()
+                .map(signalbox_domain::CurrentModelCall::state)
+            {
+                Some(signalbox_domain::CurrentModelCallState::Prepared) => {
+                    let reloaded = execution.resume_prepared_call().map_err(|_| {
+                        ModelCallRepositoryError::InvalidTransition(
+                            "ambiguous authorization reread could not resume Prepared",
+                        )
+                    })?;
+                    if &reloaded != prepared {
+                        return Err(ModelCallRepositoryError::InvalidTransition(
+                            "ambiguous authorization reread changed Prepared request",
+                        ));
+                    }
+                    Ok(ModelCallAuthorizationReread::Prepared)
+                }
+                Some(signalbox_domain::CurrentModelCallState::InFlight) => {
+                    let authorized = execution.resume_in_flight_call().ok_or(
+                        ModelCallRepositoryError::InvalidTransition(
+                            "ambiguous authorization reread could not resume InFlight",
+                        ),
+                    )?;
+                    if !prepared_matches_authorized(prepared, &authorized) {
+                        return Err(ModelCallRepositoryError::InvalidTransition(
+                            "ambiguous authorization reread changed issued request",
+                        ));
+                    }
+                    Ok(ModelCallAuthorizationReread::InFlight(Box::new(authorized)))
+                }
+                Some(signalbox_domain::CurrentModelCallState::CancellationRequested) | None => {
+                    Err(ModelCallRepositoryError::InvalidTransition(
+                        "ambiguous authorization reread found no resumable call",
+                    ))
+                }
+            }
+        }
+        .await;
+        transaction.rollback().await?;
+        result
+    }
+
+    /// Rereads whether an unchanged terminal observation already committed.
+    pub async fn reread_terminal_observation(
+        &self,
+        session: SessionId,
+        observation: &CorrelatedModelCallTerminalObservation,
+    ) -> Result<RetainedModelCallObservationStatus, ModelCallRepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        let result = async {
+            lock_session(&mut transaction, session).await?;
+            let correlation = observation.correlation();
+            if correlation.session() != session {
+                return Err(ModelCallRepositoryError::InvalidTransition(
+                    "retained observation session changed",
+                ));
+            }
+            let stored =
+                sqlx::query_as::<_, (Uuid, Uuid, Uuid, Uuid, Uuid, String, Option<String>)>(
+                    "SELECT session_id, turn_id, turn_attempt_id,
+                        resolved_provider_model_identity_id, context_frontier_id,
+                        state_kind, terminal_disposition_kind
+                   FROM model_call
+                  WHERE model_call_id = $1",
+                )
+                .bind(observation.call().into_uuid())
+                .fetch_optional(&mut *transaction)
+                .await?
+                .ok_or(ModelCallCorruption::Missing(
+                    "retained observation model call",
+                ))?;
+            let (stored_session, turn, attempt, target, frontier, state, disposition) = stored;
+            if stored_session != session_id_to_uuid(correlation.session())
+                || turn != turn_id_to_uuid(correlation.turn())
+                || attempt != correlation.attempt().into_uuid()
+                || target != correlation.target().identity().into_uuid()
+                || frontier != correlation.frontier().into_uuid()
+            {
+                return Err(ModelCallRepositoryError::InvalidTransition(
+                    "retained observation correlation changed",
+                ));
+            }
+            match (state.as_str(), disposition.as_deref()) {
+                ("in_flight", None) => {
+                    let execution = require_exact_call(
+                        require_live_execution(&mut transaction, session, &self.targets).await?,
+                        observation.call(),
+                    )?;
+                    let authorized = execution.resume_in_flight_call().ok_or(
+                        ModelCallRepositoryError::InvalidTransition(
+                            "retained observation could not resume issued call",
+                        ),
+                    )?;
+                    if authorized.observation_correlation() != *correlation {
+                        return Err(ModelCallRepositoryError::InvalidTransition(
+                            "retained observation issued authority changed",
+                        ));
+                    }
+                    Ok(RetainedModelCallObservationStatus::Pending)
+                }
+                ("terminal", Some(stored_disposition))
+                    if stored_disposition
+                        == encode_disposition(observation.observation().disposition()) =>
+                {
+                    if !terminal_content_matches(&mut transaction, session, observation).await? {
+                        return Err(ModelCallRepositoryError::InvalidTransition(
+                            "retained observation terminal content changed",
+                        ));
+                    }
+                    Ok(RetainedModelCallObservationStatus::AlreadyCommitted)
+                }
+                _ => Err(ModelCallRepositoryError::InvalidTransition(
+                    "retained observation durable state changed",
+                )),
+            }
+        }
+        .await;
+        transaction.rollback().await?;
+        result
+    }
+
     /// Applies the accepted prior-process recovery rule to one live call.
     pub async fn recover_after_restart(
         &self,
@@ -511,6 +574,132 @@ impl PostgresModelCallRepository {
         .await;
         finish_commit(transaction, result).await
     }
+}
+
+impl PrepareModelCallTransaction for PostgresModelCallRepository {
+    type Error = ModelCallRepositoryError;
+
+    async fn prepare(
+        &mut self,
+        session: SessionId,
+        call: ModelCallId,
+        failure_identities: FailedModelCallTurnIdentities,
+    ) -> Result<PrepareModelCallOutcome, Self::Error> {
+        match self
+            .prepare_initial_call(session, call, failure_identities)
+            .await
+        {
+            Err(ModelCallRepositoryError::NoLiveExecution) => Ok(PrepareModelCallOutcome::NoWork),
+            result => result,
+        }
+    }
+}
+
+impl FailPreparedModelCallTransaction for PostgresModelCallRepository {
+    type Error = ModelCallRepositoryError;
+
+    async fn fail_prepared<NextTurn>(
+        &mut self,
+        session: SessionId,
+        call: ModelCallId,
+        identities: FailedModelCallTurnIdentities,
+        next_reclassified_turn: NextTurn,
+    ) -> Result<FailedModelCallTurn, Self::Error>
+    where
+        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+    {
+        PostgresModelCallRepository::fail_prepared_call(
+            self,
+            session,
+            call,
+            identities,
+            next_reclassified_turn,
+        )
+        .await
+    }
+}
+
+impl AuthorizeModelCallTransaction for PostgresModelCallRepository {
+    type Error = ModelCallRepositoryError;
+
+    async fn authorize(
+        &mut self,
+        session: SessionId,
+        call: ModelCallId,
+    ) -> Result<AuthorizedModelCall, Self::Error> {
+        self.authorize_send(session, call).await
+    }
+
+    async fn reread_after_ambiguous_commit(
+        &mut self,
+        session: SessionId,
+        prepared: &signalbox_domain::PreparedModelCallRequest,
+    ) -> Result<ModelCallAuthorizationReread, Self::Error> {
+        self.reread_ambiguous_authorization(session, prepared).await
+    }
+}
+
+impl CommitModelCallObservationTransaction for PostgresModelCallRepository {
+    type Error = ModelCallRepositoryError;
+
+    async fn commit_observation<NextTurn>(
+        &mut self,
+        session: SessionId,
+        observation: CorrelatedModelCallTerminalObservation,
+        identities: ModelCallTerminalIdentities,
+        next_reclassified_turn: NextTurn,
+    ) -> Result<ModelCallTerminalOutcome, Self::Error>
+    where
+        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+    {
+        self.apply_terminal_observation(session, observation, identities, next_reclassified_turn)
+            .await
+    }
+
+    async fn reread_observation(
+        &mut self,
+        session: SessionId,
+        observation: &CorrelatedModelCallTerminalObservation,
+    ) -> Result<RetainedModelCallObservationStatus, Self::Error> {
+        self.reread_terminal_observation(session, observation).await
+    }
+}
+
+async fn terminal_content_matches(
+    connection: &mut PgConnection,
+    session: SessionId,
+    observation: &CorrelatedModelCallTerminalObservation,
+) -> Result<bool, ModelCallRepositoryError> {
+    let ModelCallTerminalObservation::Completed { assistant_text } = observation.observation()
+    else {
+        return Ok(true);
+    };
+    let stored = sqlx::query_scalar::<_, String>(
+        "SELECT entry.assistant_text_value
+           FROM turn_lifecycle AS turn
+           JOIN context_frontier_member AS member
+             ON member.owning_session_id = turn.session_id
+            AND member.context_frontier_id = turn.terminal_frontier_id
+           JOIN semantic_transcript_entry AS entry
+             ON entry.source_session_id = member.source_session_id
+            AND entry.semantic_entry_id = member.semantic_entry_id
+          WHERE turn.session_id = $1
+            AND turn.turn_id = $2
+            AND turn.state_kind = 'terminal'
+            AND turn.terminal_model_call_id = $3
+            AND entry.payload_kind = 'assistant_text'
+            AND entry.producing_model_call_id = $3
+          ORDER BY member.member_position",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(observation.correlation().turn()))
+    .bind(observation.call().into_uuid())
+    .fetch_all(connection)
+    .await?;
+    Ok(stored
+        .iter()
+        .map(String::as_str)
+        .eq(assistant_text.iter().map(AssistantText::as_str)))
 }
 
 fn pending_reclassification_candidates(

@@ -41,6 +41,35 @@ the deferred authority.
 startup-scan completion, hub boot, and the steering/cancellation milestone's
 reopening obligation.
 
+## 2026-07-22 — Render the initial model frontier by semantic entry role
+
+**Context.** The first model-call application slice must project ADR-0030's
+ordered semantic frontier into the provider-neutral text messages consumed by
+the runtime bridge. The accepted records fix origin and assistant entry
+semantics but leave this initial rendering choice open, and inherited entries
+need not have been created by a native turn in the current session.
+
+**Decision.** Traverse the exact frontier order. Render each
+`OriginAcceptedInput` entry and its checked receipt content as a user message,
+and each `AssistantText` entry as an assistant message. Preserve the entry's
+source-qualified reference and content provenance in the application value; skip
+terminal markers, which delimit history but carry no message content. Fail
+closed on the still-gated assistant tool-use variant. Do not infer a native turn
+from an entry or group entries into turns.
+
+**Rejected alternatives.** Render every entry as user content: assistant
+provenance and conversational role would be lost. Infer roles or grouping from
+turn ownership: inherited semantic entries do not imply native-turn ownership.
+Send terminal markers as text: that would invent model-visible content. Flatten
+directly into an Anthropic request: provider wire types would cross the
+application boundary.
+
+**Affects.** `crates/application/src/model_execution.rs`, its public
+provider-neutral operation/message values, the application service tests, and
+the later model-runtime bridge. Rich content, tool execution, provider/client
+rendering beyond these admitted baseline entries, and prompt templating remain
+open.
+
 ## 2026-07-21 — Distinct provider error type and code evidence
 
 **Context.** Provider error envelopes can carry both a categorical type token
