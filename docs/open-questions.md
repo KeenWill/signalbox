@@ -117,7 +117,8 @@ accepted records; those numbers remain reserved for their topics.
   placement constraints, per-turn resources, and interpreting-policy selections
   are unavailable baseline capabilities; a future subsystem ADR must extend the
   request, session-default, override, and effective-value algebras together
-  (ADR-0027). Blocks those capabilities. (S02, S05, S13–S16)
+  ([ADR-0027](decisions/0027-input-delivery-lifecycle.md)). Blocks those
+  capabilities. (S02, S05, S13–S16)
 
 ## Model fallback and provenance (reserved ADR-0006, ADR-0007)
 
