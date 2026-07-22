@@ -23,17 +23,18 @@ use signalbox_application::{
 };
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputStartingLineage, ActivatedAcceptedInputTurn, ActiveTurnPhase,
-    AssistantText, CompletedModelCallIdentities, ContextFrontierId, CreateSession,
-    CurrentTurnAttemptState, DeliveryRequest, DurableCommandId, FailedModelCallTurnIdentities,
-    ModelAlias, ModelCallId, ModelCallTerminalIdentities, ModelCallTerminalObservation,
-    ModelCallTerminalOutcome, ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog,
-    ModelTargetDefinition, PerInputConfigurationChoices, PreparedCreateSession,
-    ProviderModelIdentity, ReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult,
-    ReplaceSessionDefaultsResult, ResolvedProviderTarget, SemanticTranscriptEntryId,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
-    SessionCreationProvenance, SessionId, SubmitInput, SubmitInputAppliedResult,
-    SubmitInputReconstitutionFailure, SubmitInputRejectedResult, SubmitInputResult,
-    TranscriptAncestry, TurnAttemptId, TurnConfigurationProvenance, TurnId, UserContent,
+    AssistantText, AuthorizedModelCall, CompletedModelCallIdentities, ContextFrontierId,
+    CreateSession, CurrentTurnAttemptState, DeliveryRequest, DurableCommandId,
+    FailedModelCallTurnIdentities, ModelAlias, ModelCallId, ModelCallTerminalIdentities,
+    ModelCallTerminalObservation, ModelCallTerminalOutcome, ModelSelectionOverride,
+    ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition, PerInputConfigurationChoices,
+    PreparedCreateSession, ProviderModelIdentity, RefusedModelCallTurnIdentities,
+    ReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult,
+    ResolvedProviderTarget, SemanticTranscriptEntryId, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
+    SessionId, SubmitInput, SubmitInputAppliedResult, SubmitInputReconstitutionFailure,
+    SubmitInputRejectedResult, SubmitInputResult, TranscriptAncestry, TurnAttemptId,
+    TurnConfigurationProvenance, TurnId, UserContent,
 };
 use signalbox_persistence::{
     MIGRATOR,
@@ -42,7 +43,9 @@ use signalbox_persistence::{
         CreateSessionRepositoryError,
     },
     local_test_connection_options, migrate,
-    model_execution::{PostgresModelCallRepository, PrepareInitialModelCallOutcome},
+    model_execution::{
+        ModelCallRepositoryError, PostgresModelCallRepository, PrepareInitialModelCallOutcome,
+    },
     replace_session_defaults::{
         ReplaceSessionDefaultsCorruption, ReplaceSessionDefaultsHandlingOutcome,
         ReplaceSessionDefaultsRepository, ReplaceSessionDefaultsRepositoryError,
@@ -905,6 +908,48 @@ async fn checkpoint_restart_model_call(
     })
 }
 
+async fn authorize_checkpointed_model_call(
+    pool: &PgPool,
+    seed: u128,
+) -> Result<
+    (
+        RestartModelCallFixture,
+        PostgresModelCallRepository,
+        AuthorizedModelCall,
+    ),
+    Box<dyn Error>,
+> {
+    let fixture = checkpoint_restart_model_call(pool, seed, false).await?;
+    let selection = signalbox_domain::DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5));
+    let provider = ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6));
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        ResolvedProviderTarget::naming(provider),
+    )])
+    .expect("one issued fixture target forms a catalog");
+    let repository = PostgresModelCallRepository::new(pool.clone(), targets);
+    assert!(matches!(
+        repository
+            .prepare_initial_call(
+                fixture.session,
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 14)),
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 15)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 16)),
+                ),
+            )
+            .await?,
+        PrepareInitialModelCallOutcome::Ready(_)
+    ));
+    let AuthorizeModelCallOutcome::Authorized(authorized) = repository
+        .authorize_send(fixture.session, fixture.call)
+        .await?
+    else {
+        panic!("the exact Prepared fixture authorizes")
+    };
+    Ok((fixture, repository, *authorized))
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn embedded_migrator_connects_and_is_idempotent() -> Result<(), Box<dyn Error>> {
@@ -964,6 +1009,215 @@ async fn model_call_capability_failure_reread_distinguishes_pending_and_committe
             .await?,
         RetainedCapabilityFailureStatus::AlreadyCommitted
     );
+
+    sqlx::query("ALTER TABLE turn_failed_outbox_event DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM turn_failed_outbox_event WHERE turn_id = $1")
+        .bind(fixture.turn.into_uuid())
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE turn_failed_outbox_event ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    assert!(matches!(
+        repository
+            .reread_capability_failure(fixture.session, fixture.call)
+            .await,
+        Err(ModelCallRepositoryError::InvalidTransition(
+            "retained capability failure durable closure is incomplete"
+        ))
+    ));
+
+    let issued_seed = seed + 0x100;
+    let (issued, issued_repository, authorized) =
+        authorize_checkpointed_model_call(&pool, issued_seed).await?;
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::KnownFailed);
+    issued_repository
+        .apply_terminal_observation(
+            issued.session,
+            observation.clone(),
+            ModelCallTerminalIdentities::Failed(FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(issued_seed + 17)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(issued_seed + 18)),
+            )),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+    assert!(matches!(
+        issued_repository
+            .reread_capability_failure(issued.session, issued.call)
+            .await,
+        Err(ModelCallRepositoryError::InvalidTransition(
+            "retained capability failure durable closure is incomplete"
+        ))
+    ));
+    assert_eq!(
+        issued_repository
+            .reread_terminal_observation(issued.session, &observation)
+            .await?,
+        RetainedModelCallObservationStatus::AlreadyCommitted
+    );
+
+    sqlx::query("ALTER TABLE turn_failed_outbox_event DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM turn_failed_outbox_event WHERE turn_id = $1")
+        .bind(issued.turn.into_uuid())
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE turn_failed_outbox_event ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    assert!(matches!(
+        issued_repository
+            .reread_terminal_observation(issued.session, &observation)
+            .await,
+        Err(ModelCallRepositoryError::InvalidTransition(
+            "retained observation terminal closure changed"
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// ADR-0045: retained non-completed observations converge only when their
+/// complete disposition-specific durable closure remains present.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn model_call_noncompleted_rereads_validate_each_durable_closure()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+
+    let cancelled_seed = 0x7200;
+    let (cancelled, cancelled_repository, cancelled_authorized) =
+        authorize_checkpointed_model_call(&pool, cancelled_seed).await?;
+    let cancelled_observation = cancelled_authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::Cancelled);
+    cancelled_repository
+        .apply_terminal_observation(
+            cancelled.session,
+            cancelled_observation.clone(),
+            ModelCallTerminalIdentities::Failed(FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(cancelled_seed + 17)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(cancelled_seed + 18)),
+            )),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+    assert_eq!(
+        cancelled_repository
+            .reread_terminal_observation(cancelled.session, &cancelled_observation)
+            .await?,
+        RetainedModelCallObservationStatus::AlreadyCommitted
+    );
+    sqlx::query("ALTER TABLE turn_failed_outbox_event DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM turn_failed_outbox_event WHERE turn_id = $1")
+        .bind(cancelled.turn.into_uuid())
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE turn_failed_outbox_event ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    assert!(matches!(
+        cancelled_repository
+            .reread_terminal_observation(cancelled.session, &cancelled_observation)
+            .await,
+        Err(ModelCallRepositoryError::InvalidTransition(
+            "retained observation terminal closure changed"
+        ))
+    ));
+
+    let refused_seed = 0x7300;
+    let (refused, refused_repository, refused_authorized) =
+        authorize_checkpointed_model_call(&pool, refused_seed).await?;
+    let refused_observation = refused_authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::Refused);
+    refused_repository
+        .apply_terminal_observation(
+            refused.session,
+            refused_observation.clone(),
+            ModelCallTerminalIdentities::Refused(RefusedModelCallTurnIdentities::new(
+                ContextFrontierId::from_uuid(Uuid::from_u128(refused_seed + 17)),
+            )),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+    assert_eq!(
+        refused_repository
+            .reread_terminal_observation(refused.session, &refused_observation)
+            .await?,
+        RetainedModelCallObservationStatus::AlreadyCommitted
+    );
+    sqlx::query("ALTER TABLE turn_refused_outbox_event DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM turn_refused_outbox_event WHERE turn_id = $1")
+        .bind(refused.turn.into_uuid())
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE turn_refused_outbox_event ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    assert!(matches!(
+        refused_repository
+            .reread_terminal_observation(refused.session, &refused_observation)
+            .await,
+        Err(ModelCallRepositoryError::InvalidTransition(
+            "retained observation terminal closure changed"
+        ))
+    ));
+
+    let ambiguous_seed = 0x7400;
+    let (ambiguous, ambiguous_repository, ambiguous_authorized) =
+        authorize_checkpointed_model_call(&pool, ambiguous_seed).await?;
+    let ambiguous_observation = ambiguous_authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::Ambiguous);
+    ambiguous_repository
+        .apply_terminal_observation(
+            ambiguous.session,
+            ambiguous_observation.clone(),
+            ModelCallTerminalIdentities::Ambiguous,
+            |_| panic!("Ambiguous creates no pending-steering successors"),
+        )
+        .await?;
+    assert_eq!(
+        ambiguous_repository
+            .reread_terminal_observation(ambiguous.session, &ambiguous_observation)
+            .await?,
+        RetainedModelCallObservationStatus::AlreadyCommitted
+    );
+    sqlx::query("ALTER TABLE model_call_transition_outbox_event DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "DELETE FROM model_call_transition_outbox_event
+          WHERE model_call_id = $1
+            AND call_state_kind = 'terminal'",
+    )
+    .bind(ambiguous.call.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE model_call_transition_outbox_event ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    assert!(matches!(
+        ambiguous_repository
+            .reread_terminal_observation(ambiguous.session, &ambiguous_observation)
+            .await,
+        Err(ModelCallRepositoryError::InvalidTransition(
+            "retained observation terminal closure changed"
+        ))
+    ));
 
     pool.close().await;
     drop(container);

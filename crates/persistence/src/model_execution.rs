@@ -449,8 +449,8 @@ impl PostgresModelCallRepository {
         let mut transaction = self.pool.begin().await?;
         let result = async {
             lock_session(&mut transaction, session).await?;
-            let stored = sqlx::query_as::<_, (Uuid, Uuid, String, Option<String>)>(
-                "SELECT turn_id, turn_attempt_id, state_kind,
+            let stored = sqlx::query_as::<_, (Uuid, Uuid, Uuid, String, Option<String>)>(
+                "SELECT turn_id, turn_attempt_id, context_frontier_id, state_kind,
                         terminal_disposition_kind
                    FROM model_call
                   WHERE session_id = $1
@@ -463,7 +463,7 @@ impl PostgresModelCallRepository {
             .ok_or(ModelCallCorruption::Missing(
                 "retained capability-failure model call",
             ))?;
-            let (turn, attempt, state, disposition) = stored;
+            let (turn, attempt, source_frontier, state, disposition) = stored;
             match (state.as_str(), disposition.as_deref()) {
                 ("prepared", None) => {
                     let execution = require_exact_call(
@@ -478,51 +478,49 @@ impl PostgresModelCallRepository {
                     Ok(RetainedCapabilityFailureStatus::Pending)
                 }
                 ("terminal", Some("known_failed")) => {
-                    let closure_is_complete = sqlx::query_scalar::<_, bool>(
+                    let transition_history_matches = sqlx::query_scalar::<_, bool>(
                         "SELECT
                             EXISTS (
                                 SELECT 1
-                                  FROM turn_attempt
+                                  FROM model_call_transition_outbox_event
                                  WHERE session_id = $1
+                                   AND model_call_id = $3
                                    AND turn_id = $2
-                                   AND turn_attempt_id = $3
-                                   AND state_kind = 'ended'
-                                   AND end_variant = 'without_stop'
-                                   AND end_disposition = 'known_failure'
+                                   AND call_state_kind = 'prepared'
+                                   AND terminal_disposition_kind IS NULL
+                            )
+                            AND NOT EXISTS (
+                                SELECT 1
+                                  FROM model_call_transition_outbox_event
+                                 WHERE session_id = $1
+                                   AND model_call_id = $3
+                                   AND turn_id = $2
+                                   AND call_state_kind = 'in_flight'
                             )
                             AND EXISTS (
                                 SELECT 1
-                                  FROM turn_lifecycle
+                                  FROM model_call_transition_outbox_event
                                  WHERE session_id = $1
+                                   AND model_call_id = $3
                                    AND turn_id = $2
-                                   AND state_kind = 'terminal'
-                                   AND terminal_disposition_kind = 'failed'
-                            )
-                            AND EXISTS (
-                                SELECT 1
-                                  FROM turn_lifecycle AS turn
-                                  JOIN context_frontier AS frontier
-                                    ON frontier.owning_session_id = turn.session_id
-                                   AND frontier.context_frontier_id = turn.terminal_frontier_id
-                                  JOIN context_frontier_member AS member
-                                    ON member.owning_session_id = frontier.owning_session_id
-                                   AND member.context_frontier_id = frontier.context_frontier_id
-                                   AND member.member_position = frontier.member_count
-                                  JOIN semantic_transcript_entry AS entry
-                                    ON entry.source_session_id = member.source_session_id
-                                   AND entry.semantic_entry_id = member.semantic_entry_id
-                                 WHERE turn.session_id = $1
-                                   AND turn.turn_id = $2
-                                   AND entry.payload_kind = 'turn_failed'
-                                   AND entry.failed_turn_id = $2
+                                   AND call_state_kind = 'terminal'
+                                   AND terminal_disposition_kind = 'known_failed'
                             )",
                     )
                     .bind(session_id_to_uuid(session))
                     .bind(turn)
-                    .bind(attempt)
+                    .bind(call.into_uuid())
                     .fetch_one(&mut *transaction)
                     .await?;
-                    if closure_is_complete {
+                    let closure_matches = failed_turn_closure_matches(
+                        &mut transaction,
+                        session,
+                        turn,
+                        attempt,
+                        source_frontier,
+                    )
+                    .await?;
+                    if transition_history_matches && closure_matches {
                         Ok(RetainedCapabilityFailureStatus::AlreadyCommitted)
                     } else {
                         Err(ModelCallRepositoryError::InvalidTransition(
@@ -657,9 +655,11 @@ impl PostgresModelCallRepository {
                     if stored_disposition
                         == encode_disposition(observation.observation().disposition()) =>
                 {
-                    if !terminal_content_matches(&mut transaction, session, observation).await? {
+                    if !terminal_observation_closure_matches(&mut transaction, session, observation)
+                        .await?
+                    {
                         return Err(ModelCallRepositoryError::InvalidTransition(
-                            "retained observation terminal content changed",
+                            "retained observation terminal closure changed",
                         ));
                     }
                     Ok(RetainedModelCallObservationStatus::AlreadyCommitted)
@@ -798,15 +798,71 @@ impl CommitModelCallObservationTransaction for PostgresModelCallRepository {
     }
 }
 
-async fn terminal_content_matches(
+async fn terminal_observation_closure_matches(
     connection: &mut PgConnection,
     session: SessionId,
     observation: &CorrelatedModelCallTerminalObservation,
 ) -> Result<bool, ModelCallRepositoryError> {
-    let ModelCallTerminalObservation::Completed { assistant_text } = observation.observation()
-    else {
-        return Ok(true);
-    };
+    if !terminal_observation_transition_events_match(connection, session, observation).await? {
+        return Ok(false);
+    }
+    match observation.observation() {
+        ModelCallTerminalObservation::Completed { assistant_text } => {
+            completed_terminal_closure_matches(connection, session, observation, assistant_text)
+                .await
+        }
+        ModelCallTerminalObservation::KnownFailed | ModelCallTerminalObservation::Cancelled => {
+            failed_terminal_closure_matches(connection, session, observation).await
+        }
+        ModelCallTerminalObservation::Refused => {
+            refused_terminal_closure_matches(connection, session, observation).await
+        }
+        ModelCallTerminalObservation::Ambiguous => {
+            ambiguous_terminal_closure_matches(connection, session, observation).await
+        }
+    }
+}
+
+async fn terminal_observation_transition_events_match(
+    connection: &mut PgConnection,
+    session: SessionId,
+    observation: &CorrelatedModelCallTerminalObservation,
+) -> Result<bool, ModelCallRepositoryError> {
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT
+            EXISTS (
+                SELECT 1
+                  FROM model_call_transition_outbox_event
+                 WHERE session_id = $1
+                   AND model_call_id = $2
+                   AND turn_id = $3
+                   AND call_state_kind = 'in_flight'
+                   AND terminal_disposition_kind IS NULL
+            )
+            AND EXISTS (
+                SELECT 1
+                  FROM model_call_transition_outbox_event
+                 WHERE session_id = $1
+                   AND model_call_id = $2
+                   AND turn_id = $3
+                   AND call_state_kind = 'terminal'
+                   AND terminal_disposition_kind = $4
+            )",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(observation.call().into_uuid())
+    .bind(turn_id_to_uuid(observation.correlation().turn()))
+    .bind(encode_disposition(observation.observation().disposition()))
+    .fetch_one(&mut *connection)
+    .await?)
+}
+
+async fn completed_terminal_closure_matches(
+    connection: &mut PgConnection,
+    session: SessionId,
+    observation: &CorrelatedModelCallTerminalObservation,
+    assistant_text: &[AssistantText],
+) -> Result<bool, ModelCallRepositoryError> {
     let terminal_frontier = sqlx::query_scalar::<_, Uuid>(
         "SELECT terminal_frontier_id
            FROM turn_lifecycle
@@ -824,7 +880,221 @@ async fn terminal_content_matches(
     let Some(terminal_frontier) = terminal_frontier else {
         return Ok(false);
     };
-    let source_frontier = sqlx::query_as::<_, (Uuid, Uuid)>(
+    let source_frontier = load_frontier_members(
+        connection,
+        session,
+        observation.correlation().frontier().into_uuid(),
+    )
+    .await?;
+    let terminal_members = load_terminal_frontier(connection, session, terminal_frontier).await?;
+    Ok(completed_terminal_frontier_matches(
+        &source_frontier,
+        &terminal_members,
+        session_id_to_uuid(session),
+        turn_id_to_uuid(observation.correlation().turn()),
+        observation.call().into_uuid(),
+        assistant_text,
+    ))
+}
+
+async fn failed_terminal_closure_matches(
+    connection: &mut PgConnection,
+    session: SessionId,
+    observation: &CorrelatedModelCallTerminalObservation,
+) -> Result<bool, ModelCallRepositoryError> {
+    let correlation = observation.correlation();
+    failed_turn_closure_matches(
+        connection,
+        session,
+        turn_id_to_uuid(correlation.turn()),
+        correlation.attempt().into_uuid(),
+        correlation.frontier().into_uuid(),
+    )
+    .await
+}
+
+async fn failed_turn_closure_matches(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: Uuid,
+    attempt: Uuid,
+    source_frontier: Uuid,
+) -> Result<bool, ModelCallRepositoryError> {
+    let terminal_frontier = sqlx::query_scalar::<_, Uuid>(
+        "SELECT terminal_frontier_id
+           FROM turn_lifecycle
+          WHERE session_id = $1
+            AND turn_id = $2
+            AND state_kind = 'terminal'
+            AND terminal_disposition_kind = 'failed'
+            AND terminal_attempt_id IS NULL
+            AND terminal_model_call_id IS NULL
+            AND active_phase_kind IS NULL
+            AND current_attempt_id IS NULL
+            AND recovery_model_call_id IS NULL
+            AND EXISTS (
+                SELECT 1
+                  FROM turn_attempt
+                 WHERE session_id = $1
+                   AND turn_id = $2
+                   AND turn_attempt_id = $3
+                   AND state_kind = 'ended'
+                   AND end_variant = 'without_stop'
+                   AND end_disposition = 'known_failure'
+            )",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn)
+    .bind(attempt)
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(terminal_frontier) = terminal_frontier else {
+        return Ok(false);
+    };
+    let source_frontier = load_frontier_members(connection, session, source_frontier).await?;
+    let terminal_members = load_terminal_frontier(connection, session, terminal_frontier).await?;
+    if !failed_terminal_frontier_matches(
+        &source_frontier,
+        &terminal_members,
+        session_id_to_uuid(session),
+        turn,
+    ) {
+        return Ok(false);
+    }
+    let Some(failure_entry) = terminal_members.last().map(|member| member.entry) else {
+        return Ok(false);
+    };
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+            SELECT 1
+              FROM turn_failed_outbox_event
+             WHERE session_id = $1
+               AND turn_id = $2
+               AND failure_entry_id = $3
+               AND terminal_frontier_id = $4
+        )",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn)
+    .bind(failure_entry)
+    .bind(terminal_frontier)
+    .fetch_one(&mut *connection)
+    .await?)
+}
+
+async fn refused_terminal_closure_matches(
+    connection: &mut PgConnection,
+    session: SessionId,
+    observation: &CorrelatedModelCallTerminalObservation,
+) -> Result<bool, ModelCallRepositoryError> {
+    let correlation = observation.correlation();
+    let terminal_frontier = sqlx::query_scalar::<_, Uuid>(
+        "SELECT terminal_frontier_id
+           FROM turn_lifecycle
+          WHERE session_id = $1
+            AND turn_id = $2
+            AND state_kind = 'terminal'
+            AND terminal_disposition_kind = 'refused'
+            AND terminal_attempt_id = $3
+            AND terminal_model_call_id = $4
+            AND active_phase_kind IS NULL
+            AND current_attempt_id IS NULL
+            AND recovery_model_call_id IS NULL
+            AND EXISTS (
+                SELECT 1
+                  FROM turn_attempt
+                 WHERE session_id = $1
+                   AND turn_id = $2
+                   AND turn_attempt_id = $3
+                   AND state_kind = 'ended'
+                   AND end_variant = 'without_stop'
+                   AND end_disposition = 'turn_refused'
+            )",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(correlation.turn()))
+    .bind(correlation.attempt().into_uuid())
+    .bind(observation.call().into_uuid())
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(terminal_frontier) = terminal_frontier else {
+        return Ok(false);
+    };
+    let source_frontier =
+        load_frontier_members(connection, session, correlation.frontier().into_uuid()).await?;
+    let terminal_members = load_terminal_frontier(connection, session, terminal_frontier).await?;
+    if terminal_members.len() != source_frontier.len()
+        || terminal_members
+            .iter()
+            .zip(&source_frontier)
+            .any(|(stored, expected)| (stored.source_session, stored.entry) != *expected)
+    {
+        return Ok(false);
+    }
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+            SELECT 1
+              FROM turn_refused_outbox_event
+             WHERE session_id = $1
+               AND turn_id = $2
+               AND model_call_id = $3
+               AND terminal_frontier_id = $4
+        )",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(correlation.turn()))
+    .bind(observation.call().into_uuid())
+    .bind(terminal_frontier)
+    .fetch_one(&mut *connection)
+    .await?)
+}
+
+async fn ambiguous_terminal_closure_matches(
+    connection: &mut PgConnection,
+    session: SessionId,
+    observation: &CorrelatedModelCallTerminalObservation,
+) -> Result<bool, ModelCallRepositoryError> {
+    let correlation = observation.correlation();
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+            SELECT 1
+              FROM turn_lifecycle
+             WHERE session_id = $1
+               AND turn_id = $2
+               AND state_kind = 'active'
+               AND terminal_disposition_kind IS NULL
+               AND terminal_frontier_id IS NULL
+               AND terminal_attempt_id IS NULL
+               AND terminal_model_call_id IS NULL
+               AND active_phase_kind = 'awaiting_model_call_recovery'
+               AND current_attempt_id = $3
+               AND recovery_model_call_id = $4
+               AND EXISTS (
+                    SELECT 1
+                      FROM turn_attempt
+                     WHERE session_id = $1
+                       AND turn_id = $2
+                       AND turn_attempt_id = $3
+                       AND state_kind = 'ended'
+                       AND end_variant = 'without_stop'
+                       AND end_disposition = 'ambiguous'
+               )
+        )",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(correlation.turn()))
+    .bind(correlation.attempt().into_uuid())
+    .bind(observation.call().into_uuid())
+    .fetch_one(&mut *connection)
+    .await?)
+}
+
+async fn load_frontier_members(
+    connection: &mut PgConnection,
+    session: SessionId,
+    frontier: Uuid,
+) -> Result<Vec<(Uuid, Uuid)>, ModelCallRepositoryError> {
+    Ok(sqlx::query_as::<_, (Uuid, Uuid)>(
         "SELECT source_session_id, semantic_entry_id
            FROM context_frontier_member
           WHERE owning_session_id = $1
@@ -832,13 +1102,21 @@ async fn terminal_content_matches(
           ORDER BY member_position",
     )
     .bind(session_id_to_uuid(session))
-    .bind(observation.correlation().frontier().into_uuid())
+    .bind(frontier)
     .fetch_all(&mut *connection)
-    .await?;
-    let terminal_members = sqlx::query(
+    .await?)
+}
+
+async fn load_terminal_frontier(
+    connection: &mut PgConnection,
+    session: SessionId,
+    frontier: Uuid,
+) -> Result<Vec<StoredTerminalFrontierMember>, ModelCallRepositoryError> {
+    sqlx::query(
         "SELECT member.source_session_id, member.semantic_entry_id,
                 entry.payload_kind, entry.assistant_text_value,
-                entry.producing_model_call_id, entry.completed_turn_id
+                entry.producing_model_call_id, entry.completed_turn_id,
+                entry.failed_turn_id
            FROM context_frontier_member AS member
            JOIN semantic_transcript_entry AS entry
              ON entry.source_session_id = member.source_session_id
@@ -848,7 +1126,7 @@ async fn terminal_content_matches(
           ORDER BY member.member_position",
     )
     .bind(session_id_to_uuid(session))
-    .bind(terminal_frontier)
+    .bind(frontier)
     .fetch_all(&mut *connection)
     .await?
     .into_iter()
@@ -860,17 +1138,10 @@ async fn terminal_content_matches(
             assistant_text: row.try_get("assistant_text_value")?,
             producing_call: row.try_get("producing_model_call_id")?,
             completed_turn: row.try_get("completed_turn_id")?,
+            failed_turn: row.try_get("failed_turn_id")?,
         })
     })
-    .collect::<Result<Vec<_>, ModelCallRepositoryError>>()?;
-    Ok(completed_terminal_frontier_matches(
-        &source_frontier,
-        &terminal_members,
-        session_id_to_uuid(session),
-        turn_id_to_uuid(observation.correlation().turn()),
-        observation.call().into_uuid(),
-        assistant_text,
-    ))
+    .collect()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -881,6 +1152,7 @@ struct StoredTerminalFrontierMember {
     assistant_text: Option<String>,
     producing_call: Option<Uuid>,
     completed_turn: Option<Uuid>,
+    failed_turn: Option<Uuid>,
 }
 
 fn completed_terminal_frontier_matches(
@@ -911,6 +1183,7 @@ fn completed_terminal_frontier_matches(
                 || stored.assistant_text.as_deref() != Some(expected.as_str())
                 || stored.producing_call != Some(call)
                 || stored.completed_turn.is_some()
+                || stored.failed_turn.is_some()
         })
     {
         return false;
@@ -921,6 +1194,30 @@ fn completed_terminal_frontier_matches(
         && completion.assistant_text.is_none()
         && completion.producing_call.is_none()
         && completion.completed_turn == Some(turn)
+        && completion.failed_turn.is_none()
+}
+
+fn failed_terminal_frontier_matches(
+    source_frontier: &[(Uuid, Uuid)],
+    terminal_frontier: &[StoredTerminalFrontierMember],
+    session: Uuid,
+    turn: Uuid,
+) -> bool {
+    if terminal_frontier.len() != source_frontier.len() + 1
+        || terminal_frontier
+            .iter()
+            .zip(source_frontier)
+            .any(|(stored, expected)| (stored.source_session, stored.entry) != *expected)
+    {
+        return false;
+    }
+    let failure = &terminal_frontier[source_frontier.len()];
+    failure.source_session == session
+        && failure.payload_kind == "turn_failed"
+        && failure.assistant_text.is_none()
+        && failure.producing_call.is_none()
+        && failure.completed_turn.is_none()
+        && failure.failed_turn == Some(turn)
 }
 
 fn pending_reclassification_candidates(
@@ -2161,7 +2458,7 @@ mod tests {
     use super::{
         ModelCallIdentityCollision, ModelCallRepositoryError, StoredTerminalFrontierMember,
         commit_failure_is_ambiguous, completed_terminal_frontier_matches,
-        record_reclassified_turn_candidate,
+        failed_terminal_frontier_matches, record_reclassified_turn_candidate,
     };
 
     /// ADR-0045: a source-turn successor candidate is a retryable minted-ID
@@ -2295,6 +2592,7 @@ mod tests {
             assistant_text: None,
             producing_call: None,
             completed_turn: None,
+            failed_turn: None,
         };
         let assistant_member = StoredTerminalFrontierMember {
             source_session: session,
@@ -2303,6 +2601,7 @@ mod tests {
             assistant_text: Some(String::from("exact reply")),
             producing_call: Some(call),
             completed_turn: None,
+            failed_turn: None,
         };
         let completion = StoredTerminalFrontierMember {
             source_session: session,
@@ -2311,6 +2610,7 @@ mod tests {
             assistant_text: None,
             producing_call: None,
             completed_turn: Some(turn),
+            failed_turn: None,
         };
         let exact = vec![prefix.clone(), assistant_member.clone(), completion.clone()];
         assert!(completed_terminal_frontier_matches(
@@ -2339,6 +2639,55 @@ mod tests {
             turn,
             call,
             &assistant,
+        ));
+    }
+
+    /// ADR-0045: a retained failed observation is present only when its
+    /// terminal frontier is the exact source prefix plus one matching failure
+    /// marker.
+    #[test]
+    fn failed_reread_requires_exact_terminal_frontier_shape() {
+        let session = Uuid::from_u128(1);
+        let turn = Uuid::from_u128(2);
+        let source = vec![(Uuid::from_u128(3), Uuid::from_u128(4))];
+        let prefix = StoredTerminalFrontierMember {
+            source_session: source[0].0,
+            entry: source[0].1,
+            payload_kind: String::from("origin_accepted_input"),
+            assistant_text: None,
+            producing_call: None,
+            completed_turn: None,
+            failed_turn: None,
+        };
+        let failure = StoredTerminalFrontierMember {
+            source_session: session,
+            entry: Uuid::from_u128(5),
+            payload_kind: String::from("turn_failed"),
+            assistant_text: None,
+            producing_call: None,
+            completed_turn: None,
+            failed_turn: Some(turn),
+        };
+        assert!(failed_terminal_frontier_matches(
+            &source,
+            &[prefix.clone(), failure.clone()],
+            session,
+            turn,
+        ));
+
+        let mut wrong_failure = failure;
+        wrong_failure.failed_turn = Some(Uuid::from_u128(6));
+        assert!(!failed_terminal_frontier_matches(
+            &source,
+            &[prefix.clone(), wrong_failure],
+            session,
+            turn,
+        ));
+        assert!(!failed_terminal_frontier_matches(
+            &source,
+            &[prefix],
+            session,
+            turn,
         ));
     }
 }
