@@ -241,11 +241,11 @@ async fn buffered_completion_end_to_end_sends_the_documented_request_shape() {
 
 #[tokio::test]
 async fn streamed_completion_end_to_end_emits_deltas_and_gates_on_done() {
-    let sse: &[u8] = b"data: {\"id\":\"chatcmpl_loop_2\",\"model\":\"model-exact-1\",\
+    let sse: &[u8] = b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_loop_2\",\"model\":\"model-exact-1\",\
         \"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n\
-        data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n\
-        data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
-        data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2}}\n\n\
+        data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n\
+        data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+        data: {\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2}}\n\n\
         data: [DONE]\n\n";
     let server = CannedServer::serving(vec![http_response(
         "200 OK",
@@ -400,7 +400,7 @@ async fn stream_cut_before_done_is_explicit_incomplete_stream_evidence() {
     let mut response =
         b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n".to_vec();
     response.extend_from_slice(
-        b"data: {\"id\":\"chatcmpl_cut\",\"model\":\"model-exact-1\",\
+        b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_cut\",\"model\":\"model-exact-1\",\
           \"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"par\"}}]}\n\n",
     );
     let server = CannedServer::serving(vec![response]).await;
@@ -525,9 +525,10 @@ async fn successful_content_reflecting_the_key_is_redacted() {
 
 #[tokio::test]
 async fn streamed_observations_reflecting_the_key_are_redacted() {
-    let body: &[u8] = b"data: {\"id\":\"chatcmpl-key_loop\",\"model\":\"model-key_loop\",\
+    let body: &[u8] = b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl-key_loop\",\"model\":\"model-key_loop\",\
         \"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"key_loop\"}}]}\n\n\
-        data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+        data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+        data: {\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2}}\n\n\
         data: [DONE]\n\n";
     let server = CannedServer::serving(vec![http_response(
         "200 OK",

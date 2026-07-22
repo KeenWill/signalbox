@@ -5,6 +5,7 @@
 //! evidence path stays independently reviewable. Extracting a shared
 //! transport crate is a refactor candidate once a third adapter exists.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Waker};
@@ -33,18 +34,30 @@ use crate::stream::{StreamDecoder, StreamStep};
 use crate::translate::build_request;
 use crate::wire::ErrorEnvelope;
 
+const MAX_BUFFERED_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+
 /// The OpenAI Chat Completions adapter.
 ///
 /// Implements [`ModelRuntime`]: executes exactly one authorized operation as
 /// at most one `POST /v1/chat/completions` request and reports typed
 /// evidence. It holds no state between operations, retries nothing, and
 /// never issues a second request for one operation.
-#[derive(Debug)]
 pub struct OpenAiRuntime<A> {
     client: Client,
     completions_url: Url,
     credentials: A,
     sse_record_limit: usize,
+}
+
+impl<A> std::fmt::Debug for OpenAiRuntime<A> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAiRuntime")
+            .field("client", &self.client)
+            .field("completions_url", &self.completions_url)
+            .field("credentials", &"[redacted]")
+            .field("sse_record_limit", &self.sse_record_limit)
+            .finish()
+    }
 }
 
 /// Why an [`OpenAiRuntime`] could not be constructed.
@@ -199,10 +212,7 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
                 },
             ));
         };
-        let mut redacting_sink = RedactingSink {
-            inner: sink,
-            credential: &api_key,
-        };
+        let mut redacting_sink = RedactingSink::new(sink, &api_key);
         let evidence = self
             .exchange(
                 operation.delivery,
@@ -213,6 +223,7 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
                 cancellation,
             )
             .await;
+        redacting_sink.flush();
         // ADR-0017: all provider-controlled text is credential-sanitized
         // before it leaves the adapter boundary, including successful
         // assistant material that may become semantic history.
@@ -297,11 +308,9 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
         sink: &mut (dyn ObservationSink<C> + Send),
         cancellation: &mut CancellationSignal,
     ) -> TerminalEvidence {
-        let body = match with_cancellation(cancellation, response.bytes()).await {
+        let body = match collect_response_body(response, cancellation).await {
             None => return exchange_loss(LossCause::CancellationRequested, exchange),
-            Some(Err(error)) => {
-                return exchange_loss(classify_body_error(&error), exchange);
-            }
+            Some(Err(cause)) => return exchange_loss(cause, exchange),
             Some(Ok(bytes)) => bytes,
         };
         decode_buffered_response(&body, exchange, correlation, sink)
@@ -390,11 +399,9 @@ async fn finish_error(
     status: u16,
     cancellation: &mut CancellationSignal,
 ) -> TerminalEvidence {
-    let body = match with_cancellation(cancellation, response.bytes()).await {
+    let body = match collect_response_body(response, cancellation).await {
         None => return exchange_loss(LossCause::CancellationRequested, exchange),
-        Some(Err(error)) => {
-            return exchange_loss(classify_body_error(&error), exchange);
-        }
+        Some(Err(cause)) => return exchange_loss(cause, exchange),
         Some(Ok(bytes)) => bytes,
     };
     if let Ok(ErrorEnvelope { error: Some(error) }) = serde_json::from_slice(&body) {
@@ -420,6 +427,36 @@ async fn finish_error(
             message: Some(lossy_truncated(&body)),
         },
     })
+}
+
+async fn collect_response_body(
+    response: reqwest::Response,
+    cancellation: &mut CancellationSignal,
+) -> Option<Result<Vec<u8>, LossCause>> {
+    let mut body = response.bytes_stream();
+    let mut collected = Vec::new();
+    loop {
+        match with_cancellation(cancellation, body.next()).await {
+            None => return None,
+            Some(None) => return Some(Ok(collected)),
+            Some(Some(Err(error))) => return Some(Err(classify_body_error(&error))),
+            Some(Some(Ok(chunk))) => {
+                let Some(next_len) = collected.len().checked_add(chunk.len()) else {
+                    return Some(Err(response_body_too_large()));
+                };
+                if next_len > MAX_BUFFERED_RESPONSE_BYTES {
+                    return Some(Err(response_body_too_large()));
+                }
+                collected.extend_from_slice(&chunk);
+            }
+        }
+    }
+}
+
+fn response_body_too_large() -> LossCause {
+    LossCause::ResponseBodyLost(TransportFacts::new(format!(
+        "response body exceeded the {MAX_BUFFERED_RESPONSE_BYTES}-byte adapter limit"
+    )))
 }
 
 fn emit<C: Clone>(
@@ -542,13 +579,141 @@ async fn with_cancellation<F: Future>(
 struct RedactingSink<'a, C> {
     inner: &'a mut (dyn ObservationSink<C> + Send),
     credential: &'a CredentialValue,
+    credential_text: &'a str,
+    pending_stream_text: BTreeMap<(StreamField, u32), PendingStreamText<C>>,
 }
 
-impl<C> ObservationSink<C> for RedactingSink<'_, C> {
-    fn observe(&mut self, mut observation: Observation<C>) {
-        observation.fact = redact_observation_fact(observation.fact, self.credential);
-        self.inner.observe(observation);
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum StreamField {
+    Text,
+    Thinking,
+    ToolArguments,
+}
+
+struct PendingStreamText<C> {
+    correlation: C,
+    text: String,
+}
+
+impl<'a, C: Clone> RedactingSink<'a, C> {
+    fn new(
+        inner: &'a mut (dyn ObservationSink<C> + Send),
+        credential: &'a CredentialValue,
+    ) -> Self {
+        Self {
+            inner,
+            credential,
+            credential_text: std::str::from_utf8(credential.expose_bytes()).unwrap_or_default(),
+            pending_stream_text: BTreeMap::new(),
+        }
     }
+
+    fn flush(&mut self) {
+        for ((field, index), pending) in std::mem::take(&mut self.pending_stream_text) {
+            let text = if self.credential_text.is_empty() {
+                pending.text
+            } else {
+                pending.text.replace(self.credential_text, "[redacted]")
+            };
+            self.emit_stream_text(field, index, pending.correlation, text);
+        }
+    }
+
+    fn emit_stream_text(&mut self, field: StreamField, index: u32, correlation: C, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        let fact = match field {
+            StreamField::Text => ObservationFact::TextDelta { index, text },
+            StreamField::Thinking => ObservationFact::ThinkingDelta { index, text },
+            StreamField::ToolArguments => ObservationFact::ToolArgumentsDelta {
+                index,
+                fragment: text,
+            },
+        };
+        self.inner.observe(Observation { correlation, fact });
+    }
+
+    fn redact_stream_delta(
+        &mut self,
+        field: StreamField,
+        index: u32,
+        correlation: C,
+        text: String,
+    ) {
+        let mut combined = self
+            .pending_stream_text
+            .remove(&(field, index))
+            .map_or_else(String::new, |pending| pending.text);
+        combined.push_str(&text);
+        let (emitted, pending) =
+            redact_complete_credentials_and_hold_prefix(combined, self.credential_text);
+        self.emit_stream_text(field, index, correlation.clone(), emitted);
+        if !pending.is_empty() {
+            self.pending_stream_text.insert(
+                (field, index),
+                PendingStreamText {
+                    correlation,
+                    text: pending,
+                },
+            );
+        }
+    }
+}
+
+impl<C: Clone> ObservationSink<C> for RedactingSink<'_, C> {
+    fn observe(&mut self, observation: Observation<C>) {
+        match observation.fact {
+            ObservationFact::TextDelta { index, text } => {
+                self.redact_stream_delta(StreamField::Text, index, observation.correlation, text)
+            }
+            ObservationFact::ThinkingDelta { index, text } => self.redact_stream_delta(
+                StreamField::Thinking,
+                index,
+                observation.correlation,
+                text,
+            ),
+            ObservationFact::ToolArgumentsDelta { index, fragment } => self.redact_stream_delta(
+                StreamField::ToolArguments,
+                index,
+                observation.correlation,
+                fragment,
+            ),
+            fact => {
+                self.flush();
+                self.inner.observe(Observation {
+                    correlation: observation.correlation,
+                    fact: redact_observation_fact(fact, self.credential),
+                });
+            }
+        }
+    }
+}
+
+fn redact_complete_credentials_and_hold_prefix(
+    mut text: String,
+    credential: &str,
+) -> (String, String) {
+    if credential.is_empty() {
+        return (text, String::new());
+    }
+    let mut redacted = String::new();
+    while let Some(position) = text.find(credential) {
+        redacted.push_str(&text[..position]);
+        redacted.push_str("[redacted]");
+        text = text[(position + credential.len())..].to_string();
+    }
+    let longest_prefix = (1..credential.len())
+        .rev()
+        .filter(|length| credential.is_char_boundary(*length))
+        .find(|length| text.ends_with(&credential[..*length]));
+    if let Some(length) = longest_prefix {
+        let split = text.len() - length;
+        redacted.push_str(&text[..split]);
+        return (redacted, text[split..].to_string());
+    }
+    redacted.push_str(&text);
+    (redacted, String::new())
 }
 
 fn redact_observation_fact(fact: ObservationFact, credential: &CredentialValue) -> ObservationFact {
@@ -742,7 +907,53 @@ fn redact_tool_proposal(
     ToolCallProposal {
         id: ToolCallId::new(redact_text(proposal.id.as_str().to_string(), credential)),
         name: ToolName::new(redact_text(proposal.name.as_str().to_string(), credential)),
-        arguments_json: redact_text(proposal.arguments_json, credential),
+        arguments_json: redact_json(proposal.arguments_json, credential),
+    }
+}
+
+fn redact_json(raw: String, credential: &CredentialValue) -> String {
+    let key = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
+    if key.is_empty() {
+        return raw;
+    }
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return redact_text(raw, credential);
+    };
+    if !redact_json_value(&mut value, key) {
+        return raw;
+    }
+    serde_json::to_string(&value).unwrap_or_else(|_| "\"[redacted]\"".to_string())
+}
+
+fn redact_json_value(value: &mut serde_json::Value, credential: &str) -> bool {
+    match value {
+        serde_json::Value::String(text) => {
+            let redacted = text.replace(credential, "[redacted]");
+            let changed = redacted != *text;
+            *text = redacted;
+            changed
+        }
+        serde_json::Value::Array(values) => {
+            let mut changed = false;
+            for value in values {
+                changed |= redact_json_value(value, credential);
+            }
+            changed
+        }
+        serde_json::Value::Object(fields) => {
+            let old = std::mem::take(fields);
+            let mut changed = false;
+            for (key, mut value) in old {
+                let redacted_key = key.replace(credential, "[redacted]");
+                changed |= redacted_key != key;
+                changed |= redact_json_value(&mut value, credential);
+                fields.insert(redacted_key, value);
+            }
+            changed
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            false
+        }
     }
 }
 
@@ -774,4 +985,50 @@ fn sensitive_bearer(api_key: &CredentialValue) -> Option<HeaderValue> {
     let mut header = HeaderValue::from_bytes(&bytes).ok()?;
     header.set_sensitive(true);
     Some(header)
+}
+
+#[cfg(test)]
+mod tests {
+    use signalbox_model_runtime::{
+        CredentialValue, Observation, ObservationFact, ObservationSink, TokenUsage,
+    };
+
+    use super::{RedactingSink, redact_json};
+
+    #[test]
+    fn inv_035_split_streamed_credentials_are_redacted_before_observation() {
+        let credential = CredentialValue::new(b"secret".to_vec());
+        let mut observed = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed, &credential);
+        for text in ["sec", "ret"] {
+            sink.observe(Observation {
+                correlation: "call-1".to_string(),
+                fact: ObservationFact::TextDelta {
+                    index: 0,
+                    text: text.to_string(),
+                },
+            });
+        }
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::UsageReported(TokenUsage::unreported()),
+        });
+
+        let text = observed
+            .iter()
+            .filter_map(|observation| match &observation.fact {
+                ObservationFact::TextDelta { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(text, "[redacted]");
+    }
+
+    #[test]
+    fn inv_035_json_escaped_credentials_are_redacted_from_tool_arguments() {
+        let credential = CredentialValue::new(b"key_loop".to_vec());
+        let redacted = redact_json(r#"{"token":"key_\u006coop"}"#.to_string(), &credential);
+
+        assert_eq!(redacted, r#"{"token":"[redacted]"}"#);
+    }
 }

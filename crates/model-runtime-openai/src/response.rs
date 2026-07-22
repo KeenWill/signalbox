@@ -1,10 +1,11 @@
 //! Buffered-response decoding and shared response-fact mapping.
 
+use std::collections::BTreeSet;
+
 use signalbox_model_runtime::{
     AssistantPart, BoundaryLossEvidence, CompletionEvidence, ExchangeFacts, FinishReason,
-    LossCause, Observation, ObservationFact, ObservationSink, ProviderMessageId,
-    ProviderReportedModel, RefusalEvidence, TerminalEvidence, TokenUsage, ToolCallId,
-    ToolCallProposal, ToolName,
+    LossCause, Observation, ObservationFact, ObservationSink, ProviderReportedModel,
+    RefusalEvidence, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
 };
 
 use crate::wire::{ChatCompletion, WireResponseToolCall, WireUsage};
@@ -128,7 +129,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
         .as_ref()
         .map(convert_usage)
         .unwrap_or_default();
-    let message_id = completion.id.map(ProviderMessageId::new);
+    let message_id = None;
     let [choice] = completion.choices.as_slice() else {
         return unintelligible(
             format!(
@@ -176,9 +177,18 @@ pub(crate) fn decode_buffered_response<C: Clone>(
     {
         content.push(AssistantPart::Text(text.clone()));
     }
+    let mut tool_ids = BTreeSet::new();
     for call in &message.tool_calls {
         match convert_tool_call(call) {
             Ok(proposal) => {
+                if !tool_ids.insert(proposal.id.as_str().to_string()) {
+                    return unintelligible(
+                        format!("response repeats tool-call id {:?}", proposal.id.as_str()),
+                        exchange,
+                        reported_model,
+                        usage,
+                    );
+                }
                 content.push(AssistantPart::ToolCall(proposal));
             }
             Err(detail) => return unintelligible(detail, exchange, reported_model, usage),
@@ -276,8 +286,8 @@ mod tests {
     use signalbox_expect_table::table;
     use signalbox_model_runtime::{
         AssistantPart, CompletionFinish, ExchangeFacts, LossCause, Observation, ObservationFact,
-        ProviderMessageId, ProviderReportedModel, ProviderRequestId, TerminalEvidence, TokenUsage,
-        ToolCallId, ToolCallProposal, ToolName,
+        ProviderReportedModel, ProviderRequestId, TerminalEvidence, TokenUsage, ToolCallId,
+        ToolCallProposal, ToolName,
     };
 
     use super::{decode_buffered_response, map_finish};
@@ -335,10 +345,7 @@ mod tests {
             panic!("a complete success chat completion must decode as completion evidence");
         };
         assert_eq!(completion.exchange, exchange());
-        assert_eq!(
-            completion.message_id,
-            Some(ProviderMessageId::new("chatcmpl_1"))
-        );
+        assert_eq!(completion.message_id, None);
         assert_eq!(
             completion.reported_model,
             Some(ProviderReportedModel::new("model-exact-1"))
@@ -636,6 +643,21 @@ mod tests {
         ));
         assert_eq!(loss.exchange, exchange());
         assert_eq!(observations, vec![]);
+    }
+
+    #[test]
+    fn duplicate_tool_call_ids_are_boundary_loss() {
+        let (evidence, _) = decode(
+            r#"{"object":"chat.completion","choices":[{"index":0,
+                "message":{"role":"assistant","tool_calls":[
+                    {"id":"call_1","type":"function",
+                     "function":{"name":"first","arguments":"{}"}},
+                    {"id":"call_1","type":"function",
+                     "function":{"name":"second","arguments":"{}"}}]},
+                "finish_reason":"tool_calls"}]}"#,
+        );
+
+        assert!(matches!(evidence, TerminalEvidence::BoundaryLoss(_)));
     }
 
     #[derive(Debug)]

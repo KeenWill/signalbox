@@ -81,7 +81,8 @@ pub(crate) struct WireFunctionDefinition {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ChatCompletion {
-    pub id: Option<String>,
+    #[serde(rename = "id")]
+    pub _id: Option<String>,
     pub object: Option<String>,
     pub model: Option<String>,
     #[serde(default)]
@@ -171,6 +172,7 @@ impl WireError {
 #[derive(Debug, Deserialize)]
 pub(crate) struct ChatChunk {
     pub id: Option<String>,
+    pub object: Option<String>,
     pub model: Option<String>,
     #[serde(default)]
     pub choices: Vec<ChunkChoice>,

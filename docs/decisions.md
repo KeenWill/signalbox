@@ -9,6 +9,29 @@ that constrains several components — require a full record under
 [decisions/](decisions/README.md) instead. Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-21 — OpenAI adapter HTTP and codec dependencies
+
+**Context.** The OpenAI Chat Completions adapter needs the same narrow physical
+request, cancellation, bounded buffered-body, and SSE capabilities as the
+Anthropic adapter while retaining an independently reviewable wire boundary.
+
+**Decision.** Use narrowly featured `reqwest` with rustls native roots and
+streaming, with redirects, protocol retries, and idle connection reuse disabled.
+Use `futures-util` for cancellation and byte-stream combinators and `serde` plus
+`serde_json` for the provider wire codec. Test-only Tokio supplies the loopback
+runtime and socket server; existing workspace helpers cover schemas and
+fixtures.
+
+**Rejected alternatives.** The official OpenAI SDK adds provider abstractions
+and surface this adapter does not need. Sharing transport code with the first
+adapter before a third implementation exposes stable commonality would couple
+otherwise isolated provider evidence paths. A hand-rolled HTTP/TLS/SSE stack
+would make Signalbox own mature transport behavior.
+
+**Affects.** `crates/model-runtime-openai`, the workspace lockfile and
+supply-chain checks, and OpenAI loopback tests. It selects no retry, fallback,
+agent-loop, live credential source, or caller classification policy.
+
 ## 2026-07-21 — Normalize provider context-window completion
 
 **Context.** Anthropic reports `model_context_window_exceeded` when a complete
