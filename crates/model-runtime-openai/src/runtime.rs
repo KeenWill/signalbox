@@ -97,6 +97,8 @@ pub enum OpenAiConstructionError {
         /// The parser's rendered description.
         detail: String,
     },
+    /// The configured SSE record limit cannot admit any record bytes.
+    InvalidSseRecordLimit,
     /// The HTTP client could not be constructed.
     ClientConstruction {
         /// The client's rendered description.
@@ -108,6 +110,9 @@ impl std::fmt::Display for OpenAiConstructionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidBaseUrl { detail } => write!(f, "invalid base URL: {detail}"),
+            Self::InvalidSseRecordLimit => {
+                f.write_str("SSE record limit must be greater than zero")
+            }
             Self::ClientConstruction { detail } => {
                 write!(f, "HTTP client construction failed: {detail}")
             }
@@ -148,12 +153,16 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
     /// ADR-0043 selects no timeout budget: both timeouts default to none and
     /// are caller-owned configuration.
     pub fn new(config: OpenAiConfig, credentials: A) -> Result<Self, OpenAiConstructionError> {
-        let completions_url = Url::parse(&format!(
-            "{}/v1/chat/completions",
-            config.base_url.trim_end_matches('/')
-        ))
-        .map_err(|error| OpenAiConstructionError::InvalidBaseUrl {
-            detail: error.to_string(),
+        if config.sse_record_limit == 0 {
+            return Err(OpenAiConstructionError::InvalidSseRecordLimit);
+        }
+        // Parse and validate the caller's base independently. Appending first
+        // can turn an authority-less value such as `https://` into the
+        // apparently valid but unintended authority `https://v1/...`.
+        let mut completions_url = Url::parse(&config.base_url).map_err(|error| {
+            OpenAiConstructionError::InvalidBaseUrl {
+                detail: error.to_string(),
+            }
         })?;
         if completions_url.query().is_some() || completions_url.fragment().is_some() {
             // Concatenating the endpoint path onto a base with a query or
@@ -175,6 +184,18 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
                 detail: format!("unsupported scheme {:?}", completions_url.scheme()),
             });
         }
+        if completions_url.host_str().is_none() {
+            return Err(OpenAiConstructionError::InvalidBaseUrl {
+                detail: "base URL must carry an authority".to_string(),
+            });
+        }
+        completions_url
+            .path_segments_mut()
+            .map_err(|()| OpenAiConstructionError::InvalidBaseUrl {
+                detail: "base URL cannot carry path segments".to_string(),
+            })?
+            .pop_if_empty()
+            .extend(["v1", "chat", "completions"]);
         let mut builder = Client::builder()
             .redirect(Policy::none())
             .retry(reqwest::retry::never())

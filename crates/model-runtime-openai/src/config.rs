@@ -24,7 +24,7 @@ pub struct OpenAiConfig {
     /// timeout budget, so the default is none and the caller owns any budget.
     pub exchange_timeout: Option<Duration>,
     /// Upper bound on one SSE record's size; larger records are
-    /// stream-protocol-violation evidence.
+    /// stream-protocol-violation evidence. Must be greater than zero.
     pub sse_record_limit: usize,
 }
 

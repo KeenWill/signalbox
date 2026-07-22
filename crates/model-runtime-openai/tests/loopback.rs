@@ -776,6 +776,17 @@ fn base_url_user_information_is_rejected_at_construction() {
     ));
 }
 
+#[test]
+fn zero_sse_record_limit_is_rejected_at_construction() {
+    let mut config = OpenAiConfig::new();
+    config.sse_record_limit = 0;
+
+    assert!(matches!(
+        OpenAiRuntime::new(config, FixedKey),
+        Err(OpenAiConstructionError::InvalidSseRecordLimit)
+    ));
+}
+
 #[derive(Debug)]
 struct RotatingKey(Arc<Mutex<String>>);
 
@@ -1034,6 +1045,44 @@ fn a_base_url_with_query_or_fragment_fails_construction() {
         error,
         signalbox_model_runtime_openai::OpenAiConstructionError::InvalidBaseUrl { .. }
     ));
+}
+
+#[test]
+fn an_authority_less_base_url_fails_construction() {
+    let mut config = OpenAiConfig::new();
+    config.base_url = "https://".to_string();
+
+    let error = OpenAiRuntime::new(config, FixedKey)
+        .expect_err("an absent authority must not be repaired from the endpoint path");
+
+    assert!(matches!(
+        error,
+        signalbox_model_runtime_openai::OpenAiConstructionError::InvalidBaseUrl { .. }
+    ));
+}
+
+#[tokio::test]
+async fn a_base_url_path_is_preserved_when_the_endpoint_is_appended() {
+    let server = CannedServer::serving(vec![http_response(
+        "400 Bad Request",
+        &[("content-type", "application/json")],
+        br#"{"error":{"type":"invalid_request_error"}}"#,
+    )])
+    .await;
+    let mut config = OpenAiConfig::new();
+    config.base_url = format!("{}/proxy", server.base_url);
+    let runtime = OpenAiRuntime::new(config, FixedKey).expect("path-bearing base URL constructs");
+
+    let _ = execute(
+        &runtime,
+        operation("call-base-path"),
+        CancellationSignal::never(),
+    )
+    .await;
+
+    let requests = server.recorded_requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].starts_with("POST /proxy/v1/chat/completions HTTP/1.1\r\n"));
 }
 
 #[test]

@@ -155,13 +155,39 @@ fn validate_tool_history(messages: &[ConversationMessage]) -> Result<(), Prepara
             }
         }
 
-        if let Some(expected) = pending_calls.take() {
-            if message.role != ConversationRole::User || results != expected {
+        if let Some(mut expected) = pending_calls.take() {
+            if message.role != ConversationRole::User || results.is_empty() {
                 return Err(PreparationFailure::UnsupportedOperation {
-                    detail: "Chat Completions requires one matching tool result for every tool \
-                             call in the immediately following user message"
+                    detail: "Chat Completions requires consecutive user tool-result messages \
+                             until every pending tool call is answered"
                         .to_string(),
                 });
+            }
+            if let Some(unexpected) = results.iter().find(|id| !expected.contains(**id)) {
+                return Err(PreparationFailure::UnsupportedOperation {
+                    detail: format!(
+                        "tool result {unexpected} does not answer a pending Chat Completions \
+                         tool call"
+                    ),
+                });
+            }
+            for result in results {
+                expected.remove(result);
+            }
+            if !expected.is_empty() {
+                if message
+                    .parts
+                    .iter()
+                    .any(|part| !matches!(part, MessagePart::ToolResult(_)))
+                {
+                    return Err(PreparationFailure::UnsupportedOperation {
+                        detail: "Chat Completions requires every pending tool result before \
+                                 intervening user content"
+                            .to_string(),
+                    });
+                }
+                pending_calls = Some(expected);
+                continue;
             }
         } else if !results.is_empty() {
             return Err(PreparationFailure::UnsupportedOperation {
@@ -1010,6 +1036,80 @@ mod tests {
         ];
         assert!(matches!(
             build_request(&mismatched),
+            Err(PreparationFailure::UnsupportedOperation { .. })
+        ));
+    }
+
+    #[test]
+    fn parallel_tool_results_can_span_consecutive_user_messages() {
+        let call = |id: &str, name: &str| {
+            MessagePart::ToolCall(ToolCallProposal {
+                id: ToolCallId::new(id),
+                name: ToolName::new(name),
+                arguments_json: "{}".to_string(),
+            })
+        };
+        let result = |id: &str, content: &str| {
+            MessagePart::ToolResult(ToolResultRecord {
+                tool_call_id: ToolCallId::new(id),
+                content: content.to_string(),
+                is_error: false,
+            })
+        };
+        let mut operation = operation("call-parallel-results");
+        operation.messages = vec![
+            ConversationMessage {
+                role: ConversationRole::Assistant,
+                parts: vec![call("call_a", "lookup_a"), call("call_b", "lookup_b")],
+            },
+            ConversationMessage {
+                role: ConversationRole::User,
+                parts: vec![result("call_a", "first")],
+            },
+            ConversationMessage {
+                role: ConversationRole::User,
+                parts: vec![result("call_b", "second")],
+            },
+        ];
+
+        let request = build_request(&operation)
+            .expect("consecutive tool messages preserve representable parallel results");
+        let value = serde_json::to_value(request).expect("wire request serializes");
+
+        assert_eq!(value["messages"][1]["role"], "tool");
+        assert_eq!(value["messages"][1]["tool_call_id"], "call_a");
+        assert_eq!(value["messages"][2]["role"], "tool");
+        assert_eq!(value["messages"][2]["tool_call_id"], "call_b");
+    }
+
+    #[test]
+    fn user_content_cannot_intervene_between_parallel_tool_results() {
+        let call = |id: &str| {
+            MessagePart::ToolCall(ToolCallProposal {
+                id: ToolCallId::new(id),
+                name: ToolName::new("lookup"),
+                arguments_json: "{}".to_string(),
+            })
+        };
+        let result = MessagePart::ToolResult(ToolResultRecord {
+            tool_call_id: ToolCallId::new("call_a"),
+            content: "first".to_string(),
+            is_error: false,
+        });
+        let mut operation = operation("call-intervening-content");
+        operation.messages = vec![
+            ConversationMessage {
+                role: ConversationRole::Assistant,
+                parts: vec![call("call_a"), call("call_b")],
+            },
+            ConversationMessage {
+                role: ConversationRole::User,
+                parts: vec![result, MessagePart::Text("continue".to_string())],
+            },
+        ];
+
+        assert!(matches!(
+            build_request(&operation),
             Err(PreparationFailure::UnsupportedOperation { .. })
         ));
     }
