@@ -170,6 +170,7 @@ enum ShutdownOutcome {
     GraceWindowExpired,
     SignalListenerFailed,
     ExecutionFailed,
+    ExecutionFailedAfterGraceWindow,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -229,13 +230,14 @@ where
     };
     let _ = shutdown_sender.send(());
 
-    match timeout(grace_window, &mut scheduler_run).await {
-        _ if stop_cause == SchedulerStopCause::SignalListenerFailed => {
-            ShutdownOutcome::SignalListenerFailed
+    match (stop_cause, timeout(grace_window, &mut scheduler_run).await) {
+        (SchedulerStopCause::SignalListenerFailed, _) => ShutdownOutcome::SignalListenerFailed,
+        (SchedulerStopCause::ExecutionFailed, Ok(_)) => ShutdownOutcome::ExecutionFailed,
+        (SchedulerStopCause::ExecutionFailed, Err(_)) => {
+            ShutdownOutcome::ExecutionFailedAfterGraceWindow
         }
-        _ if stop_cause == SchedulerStopCause::ExecutionFailed => ShutdownOutcome::ExecutionFailed,
-        Ok(_) => ShutdownOutcome::Clean,
-        Err(_) => ShutdownOutcome::GraceWindowExpired,
+        (SchedulerStopCause::Requested, Ok(_)) => ShutdownOutcome::Clean,
+        (SchedulerStopCause::Requested, Err(_)) => ShutdownOutcome::GraceWindowExpired,
     }
 }
 
@@ -414,6 +416,16 @@ async fn main() -> ExitCode {
                 phase = ?error.phase,
                 failure_class = ?error.failure_class,
                 "activated-turn execution failed; stopping for startup recovery"
+            );
+            ExitCode::FAILURE
+        }
+        Ok(ShutdownOutcome::ExecutionFailedAfterGraceWindow) => {
+            let error = HubRuntimeError::infrastructure(RuntimePhase::Scheduling);
+            tracing::error!(
+                phase = ?error.phase,
+                failure_class = ?error.failure_class,
+                grace_window_seconds = GRACEFUL_SHUTDOWN_WINDOW.as_secs(),
+                "activated-turn execution failed and shutdown grace expired; abandoning in-flight work for startup recovery"
             );
             ExitCode::FAILURE
         }
@@ -714,6 +726,44 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn execution_failure_preserves_an_expired_grace_window() {
+        let (entered_sender, entered_receiver) = oneshot::channel();
+        let (failure_sender, failure_receiver) = oneshot::channel();
+        let session = SessionId::from_uuid(Uuid::from_u128(1));
+        let scheduler = SchedulerLoop::new(
+            OneHintThenPending {
+                hints: VecDeque::from([session]),
+            },
+            BlockingPass {
+                entered: Arc::new(Mutex::new(Some(entered_sender))),
+            },
+        );
+        let runtime = tokio::spawn(run_scheduler_until_shutdown(
+            scheduler,
+            async move {
+                failure_receiver
+                    .await
+                    .expect("the execution supervisor reports failure");
+                SchedulerStopCause::ExecutionFailed
+            },
+            Duration::from_secs(5),
+        ));
+
+        entered_receiver
+            .await
+            .expect("the scheduler admitted the first pass");
+        failure_sender
+            .send(())
+            .expect("the scheduler still listens for execution failure");
+        tokio::time::advance(Duration::from_secs(5)).await;
+
+        assert_eq!(
+            runtime.await.expect("the runtime task completes"),
+            ShutdownOutcome::ExecutionFailedAfterGraceWindow
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn adr0044_signal_listener_failure_precedes_expired_grace_window() {
         let (entered_sender, entered_receiver) = oneshot::channel();
         let (shutdown_sender, shutdown_receiver) = oneshot::channel();
@@ -756,6 +806,9 @@ mod tests {
         assert!(!should_close_pool(&Ok(ShutdownOutcome::GraceWindowExpired)));
         assert!(!should_close_pool(&Ok(
             ShutdownOutcome::SignalListenerFailed
+        )));
+        assert!(!should_close_pool(&Ok(
+            ShutdownOutcome::ExecutionFailedAfterGraceWindow
         )));
         assert!(should_close_pool(&Ok(ShutdownOutcome::ExecutionFailed)));
         assert!(should_close_pool(&Ok(ShutdownOutcome::Clean)));
