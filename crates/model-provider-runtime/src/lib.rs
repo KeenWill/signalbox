@@ -588,6 +588,7 @@ mod tests {
                     reported_model: None,
                     kind: ProviderErrorKind::RateLimited,
                     native: NativeErrorFacts::default(),
+                    usage: TokenUsage::unreported(),
                 }),
                 &[],
                 "model-exact",
