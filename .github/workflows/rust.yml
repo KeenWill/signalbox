@@ -86,3 +86,8 @@ jobs:
           --features postgres-integration
           --test postgres_integration
           -- --ignored --test-threads=1
+      - name: Run hubd end-to-end Postgres tests
+        run: >-
+          cargo test -p signalbox-hubd
+          --test offline_reply
+          -- --ignored --test-threads=1

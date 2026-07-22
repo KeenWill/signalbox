@@ -1146,15 +1146,10 @@ impl ClassifyOperatorFailure for ScriptedModelCallError {
     }
 }
 
-enum ScriptedCapabilityOutcome {
-    Return(ModelCallTerminalObservation),
-    OperatorFailure,
-}
-
 /// Opaque one-shot capability owned by [`ScriptedModelCallProvider`].
 pub struct ScriptedModelCallCapability {
     operation: PreparedModelOperation,
-    outcome: ScriptedCapabilityOutcome,
+    step: ScriptedModelCallStep,
 }
 
 /// Deterministic in-repository implementation of the provider port.
@@ -1167,6 +1162,10 @@ pub struct ScriptedModelCallProvider {
 
 impl ScriptedModelCallProvider {
     /// Creates a provider that consumes actions in supplied order.
+    ///
+    /// Capability-stage actions are consumed during preparation. Interaction
+    /// actions remain queued until their prepared capability is invoked, so a
+    /// proven authorization rollback can prepare the same action again.
     pub fn new(steps: impl IntoIterator<Item = ScriptedModelCallStep>) -> Self {
         Self {
             steps: steps.into_iter().collect(),
@@ -1201,7 +1200,16 @@ impl ModelCallProvider for ScriptedModelCallProvider {
     ) -> impl Future<Output = Result<ModelCallCapabilityPreparation<Self::Capability>, Self::Error>> + Send
     {
         self.capability_preparation_count += 1;
-        let step = self.steps.pop_front();
+        let step = self.steps.front().cloned();
+        if matches!(
+            &step,
+            Some(
+                ScriptedModelCallStep::CapabilityKnownFailure
+                    | ScriptedModelCallStep::CapabilityOperatorFailure
+            )
+        ) {
+            self.steps.pop_front();
+        }
         async move {
             match step.ok_or(ScriptedModelCallError::ScriptExhausted)? {
                 ScriptedModelCallStep::CapabilityKnownFailure => {
@@ -1210,18 +1218,10 @@ impl ModelCallProvider for ScriptedModelCallProvider {
                 ScriptedModelCallStep::CapabilityOperatorFailure => {
                     Err(ScriptedModelCallError::CapabilityOperatorFailure)
                 }
-                ScriptedModelCallStep::InteractionOperatorFailure => Ok(
-                    ModelCallCapabilityPreparation::Ready(ScriptedModelCallCapability {
-                        operation,
-                        outcome: ScriptedCapabilityOutcome::OperatorFailure,
-                    }),
-                ),
-                ScriptedModelCallStep::Return(observation) => Ok(
-                    ModelCallCapabilityPreparation::Ready(ScriptedModelCallCapability {
-                        operation,
-                        outcome: ScriptedCapabilityOutcome::Return(observation),
-                    }),
-                ),
+                step @ (ScriptedModelCallStep::InteractionOperatorFailure
+                | ScriptedModelCallStep::Return(_)) => Ok(ModelCallCapabilityPreparation::Ready(
+                    ScriptedModelCallCapability { operation, step },
+                )),
             }
         }
     }
@@ -1236,24 +1236,40 @@ impl ModelCallProvider for ScriptedModelCallProvider {
         AcceptancePossible: FnOnce() + Send,
     {
         self.interaction_count += 1;
-        async move {
-            let prepared = capability.operation.request();
-            if prepared.session() != authorized.session()
-                || prepared.turn() != authorized.turn()
-                || prepared.attempt() != authorized.attempt().id()
-                || prepared.call().id() != authorized.call().id()
-                || prepared.call().target() != authorized.call().target()
-                || prepared.call().frontier() != authorized.call().frontier()
-            {
-                return Err(ScriptedModelCallError::AuthorizationMismatch);
+        let prepared = capability.operation.request();
+        let step = if prepared.session() != authorized.session()
+            || prepared.turn() != authorized.turn()
+            || prepared.attempt() != authorized.attempt().id()
+            || prepared.call().id() != authorized.call().id()
+            || prepared.call().target() != authorized.call().target()
+            || prepared.call().frontier() != authorized.call().frontier()
+        {
+            Err(ScriptedModelCallError::AuthorizationMismatch)
+        } else {
+            match self.steps.front() {
+                None => Err(ScriptedModelCallError::ScriptExhausted),
+                Some(step) if step != &capability.step => {
+                    Err(ScriptedModelCallError::AuthorizationMismatch)
+                }
+                Some(_) => self
+                    .steps
+                    .pop_front()
+                    .ok_or(ScriptedModelCallError::ScriptExhausted),
             }
+        };
+        async move {
+            let step = step?;
             acceptance_possible();
-            match capability.outcome {
-                ScriptedCapabilityOutcome::Return(observation) => Ok(authorized
+            match step {
+                ScriptedModelCallStep::Return(observation) => Ok(authorized
                     .observation_correlation()
                     .bind_terminal_observation(observation)),
-                ScriptedCapabilityOutcome::OperatorFailure => {
+                ScriptedModelCallStep::InteractionOperatorFailure => {
                     Err(ScriptedModelCallError::InteractionOperatorFailure)
+                }
+                ScriptedModelCallStep::CapabilityKnownFailure
+                | ScriptedModelCallStep::CapabilityOperatorFailure => {
+                    Err(ScriptedModelCallError::ScriptExhausted)
                 }
             }
         }
@@ -2415,6 +2431,72 @@ mod tests {
                 },
             }) if observation == retained_observation
         ));
+    }
+
+    /// ADR-0045 / INV-014: when an ambiguous authorization is proven to have
+    /// rolled back to Prepared, the unconsumed scripted interaction action can
+    /// prepare again and still produces exactly one physical interaction.
+    #[tokio::test]
+    async fn s02_inv014_authorization_rollback_reprepares_one_scripted_interaction_action() {
+        let (request, authorized) = prepared_fixture();
+        let session = request.session();
+        let mut service = ModelCallExecutionService::new(
+            FixedIds::baseline(),
+            FakePrepare {
+                outcomes: [
+                    Ok(PrepareModelCallOutcome::Ready(Box::new(request.clone()))),
+                    Ok(PrepareModelCallOutcome::Ready(Box::new(request))),
+                ]
+                .into(),
+                calls: 0,
+            },
+            UnusedFailure,
+            FakeAuthorization {
+                outcomes: [Err(FakeError::CommitAmbiguous), Ok(authorized)].into(),
+                rereads: [
+                    Err(FakeError::Infrastructure),
+                    Ok(ModelCallAuthorizationReread::Prepared),
+                ]
+                .into(),
+                calls: 0,
+                reread_calls: 0,
+            },
+            FakeObservation {
+                commit_errors: [FakeError::Infrastructure].into(),
+                rereads: VecDeque::new(),
+                observed: Vec::new(),
+                commit_calls: 0,
+                reread_calls: 0,
+            },
+            ScriptedModelCallProvider::new([ScriptedModelCallStep::Return(
+                ModelCallTerminalObservation::KnownFailed,
+            )]),
+            InProcessAttemptDispatchGate::default(),
+        );
+
+        assert!(matches!(
+            service.execute(session).await,
+            Err(ModelCallExecutionError::AuthorizationReread {
+                authorization_error: FakeError::CommitAmbiguous,
+                reread_error: FakeError::Infrastructure,
+            })
+        ));
+        assert!(matches!(
+            service.execute(session).await,
+            Err(ModelCallExecutionError::ObservationCommit {
+                error: FakeError::Infrastructure,
+                ..
+            })
+        ));
+
+        let (_, prepare, _, authorization, observation, provider, _, _) = service.into_parts();
+        assert_eq!(prepare.calls, 2);
+        assert_eq!(authorization.calls, 2);
+        assert_eq!(authorization.reread_calls, 2);
+        assert_eq!(observation.commit_calls, 1);
+        assert_eq!(provider.capability_preparation_count(), 2);
+        assert_eq!(provider.interaction_count(), 1);
+        assert_eq!(provider.remaining_step_count(), 0);
     }
 
     /// S02 / INV-009 / INV-014: the attempt gate transfers into the provider

@@ -2356,6 +2356,16 @@ impl<
         &mut self,
         session: SessionId,
     ) -> Result<StartEligibleTurnOutcome, Transaction::Error>;
+    pub fn execute_with_cloned_transaction(
+        &mut self,
+        session: SessionId,
+    ) -> impl Future<
+        Output = Result<StartEligibleTurnOutcome, Transaction::Error>,
+    > + Send
+           + 'static
+    where
+        Transaction: Clone + Send + 'static,
+        Transaction::Error: Send + 'static;
 }
 ```
 

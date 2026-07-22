@@ -29,9 +29,9 @@ these capabilities directionally — accepted records decide them — and severa
 > **Status:** design and foundation phase, not yet a usable product. The initial
 > domain and persistence slices exist behind accepted decisions — session
 > creation and loading, defaults replacement, durable input acceptance, and
-> eligible-turn activation — with model calls next; provider adapters, runners,
-> and the clients are milestones ahead, and APIs, protocols, and storage details
-> are not yet stable.
+> eligible-turn activation — plus the first offline scripted model-call path;
+> production composition, runners, and the clients are milestones ahead, and
+> APIs, protocols, and storage details are not yet stable.
 
 ```text
  Terminal       Web       macOS / iOS
@@ -86,6 +86,22 @@ The workspace contains the dependency chain `apps/hubd` → `crates/application`
 consumed by the domain crate's tests. Before finishing any change, run the
 repository-wide validation sequence in [AGENTS.md](AGENTS.md) — the canonical
 list of required commands and their setup notes — from the repository root.
+
+### Scripted debug harness
+
+The `signalbox-debug` binary is a local harness, not the ADR-0019 client
+protocol. Against a disposable local PostgreSQL database it runs migrations,
+creates one session, submits one input, lets the real scheduler execute a
+deterministic reply, and prints the terminal semantic transcript:
+
+```console
+SIGNALBOX_DEBUG_DATABASE_URL=postgres://signalbox:signalbox@localhost/signalbox \
+  cargo run -p signalbox-hubd --bin signalbox-debug -- \
+  "hello" "scripted assistant reply"
+```
+
+The debug database connection explicitly disables TLS and must not be used as
+production connection configuration.
 
 ## License
 
