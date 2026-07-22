@@ -1134,7 +1134,7 @@ pub struct AcceptedInputTurnSchedulingProjection { /* private */ }
 impl AcceptedInputTurnSchedulingProjection {
     // accessors: session(), turn(), accepted_input(), order(),
     // origin_configuration(), status(), start(), active_phase(),
-    // failed_terminal_frontier(), terminal_frontier()
+    // active_turn_execution(), failed_terminal_frontier(), terminal_frontier()
 }
 
 pub struct AcceptedInputSchedulingProjection { /* private */ }
@@ -1172,7 +1172,7 @@ impl AcceptedInputTurnActivationIdentities {
 }
 
 pub struct ActivatedAcceptedInputTurn { /* private */ }
-// sealed: PreparedAcceptedInputTurnActivation
+// sealed: PreparedAcceptedInputTurnActivation or checked active scheduling projection
 impl ActivatedAcceptedInputTurn {
     // accessors: session(), turn(), accepted_input(), order(), configuration(),
     // start(), phase()
@@ -1532,6 +1532,7 @@ pub enum ModelCallClosureError {
     IdentityShapeMismatch,
     CallStateMismatch,
     AttemptStateMismatch,
+    TargetResolutionMismatch,
     AssistantIdentityCountMismatch,
     FrontierDerivationFailed,
     AmbiguityConstructionFailed,

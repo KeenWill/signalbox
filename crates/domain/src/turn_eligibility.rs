@@ -959,6 +959,22 @@ impl AcceptedInputTurnSchedulingProjection {
         }
     }
 
+    /// Reconstructs the sealed active-turn facts for an execution aggregate.
+    pub fn active_turn_execution(&self) -> Option<ActivatedAcceptedInputTurn> {
+        let ReconstitutedSchedulingState::Active { start, phase } = &self.state else {
+            return None;
+        };
+        Some(ActivatedAcceptedInputTurn {
+            session: self.session,
+            turn: self.turn,
+            accepted_input: self.accepted_input.clone(),
+            order: self.order,
+            configuration: self.origin_configuration.clone(),
+            start: *start,
+            phase: phase.clone(),
+        })
+    }
+
     /// Borrows the complete semantic frontier through a failed marker.
     pub const fn failed_terminal_frontier(&self) -> Option<&ResolvedContextFrontierSnapshot> {
         match &self.state {
@@ -1110,7 +1126,7 @@ impl AcceptedInputTurnActivationIdentities {
     }
 }
 
-/// Exact initial active turn state prepared by eligibility.
+/// Exact checked active turn state prepared or reconstituted by eligibility.
 ///
 /// Raw aggregate facts cannot construct this state:
 ///
@@ -1185,6 +1201,32 @@ impl ActivatedAcceptedInputTurn {
     /// Borrows the exact initial active phase.
     pub const fn phase(&self) -> &ActiveTurnPhase {
         &self.phase
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_phase_for_test(&self, phase: ActiveTurnPhase) -> Self {
+        Self {
+            session: self.session,
+            turn: self.turn,
+            accepted_input: self.accepted_input.clone(),
+            order: self.order,
+            configuration: self.configuration.clone(),
+            start: self.start,
+            phase,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_start_for_test(&self, start: AcceptedInputTurnStart) -> Self {
+        Self {
+            session: self.session,
+            turn: self.turn,
+            accepted_input: self.accepted_input.clone(),
+            order: self.order,
+            configuration: self.configuration.clone(),
+            start,
+            phase: self.phase.clone(),
+        }
     }
 }
 
@@ -3714,13 +3756,16 @@ mod tests {
             .input()
             .reconstitute()
             .expect("the complete owner projection derives the running attempt");
-        let phase = projection
+        let active_projection = projection
             .active_turn()
-            .expect("the turn owns the active slot")
-            .active_phase();
+            .expect("the turn owns the active slot");
+        let execution = active_projection
+            .active_turn_execution()
+            .expect("active scheduling facts seal execution ownership");
+        assert_eq!(execution.turn(), active.turn());
         assert!(matches!(
-            phase,
-            Some(ActiveTurnPhase::Running { current_attempt })
+            execution.phase(),
+            ActiveTurnPhase::Running { current_attempt }
                 if current_attempt.id() == expected_attempt
                     && current_attempt.state() == &CurrentTurnAttemptState::Running
         ));

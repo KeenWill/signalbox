@@ -10,15 +10,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    AcceptedInputId, AcceptedInputTurnStart, ActiveTurnPhase, AssistantText, ContextFrontierId,
-    CurrentModelCall, CurrentModelCallState, CurrentTurnAttempt, CurrentTurnAttemptState,
-    DirectModelSelection, EndedModelCall, EndedTurnAttempt, FrozenModelSelection,
-    ModelCallDisposition, ModelCallId, ModelCallReconstitutionInput, NonEmptyIssuedOperationRefs,
-    OriginConfiguration, PinnedProviderTarget, ReconstitutedModelCall, ReconstitutedSubmitInput,
-    ResolvedContextFrontierSnapshot, ResolvedProviderTarget, SemanticTranscriptEntry,
-    SemanticTranscriptEntryId, SemanticTranscriptEntryPayload, SessionId, SubmitInputAppliedResult,
-    SubmitInputResult, TurnAttemptId, TurnDisposition, TurnId, UnstoppedAttemptDisposition,
-    UserContent,
+    AcceptedInputId, AcceptedInputTurnStart, ActivatedAcceptedInputTurn, ActiveTurnPhase,
+    AssistantText, ContextFrontierId, CurrentModelCall, CurrentModelCallState, CurrentTurnAttempt,
+    CurrentTurnAttemptState, DirectModelSelection, EndedModelCall, EndedTurnAttempt,
+    FrozenModelSelection, ModelCallDisposition, ModelCallId, ModelCallReconstitutionInput,
+    NonEmptyIssuedOperationRefs, OriginConfiguration, PinnedProviderTarget, ReconstitutedModelCall,
+    ReconstitutedSubmitInput, ResolvedContextFrontierSnapshot, ResolvedProviderTarget,
+    SemanticTranscriptEntry, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload, SessionId,
+    SubmitInputAppliedResult, SubmitInputResult, TurnAttemptId, TurnDisposition, TurnId,
+    UnstoppedAttemptDisposition, UserContent,
 };
 
 /// One immutable configured direct-selection to exact-target definition.
@@ -181,11 +181,7 @@ impl ModelTargetResolutionError {
 /// Complete domain facts for reconstituting one live model-call execution.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelCallExecutionReconstitutionInput {
-    session: SessionId,
-    turn: TurnId,
-    configuration: OriginConfiguration,
-    start: AcceptedInputTurnStart,
-    phase: ActiveTurnPhase,
+    active_turn: ActivatedAcceptedInputTurn,
     targets: ModelTargetCatalog,
     starting_snapshot: ResolvedContextFrontierSnapshot,
     frontier_entries: Vec<SemanticTranscriptEntry>,
@@ -195,13 +191,8 @@ pub struct ModelCallExecutionReconstitutionInput {
 
 impl ModelCallExecutionReconstitutionInput {
     /// Supplies the complete purpose-specific active-turn projection.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        session: SessionId,
-        turn: TurnId,
-        configuration: OriginConfiguration,
-        start: AcceptedInputTurnStart,
-        phase: ActiveTurnPhase,
+        active_turn: ActivatedAcceptedInputTurn,
         targets: ModelTargetCatalog,
         starting_snapshot: ResolvedContextFrontierSnapshot,
         frontier_entries: Vec<SemanticTranscriptEntry>,
@@ -209,11 +200,7 @@ impl ModelCallExecutionReconstitutionInput {
         calls: Vec<ModelCallReconstitutionInput>,
     ) -> Self {
         Self {
-            session,
-            turn,
-            configuration,
-            start,
-            phase,
+            active_turn,
             targets,
             starting_snapshot,
             frontier_entries,
@@ -294,6 +281,7 @@ impl ModelCallExecutionReconstitutionError {
 /// One checked live initial model-call execution aggregate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelCallExecution {
+    active_turn: ActivatedAcceptedInputTurn,
     session: SessionId,
     turn: TurnId,
     configuration: OriginConfiguration,
@@ -307,6 +295,11 @@ pub struct ModelCallExecution {
 }
 
 impl ModelCallExecution {
+    /// Borrows the checked active-turn facts that establish ownership.
+    pub const fn active_turn(&self) -> &ActivatedAcceptedInputTurn {
+        &self.active_turn
+    }
+
     /// Returns the owning session.
     pub const fn session(&self) -> SessionId {
         self.session
@@ -353,12 +346,12 @@ impl ModelCallExecution {
         call: ModelCallId,
     ) -> Result<PreparedInitialModelCall, ModelCallPreparationError> {
         let frozen = *self.configuration.effective().model();
-        let resolution = self.targets.resolve(frozen).map_err(|_| {
-            ModelCallPreparationError::new(
-                self.clone(),
-                ModelCallPreparationFailure::TargetUnavailable,
-            )
-        })?;
+        let resolution = match self.targets.resolve(frozen) {
+            Ok(resolution) => resolution,
+            Err(error) => {
+                return Err(ModelCallPreparationError::target_unavailable(self, error));
+            }
+        };
         if self.current_call.is_some() {
             return Err(ModelCallPreparationError::new(
                 self,
@@ -480,10 +473,17 @@ impl ModelCallExecution {
     /// Closes target-resolution failure before a model call exists.
     pub fn fail_target_resolution(
         self,
+        resolution_error: ModelTargetResolutionError,
         identities: FailedModelCallTurnIdentities,
     ) -> Result<FailedModelCallTurn, ModelCallClosureError> {
         if self.current_call.is_some() {
             return Err(ModelCallClosureError::CallStateMismatch);
+        }
+        let frozen = *self.configuration.effective().model();
+        if resolution_error.selection() != frozen
+            || !matches!(self.targets.resolve(frozen), Err(expected) if expected == resolution_error)
+        {
+            return Err(ModelCallClosureError::TargetResolutionMismatch);
         }
         close_failed_turn(
             self.session,
@@ -589,6 +589,7 @@ pub enum ModelCallPreparationFailure {
 pub struct ModelCallPreparationError {
     execution: Box<ModelCallExecution>,
     failure: ModelCallPreparationFailure,
+    target_resolution_error: Option<ModelTargetResolutionError>,
 }
 
 impl ModelCallPreparationError {
@@ -596,6 +597,18 @@ impl ModelCallPreparationError {
         Self {
             execution: Box::new(execution),
             failure,
+            target_resolution_error: None,
+        }
+    }
+
+    fn target_unavailable(
+        execution: ModelCallExecution,
+        target_resolution_error: ModelTargetResolutionError,
+    ) -> Self {
+        Self {
+            execution: Box::new(execution),
+            failure: ModelCallPreparationFailure::TargetUnavailable,
+            target_resolution_error: Some(target_resolution_error),
         }
     }
 
@@ -607,6 +620,11 @@ impl ModelCallPreparationError {
     /// Returns the unchanged live aggregate.
     pub const fn execution(&self) -> &ModelCallExecution {
         &self.execution
+    }
+
+    /// Returns the exact immutable-catalog miss for target unavailability.
+    pub const fn target_resolution_error(&self) -> Option<ModelTargetResolutionError> {
+        self.target_resolution_error
     }
 }
 
@@ -1161,6 +1179,9 @@ pub enum ModelCallClosureError {
     CallStateMismatch,
     /// The attempt cannot take the required terminal transition.
     AttemptStateMismatch,
+    /// Claimed target-resolution failure does not match this execution's
+    /// immutable catalog and frozen selection.
+    TargetResolutionMismatch,
     /// Assistant text and entry identity counts differ.
     AssistantIdentityCountMismatch,
     /// The exact terminal frontier could not preserve its source prefix.
@@ -1176,19 +1197,24 @@ fn reconstitute(
         input: Box::new(input),
         failure,
     };
-    let ActiveTurnPhase::Running { current_attempt } = &input.phase else {
+    let ActiveTurnPhase::Running { current_attempt } = input.active_turn.phase() else {
         return Err(fail(
             input,
             ModelCallExecutionReconstitutionFailure::TurnIsNotRunning,
         ));
     };
-    if input.starting_snapshot.frontier().owning_session() != input.session {
+    let current_attempt = current_attempt.clone();
+    let session = input.active_turn.session();
+    let turn = input.active_turn.turn();
+    let configuration = input.active_turn.configuration().clone();
+    let start = input.active_turn.start();
+    if input.starting_snapshot.frontier().owning_session() != session {
         return Err(fail(
             input,
             ModelCallExecutionReconstitutionFailure::StartingSnapshotSessionMismatch,
         ));
     }
-    if input.start.frontier() != input.starting_snapshot.frontier() {
+    if start.frontier() != input.starting_snapshot.frontier() {
         return Err(fail(
             input,
             ModelCallExecutionReconstitutionFailure::StartingSnapshotMismatch,
@@ -1247,7 +1273,7 @@ fn reconstitute(
         ));
     }
     let current_call = if let Some(call) = input.calls.first() {
-        if call.turn() != input.turn
+        if call.turn() != turn
             || call.attempt() != current_attempt.id()
             || call.frontier() != input.starting_snapshot.frontier().snapshot()
         {
@@ -1256,7 +1282,7 @@ fn reconstitute(
                 ModelCallExecutionReconstitutionFailure::CallOwnershipMismatch,
             ));
         }
-        if call.selection() != *input.configuration.effective().model() {
+        if call.selection() != *configuration.effective().model() {
             return Err(fail(
                 input,
                 ModelCallExecutionReconstitutionFailure::CallSelectionMismatch,
@@ -1312,12 +1338,13 @@ fn reconstitute(
         ));
     }
     Ok(ModelCallExecution {
-        session: input.session,
-        turn: input.turn,
-        configuration: input.configuration,
-        start: input.start,
+        active_turn: input.active_turn,
+        session,
+        turn,
+        configuration,
+        start,
         targets: input.targets,
-        current_attempt: current_attempt.clone(),
+        current_attempt,
         starting_snapshot: input.starting_snapshot,
         frontier_entries: input.frontier_entries.into_boxed_slice(),
         origin_contents,
@@ -1518,11 +1545,7 @@ mod tests {
         .expect("first turn is eligible");
         let (turn, origin, snapshot) = activation.into_parts();
         ModelCallExecutionReconstitutionInput::new(
-            turn.session(),
-            turn.turn(),
-            turn.configuration().clone(),
-            turn.start(),
-            turn.phase().clone(),
+            turn,
             targets(),
             snapshot,
             vec![origin],
@@ -1551,13 +1574,7 @@ mod tests {
             .prepare_initial_call(model_call_id(9))
             .expect("initial prepared checkpoint is valid");
         ModelCallExecutionReconstitutionInput::new(
-            initial.session,
-            initial.turn,
-            initial.configuration.clone(),
-            initial.start,
-            ActiveTurnPhase::Running {
-                current_attempt: initial.current_attempt.clone(),
-            },
+            initial.active_turn.clone(),
             initial.targets.clone(),
             initial.starting_snapshot.clone(),
             initial.frontier_entries.to_vec(),
@@ -1589,13 +1606,11 @@ mod tests {
             .authorize_send()
             .expect("prepared execution may authorize send");
         ModelCallExecutionReconstitutionInput::new(
-            prepared.session,
-            prepared.turn,
-            prepared.configuration.clone(),
-            prepared.start,
-            ActiveTurnPhase::Running {
-                current_attempt: authorized.attempt.clone(),
-            },
+            prepared
+                .active_turn
+                .with_phase_for_test(ActiveTurnPhase::Running {
+                    current_attempt: authorized.attempt.clone(),
+                }),
             prepared.targets.clone(),
             prepared.starting_snapshot.clone(),
             prepared.frontier_entries.to_vec(),
@@ -1625,13 +1640,11 @@ mod tests {
         calls: Vec<ModelCallReconstitutionInput>,
     ) -> ModelCallExecutionReconstitutionInput {
         ModelCallExecutionReconstitutionInput::new(
-            execution.session,
-            execution.turn,
-            execution.configuration.clone(),
-            execution.start,
-            ActiveTurnPhase::Running {
-                current_attempt: execution.current_attempt.clone(),
-            },
+            execution
+                .active_turn
+                .with_phase_for_test(ActiveTurnPhase::Running {
+                    current_attempt: execution.current_attempt.clone(),
+                }),
             execution.targets.clone(),
             execution.starting_snapshot.clone(),
             execution.frontier_entries.to_vec(),
@@ -1676,13 +1689,7 @@ mod tests {
             snapshot.frontier(),
         );
         let input = ModelCallExecutionReconstitutionInput::new(
-            execution.session,
-            execution.turn,
-            execution.configuration.clone(),
-            start,
-            ActiveTurnPhase::Running {
-                current_attempt: execution.current_attempt.clone(),
-            },
+            execution.active_turn.with_start_for_test(start),
             execution.targets.clone(),
             snapshot,
             vec![second, first],
@@ -1720,13 +1727,7 @@ mod tests {
         )
         .expect("same-content test snapshot is valid");
         let input = ModelCallExecutionReconstitutionInput::new(
-            execution.session,
-            execution.turn,
-            execution.configuration.clone(),
-            execution.start,
-            ActiveTurnPhase::Running {
-                current_attempt: execution.current_attempt.clone(),
-            },
+            execution.active_turn.clone(),
             execution.targets.clone(),
             other_snapshot,
             execution.frontier_entries.to_vec(),
@@ -1801,6 +1802,59 @@ mod tests {
             prepared.call().frontier().snapshot(),
             context_frontier_id(6)
         );
+    }
+
+    /// S02 / INV-006 / INV-014: an immutable-catalog miss is retained as the
+    /// exact proof authorizing known-failure closure before any call exists.
+    #[test]
+    fn s02_inv006_inv014_target_resolution_failure_requires_matching_proof() {
+        let mut execution = active_execution();
+        execution.targets =
+            ModelTargetCatalog::try_from_definitions([]).expect("the empty test catalog is valid");
+        let preparation = execution
+            .prepare_initial_call(model_call_id(9))
+            .expect_err("the configured selection is unavailable");
+        let proof = preparation
+            .target_resolution_error()
+            .expect("target unavailability retains the exact catalog miss");
+
+        let failed = preparation
+            .execution()
+            .clone()
+            .fail_target_resolution(
+                proof,
+                FailedModelCallTurnIdentities::new(
+                    semantic_transcript_entry_id(10),
+                    context_frontier_id(11),
+                ),
+            )
+            .expect("the matching catalog miss authorizes known-failure closure");
+
+        assert!(failed.call().is_none());
+        assert_eq!(failed.disposition(), &TurnDisposition::Failed);
+    }
+
+    /// S02 / INV-006 / INV-014: a catalog miss obtained elsewhere cannot
+    /// discard a turn whose own immutable catalog resolves successfully.
+    #[test]
+    fn s02_inv006_inv014_resolvable_turn_rejects_foreign_resolution_failure() {
+        let execution = active_execution();
+        let foreign_proof = ModelTargetCatalog::try_from_definitions([])
+            .expect("the empty test catalog is valid")
+            .resolve(*execution.configuration().effective().model())
+            .expect_err("the foreign empty catalog cannot resolve the selection");
+
+        let error = execution
+            .fail_target_resolution(
+                foreign_proof,
+                FailedModelCallTurnIdentities::new(
+                    semantic_transcript_entry_id(10),
+                    context_frontier_id(11),
+                ),
+            )
+            .expect_err("another catalog's miss cannot terminalize a resolvable turn");
+
+        assert_eq!(error, ModelCallClosureError::TargetResolutionMismatch);
     }
 
     /// S02 / INV-005: provider rendering receives the frontier in semantic
