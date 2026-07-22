@@ -5,6 +5,7 @@
 //! evidence path stays independently reviewable. Extracting a shared
 //! transport crate is a refactor candidate once a third adapter exists.
 
+use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Waker};
@@ -962,11 +963,9 @@ fn redact_complete_credentials_and_hold_prefix(
     (text.replace(credential, "[redacted]"), pending)
 }
 
-struct DecodedJsonUnit {
+struct PendingJsonUnit {
     raw_start: usize,
     raw_end: usize,
-    decoded_start: usize,
-    decoded_end: usize,
 }
 
 /// Sanitizes one accumulated streamed JSON fragment while retaining only a
@@ -984,54 +983,67 @@ fn redact_json_stream_fragment(raw: String, credential: &str) -> (String, String
         }
     };
     let bytes = raw.as_bytes();
+    let pattern: Vec<char> = credential.chars().collect();
+    let mut prefix_lengths = vec![0; pattern.len()];
+    for index in 1..pattern.len() {
+        let mut prefix = prefix_lengths[index - 1];
+        while prefix > 0 && pattern[index] != pattern[prefix] {
+            prefix = prefix_lengths[prefix - 1];
+        }
+        if pattern[index] == pattern[prefix] {
+            prefix += 1;
+        }
+        prefix_lengths[index] = prefix;
+    }
+
     let mut cursor = 0;
-    let mut decoded = String::with_capacity(raw.len());
-    let mut units = Vec::new();
+    let mut matched = 0;
+    let mut pending: VecDeque<PendingJsonUnit> = VecDeque::with_capacity(pattern.len());
+    let mut emitted = String::with_capacity(raw.len());
     while cursor < raw.len() {
         let raw_start = cursor;
-        let decoded_start = decoded.len();
-        if bytes[cursor] != b'\\' {
+        let character = if bytes[cursor] != b'\\' {
             let Some(character) = raw[cursor..].chars().next() else {
                 return fallback(raw);
             };
             cursor += character.len_utf8();
-            decoded.push(character);
+            character
         } else {
             if cursor + 1 >= raw.len() {
                 break;
             }
             match bytes[cursor + 1] {
                 b'"' => {
-                    decoded.push('"');
                     cursor += 2;
+                    '"'
                 }
                 b'\\' => {
-                    decoded.push('\\');
                     cursor += 2;
+                    '\\'
                 }
                 b'/' => {
-                    decoded.push('/');
                     cursor += 2;
+                    '/'
                 }
                 b'b' => {
-                    decoded.push('\u{0008}');
                     cursor += 2;
+                    '\u{0008}'
                 }
                 b'f' => {
-                    decoded.push('\u{000c}');
                     cursor += 2;
+                    '\u{000c}'
                 }
                 b'n' => {
-                    decoded.push('\n');
                     cursor += 2;
+                    '\n'
                 }
                 b'r' => {
-                    decoded.push('\r');
                     cursor += 2;
+                    '\r'
                 }
                 b't' => {
-                    decoded.push('\t');
                     cursor += 2;
+                    '\t'
                 }
                 b'u' => {
                     if cursor + 6 > raw.len() {
@@ -1065,8 +1077,8 @@ fn redact_json_stream_fragment(raw: String, credential: &str) -> (String, String
                         let Some(character) = char::from_u32(scalar) else {
                             return fallback(raw);
                         };
-                        decoded.push(character);
                         cursor += 12;
+                        character
                     } else {
                         if (0xdc00..=0xdfff).contains(&first) {
                             return fallback(raw);
@@ -1074,77 +1086,43 @@ fn redact_json_stream_fragment(raw: String, credential: &str) -> (String, String
                         let Some(character) = char::from_u32(u32::from(first)) else {
                             return fallback(raw);
                         };
-                        decoded.push(character);
                         cursor += 6;
+                        character
                     }
                 }
                 _ => return fallback(raw),
             }
-        }
-        units.push(DecodedJsonUnit {
-            raw_start,
-            raw_end: cursor,
-            decoded_start,
-            decoded_end: decoded.len(),
-        });
-    }
-
-    let mut matches = Vec::new();
-    let mut start_unit_index = 0;
-    let mut end_unit_index = 0;
-    for (decoded_start, _) in decoded.match_indices(credential) {
-        let decoded_end = decoded_start + credential.len();
-        while start_unit_index < units.len()
-            && units[start_unit_index].decoded_start < decoded_start
-        {
-            start_unit_index += 1;
-        }
-        let Some(start_unit) = units
-            .get(start_unit_index)
-            .filter(|unit| unit.decoded_start == decoded_start)
-        else {
-            return fallback(raw);
         };
-        while end_unit_index < units.len() && units[end_unit_index].decoded_end < decoded_end {
-            end_unit_index += 1;
+
+        while matched > 0 && pattern[matched] != character {
+            let retained = prefix_lengths[matched - 1];
+            for _ in retained..matched {
+                let Some(unit) = pending.pop_front() else {
+                    return fallback(raw);
+                };
+                emitted.push_str(&raw[unit.raw_start..unit.raw_end]);
+            }
+            matched = retained;
         }
-        let Some(end_unit) = units
-            .get(end_unit_index)
-            .filter(|unit| unit.decoded_end == decoded_end)
-        else {
-            return fallback(raw);
-        };
-        matches.push((start_unit.raw_start, end_unit.raw_end));
+        if pattern[matched] == character {
+            pending.push_back(PendingJsonUnit {
+                raw_start,
+                raw_end: cursor,
+            });
+            matched += 1;
+            if matched == pattern.len() {
+                emitted.push_str("[redacted]");
+                pending.clear();
+                matched = 0;
+            }
+        } else {
+            emitted.push_str(&raw[raw_start..cursor]);
+        }
     }
 
-    let tail_start = decoded
-        .rfind(credential)
-        .map_or(0, |position| position + credential.len());
-    let tail = &decoded[tail_start..];
-    let held_decoded_start = (1..credential.len())
-        .rev()
-        .filter(|length| credential.is_char_boundary(*length))
-        .find(|length| tail.ends_with(&credential[..*length]))
-        .map(|length| decoded.len() - length);
-    let held_raw_start = held_decoded_start.and_then(|start| {
-        units
-            .iter()
-            .find(|unit| unit.decoded_start == start)
-            .map(|unit| unit.raw_start)
-    });
-    let pending_start = held_raw_start.map_or(cursor, |start| start.min(cursor));
-
-    let mut emitted = String::with_capacity(pending_start);
-    let mut emit_cursor = 0;
-    for (start, end) in matches {
-        if end > pending_start {
-            break;
-        }
-        emitted.push_str(&raw[emit_cursor..start]);
-        emitted.push_str("[redacted]");
-        emit_cursor = end;
-    }
-    emitted.push_str(&raw[emit_cursor..pending_start]);
+    let pending_start = pending
+        .front()
+        .map_or(cursor, |unit: &PendingJsonUnit| unit.raw_start.min(cursor));
     (emitted, raw[pending_start..].to_string())
 }
 
@@ -1906,6 +1884,16 @@ mod tests {
 
         assert_eq!(emitted, "[redacted]".repeat(512));
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn streamed_argument_redaction_retains_only_a_credential_sized_suffix() {
+        let raw = format!("{}ke", "safe".repeat(1024 * 1024));
+
+        let (emitted, pending) = redact_json_stream_fragment(raw, "key");
+
+        assert_eq!(emitted.len(), 4 * 1024 * 1024);
+        assert_eq!(pending, "ke");
     }
 
     #[test]

@@ -93,6 +93,12 @@ impl StreamDecoder {
                 return self.violation(format!("malformed stream chunk payload: {error}"));
             }
         };
+        if chunk.error.is_some()
+            && let Some(terminal) =
+                self.apply_reported_model(chunk.model.as_deref(), correlation, sink)
+        {
+            return terminal;
+        }
         if let Some(error) = chunk.error {
             // A mid-stream error record is a definitive provider error;
             // with no HTTP status of its own it classifies by native code.
@@ -131,25 +137,9 @@ impl StreamDecoder {
             }
             Some(_) => {}
         }
-        if let Some(model) = chunk.model {
-            let model = ProviderReportedModel::new(model);
-            match &self.reported_model {
-                None => {
-                    self.reported_model = Some(model.clone());
-                    Self::emit(
-                        correlation,
-                        sink,
-                        ObservationFact::ProviderModelReported(model),
-                    );
-                }
-                Some(existing) if *existing != model => {
-                    // A spliced or corrupted stream reporting a second
-                    // identity must not complete under the first one
-                    // (ADR-0005's mismatch evidence relies on this fact).
-                    return self.violation("stream chunks report conflicting model identities");
-                }
-                Some(_) => {}
-            }
+        if let Some(terminal) = self.apply_reported_model(chunk.model.as_deref(), correlation, sink)
+        {
+            return terminal;
         }
         if let Some(usage) = chunk.usage.as_ref() {
             if usage_only && usage.prompt_tokens.is_some() && usage.completion_tokens.is_some() {
@@ -384,6 +374,33 @@ impl StreamDecoder {
 
     fn violation(&self, detail: impl Into<String>) -> StreamStep {
         StreamStep::Terminal(Box::new(self.violation_evidence(detail)))
+    }
+
+    fn apply_reported_model<C: Clone>(
+        &mut self,
+        reported: Option<&str>,
+        correlation: &C,
+        sink: &mut (dyn ObservationSink<C> + Send),
+    ) -> Option<StreamStep> {
+        let model = ProviderReportedModel::new(reported?);
+        match &self.reported_model {
+            None => {
+                self.reported_model = Some(model.clone());
+                Self::emit(
+                    correlation,
+                    sink,
+                    ObservationFact::ProviderModelReported(model),
+                );
+                None
+            }
+            Some(existing) if *existing != model => {
+                // A spliced or corrupted stream reporting a second identity
+                // must not complete or become an ordinary provider failure
+                // under the first identity (ADR-0005 precedence).
+                Some(self.violation("stream chunks report conflicting model identities"))
+            }
+            Some(_) => None,
+        }
     }
 
     fn emit<C: Clone>(
@@ -953,6 +970,43 @@ mod tests {
             error.native.error_code,
             Some("insufficient_quota".to_string())
         );
+    }
+
+    #[test]
+    fn an_error_first_stream_retains_and_observes_its_model_identity() {
+        let (terminal, observations) = drive(&[
+            b"data: {\"model\":\"model-error\",\"error\":{\"message\":\"quota exhausted\",\
+              \"type\":\"insufficient_quota\",\"code\":\"insufficient_quota\"}}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::ProviderError(error)) = terminal else {
+            panic!("an error-first record is definitive provider error evidence");
+        };
+        assert_eq!(
+            error.reported_model,
+            Some(ProviderReportedModel::new("model-error"))
+        );
+        assert!(observations.contains(&Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ProviderModelReported(ProviderReportedModel::new("model-error")),
+        }));
+    }
+
+    #[test]
+    fn a_conflicting_model_on_an_error_record_is_protocol_loss() {
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"model\":\"model-other\",\"error\":{\"message\":\"quota exhausted\",\
+              \"type\":\"insufficient_quota\",\"code\":\"insufficient_quota\"}}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("a conflicting error identity must not become ordinary provider failure");
+        };
+        assert!(matches!(
+            loss.cause,
+            LossCause::StreamProtocolViolation { .. }
+        ));
     }
 
     #[test]
