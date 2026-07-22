@@ -28,6 +28,11 @@ pub(crate) fn build_request<C>(
             detail: error.to_string(),
         });
     }
+    if operation.messages.is_empty() {
+        return Err(PreparationFailure::UnsupportedOperation {
+            detail: "Anthropic requires at least one conversation message".to_string(),
+        });
+    }
     if operation.settings.max_output_tokens == 0 {
         return Err(PreparationFailure::UnsupportedOperation {
             detail: "max_output_tokens must be at least 1".to_string(),
@@ -466,6 +471,17 @@ mod tests {
               "stream": false
             }"#]]
         .assert_eq(&request_json(&operation("call-4")));
+    }
+
+    #[test]
+    fn an_empty_conversation_is_rejected_before_any_send() {
+        let mut operation = operation("call-empty-conversation");
+        operation.messages.clear();
+
+        assert!(matches!(
+            build_request(&operation),
+            Err(PreparationFailure::UnsupportedOperation { .. })
+        ));
     }
 
     #[test]
