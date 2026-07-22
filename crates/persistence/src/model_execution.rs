@@ -16,9 +16,9 @@ use signalbox_domain::{
     ModelCallExecutionReconstitutionFailure, ModelCallExecutionReconstitutionInput, ModelCallId,
     ModelCallOriginContent, ModelCallPreparationFailure, ModelCallReconstitutionInput,
     ModelCallReconstitutionState, ModelCallTerminalIdentities, ModelCallTerminalObservation,
-    ModelCallTerminalOutcome, ModelTargetCatalog, ModelTargetResolutionError,
-    PreparedModelCallRequest, ProviderModelIdentity, RefusedModelCallTurn, ResolvedProviderTarget,
-    SemanticTranscriptEntry, SemanticTranscriptEntryPayload, SessionId, TurnId,
+    ModelCallTerminalOutcome, ModelTargetCatalog, PreparedModelCallRequest, ProviderModelIdentity,
+    RefusedModelCallTurn, ResolvedProviderTarget, SemanticTranscriptEntry,
+    SemanticTranscriptEntryPayload, SessionId, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -207,10 +207,12 @@ impl ModelCallRepositoryError {
 /// Result of the load-and-prepare transaction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PrepareInitialModelCallOutcome {
-    /// The exact Prepared request is durable and safe for capability setup.
-    Prepared(PreparedModelCallRequest),
-    /// Immutable configured target resolution failed before any call existed.
-    TargetUnavailable(ModelTargetResolutionError),
+    /// A new exact Prepared call was committed; this invocation must stop.
+    Checkpointed(ModelCallId),
+    /// A previously committed Prepared request is safe for capability setup.
+    Ready(Box<PreparedModelCallRequest>),
+    /// Immutable target resolution failed and the turn closed atomically.
+    TargetUnavailable(Box<FailedModelCallTurn>),
 }
 
 /// PostgreSQL adapter for the initial model-call execution transactions.
@@ -231,22 +233,21 @@ impl PostgresModelCallRepository {
         &self,
         session: SessionId,
         call: ModelCallId,
+        failure_identities: FailedModelCallTurnIdentities,
     ) -> Result<PrepareInitialModelCallOutcome, ModelCallRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let result = async {
             lock_session(&mut transaction, session).await?;
             let execution =
                 require_live_execution(&mut transaction, session, &self.targets).await?;
-            if let Some(existing) = execution.current_call() {
-                if existing.id() != call {
-                    return Err(ModelCallRepositoryError::InvalidTransition(
-                        "a different initial call already exists",
-                    ));
-                }
+            if execution.current_call().is_some() {
                 let request = execution.resume_prepared_call().map_err(|_| {
                     ModelCallRepositoryError::InvalidTransition("existing call is not Prepared")
                 })?;
-                return Ok((false, PrepareInitialModelCallOutcome::Prepared(request)));
+                return Ok((
+                    false,
+                    PrepareInitialModelCallOutcome::Ready(Box::new(request)),
+                ));
             }
 
             let prepared = match execution.prepare_initial_call(call) {
@@ -257,9 +258,19 @@ impl PostgresModelCallRepository {
                             "target-unavailable result omitted its resolution proof",
                         ),
                     )?;
+                    let failed = error
+                        .execution()
+                        .clone()
+                        .fail_target_resolution(resolution, failure_identities)
+                        .map_err(|_| {
+                            ModelCallRepositoryError::InvalidTransition(
+                                "target-resolution failure could not close fresh execution state",
+                            )
+                        })?;
+                    persist_failed(&mut transaction, &failed).await?;
                     return Ok((
-                        false,
-                        PrepareInitialModelCallOutcome::TargetUnavailable(resolution),
+                        true,
+                        PrepareInitialModelCallOutcome::TargetUnavailable(Box::new(failed)),
                     ));
                 }
                 Err(_) => {
@@ -269,11 +280,14 @@ impl PostgresModelCallRepository {
                 }
             };
             insert_prepared_call(&mut transaction, &prepared).await?;
-            let reloaded = require_live_execution(&mut transaction, session, &self.targets).await?;
-            let request = reloaded.resume_prepared_call().map_err(|_| {
+            let reloaded = require_exact_call(
+                require_live_execution(&mut transaction, session, &self.targets).await?,
+                call,
+            )?;
+            reloaded.resume_prepared_call().map_err(|_| {
                 ModelCallCorruption::Inconsistent("committed Prepared call cannot resume")
             })?;
-            Ok((true, PrepareInitialModelCallOutcome::Prepared(request)))
+            Ok((true, PrepareInitialModelCallOutcome::Checkpointed(call)))
         }
         .await;
 
@@ -351,32 +365,6 @@ impl PostgresModelCallRepository {
                     "capability failure requires a Prepared call",
                 )
             })?;
-            persist_failed(&mut transaction, &failed).await?;
-            Ok(failed)
-        }
-        .await;
-        finish_commit(transaction, result).await
-    }
-
-    /// Atomically closes an exact catalog miss before a model call exists.
-    pub async fn fail_target_resolution(
-        &self,
-        session: SessionId,
-        resolution: ModelTargetResolutionError,
-        identities: FailedModelCallTurnIdentities,
-    ) -> Result<FailedModelCallTurn, ModelCallRepositoryError> {
-        let mut transaction = self.pool.begin().await?;
-        let result = async {
-            lock_session(&mut transaction, session).await?;
-            let execution =
-                require_live_execution(&mut transaction, session, &self.targets).await?;
-            let failed = execution
-                .fail_target_resolution(resolution, identities)
-                .map_err(|_| {
-                    ModelCallRepositoryError::InvalidTransition(
-                        "target-resolution proof does not match fresh execution state",
-                    )
-                })?;
             persist_failed(&mut transaction, &failed).await?;
             Ok(failed)
         }

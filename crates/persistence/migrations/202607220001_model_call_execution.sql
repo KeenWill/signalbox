@@ -662,7 +662,10 @@ BEGIN
            OR terminal_attempt IS DISTINCT FROM checked_attempt_id
            OR terminal_call IS DISTINCT FROM checked_model_call_id
            OR attempt_state IS DISTINCT FROM 'ended'
-           OR attempt_disposition IS DISTINCT FROM 'turn_completed'
+           OR (
+                attempt_disposition IS DISTINCT FROM 'turn_completed'
+                AND attempt_disposition IS DISTINCT FROM 'lost'
+           )
         THEN
             RAISE EXCEPTION 'Completed model call lacks its exact terminal turn outcome'
                 USING ERRCODE = '23514';
@@ -673,7 +676,10 @@ BEGIN
            OR terminal_attempt IS DISTINCT FROM checked_attempt_id
            OR terminal_call IS DISTINCT FROM checked_model_call_id
            OR attempt_state IS DISTINCT FROM 'ended'
-           OR attempt_disposition IS DISTINCT FROM 'turn_refused'
+           OR (
+                attempt_disposition IS DISTINCT FROM 'turn_refused'
+                AND attempt_disposition IS DISTINCT FROM 'lost'
+           )
         THEN
             RAISE EXCEPTION 'Refused model call lacks its exact terminal turn outcome'
                 USING ERRCODE = '23514';
@@ -1091,7 +1097,7 @@ BEGIN
                 SELECT 1
                   FROM turn_attempt
                  WHERE turn_attempt_id = checked_terminal_attempt
-                   AND end_disposition = 'turn_refused'
+                   AND end_disposition IN ('turn_refused', 'lost')
            )
            OR NOT EXISTS (
                 SELECT 1
@@ -1144,7 +1150,7 @@ BEGIN
                 SELECT 1
                   FROM turn_attempt
                  WHERE turn_attempt_id = checked_terminal_attempt
-                   AND end_disposition = 'turn_completed'
+                   AND end_disposition IN ('turn_completed', 'lost')
            )
            OR NOT EXISTS (
                 SELECT 1

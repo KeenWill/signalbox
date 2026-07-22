@@ -981,34 +981,54 @@ pub(crate) async fn load_scheduling_projection(
                         }
                         required_model_calls.insert(terminal_call);
                         match terminal_disposition.as_deref() {
-                            Some("completed")
-                                if end_disposition.as_deref() == Some("turn_completed") =>
-                            {
+                            Some("completed") => {
+                                let completing_attempt_disposition =
+                                    match end_disposition.as_deref() {
+                                        Some("turn_completed") => {
+                                            UnstoppedAttemptDisposition::TurnCompleted
+                                        }
+                                        Some("lost") => UnstoppedAttemptDisposition::Lost,
+                                        _ => {
+                                            return Err(SubmitInputCorruption::Inconsistent(
+                                                "terminal model-call disposition",
+                                            )
+                                            .into());
+                                        }
+                                    };
                                 AcceptedInputTurnSchedulingRecordState::TerminalCompleted {
                                     starting_lineage,
                                     starting_frontier: ContextFrontierId::from_uuid(
                                         starting_frontier,
                                     ),
                                     completing_attempt: stored_attempt_id,
-                                    completing_attempt_disposition:
-                                        UnstoppedAttemptDisposition::TurnCompleted,
+                                    completing_attempt_disposition,
                                     completing_call: ModelCallId::from_uuid(terminal_call),
                                     terminal_frontier: ContextFrontierId::from_uuid(
                                         terminal_frontier,
                                     ),
                                 }
                             }
-                            Some("refused")
-                                if end_disposition.as_deref() == Some("turn_refused") =>
-                            {
+                            Some("refused") => {
+                                let refusing_attempt_disposition = match end_disposition.as_deref()
+                                {
+                                    Some("turn_refused") => {
+                                        UnstoppedAttemptDisposition::TurnRefused
+                                    }
+                                    Some("lost") => UnstoppedAttemptDisposition::Lost,
+                                    _ => {
+                                        return Err(SubmitInputCorruption::Inconsistent(
+                                            "terminal model-call disposition",
+                                        )
+                                        .into());
+                                    }
+                                };
                                 AcceptedInputTurnSchedulingRecordState::TerminalRefused {
                                     starting_lineage,
                                     starting_frontier: ContextFrontierId::from_uuid(
                                         starting_frontier,
                                     ),
                                     refusing_attempt: stored_attempt_id,
-                                    refusing_attempt_disposition:
-                                        UnstoppedAttemptDisposition::TurnRefused,
+                                    refusing_attempt_disposition,
                                     refusing_call: ModelCallId::from_uuid(terminal_call),
                                     terminal_frontier: ContextFrontierId::from_uuid(
                                         terminal_frontier,

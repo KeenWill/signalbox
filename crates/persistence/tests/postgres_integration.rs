@@ -20,16 +20,16 @@ use signalbox_application::{
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputStartingLineage, ActivatedAcceptedInputTurn, ActiveTurnPhase,
     AssistantText, CompletedModelCallIdentities, ContextFrontierId, CreateSession,
-    CurrentTurnAttemptState, DeliveryRequest, DurableCommandId, ModelAlias, ModelCallId,
-    ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
-    ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition,
-    PerInputConfigurationChoices, PreparedCreateSession, ProviderModelIdentity,
-    ReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult,
-    ResolvedProviderTarget, SemanticTranscriptEntryId, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-    SessionId, SubmitInput, SubmitInputAppliedResult, SubmitInputReconstitutionFailure,
-    SubmitInputRejectedResult, SubmitInputResult, TranscriptAncestry, TurnAttemptId, TurnId,
-    UserContent,
+    CurrentTurnAttemptState, DeliveryRequest, DurableCommandId, FailedModelCallTurnIdentities,
+    ModelAlias, ModelCallId, ModelCallTerminalIdentities, ModelCallTerminalObservation,
+    ModelCallTerminalOutcome, ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog,
+    ModelTargetDefinition, PerInputConfigurationChoices, PreparedCreateSession,
+    ProviderModelIdentity, ReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult,
+    ReplaceSessionDefaultsResult, ResolvedProviderTarget, SemanticTranscriptEntryId,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
+    SessionCreationProvenance, SessionId, SubmitInput, SubmitInputAppliedResult,
+    SubmitInputReconstitutionFailure, SubmitInputRejectedResult, SubmitInputResult,
+    TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
 };
 use signalbox_persistence::{
     MIGRATOR,
@@ -846,10 +846,34 @@ async fn s01_s20_s21_inv014_inv015_inv032_model_call_transactions_complete_first
     .expect("one immutable direct target forms a catalog");
     let repository = PostgresModelCallRepository::new(pool.clone(), targets);
     let call = ModelCallId::from_uuid(Uuid::from_u128(0xce2));
-    let PrepareInitialModelCallOutcome::Prepared(prepared) =
-        repository.prepare_initial_call(session, call).await?
+    let PrepareInitialModelCallOutcome::Checkpointed(checkpointed_call) = repository
+        .prepare_initial_call(
+            session,
+            call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde8)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xee8)),
+            ),
+        )
+        .await?
     else {
-        panic!("the configured target must prepare");
+        panic!("a fresh call must stop at its Prepared checkpoint");
+    };
+    assert_eq!(checkpointed_call, call);
+
+    let unused_call_candidate = ModelCallId::from_uuid(Uuid::from_u128(0xce3));
+    let PrepareInitialModelCallOutcome::Ready(prepared) = repository
+        .prepare_initial_call(
+            session,
+            unused_call_candidate,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde9)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xee9)),
+            ),
+        )
+        .await?
+    else {
+        panic!("a later invocation must reload the committed Prepared call");
     };
     assert_eq!(prepared.session(), session);
     assert_eq!(prepared.turn(), turn);
@@ -954,6 +978,131 @@ async fn s01_s20_s21_inv014_inv015_inv032_model_call_transactions_complete_first
     .fetch_one(&pool)
     .await?;
     assert_eq!(durable_shape, (1, 1, 1, 1, 1, 3, 1));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S21 / INV-006 / INV-014 / INV-032: immutable target resolution failure
+/// creates no targetless call and atomically closes the prepared attempt and
+/// turn with its semantic failure boundary and typed outbox event.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s21_inv006_inv014_inv032_target_unavailable_closes_without_model_call()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = SessionId::from_uuid(Uuid::from_u128(0x8f1));
+    let direct_selection =
+        signalbox_domain::DirectModelSelection::from_uuid(Uuid::from_u128(0xcf1));
+    let mut create_service = CreateSessionService::new(
+        FixedSessionIds::new([session]),
+        CreateSessionRepository::new(pool.clone()),
+    );
+    let CreateSessionOutcome::Applied(_) = create_service
+        .execute(CreateSessionRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::from_u128(0x4f1)),
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(direct_selection)),
+        )?)
+        .await?
+    else {
+        panic!("the target-miss fixture session must be created");
+    };
+
+    let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x9f1));
+    let turn = TurnId::from_uuid(Uuid::from_u128(0xaf1));
+    let mut submit_service = SubmitInputService::new(
+        FixedSubmitInputIds::new([accepted_input], [turn]),
+        SubmitInputRepository::new(pool.clone()),
+        AcceptingEligibilityNudge,
+    );
+    let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::TurnOrigin(origin),
+    )) = submit_service
+        .execute(SubmitInputRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::from_u128(0x4f2)),
+            session,
+            UserContent::try_text("request with unavailable target".to_owned())
+                .expect("fixture user content is admitted"),
+            DeliveryRequest::StartWhenNoActiveTurn {
+                configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+            },
+        )?)
+        .await?
+    else {
+        panic!("the target-miss fixture input must be accepted");
+    };
+    assert_eq!(origin.accepted_input(), accepted_input);
+    assert_eq!(origin.turn(), turn);
+
+    let attempt = TurnAttemptId::from_uuid(Uuid::from_u128(0xbf1));
+    let mut activation_service = StartEligibleTurnService::new(
+        FixedStartEligibleTurnIds::new(
+            [SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdf1))],
+            [ContextFrontierId::from_uuid(Uuid::from_u128(0xef1))],
+            [attempt],
+        ),
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    let StartEligibleTurnOutcome::Activated(activated) =
+        activation_service.execute(session).await?
+    else {
+        panic!("the target-miss fixture turn must activate");
+    };
+    assert_eq!(activated.turn(), turn);
+
+    let targets = ModelTargetCatalog::try_from_definitions([])
+        .expect("an empty immutable target catalog is valid");
+    let repository = PostgresModelCallRepository::new(pool.clone(), targets);
+    let call_candidate = ModelCallId::from_uuid(Uuid::from_u128(0xcf2));
+    let failure_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdf2));
+    let terminal_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0xef2));
+    let PrepareInitialModelCallOutcome::TargetUnavailable(failed) = repository
+        .prepare_initial_call(
+            session,
+            call_candidate,
+            FailedModelCallTurnIdentities::new(failure_entry, terminal_frontier),
+        )
+        .await?
+    else {
+        panic!("the unavailable configured target must close without a call");
+    };
+    assert_eq!(failed.turn(), turn);
+    assert!(failed.call().is_none());
+
+    let durable_shape: (i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM model_call
+              WHERE model_call_id = $1),
+            (SELECT count(*) FROM turn_attempt
+              WHERE turn_attempt_id = $2
+                AND state_kind = 'ended'
+                AND end_variant = 'without_stop'
+                AND end_disposition = 'known_failure'),
+            (SELECT count(*) FROM semantic_transcript_entry
+              WHERE semantic_entry_id = $3
+                AND payload_kind = 'turn_failed'
+                AND failed_turn_id = $4),
+            (SELECT count(*) FROM turn_lifecycle
+              WHERE turn_id = $4
+                AND state_kind = 'terminal'
+                AND terminal_disposition_kind = 'failed'
+                AND terminal_frontier_id = $5
+                AND terminal_attempt_id IS NULL
+                AND terminal_model_call_id IS NULL),
+            (SELECT count(*) FROM turn_failed_outbox_event
+              WHERE turn_id = $4
+                AND failure_entry_id = $3
+                AND terminal_frontier_id = $5)",
+    )
+    .bind(call_candidate.into_uuid())
+    .bind(attempt.into_uuid())
+    .bind(failure_entry.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(terminal_frontier.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(durable_shape, (0, 1, 1, 1, 1));
 
     pool.close().await;
     drop(container);
