@@ -169,9 +169,10 @@ application boundary.
 
 **Affects.** `crates/application/src/model_execution.rs`, its public
 provider-neutral operation/message values, the application service tests, and
-the later model-runtime bridge. Rich content, tool execution, provider/client
-rendering beyond these admitted baseline entries, and prompt templating remain
-open.
+the later model-runtime bridge. Later system-prompt, projection, and
+summarization policy remains governed by the
+[model-input projection open question](open-questions.md#model-input-projection);
+rich content and tool execution remain governed by their existing records.
 
 ## 2026-07-21 — Distinct provider error type and code evidence
 

@@ -45,6 +45,16 @@ accepted records; those numbers remain reserved for their topics.
   provider/client rendering remain open. Blocks those extensions, not the first
   `SubmitInput` slice. (S01, S03, S08)
 
+## Model-input projection
+
+- **System prompts, projection, and summarization.** The
+  [M3 rendering decision](decisions.md#2026-07-22--render-the-initial-model-frontier-by-semantic-entry-role)
+  fixes only the admitted text-entry role mapping and exact frontier order.
+  System-prompt construction, prompt templating, context projection or omission,
+  summarization policy, and durable summary provenance or refresh semantics
+  remain open. Blocks those extensions, not the admitted text-only M3 rendering.
+  (S02, S17)
+
 ## Delegation (reserved ADR-0002)
 
 - **Parent cancellation propagation to active delegated children.** Leaning:
