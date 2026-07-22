@@ -38,7 +38,9 @@ use signalbox_persistence::{
         CreateSessionRepositoryError,
     },
     local_test_connection_options, migrate,
-    model_execution::{PostgresModelCallRepository, PrepareInitialModelCallOutcome},
+    model_execution::{
+        ModelCallAuthorizationReread, PostgresModelCallRepository, PrepareInitialModelCallOutcome,
+    },
     replace_session_defaults::{
         ReplaceSessionDefaultsCorruption, ReplaceSessionDefaultsHandlingOutcome,
         ReplaceSessionDefaultsRepository, ReplaceSessionDefaultsRepositoryError,
@@ -727,6 +729,7 @@ impl StartEligibleTurnIdGenerator for FixedStartEligibleTurnIds {
 struct FixedStartupScanIds {
     failure_entries: VecDeque<SemanticTranscriptEntryId>,
     terminal_frontiers: VecDeque<ContextFrontierId>,
+    reclassified_turns: VecDeque<TurnId>,
 }
 
 impl FixedStartupScanIds {
@@ -737,7 +740,13 @@ impl FixedStartupScanIds {
         Self {
             failure_entries: failure_entries.into_iter().collect(),
             terminal_frontiers: terminal_frontiers.into_iter().collect(),
+            reclassified_turns: VecDeque::new(),
         }
+    }
+
+    fn with_reclassified_turns(mut self, turns: impl IntoIterator<Item = TurnId>) -> Self {
+        self.reclassified_turns = turns.into_iter().collect();
+        self
     }
 }
 
@@ -752,6 +761,12 @@ impl StartupScanIdGenerator for FixedStartupScanIds {
         self.terminal_frontiers
             .pop_front()
             .expect("the integration test supplies one terminal frontier per recovery")
+    }
+
+    fn next_reclassified_turn_id(&mut self, _accepted_input: AcceptedInputId) -> TurnId {
+        self.reclassified_turns
+            .pop_front()
+            .expect("the integration test supplies one successor per recovered steering input")
     }
 }
 
@@ -971,6 +986,12 @@ async fn s01_s20_s21_inv014_inv015_inv032_model_call_transactions_complete_first
             .as_str(),
         "exact user request"
     );
+    assert_eq!(
+        repository
+            .reread_ambiguous_authorization(session, &prepared)
+            .await?,
+        ModelCallAuthorizationReread::Prepared
+    );
 
     let authorized = repository.authorize_send(session, call).await?;
     let observation_correlation = authorized.observation_correlation();
@@ -982,6 +1003,12 @@ async fn s01_s20_s21_inv014_inv015_inv032_model_call_transactions_complete_first
     assert_eq!(
         authorized.attempt().state(),
         &CurrentTurnAttemptState::Running
+    );
+    assert_eq!(
+        repository
+            .reread_ambiguous_authorization(session, &prepared)
+            .await?,
+        ModelCallAuthorizationReread::InFlight(Box::new(authorized.clone()))
     );
 
     let assistant_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde2));
@@ -1073,9 +1100,10 @@ async fn s01_s20_s21_inv014_inv015_inv032_model_call_transactions_complete_first
     Ok(())
 }
 
-/// S03 / S04 / INV-014 / INV-034: the production startup repository applies
+/// S03 / S04 / S08 / INV-014 / INV-016 / INV-034: the production startup repository applies
 /// call-aware recovery under its session lock: Prepared is known-failed while
-/// an issued call becomes an exact ambiguity wait, and replay changes neither.
+/// reclassifying newly observed steering, an issued call becomes an exact
+/// ambiguity wait, and replay changes neither.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s03_s04_inv014_inv034_startup_scan_classifies_prepared_and_issued_model_calls()
@@ -1083,6 +1111,33 @@ async fn s03_s04_inv014_inv034_startup_scan_classifies_prepared_and_issued_model
     let (container, pool, database_url) = migrated_postgres().await?;
     let prepared = checkpoint_restart_model_call(&pool, 0x2000, false).await?;
     let issued = checkpoint_restart_model_call(&pool, 0x3000, true).await?;
+    let prepared_steering = AcceptedInputId::from_uuid(Uuid::from_u128(0x6100));
+    let issued_steering = AcceptedInputId::from_uuid(Uuid::from_u128(0x6101));
+    for (seed, fixture, accepted_input) in [
+        (0x4100, prepared, prepared_steering),
+        (0x4200, issued, issued_steering),
+    ] {
+        assert!(matches!(
+            SubmitInputRepository::new(pool.clone())
+                .handle(
+                    SubmitInput::new(
+                        DurableCommandId::from_uuid(Uuid::from_u128(seed)),
+                        fixture.session,
+                        UserContent::try_text(String::from("steering accepted before restart"))
+                            .expect("fixture steering content is admitted"),
+                        DeliveryRequest::NextSafePoint {
+                            expected_active_turn: fixture.turn,
+                        },
+                    ),
+                    accepted_input,
+                    None,
+                )
+                .await?,
+            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+                SubmitInputAppliedResult::PendingSteering(_)
+            ))
+        ));
+    }
 
     pool.close().await;
     let restarted_pool = PgPoolOptions::new()
@@ -1103,7 +1158,8 @@ async fn s03_s04_inv014_inv034_startup_scan_classifies_prepared_and_issued_model
                 ContextFrontierId::from_uuid(Uuid::from_u128(0x5003)),
                 ContextFrontierId::from_uuid(Uuid::from_u128(0x5004)),
             ],
-        ),
+        )
+        .with_reclassified_turns([TurnId::from_uuid(Uuid::from_u128(0x6201))]),
         PostgresStartupScanRepository::new(restarted_pool.clone()),
     );
 
@@ -1165,6 +1221,42 @@ async fn s03_s04_inv014_inv034_startup_scan_classifies_prepared_and_issued_model
             "awaiting_model_call_recovery".into(),
             issued.call.into_uuid(),
         )
+    );
+    let steering_state: (String, Option<Uuid>, String, Option<Uuid>) = sqlx::query_as(
+        "SELECT prepared.disposition_kind,
+                prepared.result_turn_id,
+                issued.disposition_kind,
+                issued.result_turn_id
+           FROM accepted_input AS prepared
+           CROSS JOIN accepted_input AS issued
+          WHERE prepared.accepted_input_id = $1
+            AND issued.accepted_input_id = $2",
+    )
+    .bind(prepared_steering.into_uuid())
+    .bind(issued_steering.into_uuid())
+    .fetch_one(&restarted_pool)
+    .await?;
+    assert_eq!(
+        steering_state,
+        (
+            "reclassified_as_turn_origin".into(),
+            Some(Uuid::from_u128(0x6201)),
+            "pending_steering".into(),
+            None,
+        )
+    );
+    assert_eq!(
+        PostgresStartupScanRepository::new(restarted_pool.clone())
+            .recover(
+                prepared.session,
+                signalbox_domain::AcceptedInputTurnFailureIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x6301)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(0x6302)),
+                ),
+                |_| panic!("a stale terminal inventory entry needs no successor identity"),
+            )
+            .await?,
+        StartupScanSessionOutcome::NoActiveTurn
     );
 
     let replay = scan.execute().await?;
@@ -7739,6 +7831,7 @@ async fn s08_inv016_inv034_restart_scan_visibly_defers_pending_steering_unchange
                     SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xec3)),
                     ContextFrontierId::from_uuid(Uuid::from_u128(0xfc3)),
                 ),
+                |_| panic!("the no-call recovery must leave pending steering deferred"),
             )
             .await?,
         StartupScanSessionOutcome::DeferredPendingSteering {

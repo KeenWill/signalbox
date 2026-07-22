@@ -188,6 +188,15 @@ impl ClassifyOperatorFailure for ModelCallRepositoryError {
     }
 }
 
+/// Authoritative durable state after an ambiguous send-authorization commit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ModelCallAuthorizationReread {
+    /// The authorization rolled back and the exact call remains Prepared.
+    Prepared,
+    /// The authorization committed; this exact issued call was not consumed.
+    InFlight(Box<AuthorizedModelCall>),
+}
+
 impl From<ModelCallCorruption> for ModelCallRepositoryError {
     fn from(error: ModelCallCorruption) -> Self {
         Self::Corruption(error)
@@ -340,6 +349,58 @@ impl PostgresModelCallRepository {
         finish_commit(transaction, result).await
     }
 
+    /// Rereads exact durable authority after an ambiguous authorization commit.
+    pub async fn reread_ambiguous_authorization(
+        &self,
+        session: SessionId,
+        prepared: &PreparedModelCallRequest,
+    ) -> Result<ModelCallAuthorizationReread, ModelCallRepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        let result = async {
+            lock_session(&mut transaction, session).await?;
+            let execution = require_exact_call(
+                require_live_execution(&mut transaction, session, &self.targets).await?,
+                prepared.call().id(),
+            )?;
+            match execution.current_call().map(|call| call.state()) {
+                Some(signalbox_domain::CurrentModelCallState::Prepared) => {
+                    let reloaded = execution.resume_prepared_call().map_err(|_| {
+                        ModelCallRepositoryError::InvalidTransition(
+                            "ambiguous authorization reread could not resume Prepared",
+                        )
+                    })?;
+                    if &reloaded != prepared {
+                        return Err(ModelCallRepositoryError::InvalidTransition(
+                            "ambiguous authorization reread changed Prepared request",
+                        ));
+                    }
+                    Ok(ModelCallAuthorizationReread::Prepared)
+                }
+                Some(signalbox_domain::CurrentModelCallState::InFlight) => {
+                    let authorized = execution.resume_in_flight_call().ok_or(
+                        ModelCallRepositoryError::InvalidTransition(
+                            "ambiguous authorization reread could not resume InFlight",
+                        ),
+                    )?;
+                    if !prepared_matches_authorized(prepared, &authorized) {
+                        return Err(ModelCallRepositoryError::InvalidTransition(
+                            "ambiguous authorization reread changed issued request",
+                        ));
+                    }
+                    Ok(ModelCallAuthorizationReread::InFlight(Box::new(authorized)))
+                }
+                Some(signalbox_domain::CurrentModelCallState::CancellationRequested) | None => {
+                    Err(ModelCallRepositoryError::InvalidTransition(
+                        "ambiguous authorization reread found no resumable call",
+                    ))
+                }
+            }
+        }
+        .await;
+        transaction.rollback().await?;
+        result
+    }
+
     /// Freshly reloads issued authority and commits one terminal observation.
     pub async fn apply_terminal_observation<NextTurn>(
         &self,
@@ -478,6 +539,30 @@ fn attach_pending_reclassification_candidates(
         ),
         ModelCallTerminalIdentities::Ambiguous => ModelCallTerminalIdentities::Ambiguous,
     }
+}
+
+fn prepared_matches_authorized(
+    prepared: &PreparedModelCallRequest,
+    authorized: &AuthorizedModelCall,
+) -> bool {
+    prepared.session() == authorized.session()
+        && prepared.turn() == authorized.turn()
+        && prepared.attempt() == authorized.attempt().id()
+        && prepared.call().id() == authorized.call().id()
+        && prepared.call().selection() == authorized.call().selection()
+        && prepared.call().target() == authorized.call().target()
+        && prepared.call().frontier() == authorized.call().frontier()
+        && prepared
+            .frontier_entries()
+            .eq(authorized.frontier_entries())
+        && prepared.frontier_entries().all(|entry| {
+            let SemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input } =
+                entry.payload()
+            else {
+                return true;
+            };
+            prepared.origin_content(*accepted_input) == authorized.origin_content(*accepted_input)
+        })
 }
 
 async fn lock_session(

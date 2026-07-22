@@ -472,6 +472,25 @@ impl ModelCallExecution {
         })
     }
 
+    /// Reconstructs the exact issued metadata after an ambiguous
+    /// authorization commit without performing another state transition.
+    pub fn resume_in_flight_call(&self) -> Option<AuthorizedModelCall> {
+        let call = self.current_call.clone()?;
+        if self.current_attempt.state() != &CurrentTurnAttemptState::Running
+            || call.state() != CurrentModelCallState::InFlight
+        {
+            return None;
+        }
+        Some(AuthorizedModelCall {
+            session: self.session,
+            turn: self.turn,
+            attempt: self.current_attempt.clone(),
+            call,
+            frontier_entries: self.frontier_entries.clone(),
+            origin_contents: self.origin_contents.clone(),
+        })
+    }
+
     /// Applies one provider observation to freshly reloaded issued state.
     ///
     /// ADR-0045 requires the observation transaction to reconstruct current
@@ -2505,6 +2524,22 @@ mod tests {
             observation.observation(),
             &ModelCallTerminalObservation::KnownFailed
         );
+    }
+
+    /// S02 / INV-006 / INV-014: an ambiguous authorization commit can recover
+    /// the exact issued correlation without attempting a second transition.
+    #[test]
+    fn s02_inv006_inv014_in_flight_reread_reconstructs_exact_authorization() {
+        let execution = in_flight_execution();
+        let authorized = execution
+            .resume_in_flight_call()
+            .expect("fresh InFlight state retains exact issued authority");
+
+        assert_eq!(authorized.session(), execution.session());
+        assert_eq!(authorized.turn(), execution.turn());
+        assert_eq!(authorized.attempt(), execution.current_attempt());
+        assert_eq!(authorized.call(), execution.current_call().unwrap());
+        assert!(prepared_execution().resume_in_flight_call().is_none());
     }
 
     /// S02 / INV-006 / INV-014: a provider observation remains bound to the

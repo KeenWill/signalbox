@@ -7,8 +7,9 @@ use signalbox_application::{
     ClassifyOperatorFailure, OperatorFailureClass, StartupScanRepository, StartupScanSessionOutcome,
 };
 use signalbox_domain::{
-    AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities, AttemptEnd,
-    FailedModelCallTurnIdentities, ModelCallTerminalOutcome, PreparedAcceptedInputTurnFailure,
+    AcceptedInputId, AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities,
+    AttemptEnd, CurrentModelCallState, FailedModelCallTurnIdentities, ModelCallTerminalOutcome,
+    PendingSteeringReclassificationIdentity, PreparedAcceptedInputTurnFailure,
     SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload, SessionId,
     TurnDisposition, TurnId, UnstoppedAttemptDisposition,
 };
@@ -35,6 +36,8 @@ pub enum StartupScanIdentityCollision {
     FailureEntry,
     /// The proposed terminal context-frontier identity already exists.
     TerminalFrontier,
+    /// A proposed reclassified successor-turn identity already exists.
+    ReclassifiedTurn,
 }
 
 impl fmt::Display for StartupScanIdentityCollision {
@@ -42,6 +45,7 @@ impl fmt::Display for StartupScanIdentityCollision {
         let identity = match self {
             Self::FailureEntry => "failure semantic-entry",
             Self::TerminalFrontier => "terminal context-frontier",
+            Self::ReclassifiedTurn => "reclassified successor-turn",
         };
         write!(formatter, "{identity} identity already exists")
     }
@@ -224,13 +228,23 @@ impl PostgresStartupScanRepository {
     }
 
     /// Locks one session and atomically terminalizes its prior-process attempt.
-    pub async fn recover(
+    pub async fn recover<NextTurn>(
         &self,
         session: SessionId,
         identities: AcceptedInputTurnFailureIdentities,
-    ) -> Result<StartupScanSessionOutcome, StartupScanRepositoryError> {
+        next_reclassified_turn: NextTurn,
+    ) -> Result<StartupScanSessionOutcome, StartupScanRepositoryError>
+    where
+        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+    {
         let mut transaction = self.pool.begin().await?;
-        let decision = recover_in_transaction(&mut transaction, session, identities).await;
+        let decision = recover_in_transaction(
+            &mut transaction,
+            session,
+            identities,
+            next_reclassified_turn,
+        )
+        .await;
 
         match decision {
             Ok(TransactionDecision::Commit(outcome)) => {
@@ -261,20 +275,29 @@ impl StartupScanRepository for PostgresStartupScanRepository {
         PostgresStartupScanRepository::active_sessions(self).await
     }
 
-    async fn recover(
+    async fn recover<NextTurn>(
         &mut self,
         session: SessionId,
         identities: AcceptedInputTurnFailureIdentities,
-    ) -> Result<StartupScanSessionOutcome, Self::Error> {
-        PostgresStartupScanRepository::recover(self, session, identities).await
+        next_reclassified_turn: NextTurn,
+    ) -> Result<StartupScanSessionOutcome, Self::Error>
+    where
+        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+    {
+        PostgresStartupScanRepository::recover(self, session, identities, next_reclassified_turn)
+            .await
     }
 }
 
-async fn recover_in_transaction(
+async fn recover_in_transaction<NextTurn>(
     connection: &mut PgConnection,
     requested_session: SessionId,
     identities: AcceptedInputTurnFailureIdentities,
-) -> Result<TransactionDecision, StartupScanRepositoryError> {
+    next_reclassified_turn: NextTurn,
+) -> Result<TransactionDecision, StartupScanRepositoryError>
+where
+    NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+{
     // This is the same scheduler-row lock ordering used by every lifecycle
     // writer. Reconstitution and all guarded writes happen while it is held.
     let session_uuid = session_id_to_uuid(requested_session);
@@ -292,18 +315,23 @@ async fn recover_in_transaction(
         identities,
         session_exists,
         scheduler_session,
+        next_reclassified_turn,
     )
     .await
     .map_err(|error| error.with_corruption_turn(active_turn.map(turn_id_from_uuid)))
 }
 
-async fn recover_locked_session(
+async fn recover_locked_session<NextTurn>(
     connection: &mut PgConnection,
     requested_session: SessionId,
     identities: AcceptedInputTurnFailureIdentities,
     session_exists: bool,
     scheduler_session: Option<Uuid>,
-) -> Result<TransactionDecision, StartupScanRepositoryError> {
+    mut next_reclassified_turn: NextTurn,
+) -> Result<TransactionDecision, StartupScanRepositoryError>
+where
+    NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+{
     if scheduler_session.is_none() {
         if session_exists {
             return Err(StartupScanCorruption::Missing("session scheduler row").into());
@@ -327,33 +355,50 @@ async fn recover_locked_session(
         .await
         .map_err(map_scheduling_error)?;
 
-    if let Some(active_turn) = scheduling.active_turn_execution() {
-        if !matches!(
-            active_turn.phase(),
-            signalbox_domain::ActiveTurnPhase::Running { .. }
-        ) {
-            return Ok(TransactionDecision::Rollback(
-                StartupScanSessionOutcome::NoActiveTurn,
-            ));
-        }
-        if let Some(pending) = active_turn.pending_steering().first() {
-            return Ok(TransactionDecision::Rollback(
-                StartupScanSessionOutcome::DeferredPendingSteering {
-                    accepted_input: pending.accepted_input(),
-                },
-            ));
-        }
+    let Some(active_turn) = scheduling.active_turn_execution() else {
+        return Ok(TransactionDecision::Rollback(
+            StartupScanSessionOutcome::NoActiveTurn,
+        ));
+    };
+    if !matches!(
+        active_turn.phase(),
+        signalbox_domain::ActiveTurnPhase::Running { .. }
+    ) {
+        return Ok(TransactionDecision::Rollback(
+            StartupScanSessionOutcome::NoActiveTurn,
+        ));
     }
+    let pending_steering = active_turn
+        .pending_steering()
+        .first()
+        .map(signalbox_domain::PendingSteeringInput::accepted_input);
 
     let model_execution = require_live_execution_for_restart(connection, requested_session)
         .await
         .map_err(map_model_call_error)?;
-    if model_execution.current_call().is_some() {
+    if let Some(call_state) = model_execution.current_call().map(|call| call.state()) {
+        let mut failure_identities = FailedModelCallTurnIdentities::new(
+            identities.failure_entry(),
+            identities.terminal_frontier(),
+        );
+        if call_state == CurrentModelCallState::Prepared {
+            let reclassifications = model_execution
+                .active_turn()
+                .pending_steering()
+                .iter()
+                .map(|pending| {
+                    let accepted_input = pending.accepted_input();
+                    PendingSteeringReclassificationIdentity::new(
+                        accepted_input,
+                        next_reclassified_turn(accepted_input),
+                    )
+                })
+                .collect();
+            failure_identities =
+                failure_identities.with_pending_steering_reclassifications(reclassifications);
+        }
         let outcome = model_execution
-            .recover_after_restart(FailedModelCallTurnIdentities::new(
-                identities.failure_entry(),
-                identities.terminal_frontier(),
-            ))
+            .recover_after_restart(failure_identities)
             .map_err(|_| {
                 StartupScanCorruption::Inconsistent("model-call restart classification")
             })?;
@@ -368,6 +413,12 @@ async fn recover_locked_session(
             .map_err(map_model_call_error)?;
         return Ok(TransactionDecision::Commit(
             StartupScanSessionOutcome::RecoveredModelCall(Box::new(outcome)),
+        ));
+    }
+
+    if let Some(accepted_input) = pending_steering {
+        return Ok(TransactionDecision::Rollback(
+            StartupScanSessionOutcome::DeferredPendingSteering { accepted_input },
         ));
     }
 
@@ -582,8 +633,11 @@ fn map_model_call_error(error: ModelCallRepositoryError) -> StartupScanRepositor
             StartupScanIdentityCollision::TerminalFrontier,
         ),
         ModelCallRepositoryError::IdentityCollision(
-            ModelCallIdentityCollision::ModelCall | ModelCallIdentityCollision::ReclassifiedTurn,
-        )
+            ModelCallIdentityCollision::ReclassifiedTurn,
+        ) => StartupScanRepositoryError::IdentityCollision(
+            StartupScanIdentityCollision::ReclassifiedTurn,
+        ),
+        ModelCallRepositoryError::IdentityCollision(ModelCallIdentityCollision::ModelCall)
         | ModelCallRepositoryError::NoLiveExecution
         | ModelCallRepositoryError::InvalidTransition(_) => {
             StartupScanCorruption::Inconsistent("model-call recovery transition").into()

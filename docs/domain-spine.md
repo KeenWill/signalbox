@@ -1544,6 +1544,9 @@ pub enum ModelCallExecutionReconstitutionFailure {
 pub struct ModelCallExecutionReconstitutionError { /* private */ }
 
 pub struct ModelCallExecution { /* private */ }
+impl ModelCallExecution {
+    pub fn resume_in_flight_call(&self) -> Option<AuthorizedModelCall>;
+}
 pub enum ModelCallPreparationFailure {
     TargetUnavailable,
     CallAlreadyExists,
@@ -2189,6 +2192,7 @@ where
 pub trait StartupScanIdGenerator {
     fn next_failure_entry_id(&mut self) -> SemanticTranscriptEntryId;
     fn next_terminal_frontier_id(&mut self) -> ContextFrontierId;
+    fn next_reclassified_turn_id(&mut self, accepted_input: AcceptedInputId) -> TurnId;
 }
 
 pub struct UuidV7StartupScanIdGenerator;
@@ -2207,11 +2211,14 @@ pub trait StartupScanRepository {
     fn active_sessions(
         &mut self,
     ) -> impl Future<Output = Result<Box<[SessionId]>, Self::Error>> + Send;
-    fn recover(
+    fn recover<NextTurn>(
         &mut self,
         session: SessionId,
         identities: AcceptedInputTurnFailureIdentities,
-    ) -> impl Future<Output = Result<StartupScanSessionOutcome, Self::Error>> + Send;
+        next_reclassified_turn: NextTurn,
+    ) -> impl Future<Output = Result<StartupScanSessionOutcome, Self::Error>> + Send
+    where
+        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send;
 }
 
 pub struct StartupScanOutcome { /* private */ }
@@ -2234,7 +2241,7 @@ impl<Generator, Repository> StartupScanService<Generator, Repository> {
     pub fn into_parts(self) -> (Generator, Repository);
 }
 impl<
-    Generator: StartupScanIdGenerator,
+    Generator: StartupScanIdGenerator + Send,
     Repository: StartupScanRepository,
 > StartupScanService<Generator, Repository>
 {
