@@ -927,12 +927,14 @@ pub enum AcceptedInputTurnSchedulingRecordState {
     TerminalCompleted {
         starting_lineage: AcceptedInputStartingLineage,
         starting_frontier: ContextFrontierId,
+        completing_attempt: TurnAttemptId,
         completing_call: ModelCallId,
         terminal_frontier: ContextFrontierId,
     },
     TerminalRefused {
         starting_lineage: AcceptedInputStartingLineage,
         starting_frontier: ContextFrontierId,
+        refusing_attempt: TurnAttemptId,
         refusing_call: ModelCallId,
         terminal_frontier: ContextFrontierId,
     },
@@ -1409,14 +1411,14 @@ pub struct CurrentModelCall { /* private */ }
 // (begin_in_flight, request_cancellation, end_classified,
 // end_cancelled_unsent) are crate-private, reserved for the turn aggregate
 impl CurrentModelCall {
-    // accessors: id(), selection(), pinned(), turn(), target(), frontier(), state()
+    // accessors: id(), attempt(), selection(), pinned(), turn(), target(), frontier(), state()
 }
 
 pub struct EndedModelCall { /* private */ }
 // sealed: crate-private end transitions on CurrentModelCall; terminal —
 // no transition back to a current call
 impl EndedModelCall {
-    // accessors: id(), selection(), pinned(), turn(), target(), frontier(), disposition()
+    // accessors: id(), attempt(), selection(), pinned(), turn(), target(), frontier(), disposition()
 }
 
 pub enum ModelCallReconstitutionState {
@@ -1431,12 +1433,13 @@ impl ModelCallReconstitutionInput {
     pub const fn new(
         id: ModelCallId,
         turn: TurnId,
+        attempt: TurnAttemptId,
         selection: FrozenModelSelection,
         target: ResolvedProviderTarget,
         frontier: ContextFrontier,
         state: ModelCallReconstitutionState,
     ) -> Self;
-    // accessors: id(), turn(), selection(), target(), frontier(), state()
+    // accessors: id(), turn(), attempt(), selection(), target(), frontier(), state()
 }
 
 pub enum ReconstitutedModelCall {

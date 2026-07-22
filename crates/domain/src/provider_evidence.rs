@@ -773,7 +773,7 @@ mod tests {
     use crate::test_support::{
         context_frontier_id, model_call_id, provider_model_identity,
         provider_target_evidence_id as evidence_id, semantic_transcript_entry_id, session_id,
-        turn_id,
+        turn_attempt_id, turn_id,
     };
     use crate::{
         CurrentModelCall, CurrentModelCallState, EndedModelCall, ModelCallDisposition,
@@ -810,6 +810,7 @@ mod tests {
     fn current_call(call: u128) -> CurrentModelCall {
         CurrentModelCall::prepared(
             model_call_id(call),
+            turn_attempt_id(6),
             crate::FrozenModelSelection::Direct(crate::test_support::direct(5)),
             pinned_target(),
             &frontier_snapshot(),
@@ -989,6 +990,7 @@ mod tests {
 
         let unsent = CurrentModelCall::prepared(
             model_call_id(SUBJECT_CALL),
+            turn_attempt_id(6),
             crate::FrozenModelSelection::Direct(crate::test_support::direct(5)),
             pinned_target(),
             &frontier_snapshot(),

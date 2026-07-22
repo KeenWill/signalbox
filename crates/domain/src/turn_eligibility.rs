@@ -61,6 +61,8 @@ pub enum AcceptedInputTurnSchedulingRecordState {
         starting_lineage: AcceptedInputStartingLineage,
         /// The stored starting snapshot identity.
         starting_frontier: ContextFrontierId,
+        /// The ended physical attempt that supplied the completed call.
+        completing_attempt: TurnAttemptId,
         /// The outcome-authoritative call that completed the turn.
         completing_call: crate::ModelCallId,
         /// The complete frontier through the final completion marker.
@@ -72,6 +74,8 @@ pub enum AcceptedInputTurnSchedulingRecordState {
         starting_lineage: AcceptedInputStartingLineage,
         /// The stored starting snapshot identity.
         starting_frontier: ContextFrontierId,
+        /// The ended physical attempt that supplied the refusal.
+        refusing_attempt: TurnAttemptId,
         /// The outcome-authoritative call that refused the request.
         refusing_call: crate::ModelCallId,
         /// The equal-content terminal frontier identifying the turn boundary.
@@ -1786,6 +1790,7 @@ fn reconstitute_inner(
                             );
                         };
                         if ended_call.turn() != turn
+                            || ended_call.attempt() != phase.current_attempt
                             || ended_call.selection()
                                 != *record.origin_configuration.effective().model()
                             || ended_call.frontier().snapshot() != *starting_frontier
@@ -1889,6 +1894,7 @@ fn reconstitute_inner(
             AcceptedInputTurnSchedulingRecordState::TerminalCompleted {
                 starting_lineage,
                 starting_frontier,
+                completing_attempt,
                 completing_call,
                 terminal_frontier,
             } => {
@@ -1919,6 +1925,7 @@ fn reconstitute_inner(
                     );
                 };
                 if call.turn() != turn
+                    || call.attempt() != *completing_attempt
                     || call.selection() != *record.origin_configuration.effective().model()
                     || call.disposition() != ModelCallDisposition::Completed
                     || call.frontier().snapshot() != *starting_frontier
@@ -1973,6 +1980,7 @@ fn reconstitute_inner(
             AcceptedInputTurnSchedulingRecordState::TerminalRefused {
                 starting_lineage,
                 starting_frontier,
+                refusing_attempt,
                 refusing_call,
                 terminal_frontier,
             } => {
@@ -2003,6 +2011,7 @@ fn reconstitute_inner(
                     );
                 };
                 if call.turn() != turn
+                    || call.attempt() != *refusing_attempt
                     || call.selection() != *record.origin_configuration.effective().model()
                     || call.disposition() != ModelCallDisposition::Refused
                     || call.frontier().snapshot() != *starting_frontier
@@ -4680,6 +4689,7 @@ mod tests {
             AcceptedInputTurnSchedulingRecordState::TerminalCompleted {
                 starting_lineage: AcceptedInputStartingLineage::FirstInSession,
                 starting_frontier: starting_frontier.id(),
+                completing_attempt: turn_attempt_id(60),
                 completing_call,
                 terminal_frontier: terminal_frontier.id(),
             },
@@ -4705,6 +4715,7 @@ mod tests {
         let call = ModelCallReconstitutionInput::new(
             completing_call,
             predecessor.turn(),
+            turn_attempt_id(60),
             FrozenModelSelection::Direct(direct(1)),
             ResolvedProviderTarget::naming(provider_model_identity(51)),
             resolved_starting.frontier(),
@@ -4778,6 +4789,7 @@ mod tests {
         let call = ModelCallReconstitutionInput::new(
             ambiguous_call,
             active.turn(),
+            turn_attempt_id(60),
             FrozenModelSelection::Direct(direct(1)),
             ResolvedProviderTarget::naming(provider_model_identity(51)),
             resolved_starting.frontier(),

@@ -338,7 +338,13 @@ impl ModelCallExecution {
             ));
         }
         let pinned = PinnedProviderTarget::pinned(self.turn, resolution.target);
-        let prepared = CurrentModelCall::prepared(call, frozen, pinned, &self.starting_snapshot);
+        let prepared = CurrentModelCall::prepared(
+            call,
+            self.current_attempt.id(),
+            frozen,
+            pinned,
+            &self.starting_snapshot,
+        );
         Ok(PreparedInitialModelCall {
             session: self.session,
             turn: self.turn,
@@ -1180,7 +1186,10 @@ fn reconstitute(
         ));
     }
     let current_call = if let Some(call) = input.calls.first() {
-        if call.turn() != input.turn || call.frontier() != input.starting_snapshot.frontier() {
+        if call.turn() != input.turn
+            || call.attempt() != current_attempt.id()
+            || call.frontier() != input.starting_snapshot.frontier()
+        {
             return Err(fail(
                 input,
                 ModelCallExecutionReconstitutionFailure::CallOwnershipMismatch,
@@ -1481,6 +1490,7 @@ mod tests {
             vec![ModelCallReconstitutionInput::new(
                 prepared.call().id(),
                 prepared.call().turn(),
+                prepared.call().attempt(),
                 prepared.call().selection(),
                 prepared.call().target(),
                 prepared.call().frontier(),
@@ -1516,6 +1526,7 @@ mod tests {
             vec![ModelCallReconstitutionInput::new(
                 authorized.call.id(),
                 authorized.call.turn(),
+                authorized.call.attempt(),
                 authorized.call.selection(),
                 authorized.call.target(),
                 authorized.call.frontier(),
@@ -1536,6 +1547,7 @@ mod tests {
             .expect("initial call may be prepared");
 
         assert_eq!(prepared.call().state(), CurrentModelCallState::Prepared);
+        assert_eq!(prepared.call().attempt(), turn_attempt_id(7));
         assert_eq!(
             prepared.call().selection(),
             FrozenModelSelection::Direct(direct(2))

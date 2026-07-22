@@ -10,7 +10,7 @@
 
 use crate::{
     AppliedInterruptProof, ContextFrontier, FrozenModelSelection, ModelCallId,
-    ResolvedContextFrontierSnapshot, TurnId,
+    ResolvedContextFrontierSnapshot, TurnAttemptId, TurnId,
 };
 
 crate::define_identity!(
@@ -181,6 +181,7 @@ pub enum CurrentModelCallState {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct CurrentModelCall {
     id: ModelCallId,
+    attempt: TurnAttemptId,
     selection: FrozenModelSelection,
     pinned: PinnedProviderTarget,
     frontier: ContextFrontier,
@@ -201,12 +202,14 @@ impl CurrentModelCall {
     /// call and commit both records atomically.
     pub(crate) const fn prepared(
         id: ModelCallId,
+        attempt: TurnAttemptId,
         selection: FrozenModelSelection,
         pinned: PinnedProviderTarget,
         snapshot: &ResolvedContextFrontierSnapshot,
     ) -> Self {
         Self {
             id,
+            attempt,
             selection,
             pinned,
             frontier: snapshot.frontier(),
@@ -217,6 +220,11 @@ impl CurrentModelCall {
     /// Returns the call identity preserved by every later transition.
     pub const fn id(&self) -> ModelCallId {
         self.id
+    }
+
+    /// Returns the exact physical turn attempt that owns this call.
+    pub const fn attempt(&self) -> TurnAttemptId {
+        self.attempt
     }
 
     /// Returns the exact frozen selection this authorization records.
@@ -303,6 +311,7 @@ impl CurrentModelCall {
         if allowed {
             Ok(EndedModelCall {
                 id: self.id,
+                attempt: self.attempt,
                 selection: self.selection,
                 pinned: self.pinned,
                 frontier: self.frontier,
@@ -329,6 +338,7 @@ impl CurrentModelCall {
         if self.state == CurrentModelCallState::Prepared && proof.predecessor() == self.turn() {
             Ok(EndedModelCall {
                 id: self.id,
+                attempt: self.attempt,
                 selection: self.selection,
                 pinned: self.pinned,
                 frontier: self.frontier,
@@ -381,6 +391,7 @@ impl CurrentModelCall {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct EndedModelCall {
     id: ModelCallId,
+    attempt: TurnAttemptId,
     selection: FrozenModelSelection,
     pinned: PinnedProviderTarget,
     frontier: ContextFrontier,
@@ -391,6 +402,11 @@ impl EndedModelCall {
     /// Returns the identity preserved from the current call.
     pub const fn id(&self) -> ModelCallId {
         self.id
+    }
+
+    /// Returns the physical turn attempt preserved from authorization.
+    pub const fn attempt(&self) -> TurnAttemptId {
+        self.attempt
     }
 
     /// Returns the exact frozen selection preserved from the authorization.
@@ -446,6 +462,7 @@ pub enum ModelCallReconstitutionState {
 pub struct ModelCallReconstitutionInput {
     id: ModelCallId,
     turn: TurnId,
+    attempt: TurnAttemptId,
     selection: FrozenModelSelection,
     target: ResolvedProviderTarget,
     frontier: ContextFrontier,
@@ -457,6 +474,7 @@ impl ModelCallReconstitutionInput {
     pub const fn new(
         id: ModelCallId,
         turn: TurnId,
+        attempt: TurnAttemptId,
         selection: FrozenModelSelection,
         target: ResolvedProviderTarget,
         frontier: ContextFrontier,
@@ -465,6 +483,7 @@ impl ModelCallReconstitutionInput {
         Self {
             id,
             turn,
+            attempt,
             selection,
             target,
             frontier,
@@ -480,6 +499,11 @@ impl ModelCallReconstitutionInput {
     /// Returns the stored owning turn.
     pub const fn turn(&self) -> TurnId {
         self.turn
+    }
+
+    /// Returns the stored owning turn attempt.
+    pub const fn attempt(&self) -> TurnAttemptId {
+        self.attempt
     }
 
     /// Returns the stored frozen selection.
@@ -510,7 +534,8 @@ impl ModelCallReconstitutionInput {
             return Err(ModelCallReconstitutionFailure::FrontierMismatch);
         }
         let pinned = PinnedProviderTarget::pinned(self.turn, self.target);
-        let prepared = CurrentModelCall::prepared(self.id, self.selection, pinned, snapshot);
+        let prepared =
+            CurrentModelCall::prepared(self.id, self.attempt, self.selection, pinned, snapshot);
         match self.state {
             ModelCallReconstitutionState::Prepared => Ok(ReconstitutedModelCall::Current(prepared)),
             ModelCallReconstitutionState::InFlight => prepared
@@ -626,7 +651,7 @@ mod tests {
     use crate::applied_interrupt::test_applied_interrupt_proof;
     use crate::test_support::{
         command_id, context_frontier_id, direct, model_call_id, provider_model_identity,
-        semantic_transcript_entry_id, session_id, turn_id,
+        semantic_transcript_entry_id, session_id, turn_attempt_id, turn_id,
     };
     use crate::{
         AppliedInterruptProof, FrozenModelSelection, ResolvedContextFrontierSnapshot,
@@ -665,6 +690,7 @@ mod tests {
     ) -> CurrentModelCall {
         CurrentModelCall::prepared(
             model_call_id(call),
+            turn_attempt_id(6),
             FrozenModelSelection::Direct(direct(5)),
             pinned_target(),
             snapshot,
@@ -734,6 +760,7 @@ mod tests {
         let later = prepared_from_snapshot(4, &later_snapshot);
 
         assert_eq!(call.id(), model_call_id(3));
+        assert_eq!(call.attempt(), turn_attempt_id(6));
         assert_eq!(call.pinned(), &pinned_target());
         assert_eq!(call.turn(), pinned_target().turn());
         assert_eq!(call.target(), pinned_target().target());
@@ -944,6 +971,7 @@ mod tests {
             .expect("InFlight may complete");
 
         assert_eq!(ended.id(), model_call_id(3));
+        assert_eq!(ended.attempt(), turn_attempt_id(6));
         assert_eq!(ended.pinned(), &pinned_target());
         assert_eq!(ended.turn(), pinned_target().turn());
         assert_eq!(ended.target(), pinned_target().target());
