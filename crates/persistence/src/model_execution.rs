@@ -12,15 +12,22 @@ use std::{
 };
 
 use rust_decimal::Decimal;
-use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
+use signalbox_application::{
+    AuthorizeModelCallOutcome, AuthorizeModelCallTransaction, ClassifyOperatorFailure,
+    CommitModelCallObservationTransaction, FailPreparedModelCallTransaction,
+    ModelCallAuthorizationReread, OperatorFailureClass, PrepareModelCallOutcome,
+    PrepareModelCallTransaction, RetainedCapabilityFailureStatus,
+    RetainedModelCallObservationStatus,
+};
 use signalbox_domain::{
-    AcceptedInputDisposition, AcceptedInputId, AmbiguousModelCallTurn, AuthorizedModelCall,
-    CompletedModelCallTurn, CorrelatedModelCallTerminalObservation, DirectModelSelection,
-    FailedModelCallTurn, FailedModelCallTurnIdentities, FrozenAliasDefinition,
-    FrozenModelSelection, ModelAlias, ModelCallDisposition, ModelCallExecution,
-    ModelCallExecutionReconstitutionFailure, ModelCallExecutionReconstitutionInput, ModelCallId,
-    ModelCallOriginContent, ModelCallPreparationFailure, ModelCallReconstitutionInput,
-    ModelCallReconstitutionState, ModelCallTerminalIdentities, ModelCallTerminalOutcome,
+    AcceptedInputDisposition, AcceptedInputId, AmbiguousModelCallTurn, AssistantText,
+    AuthorizedModelCall, CompletedModelCallTurn, CorrelatedModelCallTerminalObservation,
+    DirectModelSelection, FailedModelCallTurn, FailedModelCallTurnIdentities,
+    FrozenAliasDefinition, FrozenModelSelection, ModelAlias, ModelCallDisposition,
+    ModelCallExecution, ModelCallExecutionReconstitutionFailure,
+    ModelCallExecutionReconstitutionInput, ModelCallId, ModelCallOriginContent,
+    ModelCallPreparationFailure, ModelCallReconstitutionInput, ModelCallReconstitutionState,
+    ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
     ModelTargetCatalog, ModelTargetDefinition, PendingSteeringReclassificationIdentity,
     PinnedProviderTargetReconstitutionInput, PreparedModelCallRequest, ProviderModelIdentity,
     ReclassifiedPendingSteeringTurn, RefusedModelCallTurn, ResolvedProviderTarget,
@@ -188,15 +195,6 @@ impl ClassifyOperatorFailure for ModelCallRepositoryError {
     }
 }
 
-/// Authoritative durable state after an ambiguous send-authorization commit.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ModelCallAuthorizationReread {
-    /// The authorization rolled back and the exact call remains Prepared.
-    Prepared,
-    /// The authorization committed; this exact issued call was not consumed.
-    InFlight(Box<AuthorizedModelCall>),
-}
-
 impl From<ModelCallCorruption> for ModelCallRepositoryError {
     fn from(error: ModelCallCorruption) -> Self {
         Self::Corruption(error)
@@ -222,23 +220,8 @@ impl ModelCallRepositoryError {
     }
 }
 
-/// Result of the load-and-prepare transaction.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum PrepareInitialModelCallOutcome {
-    /// The scheduling hint no longer identifies runnable work.
-    NoWork,
-    /// A new exact Prepared call was committed; this invocation must stop.
-    Checkpointed(ModelCallId),
-    /// A previously committed Prepared request is safe for capability setup.
-    Ready(Box<PreparedModelCallRequest>),
-    /// Immutable target resolution failed and the turn closed atomically.
-    TargetUnavailable(Box<FailedModelCallTurn>),
-    /// Acknowledged steering remains pending, so no call was prepared.
-    PendingSteering {
-        /// The earliest accepted input proving the safe point is not empty.
-        accepted_input: AcceptedInputId,
-    },
-}
+/// Compatibility spelling for the application-owned prepare result.
+pub use signalbox_application::PrepareModelCallOutcome as PrepareInitialModelCallOutcome;
 
 /// PostgreSQL adapter for the initial model-call execution transactions.
 #[derive(Clone, Debug)]
@@ -343,74 +326,45 @@ impl PostgresModelCallRepository {
         &self,
         session: SessionId,
         call: ModelCallId,
-    ) -> Result<AuthorizedModelCall, ModelCallRepositoryError> {
+    ) -> Result<AuthorizeModelCallOutcome, ModelCallRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let result = async {
-            lock_session(&mut transaction, session).await?;
-            let execution = require_exact_call(
-                require_live_execution(&mut transaction, session, &self.targets).await?,
-                call,
-            )?;
+            if let Err(error) = lock_session(&mut transaction, session).await {
+                return match error {
+                    ModelCallRepositoryError::NoLiveExecution => {
+                        Ok((false, AuthorizeModelCallOutcome::NoSend))
+                    }
+                    error => Err(error),
+                };
+            }
+            let execution =
+                match require_live_execution(&mut transaction, session, &self.targets).await {
+                    Ok(execution) => execution,
+                    Err(ModelCallRepositoryError::NoLiveExecution) => {
+                        return Ok((false, AuthorizeModelCallOutcome::NoSend));
+                    }
+                    Err(error) => return Err(error),
+                };
+            if !matches!(
+                execution.current_call(),
+                Some(current)
+                    if current.id() == call
+                        && current.state()
+                            == signalbox_domain::CurrentModelCallState::Prepared
+            ) {
+                return Ok((false, AuthorizeModelCallOutcome::NoSend));
+            }
             let authorized = execution.authorize_send().map_err(|_| {
-                ModelCallRepositoryError::InvalidTransition("send authorization requires Prepared")
+                ModelCallCorruption::Inconsistent("checked Prepared call could not authorize send")
             })?;
             persist_authorization(&mut transaction, &authorized).await?;
-            Ok(authorized)
+            Ok((
+                true,
+                AuthorizeModelCallOutcome::Authorized(Box::new(authorized)),
+            ))
         }
         .await;
-        finish_commit(transaction, result).await
-    }
-
-    /// Rereads exact durable authority after an ambiguous authorization commit.
-    pub async fn reread_ambiguous_authorization(
-        &self,
-        session: SessionId,
-        prepared: &PreparedModelCallRequest,
-    ) -> Result<ModelCallAuthorizationReread, ModelCallRepositoryError> {
-        let mut transaction = self.pool.begin().await?;
-        let result = async {
-            lock_session(&mut transaction, session).await?;
-            let execution = require_exact_call(
-                require_live_execution(&mut transaction, session, &self.targets).await?,
-                prepared.call().id(),
-            )?;
-            match execution.current_call().map(|call| call.state()) {
-                Some(signalbox_domain::CurrentModelCallState::Prepared) => {
-                    let reloaded = execution.resume_prepared_call().map_err(|_| {
-                        ModelCallRepositoryError::InvalidTransition(
-                            "ambiguous authorization reread could not resume Prepared",
-                        )
-                    })?;
-                    if &reloaded != prepared {
-                        return Err(ModelCallRepositoryError::InvalidTransition(
-                            "ambiguous authorization reread changed Prepared request",
-                        ));
-                    }
-                    Ok(ModelCallAuthorizationReread::Prepared)
-                }
-                Some(signalbox_domain::CurrentModelCallState::InFlight) => {
-                    let authorized = execution.resume_in_flight_call().ok_or(
-                        ModelCallRepositoryError::InvalidTransition(
-                            "ambiguous authorization reread could not resume InFlight",
-                        ),
-                    )?;
-                    if !prepared_matches_authorized(prepared, &authorized) {
-                        return Err(ModelCallRepositoryError::InvalidTransition(
-                            "ambiguous authorization reread changed issued request",
-                        ));
-                    }
-                    Ok(ModelCallAuthorizationReread::InFlight(Box::new(authorized)))
-                }
-                Some(signalbox_domain::CurrentModelCallState::CancellationRequested) | None => {
-                    Err(ModelCallRepositoryError::InvalidTransition(
-                        "ambiguous authorization reread found no resumable call",
-                    ))
-                }
-            }
-        }
-        .await;
-        transaction.rollback().await?;
-        result
+        finish_optional_commit(transaction, result).await
     }
 
     /// Freshly reloads issued authority and commits one terminal observation.
@@ -486,6 +440,240 @@ impl PostgresModelCallRepository {
         finish_commit(transaction, result).await
     }
 
+    /// Rereads whether an unchanged pre-send capability failure committed.
+    pub async fn reread_capability_failure(
+        &self,
+        session: SessionId,
+        call: ModelCallId,
+    ) -> Result<RetainedCapabilityFailureStatus, ModelCallRepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        let result = async {
+            lock_session(&mut transaction, session).await?;
+            let stored = sqlx::query_as::<_, (Uuid, Uuid, Uuid, String, Option<String>)>(
+                "SELECT turn_id, turn_attempt_id, context_frontier_id, state_kind,
+                        terminal_disposition_kind
+                   FROM model_call
+                  WHERE session_id = $1
+                    AND model_call_id = $2",
+            )
+            .bind(session_id_to_uuid(session))
+            .bind(call.into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(ModelCallCorruption::Missing(
+                "retained capability-failure model call",
+            ))?;
+            let (turn, attempt, source_frontier, state, disposition) = stored;
+            match (state.as_str(), disposition.as_deref()) {
+                ("prepared", None) => {
+                    let execution = require_exact_call(
+                        require_live_execution(&mut transaction, session, &self.targets).await?,
+                        call,
+                    )?;
+                    execution.resume_prepared_call().map_err(|_| {
+                        ModelCallRepositoryError::InvalidTransition(
+                            "retained capability failure could not resume Prepared",
+                        )
+                    })?;
+                    Ok(RetainedCapabilityFailureStatus::Pending)
+                }
+                ("terminal", Some("known_failed")) => {
+                    let transition_history_matches = sqlx::query_scalar::<_, bool>(
+                        "SELECT
+                            EXISTS (
+                                SELECT 1
+                                  FROM model_call_transition_outbox_event
+                                 WHERE session_id = $1
+                                   AND model_call_id = $3
+                                   AND turn_id = $2
+                                   AND call_state_kind = 'prepared'
+                                   AND terminal_disposition_kind IS NULL
+                            )
+                            AND NOT EXISTS (
+                                SELECT 1
+                                  FROM model_call_transition_outbox_event
+                                 WHERE session_id = $1
+                                   AND model_call_id = $3
+                                   AND turn_id = $2
+                                   AND call_state_kind = 'in_flight'
+                            )
+                            AND EXISTS (
+                                SELECT 1
+                                  FROM model_call_transition_outbox_event
+                                 WHERE session_id = $1
+                                   AND model_call_id = $3
+                                   AND turn_id = $2
+                                   AND call_state_kind = 'terminal'
+                                   AND terminal_disposition_kind = 'known_failed'
+                            )",
+                    )
+                    .bind(session_id_to_uuid(session))
+                    .bind(turn)
+                    .bind(call.into_uuid())
+                    .fetch_one(&mut *transaction)
+                    .await?;
+                    let closure_matches = failed_turn_closure_matches(
+                        &mut transaction,
+                        session,
+                        turn,
+                        attempt,
+                        source_frontier,
+                    )
+                    .await?;
+                    if transition_history_matches && closure_matches {
+                        Ok(RetainedCapabilityFailureStatus::AlreadyCommitted)
+                    } else {
+                        Err(ModelCallRepositoryError::InvalidTransition(
+                            "retained capability failure durable closure is incomplete",
+                        ))
+                    }
+                }
+                _ => Err(ModelCallRepositoryError::InvalidTransition(
+                    "retained capability failure durable state changed",
+                )),
+            }
+        }
+        .await;
+        transaction.rollback().await?;
+        result
+    }
+
+    /// Rereads exact durable authority after an ambiguous authorization commit.
+    pub async fn reread_ambiguous_authorization(
+        &self,
+        session: SessionId,
+        prepared: &signalbox_domain::PreparedModelCallRequest,
+    ) -> Result<ModelCallAuthorizationReread, ModelCallRepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        let result = async {
+            lock_session(&mut transaction, session).await?;
+            let execution = require_exact_call(
+                require_live_execution(&mut transaction, session, &self.targets).await?,
+                prepared.call().id(),
+            )?;
+            match execution
+                .current_call()
+                .map(signalbox_domain::CurrentModelCall::state)
+            {
+                Some(signalbox_domain::CurrentModelCallState::Prepared) => {
+                    let reloaded = execution.resume_prepared_call().map_err(|_| {
+                        ModelCallRepositoryError::InvalidTransition(
+                            "ambiguous authorization reread could not resume Prepared",
+                        )
+                    })?;
+                    if &reloaded != prepared {
+                        return Err(ModelCallRepositoryError::InvalidTransition(
+                            "ambiguous authorization reread changed Prepared request",
+                        ));
+                    }
+                    Ok(ModelCallAuthorizationReread::Prepared)
+                }
+                Some(signalbox_domain::CurrentModelCallState::InFlight) => {
+                    let authorized = execution.resume_in_flight_call().ok_or(
+                        ModelCallRepositoryError::InvalidTransition(
+                            "ambiguous authorization reread could not resume InFlight",
+                        ),
+                    )?;
+                    if !prepared_matches_authorized(prepared, &authorized) {
+                        return Err(ModelCallRepositoryError::InvalidTransition(
+                            "ambiguous authorization reread changed issued request",
+                        ));
+                    }
+                    Ok(ModelCallAuthorizationReread::InFlight(Box::new(authorized)))
+                }
+                Some(signalbox_domain::CurrentModelCallState::CancellationRequested) | None => {
+                    Err(ModelCallRepositoryError::InvalidTransition(
+                        "ambiguous authorization reread found no resumable call",
+                    ))
+                }
+            }
+        }
+        .await;
+        transaction.rollback().await?;
+        result
+    }
+
+    /// Rereads whether an unchanged terminal observation already committed.
+    pub async fn reread_terminal_observation(
+        &self,
+        session: SessionId,
+        observation: &CorrelatedModelCallTerminalObservation,
+    ) -> Result<RetainedModelCallObservationStatus, ModelCallRepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        let result = async {
+            lock_session(&mut transaction, session).await?;
+            let correlation = observation.correlation();
+            if correlation.session() != session {
+                return Err(ModelCallRepositoryError::InvalidTransition(
+                    "retained observation session changed",
+                ));
+            }
+            let stored =
+                sqlx::query_as::<_, (Uuid, Uuid, Uuid, Uuid, Uuid, String, Option<String>)>(
+                    "SELECT session_id, turn_id, turn_attempt_id,
+                        resolved_provider_model_identity_id, context_frontier_id,
+                        state_kind, terminal_disposition_kind
+                   FROM model_call
+                  WHERE model_call_id = $1",
+                )
+                .bind(observation.call().into_uuid())
+                .fetch_optional(&mut *transaction)
+                .await?
+                .ok_or(ModelCallCorruption::Missing(
+                    "retained observation model call",
+                ))?;
+            let (stored_session, turn, attempt, target, frontier, state, disposition) = stored;
+            if stored_session != session_id_to_uuid(correlation.session())
+                || turn != turn_id_to_uuid(correlation.turn())
+                || attempt != correlation.attempt().into_uuid()
+                || target != correlation.target().identity().into_uuid()
+                || frontier != correlation.frontier().into_uuid()
+            {
+                return Err(ModelCallRepositoryError::InvalidTransition(
+                    "retained observation correlation changed",
+                ));
+            }
+            match (state.as_str(), disposition.as_deref()) {
+                ("in_flight", None) => {
+                    let execution = require_exact_call(
+                        require_live_execution(&mut transaction, session, &self.targets).await?,
+                        observation.call(),
+                    )?;
+                    let authorized = execution.resume_in_flight_call().ok_or(
+                        ModelCallRepositoryError::InvalidTransition(
+                            "retained observation could not resume issued call",
+                        ),
+                    )?;
+                    if authorized.observation_correlation() != *correlation {
+                        return Err(ModelCallRepositoryError::InvalidTransition(
+                            "retained observation issued authority changed",
+                        ));
+                    }
+                    Ok(RetainedModelCallObservationStatus::Pending)
+                }
+                ("terminal", Some(stored_disposition))
+                    if stored_disposition
+                        == encode_disposition(observation.observation().disposition()) =>
+                {
+                    if !terminal_observation_closure_matches(&mut transaction, session, observation)
+                        .await?
+                    {
+                        return Err(ModelCallRepositoryError::InvalidTransition(
+                            "retained observation terminal closure changed",
+                        ));
+                    }
+                    Ok(RetainedModelCallObservationStatus::AlreadyCommitted)
+                }
+                _ => Err(ModelCallRepositoryError::InvalidTransition(
+                    "retained observation durable state changed",
+                )),
+            }
+        }
+        .await;
+        transaction.rollback().await?;
+        result
+    }
+
     /// Applies the accepted prior-process recovery rule to one live call.
     pub async fn recover_after_restart(
         &self,
@@ -511,6 +699,548 @@ impl PostgresModelCallRepository {
         .await;
         finish_commit(transaction, result).await
     }
+}
+
+impl PrepareModelCallTransaction for PostgresModelCallRepository {
+    type Error = ModelCallRepositoryError;
+
+    async fn prepare(
+        &mut self,
+        session: SessionId,
+        call: ModelCallId,
+        failure_identities: FailedModelCallTurnIdentities,
+    ) -> Result<PrepareModelCallOutcome, Self::Error> {
+        match self
+            .prepare_initial_call(session, call, failure_identities)
+            .await
+        {
+            Err(ModelCallRepositoryError::NoLiveExecution) => Ok(PrepareModelCallOutcome::NoWork),
+            result => result,
+        }
+    }
+}
+
+impl FailPreparedModelCallTransaction for PostgresModelCallRepository {
+    type Error = ModelCallRepositoryError;
+
+    async fn fail_prepared<NextTurn>(
+        &mut self,
+        session: SessionId,
+        call: ModelCallId,
+        identities: FailedModelCallTurnIdentities,
+        next_reclassified_turn: NextTurn,
+    ) -> Result<FailedModelCallTurn, Self::Error>
+    where
+        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+    {
+        PostgresModelCallRepository::fail_prepared_call(
+            self,
+            session,
+            call,
+            identities,
+            next_reclassified_turn,
+        )
+        .await
+    }
+
+    async fn reread_failure(
+        &mut self,
+        session: SessionId,
+        call: ModelCallId,
+    ) -> Result<RetainedCapabilityFailureStatus, Self::Error> {
+        self.reread_capability_failure(session, call).await
+    }
+}
+
+impl AuthorizeModelCallTransaction for PostgresModelCallRepository {
+    type Error = ModelCallRepositoryError;
+
+    async fn authorize(
+        &mut self,
+        session: SessionId,
+        call: ModelCallId,
+    ) -> Result<AuthorizeModelCallOutcome, Self::Error> {
+        self.authorize_send(session, call).await
+    }
+
+    async fn reread_after_ambiguous_commit(
+        &mut self,
+        session: SessionId,
+        prepared: &signalbox_domain::PreparedModelCallRequest,
+    ) -> Result<ModelCallAuthorizationReread, Self::Error> {
+        self.reread_ambiguous_authorization(session, prepared).await
+    }
+}
+
+impl CommitModelCallObservationTransaction for PostgresModelCallRepository {
+    type Error = ModelCallRepositoryError;
+
+    async fn commit_observation<NextTurn>(
+        &mut self,
+        session: SessionId,
+        observation: CorrelatedModelCallTerminalObservation,
+        identities: ModelCallTerminalIdentities,
+        next_reclassified_turn: NextTurn,
+    ) -> Result<ModelCallTerminalOutcome, Self::Error>
+    where
+        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+    {
+        self.apply_terminal_observation(session, observation, identities, next_reclassified_turn)
+            .await
+    }
+
+    async fn reread_observation(
+        &mut self,
+        session: SessionId,
+        observation: &CorrelatedModelCallTerminalObservation,
+    ) -> Result<RetainedModelCallObservationStatus, Self::Error> {
+        self.reread_terminal_observation(session, observation).await
+    }
+}
+
+async fn terminal_observation_closure_matches(
+    connection: &mut PgConnection,
+    session: SessionId,
+    observation: &CorrelatedModelCallTerminalObservation,
+) -> Result<bool, ModelCallRepositoryError> {
+    if !terminal_observation_transition_events_match(connection, session, observation).await? {
+        return Ok(false);
+    }
+    match observation.observation() {
+        ModelCallTerminalObservation::Completed { assistant_text } => {
+            completed_terminal_closure_matches(connection, session, observation, assistant_text)
+                .await
+        }
+        ModelCallTerminalObservation::KnownFailed | ModelCallTerminalObservation::Cancelled => {
+            failed_terminal_closure_matches(connection, session, observation).await
+        }
+        ModelCallTerminalObservation::Refused => {
+            refused_terminal_closure_matches(connection, session, observation).await
+        }
+        ModelCallTerminalObservation::Ambiguous => {
+            ambiguous_terminal_closure_matches(connection, session, observation).await
+        }
+    }
+}
+
+async fn terminal_observation_transition_events_match(
+    connection: &mut PgConnection,
+    session: SessionId,
+    observation: &CorrelatedModelCallTerminalObservation,
+) -> Result<bool, ModelCallRepositoryError> {
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT
+            EXISTS (
+                SELECT 1
+                  FROM model_call_transition_outbox_event
+                 WHERE session_id = $1
+                   AND model_call_id = $2
+                   AND turn_id = $3
+                   AND call_state_kind = 'in_flight'
+                   AND terminal_disposition_kind IS NULL
+            )
+            AND EXISTS (
+                SELECT 1
+                  FROM model_call_transition_outbox_event
+                 WHERE session_id = $1
+                   AND model_call_id = $2
+                   AND turn_id = $3
+                   AND call_state_kind = 'terminal'
+                   AND terminal_disposition_kind = $4
+            )",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(observation.call().into_uuid())
+    .bind(turn_id_to_uuid(observation.correlation().turn()))
+    .bind(encode_disposition(observation.observation().disposition()))
+    .fetch_one(&mut *connection)
+    .await?)
+}
+
+async fn completed_terminal_closure_matches(
+    connection: &mut PgConnection,
+    session: SessionId,
+    observation: &CorrelatedModelCallTerminalObservation,
+    assistant_text: &[AssistantText],
+) -> Result<bool, ModelCallRepositoryError> {
+    let terminal_frontier = sqlx::query_scalar::<_, Uuid>(
+        "SELECT terminal_frontier_id
+           FROM turn_lifecycle
+          WHERE session_id = $1
+            AND turn_id = $2
+            AND state_kind = 'terminal'
+            AND terminal_disposition_kind = 'completed'
+            AND terminal_model_call_id = $3",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(observation.correlation().turn()))
+    .bind(observation.call().into_uuid())
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(terminal_frontier) = terminal_frontier else {
+        return Ok(false);
+    };
+    let source_frontier = load_frontier_members(
+        connection,
+        session,
+        observation.correlation().frontier().into_uuid(),
+    )
+    .await?;
+    let terminal_members = load_terminal_frontier(connection, session, terminal_frontier).await?;
+    if !completed_terminal_frontier_matches(
+        &source_frontier,
+        &terminal_members,
+        session_id_to_uuid(session),
+        turn_id_to_uuid(observation.correlation().turn()),
+        observation.call().into_uuid(),
+        assistant_text,
+    ) {
+        return Ok(false);
+    }
+    let Some(completion_entry) = terminal_members.last().map(|member| member.entry) else {
+        return Ok(false);
+    };
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+            SELECT 1
+              FROM turn_completed_outbox_event
+             WHERE session_id = $1
+               AND turn_id = $2
+               AND model_call_id = $3
+               AND completion_entry_id = $4
+               AND terminal_frontier_id = $5
+        )",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(observation.correlation().turn()))
+    .bind(observation.call().into_uuid())
+    .bind(completion_entry)
+    .bind(terminal_frontier)
+    .fetch_one(&mut *connection)
+    .await?)
+}
+
+async fn failed_terminal_closure_matches(
+    connection: &mut PgConnection,
+    session: SessionId,
+    observation: &CorrelatedModelCallTerminalObservation,
+) -> Result<bool, ModelCallRepositoryError> {
+    let correlation = observation.correlation();
+    failed_turn_closure_matches(
+        connection,
+        session,
+        turn_id_to_uuid(correlation.turn()),
+        correlation.attempt().into_uuid(),
+        correlation.frontier().into_uuid(),
+    )
+    .await
+}
+
+async fn failed_turn_closure_matches(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: Uuid,
+    attempt: Uuid,
+    source_frontier: Uuid,
+) -> Result<bool, ModelCallRepositoryError> {
+    let terminal_frontier = sqlx::query_scalar::<_, Uuid>(
+        "SELECT terminal_frontier_id
+           FROM turn_lifecycle
+          WHERE session_id = $1
+            AND turn_id = $2
+            AND state_kind = 'terminal'
+            AND terminal_disposition_kind = 'failed'
+            AND terminal_attempt_id IS NULL
+            AND terminal_model_call_id IS NULL
+            AND active_phase_kind IS NULL
+            AND current_attempt_id IS NULL
+            AND recovery_model_call_id IS NULL
+            AND EXISTS (
+                SELECT 1
+                  FROM turn_attempt
+                 WHERE session_id = $1
+                   AND turn_id = $2
+                   AND turn_attempt_id = $3
+                   AND state_kind = 'ended'
+                   AND end_variant = 'without_stop'
+                   AND end_disposition = 'known_failure'
+            )",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn)
+    .bind(attempt)
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(terminal_frontier) = terminal_frontier else {
+        return Ok(false);
+    };
+    let source_frontier = load_frontier_members(connection, session, source_frontier).await?;
+    let terminal_members = load_terminal_frontier(connection, session, terminal_frontier).await?;
+    if !failed_terminal_frontier_matches(
+        &source_frontier,
+        &terminal_members,
+        session_id_to_uuid(session),
+        turn,
+    ) {
+        return Ok(false);
+    }
+    let Some(failure_entry) = terminal_members.last().map(|member| member.entry) else {
+        return Ok(false);
+    };
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+            SELECT 1
+              FROM turn_failed_outbox_event
+             WHERE session_id = $1
+               AND turn_id = $2
+               AND failure_entry_id = $3
+               AND terminal_frontier_id = $4
+        )",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn)
+    .bind(failure_entry)
+    .bind(terminal_frontier)
+    .fetch_one(&mut *connection)
+    .await?)
+}
+
+async fn refused_terminal_closure_matches(
+    connection: &mut PgConnection,
+    session: SessionId,
+    observation: &CorrelatedModelCallTerminalObservation,
+) -> Result<bool, ModelCallRepositoryError> {
+    let correlation = observation.correlation();
+    let terminal_frontier = sqlx::query_scalar::<_, Uuid>(
+        "SELECT terminal_frontier_id
+           FROM turn_lifecycle
+          WHERE session_id = $1
+            AND turn_id = $2
+            AND state_kind = 'terminal'
+            AND terminal_disposition_kind = 'refused'
+            AND terminal_attempt_id = $3
+            AND terminal_model_call_id = $4
+            AND active_phase_kind IS NULL
+            AND current_attempt_id IS NULL
+            AND recovery_model_call_id IS NULL
+            AND EXISTS (
+                SELECT 1
+                  FROM turn_attempt
+                 WHERE session_id = $1
+                   AND turn_id = $2
+                   AND turn_attempt_id = $3
+                   AND state_kind = 'ended'
+                   AND end_variant = 'without_stop'
+                   AND end_disposition = 'turn_refused'
+            )",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(correlation.turn()))
+    .bind(correlation.attempt().into_uuid())
+    .bind(observation.call().into_uuid())
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(terminal_frontier) = terminal_frontier else {
+        return Ok(false);
+    };
+    let source_frontier =
+        load_frontier_members(connection, session, correlation.frontier().into_uuid()).await?;
+    let terminal_members = load_terminal_frontier(connection, session, terminal_frontier).await?;
+    if terminal_members.len() != source_frontier.len()
+        || terminal_members
+            .iter()
+            .zip(&source_frontier)
+            .any(|(stored, expected)| (stored.source_session, stored.entry) != *expected)
+    {
+        return Ok(false);
+    }
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+            SELECT 1
+              FROM turn_refused_outbox_event
+             WHERE session_id = $1
+               AND turn_id = $2
+               AND model_call_id = $3
+               AND terminal_frontier_id = $4
+        )",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(correlation.turn()))
+    .bind(observation.call().into_uuid())
+    .bind(terminal_frontier)
+    .fetch_one(&mut *connection)
+    .await?)
+}
+
+async fn ambiguous_terminal_closure_matches(
+    connection: &mut PgConnection,
+    session: SessionId,
+    observation: &CorrelatedModelCallTerminalObservation,
+) -> Result<bool, ModelCallRepositoryError> {
+    let correlation = observation.correlation();
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+            SELECT 1
+              FROM turn_lifecycle
+             WHERE session_id = $1
+               AND turn_id = $2
+               AND state_kind = 'active'
+               AND terminal_disposition_kind IS NULL
+               AND terminal_frontier_id IS NULL
+               AND terminal_attempt_id IS NULL
+               AND terminal_model_call_id IS NULL
+               AND active_phase_kind = 'awaiting_model_call_recovery'
+               AND current_attempt_id = $3
+               AND recovery_model_call_id = $4
+               AND EXISTS (
+                    SELECT 1
+                      FROM turn_attempt
+                     WHERE session_id = $1
+                       AND turn_id = $2
+                       AND turn_attempt_id = $3
+                       AND state_kind = 'ended'
+                       AND end_variant = 'without_stop'
+                       AND end_disposition = 'ambiguous'
+               )
+        )",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(correlation.turn()))
+    .bind(correlation.attempt().into_uuid())
+    .bind(observation.call().into_uuid())
+    .fetch_one(&mut *connection)
+    .await?)
+}
+
+async fn load_frontier_members(
+    connection: &mut PgConnection,
+    session: SessionId,
+    frontier: Uuid,
+) -> Result<Vec<(Uuid, Uuid)>, ModelCallRepositoryError> {
+    Ok(sqlx::query_as::<_, (Uuid, Uuid)>(
+        "SELECT source_session_id, semantic_entry_id
+           FROM context_frontier_member
+          WHERE owning_session_id = $1
+            AND context_frontier_id = $2
+          ORDER BY member_position",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(frontier)
+    .fetch_all(&mut *connection)
+    .await?)
+}
+
+async fn load_terminal_frontier(
+    connection: &mut PgConnection,
+    session: SessionId,
+    frontier: Uuid,
+) -> Result<Vec<StoredTerminalFrontierMember>, ModelCallRepositoryError> {
+    sqlx::query(
+        "SELECT member.source_session_id, member.semantic_entry_id,
+                entry.payload_kind, entry.assistant_text_value,
+                entry.producing_model_call_id, entry.completed_turn_id,
+                entry.failed_turn_id
+           FROM context_frontier_member AS member
+           JOIN semantic_transcript_entry AS entry
+             ON entry.source_session_id = member.source_session_id
+            AND entry.semantic_entry_id = member.semantic_entry_id
+          WHERE member.owning_session_id = $1
+            AND member.context_frontier_id = $2
+          ORDER BY member.member_position",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(frontier)
+    .fetch_all(&mut *connection)
+    .await?
+    .into_iter()
+    .map(|row| {
+        Ok(StoredTerminalFrontierMember {
+            source_session: required(&row, "source_session_id")?,
+            entry: required(&row, "semantic_entry_id")?,
+            payload_kind: required(&row, "payload_kind")?,
+            assistant_text: row.try_get("assistant_text_value")?,
+            producing_call: row.try_get("producing_model_call_id")?,
+            completed_turn: row.try_get("completed_turn_id")?,
+            failed_turn: row.try_get("failed_turn_id")?,
+        })
+    })
+    .collect()
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct StoredTerminalFrontierMember {
+    source_session: Uuid,
+    entry: Uuid,
+    payload_kind: String,
+    assistant_text: Option<String>,
+    producing_call: Option<Uuid>,
+    completed_turn: Option<Uuid>,
+    failed_turn: Option<Uuid>,
+}
+
+fn completed_terminal_frontier_matches(
+    source_frontier: &[(Uuid, Uuid)],
+    terminal_frontier: &[StoredTerminalFrontierMember],
+    session: Uuid,
+    turn: Uuid,
+    call: Uuid,
+    assistant_text: &[AssistantText],
+) -> bool {
+    if terminal_frontier.len() != source_frontier.len() + assistant_text.len() + 1 {
+        return false;
+    }
+    if terminal_frontier
+        .iter()
+        .zip(source_frontier)
+        .any(|(stored, expected)| (stored.source_session, stored.entry) != *expected)
+    {
+        return false;
+    }
+    let assistant_start = source_frontier.len();
+    if terminal_frontier[assistant_start..assistant_start + assistant_text.len()]
+        .iter()
+        .zip(assistant_text)
+        .any(|(stored, expected)| {
+            stored.source_session != session
+                || stored.payload_kind != "assistant_text"
+                || stored.assistant_text.as_deref() != Some(expected.as_str())
+                || stored.producing_call != Some(call)
+                || stored.completed_turn.is_some()
+                || stored.failed_turn.is_some()
+        })
+    {
+        return false;
+    }
+    let completion = &terminal_frontier[assistant_start + assistant_text.len()];
+    completion.source_session == session
+        && completion.payload_kind == "turn_completed"
+        && completion.assistant_text.is_none()
+        && completion.producing_call.is_none()
+        && completion.completed_turn == Some(turn)
+        && completion.failed_turn.is_none()
+}
+
+fn failed_terminal_frontier_matches(
+    source_frontier: &[(Uuid, Uuid)],
+    terminal_frontier: &[StoredTerminalFrontierMember],
+    session: Uuid,
+    turn: Uuid,
+) -> bool {
+    if terminal_frontier.len() != source_frontier.len() + 1
+        || terminal_frontier
+            .iter()
+            .zip(source_frontier)
+            .any(|(stored, expected)| (stored.source_session, stored.entry) != *expected)
+    {
+        return false;
+    }
+    let failure = &terminal_frontier[source_frontier.len()];
+    failure.source_session == session
+        && failure.payload_kind == "turn_failed"
+        && failure.assistant_text.is_none()
+        && failure.producing_call.is_none()
+        && failure.completed_turn.is_none()
+        && failure.failed_turn == Some(turn)
 }
 
 fn pending_reclassification_candidates(
@@ -1742,13 +2472,16 @@ mod tests {
     use std::{borrow::Cow, collections::BTreeSet, error::Error, fmt, io};
 
     use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
-    use signalbox_domain::TurnId;
-    use sqlx::error::{DatabaseError, ErrorKind};
-    use sqlx::types::Uuid;
+    use signalbox_domain::{AssistantText, TurnId};
+    use sqlx::{
+        error::{DatabaseError, ErrorKind},
+        types::Uuid,
+    };
 
     use super::{
-        ModelCallIdentityCollision, ModelCallRepositoryError, commit_failure_is_ambiguous,
-        record_reclassified_turn_candidate,
+        ModelCallIdentityCollision, ModelCallRepositoryError, StoredTerminalFrontierMember,
+        commit_failure_is_ambiguous, completed_terminal_frontier_matches,
+        failed_terminal_frontier_matches, record_reclassified_turn_candidate,
     };
 
     /// ADR-0045: a source-turn successor candidate is a retryable minted-ID
@@ -1783,7 +2516,6 @@ mod tests {
             ))
         ));
     }
-
     #[derive(Debug)]
     struct ServerCommitFailure {
         code: &'static str,
@@ -1858,9 +2590,130 @@ mod tests {
 
     #[test]
     fn server_reported_unknown_commit_outcomes_are_ambiguous() {
-        for code in ["08007", "40003"] {
-            let error = sqlx::Error::Database(Box::new(ServerCommitFailure { code }));
-            assert!(commit_failure_is_ambiguous(&error));
-        }
+        let transaction_resolution_unknown =
+            sqlx::Error::Database(Box::new(ServerCommitFailure { code: "08007" }));
+        assert!(commit_failure_is_ambiguous(&transaction_resolution_unknown));
+
+        let statement_completion_unknown =
+            sqlx::Error::Database(Box::new(ServerCommitFailure { code: "40003" }));
+        assert!(commit_failure_is_ambiguous(&statement_completion_unknown));
+    }
+
+    /// ADR-0042: a retained completed observation is present only when the
+    /// terminal frontier is the exact source prefix, assistant sequence, and
+    /// final `TurnCompleted` marker.
+    #[test]
+    fn completed_reread_requires_exact_terminal_frontier_shape() {
+        let session = Uuid::from_u128(1);
+        let turn = Uuid::from_u128(2);
+        let call = Uuid::from_u128(3);
+        let source = vec![(Uuid::from_u128(4), Uuid::from_u128(5))];
+        let assistant = vec![
+            AssistantText::try_new(String::from("exact reply")).expect("fixture text is admitted"),
+        ];
+        let prefix = StoredTerminalFrontierMember {
+            source_session: source[0].0,
+            entry: source[0].1,
+            payload_kind: String::from("origin_accepted_input"),
+            assistant_text: None,
+            producing_call: None,
+            completed_turn: None,
+            failed_turn: None,
+        };
+        let assistant_member = StoredTerminalFrontierMember {
+            source_session: session,
+            entry: Uuid::from_u128(6),
+            payload_kind: String::from("assistant_text"),
+            assistant_text: Some(String::from("exact reply")),
+            producing_call: Some(call),
+            completed_turn: None,
+            failed_turn: None,
+        };
+        let completion = StoredTerminalFrontierMember {
+            source_session: session,
+            entry: Uuid::from_u128(7),
+            payload_kind: String::from("turn_completed"),
+            assistant_text: None,
+            producing_call: None,
+            completed_turn: Some(turn),
+            failed_turn: None,
+        };
+        let exact = vec![prefix.clone(), assistant_member.clone(), completion.clone()];
+        assert!(completed_terminal_frontier_matches(
+            &source, &exact, session, turn, call, &assistant,
+        ));
+
+        assert!(!completed_terminal_frontier_matches(
+            &source,
+            &[prefix.clone(), assistant_member.clone()],
+            session,
+            turn,
+            call,
+            &assistant,
+        ));
+        let mut extra = exact.clone();
+        extra.insert(1, prefix.clone());
+        assert!(!completed_terminal_frontier_matches(
+            &source, &extra, session, turn, call, &assistant,
+        ));
+        let mut wrong_marker = completion;
+        wrong_marker.completed_turn = Some(Uuid::from_u128(8));
+        assert!(!completed_terminal_frontier_matches(
+            &source,
+            &[prefix, assistant_member, wrong_marker],
+            session,
+            turn,
+            call,
+            &assistant,
+        ));
+    }
+
+    /// ADR-0045: a retained failed observation is present only when its
+    /// terminal frontier is the exact source prefix plus one matching failure
+    /// marker.
+    #[test]
+    fn failed_reread_requires_exact_terminal_frontier_shape() {
+        let session = Uuid::from_u128(1);
+        let turn = Uuid::from_u128(2);
+        let source = vec![(Uuid::from_u128(3), Uuid::from_u128(4))];
+        let prefix = StoredTerminalFrontierMember {
+            source_session: source[0].0,
+            entry: source[0].1,
+            payload_kind: String::from("origin_accepted_input"),
+            assistant_text: None,
+            producing_call: None,
+            completed_turn: None,
+            failed_turn: None,
+        };
+        let failure = StoredTerminalFrontierMember {
+            source_session: session,
+            entry: Uuid::from_u128(5),
+            payload_kind: String::from("turn_failed"),
+            assistant_text: None,
+            producing_call: None,
+            completed_turn: None,
+            failed_turn: Some(turn),
+        };
+        assert!(failed_terminal_frontier_matches(
+            &source,
+            &[prefix.clone(), failure.clone()],
+            session,
+            turn,
+        ));
+
+        let mut wrong_failure = failure;
+        wrong_failure.failed_turn = Some(Uuid::from_u128(6));
+        assert!(!failed_terminal_frontier_matches(
+            &source,
+            &[prefix.clone(), wrong_failure],
+            session,
+            turn,
+        ));
+        assert!(!failed_terminal_frontier_matches(
+            &source,
+            &[prefix],
+            session,
+            turn,
+        ));
     }
 }

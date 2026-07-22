@@ -2526,15 +2526,27 @@ mod tests {
         );
     }
 
-    /// S02 / INV-006 / INV-014: an ambiguous authorization commit can recover
-    /// the exact issued correlation without attempting a second transition.
+    /// S02 / INV-006 / INV-014 / INV-034: an authoritative reread of a durably
+    /// issued call reconstructs the same provider-facing correlation without
+    /// authorizing or transitioning it a second time.
     #[test]
-    fn s02_inv006_inv014_in_flight_reread_reconstructs_exact_authorization() {
+    fn s02_inv006_inv014_inv034_in_flight_reread_reconstructs_exact_authorization() {
         let execution = in_flight_execution();
+        let expected_call = execution
+            .current_call()
+            .expect("the fixture contains one issued call")
+            .id();
         let authorized = execution
             .resume_in_flight_call()
-            .expect("fresh InFlight state retains exact issued authority");
+            .expect("checked InFlight state is resumable for reread only");
 
+        assert_eq!(authorized.call().id(), expected_call);
+        assert_eq!(authorized.call().state(), CurrentModelCallState::InFlight);
+        assert_eq!(
+            authorized.attempt().state(),
+            &CurrentTurnAttemptState::Running
+        );
+        assert_eq!(authorized.observation_correlation().call(), expected_call);
         assert_eq!(authorized.session(), execution.session());
         assert_eq!(authorized.turn(), execution.turn());
         assert_eq!(authorized.attempt(), execution.current_attempt());

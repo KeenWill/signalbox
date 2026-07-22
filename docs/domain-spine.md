@@ -1981,6 +1981,284 @@ impl<Reader: SessionReader> LoadSessionService<Reader> {
 }
 ```
 
+## application: model_execution
+
+```rust
+pub enum ModelConversationMessage {
+    User {
+        source: SemanticTranscriptEntryRef,
+        accepted_input: AcceptedInputId,
+        content: UserContent,
+    },
+    Assistant {
+        source: SemanticTranscriptEntryRef,
+        producing_call: ModelCallId,
+        content: AssistantText,
+    },
+}
+
+pub struct PreparedModelOperation { /* private */ }
+impl PreparedModelOperation {
+    // accessors: request(), messages()
+}
+
+pub enum ModelFrontierRenderingError {
+    MissingOriginContent {
+        entry: SemanticTranscriptEntryRef,
+        accepted_input: AcceptedInputId,
+    },
+    UnsupportedAssistantToolUse { entry: SemanticTranscriptEntryRef },
+}
+// impl Display + std::error::Error + ClassifyOperatorFailure
+
+pub enum PrepareModelCallOutcome {
+    NoWork,
+    Checkpointed(ModelCallId),
+    Ready(Box<PreparedModelCallRequest>),
+    TargetUnavailable(Box<FailedModelCallTurn>),
+    PendingSteering { accepted_input: AcceptedInputId },
+}
+
+pub trait PrepareModelCallTransaction {
+    type Error: ClassifyOperatorFailure;
+    fn prepare(
+        &mut self,
+        session: SessionId,
+        call: ModelCallId,
+        failure_identities: FailedModelCallTurnIdentities,
+    ) -> impl Future<Output = Result<PrepareModelCallOutcome, Self::Error>> + Send;
+}
+
+pub trait FailPreparedModelCallTransaction {
+    type Error: ClassifyOperatorFailure;
+    fn fail_prepared<NextTurn>(
+        &mut self,
+        session: SessionId,
+        call: ModelCallId,
+        identities: FailedModelCallTurnIdentities,
+        next_reclassified_turn: NextTurn,
+    ) -> impl Future<Output = Result<FailedModelCallTurn, Self::Error>> + Send
+    where
+        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send;
+    fn reread_failure(
+        &mut self,
+        session: SessionId,
+        call: ModelCallId,
+    ) -> impl Future<Output = Result<RetainedCapabilityFailureStatus, Self::Error>> + Send;
+}
+
+pub enum RetainedCapabilityFailureStatus {
+    Pending,
+    AlreadyCommitted,
+}
+
+pub trait AuthorizeModelCallTransaction {
+    type Error: ClassifyOperatorFailure;
+    fn authorize(
+        &mut self,
+        session: SessionId,
+        call: ModelCallId,
+    ) -> impl Future<Output = Result<AuthorizeModelCallOutcome, Self::Error>> + Send;
+    fn reread_after_ambiguous_commit(
+        &mut self,
+        session: SessionId,
+        prepared: &PreparedModelCallRequest,
+    ) -> impl Future<Output = Result<ModelCallAuthorizationReread, Self::Error>> + Send;
+}
+
+pub enum AuthorizeModelCallOutcome {
+    NoSend,
+    Authorized(Box<AuthorizedModelCall>),
+}
+
+pub enum ModelCallAuthorizationReread {
+    Prepared,
+    InFlight(Box<AuthorizedModelCall>),
+}
+
+pub trait CommitModelCallObservationTransaction {
+    type Error: ClassifyOperatorFailure;
+    fn commit_observation<NextTurn>(
+        &mut self,
+        session: SessionId,
+        observation: CorrelatedModelCallTerminalObservation,
+        identities: ModelCallTerminalIdentities,
+        next_reclassified_turn: NextTurn,
+    ) -> impl Future<Output = Result<ModelCallTerminalOutcome, Self::Error>> + Send
+    where
+        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send;
+    fn reread_observation(
+        &mut self,
+        session: SessionId,
+        observation: &CorrelatedModelCallTerminalObservation,
+    ) -> impl Future<Output = Result<RetainedModelCallObservationStatus, Self::Error>> + Send;
+}
+
+pub enum RetainedModelCallObservationStatus {
+    Pending,
+    AlreadyCommitted,
+}
+
+pub struct RetainedModelCallExecutionState { /* private */ }
+
+pub enum ModelCallCapabilityPreparation<Capability> {
+    Ready(Capability),
+    KnownFailure,
+}
+
+pub trait ModelCallProvider {
+    type Capability;
+    type Error: ClassifyOperatorFailure;
+    fn prepare_capability(
+        &mut self,
+        operation: PreparedModelOperation,
+    ) -> impl Future<Output = Result<ModelCallCapabilityPreparation<Self::Capability>, Self::Error>>
+           + Send;
+    fn invoke<AcceptancePossible>(
+        &mut self,
+        authorized: AuthorizedModelCall,
+        capability: Self::Capability,
+        acceptance_possible: AcceptancePossible,
+    ) -> impl Future<Output = Result<CorrelatedModelCallTerminalObservation, Self::Error>> + Send
+    where
+        AcceptancePossible: FnOnce() + Send;
+}
+
+pub trait ModelCallExecutionIdGenerator {
+    fn next_model_call_id(&mut self) -> ModelCallId;
+    fn next_semantic_entry_id(&mut self) -> SemanticTranscriptEntryId;
+    fn next_context_frontier_id(&mut self) -> ContextFrontierId;
+    fn next_turn_id(&mut self) -> TurnId;
+}
+pub struct UuidV7ModelCallExecutionIdGenerator;
+// Default; impl ModelCallExecutionIdGenerator
+
+pub trait AttemptDispatchGate {
+    type Permit: Send;
+    fn acquire(&self, attempt: TurnAttemptId) -> impl Future<Output = Self::Permit> + Send;
+}
+pub struct InProcessAttemptDispatchGate { /* private */ }
+// Clone + Default; impl AttemptDispatchGate
+pub struct InProcessAttemptDispatchPermit { /* private */ }
+
+pub enum ModelCallExecutionOutcome {
+    NoWork,
+    Checkpointed(ModelCallId),
+    TargetUnavailable(Box<FailedModelCallTurn>),
+    PendingSteering { accepted_input: AcceptedInputId },
+    CapabilityKnownFailure(Box<FailedModelCallTurn>),
+    CapabilityFailureAlreadyCommitted(ModelCallId),
+    ObservationCommitted(Box<ModelCallTerminalOutcome>),
+    ObservationAlreadyCommitted(ModelCallId),
+}
+
+pub enum ModelCallExecutionError<
+    PrepareError,
+    FailureError,
+    AuthorizationError,
+    ProviderError,
+    ObservationError,
+> {
+    Prepare(PrepareError),
+    Render(ModelFrontierRenderingError),
+    CapabilityPreparation(ProviderError),
+    CapabilityFailureCommit(FailureError),
+    CapabilityFailureReread(FailureError),
+    Authorization(AuthorizationError),
+    AuthorizationReread {
+        authorization_error: AuthorizationError,
+        reread_error: AuthorizationError,
+    },
+    AuthorizationReconciliation(AuthorizationError),
+    Provider(ProviderError),
+    ObservationCommit {
+        error: ObservationError,
+        retained_observation: CorrelatedModelCallTerminalObservation,
+    },
+}
+// impl Display + std::error::Error + ClassifyOperatorFailure (bounded)
+
+pub struct ModelCallExecutionService<
+    Ids,
+    Prepare,
+    Failure,
+    Authorization,
+    Observation,
+    Provider,
+    Gate,
+> { /* private */ }
+impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
+    ModelCallExecutionService<
+        Ids,
+        Prepare,
+        Failure,
+        Authorization,
+        Observation,
+        Provider,
+        Gate,
+    >
+{
+    pub const fn new(
+        ids: Ids,
+        prepare: Prepare,
+        failure: Failure,
+        authorization: Authorization,
+        observation: Observation,
+        provider: Provider,
+        gate: Gate,
+    ) -> Self;
+    pub const fn from_parts(
+        ids: Ids,
+        prepare: Prepare,
+        failure: Failure,
+        authorization: Authorization,
+        observation: Observation,
+        provider: Provider,
+        gate: Gate,
+        retained_state: Option<RetainedModelCallExecutionState>,
+    ) -> Self;
+    pub fn into_parts(
+        self,
+    ) -> (
+        Ids,
+        Prepare,
+        Failure,
+        Authorization,
+        Observation,
+        Provider,
+        Gate,
+        Option<RetainedModelCallExecutionState>,
+    );
+    pub const fn retained_state(&self) -> Option<&RetainedModelCallExecutionState>;
+    pub fn retained_observation(&self) -> Option<&CorrelatedModelCallTerminalObservation>;
+    pub async fn execute(
+        &mut self,
+        session: SessionId,
+    ) -> Result<ModelCallExecutionOutcome, ModelCallExecutionError</* port errors */>>;
+}
+
+pub enum ScriptedModelCallStep {
+    CapabilityKnownFailure,
+    CapabilityOperatorFailure,
+    InteractionOperatorFailure,
+    Return(ModelCallTerminalObservation),
+}
+pub enum ScriptedModelCallError {
+    ScriptExhausted,
+    CapabilityOperatorFailure,
+    InteractionOperatorFailure,
+    AuthorizationMismatch,
+}
+// impl Display + std::error::Error + ClassifyOperatorFailure
+pub struct ScriptedModelCallCapability { /* private */ }
+pub struct ScriptedModelCallProvider { /* private */ }
+impl ScriptedModelCallProvider {
+    pub fn new(steps: impl IntoIterator<Item = ScriptedModelCallStep>) -> Self;
+    // accessors: capability_preparation_count(), interaction_count(), remaining_step_count()
+}
+// impl ModelCallProvider
+```
+
 ## application: replace_session_defaults
 
 ```rust
@@ -2339,10 +2617,11 @@ impl<
 | **signalbox-domain total**            | **198 (+1 free fn)** |
 | application: create_session           | 8 (incl. 2 traits)   |
 | application: load_session             | 2 (incl. 1 trait)    |
+| application: model_execution          | 27 (incl. 7 traits)  |
 | application: operator_failure         | 2 (incl. 1 trait)    |
 | application: replace_session_defaults | 4 (incl. 1 trait)    |
 | application: scheduler                | 12 (incl. 4 traits)  |
 | application: start_eligible_turn      | 5 (incl. 2 traits)   |
 | application: startup_scan             | 7 (incl. 2 traits)   |
 | application: submit_input             | 7 (incl. 2 traits)   |
-| **signalbox-application total**       | **47**               |
+| **signalbox-application total**       | **74**               |
