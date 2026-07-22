@@ -9,8 +9,9 @@ use crate::wire::{MessagesRequest, WireMessage, WireRequestBlock, WireTool, Wire
 
 /// Builds the wire request for one operation.
 ///
-/// Pure translation: any failure is a [`PreparationFailure`] the runtime
-/// reports as proven-unsent evidence — nothing has touched the network.
+/// Pure translation: any failure is a trustworthy [`PreparationFailure`]
+/// returned before a one-shot capability exists. Nothing has touched the
+/// network.
 ///
 /// A structured-output contract is realized as a forced tool call: the
 /// contract joins the declared tools and `tool_choice` forces it with
@@ -145,14 +146,15 @@ fn wire_message(message: &ConversationMessage) -> Result<WireMessage, Preparatio
         .map(|part| match part {
             MessagePart::Text(text) => Ok(WireRequestBlock::Text { text: text.clone() }),
             MessagePart::ToolCall(proposal) => {
-                let input: serde_json::Value = serde_json::from_str(&proposal.arguments_json)
-                    .map_err(|error| PreparationFailure::SerializationFailed {
-                        detail: format!(
-                            "replayed tool call {} carries arguments that are not valid JSON: \
+                let input =
+                    serde_json::value::RawValue::from_string(proposal.arguments_json.clone())
+                        .map_err(|error| PreparationFailure::UnsupportedOperation {
+                            detail: format!(
+                                "replayed tool call {} carries arguments that are not valid JSON: \
                              {error}",
-                            proposal.id.as_str()
-                        ),
-                    })?;
+                                proposal.id.as_str()
+                            ),
+                        })?;
                 Ok(WireRequestBlock::ToolUse {
                     id: proposal.id.as_str().to_string(),
                     name: proposal.name.as_str().to_string(),
@@ -454,8 +456,27 @@ mod tests {
 
         assert!(matches!(
             failure,
-            PreparationFailure::SerializationFailed { .. }
+            PreparationFailure::UnsupportedOperation { .. }
         ));
+    }
+
+    #[test]
+    fn replayed_tool_arguments_preserve_raw_json_verbatim() {
+        let mut operation = operation("call-raw");
+        let raw = r#"{"identifier":184467440737095516160,"duplicate":1,"duplicate":2}"#;
+        operation.messages = vec![ConversationMessage {
+            role: ConversationRole::Assistant,
+            parts: vec![MessagePart::ToolCall(ToolCallProposal {
+                id: ToolCallId::new("toolu_raw"),
+                name: ToolName::new("lookup"),
+                arguments_json: raw.to_string(),
+            })],
+        }];
+
+        let request = build_request(&operation).expect("raw arguments are valid JSON");
+        let serialized = serde_json::to_string(&request).expect("request serializes");
+
+        assert!(serialized.contains(raw));
     }
 
     #[test]

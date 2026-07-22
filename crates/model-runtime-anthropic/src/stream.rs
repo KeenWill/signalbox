@@ -223,6 +223,9 @@ impl StreamDecoder {
         if !event.message.content.is_empty() {
             return self.violation("message_start must not carry content blocks");
         }
+        if event.message.stop_reason.is_some() || event.message.stop_sequence.is_some() {
+            return self.violation("message_start must not carry terminal metadata");
+        }
         let (Some(id), Some(model), Some(usage)) = (
             event.message.id,
             event.message.model,
@@ -545,7 +548,7 @@ impl StreamDecoder {
             .closed
             .values()
             .any(|part| matches!(part, AssistantPart::ToolCall(_)));
-        if has_tool_calls != matches!(finish, FinishReason::ToolUse) {
+        if matches!(finish, FinishReason::ToolUse) && !has_tool_calls {
             return self.violation("stream content contradicts its stop_reason");
         }
         let evidence = match finish.completion_finish() {
@@ -819,6 +822,32 @@ mod tests {
                 arguments_json: "{}".to_string(),
             })]
         );
+    }
+
+    #[test]
+    fn max_token_stream_retains_a_partial_tool_call() {
+        let (terminal, _) = drive(&[
+            message_start(),
+            b"event: content_block_start\n\
+              data: {\"type\":\"content_block_start\",\"index\":0,\
+              \"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\
+              \"name\":\"lookup\",\"input\":{}}}\n\n",
+            b"event: content_block_stop\n\
+              data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            b"event: message_delta\n\
+              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"},\
+              \"usage\":{\"output_tokens\":7}}\n\n",
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::Completed(completion)) = terminal else {
+            panic!("token exhaustion with partial tool material is definitive completion");
+        };
+        assert_eq!(completion.finish, CompletionFinish::MaxOutputTokens);
+        assert!(matches!(
+            completion.content.as_slice(),
+            [AssistantPart::ToolCall(_)]
+        ));
     }
 
     #[test]
@@ -1162,6 +1191,23 @@ mod tests {
 
         let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
             panic!("opening content must not be silently discarded");
+        };
+        assert!(matches!(
+            loss.cause,
+            LossCause::StreamProtocolViolation { .. }
+        ));
+    }
+
+    #[test]
+    fn message_start_with_terminal_metadata_is_a_protocol_violation() {
+        let (terminal, _) = drive(&[b"event: message_start\n\
+              data: {\"type\":\"message_start\",\"message\":{\"type\":\"message\",\
+              \"role\":\"assistant\",\"id\":\"msg_1\",\"model\":\"model-exact-1\",\
+              \"content\":[],\"stop_reason\":\"refusal\",\"stop_sequence\":null,\
+              \"usage\":{\"input_tokens\":1}}}\n\n"]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("opening terminal metadata must not be silently discarded");
         };
         assert!(matches!(
             loss.cause,

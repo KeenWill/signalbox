@@ -137,10 +137,10 @@ There is no explicit boundary observation anywhere. What exists:
   unsent under that ADR) and a post-send connection loss (must be `Ambiguous`)
   can surface as the same `ModelError::Connection` / `ModelError::Timeout`
   values.
-- The `RequestPrepared` vs `ProviderBoundaryCrossed` distinction the handoff
-  sketches does not exist and cannot be added by wrapping: request construction
-  and `send()` are fused inside each adapter method. The HTTP client is
-  injectable (`serdes-ai-models/src/anthropic/model.rs:79`,
+- The opaque prepared-capability vs `ProviderBoundaryCrossed` distinction the
+  handoff sketches does not exist and cannot be added by wrapping: request
+  construction and `send()` are fused inside each adapter method. The HTTP
+  client is injectable (`serdes-ai-models/src/anthropic/model.rs:79`,
   `serdes-ai-models/src/openai/chat.rs:85` `with_client`), so a
   middleware-instrumented `reqwest::Client` could observe connect/write phases
   out-of-band, but correlating that side channel to a specific logical call from

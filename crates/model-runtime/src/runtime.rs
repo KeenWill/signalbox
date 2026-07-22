@@ -7,8 +7,9 @@ use std::task::{Context, Poll};
 use crate::evidence::TerminalReport;
 use crate::observation::ObservationSink;
 use crate::operation::ModelOperation;
+use crate::preparation::PreparationOutcome;
 
-/// Executes exactly one explicitly authorized model operation.
+/// Prepares and executes exactly one explicitly authorized model operation.
 ///
 /// An implementation performs at most one provider interaction per call,
 /// emits observations to the sink in order, and always returns a
@@ -17,19 +18,36 @@ use crate::operation::ModelOperation;
 /// retry, fall back, or issue a second request; uncertainty is reported as
 /// boundary-loss evidence, not resolved by repetition (ADR-0005).
 ///
-/// This trait is ADR-0047 draft scaffolding: the accepted application-side
-/// model-execution port is owned by the orchestration ADR process, and this
-/// signature is rewritten to conform when that port lands.
+/// ADR-0045 requires two distinct stages. [`prepare`](Self::prepare) performs
+/// all validation, translation, serialization, credential access, and request
+/// construction without provider traffic. The caller may durably authorize
+/// the interaction only after that stage succeeds. [`execute`](Self::execute)
+/// then consumes the opaque capability and performs no second preparation or
+/// credential access.
 pub trait ModelRuntime<C> {
-    /// Executes the operation, emitting observations and returning terminal
-    /// evidence.
+    /// The adapter-owned, non-cloneable, nonserializable one-shot request
+    /// capability produced by preparation and consumed by execution.
+    type Prepared: Send;
+
+    /// Prepares a complete request capability without provider traffic.
+    ///
+    /// The cancellation signal is work-first: a preparation result already
+    /// available in the same poll wins over cancellation.
+    fn prepare(
+        &self,
+        operation: ModelOperation<C>,
+        cancellation: CancellationSignal,
+    ) -> impl Future<Output = PreparationOutcome<C, Self::Prepared>> + Send;
+
+    /// Consumes one prepared capability, emitting observations and returning
+    /// terminal evidence.
     ///
     /// The cancellation signal is best-effort: an implementation stops local
     /// work when it fires and reports evidence about how far the request
     /// provably progressed; it never claims provider-side work stopped.
     fn execute(
         &self,
-        operation: ModelOperation<C>,
+        prepared: Self::Prepared,
         sink: &mut (dyn ObservationSink<C> + Send),
         cancellation: CancellationSignal,
     ) -> impl Future<Output = TerminalReport<C>> + Send;

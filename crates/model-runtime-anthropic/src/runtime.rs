@@ -12,12 +12,13 @@ use reqwest::redirect::Policy;
 use reqwest::{Client, Url};
 
 use signalbox_model_runtime::{
-    AssistantPart, BoundaryLossEvidence, CancellationSignal, CompletionFinish, ExchangeFacts,
-    FinishReason, LossCause, ModelOperation, ModelRuntime, NativeErrorFacts, Observation,
-    ObservationFact, ObservationSink, PreparationFailure, ProvenUnsentEvidence,
-    ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId, ProviderReportedModel,
-    ProviderRequestId, SseFraming, StreamInterruption, TerminalEvidence, TerminalReport,
-    TokenUsage, ToolCallId, ToolCallProposal, ToolName, TransportFacts, UnsentCause,
+    AssistantPart, BoundaryLossEvidence, CancellationSignal, CompletionFinish, DeliveryMode,
+    ExchangeFacts, FinishReason, LossCause, ModelOperation, ModelRuntime, NativeErrorFacts,
+    Observation, ObservationFact, ObservationSink, PreparationDefect, PreparationFailure,
+    PreparationOutcome, ProvenUnsentEvidence, ProviderErrorEvidence, ProviderErrorKind,
+    ProviderMessageId, ProviderReportedModel, ProviderRequestId, SseFraming, StreamInterruption,
+    TerminalEvidence, TerminalReport, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
+    TransportFacts, UnsentCause,
 };
 
 use signalbox_model_runtime::{CredentialAccess, CredentialValue};
@@ -46,6 +47,20 @@ pub struct AnthropicRuntime<A> {
     credentials: A,
     version_header: HeaderValue,
     sse_record_limit: usize,
+}
+
+/// An opaque, one-shot Anthropic request capability prepared under ADR-0045.
+///
+/// The private fields bind the complete authenticated request, caller
+/// correlation, delivery mode, and exact credential value needed to sanitize
+/// provider-controlled evidence. The type deliberately implements neither
+/// `Clone`, serialization, nor diagnostic formatting.
+#[must_use]
+pub struct AnthropicPreparedRequest<C> {
+    request: reqwest::Request,
+    correlation: C,
+    delivery: DeliveryMode,
+    credential: CredentialValue,
 }
 
 impl<A> std::fmt::Debug for AnthropicRuntime<A> {
@@ -179,25 +194,28 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
         })
     }
 
-    async fn run<C: Clone + Send + Sync>(
+    async fn prepare_request<C: Clone + Send + Sync>(
         &self,
         operation: ModelOperation<C>,
-        correlation: &C,
-        sink: &mut (dyn ObservationSink<C> + Send),
         cancellation: &mut CancellationSignal,
-    ) -> TerminalEvidence {
+    ) -> PreparationOutcome<C, AnthropicPreparedRequest<C>> {
+        let correlation = operation.correlation.clone();
         let wire_request = match build_request(&operation) {
             Ok(request) => request,
-            Err(failure) => return proven_unsent(UnsentCause::PreparationFailed(failure)),
+            Err(failure) => {
+                return PreparationOutcome::Failed {
+                    correlation,
+                    failure,
+                };
+            }
         };
-        let body = match serde_json::to_vec(&wire_request) {
+        let body = match serialize_request(&wire_request) {
             Ok(body) => body,
-            Err(error) => {
-                return proven_unsent(UnsentCause::PreparationFailed(
-                    PreparationFailure::SerializationFailed {
-                        detail: error.to_string(),
-                    },
-                ));
+            Err(defect) => {
+                return PreparationOutcome::Defect {
+                    correlation,
+                    defect,
+                };
             }
         };
         // ADR-0017: the pinned reference is resolved during send preparation
@@ -208,65 +226,58 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
         // read cannot hold a cancelled operation.
         let resolve = self.credentials.resolve(&operation.credential_reference);
         let api_key = match with_cancellation(cancellation, resolve).await {
-            None => return proven_unsent(UnsentCause::CancelledBeforeSend),
+            None => return PreparationOutcome::Cancelled { correlation },
             Some(Err(error)) => {
-                return proven_unsent(UnsentCause::PreparationFailed(
-                    PreparationFailure::CredentialUnavailable { error },
-                ));
+                return PreparationOutcome::Failed {
+                    correlation,
+                    failure: PreparationFailure::CredentialUnavailable { error },
+                };
             }
             Some(Ok(value)) => value,
         };
         let Some(api_key_header) = sensitive_header(&api_key) else {
-            return proven_unsent(UnsentCause::PreparationFailed(
-                PreparationFailure::CredentialUnusable {
+            return PreparationOutcome::Failed {
+                correlation,
+                failure: PreparationFailure::CredentialUnusable {
                     detail: "credential value cannot form an HTTP header value".to_string(),
                 },
-            ));
+            };
         };
-        let mut redacting_sink = RedactingObservationSink::new(sink, &api_key);
-        let evidence = self
-            .exchange(
-                operation.delivery,
-                body,
-                api_key_header,
-                correlation,
-                &mut redacting_sink,
-                cancellation,
-            )
-            .await;
-        redacting_sink.flush();
-        // ADR-0017: provider-controlled text in the evidence (error
-        // messages, raw bodies, transport detail) is credential-sanitized
-        // before it leaves the adapter boundary.
-        redact_evidence(evidence, &api_key)
+        let delivery = operation.delivery;
+        let request = match build_http_request(
+            self.client
+                .post(self.messages_url.clone())
+                .header("x-api-key", api_key_header)
+                .header("anthropic-version", self.version_header.clone())
+                .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
+                .body(body),
+        ) {
+            Ok(request) => request,
+            Err(defect) => {
+                return PreparationOutcome::Defect {
+                    correlation,
+                    defect,
+                };
+            }
+        };
+        PreparationOutcome::Prepared(AnthropicPreparedRequest {
+            request,
+            correlation,
+            delivery,
+            credential: api_key,
+        })
     }
 
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the exchange carries exactly the facts of one prepared send"
-    )]
     async fn exchange<C: Clone + Send + Sync>(
         &self,
-        delivery: signalbox_model_runtime::DeliveryMode,
-        body: Vec<u8>,
-        api_key_header: HeaderValue,
+        request: reqwest::Request,
+        delivery: DeliveryMode,
         correlation: &C,
         sink: &mut (dyn ObservationSink<C> + Send),
         cancellation: &mut CancellationSignal,
     ) -> TerminalEvidence {
-        emit(correlation, sink, ObservationFact::RequestPrepared);
-        if already_fired(cancellation) {
-            return proven_unsent(UnsentCause::CancelledBeforeSend);
-        }
         emit(correlation, sink, ObservationFact::SendCommenced);
-        let send = self
-            .client
-            .post(self.messages_url.clone())
-            .header("x-api-key", api_key_header)
-            .header("anthropic-version", self.version_header.clone())
-            .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
-            .body(body)
-            .send();
+        let send = self.client.execute(request);
         let response = match with_cancellation(cancellation, send).await {
             None => return pre_exchange_loss(LossCause::CancellationRequested),
             Some(Err(error)) => return classify_send_error(&error),
@@ -286,11 +297,11 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
         // 2xx is not recognized terminal-success evidence.
         if status.as_u16() == 200 {
             match delivery {
-                signalbox_model_runtime::DeliveryMode::Buffered => {
+                DeliveryMode::Buffered => {
                     self.finish_buffered(response, exchange, correlation, sink, cancellation)
                         .await
                 }
-                signalbox_model_runtime::DeliveryMode::Streamed => {
+                DeliveryMode::Streamed => {
                     self.finish_streamed(response, exchange, correlation, sink, cancellation)
                         .await
                 }
@@ -368,23 +379,15 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
                     return decoder.lost(interruption);
                 }
                 Some(Ok(bytes)) => {
-                    streamed_bytes =
-                        match checked_streamed_response_len(streamed_bytes, bytes.len()) {
-                            Ok(next_len) => next_len,
-                            Err(detail) => return decoder.violation_evidence(detail),
-                        };
-                    // Records completed before a framing failure are applied
-                    // first, so evidence they carry is never lost to how the
-                    // transport batched bytes.
-                    let outcome = framing.push(&bytes);
-                    for record in outcome.records {
-                        match decoder.apply(&record, correlation, sink) {
-                            StreamStep::Continue => {}
-                            StreamStep::Terminal(evidence) => return evidence,
-                        }
-                    }
-                    if let Some(error) = outcome.error {
-                        return decoder.violation_evidence(error.to_string());
+                    if let Some(evidence) = process_streamed_chunk(
+                        &bytes,
+                        &mut streamed_bytes,
+                        &mut framing,
+                        &mut decoder,
+                        correlation,
+                        sink,
+                    ) {
+                        return evidence;
                     }
                 }
             }
@@ -392,33 +395,128 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
     }
 }
 
-fn checked_streamed_response_len(current: usize, chunk: usize) -> Result<usize, String> {
-    let Some(next_len) = current.checked_add(chunk) else {
-        return Err("streamed response byte count overflowed".to_string());
-    };
-    if next_len > MAX_STREAMED_RESPONSE_BYTES {
-        return Err(format!(
-            "streamed response exceeded the {MAX_STREAMED_RESPONSE_BYTES}-byte adapter limit"
-        ));
+fn serialize_request(value: &impl serde::Serialize) -> Result<Vec<u8>, PreparationDefect> {
+    serde_json::to_vec(value).map_err(|error| PreparationDefect::SerializationFailed {
+        detail: error.to_string(),
+    })
+}
+
+fn build_http_request(
+    builder: reqwest::RequestBuilder,
+) -> Result<reqwest::Request, PreparationDefect> {
+    builder
+        .build()
+        .map_err(|error| PreparationDefect::RequestConstructionFailed {
+            detail: error.to_string(),
+        })
+}
+
+fn streamed_response_prefix_len(current: usize, chunk: usize) -> (usize, bool) {
+    let remaining = MAX_STREAMED_RESPONSE_BYTES.saturating_sub(current);
+    (chunk.min(remaining), chunk > remaining)
+}
+
+fn process_streamed_chunk<C: Clone>(
+    bytes: &[u8],
+    streamed_bytes: &mut usize,
+    framing: &mut SseFraming,
+    decoder: &mut StreamDecoder,
+    correlation: &C,
+    sink: &mut (dyn ObservationSink<C> + Send),
+) -> Option<TerminalEvidence> {
+    let (accepted, exceeded) = streamed_response_prefix_len(*streamed_bytes, bytes.len());
+    *streamed_bytes += accepted;
+    // Records completed before a framing failure are applied first, so
+    // evidence they carry is never lost to how the transport batched bytes.
+    // The same rule applies at the aggregate byte budget: process the
+    // in-budget prefix so a terminal marker in it wins over coalesced trailing
+    // data.
+    let outcome = framing.push(&bytes[..accepted]);
+    for record in outcome.records {
+        match decoder.apply(&record, correlation, sink) {
+            StreamStep::Continue => {}
+            StreamStep::Terminal(evidence) => return Some(evidence),
+        }
     }
-    Ok(next_len)
+    if let Some(error) = outcome.error {
+        return Some(decoder.violation_evidence(error.to_string()));
+    }
+    exceeded.then(|| {
+        decoder.violation_evidence(format!(
+            "streamed response exceeded the {MAX_STREAMED_RESPONSE_BYTES}-byte adapter limit"
+        ))
+    })
 }
 
 impl<C: Clone + Send + Sync, A: CredentialAccess> ModelRuntime<C> for AnthropicRuntime<A> {
-    async fn execute(
+    type Prepared = AnthropicPreparedRequest<C>;
+
+    async fn prepare(
         &self,
         operation: ModelOperation<C>,
+        mut cancellation: CancellationSignal,
+    ) -> PreparationOutcome<C, Self::Prepared> {
+        self.prepare_request(operation, &mut cancellation).await
+    }
+
+    async fn execute(
+        &self,
+        prepared: Self::Prepared,
         sink: &mut (dyn ObservationSink<C> + Send),
         mut cancellation: CancellationSignal,
     ) -> TerminalReport<C> {
-        let correlation = operation.correlation.clone();
+        let AnthropicPreparedRequest {
+            request,
+            correlation,
+            delivery,
+            credential,
+        } = prepared;
+        if already_fired(&mut cancellation) {
+            return TerminalReport {
+                correlation,
+                evidence: proven_unsent(UnsentCause::CancelledBeforeSend),
+            };
+        }
+        let mut redacting_sink = RedactingObservationSink::new(sink, &credential);
         let evidence = self
-            .run(operation, &correlation, sink, &mut cancellation)
+            .exchange(
+                request,
+                delivery,
+                &correlation,
+                &mut redacting_sink,
+                &mut cancellation,
+            )
             .await;
+        redacting_sink.flush();
+        // A fully buffered reqwest request does not expose independent proof
+        // that an early response arrived only after the complete upload. ADR-0043
+        // therefore forbids classifying its refusal token as `Refused`.
+        let evidence = without_unproven_refusal(evidence);
+        // ADR-0017: provider-controlled text in the evidence (error messages,
+        // raw bodies, transport detail) is credential-sanitized before it
+        // leaves the adapter boundary, using the exact preparation-time value.
+        let evidence = redact_evidence(evidence, &credential);
         TerminalReport {
             correlation,
             evidence,
         }
+    }
+}
+
+fn without_unproven_refusal(evidence: TerminalEvidence) -> TerminalEvidence {
+    match evidence {
+        TerminalEvidence::Refused(refusal) => {
+            TerminalEvidence::ProviderError(ProviderErrorEvidence {
+                exchange: refusal.exchange,
+                reported_model: refusal.reported_model,
+                kind: ProviderErrorKind::Unrecognized,
+                native: NativeErrorFacts {
+                    error_token: Some("refusal".to_string()),
+                    message: None,
+                },
+            })
+        }
+        evidence => evidence,
     }
 }
 
@@ -758,6 +856,17 @@ fn redact_text(text: String, credential: &str) -> String {
     }
 }
 
+/// Redacts complete credentials and fails closed on a trailing credential
+/// prefix. Final content parts are independently persisted values, so a prefix
+/// may not leave one part and be completed by the next.
+fn redact_bounded_text(text: String, credential: &str) -> String {
+    let (mut redacted, pending) = redact_complete_credentials_and_hold_prefix(text, credential);
+    if !pending.is_empty() {
+        redacted.push_str("[redacted]");
+    }
+    redacted
+}
+
 /// Redacts a complete credential and any trailing prefix of it. Provider
 /// chunk boundaries are arbitrary: removing a credential prefix at the end
 /// of every emitted delta prevents a later delta from completing the secret
@@ -877,13 +986,13 @@ fn redact_json_value(value: &mut serde_json::Value, credential: &str) -> bool {
 
 fn redact_part(part: AssistantPart, credential: &str) -> AssistantPart {
     match part {
-        AssistantPart::Text(text) => AssistantPart::Text(redact_text(text, credential)),
+        AssistantPart::Text(text) => AssistantPart::Text(redact_bounded_text(text, credential)),
         AssistantPart::Thinking { text, signature } => AssistantPart::Thinking {
-            text: redact_text(text, credential),
-            signature: signature.map(|value| redact_text(value, credential)),
+            text: redact_bounded_text(text, credential),
+            signature: signature.map(|value| redact_bounded_text(value, credential)),
         },
         AssistantPart::RedactedThinking { data } => AssistantPart::RedactedThinking {
-            data: redact_text(data, credential),
+            data: redact_bounded_text(data, credential),
         },
         AssistantPart::ToolCall(proposal) => {
             AssistantPart::ToolCall(redact_proposal(proposal, credential))
@@ -919,9 +1028,7 @@ fn redact_observation_fact(fact: ObservationFact, credential: &str) -> Observati
         ObservationFact::FinishReported(finish) => {
             ObservationFact::FinishReported(redact_finish(finish, credential))
         }
-        fact @ (ObservationFact::RequestPrepared
-        | ObservationFact::SendCommenced
-        | ObservationFact::UsageReported(_)) => fact,
+        fact @ (ObservationFact::SendCommenced | ObservationFact::UsageReported(_)) => fact,
     }
 }
 
@@ -995,9 +1102,7 @@ fn redact_evidence(evidence: TerminalEvidence, api_key: &CredentialValue) -> Ter
                 UnsentCause::SendIncompleteProvenUnacceptable(facts) => {
                     UnsentCause::SendIncompleteProvenUnacceptable(redact_transport(facts))
                 }
-                cause @ (UnsentCause::PreparationFailed(_) | UnsentCause::CancelledBeforeSend) => {
-                    cause
-                }
+                UnsentCause::CancelledBeforeSend => UnsentCause::CancelledBeforeSend,
             };
             TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence { cause })
         }
@@ -1049,20 +1154,103 @@ fn redact_evidence(evidence: TerminalEvidence, api_key: &CredentialValue) -> Ter
 
 #[cfg(test)]
 mod tests {
+    use serde::Serialize;
     use signalbox_model_runtime::{
-        CredentialValue, Observation, ObservationFact, ObservationSink, TokenUsage,
+        AssistantPart, CompletionEvidence, CompletionFinish, CredentialValue, ExchangeFacts,
+        Observation, ObservationFact, ObservationSink, PreparationDefect, RefusalEvidence,
+        SseFraming, TerminalEvidence, TokenUsage,
     };
 
     use super::{
-        MAX_STREAMED_RESPONSE_BYTES, RedactingObservationSink, checked_streamed_response_len,
-        redact_json,
+        MAX_STREAMED_RESPONSE_BYTES, RedactingObservationSink, build_http_request,
+        process_streamed_chunk, redact_evidence, redact_json, serialize_request,
+        streamed_response_prefix_len, without_unproven_refusal,
     };
+    use crate::stream::StreamDecoder;
 
     #[test]
     fn inv_035_json_escaped_credentials_are_redacted_from_tool_arguments() {
         let redacted = redact_json(r#"{"token":"key_\u006coop"}"#.to_string(), "key_loop");
 
         assert_eq!(redacted, r#"{"token":"[redacted]"}"#);
+    }
+
+    #[test]
+    fn inv_035_final_content_cannot_reconstruct_a_credential_across_parts() {
+        let credential = CredentialValue::new(b"key_loop".to_vec());
+        let evidence = TerminalEvidence::Completed(CompletionEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: None,
+            finish: CompletionFinish::EndTurn,
+            content: vec![
+                AssistantPart::Text("safe key_".to_string()),
+                AssistantPart::Text("loop tail".to_string()),
+            ],
+            usage: TokenUsage::unreported(),
+        });
+
+        let TerminalEvidence::Completed(completion) = redact_evidence(evidence, &credential) else {
+            panic!("completion remains completion");
+        };
+        let joined = completion
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                AssistantPart::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+
+        assert_eq!(joined, "safe [redacted]loop tail");
+        assert!(!joined.contains("key_loop"));
+    }
+
+    #[test]
+    fn refusal_without_full_upload_proof_is_known_failure_evidence() {
+        let refusal = TerminalEvidence::Refused(RefusalEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: None,
+            content: Vec::new(),
+            usage: TokenUsage::unreported(),
+        });
+
+        let TerminalEvidence::ProviderError(error) = without_unproven_refusal(refusal) else {
+            panic!("unproven refusal must use the non-refusal known-failure mapping");
+        };
+        assert_eq!(error.native.error_token.as_deref(), Some("refusal"));
+    }
+
+    struct SerializationFails;
+
+    impl Serialize for SerializationFails {
+        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            Err(serde::ser::Error::custom("fixture serialization failure"))
+        }
+    }
+
+    #[test]
+    fn serialization_failure_is_a_preparation_defect() {
+        assert!(matches!(
+            serialize_request(&SerializationFails),
+            Err(PreparationDefect::SerializationFailed { .. })
+        ));
+    }
+
+    #[test]
+    fn request_build_failure_is_a_preparation_defect() {
+        let builder = reqwest::Client::new()
+            .get("http://127.0.0.1/")
+            .header("invalid\nheader", "value");
+
+        assert!(matches!(
+            build_http_request(builder),
+            Err(PreparationDefect::RequestConstructionFailed { .. })
+        ));
     }
 
     #[test]
@@ -1138,10 +1326,46 @@ mod tests {
     #[test]
     fn streamed_response_budget_rejects_aggregate_overflow() {
         assert_eq!(
-            checked_streamed_response_len(MAX_STREAMED_RESPONSE_BYTES - 1, 1),
-            Ok(MAX_STREAMED_RESPONSE_BYTES)
+            streamed_response_prefix_len(MAX_STREAMED_RESPONSE_BYTES - 1, 1),
+            (1, false)
         );
-        assert!(checked_streamed_response_len(MAX_STREAMED_RESPONSE_BYTES, 1).is_err());
-        assert!(checked_streamed_response_len(usize::MAX, 1).is_err());
+        assert_eq!(
+            streamed_response_prefix_len(MAX_STREAMED_RESPONSE_BYTES - 1, 2),
+            (1, true)
+        );
+        assert_eq!(
+            streamed_response_prefix_len(MAX_STREAMED_RESPONSE_BYTES, usize::MAX),
+            (0, true)
+        );
+    }
+
+    #[test]
+    fn terminal_record_in_budget_wins_over_coalesced_trailing_bytes() {
+        let mut bytes = b"event: message_start\n\
+            data: {\"type\":\"message_start\",\"message\":{\"type\":\"message\",\
+            \"role\":\"assistant\",\"id\":\"msg_1\",\"model\":\"model-exact-1\",\
+            \"content\":[],\"usage\":{\"input_tokens\":1}}}\n\n\
+            event: message_delta\n\
+            data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\
+            \"usage\":{\"output_tokens\":1}}\n\n\
+            event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+            .to_vec();
+        let terminal_len = bytes.len();
+        bytes.extend_from_slice(b"coalesced trailing bytes");
+        let mut streamed_bytes = MAX_STREAMED_RESPONSE_BYTES - terminal_len;
+        let mut framing = SseFraming::new(1024);
+        let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+        let mut observations = Vec::new();
+
+        let evidence = process_streamed_chunk(
+            &bytes,
+            &mut streamed_bytes,
+            &mut framing,
+            &mut decoder,
+            &"call-1".to_string(),
+            &mut observations,
+        );
+
+        assert!(matches!(evidence, Some(TerminalEvidence::Completed(_))));
     }
 }
