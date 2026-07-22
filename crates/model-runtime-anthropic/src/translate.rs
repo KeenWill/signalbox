@@ -134,6 +134,26 @@ fn validate_tool_history(messages: &[ConversationMessage]) -> Result<(), Prepara
 fn tools_and_choice<C>(
     operation: &ModelOperation<C>,
 ) -> Result<(Option<Vec<WireTool>>, Option<WireToolChoice>), PreparationFailure> {
+    for tool in &operation.tools {
+        if !tool.input_schema.is_object() {
+            return Err(PreparationFailure::UnsupportedOperation {
+                detail: format!(
+                    "Anthropic requires tool {} to carry a JSON Schema object",
+                    tool.name.as_str()
+                ),
+            });
+        }
+    }
+    if let Some(contract) = &operation.output_contract
+        && !contract.schema.is_object()
+    {
+        return Err(PreparationFailure::UnsupportedOperation {
+            detail: format!(
+                "Anthropic requires output contract {} to carry a JSON Schema object",
+                contract.name.as_str()
+            ),
+        });
+    }
     let mut tools: Vec<WireTool> = operation
         .tools
         .iter()
@@ -505,6 +525,36 @@ mod tests {
             })
         );
         assert_eq!(value["tools"][0]["name"], serde_json::json!("verdict"));
+    }
+
+    #[test]
+    fn a_non_object_tool_schema_is_rejected_before_any_send() {
+        let mut operation = operation("call-non-object-tool-schema");
+        operation.tools = vec![ToolDefinition::with_schema(
+            "lookup",
+            "Looks up a city.",
+            serde_json::Value::Null,
+        )];
+
+        assert!(matches!(
+            build_request(&operation),
+            Err(PreparationFailure::UnsupportedOperation { .. })
+        ));
+    }
+
+    #[test]
+    fn a_non_object_contract_schema_is_rejected_before_any_send() {
+        let mut operation = operation("call-non-object-contract-schema");
+        operation.output_contract = Some(StructuredOutputContract {
+            name: ToolName::new("verdict"),
+            description: "The verdict.".to_string(),
+            schema: serde_json::json!([]),
+        });
+
+        assert!(matches!(
+            build_request(&operation),
+            Err(PreparationFailure::UnsupportedOperation { .. })
+        ));
     }
 
     #[test]

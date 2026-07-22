@@ -99,6 +99,8 @@ pub enum AnthropicConstructionError {
     },
     /// The configured `anthropic-version` cannot form an HTTP header value.
     InvalidVersion,
+    /// The configured SSE record limit cannot admit any record bytes.
+    InvalidSseRecordLimit,
     /// The HTTP client could not be constructed.
     ClientConstruction {
         /// The client's rendered description.
@@ -112,6 +114,9 @@ impl std::fmt::Display for AnthropicConstructionError {
             Self::InvalidBaseUrl { detail } => write!(f, "invalid base URL: {detail}"),
             Self::InvalidVersion => {
                 f.write_str("anthropic-version cannot form an HTTP header value")
+            }
+            Self::InvalidSseRecordLimit => {
+                f.write_str("SSE record limit must be greater than zero")
             }
             Self::ClientConstruction { detail } => {
                 write!(f, "HTTP client construction failed: {detail}")
@@ -156,6 +161,9 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
         config: AnthropicConfig,
         credentials: A,
     ) -> Result<Self, AnthropicConstructionError> {
+        if config.sse_record_limit == 0 {
+            return Err(AnthropicConstructionError::InvalidSseRecordLimit);
+        }
         let messages_url = Url::parse(&format!(
             "{}/v1/messages",
             config.base_url.trim_end_matches('/')
@@ -603,7 +611,12 @@ async fn finish_error(
         kind: classify_error_status(status),
         native: NativeErrorFacts {
             error_token: None,
-            message: Some(lossy_truncated(&body)),
+            // Preserve the complete bounded body until the execution
+            // boundary can sanitize JSON escapes with the exact prepared
+            // credential. Truncating first could make valid JSON
+            // unparseable and hide a reversible credential representation
+            // from JSON-aware redaction.
+            message: Some(String::from_utf8_lossy(&body).into_owned()),
         },
     })
 }
@@ -721,11 +734,10 @@ fn request_id_from(headers: &HeaderMap) -> Option<ProviderRequestId> {
         .map(ProviderRequestId::new)
 }
 
-fn lossy_truncated(body: &[u8]) -> String {
+fn truncated(text: String) -> String {
     const LIMIT: usize = 2048;
-    let text = String::from_utf8_lossy(body);
     if text.len() <= LIMIT {
-        return text.into_owned();
+        return text;
     }
     let mut end = LIMIT;
     while !text.is_char_boundary(end) {
@@ -928,7 +940,7 @@ fn redact_native_message(text: String, credential: &str) -> String {
         redacted.push_str(TRUNCATION_SUFFIX);
         redacted
     } else {
-        redact_native_body(text, credential)
+        truncated(redact_native_body(text, credential))
     }
 }
 
@@ -1310,6 +1322,18 @@ mod tests {
             redact_native_message(r#"{"message":"key_\u006coop"}"#.to_string(), "key_loop"),
             r#"{"message":"[redacted]"}"#
         );
+    }
+
+    #[test]
+    fn large_json_fallback_body_is_sanitized_before_truncation() {
+        let body = format!(r#"{{"message":"key_\u006coop{}"}}"#, "x".repeat(2_200));
+
+        let redacted = redact_native_message(body, "key_loop");
+
+        assert!(redacted.starts_with(r#"{"message":"[redacted]"#));
+        assert!(redacted.ends_with(" … [truncated]"));
+        assert!(!redacted.contains(r"key_\u006coop"));
+        assert!(!redacted.contains("key_loop"));
     }
 
     #[test]

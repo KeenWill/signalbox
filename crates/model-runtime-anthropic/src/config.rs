@@ -25,8 +25,9 @@ pub struct AnthropicConfig {
     /// boundary-loss evidence (ADR-0043 timeout rule). ADR-0043 selects no
     /// timeout budget, so the default is none and the caller owns any budget.
     pub exchange_timeout: Option<Duration>,
-    /// Upper bound on one SSE record's size; larger records are
-    /// stream-protocol-violation evidence.
+    /// Positive upper bound on one SSE record's size; zero is rejected at
+    /// construction and larger records are stream-protocol-violation
+    /// evidence.
     pub sse_record_limit: usize,
 }
 

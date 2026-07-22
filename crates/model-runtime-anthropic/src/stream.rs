@@ -13,7 +13,7 @@
 //! protocol-violation evidence: later records about material this adapter
 //! cannot interpret would not be trustworthy.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use signalbox_model_runtime::{
     AssistantPart, BoundaryLossEvidence, CompletionEvidence, ExchangeFacts, FinishReason,
@@ -66,6 +66,7 @@ pub(crate) struct StreamDecoder {
     final_output_usage_reported: bool,
     finish: Option<FinishReason>,
     declared_stop_sequences: Vec<String>,
+    tool_call_ids: BTreeSet<String>,
     open_blocks: BTreeMap<u32, BlockBuilder>,
     closed: BTreeMap<u32, AssistantPart>,
 }
@@ -85,6 +86,7 @@ impl StreamDecoder {
             final_output_usage_reported: false,
             finish: None,
             declared_stop_sequences,
+            tool_call_ids: BTreeSet::new(),
             open_blocks: BTreeMap::new(),
             closed: BTreeMap::new(),
         }
@@ -282,6 +284,9 @@ impl StreamDecoder {
         let builder = match content_block {
             WireResponseBlock::Text { text } => BlockBuilder::Text(text),
             WireResponseBlock::ToolUse { id, name, input } => {
+                if !self.tool_call_ids.insert(id.clone()) {
+                    return self.violation(format!("stream repeats tool-call identifier {id:?}"));
+                }
                 let start_input = input.get().to_string();
                 let documented_empty_input =
                     serde_json::from_str::<serde_json::Value>(&start_input).is_ok_and(|value| {
@@ -867,6 +872,35 @@ mod tests {
                 name: ToolName::new("ping"),
                 arguments_json: "{}".to_string(),
             })]
+        );
+    }
+
+    #[test]
+    fn duplicate_streamed_tool_call_ids_are_a_protocol_violation() {
+        let (terminal, observations) = drive(&[
+            message_start(),
+            b"event: content_block_start\n\
+              data: {\"type\":\"content_block_start\",\"index\":0,\
+              \"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\
+              \"name\":\"first\",\"input\":{}}}\n\n",
+            b"event: content_block_stop\n\
+              data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            b"event: content_block_start\n\
+              data: {\"type\":\"content_block_start\",\"index\":1,\
+              \"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\
+              \"name\":\"second\",\"input\":{}}}\n\n",
+        ]);
+
+        assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
+        assert_eq!(
+            observations
+                .iter()
+                .filter(|observation| {
+                    matches!(observation.fact, ObservationFact::ToolCallProposed(_))
+                })
+                .count(),
+            1,
+            "the duplicate proposal is rejected before observation"
         );
     }
 

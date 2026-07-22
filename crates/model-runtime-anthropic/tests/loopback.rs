@@ -747,6 +747,17 @@ fn base_url_user_information_is_rejected_at_construction() {
     ));
 }
 
+#[test]
+fn a_zero_sse_record_limit_is_rejected_at_construction() {
+    let mut config = AnthropicConfig::new();
+    config.sse_record_limit = 0;
+
+    assert!(matches!(
+        AnthropicRuntime::new(config, FixedKey),
+        Err(AnthropicConstructionError::InvalidSseRecordLimit)
+    ));
+}
+
 /// A key source whose value the test rotates between operations.
 #[derive(Debug)]
 struct RotatingKey(Arc<Mutex<String>>);
