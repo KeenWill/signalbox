@@ -11,7 +11,8 @@ use std::time::Duration;
 #[derive(Debug, Clone)]
 pub struct AnthropicConfig {
     /// Base URL of the API; the adapter appends `/v1/messages`. The scheme
-    /// must be `http` or `https`, with no query or fragment.
+    /// must be `http` or `https`, with no user information, query, or
+    /// fragment.
     pub base_url: String,
     /// The `anthropic-version` header value.
     pub anthropic_version: String,
