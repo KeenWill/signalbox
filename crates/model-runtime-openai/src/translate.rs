@@ -382,6 +382,26 @@ mod tests {
         )
     }
 
+    #[track_caller]
+    fn assert_temperature_is_rejected(value: f64) {
+        let mut candidate = operation("call-temperature");
+        candidate.settings.temperature = Some(value);
+        assert!(matches!(
+            build_request(&candidate),
+            Err(PreparationFailure::UnsupportedOperation { .. })
+        ));
+    }
+
+    #[track_caller]
+    fn assert_top_p_is_rejected(value: f64) {
+        let mut candidate = operation("call-top-p");
+        candidate.settings.top_p = Some(value);
+        assert!(matches!(
+            build_request(&candidate),
+            Err(PreparationFailure::UnsupportedOperation { .. })
+        ));
+    }
+
     fn request_json(operation: &ModelOperation<String>) -> String {
         let request = build_request(operation).expect("translatable operation builds");
         let value = serde_json::to_value(&request).expect("wire request serializes");
@@ -706,23 +726,21 @@ mod tests {
     }
 
     #[test]
-    fn provider_numeric_domains_are_enforced_before_send() {
-        for value in [-0.1, 2.1, f64::INFINITY] {
-            let mut candidate = operation("call-temperature");
-            candidate.settings.temperature = Some(value);
-            assert!(matches!(
-                build_request(&candidate),
-                Err(PreparationFailure::UnsupportedOperation { .. })
-            ));
-        }
-        for value in [-0.1, 1.1, f64::INFINITY] {
-            let mut candidate = operation("call-top-p");
-            candidate.settings.top_p = Some(value);
-            assert!(matches!(
-                build_request(&candidate),
-                Err(PreparationFailure::UnsupportedOperation { .. })
-            ));
-        }
+    fn temperature_outside_the_provider_domain_is_rejected_before_send() {
+        assert_temperature_is_rejected(-0.1);
+        assert_temperature_is_rejected(2.1);
+        assert_temperature_is_rejected(f64::INFINITY);
+    }
+
+    #[test]
+    fn top_p_outside_the_provider_domain_is_rejected_before_send() {
+        assert_top_p_is_rejected(-0.1);
+        assert_top_p_is_rejected(1.1);
+        assert_top_p_is_rejected(f64::INFINITY);
+    }
+
+    #[test]
+    fn zero_output_token_limit_is_rejected_before_send() {
         let mut candidate = operation("call-zero-tokens");
         candidate.settings.max_output_tokens = 0;
         assert!(matches!(

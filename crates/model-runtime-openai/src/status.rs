@@ -15,6 +15,9 @@ use signalbox_model_runtime::ProviderErrorKind;
 /// Classifies a definitive error response from its native code and HTTP
 /// status.
 pub(crate) fn classify_error(status: u16, code: Option<&str>) -> ProviderErrorKind {
+    if status == 401 {
+        return ProviderErrorKind::CredentialRejected;
+    }
     match code {
         Some("invalid_api_key") => ProviderErrorKind::CredentialRejected,
         Some("model_not_found") => ProviderErrorKind::TargetNotFound,
@@ -81,6 +84,10 @@ mod tests {
         );
         assert_eq!(
             classify_error(401, None),
+            ProviderErrorKind::CredentialRejected
+        );
+        assert_eq!(
+            classify_error(401, Some("insufficient_quota")),
             ProviderErrorKind::CredentialRejected
         );
     }

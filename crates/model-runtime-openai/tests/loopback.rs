@@ -648,25 +648,56 @@ async fn ordinary_validation_and_credential_failures_are_preparation_outcomes() 
 }
 
 #[tokio::test]
-async fn unusable_credential_is_an_ordinary_preparation_failure() {
+async fn credential_with_invalid_header_bytes_is_an_ordinary_preparation_failure() {
     let server = CannedServer::serving(vec![http_response("200 OK", &[], b"{}")]).await;
-    for value in [b"invalid\nkey".as_slice(), b"non-utf8-\xff".as_slice()] {
-        let resolutions = Arc::new(AtomicUsize::new(0));
-        let mut config = OpenAiConfig::new();
-        config.base_url = server.base_url.clone();
-        let runtime = OpenAiRuntime::new(config, CountingKey { resolutions, value })
-            .expect("configuration constructs");
+    let resolutions = Arc::new(AtomicUsize::new(0));
+    let mut config = OpenAiConfig::new();
+    config.base_url = server.base_url.clone();
+    let runtime = OpenAiRuntime::new(
+        config,
+        CountingKey {
+            resolutions,
+            value: b"invalid\nkey",
+        },
+    )
+    .expect("configuration constructs");
 
-        assert!(matches!(
-            runtime
-                .prepare(operation("call-unusable"), CancellationSignal::never())
-                .await,
-            PreparationOutcome::Failed {
-                failure: PreparationFailure::CredentialUnusable { .. },
-                ..
-            }
-        ));
-    }
+    assert!(matches!(
+        runtime
+            .prepare(operation("call-unusable"), CancellationSignal::never())
+            .await,
+        PreparationOutcome::Failed {
+            failure: PreparationFailure::CredentialUnusable { .. },
+            ..
+        }
+    ));
+    assert!(server.recorded_requests().is_empty());
+}
+
+#[tokio::test]
+async fn non_utf8_credential_is_an_ordinary_preparation_failure() {
+    let server = CannedServer::serving(vec![http_response("200 OK", &[], b"{}")]).await;
+    let resolutions = Arc::new(AtomicUsize::new(0));
+    let mut config = OpenAiConfig::new();
+    config.base_url = server.base_url.clone();
+    let runtime = OpenAiRuntime::new(
+        config,
+        CountingKey {
+            resolutions,
+            value: b"non-utf8-\xff",
+        },
+    )
+    .expect("configuration constructs");
+
+    assert!(matches!(
+        runtime
+            .prepare(operation("call-unusable"), CancellationSignal::never())
+            .await,
+        PreparationOutcome::Failed {
+            failure: PreparationFailure::CredentialUnusable { .. },
+            ..
+        }
+    ));
     assert!(server.recorded_requests().is_empty());
 }
 
@@ -791,6 +822,57 @@ async fn provider_error_text_reflecting_the_key_is_redacted() {
         "the key value must never leave the adapter"
     );
     assert!(message.contains("[redacted]"));
+}
+
+#[tokio::test]
+async fn json_escaped_credential_in_fallback_error_body_is_redacted() {
+    let body = br#"{"message":"key_\u006coop"}"#;
+    let server = CannedServer::serving(vec![http_response(
+        "500 Internal Server Error",
+        &[("content-type", "application/json")],
+        body,
+    )])
+    .await;
+    let runtime = runtime_for(&server.base_url);
+
+    let (report, _) = execute(
+        &runtime,
+        operation("call-encoded-error"),
+        CancellationSignal::never(),
+    )
+    .await;
+
+    let TerminalEvidence::ProviderError(error) = report.evidence else {
+        panic!("a complete error status remains definitive provider evidence");
+    };
+    assert_eq!(
+        error.native.message,
+        Some(r#"{"message":"[redacted]"}"#.to_string())
+    );
+}
+
+#[tokio::test]
+async fn credential_rejection_status_precedes_a_contradictory_error_type() {
+    let body = br#"{"error":{"message":"quota","type":"insufficient_quota"}}"#;
+    let server = CannedServer::serving(vec![http_response(
+        "401 Unauthorized",
+        &[("content-type", "application/json")],
+        body,
+    )])
+    .await;
+    let runtime = runtime_for(&server.base_url);
+
+    let (report, _) = execute(
+        &runtime,
+        operation("call-contradictory-401"),
+        CancellationSignal::never(),
+    )
+    .await;
+
+    let TerminalEvidence::ProviderError(error) = report.evidence else {
+        panic!("a complete error status remains definitive provider evidence");
+    };
+    assert_eq!(error.kind, ProviderErrorKind::CredentialRejected);
 }
 
 #[tokio::test]

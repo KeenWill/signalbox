@@ -5,7 +5,6 @@
 //! evidence path stays independently reviewable. Extracting a shared
 //! transport crate is a refactor candidate once a third adapter exists.
 
-use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Waker};
@@ -701,8 +700,8 @@ struct RedactingSink<'a, C> {
     inner: &'a mut (dyn ObservationSink<C> + Send),
     credential: &'a CredentialValue,
     credential_text: &'a str,
-    pending_stream_text: BTreeMap<(StreamField, u32), PendingStreamText<C>>,
-    pending_tool_arguments: BTreeMap<u32, PendingStreamText<C>>,
+    pending_stream_text: Option<PendingStreamText<C>>,
+    pending_tool_arguments: Option<PendingToolArguments<C>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -712,8 +711,16 @@ enum StreamField {
 }
 
 struct PendingStreamText<C> {
+    field: StreamField,
+    index: u32,
     correlation: C,
     text: String,
+}
+
+struct PendingToolArguments<C> {
+    index: u32,
+    correlation: C,
+    fragment: String,
 }
 
 impl<'a, C: Clone> RedactingSink<'a, C> {
@@ -725,26 +732,33 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
             inner,
             credential,
             credential_text: std::str::from_utf8(credential.expose_bytes()).unwrap_or_default(),
-            pending_stream_text: BTreeMap::new(),
-            pending_tool_arguments: BTreeMap::new(),
+            pending_stream_text: None,
+            pending_tool_arguments: None,
+        }
+    }
+
+    fn flush_stream_text(&mut self) {
+        if let Some(pending) = self.pending_stream_text.take() {
+            // Pending text is exactly a credential prefix. Once another fact
+            // must cross the boundary, retain ordering and fail closed.
+            self.emit_stream_text(
+                pending.field,
+                pending.index,
+                pending.correlation,
+                "[redacted]".to_string(),
+            );
+        }
+    }
+
+    fn flush_tool_arguments(&mut self) {
+        if let Some(pending) = self.pending_tool_arguments.take() {
+            self.emit_tool_arguments(pending.index, pending.correlation, "[redacted]".to_string());
         }
     }
 
     fn flush(&mut self) {
-        for ((field, index), pending) in std::mem::take(&mut self.pending_stream_text) {
-            // Pending text is exactly a credential prefix. Once another fact
-            // must cross the boundary, retain ordering and fail closed.
-            self.emit_stream_text(field, index, pending.correlation, "[redacted]".to_string());
-        }
-        for (index, pending) in std::mem::take(&mut self.pending_tool_arguments) {
-            let fragment = redact_json(pending.text, self.credential);
-            if !fragment.is_empty() {
-                self.inner.observe(Observation {
-                    correlation: pending.correlation,
-                    fact: ObservationFact::ToolArgumentsDelta { index, fragment },
-                });
-            }
-        }
+        self.flush_stream_text();
+        self.flush_tool_arguments();
     }
 
     fn emit_stream_text(&mut self, field: StreamField, index: u32, correlation: C, text: String) {
@@ -758,6 +772,15 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         self.inner.observe(Observation { correlation, fact });
     }
 
+    fn emit_tool_arguments(&mut self, index: u32, correlation: C, fragment: String) {
+        if !fragment.is_empty() {
+            self.inner.observe(Observation {
+                correlation,
+                fact: ObservationFact::ToolArgumentsDelta { index, fragment },
+            });
+        }
+    }
+
     fn redact_stream_delta(
         &mut self,
         field: StreamField,
@@ -765,22 +788,54 @@ impl<'a, C: Clone> RedactingSink<'a, C> {
         correlation: C,
         text: String,
     ) {
+        self.flush_tool_arguments();
+        if self
+            .pending_stream_text
+            .as_ref()
+            .is_some_and(|pending| pending.field != field || pending.index != index)
+        {
+            self.flush_stream_text();
+        }
         let mut combined = self
             .pending_stream_text
-            .remove(&(field, index))
+            .take()
             .map_or_else(String::new, |pending| pending.text);
         combined.push_str(&text);
         let (emitted, pending) =
             redact_complete_credentials_and_hold_prefix(combined, self.credential_text);
         self.emit_stream_text(field, index, correlation.clone(), emitted);
         if !pending.is_empty() {
-            self.pending_stream_text.insert(
-                (field, index),
-                PendingStreamText {
-                    correlation,
-                    text: pending,
-                },
-            );
+            self.pending_stream_text = Some(PendingStreamText {
+                field,
+                index,
+                correlation,
+                text: pending,
+            });
+        }
+    }
+
+    fn redact_tool_delta(&mut self, index: u32, correlation: C, fragment: String) {
+        self.flush_stream_text();
+        if self
+            .pending_tool_arguments
+            .as_ref()
+            .is_some_and(|pending| pending.index != index)
+        {
+            self.flush_tool_arguments();
+        }
+        let mut combined = self
+            .pending_tool_arguments
+            .take()
+            .map_or_else(String::new, |pending| pending.fragment);
+        combined.push_str(&fragment);
+        let (emitted, pending) = redact_json_stream_fragment(combined, self.credential_text);
+        self.emit_tool_arguments(index, correlation.clone(), emitted);
+        if !pending.is_empty() {
+            self.pending_tool_arguments = Some(PendingToolArguments {
+                index,
+                correlation,
+                fragment: pending,
+            });
         }
     }
 }
@@ -798,14 +853,7 @@ impl<C: Clone> ObservationSink<C> for RedactingSink<'_, C> {
                 text,
             ),
             ObservationFact::ToolArgumentsDelta { index, fragment } => {
-                let pending =
-                    self.pending_tool_arguments
-                        .entry(index)
-                        .or_insert_with(|| PendingStreamText {
-                            correlation: observation.correlation.clone(),
-                            text: String::new(),
-                        });
-                pending.text.push_str(&fragment);
+                self.redact_tool_delta(index, observation.correlation, fragment);
             }
             ObservationFact::ToolCallProposed(proposal) => {
                 self.flush();
@@ -846,6 +894,184 @@ fn redact_complete_credentials_and_hold_prefix(
     let split = longest_prefix.map_or(text.len(), |length| text.len() - length);
     let pending = text.split_off(split);
     (text.replace(credential, "[redacted]"), pending)
+}
+
+struct DecodedJsonUnit {
+    raw_start: usize,
+    raw_end: usize,
+    decoded_start: usize,
+    decoded_end: usize,
+}
+
+/// Sanitizes one accumulated streamed JSON fragment while retaining only a
+/// suffix whose decoded characters could still complete the credential.
+fn redact_json_stream_fragment(raw: String, credential: &str) -> (String, String) {
+    if credential.is_empty() {
+        return (raw, String::new());
+    }
+
+    let fallback = |raw: String| {
+        if json_escapes_decode_to_credential(&raw, credential) {
+            ("[redacted]".to_string(), String::new())
+        } else {
+            redact_complete_credentials_and_hold_prefix(raw, credential)
+        }
+    };
+    let bytes = raw.as_bytes();
+    let mut cursor = 0;
+    let mut decoded = String::with_capacity(raw.len());
+    let mut units = Vec::new();
+    while cursor < raw.len() {
+        let raw_start = cursor;
+        let decoded_start = decoded.len();
+        if bytes[cursor] != b'\\' {
+            let Some(character) = raw[cursor..].chars().next() else {
+                return fallback(raw);
+            };
+            cursor += character.len_utf8();
+            decoded.push(character);
+        } else {
+            if cursor + 1 >= raw.len() {
+                break;
+            }
+            match bytes[cursor + 1] {
+                b'"' => {
+                    decoded.push('"');
+                    cursor += 2;
+                }
+                b'\\' => {
+                    decoded.push('\\');
+                    cursor += 2;
+                }
+                b'/' => {
+                    decoded.push('/');
+                    cursor += 2;
+                }
+                b'b' => {
+                    decoded.push('\u{0008}');
+                    cursor += 2;
+                }
+                b'f' => {
+                    decoded.push('\u{000c}');
+                    cursor += 2;
+                }
+                b'n' => {
+                    decoded.push('\n');
+                    cursor += 2;
+                }
+                b'r' => {
+                    decoded.push('\r');
+                    cursor += 2;
+                }
+                b't' => {
+                    decoded.push('\t');
+                    cursor += 2;
+                }
+                b'u' => {
+                    if cursor + 6 > raw.len() {
+                        break;
+                    }
+                    let Ok(hex) = std::str::from_utf8(&bytes[cursor + 2..cursor + 6]) else {
+                        return fallback(raw);
+                    };
+                    let Ok(first) = u16::from_str_radix(hex, 16) else {
+                        return fallback(raw);
+                    };
+                    if (0xd800..=0xdbff).contains(&first) {
+                        if cursor + 12 > raw.len() {
+                            break;
+                        }
+                        if &bytes[cursor + 6..cursor + 8] != b"\\u" {
+                            return fallback(raw);
+                        }
+                        let Ok(hex) = std::str::from_utf8(&bytes[cursor + 8..cursor + 12]) else {
+                            return fallback(raw);
+                        };
+                        let Ok(second) = u16::from_str_radix(hex, 16) else {
+                            return fallback(raw);
+                        };
+                        if !(0xdc00..=0xdfff).contains(&second) {
+                            return fallback(raw);
+                        }
+                        let scalar = 0x1_0000
+                            + ((u32::from(first) - 0xd800) << 10)
+                            + (u32::from(second) - 0xdc00);
+                        let Some(character) = char::from_u32(scalar) else {
+                            return fallback(raw);
+                        };
+                        decoded.push(character);
+                        cursor += 12;
+                    } else {
+                        if (0xdc00..=0xdfff).contains(&first) {
+                            return fallback(raw);
+                        }
+                        let Some(character) = char::from_u32(u32::from(first)) else {
+                            return fallback(raw);
+                        };
+                        decoded.push(character);
+                        cursor += 6;
+                    }
+                }
+                _ => return fallback(raw),
+            }
+        }
+        units.push(DecodedJsonUnit {
+            raw_start,
+            raw_end: cursor,
+            decoded_start,
+            decoded_end: decoded.len(),
+        });
+    }
+
+    let mut matches = Vec::new();
+    for (decoded_start, _) in decoded.match_indices(credential) {
+        let decoded_end = decoded_start + credential.len();
+        let Some(raw_start) = units
+            .iter()
+            .find(|unit| unit.decoded_start == decoded_start)
+            .map(|unit| unit.raw_start)
+        else {
+            return fallback(raw);
+        };
+        let Some(raw_end) = units
+            .iter()
+            .find(|unit| unit.decoded_end == decoded_end)
+            .map(|unit| unit.raw_end)
+        else {
+            return fallback(raw);
+        };
+        matches.push((raw_start, raw_end));
+    }
+
+    let tail_start = decoded
+        .rfind(credential)
+        .map_or(0, |position| position + credential.len());
+    let tail = &decoded[tail_start..];
+    let held_decoded_start = (1..credential.len())
+        .rev()
+        .filter(|length| credential.is_char_boundary(*length))
+        .find(|length| tail.ends_with(&credential[..*length]))
+        .map(|length| decoded.len() - length);
+    let held_raw_start = held_decoded_start.and_then(|start| {
+        units
+            .iter()
+            .find(|unit| unit.decoded_start == start)
+            .map(|unit| unit.raw_start)
+    });
+    let pending_start = held_raw_start.map_or(cursor, |start| start.min(cursor));
+
+    let mut emitted = String::with_capacity(pending_start);
+    let mut emit_cursor = 0;
+    for (start, end) in matches {
+        if end > pending_start {
+            break;
+        }
+        emitted.push_str(&raw[emit_cursor..start]);
+        emitted.push_str("[redacted]");
+        emit_cursor = end;
+    }
+    emitted.push_str(&raw[emit_cursor..pending_start]);
+    (emitted, raw[pending_start..].to_string())
 }
 
 fn redact_observation_fact(fact: ObservationFact, credential: &CredentialValue) -> ObservationFact {
@@ -902,7 +1128,7 @@ fn redact_evidence(evidence: TerminalEvidence, api_key: &CredentialValue) -> Ter
         native.error_code = native.error_code.map(redact);
         native.message = native
             .message
-            .map(|message| redact_native_message(message, key_text));
+            .map(|message| redact_native_message(message, api_key));
         native
     };
     let redact_transport =
@@ -1037,23 +1263,30 @@ fn redact_bounded_text(text: String, credential: &CredentialValue) -> String {
     redacted
 }
 
-fn redact_native_message(text: String, credential: &str) -> String {
+fn redact_native_message(text: String, credential: &CredentialValue) -> String {
     const TRUNCATION_SUFFIX: &str = " … [truncated]";
     if let Some(body) = text.strip_suffix(TRUNCATION_SUFFIX) {
-        let (mut redacted, pending) =
-            redact_complete_credentials_and_hold_prefix(body.to_string(), credential);
-        if !pending.is_empty() {
-            redacted.push_str("[redacted]");
-        }
+        let mut redacted = redact_native_body(body.to_string(), credential);
         redacted.push_str(TRUNCATION_SUFFIX);
         redacted
     } else {
-        let (mut redacted, pending) = redact_complete_credentials_and_hold_prefix(text, credential);
-        if !pending.is_empty() {
-            redacted.push_str("[redacted]");
-        }
-        redacted
+        redact_native_body(text, credential)
     }
+}
+
+fn redact_native_body(text: String, credential: &CredentialValue) -> String {
+    if serde_json::value::RawValue::from_string(text.clone()).is_ok() {
+        return redact_json(text, credential);
+    }
+    let key = std::str::from_utf8(credential.expose_bytes()).unwrap_or_default();
+    if json_escapes_decode_to_credential(&text, key) {
+        return "\"[redacted]\"".to_string();
+    }
+    let (mut redacted, pending) = redact_complete_credentials_and_hold_prefix(text, key);
+    if !pending.is_empty() {
+        redacted.push_str("[redacted]");
+    }
+    redacted
 }
 
 fn redact_completion_finish(
@@ -1094,7 +1327,7 @@ fn redact_json(raw: String, credential: &CredentialValue) -> String {
     if key.is_empty() {
         return raw;
     }
-    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+    if serde_json::value::RawValue::from_string(raw.clone()).is_err() {
         // A partial or malformed JSON value can encode a credential with
         // escapes that literal replacement cannot see. Fail closed only when
         // the escape-decoded material contains the credential; otherwise
@@ -1104,11 +1337,69 @@ fn redact_json(raw: String, credential: &CredentialValue) -> String {
         } else {
             redact_text(raw, credential)
         };
-    };
-    if !redact_json_value(&mut value, key) {
-        return raw;
     }
-    serde_json::to_string(&value).unwrap_or_else(|_| "\"[redacted]\"".to_string())
+
+    let mut redacted = String::with_capacity(raw.len());
+    let mut cursor = 0;
+    while cursor < raw.len() {
+        if raw.as_bytes()[cursor] == b'"' {
+            let mut end = cursor + 1;
+            let mut escaped = false;
+            while end < raw.len() {
+                let byte = raw.as_bytes()[end];
+                end += 1;
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == b'"' {
+                    break;
+                }
+            }
+            let token = &raw[cursor..end];
+            let Ok(decoded) = serde_json::from_str::<String>(token) else {
+                return redact_text(raw, credential);
+            };
+            if decoded.contains(key) {
+                let Ok(sanitized) = serde_json::to_string(&decoded.replace(key, "[redacted]"))
+                else {
+                    return "\"[redacted]\"".to_string();
+                };
+                redacted.push_str(&sanitized);
+            } else {
+                redacted.push_str(token);
+            }
+            cursor = end;
+            continue;
+        }
+
+        if matches!(
+            raw.as_bytes()[cursor],
+            b'{' | b'}' | b'[' | b']' | b',' | b':'
+        ) || raw.as_bytes()[cursor].is_ascii_whitespace()
+        {
+            redacted.push(raw.as_bytes()[cursor] as char);
+            cursor += 1;
+            continue;
+        }
+
+        let start = cursor;
+        while cursor < raw.len()
+            && !matches!(
+                raw.as_bytes()[cursor],
+                b'{' | b'}' | b'[' | b']' | b',' | b':' | b' ' | b'\t' | b'\r' | b'\n'
+            )
+        {
+            cursor += 1;
+        }
+        let token = &raw[start..cursor];
+        if token.contains(key) {
+            redacted.push_str("\"[redacted]\"");
+        } else {
+            redacted.push_str(token);
+        }
+    }
+    redacted
 }
 
 fn json_escapes_decode_to_credential(raw: &str, credential: &str) -> bool {
@@ -1143,45 +1434,6 @@ fn json_escapes_decode_to_credential(raw: &str, credential: &str) -> bool {
         }
     }
     decoded.contains(credential)
-}
-
-fn redact_json_value(value: &mut serde_json::Value, credential: &str) -> bool {
-    match value {
-        serde_json::Value::String(text) => {
-            let redacted = text.replace(credential, "[redacted]");
-            let changed = redacted != *text;
-            *text = redacted;
-            changed
-        }
-        serde_json::Value::Array(values) => {
-            let mut changed = false;
-            for value in values {
-                changed |= redact_json_value(value, credential);
-            }
-            changed
-        }
-        serde_json::Value::Object(fields) => {
-            let old = std::mem::take(fields);
-            let mut changed = false;
-            for (key, mut value) in old {
-                let redacted_key = key.replace(credential, "[redacted]");
-                changed |= redacted_key != key;
-                changed |= redact_json_value(&mut value, credential);
-                fields.insert(redacted_key, value);
-            }
-            changed
-        }
-        value @ (serde_json::Value::Null
-        | serde_json::Value::Bool(_)
-        | serde_json::Value::Number(_)) => {
-            if value.to_string().contains(credential) {
-                *value = serde_json::Value::String("[redacted]".to_string());
-                true
-            } else {
-                false
-            }
-        }
-    }
 }
 
 fn redact_assistant_part(part: AssistantPart, credential: &CredentialValue) -> AssistantPart {
@@ -1235,15 +1487,20 @@ mod tests {
         let credential = CredentialValue::new(b"secret".to_vec());
         let mut observed = Vec::new();
         let mut sink = RedactingSink::new(&mut observed, &credential);
-        for text in ["sec", "ret"] {
-            sink.observe(Observation {
-                correlation: "call-1".to_string(),
-                fact: ObservationFact::TextDelta {
-                    index: 0,
-                    text: text.to_string(),
-                },
-            });
-        }
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::TextDelta {
+                index: 0,
+                text: "sec".to_string(),
+            },
+        });
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::TextDelta {
+                index: 0,
+                text: "ret".to_string(),
+            },
+        });
         sink.observe(Observation {
             correlation: "call-1".to_string(),
             fact: ObservationFact::UsageReported(TokenUsage::unreported()),
@@ -1273,18 +1530,44 @@ mod tests {
     }
 
     #[test]
-    fn credential_reflected_as_a_json_primitive_is_redacted() {
-        for (raw, key) in [
-            (r#"{"value":1234}"#, b"23".as_slice()),
-            (r#"{"value":true}"#, b"true".as_slice()),
-            (r#"{"value":null}"#, b"null".as_slice()),
-        ] {
-            let credential = CredentialValue::new(key.to_vec());
-            assert_eq!(
-                redact_json(raw.to_string(), &credential),
-                r#"{"value":"[redacted]"}"#
-            );
-        }
+    fn credential_reflected_as_a_json_number_is_redacted() {
+        let credential = CredentialValue::new(b"23".to_vec());
+
+        assert_eq!(
+            redact_json(r#"{"value":1234}"#.to_string(), &credential),
+            r#"{"value":"[redacted]"}"#
+        );
+    }
+
+    #[test]
+    fn credential_reflected_as_a_json_boolean_is_redacted() {
+        let credential = CredentialValue::new(b"true".to_vec());
+
+        assert_eq!(
+            redact_json(r#"{"value":true}"#.to_string(), &credential),
+            r#"{"value":"[redacted]"}"#
+        );
+    }
+
+    #[test]
+    fn credential_reflected_as_json_null_is_redacted() {
+        let credential = CredentialValue::new(b"null".to_vec());
+
+        assert_eq!(
+            redact_json(r#"{"value":null}"#.to_string(), &credential),
+            r#"{"value":"[redacted]"}"#
+        );
+    }
+
+    #[test]
+    fn json_redaction_preserves_untouched_raw_lexemes_and_duplicate_keys() {
+        let credential = CredentialValue::new(b"key_loop".to_vec());
+        let raw = r#"{"token":"key_loop","id":184467440737095516160,"dup":1,"dup":2}"#;
+
+        assert_eq!(
+            redact_json(raw.to_string(), &credential),
+            r#"{"token":"[redacted]","id":184467440737095516160,"dup":1,"dup":2}"#
+        );
     }
 
     #[test]
@@ -1314,9 +1597,21 @@ mod tests {
 
     #[test]
     fn truncated_native_body_redacts_a_credential_prefix_at_the_cut() {
+        let credential = CredentialValue::new(b"key_loop".to_vec());
+
         assert_eq!(
-            redact_native_message("safe key_ … [truncated]".to_string(), "key_loop"),
+            redact_native_message("safe key_ … [truncated]".to_string(), &credential),
             "safe [redacted] … [truncated]"
+        );
+    }
+
+    #[test]
+    fn json_escaped_credential_in_a_fallback_error_body_is_redacted() {
+        let credential = CredentialValue::new(b"key_loop".to_vec());
+
+        assert_eq!(
+            redact_native_message(r#"{"message":"key_\u006coop"}"#.to_string(), &credential),
+            r#"{"message":"[redacted]"}"#
         );
     }
 
@@ -1325,15 +1620,20 @@ mod tests {
         let credential = CredentialValue::new(b"key_loop".to_vec());
         let mut observed = Vec::new();
         let mut sink = RedactingSink::new(&mut observed, &credential);
-        for fragment in [r#"{"token":"key_\u00"#, r#"6coop"}"#] {
-            sink.observe(Observation {
-                correlation: "call-1".to_string(),
-                fact: ObservationFact::ToolArgumentsDelta {
-                    index: 0,
-                    fragment: fragment.to_string(),
-                },
-            });
-        }
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ToolArgumentsDelta {
+                index: 0,
+                fragment: r#"{"token":"key_\u00"#.to_string(),
+            },
+        });
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ToolArgumentsDelta {
+                index: 0,
+                fragment: r#"6coop"}"#.to_string(),
+            },
+        });
         sink.observe(Observation {
             correlation: "call-1".to_string(),
             fact: ObservationFact::ToolCallProposed(ToolCallProposal {
@@ -1344,12 +1644,46 @@ mod tests {
         });
         drop(sink);
 
-        assert!(observed.iter().any(|observation| matches!(
-            &observation.fact,
-            ObservationFact::ToolArgumentsDelta { fragment, .. }
-                if fragment == r#"{"token":"[redacted]"}"#
-        )));
+        let fragments = observed
+            .iter()
+            .filter_map(|observation| match &observation.fact {
+                ObservationFact::ToolArgumentsDelta { fragment, .. } => Some(fragment.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(fragments, vec![r#"{"token":""#, r#"[redacted]"}"#]);
         assert!(!format!("{observed:?}").contains("key_loop"));
+    }
+
+    #[test]
+    fn parallel_tool_argument_deltas_preserve_provider_arrival_order() {
+        let credential = CredentialValue::new(b"key_loop".to_vec());
+        let mut observed = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed, &credential);
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ToolArgumentsDelta {
+                index: 1,
+                fragment: r#"{"later":1}"#.to_string(),
+            },
+        });
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ToolArgumentsDelta {
+                index: 0,
+                fragment: r#"{"earlier":0}"#.to_string(),
+            },
+        });
+        drop(sink);
+
+        let indexes = observed
+            .iter()
+            .filter_map(|observation| match observation.fact {
+                ObservationFact::ToolArgumentsDelta { index, .. } => Some(index),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(indexes, vec![1, 0]);
     }
 
     #[test]

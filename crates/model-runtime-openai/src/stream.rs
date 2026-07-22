@@ -141,6 +141,9 @@ impl StreamDecoder {
         }
         if let Some(usage) = chunk.usage.as_ref() {
             if usage_only && usage.prompt_tokens.is_some() && usage.completion_tokens.is_some() {
+                if self.finish.is_none() {
+                    return self.violation("final usage chunk precedes the finish_reason");
+                }
                 self.final_usage_reported = true;
             }
             let usage = convert_usage(usage);
@@ -531,6 +534,17 @@ mod tests {
           \"usage\":{\"prompt_tokens\":25,\"completion_tokens\":7}}\n\n"
     }
 
+    #[track_caller]
+    fn assert_statusless_error_classifies(token: &str, expected: ProviderErrorKind) {
+        let record =
+            format!("data: {{\"error\":{{\"message\":\"failed\",\"type\":\"{token}\"}}}}\n\n");
+        let (terminal, _) = drive(&[first_chunk(), record.as_bytes()]);
+        let Some(TerminalEvidence::ProviderError(error)) = terminal else {
+            panic!("a statusless stream error is definitive provider evidence");
+        };
+        assert_eq!(error.kind, expected, "native token {token}");
+    }
+
     #[test]
     fn content_stream_gated_on_done_completes_with_assembled_content() {
         let (terminal, observations) = drive(&[
@@ -721,6 +735,19 @@ mod tests {
     }
 
     #[test]
+    fn final_usage_before_the_finish_reason_is_a_protocol_violation() {
+        let (terminal, _) = drive(&[first_chunk(), final_usage_chunk()]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("usage sent before the terminal choice cannot complete the stream");
+        };
+        assert!(matches!(
+            loss.cause,
+            LossCause::StreamProtocolViolation { .. }
+        ));
+    }
+
+    #[test]
     fn refusal_deltas_accumulate_into_refusal_evidence_at_done() {
         let (terminal, _) = drive(&[
             first_chunk(),
@@ -805,21 +832,18 @@ mod tests {
     }
 
     #[test]
-    fn statusless_stream_error_tokens_keep_their_native_classes() {
-        for (token, expected) in [
-            ("rate_limit_exceeded", ProviderErrorKind::RateLimited),
-            ("rate_limit_error", ProviderErrorKind::RateLimited),
-            ("server_error", ProviderErrorKind::ProviderInternal),
-            ("internal_server_error", ProviderErrorKind::ProviderInternal),
-        ] {
-            let record =
-                format!("data: {{\"error\":{{\"message\":\"failed\",\"type\":\"{token}\"}}}}\n\n");
-            let (terminal, _) = drive(&[first_chunk(), record.as_bytes()]);
-            let Some(TerminalEvidence::ProviderError(error)) = terminal else {
-                panic!("a statusless stream error is definitive provider evidence");
-            };
-            assert_eq!(error.kind, expected, "native token {token}");
-        }
+    fn statusless_rate_limit_tokens_keep_their_native_class() {
+        assert_statusless_error_classifies("rate_limit_exceeded", ProviderErrorKind::RateLimited);
+        assert_statusless_error_classifies("rate_limit_error", ProviderErrorKind::RateLimited);
+    }
+
+    #[test]
+    fn statusless_server_error_tokens_keep_their_native_class() {
+        assert_statusless_error_classifies("server_error", ProviderErrorKind::ProviderInternal);
+        assert_statusless_error_classifies(
+            "internal_server_error",
+            ProviderErrorKind::ProviderInternal,
+        );
     }
 
     #[test]
@@ -1118,12 +1142,13 @@ mod tests {
     }
 
     #[test]
-    fn usage_only_chunk_reports_usage_and_keeps_streaming() {
+    fn nonfinal_partial_usage_chunk_reports_usage_and_keeps_streaming() {
         let (terminal, observations) = drive(&[
             first_chunk(),
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":1,\
+            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":9,\
               \"prompt_tokens_details\":{\"cached_tokens\":4}}}\n\n",
             b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            final_usage_chunk(),
             b"data: [DONE]\n\n",
         ]);
 
@@ -1132,7 +1157,7 @@ mod tests {
             correlation: "call-1".to_string(),
             fact: ObservationFact::UsageReported(TokenUsage {
                 input_tokens: Some(9),
-                output_tokens: Some(1),
+                output_tokens: None,
                 cache_creation_input_tokens: None,
                 cache_read_input_tokens: Some(4),
             }),
