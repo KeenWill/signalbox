@@ -12,9 +12,9 @@ use signalbox_application::{
     AuthorizeModelCallOutcome, CommitModelCallObservationTransaction, CreateSessionError,
     CreateSessionOutcome, CreateSessionRequest, CreateSessionService, EligibilityNudge,
     EligibilityNudgeOutcome, EligibilitySweep, InProcessAttemptDispatchGate, LoadSessionService,
-    ModelCallAuthorizationReread, ModelCallExecutionIdGenerator, ModelCallExecutionOutcome,
-    ModelCallExecutionService, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
-    ReplaceSessionDefaultsService, RetainedCapabilityFailureStatus,
+    ModelCallAuthorizationReread, ModelCallCredentialReference, ModelCallExecutionIdGenerator,
+    ModelCallExecutionOutcome, ModelCallExecutionService, ReplaceSessionDefaultsOutcome,
+    ReplaceSessionDefaultsRequest, ReplaceSessionDefaultsService, RetainedCapabilityFailureStatus,
     RetainedModelCallObservationStatus, ScriptedModelCallProvider, ScriptedModelCallStep,
     SessionIdGenerator, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
     StartEligibleTurnService, StartupScanIdGenerator, StartupScanService,
@@ -72,6 +72,10 @@ const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_NAME: &str = "signalbox_integration";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
+
+fn model_credential_reference() -> ModelCallCredentialReference {
+    ModelCallCredentialReference::new("fixture-provider-primary")
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 struct AcceptingEligibilityNudge;
@@ -879,7 +883,8 @@ async fn checkpoint_restart_model_call(
         ResolvedProviderTarget::naming(provider),
     )])
     .expect("one restart fixture target forms a catalog");
-    let repository = PostgresModelCallRepository::new(pool.clone(), targets);
+    let repository =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
     assert!(matches!(
         repository
             .prepare_initial_call(
@@ -927,7 +932,8 @@ async fn authorize_checkpointed_model_call(
         ResolvedProviderTarget::naming(provider),
     )])
     .expect("one issued fixture target forms a catalog");
-    let repository = PostgresModelCallRepository::new(pool.clone(), targets);
+    let repository =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
     assert!(matches!(
         repository
             .prepare_initial_call(
@@ -939,7 +945,7 @@ async fn authorize_checkpointed_model_call(
                 ),
             )
             .await?,
-        PrepareInitialModelCallOutcome::Ready(_)
+        PrepareInitialModelCallOutcome::Ready { .. }
     ));
     let AuthorizeModelCallOutcome::Authorized(authorized) = repository
         .authorize_send(fixture.session, fixture.call)
@@ -964,6 +970,76 @@ async fn embedded_migrator_connects_and_is_idempotent() -> Result<(), Box<dyn Er
     Ok(())
 }
 
+/// ADR-0017 / INV-014: the forward-only nullable credential-reference column
+/// remains compatible with historical rows, while a reference pinned on a new
+/// model call cannot be replaced or cleared.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv014_model_call_credential_reference_is_nullable_but_immutable()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = checkpoint_restart_model_call(&pool, 0x6f00, false).await?;
+
+    let is_nullable: String = sqlx::query_scalar(
+        "SELECT is_nullable
+           FROM information_schema.columns
+          WHERE table_schema = 'public'
+            AND table_name = 'model_call'
+            AND column_name = 'credential_reference'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(is_nullable, "YES");
+
+    let replacement = sqlx::query(
+        "UPDATE model_call
+            SET credential_reference = 'replacement-provider-reference'
+          WHERE model_call_id = $1",
+    )
+    .bind(fixture.call.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("a pinned credential reference cannot be replaced");
+    assert_eq!(
+        replacement
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into())
+    );
+
+    let clearing = sqlx::query(
+        "UPDATE model_call
+            SET credential_reference = NULL
+          WHERE model_call_id = $1",
+    )
+    .bind(fixture.call.into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("a pinned credential reference cannot be cleared");
+    assert_eq!(
+        clearing.as_database_error().and_then(|error| error.code()),
+        Some("23514".into())
+    );
+
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT credential_reference
+           FROM model_call
+          WHERE model_call_id = $1",
+    )
+    .bind(fixture.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        stored.as_deref(),
+        Some(model_credential_reference().as_str())
+    );
+
+    pool.close().await;
+    drop(container);
+
+    Ok(())
+}
+
 /// ADR-0045: an uncertain capability-failure closure is reconciled from exact
 /// durable Prepared or complete known-failure state before any resubmission.
 #[tokio::test(flavor = "multi_thread")]
@@ -980,7 +1056,8 @@ async fn model_call_capability_failure_reread_distinguishes_pending_and_committe
         ResolvedProviderTarget::naming(provider),
     )])
     .expect("one restart fixture target forms a catalog");
-    let repository = PostgresModelCallRepository::new(pool.clone(), targets);
+    let repository =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
 
     assert_eq!(
         repository
@@ -1224,13 +1301,15 @@ async fn model_call_noncompleted_rereads_validate_each_durable_closure()
     Ok(())
 }
 
-/// S01 / S20 / S21 / INV-014 / INV-015 / INV-032: the production persistence
-/// chain checkpoints Prepared, separately authorizes send, and atomically
-/// commits exact assistant content, completion, terminal frontier, lifecycle,
-/// call, attempt, and typed outbox records.
+/// S01 / S20 / S21 / INV-014 / INV-015 / INV-032 / INV-035: the production
+/// persistence chain checkpoints Prepared with its non-secret credential
+/// reference, reloads that reference instead of a changed deployment value,
+/// separately authorizes send, and atomically commits exact assistant content,
+/// completion, terminal frontier, lifecycle, call, attempt, and typed outbox
+/// records.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_s20_s21_inv014_inv015_inv032_model_call_transactions_complete_first_reply()
+async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complete_first_reply()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0x8e1));
@@ -1299,7 +1378,12 @@ async fn s01_s20_s21_inv014_inv015_inv032_model_call_transactions_complete_first
         ResolvedProviderTarget::naming(provider_identity),
     )])
     .expect("one immutable direct target forms a catalog");
-    let repository = PostgresModelCallRepository::new(pool.clone(), targets);
+    let pinned_credential_reference = model_credential_reference();
+    let repository = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets.clone(),
+        pinned_credential_reference.clone(),
+    );
     let call = ModelCallId::from_uuid(Uuid::from_u128(0xce2));
     let PrepareInitialModelCallOutcome::Checkpointed(checkpointed_call) = repository
         .prepare_initial_call(
@@ -1316,8 +1400,16 @@ async fn s01_s20_s21_inv014_inv015_inv032_model_call_transactions_complete_first
     };
     assert_eq!(checkpointed_call, call);
 
+    let repository = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets,
+        ModelCallCredentialReference::new("replacement-provider-reference"),
+    );
     let unused_call_candidate = ModelCallId::from_uuid(Uuid::from_u128(0xce3));
-    let PrepareInitialModelCallOutcome::Ready(prepared) = repository
+    let PrepareInitialModelCallOutcome::Ready {
+        request: prepared,
+        credential_reference,
+    } = repository
         .prepare_initial_call(
             session,
             unused_call_candidate,
@@ -1330,6 +1422,7 @@ async fn s01_s20_s21_inv014_inv015_inv032_model_call_transactions_complete_first
     else {
         panic!("a later invocation must reload the committed Prepared call");
     };
+    assert_eq!(credential_reference, pinned_credential_reference);
     assert_eq!(prepared.session(), session);
     assert_eq!(prepared.turn(), turn);
     assert_eq!(prepared.attempt(), attempt);
@@ -1444,7 +1537,7 @@ async fn s01_s20_s21_inv014_inv015_inv032_model_call_transactions_complete_first
         }
     );
 
-    let durable_shape: (i64, i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+    let durable_shape: (i64, i64, i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
             (SELECT count(*) FROM model_call
               WHERE model_call_id = $1
@@ -1479,7 +1572,10 @@ async fn s01_s20_s21_inv014_inv015_inv032_model_call_transactions_complete_first
                 AND terminal_frontier_id = $6),
             (SELECT count(*) FROM turn_lifecycle
               WHERE turn_id = $5
-                AND pinned_provider_model_identity_id = $7)",
+                AND pinned_provider_model_identity_id = $7),
+            (SELECT count(*) FROM model_call
+              WHERE model_call_id = $1
+                AND credential_reference = $9)",
     )
     .bind(call.into_uuid())
     .bind(attempt.into_uuid())
@@ -1489,9 +1585,10 @@ async fn s01_s20_s21_inv014_inv015_inv032_model_call_transactions_complete_first
     .bind(terminal_frontier.into_uuid())
     .bind(provider_identity.into_uuid())
     .bind(assistant_text.as_str())
+    .bind(pinned_credential_reference.as_str())
     .fetch_one(&pool)
     .await?;
-    assert_eq!(durable_shape, (1, 1, 1, 1, 1, 3, 1, 1));
+    assert_eq!(durable_shape, (1, 1, 1, 1, 1, 3, 1, 1, 1));
 
     sqlx::query("ALTER TABLE turn_completed_outbox_event DISABLE TRIGGER USER")
         .execute(&pool)
@@ -1572,7 +1669,8 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
         ResolvedProviderTarget::naming(provider_identity),
     )])
     .expect("one immutable direct target forms a catalog");
-    let repository = PostgresModelCallRepository::new(pool.clone(), targets);
+    let repository =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
     let call = ModelCallId::from_uuid(Uuid::from_u128(0x1ce2));
     let unused_call = ModelCallId::from_uuid(Uuid::from_u128(0x1ce3));
     let assistant_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1de4));
@@ -1877,7 +1975,11 @@ async fn s04_inv014_inv034_restart_recovery_preserves_durable_target_after_catal
         ResolvedProviderTarget::naming(remapped_provider),
     )])
     .expect("one remapped target forms a catalog");
-    let repository = PostgresModelCallRepository::new(pool.clone(), remapped_targets);
+    let repository = PostgresModelCallRepository::new(
+        pool.clone(),
+        remapped_targets,
+        model_credential_reference(),
+    );
 
     let outcome = repository
         .recover_after_restart(
@@ -1962,7 +2064,8 @@ async fn s04_s08_s09_inv016_terminal_call_reclassifies_and_schedules_pending_ste
         ResolvedProviderTarget::naming(provider),
     )])
     .expect("one target is a valid catalog");
-    let mut calls = PostgresModelCallRepository::new(pool.clone(), targets);
+    let mut calls =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
     let call = ModelCallId::from_uuid(Uuid::from_u128(0xce5));
     assert!(matches!(
         calls
@@ -2198,7 +2301,8 @@ async fn s21_inv006_inv014_inv032_target_unavailable_closes_without_model_call()
 
     let targets = ModelTargetCatalog::try_from_definitions([])
         .expect("an empty immutable target catalog is valid");
-    let repository = PostgresModelCallRepository::new(pool.clone(), targets);
+    let repository =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
     let call_candidate = ModelCallId::from_uuid(Uuid::from_u128(0xcf2));
     let failure_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdf2));
     let terminal_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0xef2));

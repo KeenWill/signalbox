@@ -1,14 +1,17 @@
-//! Local scripted assistant-reply harness.
+//! Local assistant-reply harness.
 //!
 //! This binary is deliberately not the ADR-0019 client protocol. It accepts
-//! one input and one deterministic reply, runs the real scheduler and
-//! PostgreSQL path, then prints the resulting semantic transcript.
+//! either one deterministic reply or an explicit Anthropic smoke mode, runs
+//! the real scheduler and PostgreSQL path, then prints the resulting semantic
+//! transcript.
 
 use std::{
     env,
     error::Error,
+    ffi::OsString,
     fmt,
     future::{Future, pending},
+    path::PathBuf,
     process::ExitCode,
     time::Duration,
 };
@@ -16,9 +19,10 @@ use std::{
 use signalbox_application::{
     ClassifyOperatorFailure, CreateSessionOutcome, CreateSessionRequest, CreateSessionService,
     EligibilityNudge, EligibilityNudgeOutcome, EligibilityPass, EligibilityWorkSource,
-    InProcessAttemptDispatchGate, OperatorFailureClass, SchedulerLoop, StartEligibleTurnService,
-    SubmitInputOutcome, SubmitInputRequest, SubmitInputService, UuidV7SessionIdGenerator,
-    UuidV7StartEligibleTurnIdGenerator, UuidV7SubmitInputIdGenerator,
+    InProcessAttemptDispatchGate, ModelCallCredentialReference, OperatorFailureClass,
+    SchedulerLoop, StartEligibleTurnService, SubmitInputOutcome, SubmitInputRequest,
+    SubmitInputService, UuidV7SessionIdGenerator, UuidV7StartEligibleTurnIdGenerator,
+    UuidV7SubmitInputIdGenerator,
 };
 use signalbox_domain::{
     AssistantText, DeliveryRequest, DirectModelSelection, DurableCommandId, ModelSelectionOverride,
@@ -27,7 +31,14 @@ use signalbox_domain::{
     SessionConfigurationDefaultsVersion, SessionId, SubmitInputAppliedResult, SubmitInputResult,
     TurnId, UserContent,
 };
-use signalbox_hubd::{ActivatedTurnPass, FatalExecutionSupervisor, PostgresScriptedModelExecution};
+use signalbox_hubd::{
+    ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, FatalExecutionSignal,
+    FatalExecutionSupervisor, FileCredentialAccess, HubModelConfiguration,
+    PostgresProviderModelExecution, PostgresScriptedModelExecution,
+};
+use signalbox_model_provider_runtime::RuntimeModelCallProvider;
+use signalbox_model_runtime::CredentialReference;
+use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
 use signalbox_persistence::{
     create_session::CreateSessionRepository, local_test_connection_options, migrate,
     model_execution::PostgresModelCallRepository, start_eligible_turn::StartEligibleTurnRepository,
@@ -42,12 +53,15 @@ use tokio::{
 use uuid::Uuid;
 
 const DATABASE_URL_ENVIRONMENT: &str = "SIGNALBOX_DEBUG_DATABASE_URL";
-const TRANSCRIPT_WAIT: Duration = Duration::from_secs(15);
+const MODEL_CONFIGURATION_FILE_ENVIRONMENT: &str = "SIGNALBOX_CONFIG_FILE";
+const ANTHROPIC_API_KEY_FILE_ENVIRONMENT: &str = "ANTHROPIC_API_KEY_FILE";
+const TRANSCRIPT_WAIT: Duration = Duration::from_secs(120);
 const SCHEDULER_SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DebugDriverError {
     Usage,
+    Configuration,
     Database,
     InvalidText,
     CreateSession,
@@ -60,7 +74,10 @@ enum DebugDriverError {
 impl fmt::Display for DebugDriverError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
-            Self::Usage => "set SIGNALBOX_DEBUG_DATABASE_URL and pass INPUT_TEXT SCRIPTED_REPLY",
+            Self::Usage => {
+                "set SIGNALBOX_DEBUG_DATABASE_URL and pass INPUT_TEXT SCRIPTED_REPLY, or pass --anthropic SELECTION_UUID INPUT_TEXT with SIGNALBOX_CONFIG_FILE and ANTHROPIC_API_KEY_FILE"
+            }
+            Self::Configuration => "debug provider configuration is invalid",
             Self::Database => "debug database operation failed",
             Self::InvalidText => "input or scripted reply is not admitted text",
             Self::CreateSession => "debug session creation failed",
@@ -77,7 +94,18 @@ impl Error for DebugDriverError {}
 struct DebugArguments {
     database_url: String,
     input: String,
-    reply: String,
+    provider: DebugProvider,
+}
+
+enum DebugProvider {
+    Scripted {
+        reply: String,
+    },
+    Anthropic {
+        selection: DirectModelSelection,
+        model_configuration_file: PathBuf,
+        api_key_file: PathBuf,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -200,16 +228,48 @@ impl DebugArguments {
                 }
             })?;
         let mut arguments = env::args().skip(1);
-        let input = arguments.next().ok_or(DebugDriverError::Usage)?;
-        let reply = arguments.next().ok_or(DebugDriverError::Usage)?;
-        if arguments.next().is_some() {
-            return Err(DebugDriverError::Usage);
+        let first = arguments.next().ok_or(DebugDriverError::Usage)?;
+        if first == "--anthropic" {
+            let selection = arguments
+                .next()
+                .and_then(|value| Uuid::parse_str(&value).ok())
+                .map(DirectModelSelection::from_uuid)
+                .ok_or(DebugDriverError::Usage)?;
+            let input = arguments.next().ok_or(DebugDriverError::Usage)?;
+            if arguments.next().is_some() {
+                return Err(DebugDriverError::Usage);
+            }
+            Ok(Self {
+                database_url,
+                input,
+                provider: DebugProvider::Anthropic {
+                    selection,
+                    model_configuration_file: required_environment_path(
+                        MODEL_CONFIGURATION_FILE_ENVIRONMENT,
+                    )?,
+                    api_key_file: required_environment_path(ANTHROPIC_API_KEY_FILE_ENVIRONMENT)?,
+                },
+            })
+        } else {
+            let reply = arguments.next().ok_or(DebugDriverError::Usage)?;
+            if arguments.next().is_some() {
+                return Err(DebugDriverError::Usage);
+            }
+            Ok(Self {
+                database_url,
+                input: first,
+                provider: DebugProvider::Scripted { reply },
+            })
         }
-        Ok(Self {
-            database_url,
-            input,
-            reply,
-        })
+    }
+}
+
+fn required_environment_path(name: &str) -> Result<PathBuf, DebugDriverError> {
+    let value = env::var_os(name).ok_or(DebugDriverError::Usage)?;
+    if value == OsString::new() {
+        Err(DebugDriverError::Usage)
+    } else {
+        Ok(PathBuf::from(value))
     }
 }
 
@@ -270,6 +330,51 @@ fn format_transcript_text(role: &str, text: &str) -> String {
     format!("{role}: {text:?}")
 }
 
+async fn drive_scheduler<WorkSource, Pass>(
+    mut scheduler: SchedulerLoop<WorkSource, Pass>,
+    fatal_execution: FatalExecutionSignal,
+    pass_failure: DebugPassFailureSignal,
+    pool: &sqlx::PgPool,
+    session: SessionId,
+    turn: TurnId,
+) -> Result<Vec<TranscriptRow>, DebugDriverError>
+where
+    WorkSource: EligibilityWorkSource + Send + 'static,
+    WorkSource::Error: ClassifyOperatorFailure,
+    Pass: EligibilityPass + Send + 'static,
+    Pass::Error: ClassifyOperatorFailure + Send + 'static,
+{
+    let (shutdown_sender, shutdown_receiver) = oneshot::channel();
+    let fatal_shutdown = fatal_execution.clone();
+    let pass_failure_shutdown = pass_failure.clone();
+    let scheduler_task = tokio::spawn(async move {
+        scheduler
+            .run_until(async move {
+                tokio::select! {
+                    _ = shutdown_receiver => {}
+                    () = fatal_shutdown.wait() => {}
+                    () = pass_failure_shutdown.wait() => {}
+                }
+            })
+            .await
+    });
+    let fatal_observation = fatal_execution.clone();
+    let pass_failure_observation = pass_failure.clone();
+    let transcript = timeout(TRANSCRIPT_WAIT, async {
+        tokio::select! {
+            transcript = poll_terminal_transcript(pool, session, turn) => transcript,
+            () = fatal_observation.wait() => Err(DebugDriverError::Scheduler),
+            () = pass_failure_observation.wait() => Err(DebugDriverError::Scheduler),
+        }
+    })
+    .await;
+    stop_scheduler(shutdown_sender, scheduler_task).await?;
+    if fatal_execution.is_triggered() || pass_failure.is_triggered() {
+        return Err(DebugDriverError::Scheduler);
+    }
+    transcript.map_err(|_| DebugDriverError::TranscriptTimeout)?
+}
+
 async fn stop_scheduler(
     shutdown_sender: oneshot::Sender<()>,
     mut scheduler_task: JoinHandle<signalbox_application::SchedulerLoopExit>,
@@ -289,11 +394,55 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
     let DebugArguments {
         database_url,
         input,
-        reply,
+        provider,
     } = arguments;
     let content = UserContent::try_text(input).map_err(|_| DebugDriverError::InvalidText)?;
-    let assistant_reply =
-        AssistantText::try_new(reply).map_err(|_| DebugDriverError::InvalidText)?;
+    let (selection, targets, credential_reference, provider) = match provider {
+        DebugProvider::Scripted { reply } => {
+            let selection = DirectModelSelection::from_uuid(Uuid::now_v7());
+            let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+                selection,
+                ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::now_v7())),
+            )])
+            .map_err(|_| DebugDriverError::UnexpectedOutcome)?;
+            (
+                selection,
+                targets,
+                ModelCallCredentialReference::new("scripted-test"),
+                DebugProviderRuntime::Scripted(
+                    AssistantText::try_new(reply).map_err(|_| DebugDriverError::InvalidText)?,
+                ),
+            )
+        }
+        DebugProvider::Anthropic {
+            selection,
+            model_configuration_file,
+            api_key_file,
+        } => {
+            let configuration = HubModelConfiguration::read(&model_configuration_file)
+                .map_err(|_| DebugDriverError::Configuration)?;
+            if !configuration.contains_selection(selection) {
+                return Err(DebugDriverError::Configuration);
+            }
+            let credential_access = FileCredentialAccess::new(
+                api_key_file,
+                CredentialReference::new(ANTHROPIC_CREDENTIAL_REFERENCE),
+            );
+            let credential_reference = ModelCallCredentialReference::new(
+                credential_access.credential_reference().as_str(),
+            );
+            let runtime = AnthropicRuntime::new(AnthropicConfig::new(), credential_access)
+                .map_err(|_| DebugDriverError::Configuration)?;
+            let provider =
+                RuntimeModelCallProvider::new(runtime, configuration.runtime_model_catalog());
+            (
+                selection,
+                configuration.target_catalog(),
+                credential_reference,
+                DebugProviderRuntime::Anthropic(provider),
+            )
+        }
+    };
     let connection_options =
         local_test_connection_options(&database_url).map_err(|_| DebugDriverError::Database)?;
     let pool = PgPoolOptions::new()
@@ -305,12 +454,6 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
         .await
         .map_err(|_| DebugDriverError::Database)?;
 
-    let selection = DirectModelSelection::from_uuid(Uuid::now_v7());
-    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
-        selection,
-        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::now_v7())),
-    )])
-    .map_err(|_| DebugDriverError::UnexpectedOutcome)?;
     let mut create = CreateSessionService::new(
         UuidV7SessionIdGenerator,
         CreateSessionRepository::new(pool.clone()),
@@ -360,56 +503,60 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
     let turn = origin.turn();
     let work_source = DebugSessionWorkSource::new(session);
 
-    let gate = InProcessAttemptDispatchGate::default();
-    let (execution, fatal_execution) =
-        FatalExecutionSupervisor::new(PostgresScriptedModelExecution::new(
-            PostgresModelCallRepository::new(pool.clone(), targets),
-            gate,
-            assistant_reply,
-        ));
-    let pass = ActivatedTurnPass::new(
-        StartEligibleTurnService::new(
-            UuidV7StartEligibleTurnIdGenerator,
-            StartEligibleTurnRepository::new(pool.clone()),
-        ),
-        execution,
+    let repository = PostgresModelCallRepository::new(pool.clone(), targets, credential_reference);
+    let activation = StartEligibleTurnService::new(
+        UuidV7StartEligibleTurnIdGenerator,
+        StartEligibleTurnRepository::new(pool.clone()),
     );
-    let (pass, pass_failure) = ObservableDebugPass::new(pass);
-    let mut scheduler = SchedulerLoop::new(work_source, pass);
-    let (shutdown_sender, shutdown_receiver) = oneshot::channel();
-    let fatal_shutdown = fatal_execution.clone();
-    let pass_failure_shutdown = pass_failure.clone();
-    let scheduler_task = tokio::spawn(async move {
-        scheduler
-            .run_until(async move {
-                tokio::select! {
-                    _ = shutdown_receiver => {}
-                    () = fatal_shutdown.wait() => {}
-                    () = pass_failure_shutdown.wait() => {}
-                }
-            })
-            .await
-    });
-
-    let fatal_observation = fatal_execution.clone();
-    let pass_failure_observation = pass_failure.clone();
-    let transcript = timeout(TRANSCRIPT_WAIT, async {
-        tokio::select! {
-            transcript = poll_terminal_transcript(&pool, session, turn) => transcript,
-            () = fatal_observation.wait() => Err(DebugDriverError::Scheduler),
-            () = pass_failure_observation.wait() => Err(DebugDriverError::Scheduler),
+    let transcript = match provider {
+        DebugProviderRuntime::Scripted(reply) => {
+            let (execution, fatal_execution) =
+                FatalExecutionSupervisor::new(PostgresScriptedModelExecution::new(
+                    repository,
+                    InProcessAttemptDispatchGate::default(),
+                    reply,
+                ));
+            let (pass, pass_failure) =
+                ObservableDebugPass::new(ActivatedTurnPass::new(activation, execution));
+            drive_scheduler(
+                SchedulerLoop::new(work_source, pass),
+                fatal_execution,
+                pass_failure,
+                &pool,
+                session,
+                turn,
+            )
+            .await?
         }
-    })
-    .await;
-    stop_scheduler(shutdown_sender, scheduler_task).await?;
-    if fatal_execution.is_triggered() || pass_failure.is_triggered() {
-        return Err(DebugDriverError::Scheduler);
-    }
-    let transcript = transcript.map_err(|_| DebugDriverError::TranscriptTimeout)??;
+        DebugProviderRuntime::Anthropic(provider) => {
+            let (execution, fatal_execution) =
+                FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
+                    repository,
+                    InProcessAttemptDispatchGate::default(),
+                    provider,
+                ));
+            let (pass, pass_failure) =
+                ObservableDebugPass::new(ActivatedTurnPass::new(activation, execution));
+            drive_scheduler(
+                SchedulerLoop::new(work_source, pass),
+                fatal_execution,
+                pass_failure,
+                &pool,
+                session,
+                turn,
+            )
+            .await?
+        }
+    };
     print_transcript(transcript);
 
     pool.close().await;
     Ok(())
+}
+
+enum DebugProviderRuntime {
+    Scripted(AssistantText),
+    Anthropic(RuntimeModelCallProvider<AnthropicRuntime<FileCredentialAccess>>),
 }
 
 #[tokio::main]

@@ -41,6 +41,83 @@ the deferred authority.
 startup-scan completion, hub boot, and the steering/cancellation milestone's
 reopening obligation.
 
+## 2026-07-22 — Pin model-call credential references on the call record
+
+**Context.** [ADR-0017](decisions/0017-credential-lifecycle.md) requires the
+non-secret credential reference selected with an exact provider target to
+survive restart, while deferring its concrete persistence shape. The initial
+provider composition instead supplied a process-wide reference during request
+preparation, which could re-derive a different scope for already-prepared work
+after deployment configuration changed.
+
+**Decision.** Add a forward-only nullable `credential_reference` column to the
+model-call record. Every newly prepared call writes its current non-secret
+reference in the same transaction that pins the exact target. A resumed prepared
+call must reload that stored reference and fails closed if a historical row
+predating the column has none; startup recovery still reads no credential. Carry
+the reloaded application value into the runtime bridge, which converts it to the
+runtime boundary type only while preparing the request.
+
+**Rejected alternatives.** Re-deriving the reference from current deployment
+configuration violates ADR-0017 across restart. Storing credential bytes is
+forbidden. Putting the reference in domain values would cross the credential
+boundary, while placing it only on the turn would obscure which physical call
+consumed it and complicate later continuation policy.
+
+**Affects.** The model-call migration and persistence adapter, application
+prepared-operation API and domain spine, runtime bridge, hub composition, and
+INV-035 enforcement index.
+
+## 2026-07-22 — Anthropic credentials come from one reread file
+
+**Context.** The first production Anthropic composition needs to resolve
+ADR-0017's non-secret credential reference during each request preparation,
+without putting the secret in process arguments, model configuration, durable
+records, telemetry, or tests. The owner selected the deployment channel for this
+milestone.
+
+**Decision.** Require `ANTHROPIC_API_KEY_FILE` at the hubd composition root.
+Bind its path to the non-secret `anthropic-primary` reference and reread the
+file as raw bytes for every request preparation, so file replacement rotates the
+credential without a restart. Neither the path nor bytes appear in shared
+diagnostics. The file must contain only the header-ready key bytes.
+
+**Rejected alternatives.** Reading key bytes directly from an environment
+variable exposes the secret through a broader process channel. Caching the file
+at startup hides rotation. Putting the path or value in model TOML mixes secret
+delivery with non-secret model policy.
+
+**Affects.** `apps/hubd` production and Anthropic debug composition,
+`FileCredentialAccess`, deployment documentation, and INV-035 tests; no test
+requires a credential or live provider.
+
+## 2026-07-22 — Versioned static model configuration maps durable keys to Anthropic
+
+**Context.** The earlier static-TOML decision deliberately left its layout open.
+Production model execution now needs one correlated source for immutable domain
+selection/target keys, exact Anthropic model spellings, the required
+output-token ceiling, and alias definitions.
+
+**Decision.** Require `SIGNALBOX_CONFIG_FILE` to name strict TOML version 1.
+Each `models` row supplies `selection_id`, `target_id`, provider `anthropic`, an
+unpadded nonempty `provider_model`, and a positive `max_output_tokens`; each
+optional `aliases` row maps `alias_id` to a configured `selection_id`. Reject
+unknown fields, duplicate selections or aliases, conflicting target meanings,
+dangling aliases, unsupported providers, and invalid values at startup. Use
+buffered delivery with otherwise unset runtime settings. Parse with narrowly
+featured `toml_edit`, already present in the resolved workspace dependency
+graph, and construct checked domain/runtime values explicitly.
+
+**Rejected alternatives.** Deriving durable UUIDs from provider strings would
+make normalization an implicit hash convention. Separate domain and runtime
+files could drift after target resolution. Environment variables per model do
+not provide a versioned, reviewable catalog. A hand-written TOML parser would
+duplicate syntax handling without strengthening the checked mappings.
+
+**Affects.** `apps/hubd` configuration and example file, the runtime-port bridge
+catalog, production target resolution, and the real-provider smoke command; no
+database schema or accepted ADR changes.
+
 ## 2026-07-22 — Direct dependencies for the offline hub driver
 
 **Context.** The smoke-critical composition slice adds a local executable that

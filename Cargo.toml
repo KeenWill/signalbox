@@ -7,6 +7,7 @@ members = [
     "crates/model-runtime",
     "crates/model-runtime-anthropic",
     "crates/model-runtime-openai",
+    "crates/model-provider-runtime",
     "crates/persistence",
 ]
 resolver = "3"

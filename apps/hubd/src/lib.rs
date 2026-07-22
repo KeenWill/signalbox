@@ -9,15 +9,22 @@ use std::{error::Error, fmt, future::Future};
 use signalbox_application::{
     ClassifyOperatorFailure, EligibilityPass, InProcessAttemptDispatchGate,
     ModelCallExecutionError, ModelCallExecutionOutcome, ModelCallExecutionService,
-    OperatorFailureClass, ScriptedModelCallError, ScriptedModelCallProvider, ScriptedModelCallStep,
-    StartEligibleTurnIdGenerator, StartEligibleTurnOutcome, StartEligibleTurnService,
-    StartEligibleTurnTransaction, UuidV7ModelCallExecutionIdGenerator,
+    ModelCallProvider, OperatorFailureClass, ScriptedModelCallError, ScriptedModelCallProvider,
+    ScriptedModelCallStep, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
+    StartEligibleTurnService, StartEligibleTurnTransaction, UuidV7ModelCallExecutionIdGenerator,
 };
 use signalbox_domain::{ActivatedAcceptedInputTurn, AssistantText, SessionId};
 use signalbox_persistence::model_execution::{
     ModelCallRepositoryError, PostgresModelCallRepository,
 };
 use tokio::sync::watch;
+
+mod configuration;
+
+pub use configuration::{
+    ANTHROPIC_CREDENTIAL_REFERENCE, FileCredentialAccess, HubModelConfiguration,
+    HubModelConfigurationError,
+};
 
 /// Per-activation model execution constructed by the hub composition root.
 pub trait ActivatedTurnExecution {
@@ -393,6 +400,95 @@ type PostgresScriptedModelExecutionStageError = ModelCallExecutionError<
 /// same-incarnation retained-state reconciliation when one occurred.
 pub type PostgresScriptedModelExecutionError =
     RetainedModelExecutionError<PostgresScriptedModelExecutionStageError>;
+
+/// Classified provider execution failure, including a failed same-incarnation
+/// retained-state reconciliation when one occurred.
+pub type PostgresProviderModelExecutionError<ProviderError> = RetainedModelExecutionError<
+    ModelCallExecutionError<
+        ModelCallRepositoryError,
+        ModelCallRepositoryError,
+        ModelCallRepositoryError,
+        ProviderError,
+        ModelCallRepositoryError,
+    >,
+>;
+
+/// Production execution factory over PostgreSQL orchestration and one cloned
+/// provider-port adapter per activation.
+#[derive(Clone, Debug)]
+pub struct PostgresProviderModelExecution<Provider> {
+    repository: PostgresModelCallRepository,
+    gate: InProcessAttemptDispatchGate,
+    provider: Provider,
+}
+
+impl<Provider> PostgresProviderModelExecution<Provider> {
+    /// Supplies shared persistence, the per-attempt gate, and provider port.
+    pub const fn new(
+        repository: PostgresModelCallRepository,
+        gate: InProcessAttemptDispatchGate,
+        provider: Provider,
+    ) -> Self {
+        Self {
+            repository,
+            gate,
+            provider,
+        }
+    }
+}
+
+impl<Provider> ActivatedTurnExecution for PostgresProviderModelExecution<Provider>
+where
+    Provider: ModelCallProvider + Clone + Send + 'static,
+    Provider::Capability: Send,
+    Provider::Error: Send + 'static,
+{
+    type Error = PostgresProviderModelExecutionError<Provider::Error>;
+
+    fn execute(
+        &self,
+        activated: Box<ActivatedAcceptedInputTurn>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let repository = self.repository.clone();
+        let gate = self.gate.clone();
+        let provider = self.provider.clone();
+        async move {
+            let session = activated.session();
+            drop(activated);
+            let mut service = ModelCallExecutionService::new(
+                UuidV7ModelCallExecutionIdGenerator,
+                repository.clone(),
+                repository.clone(),
+                repository.clone(),
+                repository,
+                provider,
+                gate,
+            );
+            loop {
+                let outcome = match service.execute(session).await {
+                    Ok(outcome) => outcome,
+                    Err(error) if service.retained_state().is_some() => {
+                        // Preserve same-incarnation evidence for one
+                        // authoritative reconciliation pass before fatal
+                        // supervision hands authority to startup recovery.
+                        reconcile_retained_once(error, service.execute(session)).await?
+                    }
+                    Err(error) => return Err(RetainedModelExecutionError::Primary(error)),
+                };
+                match outcome {
+                    ModelCallExecutionOutcome::Checkpointed(_) => continue,
+                    ModelCallExecutionOutcome::NoWork
+                    | ModelCallExecutionOutcome::TargetUnavailable(_)
+                    | ModelCallExecutionOutcome::PendingSteering { .. }
+                    | ModelCallExecutionOutcome::CapabilityKnownFailure(_)
+                    | ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(_)
+                    | ModelCallExecutionOutcome::ObservationCommitted(_)
+                    | ModelCallExecutionOutcome::ObservationAlreadyCommitted(_) => return Ok(()),
+                }
+            }
+        }
+    }
+}
 
 /// Debug/test-only execution factory using the deterministic scripted provider.
 #[derive(Clone, Debug)]
