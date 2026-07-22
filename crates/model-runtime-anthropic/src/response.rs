@@ -1,5 +1,7 @@
 //! Buffered-response decoding and shared response-fact mapping.
 
+use std::collections::BTreeSet;
+
 use signalbox_model_runtime::{
     AssistantPart, BoundaryLossEvidence, CompletionEvidence, ExchangeFacts, FinishReason,
     LossCause, Observation, ObservationFact, ObservationSink, ProviderMessageId,
@@ -155,6 +157,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
         });
     }
     let mut content = Vec::new();
+    let mut tool_call_ids = BTreeSet::new();
     for raw_block in response.content {
         let block = match parse_response_block(&raw_block) {
             Ok(block) => block,
@@ -196,6 +199,20 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             }
             Some(part) => {
                 if let AssistantPart::ToolCall(proposal) = &part {
+                    if !tool_call_ids.insert(proposal.id.as_str().to_string()) {
+                        return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+                            cause: LossCause::ResponseUnintelligible {
+                                detail: format!(
+                                    "success response repeats tool-call identifier {:?}",
+                                    proposal.id.as_str()
+                                ),
+                            },
+                            exchange,
+                            reported_model,
+                            finish_reported: None,
+                            usage,
+                        });
+                    }
                     sink.observe(Observation {
                         correlation: correlation.clone(),
                         fact: ObservationFact::ToolCallProposed(proposal.clone()),
@@ -657,6 +674,29 @@ mod tests {
         );
 
         assert!(matches!(evidence, TerminalEvidence::BoundaryLoss(_)));
+    }
+
+    #[test]
+    fn duplicate_tool_call_ids_are_boundary_loss() {
+        let (evidence, observations) = decode(
+            r#"{"id":"msg_1","type":"message","role":"assistant",
+                "model":"model-exact-1","content":[
+                {"type":"tool_use","id":"toolu_1","name":"first","input":{}},
+                {"type":"tool_use","id":"toolu_1","name":"second","input":{}}],
+                "stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}"#,
+        );
+
+        assert!(matches!(evidence, TerminalEvidence::BoundaryLoss(_)));
+        assert_eq!(
+            observations
+                .iter()
+                .filter(|observation| {
+                    matches!(observation.fact, ObservationFact::ToolCallProposed(_))
+                })
+                .count(),
+            1,
+            "the duplicate proposal is rejected before observation"
+        );
     }
 
     #[test]
