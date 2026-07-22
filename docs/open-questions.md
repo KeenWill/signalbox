@@ -47,13 +47,16 @@ accepted records; those numbers remain reserved for their topics.
 
 ## Model-input projection
 
-- **System prompts, projection, and summarization.** The
+- **Projection and summarization beyond the M3 role mapping.** The
   [M3 rendering decision](decisions.md#2026-07-22--render-the-initial-model-frontier-by-semantic-entry-role)
   fixes only the admitted text-entry role mapping and exact frontier order.
-  System-prompt construction, prompt templating, context projection or omission,
-  summarization policy, and durable summary provenance or refresh semantics
-  remain open. Blocks those extensions, not the admitted text-only M3 rendering.
-  (S02, S17)
+  Semantic compaction, selective omission, summarization, rebasing, and
+  context-window policy remain routed to
+  [ADR-0030's extension gate](decisions/0030-context-frontier-snapshots.md#extension-implications)
+  and
+  [ADR-0036's open-question routing](decisions/0036-initial-semantic-transcript-entries.md#open-questions),
+  including their foundation-decision requirements. Blocks those extensions, not
+  the admitted text-only M3 rendering. (S02, S17)
 
 ## Delegation (reserved ADR-0002)
 
@@ -109,12 +112,12 @@ accepted records; those numbers remain reserved for their topics.
 
 ## Configuration categories
 
-- **Additional effective-configuration categories.** Custom parameters,
-  instructions, tool enablement/configuration, placement constraints, per-turn
-  resources, and interpreting-policy selections are unavailable baseline
-  capabilities; a future subsystem ADR must extend the request, session-default,
-  override, and effective-value algebras together (ADR-0027). Blocks those
-  capabilities. (S02, S05, S13–S16)
+- **Additional effective-configuration categories.** System prompts, prompt
+  templates, custom parameters, instructions, tool enablement/configuration,
+  placement constraints, per-turn resources, and interpreting-policy selections
+  are unavailable baseline capabilities; a future subsystem ADR must extend the
+  request, session-default, override, and effective-value algebras together
+  (ADR-0027). Blocks those capabilities. (S02, S05, S13–S16)
 
 ## Model fallback and provenance (reserved ADR-0006, ADR-0007)
 
