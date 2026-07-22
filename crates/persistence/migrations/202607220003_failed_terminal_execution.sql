@@ -160,7 +160,10 @@ ALTER TABLE turn_lifecycle
                 AND terminal_attempt_id IS NOT NULL
                 AND terminal_model_call_id IS NOT NULL
             )
-        );
+        ) NOT VALID;
+
+ALTER TABLE turn_lifecycle
+    VALIDATE CONSTRAINT turn_lifecycle_state_payload_shape;
 
 CREATE FUNCTION assert_failed_terminal_execution_final_state(
     checked_turn_id uuid

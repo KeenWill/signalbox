@@ -2333,7 +2333,7 @@ async fn s21_inv006_inv014_inv032_target_unavailable_closes_without_model_call()
                 AND state_kind = 'terminal'
                 AND terminal_disposition_kind = 'failed'
                 AND terminal_frontier_id = $5
-                AND terminal_attempt_id IS NULL
+                AND terminal_attempt_id = $2
                 AND terminal_model_call_id IS NULL),
             (SELECT count(*) FROM turn_failed_outbox_event
               WHERE turn_id = $4
@@ -6014,6 +6014,7 @@ async fn s09_inv009_inv015_start_eligible_turn_preserves_failed_predecessor_pref
             SET state_kind = 'terminal',
                 terminal_frontier_id = $1,
                 active_phase_kind = NULL,
+                terminal_attempt_id = current_attempt_id,
                 current_attempt_id = NULL,
                 terminal_disposition_kind = 'failed'
           WHERE turn_id = $2",
@@ -6514,6 +6515,7 @@ async fn s01_inv006_inv009_inv015_turn_storage_enforces_lifecycle_consistency()
             "UPDATE turn_lifecycle
                 SET state_kind = 'terminal',
                     active_phase_kind = NULL,
+                    terminal_attempt_id = current_attempt_id,
                     current_attempt_id = NULL,
                     terminal_frontier_id = $1,
                     terminal_disposition_kind = 'failed'
@@ -6578,6 +6580,7 @@ async fn s01_inv006_inv009_inv015_turn_storage_enforces_lifecycle_consistency()
         "UPDATE turn_lifecycle
             SET state_kind = 'terminal',
                 active_phase_kind = NULL,
+                terminal_attempt_id = current_attempt_id,
                 current_attempt_id = NULL,
                 terminal_frontier_id = $1,
                 terminal_disposition_kind = 'failed'
@@ -7268,6 +7271,7 @@ async fn occupied_slot_handling_composes_with_service_activated_after_lineage_tu
             SET state_kind = 'terminal',
                 terminal_frontier_id = $1,
                 active_phase_kind = NULL,
+                terminal_attempt_id = current_attempt_id,
                 current_attempt_id = NULL,
                 terminal_disposition_kind = 'failed'
           WHERE turn_id = $2",
@@ -7597,6 +7601,7 @@ async fn occupied_slot_schema_constraints_and_checked_decode_fail_closed()
         "UPDATE turn_lifecycle
             SET state_kind = 'terminal',
                 active_phase_kind = NULL,
+                terminal_attempt_id = current_attempt_id,
                 current_attempt_id = NULL,
                 terminal_frontier_id = $1,
                 terminal_disposition_kind = 'failed'
@@ -7982,6 +7987,7 @@ async fn inv016_pending_steering_and_source_terminalization_serialize() -> Resul
         "UPDATE turn_lifecycle
             SET state_kind = 'terminal',
                 active_phase_kind = NULL,
+                terminal_attempt_id = current_attempt_id,
                 current_attempt_id = NULL,
                 terminal_frontier_id = $1,
                 terminal_disposition_kind = 'failed'

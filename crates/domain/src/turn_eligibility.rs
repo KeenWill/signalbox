@@ -5291,6 +5291,54 @@ mod tests {
         );
     }
 
+    #[track_caller]
+    fn assert_failed_terminal_call_provenance_is_complete(
+        session: &Session,
+        failed: OriginFixture,
+        attempt: TurnAttemptId,
+        call_disposition: ModelCallDisposition,
+    ) {
+        let origin_entry = FailedTerminalReconstitutionFacts::matching_origin_entry();
+        let starting_frontier = FailedTerminalReconstitutionFacts::matching_starting_frontier();
+        let call_id = model_call_id(50);
+        let mut facts = FailedTerminalReconstitutionFacts::matching(session, failed);
+        facts.replace_terminal_execution(Some(FailedTurnExecutionReconstitutionInput::with_call(
+            failed.turn(),
+            attempt,
+            UnstoppedAttemptDisposition::KnownFailure,
+            call_id,
+        )));
+        let call = ModelCallReconstitutionInput::new(
+            call_id,
+            failed.turn(),
+            attempt,
+            FrozenModelSelection::Direct(direct(1)),
+            ResolvedProviderTarget::naming(provider_model_identity(51)),
+            starting_frontier.id(),
+            ModelCallReconstitutionState::Terminal(call_disposition),
+        );
+        let projection = facts
+            .input()
+            .with_model_call_facts(
+                vec![crate::PinnedProviderTargetReconstitutionInput::new(
+                    failed.turn(),
+                    call.target(),
+                )],
+                vec![call],
+            )
+            .reconstitute()
+            .expect("failed terminal call provenance is fully correlated");
+        assert_eq!(
+            projection.attempt_owners.get(&attempt),
+            Some(&failed.turn())
+        );
+        assert!(
+            projection
+                .semantic_entries
+                .contains_key(&origin_entry.reference(session))
+        );
+    }
+
     /// S02 / S03 / INV-006: failed-terminal reconstitution preserves all
     /// three accepted execution shapes: direct failure, attempt-only startup
     /// loss, and an attempt with an exact KnownFailed or Cancelled call.
@@ -5323,52 +5371,18 @@ mod tests {
             Some(&failed.turn())
         );
 
-        let origin_entry = FailedTerminalReconstitutionFacts::matching_origin_entry();
-        let starting_frontier = FailedTerminalReconstitutionFacts::matching_starting_frontier();
-        let call_id = model_call_id(50);
-        for call_disposition in [
+        assert_failed_terminal_call_provenance_is_complete(
+            &session,
+            failed,
+            attempt,
             ModelCallDisposition::KnownFailed,
+        );
+        assert_failed_terminal_call_provenance_is_complete(
+            &session,
+            failed,
+            attempt,
             ModelCallDisposition::Cancelled,
-        ] {
-            let mut facts = FailedTerminalReconstitutionFacts::matching(&session, failed);
-            facts.replace_terminal_execution(Some(
-                FailedTurnExecutionReconstitutionInput::with_call(
-                    failed.turn(),
-                    attempt,
-                    UnstoppedAttemptDisposition::KnownFailure,
-                    call_id,
-                ),
-            ));
-            let call = ModelCallReconstitutionInput::new(
-                call_id,
-                failed.turn(),
-                attempt,
-                FrozenModelSelection::Direct(direct(1)),
-                ResolvedProviderTarget::naming(provider_model_identity(51)),
-                starting_frontier.id(),
-                ModelCallReconstitutionState::Terminal(call_disposition),
-            );
-            let projection = facts
-                .input()
-                .with_model_call_facts(
-                    vec![crate::PinnedProviderTargetReconstitutionInput::new(
-                        failed.turn(),
-                        call.target(),
-                    )],
-                    vec![call],
-                )
-                .reconstitute()
-                .expect("failed terminal call provenance is fully correlated");
-            assert_eq!(
-                projection.attempt_owners.get(&attempt),
-                Some(&failed.turn())
-            );
-            assert!(
-                projection
-                    .semantic_entries
-                    .contains_key(&origin_entry.reference(&session))
-            );
-        }
+        );
     }
 
     /// S02 / S03 / INV-006: failed-terminal attempt provenance fails closed
