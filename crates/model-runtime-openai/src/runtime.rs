@@ -326,7 +326,17 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
             match chunk {
                 // End of transport without `[DONE]`: the explicit
                 // incomplete-stream fact, never silent success.
-                None => return decoder.lost(StreamInterruption::EndOfStream),
+                None => {
+                    return match framing.finish() {
+                        signalbox_model_runtime::SseTermination::Clean => {
+                            decoder.lost(StreamInterruption::EndOfStream)
+                        }
+                        signalbox_model_runtime::SseTermination::TruncatedRecord => decoder
+                            .violation_evidence(
+                                "transport ended inside an incomplete SSE record".to_string(),
+                            ),
+                    };
+                }
                 Some(Err(error)) => {
                     let facts = transport_facts(&error);
                     let interruption = if error.is_timeout() {
