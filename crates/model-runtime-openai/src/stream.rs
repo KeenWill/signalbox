@@ -83,11 +83,8 @@ impl StreamDecoder {
         correlation: &C,
         sink: &mut (dyn ObservationSink<C> + Send),
     ) -> StreamStep {
-        if record.data.trim() == "[DONE]" {
+        if record.data == "[DONE]" {
             return self.apply_done();
-        }
-        if self.final_usage_reported {
-            return self.violation("stream record follows the requested final usage chunk");
         }
         let chunk: ChatChunk = match serde_json::from_str(&record.data) {
             Ok(chunk) => chunk,
@@ -106,6 +103,9 @@ impl StreamDecoder {
                 kind,
                 native: error.into_native_facts(),
             }));
+        }
+        if self.final_usage_reported {
+            return self.violation("stream record follows the requested final usage chunk");
         }
         if chunk.object.as_deref() != Some("chat.completion.chunk") {
             return self.violation("stream chunk is not a chat.completion.chunk object");
@@ -819,6 +819,36 @@ mod tests {
         ]);
 
         assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
+    }
+
+    #[test]
+    fn a_non_literal_done_marker_is_a_protocol_violation() {
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
+              \"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            final_usage_chunk(),
+            b"data: [DONE] \n\n",
+        ]);
+
+        assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
+    }
+
+    #[test]
+    fn an_error_after_final_usage_remains_definitive_provider_evidence() {
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
+              \"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            final_usage_chunk(),
+            b"data: {\"error\":{\"message\":\"quota exhausted\",\
+              \"type\":\"insufficient_quota\",\"code\":\"insufficient_quota\"}}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::ProviderError(error)) = terminal else {
+            panic!("a definitive error record outranks weaker post-usage protocol loss");
+        };
+        assert_eq!(error.kind, ProviderErrorKind::QuotaExhausted);
     }
 
     #[test]

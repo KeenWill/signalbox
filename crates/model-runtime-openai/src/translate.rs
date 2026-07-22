@@ -200,6 +200,26 @@ type ToolsAndChoice = (
 fn tools_and_choice<C>(
     operation: &ModelOperation<C>,
 ) -> Result<ToolsAndChoice, PreparationFailure> {
+    for tool in &operation.tools {
+        if !tool.input_schema.is_object() {
+            return Err(PreparationFailure::UnsupportedOperation {
+                detail: format!(
+                    "Chat Completions requires function {} to carry a JSON Schema object",
+                    tool.name.as_str()
+                ),
+            });
+        }
+    }
+    if let Some(contract) = &operation.output_contract
+        && !contract.schema.is_object()
+    {
+        return Err(PreparationFailure::UnsupportedOperation {
+            detail: format!(
+                "Chat Completions requires output contract {} to carry a JSON Schema object",
+                contract.name.as_str()
+            ),
+        });
+    }
     let function_count = operation.tools.len() + usize::from(operation.output_contract.is_some());
     if function_count > 128 {
         return Err(PreparationFailure::UnsupportedOperation {
@@ -773,6 +793,36 @@ mod tests {
                 )
             })
             .collect();
+
+        assert!(matches!(
+            build_request(&operation),
+            Err(PreparationFailure::UnsupportedOperation { .. })
+        ));
+    }
+
+    #[test]
+    fn a_non_object_function_schema_is_rejected_before_any_send() {
+        let mut operation = operation("call-non-object-function-schema");
+        operation.tools = vec![ToolDefinition::with_schema(
+            "lookup",
+            "Looks up a city.",
+            serde_json::Value::Null,
+        )];
+
+        assert!(matches!(
+            build_request(&operation),
+            Err(PreparationFailure::UnsupportedOperation { .. })
+        ));
+    }
+
+    #[test]
+    fn a_non_object_contract_schema_is_rejected_before_any_send() {
+        let mut operation = operation("call-non-object-contract-schema");
+        operation.output_contract = Some(StructuredOutputContract {
+            name: ToolName::new("contract"),
+            description: "The contract.".to_string(),
+            schema: serde_json::json!([]),
+        });
 
         assert!(matches!(
             build_request(&operation),
