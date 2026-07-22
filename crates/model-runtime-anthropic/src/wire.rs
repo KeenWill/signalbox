@@ -46,7 +46,7 @@ pub(crate) enum WireRequestBlock {
     ToolUse {
         id: String,
         name: String,
-        input: serde_json::Value,
+        input: Box<serde_json::value::RawValue>,
     },
     #[serde(rename = "tool_result")]
     ToolResult {

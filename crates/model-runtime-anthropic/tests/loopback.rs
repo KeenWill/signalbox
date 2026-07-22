@@ -12,18 +12,22 @@
 //! real transport path — headers sent, redirect discipline, connect-failure
 //! classification, and stream-integrity evidence — deterministically.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, CompletionFinish, ConversationMessage, DeliveryMode,
     LossCause, ModelOperation, ModelRuntime, ModelSettings, Observation, ObservationFact,
-    ProviderErrorKind, ProviderRequestId, RequestedTarget, ResolvedTarget, StreamInterruption,
-    TerminalEvidence, TerminalReport, UnsentCause,
+    PreparationFailure, PreparationOutcome, ProviderErrorKind, ProviderRequestId, RequestedTarget,
+    ResolvedTarget, StreamInterruption, TerminalEvidence, TerminalReport, UnsentCause,
 };
 use signalbox_model_runtime::{
-    CredentialAccess, CredentialAccessError, CredentialReference, CredentialValue,
+    CredentialAccess, CredentialAccessError, CredentialAccessFailure, CredentialReference,
+    CredentialValue,
 };
-use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
+use signalbox_model_runtime_anthropic::{
+    AnthropicConfig, AnthropicPreparedRequest, AnthropicRuntime,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -154,10 +158,28 @@ async fn execute<A: CredentialAccess>(
     cancellation: CancellationSignal,
 ) -> (TerminalReport<String>, Vec<Observation<String>>) {
     let mut observations: Vec<Observation<String>> = Vec::new();
+    let prepared = prepare(runtime, operation, CancellationSignal::never()).await;
     let report = runtime
-        .execute(operation, &mut observations, cancellation)
+        .execute(prepared, &mut observations, cancellation)
         .await;
     (report, observations)
+}
+
+async fn prepare<A: CredentialAccess>(
+    runtime: &AnthropicRuntime<A>,
+    operation: ModelOperation<String>,
+    cancellation: CancellationSignal,
+) -> AnthropicPreparedRequest<String> {
+    match runtime.prepare(operation, cancellation).await {
+        PreparationOutcome::Prepared(prepared) => prepared,
+        PreparationOutcome::Cancelled { .. } => panic!("loopback preparation cancelled"),
+        PreparationOutcome::Failed { failure, .. } => {
+            panic!("loopback preparation failed: {failure:?}")
+        }
+        PreparationOutcome::Defect { defect, .. } => {
+            panic!("loopback preparation was defective: {defect:?}")
+        }
+    }
 }
 
 #[tokio::test]
@@ -438,15 +460,185 @@ async fn a_signal_cancelled_before_send_proves_the_request_unsent() {
         "a pre-send cancellation must reach the network never"
     );
     assert!(
-        observations
-            .iter()
-            .any(|observation| matches!(observation.fact, ObservationFact::RequestPrepared))
-    );
-    assert!(
         !observations
             .iter()
             .any(|observation| matches!(observation.fact, ObservationFact::SendCommenced))
     );
+}
+
+#[derive(Debug)]
+struct CountingKey {
+    resolutions: Arc<AtomicUsize>,
+    value: &'static [u8],
+}
+
+impl CredentialAccess for CountingKey {
+    async fn resolve(
+        &self,
+        _reference: &CredentialReference,
+    ) -> Result<CredentialValue, CredentialAccessError> {
+        self.resolutions.fetch_add(1, Ordering::SeqCst);
+        Ok(CredentialValue::new(self.value.to_vec()))
+    }
+}
+
+#[tokio::test]
+async fn preparation_resolves_once_sends_nothing_and_execution_does_not_resolve_again() {
+    let server = CannedServer::serving(vec![http_response("200 OK", &[], b"{}")]).await;
+    let resolutions = Arc::new(AtomicUsize::new(0));
+    let mut config = AnthropicConfig::new();
+    config.base_url = server.base_url.clone();
+    let runtime = AnthropicRuntime::new(
+        config,
+        CountingKey {
+            resolutions: Arc::clone(&resolutions),
+            value: b"key_once",
+        },
+    )
+    .expect("loopback configuration constructs");
+
+    let prepared = prepare(
+        &runtime,
+        operation("call-prepare-once"),
+        CancellationSignal::never(),
+    )
+    .await;
+
+    assert_eq!(resolutions.load(Ordering::SeqCst), 1);
+    assert!(server.recorded_requests().is_empty());
+
+    let mut observations = Vec::new();
+    runtime
+        .execute(prepared, &mut observations, CancellationSignal::never())
+        .await;
+
+    assert_eq!(resolutions.load(Ordering::SeqCst), 1);
+    assert_eq!(server.recorded_requests().len(), 1);
+}
+
+#[derive(Debug)]
+struct PendingKey;
+
+impl CredentialAccess for PendingKey {
+    async fn resolve(
+        &self,
+        _reference: &CredentialReference,
+    ) -> Result<CredentialValue, CredentialAccessError> {
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn cancellation_during_preparation_creates_no_capability_or_http_traffic() {
+    let server = CannedServer::serving(vec![http_response("200 OK", &[], b"{}")]).await;
+    let mut config = AnthropicConfig::new();
+    config.base_url = server.base_url.clone();
+    let runtime =
+        AnthropicRuntime::new(config, PendingKey).expect("loopback configuration constructs");
+
+    let outcome = runtime
+        .prepare(
+            operation("call-cancel-prepare"),
+            CancellationSignal::already_cancelled(),
+        )
+        .await;
+
+    assert!(matches!(
+        outcome,
+        PreparationOutcome::Cancelled { correlation }
+            if correlation == "call-cancel-prepare"
+    ));
+    assert!(server.recorded_requests().is_empty());
+}
+
+#[tokio::test]
+async fn a_ready_preparation_wins_a_same_poll_cancellation_race() {
+    let server = CannedServer::serving(vec![http_response("200 OK", &[], b"{}")]).await;
+    let runtime = runtime_for(&server.base_url);
+
+    let outcome = runtime
+        .prepare(
+            operation("call-work-first"),
+            CancellationSignal::already_cancelled(),
+        )
+        .await;
+
+    assert!(matches!(outcome, PreparationOutcome::Prepared(_)));
+    assert!(server.recorded_requests().is_empty());
+}
+
+#[derive(Debug)]
+struct UnavailableKey;
+
+impl CredentialAccess for UnavailableKey {
+    async fn resolve(
+        &self,
+        reference: &CredentialReference,
+    ) -> Result<CredentialValue, CredentialAccessError> {
+        Err(CredentialAccessError::new(
+            reference.clone(),
+            CredentialAccessFailure::Unavailable,
+        ))
+    }
+}
+
+#[tokio::test]
+async fn ordinary_validation_and_credential_failures_are_preparation_outcomes() {
+    let server = CannedServer::serving(vec![http_response("200 OK", &[], b"{}")]).await;
+    let mut invalid = operation("call-invalid");
+    invalid.settings.temperature = Some(f64::NAN);
+    let fixed = runtime_for(&server.base_url);
+
+    assert!(matches!(
+        fixed.prepare(invalid, CancellationSignal::never()).await,
+        PreparationOutcome::Failed {
+            failure: PreparationFailure::UnsupportedOperation { .. },
+            ..
+        }
+    ));
+
+    let mut config = AnthropicConfig::new();
+    config.base_url = server.base_url.clone();
+    let unavailable =
+        AnthropicRuntime::new(config, UnavailableKey).expect("loopback configuration constructs");
+    assert!(matches!(
+        unavailable
+            .prepare(operation("call-unavailable"), CancellationSignal::never())
+            .await,
+        PreparationOutcome::Failed {
+            failure: PreparationFailure::CredentialUnavailable { .. },
+            ..
+        }
+    ));
+
+    assert!(server.recorded_requests().is_empty());
+}
+
+#[tokio::test]
+async fn unusable_credential_is_an_ordinary_preparation_failure() {
+    let server = CannedServer::serving(vec![http_response("200 OK", &[], b"{}")]).await;
+    let resolutions = Arc::new(AtomicUsize::new(0));
+    let mut config = AnthropicConfig::new();
+    config.base_url = server.base_url.clone();
+    let runtime = AnthropicRuntime::new(
+        config,
+        CountingKey {
+            resolutions,
+            value: b"invalid\nkey",
+        },
+    )
+    .expect("loopback configuration constructs");
+
+    assert!(matches!(
+        runtime
+            .prepare(operation("call-unusable"), CancellationSignal::never())
+            .await,
+        PreparationOutcome::Failed {
+            failure: PreparationFailure::CredentialUnusable { .. },
+            ..
+        }
+    ));
+    assert!(server.recorded_requests().is_empty());
 }
 
 /// A key source whose value the test rotates between operations.
@@ -466,7 +658,7 @@ impl CredentialAccess for RotatingKey {
 }
 
 #[tokio::test]
-async fn inv_035_api_key_is_resolved_at_each_send_so_rotation_takes_effect() {
+async fn inv_035_api_key_rotation_is_visible_to_the_next_preparation() {
     // ADR-0017: the credential is read during send preparation of each
     // physical request; a rotated value must reach the next request without
     // reconstructing the runtime.
@@ -481,13 +673,57 @@ async fn inv_035_api_key_is_resolved_at_each_send_so_rotation_takes_effect() {
     let runtime = AnthropicRuntime::new(config, RotatingKey(Arc::clone(&value)))
         .expect("loopback configuration constructs");
 
-    execute(&runtime, operation("call-9"), CancellationSignal::never()).await;
+    let before = prepare(&runtime, operation("call-9"), CancellationSignal::never()).await;
     *value.lock().expect("key lock") = "key_after".to_string();
-    execute(&runtime, operation("call-10"), CancellationSignal::never()).await;
+    let after = prepare(&runtime, operation("call-10"), CancellationSignal::never()).await;
+    let mut observations = Vec::new();
+    runtime
+        .execute(before, &mut observations, CancellationSignal::never())
+        .await;
+    runtime
+        .execute(after, &mut observations, CancellationSignal::never())
+        .await;
 
     let requests = server.recorded_requests();
     assert!(requests[0].contains("x-api-key: key_before\r\n"));
     assert!(requests[1].contains("x-api-key: key_after\r\n"));
+}
+
+#[tokio::test]
+async fn execution_redacts_with_the_exact_credential_captured_by_preparation() {
+    let body = br#"{
+        "id":"msg_1","type":"message","role":"assistant",
+        "model":"model-exact-1",
+        "content":[{"type":"text","text":"echo key_before"}],
+        "stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}
+    }"#;
+    let server = CannedServer::serving(vec![http_response("200 OK", &[], body)]).await;
+    let value = Arc::new(Mutex::new("key_before".to_string()));
+    let mut config = AnthropicConfig::new();
+    config.base_url = server.base_url.clone();
+    let runtime = AnthropicRuntime::new(config, RotatingKey(Arc::clone(&value)))
+        .expect("loopback configuration constructs");
+    let prepared = prepare(
+        &runtime,
+        operation("call-captured-key"),
+        CancellationSignal::never(),
+    )
+    .await;
+    *value.lock().expect("key lock") = "key_after".to_string();
+
+    let mut observations = Vec::new();
+    let report = runtime
+        .execute(prepared, &mut observations, CancellationSignal::never())
+        .await;
+
+    let TerminalEvidence::Completed(completion) = report.evidence else {
+        panic!("complete response remains completion evidence");
+    };
+    assert_eq!(
+        completion.content,
+        vec![AssistantPart::Text("echo [redacted]".to_string())]
+    );
+    assert!(server.recorded_requests()[0].contains("x-api-key: key_before\r\n"));
 }
 
 #[tokio::test]

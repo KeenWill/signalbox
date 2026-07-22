@@ -1,0 +1,38 @@
+// Configuration for the policy recorded in docs/decisions.md at
+// #2026-07-20--conservative-renovate-policy-with-release-age-gates.
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  // Renovate's maintained baseline: monorepo groupings, replacement rules for
+  // renamed packages, and workarounds for known upstream oddities. Every
+  // policy choice below is explicit and overrides it where they overlap.
+  "extends": ["config:recommended"],
+  "dependencyDashboard": true,
+  "internalChecksFilter": "strict",
+  // The cargo manager's default file pattern ((^|/)Cargo\.toml$) already
+  // covers the root manifest and every workspace member under crates/ and
+  // apps/, so no path configuration is needed for full workspace coverage.
+  "packageRules": [
+    {
+      "matchManagers": ["cargo"],
+      "matchUpdateTypes": ["patch", "minor"],
+      "minimumReleaseAge": "7 days",
+      "minimumReleaseAgeBehaviour": "timestamp-required",
+    },
+    {
+      "matchManagers": ["cargo"],
+      "matchUpdateTypes": ["major"],
+      "minimumReleaseAge": "14 days",
+      "minimumReleaseAgeBehaviour": "timestamp-required",
+      "automerge": false,
+    },
+    {
+      // Activation requires branch protection to make the Rust and
+      // supply-chain checks required; see the linked decision.
+      "matchManagers": ["cargo"],
+      "matchUpdateTypes": ["patch"],
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": true,
+    },
+  ],
+}

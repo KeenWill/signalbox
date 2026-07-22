@@ -5,7 +5,10 @@
 //! while executing it, and the terminal evidence the caller classifies
 //! afterwards. Provider adapters (one crate per provider) translate exactly
 //! one [`ModelOperation`] into at most one provider interaction and report
-//! typed facts; they never decide lifecycle outcomes.
+//! typed facts; they never decide lifecycle outcomes. ADR-0045's accepted
+//! orchestration boundary is represented directly: request preparation yields
+//! an opaque one-shot capability, and execution consumes it only after the
+//! caller has durably authorized the provider interaction.
 //!
 //! Despite the name, this layer is unrelated to the hub's asynchronous
 //! runtime (ADR-0044): a *model runtime* here is a library that executes one
@@ -24,17 +27,17 @@
 //!   retries, falls back, or repeats a request after the provider could have
 //!   accepted it. There is no retry machinery to disable.
 //! - Evidence, not classification (ADR-0043): adapters report what provably
-//!   happened — prepared, possibly accepted, definitive response, incomplete
+//!   happened — possibly accepted, definitive response, incomplete
 //!   stream — and the caller classifies dispositions. See [`TerminalEvidence`]
 //!   for the intended mapping onto ADR-0043's vocabulary.
 //! - Structured-output parsing and tool-call decoding are pure functions.
 //!   Parsing never performs a model call; a repair call is a new, explicitly
 //!   authorized operation owned by the caller.
 //!
-//! Every trait and signature in this crate is draft scaffolding under
-//! ADR-0047: the application-side model-execution port is owned by the
-//! orchestration ADR process, and this crate is rewritten to conform when
-//! that port lands.
+//! The two-stage [`ModelRuntime`] interface conforms to ADR-0045's accepted
+//! provider-interaction boundary. It remains a Layer-1 interface: application
+//! and domain crates neither import these types nor delegate lifecycle policy
+//! to them.
 
 mod credential;
 mod evidence;
@@ -42,6 +45,7 @@ mod message;
 mod observation;
 mod operation;
 mod output;
+mod preparation;
 mod runtime;
 mod scripted;
 mod settings;
@@ -56,10 +60,10 @@ pub use credential::{
 };
 pub use evidence::{
     BoundaryLossEvidence, CancellationConfirmedEvidence, CompletionEvidence, CompletionFinish,
-    ExchangeFacts, FinishReason, LossCause, NativeErrorFacts, PreparationFailure,
-    ProvenUnsentEvidence, ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId,
-    ProviderRequestId, RefusalEvidence, StreamInterruption, TerminalEvidence, TerminalReport,
-    TransportFacts, UnsentCause,
+    ExchangeFacts, FinishReason, LossCause, NativeErrorFacts, ProvenUnsentEvidence,
+    ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId, ProviderRequestId,
+    RefusalEvidence, StreamInterruption, TerminalEvidence, TerminalReport, TransportFacts,
+    UnsentCause,
 };
 pub use message::{
     AssistantPart, ConversationMessage, ConversationRole, MessagePart, ToolResultRecord,
@@ -70,8 +74,9 @@ pub use output::{
     DomainValidator, NoDomainConstraints, StructuredDecodeFailure, StructuredOutputContract,
     decode_structured, decode_structured_json,
 };
+pub use preparation::{PreparationDefect, PreparationFailure, PreparationOutcome};
 pub use runtime::{CancellationSignal, ModelRuntime};
-pub use scripted::{Script, ScriptedModel};
+pub use scripted::{Script, ScriptedModel, ScriptedPrepared};
 pub use settings::ModelSettings;
 pub use sse::{SseFraming, SseFramingError, SsePushOutcome, SseRecord, SseTermination};
 pub use target::{ProviderReportedModel, RequestedTarget, ResolvedTarget};

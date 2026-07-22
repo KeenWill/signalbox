@@ -241,7 +241,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
     let has_tool_calls = content
         .iter()
         .any(|part| matches!(part, AssistantPart::ToolCall(_)));
-    if has_tool_calls != matches!(finish, FinishReason::ToolUse) {
+    if matches!(finish, FinishReason::ToolUse) && !has_tool_calls {
         return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
             cause: LossCause::ResponseUnintelligible {
                 detail: "success response content contradicts its stop_reason".to_string(),
@@ -556,6 +556,26 @@ mod tests {
         );
 
         assert!(matches!(evidence, TerminalEvidence::BoundaryLoss(_)));
+    }
+
+    #[test]
+    fn max_token_completion_retains_a_partial_tool_call() {
+        let (evidence, _) = decode(
+            r#"{"id":"msg_1","type":"message","role":"assistant",
+                "model":"model-exact-1","content":[{"type":"tool_use",
+                "id":"toolu_1","name":"lookup","input":{}}],
+                "stop_reason":"max_tokens",
+                "usage":{"input_tokens":1,"output_tokens":1}}"#,
+        );
+
+        let TerminalEvidence::Completed(completion) = evidence else {
+            panic!("token exhaustion with partial tool material is definitive completion");
+        };
+        assert_eq!(completion.finish, CompletionFinish::MaxOutputTokens);
+        assert!(matches!(
+            completion.content.as_slice(),
+            [AssistantPart::ToolCall(_)]
+        ));
     }
 
     #[test]

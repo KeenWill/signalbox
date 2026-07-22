@@ -1,5 +1,11 @@
 /target/
 
+# devenv/direnv local state; the environment definition (devenv.nix,
+# devenv.yaml, devenv.lock) is committed, local build state is not.
+.devenv/
+.direnv/
+devenv.local.nix
+
 # Local secrets and encryption materials — never committed.
 .env
 .env.*
