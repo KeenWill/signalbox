@@ -2,10 +2,10 @@
 //!
 //! ADR-0043 requires each real adapter to define an exhaustive, mutually
 //! exclusive mapping of its provider-native terminal statuses and payloads.
-//! Chat Completions carries the specific condition in `error.code` while the
-//! HTTP status carries the category, so classification consults the
-//! documented specific codes first and falls back to the status table; the
-//! whole mapping is one function of first-match arms, so exhaustiveness and
+//! Chat Completions carries the specific condition in `error.code` or
+//! `error.type` while the HTTP status carries the category, so envelope
+//! classification consults a recognized code, then a recognized type, then
+//! the status table. The mapping uses first-match arms, so exhaustiveness and
 //! mutual exclusivity hold by construction. Unknown combinations land in
 //! [`ProviderErrorKind::Unrecognized`] with the native material retained on
 //! the evidence rather than being guessed at.
@@ -39,13 +39,36 @@ pub(crate) fn classify_error(status: u16, code: Option<&str>) -> ProviderErrorKi
     }
 }
 
+/// Classifies an envelope whose native code and type are distinct facts.
+///
+/// A recognized code takes precedence, then a recognized type, then the HTTP
+/// status. An unknown non-null code must not hide a useful type token.
+pub(crate) fn classify_error_envelope(
+    status: u16,
+    code: Option<&str>,
+    error_type: Option<&str>,
+) -> ProviderErrorKind {
+    if status == 401 {
+        return ProviderErrorKind::CredentialRejected;
+    }
+    let code_kind = classify_error(0, code);
+    if code_kind != ProviderErrorKind::Unrecognized {
+        return code_kind;
+    }
+    let type_kind = classify_error(0, error_type);
+    if type_kind != ProviderErrorKind::Unrecognized {
+        return type_kind;
+    }
+    classify_error(status, None)
+}
+
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
     use signalbox_expect_table::table;
     use signalbox_model_runtime::ProviderErrorKind;
 
-    use super::classify_error;
+    use super::{classify_error, classify_error_envelope};
 
     #[derive(Debug)]
     #[allow(
@@ -140,5 +163,13 @@ mod tests {
             └────────┴─────────────────────────┴────────────────────┘
         "#]]
         .assert_eq(&table(rows));
+    }
+
+    #[test]
+    fn unknown_code_falls_through_to_a_recognized_error_type() {
+        assert_eq!(
+            classify_error_envelope(429, Some("new_gateway_code"), Some("insufficient_quota")),
+            ProviderErrorKind::QuotaExhausted
+        );
     }
 }

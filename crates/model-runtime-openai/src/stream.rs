@@ -22,7 +22,7 @@ use signalbox_model_runtime::{
 };
 
 use crate::response::{convert_usage, map_finish};
-use crate::status::classify_error;
+use crate::status::classify_error_envelope;
 use crate::wire::ChatChunk;
 
 /// The decoder's verdict on one record.
@@ -86,6 +86,9 @@ impl StreamDecoder {
         if record.data.trim() == "[DONE]" {
             return self.apply_done();
         }
+        if self.final_usage_reported {
+            return self.violation("stream record follows the requested final usage chunk");
+        }
         let chunk: ChatChunk = match serde_json::from_str(&record.data) {
             Ok(chunk) => chunk,
             Err(error) => {
@@ -96,7 +99,7 @@ impl StreamDecoder {
             // A mid-stream error record is a definitive provider error;
             // with no HTTP status of its own it classifies by native code.
             let code = error.code_text();
-            let kind = classify_error(0, code.as_deref().or(error.error_type.as_deref()));
+            let kind = classify_error_envelope(0, code.as_deref(), error.error_type.as_deref());
             return StreamStep::Terminal(TerminalEvidence::ProviderError(ProviderErrorEvidence {
                 exchange: self.exchange.clone(),
                 reported_model: self.reported_model.clone(),
@@ -170,6 +173,26 @@ impl StreamDecoder {
                 ));
             }
             if let Some(delta) = choice.delta {
+                let mut known_indices: BTreeSet<u32> = self.tool_builders.keys().copied().collect();
+                let Ok(mut next_index) = u32::try_from(known_indices.len()) else {
+                    return self.violation("stream carries too many tool-call indices");
+                };
+                for call in &delta.tool_calls {
+                    let Some(index) = call.index else {
+                        return self.violation("streamed tool call carries no index");
+                    };
+                    if known_indices.insert(index) {
+                        if index != next_index {
+                            return self.violation(format!(
+                                "streamed tool call index {index} is sparse; expected {next_index}"
+                            ));
+                        }
+                        let Some(successor) = next_index.checked_add(1) else {
+                            return self.violation("streamed tool call index space is exhausted");
+                        };
+                        next_index = successor;
+                    }
+                }
                 if let Some(role) = delta.role {
                     if role != "assistant" {
                         return self.violation(format!(
@@ -181,6 +204,9 @@ impl StreamDecoder {
                 if let Some(text) = delta.content
                     && !text.is_empty()
                 {
+                    if !self.refusal_text.is_empty() {
+                        return self.violation("content delta follows refusal fragments");
+                    }
                     if !self.tool_builders.is_empty() {
                         // The protocol streams content before tool calls;
                         // content arriving afterwards would shift the part
@@ -194,8 +220,22 @@ impl StreamDecoder {
                         ObservationFact::TextDelta { index: 0, text },
                     );
                 }
-                if let Some(refusal) = delta.refusal {
+                if let Some(refusal) = delta.refusal
+                    && !refusal.is_empty()
+                {
+                    if !self.tool_builders.is_empty() || !delta.tool_calls.is_empty() {
+                        return self.violation("refusal fragments cannot accompany tool calls");
+                    }
+                    let index = u32::from(!self.content_text.is_empty());
                     self.refusal_text.push_str(&refusal);
+                    Self::emit(
+                        correlation,
+                        sink,
+                        ObservationFact::TextDelta {
+                            index,
+                            text: refusal,
+                        },
+                    );
                 }
                 for call in delta.tool_calls {
                     let Some(call_index) = call.index else {
@@ -251,6 +291,10 @@ impl StreamDecoder {
                             builder.arguments.push_str(&fragment);
                             if !fragment.is_empty() {
                                 let text_parts = u32::from(!self.content_text.is_empty());
+                                let Some(index) = text_parts.checked_add(call_index) else {
+                                    return self
+                                        .violation("tool-argument observation index overflows");
+                                };
                                 Self::emit(
                                     correlation,
                                     sink,
@@ -259,7 +303,7 @@ impl StreamDecoder {
                                         // exists) at 0, then tool call k. Stable
                                         // because content cannot arrive after
                                         // tool fragments (violation above).
-                                        index: text_parts + call_index,
+                                        index,
                                         fragment,
                                     },
                                 );
@@ -764,8 +808,22 @@ mod tests {
     }
 
     #[test]
-    fn refusal_deltas_accumulate_into_refusal_evidence_at_done() {
+    fn a_record_after_final_usage_is_a_protocol_violation() {
         let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
+              \"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            final_usage_chunk(),
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
+              \"choices\":[],\"usage\":{\"prompt_tokens\":999}}\n\n",
+        ]);
+
+        assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
+    }
+
+    #[test]
+    fn refusal_deltas_accumulate_into_refusal_evidence_at_done() {
+        let (terminal, observations) = drive(&[
             first_chunk(),
             b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"refusal\":\"I cannot \"}}]}\n\n",
             b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"refusal\":\"help with that.\"},\
@@ -781,6 +839,20 @@ mod tests {
             refusal.content,
             vec![AssistantPart::Text("I cannot help with that.".to_string())]
         );
+        assert!(observations.contains(&Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::TextDelta {
+                index: 0,
+                text: "I cannot ".to_string(),
+            },
+        }));
+        assert!(observations.contains(&Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::TextDelta {
+                index: 0,
+                text: "help with that.".to_string(),
+            },
+        }));
     }
 
     #[test]
@@ -1168,6 +1240,25 @@ mod tests {
         ]);
 
         assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
+    }
+
+    #[test]
+    fn a_sparse_tool_index_is_rejected_before_its_deltas_are_emitted() {
+        let (terminal, observations) = drive(&[
+            first_chunk(),
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
+              \"choices\":[{\"index\":0,\"delta\":{\"content\":\"must not emit\",\
+              \"tool_calls\":[{\"index\":4294967295,\"id\":\"call_bad\",\"type\":\"function\",\
+              \"function\":{\"name\":\"ping\",\"arguments\":\"{}\"}}]}}]}\n\n",
+        ]);
+
+        assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
+        assert!(!observations.iter().any(|observation| {
+            matches!(
+                &observation.fact,
+                ObservationFact::TextDelta { text, .. } if text == "must not emit"
+            ) || matches!(observation.fact, ObservationFact::ToolArgumentsDelta { .. })
+        }));
     }
 
     #[test]

@@ -200,6 +200,12 @@ type ToolsAndChoice = (
 fn tools_and_choice<C>(
     operation: &ModelOperation<C>,
 ) -> Result<ToolsAndChoice, PreparationFailure> {
+    let function_count = operation.tools.len() + usize::from(operation.output_contract.is_some());
+    if function_count > 128 {
+        return Err(PreparationFailure::UnsupportedOperation {
+            detail: "Chat Completions accepts at most 128 functions in one request".to_string(),
+        });
+    }
     let mut tools: Vec<WireFunctionTool> = operation
         .tools
         .iter()
@@ -748,6 +754,49 @@ mod tests {
                 arguments_json: "{}".to_string(),
             })],
         }];
+
+        assert!(matches!(
+            build_request(&operation),
+            Err(PreparationFailure::UnsupportedOperation { .. })
+        ));
+    }
+
+    #[test]
+    fn more_than_128_ordinary_tools_are_rejected_before_any_send() {
+        let mut operation = operation("call-too-many-tools");
+        operation.tools = (0..129)
+            .map(|index| {
+                ToolDefinition::with_schema(
+                    format!("tool_{index}"),
+                    "A tool.",
+                    serde_json::json!({"type": "object"}),
+                )
+            })
+            .collect();
+
+        assert!(matches!(
+            build_request(&operation),
+            Err(PreparationFailure::UnsupportedOperation { .. })
+        ));
+    }
+
+    #[test]
+    fn a_contract_counts_toward_the_128_function_limit() {
+        let mut operation = operation("call-contract-over-limit");
+        operation.tools = (0..128)
+            .map(|index| {
+                ToolDefinition::with_schema(
+                    format!("tool_{index}"),
+                    "A tool.",
+                    serde_json::json!({"type": "object"}),
+                )
+            })
+            .collect();
+        operation.output_contract = Some(StructuredOutputContract {
+            name: ToolName::new("contract"),
+            description: "The contract.".to_string(),
+            schema: serde_json::json!({"type": "object"}),
+        });
 
         assert!(matches!(
             build_request(&operation),

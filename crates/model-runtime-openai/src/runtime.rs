@@ -29,7 +29,7 @@ use signalbox_model_runtime::{CredentialAccess, CredentialValue};
 
 use crate::config::OpenAiConfig;
 use crate::response::decode_buffered_response;
-use crate::status::classify_error;
+use crate::status::{classify_error, classify_error_envelope};
 use crate::stream::{StreamDecoder, StreamStep};
 use crate::translate::build_request;
 use crate::wire::ErrorEnvelope;
@@ -567,7 +567,7 @@ async fn finish_error(
     };
     if let Ok(ErrorEnvelope { error: Some(error) }) = serde_json::from_slice(&body) {
         let code = error.code_text();
-        let kind = classify_error(status, code.as_deref().or(error.error_type.as_deref()));
+        let kind = classify_error_envelope(status, code.as_deref(), error.error_type.as_deref());
         return TerminalEvidence::ProviderError(ProviderErrorEvidence {
             exchange,
             // The Chat Completions error envelope reports no model identity.
