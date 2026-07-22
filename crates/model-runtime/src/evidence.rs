@@ -6,7 +6,6 @@
 //! detail inside an already-classified variant, never as the thing that
 //! decides the variant.
 
-use crate::credential::CredentialAccessError;
 use crate::message::AssistantPart;
 use crate::target::ProviderReportedModel;
 use crate::usage::TokenUsage;
@@ -120,6 +119,8 @@ pub enum FinishReason {
     EndTurn,
     /// Generation hit the operation's output-token ceiling.
     MaxOutputTokens,
+    /// Generation reached the model's context-window limit.
+    ContextWindowExceeded,
     /// Generation hit a caller-declared stop sequence.
     StopSequence {
         /// The sequence the provider reported hitting, when reported.
@@ -144,6 +145,7 @@ impl FinishReason {
         match self {
             Self::EndTurn => Some(CompletionFinish::EndTurn),
             Self::MaxOutputTokens => Some(CompletionFinish::MaxOutputTokens),
+            Self::ContextWindowExceeded => Some(CompletionFinish::ContextWindowExceeded),
             Self::StopSequence { sequence } => Some(CompletionFinish::StopSequence { sequence }),
             Self::ToolUse => Some(CompletionFinish::ToolUse),
             Self::Refusal => None,
@@ -166,6 +168,8 @@ pub enum CompletionFinish {
     EndTurn,
     /// Generation hit the operation's output-token ceiling.
     MaxOutputTokens,
+    /// Generation reached the model's context-window limit.
+    ContextWindowExceeded,
     /// Generation hit a caller-declared stop sequence.
     StopSequence {
         /// The sequence the provider reported hitting, when reported.
@@ -185,6 +189,7 @@ impl From<CompletionFinish> for FinishReason {
         match finish {
             CompletionFinish::EndTurn => Self::EndTurn,
             CompletionFinish::MaxOutputTokens => Self::MaxOutputTokens,
+            CompletionFinish::ContextWindowExceeded => Self::ContextWindowExceeded,
             CompletionFinish::StopSequence { sequence } => Self::StopSequence { sequence },
             CompletionFinish::ToolUse => Self::ToolUse,
             CompletionFinish::Unrecognized { provider_token } => {
@@ -311,8 +316,6 @@ pub struct ProvenUnsentEvidence {
 /// Why provider acceptance was provably impossible.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnsentCause {
-    /// Local preparation failed before any send was attempted.
-    PreparationFailed(PreparationFailure),
     /// The caller's cancellation signal fired before any send was attempted.
     CancelledBeforeSend,
     /// Establishing the connection failed before any request byte could be
@@ -325,41 +328,6 @@ pub enum UnsentCause {
     /// begin acting before end-of-request framing, so their incomplete
     /// writes are boundary-loss evidence instead.
     SendIncompleteProvenUnacceptable(TransportFacts),
-}
-
-/// A local preparation failure, classified before any transport work.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PreparationFailure {
-    /// The operation asks for something this adapter does not support.
-    UnsupportedOperation {
-        /// What the adapter does not support.
-        detail: String,
-    },
-    /// The operation could not be serialized into the provider's wire shape.
-    SerializationFailed {
-        /// The serializer's rendered description.
-        detail: String,
-    },
-    /// The adapter's configuration cannot address the provider.
-    InvalidConfiguration {
-        /// What is invalid.
-        detail: String,
-    },
-    /// The provider credential could not be read during send preparation
-    /// (ADR-0017: a failed credential read at send preparation means
-    /// preparation cannot proceed — a known failure, never a retry). The
-    /// typed reference-only access error is preserved so the caller keeps
-    /// the failed reference and failure class without parsing text.
-    CredentialUnavailable {
-        /// The reference-only access failure.
-        error: CredentialAccessError,
-    },
-    /// A credential value was read but cannot authenticate a request (for
-    /// example, its bytes cannot form a header). Never carries the value.
-    CredentialUnusable {
-        /// Why the value cannot be used.
-        detail: String,
-    },
 }
 
 /// Evidence that the exchange ended without a definitive provider response
