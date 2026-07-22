@@ -1,5 +1,7 @@
 //! Operation-to-wire translation.
 
+use std::collections::BTreeSet;
+
 use signalbox_model_runtime::{
     ConversationMessage, ConversationRole, DeliveryMode, MessagePart, ModelOperation,
     PreparationFailure, ToolChoice,
@@ -26,20 +28,27 @@ pub(crate) fn build_request<C>(
             detail: error.to_string(),
         });
     }
-    // serde_json serializes a non-finite f64 as null, which would silently
-    // drop the caller's stated setting; reject during preparation instead.
+    if operation.settings.max_output_tokens == 0 {
+        return Err(PreparationFailure::UnsupportedOperation {
+            detail: "max_output_tokens must be at least 1".to_string(),
+        });
+    }
+    // serde_json serializes a non-finite f64 as null, and the provider only
+    // accepts sampling controls in the inclusive unit interval. Reject both
+    // cases during preparation rather than relying on a post-send 4xx.
     for (name, value) in [
         ("temperature", operation.settings.temperature),
         ("top_p", operation.settings.top_p),
     ] {
         if let Some(value) = value
-            && !value.is_finite()
+            && !(0.0..=1.0).contains(&value)
         {
             return Err(PreparationFailure::UnsupportedOperation {
-                detail: format!("{name} must be a finite number"),
+                detail: format!("{name} must be a finite number from 0 through 1"),
             });
         }
     }
+    validate_tool_history(&operation.messages)?;
     let (tools, tool_choice) = tools_and_choice(operation)?;
     Ok(MessagesRequest {
         model: operation.resolved_target.as_str().to_string(),
@@ -57,6 +66,64 @@ pub(crate) fn build_request<C>(
         tool_choice,
         stream: operation.delivery == DeliveryMode::Streamed,
     })
+}
+
+fn validate_tool_history(messages: &[ConversationMessage]) -> Result<(), PreparationFailure> {
+    let mut pending_calls: Option<BTreeSet<&str>> = None;
+    for message in messages {
+        let mut results = BTreeSet::new();
+        for part in &message.parts {
+            if let MessagePart::ToolResult(result) = part
+                && !results.insert(result.tool_call_id.as_str())
+            {
+                return Err(PreparationFailure::UnsupportedOperation {
+                    detail: format!(
+                        "tool result {} appears more than once",
+                        result.tool_call_id.as_str()
+                    ),
+                });
+            }
+        }
+
+        if let Some(expected) = pending_calls.take() {
+            if message.role != ConversationRole::User || results != expected {
+                return Err(PreparationFailure::UnsupportedOperation {
+                    detail: "Anthropic requires one matching tool result for every tool use in \
+                             the immediately following user message"
+                        .to_string(),
+                });
+            }
+        } else if !results.is_empty() {
+            return Err(PreparationFailure::UnsupportedOperation {
+                detail: "Anthropic tool results must answer tool uses from the immediately \
+                         preceding assistant message"
+                    .to_string(),
+            });
+        }
+
+        if message.role == ConversationRole::Assistant {
+            let mut calls = BTreeSet::new();
+            for part in &message.parts {
+                if let MessagePart::ToolCall(call) = part
+                    && !calls.insert(call.id.as_str())
+                {
+                    return Err(PreparationFailure::UnsupportedOperation {
+                        detail: format!("tool call {} appears more than once", call.id.as_str()),
+                    });
+                }
+            }
+            if !calls.is_empty() {
+                pending_calls = Some(calls);
+            }
+        }
+    }
+    if pending_calls.is_some() {
+        return Err(PreparationFailure::UnsupportedOperation {
+            detail: "Anthropic requires tool uses to be followed by matching tool results"
+                .to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn tools_and_choice<C>(
@@ -442,14 +509,24 @@ mod tests {
     #[test]
     fn replayed_tool_call_with_invalid_argument_json_fails_preparation() {
         let mut operation = operation("call-7");
-        operation.messages = vec![ConversationMessage {
-            role: ConversationRole::Assistant,
-            parts: vec![MessagePart::ToolCall(ToolCallProposal {
-                id: ToolCallId::new("toolu_9"),
-                name: ToolName::new("lookup"),
-                arguments_json: "{not json".to_string(),
-            })],
-        }];
+        operation.messages = vec![
+            ConversationMessage {
+                role: ConversationRole::Assistant,
+                parts: vec![MessagePart::ToolCall(ToolCallProposal {
+                    id: ToolCallId::new("toolu_9"),
+                    name: ToolName::new("lookup"),
+                    arguments_json: "{not json".to_string(),
+                })],
+            },
+            ConversationMessage {
+                role: ConversationRole::User,
+                parts: vec![MessagePart::ToolResult(ToolResultRecord {
+                    tool_call_id: ToolCallId::new("toolu_9"),
+                    content: "done".to_string(),
+                    is_error: false,
+                })],
+            },
+        ];
 
         let failure = build_request(&operation)
             .expect_err("invalid replayed tool arguments must fail before any send");
@@ -464,14 +541,24 @@ mod tests {
     fn replayed_tool_arguments_preserve_raw_json_verbatim() {
         let mut operation = operation("call-raw");
         let raw = r#"{"identifier":184467440737095516160,"duplicate":1,"duplicate":2}"#;
-        operation.messages = vec![ConversationMessage {
-            role: ConversationRole::Assistant,
-            parts: vec![MessagePart::ToolCall(ToolCallProposal {
-                id: ToolCallId::new("toolu_raw"),
-                name: ToolName::new("lookup"),
-                arguments_json: raw.to_string(),
-            })],
-        }];
+        operation.messages = vec![
+            ConversationMessage {
+                role: ConversationRole::Assistant,
+                parts: vec![MessagePart::ToolCall(ToolCallProposal {
+                    id: ToolCallId::new("toolu_raw"),
+                    name: ToolName::new("lookup"),
+                    arguments_json: raw.to_string(),
+                })],
+            },
+            ConversationMessage {
+                role: ConversationRole::User,
+                parts: vec![MessagePart::ToolResult(ToolResultRecord {
+                    tool_call_id: ToolCallId::new("toolu_raw"),
+                    content: "done".to_string(),
+                    is_error: false,
+                })],
+            },
+        ];
 
         let request = build_request(&operation).expect("raw arguments are valid JSON");
         let serialized = serde_json::to_string(&request).expect("request serializes");
@@ -510,6 +597,84 @@ mod tests {
         assert!(matches!(
             failure,
             PreparationFailure::UnsupportedOperation { .. }
+        ));
+    }
+
+    #[test]
+    fn provider_numeric_domains_are_enforced_before_send() {
+        for value in [-0.1, 1.1, f64::INFINITY] {
+            let mut candidate = operation("call-numeric");
+            candidate.settings.temperature = Some(value);
+            assert!(matches!(
+                build_request(&candidate),
+                Err(PreparationFailure::UnsupportedOperation { .. })
+            ));
+
+            let mut candidate = operation("call-numeric");
+            candidate.settings.top_p = Some(value);
+            assert!(matches!(
+                build_request(&candidate),
+                Err(PreparationFailure::UnsupportedOperation { .. })
+            ));
+        }
+
+        let mut operation = operation("call-zero-tokens");
+        operation.settings.max_output_tokens = 0;
+        assert!(matches!(
+            build_request(&operation),
+            Err(PreparationFailure::UnsupportedOperation { .. })
+        ));
+    }
+
+    #[test]
+    fn tool_results_must_match_the_immediately_preceding_tool_uses() {
+        let result = |id: &str| {
+            MessagePart::ToolResult(ToolResultRecord {
+                tool_call_id: ToolCallId::new(id),
+                content: "done".to_string(),
+                is_error: false,
+            })
+        };
+        let call = MessagePart::ToolCall(ToolCallProposal {
+            id: ToolCallId::new("toolu_1"),
+            name: ToolName::new("lookup"),
+            arguments_json: "{}".to_string(),
+        });
+
+        let mut orphan = operation("call-orphan");
+        orphan.messages = vec![ConversationMessage {
+            role: ConversationRole::User,
+            parts: vec![result("toolu_1")],
+        }];
+        assert!(matches!(
+            build_request(&orphan),
+            Err(PreparationFailure::UnsupportedOperation { .. })
+        ));
+
+        let mut missing = operation("call-missing");
+        missing.messages = vec![ConversationMessage {
+            role: ConversationRole::Assistant,
+            parts: vec![call.clone()],
+        }];
+        assert!(matches!(
+            build_request(&missing),
+            Err(PreparationFailure::UnsupportedOperation { .. })
+        ));
+
+        let mut mismatched = operation("call-mismatch");
+        mismatched.messages = vec![
+            ConversationMessage {
+                role: ConversationRole::Assistant,
+                parts: vec![call],
+            },
+            ConversationMessage {
+                role: ConversationRole::User,
+                parts: vec![result("toolu_other")],
+            },
+        ];
+        assert!(matches!(
+            build_request(&mismatched),
+            Err(PreparationFailure::UnsupportedOperation { .. })
         ));
     }
 

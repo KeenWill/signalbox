@@ -26,7 +26,7 @@ use signalbox_model_runtime::{
     CredentialValue,
 };
 use signalbox_model_runtime_anthropic::{
-    AnthropicConfig, AnthropicPreparedRequest, AnthropicRuntime,
+    AnthropicConfig, AnthropicConstructionError, AnthropicPreparedRequest, AnthropicRuntime,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -617,28 +617,39 @@ async fn ordinary_validation_and_credential_failures_are_preparation_outcomes() 
 #[tokio::test]
 async fn unusable_credential_is_an_ordinary_preparation_failure() {
     let server = CannedServer::serving(vec![http_response("200 OK", &[], b"{}")]).await;
-    let resolutions = Arc::new(AtomicUsize::new(0));
+    for value in [
+        b"".as_slice(),
+        b"invalid\nkey".as_slice(),
+        b"non-utf8-\xff".as_slice(),
+    ] {
+        let resolutions = Arc::new(AtomicUsize::new(0));
+        let mut config = AnthropicConfig::new();
+        config.base_url = server.base_url.clone();
+        let runtime = AnthropicRuntime::new(config, CountingKey { resolutions, value })
+            .expect("loopback configuration constructs");
+
+        assert!(matches!(
+            runtime
+                .prepare(operation("call-unusable"), CancellationSignal::never())
+                .await,
+            PreparationOutcome::Failed {
+                failure: PreparationFailure::CredentialUnusable { .. },
+                ..
+            }
+        ));
+    }
+    assert!(server.recorded_requests().is_empty());
+}
+
+#[test]
+fn base_url_user_information_is_rejected_at_construction() {
     let mut config = AnthropicConfig::new();
-    config.base_url = server.base_url.clone();
-    let runtime = AnthropicRuntime::new(
-        config,
-        CountingKey {
-            resolutions,
-            value: b"invalid\nkey",
-        },
-    )
-    .expect("loopback configuration constructs");
+    config.base_url = "https://user:password@example.com".to_string();
 
     assert!(matches!(
-        runtime
-            .prepare(operation("call-unusable"), CancellationSignal::never())
-            .await,
-        PreparationOutcome::Failed {
-            failure: PreparationFailure::CredentialUnusable { .. },
-            ..
-        }
+        AnthropicRuntime::new(config, FixedKey),
+        Err(AnthropicConstructionError::InvalidBaseUrl { .. })
     ));
-    assert!(server.recorded_requests().is_empty());
 }
 
 /// A key source whose value the test rotates between operations.
