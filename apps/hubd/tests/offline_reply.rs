@@ -84,7 +84,8 @@ async fn wait_for_terminal(pool: &PgPool, session: SessionId, turn: TurnId) {
 /// S01 / S02 / INV-014 / INV-015: the complete offline
 /// chain creates a session, submits input, lets the scheduler activate it,
 /// invokes the application provider port, and atomically persists the exact
-/// assistant reply plus completion and terminal lifecycle facts.
+/// selection, resolved target, consumed frontier, Prepared-to-InFlight
+/// checkpoint sequence, assistant reply, and terminal lifecycle facts.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s01_s02_inv014_inv015_scheduler_persists_scripted_assistant_reply()
@@ -134,9 +135,10 @@ async fn s01_s02_inv014_inv015_scheduler_persists_scripted_assistant_reply()
     };
     let turn = origin.turn();
 
+    let provider_identity = ProviderModelIdentity::from_uuid(Uuid::from_u128(0x2004));
     let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
         selection,
-        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(0x2004))),
+        ResolvedProviderTarget::naming(provider_identity),
     )])
     .expect("one fixture target definition is unique");
     let (execution, fatal_execution) =
@@ -234,6 +236,52 @@ async fn s01_s02_inv014_inv015_scheduler_persists_scripted_assistant_reply()
     .await?;
     assert_eq!(terminal_shape, (1, 1, 1));
 
+    let call_provenance: (Uuid, String, Option<Uuid>, Uuid, Uuid, Uuid) = sqlx::query_as(
+        "SELECT call.model_call_id,
+                call.selection_kind,
+                call.direct_model_selection_id,
+                call.resolved_provider_model_identity_id,
+                call.context_frontier_id,
+                turn.starting_frontier_id
+           FROM model_call AS call
+           JOIN turn_lifecycle AS turn
+             ON turn.session_id = call.session_id
+            AND turn.turn_id = call.turn_id
+          WHERE call.session_id = $1
+            AND call.turn_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(call_provenance.1, "direct");
+    assert_eq!(call_provenance.2, Some(selection.into_uuid()));
+    assert_eq!(call_provenance.3, provider_identity.into_uuid());
+    assert_eq!(call_provenance.4, call_provenance.5);
+
+    let transition_sequence = sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT transition.call_state_kind,
+                transition.terminal_disposition_kind
+           FROM model_call_transition_outbox_event AS transition
+          WHERE transition.session_id = $1
+            AND transition.turn_id = $2
+            AND transition.model_call_id = $3
+          ORDER BY transition.event_sequence",
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(call_provenance.0)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        transition_sequence,
+        vec![
+            (String::from("prepared"), None),
+            (String::from("in_flight"), None),
+            (String::from("terminal"), Some(String::from("completed"))),
+        ]
+    );
+
     pool.close().await;
     drop(container);
     Ok(())
@@ -255,7 +303,31 @@ async fn debug_driver_prints_the_scripted_terminal_transcript() -> Result<(), Bo
     );
     assert_eq!(
         String::from_utf8(output.stdout)?,
-        "user: driver user request\nassistant: driver assistant reply\nevent: turn_completed\n"
+        "user: \"driver user request\"\nassistant: \"driver assistant reply\"\nevent: turn_completed\n"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Invalid scripted output is rejected before the debug harness writes any
+/// session or queued work to its database.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn debug_driver_rejects_invalid_reply_before_durable_writes() -> Result<(), Box<dyn Error>> {
+    let (container, pool, database_url) = migrated_postgres().await?;
+    let output = Command::new(env!("CARGO_BIN_EXE_signalbox-debug"))
+        .env("SIGNALBOX_DEBUG_DATABASE_URL", database_url)
+        .args(["valid user input", ""])
+        .output()?;
+
+    assert!(!output.status.success());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM session")
+            .fetch_one(&pool)
+            .await?,
+        0
     );
 
     pool.close().await;

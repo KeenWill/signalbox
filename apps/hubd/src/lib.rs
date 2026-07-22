@@ -108,11 +108,41 @@ async fn supervise_execution<Execution, ExecutionError>(
 where
     Execution: Future<Output = Result<(), ExecutionError>>,
 {
+    let fatal_on_drop = FatalOnIncompleteExecution(Some(fatal_signal));
     let result = execution.await;
-    if result.is_err() {
-        fatal_signal.send_replace(true);
+    if result.is_ok() {
+        fatal_on_drop.disarm();
     }
     result
+}
+
+async fn reconcile_retained_once<Outcome, ExecutionError, Execution>(
+    original_error: ExecutionError,
+    execution: Execution,
+) -> Result<Outcome, ExecutionError>
+where
+    Execution: Future<Output = Result<Outcome, ExecutionError>>,
+{
+    match execution.await {
+        Ok(outcome) => Ok(outcome),
+        Err(_reconciliation_error) => Err(original_error),
+    }
+}
+
+struct FatalOnIncompleteExecution(Option<watch::Sender<bool>>);
+
+impl FatalOnIncompleteExecution {
+    fn disarm(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for FatalOnIncompleteExecution {
+    fn drop(&mut self) {
+        if let Some(fatal_signal) = self.0.take() {
+            fatal_signal.send_replace(true);
+        }
+    }
 }
 
 /// Scheduler-pass failure retaining whether activation or execution failed.
@@ -316,7 +346,19 @@ impl ActivatedTurnExecution for PostgresScriptedModelExecution {
                 gate,
             );
             loop {
-                match service.execute(session).await? {
+                let outcome = match service.execute(session).await {
+                    Ok(outcome) => outcome,
+                    Err(error) if service.retained_state().is_some() => {
+                        // ADR-0045 gives same-incarnation evidence one
+                        // authoritative reconciliation pass before fatal
+                        // supervision hands authority to startup recovery. A
+                        // second failure does not replace the causal stage
+                        // error that created the retained obligation.
+                        reconcile_retained_once(error, service.execute(session)).await?
+                    }
+                    Err(error) => return Err(error),
+                };
+                match outcome {
                     ModelCallExecutionOutcome::Checkpointed(_) => continue,
                     ModelCallExecutionOutcome::NoWork
                     | ModelCallExecutionOutcome::TargetUnavailable(_)
@@ -335,7 +377,7 @@ impl ActivatedTurnExecution for PostgresScriptedModelExecution {
 mod tests {
     use std::{
         fmt,
-        future::{Future, ready},
+        future::{Future, pending, ready},
         sync::{Arc, Mutex},
     };
 
@@ -353,7 +395,7 @@ mod tests {
 
     use super::{
         ActivatedTurnExecution, ActivatedTurnPass, FatalExecutionSignal, FatalExecutionSupervisor,
-        activation_session_matches, supervise_execution,
+        activation_session_matches, reconcile_retained_once, supervise_execution,
     };
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -530,6 +572,60 @@ mod tests {
         assert_eq!(
             supervise_execution(fatal_signal, ready(Err(ExecutionFailure))).await,
             Err(ExecutionFailure)
+        );
+        signal.wait().await;
+        assert!(signal.is_triggered());
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::panic,
+        reason = "the test deliberately exercises unwind supervision"
+    )]
+    async fn activated_execution_unwind_raises_the_fatal_signal() {
+        let (fatal_signal, triggered) = watch::channel(false);
+        let signal = FatalExecutionSignal { triggered };
+        let execution = tokio::spawn(supervise_execution(fatal_signal, async {
+            panic!("simulated activated-turn execution unwind");
+            #[allow(unreachable_code)]
+            Ok::<(), ExecutionFailure>(())
+        }));
+
+        assert!(execution.await.is_err());
+        signal.wait().await;
+        assert!(signal.is_triggered());
+    }
+
+    #[tokio::test]
+    async fn retained_reconciliation_failure_preserves_the_original_error() {
+        assert_eq!(
+            reconcile_retained_once(
+                "original stage",
+                ready(Err::<(), _>("reconciliation stage")),
+            )
+            .await,
+            Err("original stage")
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_activated_execution_raises_the_fatal_signal() {
+        let (fatal_signal, triggered) = watch::channel(false);
+        let signal = FatalExecutionSignal { triggered };
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let execution_entered = Arc::clone(&entered);
+        let execution = tokio::spawn(supervise_execution(fatal_signal, async move {
+            execution_entered.notify_one();
+            pending::<Result<(), ExecutionFailure>>().await
+        }));
+        entered.notified().await;
+
+        execution.abort();
+        assert!(
+            execution
+                .await
+                .expect_err("the execution task is cancelled")
+                .is_cancelled()
         );
         signal.wait().await;
         assert!(signal.is_triggered());

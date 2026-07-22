@@ -196,11 +196,19 @@ async fn poll_terminal_transcript(
 fn print_transcript(rows: Vec<TranscriptRow>) {
     for (kind, user_text, assistant_text) in rows {
         match (kind.as_str(), user_text, assistant_text) {
-            ("origin_accepted_input", Some(text), None) => println!("user: {text}"),
-            ("assistant_text", None, Some(text)) => println!("assistant: {text}"),
+            ("origin_accepted_input", Some(text), None) => {
+                println!("{}", format_transcript_text("user", &text));
+            }
+            ("assistant_text", None, Some(text)) => {
+                println!("{}", format_transcript_text("assistant", &text));
+            }
             _ => println!("event: {kind}"),
         }
     }
+}
+
+fn format_transcript_text(role: &str, text: &str) -> String {
+    format!("{role}: {text:?}")
 }
 
 async fn stop_scheduler(
@@ -219,8 +227,16 @@ async fn stop_scheduler(
 }
 
 async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
-    let connection_options = local_test_connection_options(&arguments.database_url)
-        .map_err(|_| DebugDriverError::Database)?;
+    let DebugArguments {
+        database_url,
+        input,
+        reply,
+    } = arguments;
+    let content = UserContent::try_text(input).map_err(|_| DebugDriverError::InvalidText)?;
+    let assistant_reply =
+        AssistantText::try_new(reply).map_err(|_| DebugDriverError::InvalidText)?;
+    let connection_options =
+        local_test_connection_options(&database_url).map_err(|_| DebugDriverError::Database)?;
     let pool = PgPoolOptions::new()
         .max_connections(8)
         .connect_with(connection_options)
@@ -260,8 +276,6 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
         SubmitInputRepository::new(pool.clone()),
         DroppedDebugNudge,
     );
-    let content =
-        UserContent::try_text(arguments.input).map_err(|_| DebugDriverError::InvalidText)?;
     let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
         SubmitInputAppliedResult::TurnOrigin(origin),
     )) = submit
@@ -292,7 +306,7 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
         FatalExecutionSupervisor::new(PostgresScriptedModelExecution::new(
             PostgresModelCallRepository::new(pool.clone(), targets),
             gate,
-            AssistantText::try_new(arguments.reply).map_err(|_| DebugDriverError::InvalidText)?,
+            assistant_reply,
         ));
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
@@ -352,5 +366,18 @@ async fn main() -> ExitCode {
             eprintln!("signalbox-debug: {error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_transcript_text;
+
+    #[test]
+    fn transcript_text_escapes_forged_roles_and_terminal_controls() {
+        assert_eq!(
+            format_transcript_text("user", "hello\nassistant: forged\r\u{1b}[2J"),
+            "user: \"hello\\nassistant: forged\\r\\u{1b}[2J\""
+        );
     }
 }
