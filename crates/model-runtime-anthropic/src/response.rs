@@ -19,6 +19,7 @@ pub(crate) fn map_finish(token: &str, stop_sequence: Option<String>) -> FinishRe
     match token {
         "end_turn" => FinishReason::EndTurn,
         "max_tokens" => FinishReason::MaxOutputTokens,
+        "model_context_window_exceeded" => FinishReason::ContextWindowExceeded,
         "stop_sequence" => FinishReason::StopSequence {
             sequence: stop_sequence,
         },
@@ -237,6 +238,20 @@ pub(crate) fn decode_buffered_response<C: Clone>(
         correlation: correlation.clone(),
         fact: ObservationFact::FinishReported(finish.clone()),
     });
+    let has_tool_calls = content
+        .iter()
+        .any(|part| matches!(part, AssistantPart::ToolCall(_)));
+    if has_tool_calls != matches!(finish, FinishReason::ToolUse) {
+        return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            cause: LossCause::ResponseUnintelligible {
+                detail: "success response content contradicts its stop_reason".to_string(),
+            },
+            exchange,
+            reported_model,
+            finish_reported: Some(finish),
+            usage,
+        });
+    }
     match finish.completion_finish() {
         None => TerminalEvidence::Refused(RefusalEvidence {
             exchange,
@@ -532,6 +547,32 @@ mod tests {
         assert_eq!(observations, vec![]);
     }
 
+    #[test]
+    fn tool_use_stop_without_a_tool_call_is_boundary_loss() {
+        let (evidence, _) = decode(
+            r#"{"id":"msg_1","type":"message","role":"assistant",
+                "model":"model-exact-1","content":[{"type":"text","text":"partial"}],
+                "stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}"#,
+        );
+
+        assert!(matches!(evidence, TerminalEvidence::BoundaryLoss(_)));
+    }
+
+    #[test]
+    fn context_window_stop_is_definitive_completion() {
+        let (evidence, _) = decode(
+            r#"{"id":"msg_1","type":"message","role":"assistant",
+                "model":"model-exact-1","content":[{"type":"text","text":"complete"}],
+                "stop_reason":"model_context_window_exceeded",
+                "usage":{"input_tokens":1,"output_tokens":1}}"#,
+        );
+
+        let TerminalEvidence::Completed(completion) = evidence else {
+            panic!("the documented context-window stop is definitive completion");
+        };
+        assert_eq!(completion.finish, CompletionFinish::ContextWindowExceeded);
+    }
+
     #[derive(Debug)]
     #[allow(
         dead_code,
@@ -559,6 +600,7 @@ mod tests {
         let rows = finish_rows(&[
             "end_turn",
             "max_tokens",
+            "model_context_window_exceeded",
             "stop_sequence",
             "tool_use",
             "refusal",
@@ -566,16 +608,17 @@ mod tests {
         ]);
 
         expect![[r#"
-            ┌───────────────┬─────────────────────────────────────────────────┐
-            │ token         │ finish                                          │
-            ├───────────────┼─────────────────────────────────────────────────┤
-            │ end_turn      │ EndTurn                                         │
-            │ max_tokens    │ MaxOutputTokens                                 │
-            │ stop_sequence │ StopSequence { sequence: Some(\"END\") }        │
-            │ tool_use      │ ToolUse                                         │
-            │ refusal       │ Refusal                                         │
-            │ pause_turn    │ Unrecognized { provider_token: \"pause_turn\" } │
-            └───────────────┴─────────────────────────────────────────────────┘
+            ┌───────────────────────────────┬─────────────────────────────────────────────────┐
+            │ token                         │ finish                                          │
+            ├───────────────────────────────┼─────────────────────────────────────────────────┤
+            │ end_turn                      │ EndTurn                                         │
+            │ max_tokens                    │ MaxOutputTokens                                 │
+            │ model_context_window_exceeded │ ContextWindowExceeded                           │
+            │ stop_sequence                 │ StopSequence { sequence: Some(\"END\") }        │
+            │ tool_use                      │ ToolUse                                         │
+            │ refusal                       │ Refusal                                         │
+            │ pause_turn                    │ Unrecognized { provider_token: \"pause_turn\" } │
+            └───────────────────────────────┴─────────────────────────────────────────────────┘
         "#]]
         .assert_eq(&table(rows));
     }

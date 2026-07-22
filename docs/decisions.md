@@ -9,6 +9,26 @@ that constrains several components — require a full record under
 [decisions/](decisions/README.md) instead. Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-21 — Normalize provider context-window completion
+
+**Context.** Anthropic reports `model_context_window_exceeded` when a complete
+Messages response stops because generation reached the model's context-window
+limit. Treating that documented terminal outcome as an unknown token would turn
+definitive completion material into ambiguous boundary-loss evidence.
+
+**Decision.** Add `ContextWindowExceeded` to the provider-neutral finish and
+completion-finish vocabularies, and map Anthropic's documented token to it.
+Unknown or provider-specific nonterminal stop reasons remain boundary loss.
+
+**Rejected alternatives.** Mapping the token to `MaxOutputTokens` would conflate
+the model's context capacity with the operation's requested output ceiling.
+Keeping it unrecognized would cause unnecessary reconciliation after a complete
+provider response.
+
+**Affects.** `signalbox-model-runtime` finish evidence and the Anthropic
+buffered and streamed response decoders. It changes no retry, fallback, or
+caller classification policy.
+
 ## 2026-07-21 — Anthropic adapter HTTP and codec dependencies
 
 **Context.** ADR-0047 authorizes provider adapters but deliberately leaves each

@@ -120,6 +120,8 @@ pub enum FinishReason {
     EndTurn,
     /// Generation hit the operation's output-token ceiling.
     MaxOutputTokens,
+    /// Generation reached the model's context-window limit.
+    ContextWindowExceeded,
     /// Generation hit a caller-declared stop sequence.
     StopSequence {
         /// The sequence the provider reported hitting, when reported.
@@ -144,6 +146,7 @@ impl FinishReason {
         match self {
             Self::EndTurn => Some(CompletionFinish::EndTurn),
             Self::MaxOutputTokens => Some(CompletionFinish::MaxOutputTokens),
+            Self::ContextWindowExceeded => Some(CompletionFinish::ContextWindowExceeded),
             Self::StopSequence { sequence } => Some(CompletionFinish::StopSequence { sequence }),
             Self::ToolUse => Some(CompletionFinish::ToolUse),
             Self::Refusal => None,
@@ -166,6 +169,8 @@ pub enum CompletionFinish {
     EndTurn,
     /// Generation hit the operation's output-token ceiling.
     MaxOutputTokens,
+    /// Generation reached the model's context-window limit.
+    ContextWindowExceeded,
     /// Generation hit a caller-declared stop sequence.
     StopSequence {
         /// The sequence the provider reported hitting, when reported.
@@ -185,6 +190,7 @@ impl From<CompletionFinish> for FinishReason {
         match finish {
             CompletionFinish::EndTurn => Self::EndTurn,
             CompletionFinish::MaxOutputTokens => Self::MaxOutputTokens,
+            CompletionFinish::ContextWindowExceeded => Self::ContextWindowExceeded,
             CompletionFinish::StopSequence { sequence } => Self::StopSequence { sequence },
             CompletionFinish::ToolUse => Self::ToolUse,
             CompletionFinish::Unrecognized { provider_token } => {
