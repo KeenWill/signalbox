@@ -426,6 +426,7 @@ impl AcceptedInputTurnSchedulingRecord {
         queue_session: SessionId,
         queue_turn: TurnId,
         order: AcceptedInputQueueOrder,
+        origin_delivery: DeliveryRequest,
         binding: crate::SteeringBinding,
         source_configuration: OriginConfiguration,
         state: AcceptedInputTurnSchedulingRecordState,
@@ -438,9 +439,7 @@ impl AcceptedInputTurnSchedulingRecord {
             queue_session,
             queue_turn,
             order,
-            origin_delivery: DeliveryRequest::NextSafePoint {
-                expected_active_turn: binding.source_turn(),
-            },
+            origin_delivery,
             origin_configuration: source_configuration,
             configuration_provenance: TurnConfigurationProvenance::InheritedForReclassifiedSteering(
                 binding,
@@ -517,6 +516,7 @@ pub struct AcceptedInputSchedulingReconstitutionInput {
     turns: Vec<AcceptedInputTurnSchedulingRecord>,
     semantic_entries: Vec<SemanticTranscriptEntryReconstitutionInput>,
     snapshots: Vec<ResolvedContextFrontierReconstitutionInput>,
+    pinned_targets: Vec<crate::PinnedProviderTargetReconstitutionInput>,
     model_calls: Vec<crate::ModelCallReconstitutionInput>,
     active_acceptance_tail: Option<SessionAcceptanceTailReconstitutionInput>,
 }
@@ -535,17 +535,20 @@ impl AcceptedInputSchedulingReconstitutionInput {
             turns,
             semantic_entries,
             snapshots,
+            pinned_targets: Vec::new(),
             model_calls: Vec::new(),
             active_acceptance_tail,
         }
     }
 
-    /// Supplies the complete model-call facts referenced by terminal semantic
-    /// content in this scheduling projection.
-    pub fn with_model_calls(
+    /// Supplies the independently stored turn-level targets and complete call
+    /// facts referenced by this scheduling projection.
+    pub fn with_model_call_facts(
         mut self,
+        pinned_targets: Vec<crate::PinnedProviderTargetReconstitutionInput>,
         model_calls: Vec<crate::ModelCallReconstitutionInput>,
     ) -> Self {
+        self.pinned_targets = pinned_targets;
         self.model_calls = model_calls;
         self
     }
@@ -573,6 +576,11 @@ impl AcceptedInputSchedulingReconstitutionInput {
     /// Returns every model call required by terminal semantic content.
     pub fn model_calls(&self) -> &[crate::ModelCallReconstitutionInput] {
         &self.model_calls
+    }
+
+    /// Returns every independently stored turn-level target fact.
+    pub fn pinned_targets(&self) -> &[crate::PinnedProviderTargetReconstitutionInput] {
+        &self.pinned_targets
     }
 
     /// Borrows the claimed complete tail required by an active turn.
@@ -686,6 +694,21 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
     DuplicateModelCall {
         /// The duplicated call.
         call: crate::ModelCallId,
+    },
+    /// The same turn-level pinned-target fact appeared more than once.
+    DuplicatePinnedTarget {
+        /// The turn whose target was duplicated.
+        turn: TurnId,
+    },
+    /// A call has no independently stored turn-level pinned target.
+    PinnedTargetMissing {
+        /// The affected call.
+        call: crate::ModelCallId,
+    },
+    /// A turn-level pinned target is unrelated to every supplied call.
+    UnreferencedPinnedTarget {
+        /// The unrelated turn.
+        turn: TurnId,
     },
     /// A model call references a snapshot absent from this complete read.
     ModelCallSnapshotMissing {
@@ -1900,18 +1923,46 @@ fn reconstitute_inner(
         }
     }
 
+    let mut pinned_targets = BTreeMap::new();
+    for candidate in &input.pinned_targets {
+        let turn = candidate.turn();
+        let Some(pinned) = candidate.reconstitute_for_turn(turn) else {
+            return Err(
+                AcceptedInputSchedulingReconstitutionFailure::UnreferencedPinnedTarget { turn },
+            );
+        };
+        if pinned_targets.insert(turn, pinned).is_some() {
+            return Err(
+                AcceptedInputSchedulingReconstitutionFailure::DuplicatePinnedTarget { turn },
+            );
+        }
+    }
+    let mut referenced_pinned_targets = BTreeSet::new();
     let mut model_calls = BTreeMap::new();
     for candidate in &input.model_calls {
         let call = candidate.id();
         let snapshot = snapshots.get(&candidate.frontier()).ok_or(
             AcceptedInputSchedulingReconstitutionFailure::ModelCallSnapshotMissing { call },
         )?;
+        let Some(pinned) = pinned_targets.get(&candidate.turn()).copied() else {
+            return Err(AcceptedInputSchedulingReconstitutionFailure::PinnedTargetMissing { call });
+        };
         let reconstituted = candidate
-            .reconstitute(snapshot)
+            .reconstitute(snapshot, pinned)
             .map_err(|_| AcceptedInputSchedulingReconstitutionFailure::InvalidModelCall { call })?;
+        referenced_pinned_targets.insert(candidate.turn());
         if model_calls.insert(call, reconstituted).is_some() {
             return Err(AcceptedInputSchedulingReconstitutionFailure::DuplicateModelCall { call });
         }
+    }
+    if let Some(turn) = pinned_targets
+        .keys()
+        .find(|turn| !referenced_pinned_targets.contains(turn))
+        .copied()
+    {
+        return Err(
+            AcceptedInputSchedulingReconstitutionFailure::UnreferencedPinnedTarget { turn },
+        );
     }
     for (call, entries) in &assistant_by_call {
         let Some(reconstituted) = model_calls.get(call) else {
@@ -4996,24 +5047,65 @@ mod tests {
             session.id(),
             successor.turn(),
             successor.ordinary_order(),
+            DeliveryRequest::NextSafePoint {
+                expected_active_turn: predecessor.turn(),
+            },
             binding,
             source_configuration.clone(),
             AcceptedInputTurnSchedulingRecordState::Queued,
         );
+        let mismatched_delivery_record = AcceptedInputTurnSchedulingRecord::reclassified(
+            session.id(),
+            successor.turn(),
+            session.id(),
+            AcceptedInputLifecycle::new(
+                successor.accepted_input(),
+                AcceptedInputDisposition::ReclassifiedAsTurnOrigin {
+                    turn: successor.turn(),
+                    reason: crate::SteeringReclassificationReason::NoSafePointBeforeTerminal,
+                },
+            ),
+            session.id(),
+            successor.turn(),
+            successor.ordinary_order(),
+            DeliveryRequest::NextSafePoint {
+                expected_active_turn: turn_id(99),
+            },
+            binding,
+            source_configuration.clone(),
+            AcceptedInputTurnSchedulingRecordState::Queued,
+        );
+        let semantic_entries = vec![
+            predecessor_failure_entry.failed_turn(&session, predecessor),
+            predecessor.entry(&session, predecessor_origin_entry),
+        ];
+        let snapshots = vec![
+            predecessor_terminal_frontier.snapshot(
+                &session,
+                &[predecessor_origin_entry, predecessor_failure_entry],
+            ),
+            predecessor_starting_frontier.snapshot(&session, &[predecessor_origin_entry]),
+        ];
+        let error = AcceptedInputSchedulingReconstitutionInput::new(
+            session.clone(),
+            vec![mismatched_delivery_record, predecessor_record.clone()],
+            semantic_entries.clone(),
+            snapshots.clone(),
+            None,
+        )
+        .reconstitute()
+        .expect_err("stored reclassified delivery must agree with its exact source binding");
+        assert_eq!(
+            error.failure(),
+            &AcceptedInputSchedulingReconstitutionFailure::OriginDeliveryMismatch {
+                turn: successor.turn(),
+            }
+        );
         let projection = AcceptedInputSchedulingReconstitutionInput::new(
             session.clone(),
             vec![successor_record, predecessor_record],
-            vec![
-                predecessor_failure_entry.failed_turn(&session, predecessor),
-                predecessor.entry(&session, predecessor_origin_entry),
-            ],
-            vec![
-                predecessor_terminal_frontier.snapshot(
-                    &session,
-                    &[predecessor_origin_entry, predecessor_failure_entry],
-                ),
-                predecessor_starting_frontier.snapshot(&session, &[predecessor_origin_entry]),
-            ],
+            semantic_entries,
+            snapshots,
             None,
         )
         .reconstitute()
@@ -5111,7 +5203,13 @@ mod tests {
                 ],
                 None,
             )
-            .with_model_calls(vec![call])
+            .with_model_call_facts(
+                vec![crate::PinnedProviderTargetReconstitutionInput::new(
+                    call.turn(),
+                    call.target(),
+                )],
+                vec![call],
+            )
             .reconstitute()
             .expect("the completed predecessor is fully correlated");
 
@@ -5244,26 +5342,38 @@ mod tests {
             ],
             None,
         )
-        .with_model_calls(vec![
-            ModelCallReconstitutionInput::new(
-                completed_call,
-                completed.turn(),
-                shared_attempt,
-                FrozenModelSelection::Direct(direct(1)),
-                ResolvedProviderTarget::naming(provider_model_identity(51)),
-                completed_start_snapshot.frontier().snapshot(),
-                ModelCallReconstitutionState::Terminal(ModelCallDisposition::Completed),
-            ),
-            ModelCallReconstitutionInput::new(
-                refused_call,
-                refused.turn(),
-                shared_attempt,
-                FrozenModelSelection::Direct(direct(1)),
-                ResolvedProviderTarget::naming(provider_model_identity(51)),
-                refused_start_snapshot.frontier().snapshot(),
-                ModelCallReconstitutionState::Terminal(ModelCallDisposition::Refused),
-            ),
-        ]);
+        .with_model_call_facts(
+            vec![
+                crate::PinnedProviderTargetReconstitutionInput::new(
+                    completed.turn(),
+                    ResolvedProviderTarget::naming(provider_model_identity(51)),
+                ),
+                crate::PinnedProviderTargetReconstitutionInput::new(
+                    refused.turn(),
+                    ResolvedProviderTarget::naming(provider_model_identity(51)),
+                ),
+            ],
+            vec![
+                ModelCallReconstitutionInput::new(
+                    completed_call,
+                    completed.turn(),
+                    shared_attempt,
+                    FrozenModelSelection::Direct(direct(1)),
+                    ResolvedProviderTarget::naming(provider_model_identity(51)),
+                    completed_start_snapshot.frontier().snapshot(),
+                    ModelCallReconstitutionState::Terminal(ModelCallDisposition::Completed),
+                ),
+                ModelCallReconstitutionInput::new(
+                    refused_call,
+                    refused.turn(),
+                    shared_attempt,
+                    FrozenModelSelection::Direct(direct(1)),
+                    ResolvedProviderTarget::naming(provider_model_identity(51)),
+                    refused_start_snapshot.frontier().snapshot(),
+                    ModelCallReconstitutionState::Terminal(ModelCallDisposition::Refused),
+                ),
+            ],
+        );
 
         let error = input
             .reconstitute()
@@ -5333,7 +5443,13 @@ mod tests {
                 ],
                 None,
             )
-            .with_model_calls(vec![call])
+            .with_model_call_facts(
+                vec![crate::PinnedProviderTargetReconstitutionInput::new(
+                    call.turn(),
+                    call.target(),
+                )],
+                vec![call],
+            )
             .reconstitute()
             .expect("the refused predecessor is fully correlated");
 
@@ -5412,7 +5528,13 @@ mod tests {
             ],
             None,
         )
-        .with_model_calls(vec![call]);
+        .with_model_call_facts(
+            vec![crate::PinnedProviderTargetReconstitutionInput::new(
+                call.turn(),
+                call.target(),
+            )],
+            vec![call],
+        );
 
         let error = input
             .reconstitute()
@@ -5473,7 +5595,13 @@ mod tests {
             ],
             None,
         )
-        .with_model_calls(vec![call]);
+        .with_model_call_facts(
+            vec![crate::PinnedProviderTargetReconstitutionInput::new(
+                call.turn(),
+                call.target(),
+            )],
+            vec![call],
+        );
 
         let error = input
             .reconstitute()
@@ -5529,7 +5657,13 @@ mod tests {
             vec![starting_frontier.snapshot(&session, &[origin_entry])],
             Some(active.active_tail(&session)),
         )
-        .with_model_calls(vec![call])
+        .with_model_call_facts(
+            vec![crate::PinnedProviderTargetReconstitutionInput::new(
+                call.turn(),
+                call.target(),
+            )],
+            vec![call],
+        )
         .reconstitute()
         .expect("the ambiguous call and wait are fully correlated");
         let waiting = projection

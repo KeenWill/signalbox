@@ -71,6 +71,45 @@ pub struct PinnedProviderTarget {
     target: ResolvedProviderTarget,
 }
 
+/// Independently stored turn-level target facts supplied for reconstitution.
+///
+/// This input is inert: constructing it does not pin a target. The owning
+/// model-execution aggregate checks the stored turn against its canonical turn
+/// before producing the sealed [`PinnedProviderTarget`] used by any call.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct PinnedProviderTargetReconstitutionInput {
+    turn: TurnId,
+    target: ResolvedProviderTarget,
+}
+
+impl PinnedProviderTargetReconstitutionInput {
+    /// Supplies the independently stored owning turn and exact target.
+    pub const fn new(turn: TurnId, target: ResolvedProviderTarget) -> Self {
+        Self { turn, target }
+    }
+
+    /// Returns the stored owning turn.
+    pub const fn turn(&self) -> TurnId {
+        self.turn
+    }
+
+    /// Returns the stored exact target.
+    pub const fn target(&self) -> ResolvedProviderTarget {
+        self.target
+    }
+
+    pub(crate) fn reconstitute_for_turn(
+        self,
+        expected_turn: TurnId,
+    ) -> Option<PinnedProviderTarget> {
+        if self.turn == expected_turn {
+            Some(PinnedProviderTarget::pinned(self.turn, self.target))
+        } else {
+            None
+        }
+    }
+}
+
 impl PinnedProviderTarget {
     /// Pins the exact resolved target for one turn.
     pub(crate) const fn pinned(turn: TurnId, target: ResolvedProviderTarget) -> Self {
@@ -529,11 +568,14 @@ impl ModelCallReconstitutionInput {
     pub(crate) fn reconstitute(
         &self,
         snapshot: &ResolvedContextFrontierSnapshot,
+        pinned: PinnedProviderTarget,
     ) -> Result<ReconstitutedModelCall, ModelCallReconstitutionFailure> {
         if self.frontier != snapshot.frontier().snapshot() {
             return Err(ModelCallReconstitutionFailure::FrontierMismatch);
         }
-        let pinned = PinnedProviderTarget::pinned(self.turn, self.target);
+        if self.turn != pinned.turn() || self.target != pinned.target() {
+            return Err(ModelCallReconstitutionFailure::PinnedTargetMismatch);
+        }
         let prepared =
             CurrentModelCall::prepared(self.id, self.attempt, self.selection, pinned, snapshot);
         match self.state {
@@ -578,6 +620,8 @@ pub enum ReconstitutedModelCall {
 pub enum ModelCallReconstitutionFailure {
     /// The call's frontier is not the supplied exact resolved snapshot.
     FrontierMismatch,
+    /// The call's stored target reference differs from the checked turn fact.
+    PinnedTargetMismatch,
     /// The stored state cannot follow the accepted predecessor matrix.
     InvalidTransition,
 }

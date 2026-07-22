@@ -16,11 +16,12 @@ use crate::{
     CurrentTurnAttemptState, DirectModelSelection, EffectiveConfiguration, EndedModelCall,
     EndedTurnAttempt, FrozenModelSelection, ModelCallDisposition, ModelCallId,
     ModelCallReconstitutionInput, NonEmptyIssuedOperationRefs, OriginConfiguration,
-    PinnedProviderTarget, ReconstitutedModelCall, ReconstitutedSubmitInput,
-    ResolvedContextFrontierSnapshot, ResolvedProviderTarget, SemanticTranscriptEntry,
-    SemanticTranscriptEntryId, SemanticTranscriptEntryPayload, SessionId, SteeringBinding,
-    SteeringReclassificationReason, SubmitInputAppliedResult, SubmitInputResult, TurnAttemptId,
-    TurnDisposition, TurnId, UnstoppedAttemptDisposition, UserContent,
+    PinnedProviderTarget, PinnedProviderTargetReconstitutionInput, ReconstitutedModelCall,
+    ReconstitutedSubmitInput, ResolvedContextFrontierSnapshot, ResolvedProviderTarget,
+    SemanticTranscriptEntry, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload, SessionId,
+    SteeringBinding, SteeringReclassificationReason, SubmitInputAppliedResult, SubmitInputResult,
+    SubmitInputTurnOriginReconstitutionInput, TurnAttemptId, TurnDisposition, TurnId,
+    UnstoppedAttemptDisposition, UserContent,
 };
 
 /// One immutable configured direct-selection to exact-target definition.
@@ -157,6 +158,18 @@ impl ModelCallOriginContent {
         })
     }
 
+    /// Derives exact origin content from a fully validated direct or
+    /// reclassified accepted-input turn-origin chain.
+    pub fn from_reconstituted_turn_origin(
+        origin: &SubmitInputTurnOriginReconstitutionInput,
+    ) -> Option<Self> {
+        let (accepted_input, content) = origin.validated_origin_content()?;
+        Some(Self {
+            accepted_input,
+            content,
+        })
+    }
+
     /// Returns the accepted input whose origin carries this content.
     pub const fn accepted_input(&self) -> AcceptedInputId {
         self.accepted_input
@@ -188,6 +201,7 @@ pub struct ModelCallExecutionReconstitutionInput {
     starting_snapshot: ResolvedContextFrontierSnapshot,
     frontier_entries: Vec<SemanticTranscriptEntry>,
     origin_contents: Vec<ModelCallOriginContent>,
+    pinned_target: Option<PinnedProviderTargetReconstitutionInput>,
     calls: Vec<ModelCallReconstitutionInput>,
 }
 
@@ -199,6 +213,7 @@ impl ModelCallExecutionReconstitutionInput {
         starting_snapshot: ResolvedContextFrontierSnapshot,
         frontier_entries: Vec<SemanticTranscriptEntry>,
         origin_contents: Vec<ModelCallOriginContent>,
+        pinned_target: Option<PinnedProviderTargetReconstitutionInput>,
         calls: Vec<ModelCallReconstitutionInput>,
     ) -> Self {
         Self {
@@ -207,6 +222,7 @@ impl ModelCallExecutionReconstitutionInput {
             starting_snapshot,
             frontier_entries,
             origin_contents,
+            pinned_target,
             calls,
         }
     }
@@ -243,6 +259,12 @@ pub enum ModelCallExecutionReconstitutionFailure {
     CallSelectionMismatch,
     /// A stored call target contradicts an available immutable catalog entry.
     CallTargetMismatch,
+    /// A call exists without the independently stored turn-pinned target.
+    PinnedTargetMissing,
+    /// A pinned target exists even though no call was atomically created.
+    PinnedTargetUnexpected,
+    /// The stored pinned target belongs to another turn.
+    PinnedTargetTurnMismatch,
     /// Stored call facts cannot reconstruct the accepted call lifecycle.
     InvalidCall,
     /// Attempt and call states do not form one accepted execution phase.
@@ -600,7 +622,7 @@ impl ModelCallExecution {
                 )
                 .map(ModelCallTerminalOutcome::Failed)
             }
-            CurrentModelCallState::InFlight | CurrentModelCallState::CancellationRequested => {
+            CurrentModelCallState::InFlight => {
                 let call = call
                     .end_classified(ModelCallDisposition::Ambiguous)
                     .map_err(|_| ModelCallClosureError::CallStateMismatch)?;
@@ -622,6 +644,9 @@ impl ModelCallExecution {
                         ambiguous_operations,
                     },
                 ))
+            }
+            CurrentModelCallState::CancellationRequested => {
+                Err(ModelCallClosureError::AttemptStateMismatch)
             }
         }
     }
@@ -1577,6 +1602,30 @@ fn reconstitute(
             ModelCallExecutionReconstitutionFailure::MultipleCalls,
         ));
     }
+    let pinned_target = match (input.pinned_target, input.calls.first()) {
+        (None, None) => None,
+        (None, Some(_)) => {
+            return Err(fail(
+                input,
+                ModelCallExecutionReconstitutionFailure::PinnedTargetMissing,
+            ));
+        }
+        (Some(_), None) => {
+            return Err(fail(
+                input,
+                ModelCallExecutionReconstitutionFailure::PinnedTargetUnexpected,
+            ));
+        }
+        (Some(stored), Some(_)) => {
+            let Some(pinned) = stored.reconstitute_for_turn(turn) else {
+                return Err(fail(
+                    input,
+                    ModelCallExecutionReconstitutionFailure::PinnedTargetTurnMismatch,
+                ));
+            };
+            Some(pinned)
+        }
+    };
     let current_call = if let Some(call) = input.calls.first() {
         if call.turn() != turn
             || call.attempt() != current_attempt.id()
@@ -1593,17 +1642,24 @@ fn reconstitute(
                 ModelCallExecutionReconstitutionFailure::CallSelectionMismatch,
             ));
         }
-        if input
-            .targets
-            .resolve(call.selection())
-            .is_ok_and(|resolution| call.target() != resolution.target())
+        let Some(pinned) = pinned_target else {
+            return Err(fail(
+                input,
+                ModelCallExecutionReconstitutionFailure::PinnedTargetMissing,
+            ));
+        };
+        if call.target() != pinned.target()
+            || input
+                .targets
+                .resolve(call.selection())
+                .is_ok_and(|resolution| pinned.target() != resolution.target())
         {
             return Err(fail(
                 input,
                 ModelCallExecutionReconstitutionFailure::CallTargetMismatch,
             ));
         }
-        match call.reconstitute(&input.starting_snapshot) {
+        match call.reconstitute(&input.starting_snapshot, pinned) {
             Ok(ReconstitutedModelCall::Current(call)) => Some(call),
             Ok(ReconstitutedModelCall::Ended(_)) | Err(_) => {
                 return Err(fail(
@@ -1628,10 +1684,6 @@ fn reconstitute(
             | (
                 CurrentTurnAttemptState::Running,
                 Some(CurrentModelCallState::InFlight)
-            )
-            | (
-                CurrentTurnAttemptState::Running,
-                Some(CurrentModelCallState::CancellationRequested)
             )
     );
     if !lifecycle_valid {
@@ -1905,6 +1957,7 @@ mod tests {
                 accepted_input_id(4),
                 UserContent::try_text(String::from("hello")).expect("test content is valid"),
             )],
+            None,
             Vec::new(),
         )
         .reconstitute()
@@ -1937,6 +1990,10 @@ mod tests {
                     ModelCallOriginContent::from_validated_parts(*accepted_input, content.clone())
                 })
                 .collect(),
+            Some(PinnedProviderTargetReconstitutionInput::new(
+                prepared.call().turn(),
+                prepared.call().target(),
+            )),
             vec![ModelCallReconstitutionInput::new(
                 prepared.call().id(),
                 prepared.call().turn(),
@@ -1973,6 +2030,10 @@ mod tests {
                     ModelCallOriginContent::from_validated_parts(*accepted_input, content.clone())
                 })
                 .collect(),
+            Some(PinnedProviderTargetReconstitutionInput::new(
+                authorized.call.turn(),
+                authorized.call.target(),
+            )),
             vec![ModelCallReconstitutionInput::new(
                 authorized.call.id(),
                 authorized.call.turn(),
@@ -1991,6 +2052,9 @@ mod tests {
         execution: &ModelCallExecution,
         calls: Vec<ModelCallReconstitutionInput>,
     ) -> ModelCallExecutionReconstitutionInput {
+        let pinned_target = execution
+            .current_call()
+            .map(|call| PinnedProviderTargetReconstitutionInput::new(call.turn(), call.target()));
         ModelCallExecutionReconstitutionInput::new(
             execution
                 .active_turn
@@ -2007,6 +2071,7 @@ mod tests {
                     ModelCallOriginContent::from_validated_parts(*accepted_input, content.clone())
                 })
                 .collect(),
+            pinned_target,
             calls,
         )
     }
@@ -2130,6 +2195,7 @@ mod tests {
                     UserContent::try_text(String::from("second")).expect("valid text"),
                 ),
             ],
+            None,
             Vec::new(),
         );
 
@@ -2165,6 +2231,7 @@ mod tests {
                     ModelCallOriginContent::from_validated_parts(*accepted_input, content.clone())
                 })
                 .collect(),
+            None,
             Vec::new(),
         );
 
@@ -2180,7 +2247,7 @@ mod tests {
     /// S02 / INV-014: persisted target facts must still match immutable
     /// configured target resolution when an execution is reloaded.
     #[test]
-    fn s02_inv014_reconstitution_rejects_stored_target_mismatch() {
+    fn s02_inv014_reconstitution_rejects_call_target_crosswired_from_turn_pin() {
         let execution = prepared_execution();
         let call = execution
             .current_call()
@@ -2204,6 +2271,37 @@ mod tests {
         assert_eq!(
             error.failure(),
             ModelCallExecutionReconstitutionFailure::CallTargetMismatch
+        );
+    }
+
+    /// S02 / INV-014: a call row cannot manufacture the durable target that
+    /// belongs independently to its owning turn.
+    #[test]
+    fn s02_inv014_reconstitution_requires_independent_turn_pin() {
+        let execution = prepared_execution();
+        let call = execution
+            .current_call()
+            .expect("prepared execution has one call");
+        let mut input = reconstitution_input_with_calls(
+            &execution,
+            vec![ModelCallReconstitutionInput::new(
+                call.id(),
+                call.turn(),
+                call.attempt(),
+                call.selection(),
+                call.target(),
+                call.frontier().snapshot(),
+                ModelCallReconstitutionState::Prepared,
+            )],
+        );
+        input.pinned_target = None;
+
+        let error = input
+            .reconstitute()
+            .expect_err("a call without its independent turn pin fails closed");
+        assert_eq!(
+            error.failure(),
+            ModelCallExecutionReconstitutionFailure::PinnedTargetMissing
         );
     }
 
@@ -2715,10 +2813,11 @@ mod tests {
         );
     }
 
-    /// S04 / INV-025 / INV-026 / INV-034: a committed cancellation request
-    /// remains an issued call whose fate startup cannot infer.
+    /// S02 / S04 / INV-006 / INV-014: cancellation-requested call state lacks
+    /// the proof-bearing stopped-attempt facts required by ADR-0041, so this
+    /// evidence-free execution projection fails closed during reconstitution.
     #[test]
-    fn s04_inv025_inv026_inv034_restart_preserves_cancellation_requested_call_as_ambiguous() {
+    fn s02_s04_inv006_inv014_cancellation_requested_reconstitution_fails_closed() {
         let in_flight = in_flight_execution();
         let cancellation_requested = in_flight
             .current_call()
@@ -2726,7 +2825,7 @@ mod tests {
             .clone()
             .request_cancellation()
             .expect("an in-flight call may request cancellation");
-        let execution = reconstitution_input_with_calls(
+        let error = reconstitution_input_with_calls(
             &in_flight,
             vec![ModelCallReconstitutionInput::new(
                 cancellation_requested.id(),
@@ -2739,73 +2838,12 @@ mod tests {
             )],
         )
         .reconstitute()
-        .expect("cancellation-requested facts retain live issued authority");
-
-        let outcome = execution
-            .recover_after_restart(FailedModelCallTurnIdentities::new(
-                semantic_transcript_entry_id(10),
-                context_frontier_id(11),
-            ))
-            .expect("startup may classify an abandoned cancellation request");
-        let ModelCallTerminalOutcome::AwaitingRecovery(waiting) = outcome else {
-            panic!("a cancellation-requested prior-process call selects recovery wait");
-        };
+        .expect_err("proof-free cancellation-requested storage must not reconstruct live");
 
         assert_eq!(
-            waiting.call().disposition(),
-            ModelCallDisposition::Ambiguous
+            error.failure(),
+            ModelCallExecutionReconstitutionFailure::LifecycleMismatch
         );
-    }
-
-    /// S02 / INV-006 / INV-014: cancellation-requested state lacks the
-    /// proof-bearing attempt facts required to authorize a live semantic
-    /// closure through this evidence-free aggregate; startup recovery remains
-    /// available through its conservative Lost path.
-    #[test]
-    fn s02_inv006_inv014_cancellation_requested_call_rejects_live_observation() {
-        let in_flight = in_flight_execution();
-        let cancellation_requested = in_flight
-            .current_call()
-            .expect("in-flight execution has one call")
-            .clone()
-            .request_cancellation()
-            .expect("an in-flight call may request cancellation");
-        let execution = reconstitution_input_with_calls(
-            &in_flight,
-            vec![ModelCallReconstitutionInput::new(
-                cancellation_requested.id(),
-                cancellation_requested.turn(),
-                cancellation_requested.attempt(),
-                cancellation_requested.selection(),
-                cancellation_requested.target(),
-                cancellation_requested.frontier().snapshot(),
-                ModelCallReconstitutionState::CancellationRequested,
-            )],
-        )
-        .reconstitute()
-        .expect("cancellation-requested facts remain available for recovery");
-
-        let observation = correlated_observation(
-            &execution,
-            ModelCallTerminalObservation::Completed {
-                assistant_text: vec![
-                    AssistantText::try_new("late completion".to_owned())
-                        .expect("test assistant text is nonempty"),
-                ],
-            },
-        );
-        let error = execution
-            .apply_terminal_observation(
-                observation,
-                ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
-                    vec![semantic_transcript_entry_id(10)],
-                    semantic_transcript_entry_id(11),
-                    context_frontier_id(12),
-                )),
-            )
-            .expect_err("evidence-free live closure cannot discard stop authority");
-
-        assert_eq!(error, ModelCallClosureError::CallStateMismatch);
     }
 
     /// S02 / INV-006: definitive known failure closes the physical call and

@@ -48,7 +48,8 @@ pub use delivery_request::{DeliveryRequest, PerInputConfigurationChoices};
 pub use model_call::{
     CurrentModelCall, CurrentModelCallState, EndedModelCall, ModelCallDisposition,
     ModelCallReconstitutionFailure, ModelCallReconstitutionInput, ModelCallReconstitutionState,
-    PinnedProviderTarget, ProviderModelIdentity, ReconstitutedModelCall, ResolvedProviderTarget,
+    PinnedProviderTarget, PinnedProviderTargetReconstitutionInput, ProviderModelIdentity,
+    ReconstitutedModelCall, ResolvedProviderTarget,
 };
 pub use model_execution::{
     AmbiguousModelCallTurn, AuthorizedModelCall, CompletedModelCallIdentities,

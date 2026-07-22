@@ -1015,6 +1015,7 @@ impl AcceptedInputTurnSchedulingRecord {
         queue_session: SessionId,
         queue_turn: TurnId,
         order: AcceptedInputQueueOrder,
+        origin_delivery: DeliveryRequest,
         binding: SteeringBinding,
         source_configuration: OriginConfiguration,
         state: AcceptedInputTurnSchedulingRecordState,
@@ -1038,9 +1039,13 @@ impl AcceptedInputSchedulingReconstitutionInput {
             AcceptedInputSchedulingProjection,
             AcceptedInputSchedulingReconstitutionError,
         >;
-    pub fn with_model_calls(self, model_calls: Vec<ModelCallReconstitutionInput>) -> Self;
+    pub fn with_model_call_facts(
+        self,
+        pinned_targets: Vec<PinnedProviderTargetReconstitutionInput>,
+        model_calls: Vec<ModelCallReconstitutionInput>,
+    ) -> Self;
     // accessors: session(), turns(), semantic_entries(), snapshots(),
-    // model_calls(), active_acceptance_tail()
+    // pinned_targets(), model_calls(), active_acceptance_tail()
 }
 
 pub enum AcceptedInputSchedulingReconstitutionFailure {
@@ -1068,6 +1073,9 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
         call: ModelCallId,
     },
     DuplicateModelCall { call: ModelCallId },
+    DuplicatePinnedTarget { turn: TurnId },
+    PinnedTargetMissing { call: ModelCallId },
+    UnreferencedPinnedTarget { turn: TurnId },
     ModelCallSnapshotMissing { call: ModelCallId },
     InvalidModelCall { call: ModelCallId },
     UnreferencedModelCall { call: ModelCallId },
@@ -1416,6 +1424,12 @@ impl PinnedProviderTarget {
     // accessors: turn(), target()
 }
 
+pub struct PinnedProviderTargetReconstitutionInput { /* private */ }
+impl PinnedProviderTargetReconstitutionInput {
+    pub const fn new(turn: TurnId, target: ResolvedProviderTarget) -> Self;
+    // accessors: turn(), target()
+}
+
 pub enum ModelCallDisposition {
     Completed,
     KnownFailed,
@@ -1474,6 +1488,7 @@ pub enum ReconstitutedModelCall {
 
 pub enum ModelCallReconstitutionFailure {
     FrontierMismatch,
+    PinnedTargetMismatch,
     InvalidTransition,
 }
 ```
@@ -1487,8 +1502,27 @@ pub enum ModelTargetCatalogError { DuplicateSelection { selection: DirectModelSe
 pub struct ResolvedModelSelection { /* private */ }
 pub struct ModelTargetResolutionError { /* private */ }
 pub struct ModelCallOriginContent { /* private */ }
+impl ModelCallOriginContent {
+    pub fn from_recorded_submit(recorded: &ReconstitutedSubmitInput) -> Option<Self>;
+    pub fn from_reconstituted_turn_origin(
+        origin: &SubmitInputTurnOriginReconstitutionInput,
+    ) -> Option<Self>;
+    // accessors: accepted_input(), content()
+}
 
 pub struct ModelCallExecutionReconstitutionInput { /* private */ }
+impl ModelCallExecutionReconstitutionInput {
+    pub fn new(
+        active_turn: ActivatedAcceptedInputTurn,
+        targets: ModelTargetCatalog,
+        starting_snapshot: ResolvedContextFrontierSnapshot,
+        frontier_entries: Vec<SemanticTranscriptEntry>,
+        origin_contents: Vec<ModelCallOriginContent>,
+        pinned_target: Option<PinnedProviderTargetReconstitutionInput>,
+        calls: Vec<ModelCallReconstitutionInput>,
+    ) -> Self;
+    pub fn reconstitute(self) -> Result<ModelCallExecution, ModelCallExecutionReconstitutionError>;
+}
 pub enum ModelCallExecutionReconstitutionFailure {
     TurnIsNotRunning,
     StartingSnapshotSessionMismatch,
@@ -1501,6 +1535,9 @@ pub enum ModelCallExecutionReconstitutionFailure {
     CallOwnershipMismatch,
     CallSelectionMismatch,
     CallTargetMismatch,
+    PinnedTargetMissing,
+    PinnedTargetUnexpected,
+    PinnedTargetTurnMismatch,
     InvalidCall,
     LifecycleMismatch,
 }
@@ -2283,7 +2320,7 @@ impl<
 | domain: turn_lifecycle                | 10                   |
 | domain: turn_eligibility              | 22                   |
 | domain: turn_attempt                  | 13                   |
-| domain: model_call                    | 11                   |
+| domain: model_call                    | 12                   |
 | domain: model_execution               | 33                   |
 | domain: context_frontier              | 6                    |
 | domain: semantic_entry                | 4                    |
@@ -2291,7 +2328,7 @@ impl<
 | domain: applied_interrupt             | 2                    |
 | domain: fatal_mismatch                | 0                    |
 | domain: replace_session_defaults      | 13                   |
-| **signalbox-domain total**            | **197 (+1 free fn)** |
+| **signalbox-domain total**            | **198 (+1 free fn)** |
 | application: create_session           | 8 (incl. 2 traits)   |
 | application: load_session             | 2 (incl. 1 trait)    |
 | application: operator_failure         | 2 (incl. 1 trait)    |
