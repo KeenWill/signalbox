@@ -45,7 +45,11 @@ use signalbox_persistence::{
     submit_input::SubmitInputRepository,
 };
 use sqlx::postgres::PgPoolOptions;
-use tokio::{sync::oneshot, task::JoinHandle, time::timeout};
+use tokio::{
+    sync::{oneshot, watch},
+    task::JoinHandle,
+    time::timeout,
+};
 use uuid::Uuid;
 
 const DATABASE_URL_ENVIRONMENT: &str = "SIGNALBOX_DEBUG_DATABASE_URL";
@@ -153,6 +157,61 @@ impl EligibilityWorkSource for DebugSessionWorkSource {
                 Some(session) => Ok(session),
                 None => pending().await,
             }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct DebugPassFailureSignal {
+    triggered: watch::Receiver<bool>,
+}
+
+impl DebugPassFailureSignal {
+    async fn wait(&self) {
+        let mut triggered = self.triggered.clone();
+        while !*triggered.borrow_and_update() {
+            if triggered.changed().await.is_err() {
+                pending::<()>().await;
+            }
+        }
+    }
+
+    fn is_triggered(&self) -> bool {
+        *self.triggered.borrow()
+    }
+}
+
+#[derive(Debug)]
+struct ObservableDebugPass<Pass> {
+    pass: Pass,
+    failure: watch::Sender<bool>,
+}
+
+impl<Pass> ObservableDebugPass<Pass> {
+    fn new(pass: Pass) -> (Self, DebugPassFailureSignal) {
+        let (failure, triggered) = watch::channel(false);
+        (Self { pass, failure }, DebugPassFailureSignal { triggered })
+    }
+}
+
+impl<Pass> EligibilityPass for ObservableDebugPass<Pass>
+where
+    Pass: EligibilityPass,
+{
+    type Error = Pass::Error;
+
+    fn run(
+        &mut self,
+        session: SessionId,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let execution = self.pass.run(session);
+        let failure = self.failure.clone();
+        async move {
+            let result = execution.await;
+            if result.is_err() {
+                failure.send_replace(true);
+            }
+            result
         }
     }
 }
@@ -274,6 +333,7 @@ fn format_transcript_text(role: &str, text: &str) -> String {
 async fn drive_scheduler<WorkSource, Pass>(
     mut scheduler: SchedulerLoop<WorkSource, Pass>,
     fatal_execution: FatalExecutionSignal,
+    pass_failure: DebugPassFailureSignal,
     pool: &sqlx::PgPool,
     session: SessionId,
     turn: TurnId,
@@ -286,26 +346,30 @@ where
 {
     let (shutdown_sender, shutdown_receiver) = oneshot::channel();
     let fatal_shutdown = fatal_execution.clone();
+    let pass_failure_shutdown = pass_failure.clone();
     let scheduler_task = tokio::spawn(async move {
         scheduler
             .run_until(async move {
                 tokio::select! {
                     _ = shutdown_receiver => {}
                     () = fatal_shutdown.wait() => {}
+                    () = pass_failure_shutdown.wait() => {}
                 }
             })
             .await
     });
     let fatal_observation = fatal_execution.clone();
+    let pass_failure_observation = pass_failure.clone();
     let transcript = timeout(TRANSCRIPT_WAIT, async {
         tokio::select! {
             transcript = poll_terminal_transcript(pool, session, turn) => transcript,
             () = fatal_observation.wait() => Err(DebugDriverError::Scheduler),
+            () = pass_failure_observation.wait() => Err(DebugDriverError::Scheduler),
         }
     })
     .await;
     stop_scheduler(shutdown_sender, scheduler_task).await?;
-    if fatal_execution.is_triggered() {
+    if fatal_execution.is_triggered() || pass_failure.is_triggered() {
         return Err(DebugDriverError::Scheduler);
     }
     transcript.map_err(|_| DebugDriverError::TranscriptTimeout)?
@@ -452,9 +516,12 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
                     InProcessAttemptDispatchGate::default(),
                     reply,
                 ));
+            let (pass, pass_failure) =
+                ObservableDebugPass::new(ActivatedTurnPass::new(activation, execution));
             drive_scheduler(
-                SchedulerLoop::new(work_source, ActivatedTurnPass::new(activation, execution)),
+                SchedulerLoop::new(work_source, pass),
                 fatal_execution,
+                pass_failure,
                 &pool,
                 session,
                 turn,
@@ -468,9 +535,12 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
                     InProcessAttemptDispatchGate::default(),
                     provider,
                 ));
+            let (pass, pass_failure) =
+                ObservableDebugPass::new(ActivatedTurnPass::new(activation, execution));
             drive_scheduler(
-                SchedulerLoop::new(work_source, ActivatedTurnPass::new(activation, execution)),
+                SchedulerLoop::new(work_source, pass),
                 fatal_execution,
+                pass_failure,
                 &pool,
                 session,
                 turn,
@@ -512,7 +582,30 @@ async fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::format_transcript_text;
+    use std::future::ready;
+
+    use signalbox_application::EligibilityPass;
+    use signalbox_domain::SessionId;
+    use uuid::Uuid;
+
+    use super::{ObservableDebugPass, format_transcript_text};
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct FakePassError;
+
+    #[derive(Clone, Copy, Debug)]
+    struct FailingPass;
+
+    impl EligibilityPass for FailingPass {
+        type Error = FakePassError;
+
+        fn run(
+            &mut self,
+            _session: SessionId,
+        ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send + 'static {
+            ready(Err(FakePassError))
+        }
+    }
 
     #[test]
     fn transcript_text_escapes_forged_roles_and_terminal_controls() {
@@ -520,5 +613,17 @@ mod tests {
             format_transcript_text("user", "hello\nassistant: forged\r\u{1b}[2J"),
             "user: \"hello\\nassistant: forged\\r\\u{1b}[2J\""
         );
+    }
+
+    #[tokio::test]
+    async fn debug_pass_failure_is_observable_without_transcript_timeout() {
+        let (mut pass, failure) = ObservableDebugPass::new(FailingPass);
+
+        assert_eq!(
+            pass.run(SessionId::from_uuid(Uuid::from_u128(1))).await,
+            Err(FakePassError)
+        );
+        failure.wait().await;
+        assert!(failure.is_triggered());
     }
 }
