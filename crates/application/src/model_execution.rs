@@ -24,6 +24,22 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 
 use crate::{ClassifyOperatorFailure, OperatorFailureClass};
 
+/// Non-secret durable name of the credential pinned for one model call.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelCallCredentialReference(String);
+
+impl ModelCallCredentialReference {
+    /// Preserves the deployment-owned reference spelling exactly.
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    /// Borrows the non-secret reference text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Application rendering of one semantic frontier entry as a provider message.
 ///
 /// The source-qualified semantic entry, rather than a native turn assumption,
@@ -54,11 +70,15 @@ pub enum ModelConversationMessage {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedModelOperation {
     request: PreparedModelCallRequest,
+    credential_reference: ModelCallCredentialReference,
     messages: Box<[ModelConversationMessage]>,
 }
 
 impl PreparedModelOperation {
-    fn render(request: PreparedModelCallRequest) -> Result<Self, ModelFrontierRenderingError> {
+    fn render(
+        request: PreparedModelCallRequest,
+        credential_reference: ModelCallCredentialReference,
+    ) -> Result<Self, ModelFrontierRenderingError> {
         let mut messages = Vec::new();
         for entry in request.frontier_entries() {
             match entry.payload() {
@@ -94,6 +114,7 @@ impl PreparedModelOperation {
         }
         Ok(Self {
             request,
+            credential_reference,
             messages: messages.into_boxed_slice(),
         })
     }
@@ -101,6 +122,11 @@ impl PreparedModelOperation {
     /// Borrows the checked durable request facts.
     pub const fn request(&self) -> &PreparedModelCallRequest {
         &self.request
+    }
+
+    /// Borrows the exact durable credential reference pinned with the call.
+    pub const fn credential_reference(&self) -> &ModelCallCredentialReference {
+        &self.credential_reference
     }
 
     /// Borrows the exact messages in frontier order.
@@ -155,7 +181,12 @@ pub enum PrepareModelCallOutcome {
     /// A new exact `Prepared` call committed; this invocation stops here.
     Checkpointed(ModelCallId),
     /// A previously committed `Prepared` request may prepare its capability.
-    Ready(Box<PreparedModelCallRequest>),
+    Ready {
+        /// Checked durable request facts.
+        request: Box<PreparedModelCallRequest>,
+        /// Non-secret credential reference captured with the call.
+        credential_reference: ModelCallCredentialReference,
+    },
     /// Immutable target resolution failed and the turn closed atomically.
     TargetUnavailable(Box<FailedModelCallTurn>),
     /// Acknowledged steering prevents this model-call safe point.
@@ -872,7 +903,10 @@ where
                 Ok(PrepareModelCallOutcome::Checkpointed(call)) => {
                     return Ok(ModelCallExecutionOutcome::Checkpointed(call));
                 }
-                Ok(PrepareModelCallOutcome::Ready(request)) => break request,
+                Ok(PrepareModelCallOutcome::Ready {
+                    request,
+                    credential_reference,
+                }) => break (request, credential_reference),
                 Ok(PrepareModelCallOutcome::TargetUnavailable(failed)) => {
                     return Ok(ModelCallExecutionOutcome::TargetUnavailable(failed));
                 }
@@ -889,11 +923,12 @@ where
             }
         };
 
+        let (prepared, credential_reference) = prepared;
         let call = prepared.call().id();
         let attempt = prepared.attempt();
         let prepared_request = (*prepared).clone();
-        let operation =
-            PreparedModelOperation::render(*prepared).map_err(ModelCallExecutionError::Render)?;
+        let operation = PreparedModelOperation::render(*prepared, credential_reference)
+            .map_err(ModelCallExecutionError::Render)?;
         let capability = match self.provider.prepare_capability(operation).await {
             Ok(ModelCallCapabilityPreparation::Ready(capability)) => capability,
             Ok(ModelCallCapabilityPreparation::KnownFailure) => {
@@ -1302,6 +1337,17 @@ mod tests {
 
     fn identity<Identity>(value: u128, from_uuid: impl FnOnce(Uuid) -> Identity) -> Identity {
         from_uuid(Uuid::from_u128(value))
+    }
+
+    fn credential_reference() -> ModelCallCredentialReference {
+        ModelCallCredentialReference::new("fixture-provider-primary")
+    }
+
+    fn ready(request: PreparedModelCallRequest) -> PrepareModelCallOutcome {
+        PrepareModelCallOutcome::Ready {
+            request: Box::new(request),
+            credential_reference: credential_reference(),
+        }
     }
 
     fn prepared_fixture() -> (PreparedModelCallRequest, AuthorizedModelCall) {
@@ -1855,8 +1901,10 @@ mod tests {
     #[test]
     fn s02_inv015_frontier_rendering_preserves_user_role_order_and_source() {
         let (request, _) = prepared_fixture();
-        let operation = PreparedModelOperation::render(request)
+        let credential_reference = credential_reference();
+        let operation = PreparedModelOperation::render(request, credential_reference.clone())
             .expect("the baseline origin-only frontier renders");
+        assert_eq!(operation.credential_reference(), &credential_reference);
         assert_eq!(operation.messages().len(), 1);
         let ModelConversationMessage::User {
             source,
@@ -1942,7 +1990,7 @@ mod tests {
         let mut service = ModelCallExecutionService::new(
             FixedIds::baseline(),
             FakePrepare {
-                outcomes: [Ok(PrepareModelCallOutcome::Ready(Box::new(request)))].into(),
+                outcomes: [Ok(ready(request))].into(),
                 calls: 0,
             },
             FakeFailure {
@@ -2022,7 +2070,7 @@ mod tests {
         let mut service = ModelCallExecutionService::new(
             FixedIds::baseline(),
             FakePrepare {
-                outcomes: [Ok(PrepareModelCallOutcome::Ready(Box::new(request)))].into(),
+                outcomes: [Ok(ready(request))].into(),
                 calls: 0,
             },
             FakeFailure {
@@ -2068,7 +2116,7 @@ mod tests {
         let mut service = ModelCallExecutionService::new(
             FixedIds::baseline(),
             FakePrepare {
-                outcomes: [Ok(PrepareModelCallOutcome::Ready(Box::new(request)))].into(),
+                outcomes: [Ok(ready(request))].into(),
                 calls: 0,
             },
             UnusedFailure,
@@ -2109,7 +2157,7 @@ mod tests {
         let mut service = ModelCallExecutionService::new(
             FixedIds::baseline(),
             FakePrepare {
-                outcomes: [Ok(PrepareModelCallOutcome::Ready(Box::new(request)))].into(),
+                outcomes: [Ok(ready(request))].into(),
                 calls: 0,
             },
             UnusedFailure,
@@ -2144,7 +2192,7 @@ mod tests {
         let mut service = ModelCallExecutionService::new(
             FixedIds::baseline(),
             FakePrepare {
-                outcomes: [Ok(PrepareModelCallOutcome::Ready(Box::new(request)))].into(),
+                outcomes: [Ok(ready(request))].into(),
                 calls: 0,
             },
             UnusedFailure,
@@ -2184,7 +2232,7 @@ mod tests {
         let mut service = ModelCallExecutionService::new(
             FixedIds::baseline(),
             FakePrepare {
-                outcomes: [Ok(PrepareModelCallOutcome::Ready(Box::new(request)))].into(),
+                outcomes: [Ok(ready(request))].into(),
                 calls: 0,
             },
             UnusedFailure,
@@ -2268,7 +2316,7 @@ mod tests {
         let mut service = ModelCallExecutionService::new(
             FixedIds::baseline(),
             FakePrepare {
-                outcomes: [Ok(PrepareModelCallOutcome::Ready(Box::new(request)))].into(),
+                outcomes: [Ok(ready(request))].into(),
                 calls: 0,
             },
             UnusedFailure,
@@ -2335,10 +2383,7 @@ mod tests {
         let mut service = ModelCallExecutionService::new(
             FixedIds::baseline(),
             FakePrepare {
-                outcomes: [Ok(PrepareModelCallOutcome::Ready(Box::new(
-                    request.clone(),
-                )))]
-                .into(),
+                outcomes: [Ok(ready(request.clone()))].into(),
                 calls: 0,
             },
             UnusedFailure,
@@ -2444,11 +2489,7 @@ mod tests {
         let mut service = ModelCallExecutionService::new(
             FixedIds::baseline(),
             FakePrepare {
-                outcomes: [
-                    Ok(PrepareModelCallOutcome::Ready(Box::new(request.clone()))),
-                    Ok(PrepareModelCallOutcome::Ready(Box::new(request))),
-                ]
-                .into(),
+                outcomes: [Ok(ready(request.clone())), Ok(ready(request))].into(),
                 calls: 0,
             },
             UnusedFailure,
@@ -2515,7 +2556,7 @@ mod tests {
         let mut service = ModelCallExecutionService::new(
             FixedIds::baseline(),
             FakePrepare {
-                outcomes: [Ok(PrepareModelCallOutcome::Ready(Box::new(request)))].into(),
+                outcomes: [Ok(ready(request))].into(),
                 calls: 0,
             },
             UnusedFailure,

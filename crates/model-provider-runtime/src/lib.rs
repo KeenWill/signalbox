@@ -225,10 +225,11 @@ impl ClassifyOperatorFailure for RuntimeModelCallProviderError {
 pub struct RuntimeModelCallProvider<R> {
     runtime: Arc<R>,
     models: RuntimeModelCatalog,
-    credential: CredentialReference,
 }
 
 struct AcceptanceObservations<AcceptancePossible, Correlation> {
+    expected_correlation: Correlation,
+    correlation_mismatch: bool,
     acceptance_possible: Option<AcceptancePossible>,
     observations: Vec<Observation<Correlation>>,
 }
@@ -237,8 +238,14 @@ impl<AcceptancePossible, Correlation> ObservationSink<Correlation>
     for AcceptanceObservations<AcceptancePossible, Correlation>
 where
     AcceptancePossible: FnOnce(),
+    Correlation: PartialEq,
 {
     fn observe(&mut self, observation: Observation<Correlation>) {
+        if observation.correlation != self.expected_correlation {
+            self.correlation_mismatch = true;
+            self.observations.push(observation);
+            return;
+        }
         if matches!(&observation.fact, ObservationFact::SendCommenced)
             && let Some(acceptance_possible) = self.acceptance_possible.take()
         {
@@ -249,13 +256,11 @@ where
 }
 
 impl<R> RuntimeModelCallProvider<R> {
-    /// Supplies the runtime, immutable target mapping, and non-secret
-    /// credential reference used by every prepared operation.
-    pub fn new(runtime: R, models: RuntimeModelCatalog, credential: CredentialReference) -> Self {
+    /// Supplies the runtime and immutable target mapping.
+    pub fn new(runtime: R, models: RuntimeModelCatalog) -> Self {
         Self {
             runtime: Arc::new(runtime),
             models,
-            credential,
         }
     }
 }
@@ -265,7 +270,6 @@ impl<R> Clone for RuntimeModelCallProvider<R> {
         Self {
             runtime: Arc::clone(&self.runtime),
             models: self.models.clone(),
-            credential: self.credential.clone(),
         }
     }
 }
@@ -276,7 +280,6 @@ impl<R> fmt::Debug for RuntimeModelCallProvider<R> {
             .debug_struct("RuntimeModelCallProvider")
             .field("runtime", &"[provider runtime]")
             .field("models", &self.models)
-            .field("credential", &self.credential)
             .finish()
     }
 }
@@ -294,6 +297,8 @@ where
     ) -> Result<ModelCallCapabilityPreparation<Self::Capability>, Self::Error> {
         let request = operation.request();
         let call = request.call();
+        let credential =
+            CredentialReference::new(operation.credential_reference().as_str().to_owned());
         let definition = self
             .models
             .resolve(call.target())
@@ -322,7 +327,7 @@ where
             .collect();
         let runtime_operation = ModelOperation::new(
             correlation,
-            self.credential.clone(),
+            credential,
             RequestedTarget::new(render_requested_target(call.selection())),
             ResolvedTarget::new(definition.provider_model().to_owned()),
             messages,
@@ -375,6 +380,8 @@ where
         }
         let correlation = authorized.call().id();
         let mut observations = AcceptanceObservations {
+            expected_correlation: correlation,
+            correlation_mismatch: false,
             acceptance_possible: Some(acceptance_possible),
             observations: Vec::new(),
         };
@@ -387,11 +394,7 @@ where
             )
             .await;
         require_correlation(correlation, report.correlation)?;
-        if observations
-            .observations
-            .iter()
-            .any(|observation| observation.correlation != correlation)
-        {
+        if observations.correlation_mismatch {
             return Err(RuntimeModelCallProviderError::ObservationCorrelationMismatch);
         }
         let observation = classify_terminal(
@@ -536,6 +539,8 @@ mod tests {
         let release_count = Arc::new(AtomicUsize::new(0));
         let callback_count = Arc::clone(&release_count);
         let mut sink = AcceptanceObservations {
+            expected_correlation: call(),
+            correlation_mismatch: false,
             acceptance_possible: Some(move || {
                 callback_count.fetch_add(1, Ordering::SeqCst);
             }),
@@ -559,6 +564,31 @@ mod tests {
 
         assert_eq!(release_count.load(Ordering::SeqCst), 1);
         assert_eq!(sink.observations.len(), 3);
+    }
+
+    /// INV-026: cross-wired acceptance evidence cannot release another
+    /// attempt's dispatch/stop gate.
+    #[test]
+    fn inv026_cross_wired_send_commenced_retains_acceptance_callback() {
+        let release_count = Arc::new(AtomicUsize::new(0));
+        let callback_count = Arc::clone(&release_count);
+        let mut sink = AcceptanceObservations {
+            expected_correlation: call(),
+            correlation_mismatch: false,
+            acceptance_possible: Some(move || {
+                callback_count.fetch_add(1, Ordering::SeqCst);
+            }),
+            observations: Vec::new(),
+        };
+
+        sink.observe(Observation {
+            correlation: ModelCallId::from_uuid(Uuid::from_u128(2)),
+            fact: ObservationFact::SendCommenced,
+        });
+
+        assert_eq!(release_count.load(Ordering::SeqCst), 0);
+        assert!(sink.correlation_mismatch);
+        assert!(sink.acceptance_possible.is_some());
     }
 
     /// S02 / INV-014 / INV-025: runtime terminal evidence maps to the exact

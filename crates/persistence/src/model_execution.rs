@@ -15,8 +15,8 @@ use rust_decimal::Decimal;
 use signalbox_application::{
     AuthorizeModelCallOutcome, AuthorizeModelCallTransaction, ClassifyOperatorFailure,
     CommitModelCallObservationTransaction, FailPreparedModelCallTransaction,
-    ModelCallAuthorizationReread, OperatorFailureClass, PrepareModelCallOutcome,
-    PrepareModelCallTransaction, RetainedCapabilityFailureStatus,
+    ModelCallAuthorizationReread, ModelCallCredentialReference, OperatorFailureClass,
+    PrepareModelCallOutcome, PrepareModelCallTransaction, RetainedCapabilityFailureStatus,
     RetainedModelCallObservationStatus,
 };
 use signalbox_domain::{
@@ -228,12 +228,22 @@ pub use signalbox_application::PrepareModelCallOutcome as PrepareInitialModelCal
 pub struct PostgresModelCallRepository {
     pool: PgPool,
     targets: ModelTargetCatalog,
+    credential_reference: ModelCallCredentialReference,
 }
 
 impl PostgresModelCallRepository {
-    /// Uses the shared pool and immutable deployment target catalog.
-    pub fn new(pool: PgPool, targets: ModelTargetCatalog) -> Self {
-        Self { pool, targets }
+    /// Uses the shared pool, immutable target catalog, and current non-secret
+    /// credential reference for calls first pinned by this repository.
+    pub fn new(
+        pool: PgPool,
+        targets: ModelTargetCatalog,
+        credential_reference: ModelCallCredentialReference,
+    ) -> Self {
+        Self {
+            pool,
+            targets,
+            credential_reference,
+        }
     }
 
     /// Commits Prepared before returning any provider request material.
@@ -251,14 +261,24 @@ impl PostgresModelCallRepository {
             if let Some(current_call) = execution.current_call() {
                 return match current_call.state() {
                     signalbox_domain::CurrentModelCallState::Prepared => {
+                        let current_call_id = current_call.id();
                         let request = execution.resume_prepared_call().map_err(|_| {
                             ModelCallRepositoryError::InvalidTransition(
                                 "Prepared call could not resume",
                             )
                         })?;
+                        let credential_reference = load_call_credential_reference(
+                            &mut transaction,
+                            session,
+                            current_call_id,
+                        )
+                        .await?;
                         Ok((
                             false,
-                            PrepareInitialModelCallOutcome::Ready(Box::new(request)),
+                            PrepareInitialModelCallOutcome::Ready {
+                                request: Box::new(request),
+                                credential_reference,
+                            },
                         ))
                     }
                     signalbox_domain::CurrentModelCallState::InFlight
@@ -306,7 +326,7 @@ impl PostgresModelCallRepository {
                     ));
                 }
             };
-            insert_prepared_call(&mut transaction, &prepared).await?;
+            insert_prepared_call(&mut transaction, &prepared, &self.credential_reference).await?;
             let reloaded = require_exact_call(
                 require_live_execution(&mut transaction, session, &self.targets).await?,
                 call,
@@ -1649,6 +1669,7 @@ fn require_exact_call(
 async fn insert_prepared_call(
     connection: &mut PgConnection,
     prepared: &signalbox_domain::PreparedInitialModelCall,
+    credential_reference: &ModelCallCredentialReference,
 ) -> Result<(), ModelCallRepositoryError> {
     let call = prepared.call();
     let (kind, direct, alias, alias_selected) = encode_selection(call.selection());
@@ -1675,8 +1696,9 @@ async fn insert_prepared_call(
             (model_call_id, turn_id, session_id, turn_attempt_id,
              selection_kind, direct_model_selection_id, frozen_model_alias_id,
              frozen_alias_selected_direct_id, resolved_provider_model_identity_id,
-             context_frontier_id, state_kind, terminal_disposition_kind)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'prepared', NULL)",
+             context_frontier_id, credential_reference, state_kind,
+             terminal_disposition_kind)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'prepared', NULL)",
     )
     .bind(call.id().into_uuid())
     .bind(turn_id_to_uuid(prepared.turn()))
@@ -1688,6 +1710,7 @@ async fn insert_prepared_call(
     .bind(alias_selected)
     .bind(call.target().identity().into_uuid())
     .bind(call.frontier().snapshot().into_uuid())
+    .bind(credential_reference.as_str())
     .execute(&mut *connection)
     .await?;
     outbox::append(
@@ -1701,6 +1724,28 @@ async fn insert_prepared_call(
     )
     .await?;
     Ok(())
+}
+
+async fn load_call_credential_reference(
+    connection: &mut PgConnection,
+    session: SessionId,
+    call: ModelCallId,
+) -> Result<ModelCallCredentialReference, ModelCallRepositoryError> {
+    let reference = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT credential_reference
+           FROM model_call
+          WHERE session_id = $1
+            AND model_call_id = $2",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(call.into_uuid())
+    .fetch_optional(&mut *connection)
+    .await?
+    .ok_or(ModelCallCorruption::Missing("prepared model call"))?
+    .ok_or(ModelCallCorruption::Missing(
+        "model-call credential reference",
+    ))?;
+    Ok(ModelCallCredentialReference::new(reference))
 }
 
 async fn persist_authorization(

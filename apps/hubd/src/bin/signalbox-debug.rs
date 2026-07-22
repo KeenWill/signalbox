@@ -19,9 +19,10 @@ use std::{
 use signalbox_application::{
     ClassifyOperatorFailure, CreateSessionOutcome, CreateSessionRequest, CreateSessionService,
     EligibilityNudge, EligibilityNudgeOutcome, EligibilityPass, EligibilityWorkSource,
-    InProcessAttemptDispatchGate, OperatorFailureClass, SchedulerLoop, StartEligibleTurnService,
-    SubmitInputOutcome, SubmitInputRequest, SubmitInputService, UuidV7SessionIdGenerator,
-    UuidV7StartEligibleTurnIdGenerator, UuidV7SubmitInputIdGenerator,
+    InProcessAttemptDispatchGate, ModelCallCredentialReference, OperatorFailureClass,
+    SchedulerLoop, StartEligibleTurnService, SubmitInputOutcome, SubmitInputRequest,
+    SubmitInputService, UuidV7SessionIdGenerator, UuidV7StartEligibleTurnIdGenerator,
+    UuidV7SubmitInputIdGenerator,
 };
 use signalbox_domain::{
     AssistantText, DeliveryRequest, DirectModelSelection, DurableCommandId, ModelSelectionOverride,
@@ -332,7 +333,7 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
         provider,
     } = arguments;
     let content = UserContent::try_text(input).map_err(|_| DebugDriverError::InvalidText)?;
-    let (selection, targets, provider) = match provider {
+    let (selection, targets, credential_reference, provider) = match provider {
         DebugProvider::Scripted { reply } => {
             let selection = DirectModelSelection::from_uuid(Uuid::now_v7());
             let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
@@ -343,6 +344,7 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
             (
                 selection,
                 targets,
+                ModelCallCredentialReference::new("scripted-test"),
                 DebugProviderRuntime::Scripted(
                     AssistantText::try_new(reply).map_err(|_| DebugDriverError::InvalidText)?,
                 ),
@@ -362,17 +364,17 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
                 api_key_file,
                 CredentialReference::new(ANTHROPIC_CREDENTIAL_REFERENCE),
             );
-            let credential_reference = credential_access.credential_reference();
+            let credential_reference = ModelCallCredentialReference::new(
+                credential_access.credential_reference().as_str(),
+            );
             let runtime = AnthropicRuntime::new(AnthropicConfig::new(), credential_access)
                 .map_err(|_| DebugDriverError::Configuration)?;
-            let provider = RuntimeModelCallProvider::new(
-                runtime,
-                configuration.runtime_model_catalog(),
-                credential_reference,
-            );
+            let provider =
+                RuntimeModelCallProvider::new(runtime, configuration.runtime_model_catalog());
             (
                 selection,
                 configuration.target_catalog(),
+                credential_reference,
                 DebugProviderRuntime::Anthropic(provider),
             )
         }
@@ -437,7 +439,7 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
     let turn = origin.turn();
     let work_source = DebugSessionWorkSource::new(session);
 
-    let repository = PostgresModelCallRepository::new(pool.clone(), targets);
+    let repository = PostgresModelCallRepository::new(pool.clone(), targets, credential_reference);
     let activation = StartEligibleTurnService::new(
         UuidV7StartEligibleTurnIdGenerator,
         StartEligibleTurnRepository::new(pool.clone()),

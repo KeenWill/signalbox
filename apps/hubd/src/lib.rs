@@ -10,9 +10,8 @@ use signalbox_application::{
     ClassifyOperatorFailure, EligibilityPass, InProcessAttemptDispatchGate,
     ModelCallExecutionError, ModelCallExecutionOutcome, ModelCallExecutionService,
     ModelCallProvider, OperatorFailureClass, ScriptedModelCallError, ScriptedModelCallProvider,
-    ScriptedModelCallStep,
-    StartEligibleTurnIdGenerator, StartEligibleTurnOutcome, StartEligibleTurnService,
-    StartEligibleTurnTransaction, UuidV7ModelCallExecutionIdGenerator,
+    ScriptedModelCallStep, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
+    StartEligibleTurnService, StartEligibleTurnTransaction, UuidV7ModelCallExecutionIdGenerator,
 };
 use signalbox_domain::{ActivatedAcceptedInputTurn, AssistantText, SessionId};
 use signalbox_persistence::model_execution::{
@@ -402,14 +401,16 @@ type PostgresScriptedModelExecutionStageError = ModelCallExecutionError<
 pub type PostgresScriptedModelExecutionError =
     RetainedModelExecutionError<PostgresScriptedModelExecutionStageError>;
 
-/// Concrete error from a PostgreSQL execution composition over any provider
-/// port adapter.
-pub type PostgresProviderModelExecutionError<ProviderError> = ModelCallExecutionError<
-    ModelCallRepositoryError,
-    ModelCallRepositoryError,
-    ModelCallRepositoryError,
-    ProviderError,
-    ModelCallRepositoryError,
+/// Classified provider execution failure, including a failed same-incarnation
+/// retained-state reconciliation when one occurred.
+pub type PostgresProviderModelExecutionError<ProviderError> = RetainedModelExecutionError<
+    ModelCallExecutionError<
+        ModelCallRepositoryError,
+        ModelCallRepositoryError,
+        ModelCallRepositoryError,
+        ProviderError,
+        ModelCallRepositoryError,
+    >,
 >;
 
 /// Production execution factory over PostgreSQL orchestration and one cloned
@@ -464,12 +465,23 @@ where
                 gate,
             );
             loop {
-                match service.execute(session).await? {
+                let outcome = match service.execute(session).await {
+                    Ok(outcome) => outcome,
+                    Err(error) if service.retained_state().is_some() => {
+                        // Preserve same-incarnation evidence for one
+                        // authoritative reconciliation pass before fatal
+                        // supervision hands authority to startup recovery.
+                        reconcile_retained_once(error, service.execute(session)).await?
+                    }
+                    Err(error) => return Err(RetainedModelExecutionError::Primary(error)),
+                };
+                match outcome {
                     ModelCallExecutionOutcome::Checkpointed(_) => continue,
                     ModelCallExecutionOutcome::NoWork
                     | ModelCallExecutionOutcome::TargetUnavailable(_)
                     | ModelCallExecutionOutcome::PendingSteering { .. }
                     | ModelCallExecutionOutcome::CapabilityKnownFailure(_)
+                    | ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(_)
                     | ModelCallExecutionOutcome::ObservationCommitted(_)
                     | ModelCallExecutionOutcome::ObservationAlreadyCommitted(_) => return Ok(()),
                 }

@@ -41,6 +41,33 @@ the deferred authority.
 startup-scan completion, hub boot, and the steering/cancellation milestone's
 reopening obligation.
 
+## 2026-07-22 — Pin model-call credential references on the call record
+
+**Context.** [ADR-0017](decisions/0017-credential-lifecycle.md) requires the
+non-secret credential reference selected with an exact provider target to
+survive restart, while deferring its concrete persistence shape. The initial
+provider composition instead supplied a process-wide reference during request
+preparation, which could re-derive a different scope for already-prepared work
+after deployment configuration changed.
+
+**Decision.** Add a forward-only nullable `credential_reference` column to the
+model-call record. Every newly prepared call writes its current non-secret
+reference in the same transaction that pins the exact target. A resumed prepared
+call must reload that stored reference and fails closed if a historical row
+predating the column has none; startup recovery still reads no credential. Carry
+the reloaded application value into the runtime bridge, which converts it to the
+runtime boundary type only while preparing the request.
+
+**Rejected alternatives.** Re-deriving the reference from current deployment
+configuration violates ADR-0017 across restart. Storing credential bytes is
+forbidden. Putting the reference in domain values would cross the credential
+boundary, while placing it only on the turn would obscure which physical call
+consumed it and complicate later continuation policy.
+
+**Affects.** The model-call migration and persistence adapter, application
+prepared-operation API and domain spine, runtime bridge, hub composition, and
+INV-035 enforcement index.
+
 ## 2026-07-22 — Anthropic credentials come from one reread file
 
 **Context.** The first production Anthropic composition needs to resolve

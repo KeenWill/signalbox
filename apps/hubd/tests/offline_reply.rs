@@ -8,9 +8,9 @@ use std::{error::Error, process::Command, time::Duration};
 
 use signalbox_application::{
     CreateSessionOutcome, CreateSessionRequest, CreateSessionService, InProcessAttemptDispatchGate,
-    InProcessEligibilityWorkSource, SchedulerLoop, SchedulerLoopExit, StartEligibleTurnService,
-    SubmitInputOutcome, SubmitInputRequest, SubmitInputService, UuidV7SessionIdGenerator,
-    UuidV7StartEligibleTurnIdGenerator, UuidV7SubmitInputIdGenerator,
+    InProcessEligibilityWorkSource, ModelCallCredentialReference, SchedulerLoop, SchedulerLoopExit,
+    StartEligibleTurnService, SubmitInputOutcome, SubmitInputRequest, SubmitInputService,
+    UuidV7SessionIdGenerator, UuidV7StartEligibleTurnIdGenerator, UuidV7SubmitInputIdGenerator,
 };
 use signalbox_domain::{
     DeliveryRequest, DirectModelSelection, DurableCommandId, ModelSelectionOverride,
@@ -24,8 +24,8 @@ use signalbox_model_provider_runtime::{
     RuntimeModelCallProvider, RuntimeModelCatalog, RuntimeModelDefinition,
 };
 use signalbox_model_runtime::{
-    AssistantPart, CompletionEvidence, CompletionFinish, CredentialReference, ExchangeFacts,
-    ProviderReportedModel, Script, ScriptedModel, TerminalEvidence, TokenUsage,
+    AssistantPart, CompletionEvidence, CompletionFinish, ExchangeFacts, ProviderReportedModel,
+    Script, ScriptedModel, TerminalEvidence, TokenUsage,
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository, local_test_connection_options, migrate,
@@ -167,14 +167,14 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
             usage: TokenUsage::unreported(),
         },
     )));
-    let provider = RuntimeModelCallProvider::new(
-        runtime,
-        runtime_models,
-        CredentialReference::new("scripted-test"),
-    );
+    let provider = RuntimeModelCallProvider::new(runtime, runtime_models);
     let (execution, fatal_execution) =
         FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
-            PostgresModelCallRepository::new(pool.clone(), targets),
+            PostgresModelCallRepository::new(
+                pool.clone(),
+                targets,
+                ModelCallCredentialReference::new("scripted-test"),
+            ),
             InProcessAttemptDispatchGate::default(),
             provider,
         ));

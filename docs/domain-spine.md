@@ -1984,6 +1984,12 @@ impl<Reader: SessionReader> LoadSessionService<Reader> {
 ## application: model_execution
 
 ```rust
+pub struct ModelCallCredentialReference { /* private */ }
+impl ModelCallCredentialReference {
+    pub fn new(value: impl Into<String>) -> Self;
+    pub fn as_str(&self) -> &str;
+}
+
 pub enum ModelConversationMessage {
     User {
         source: SemanticTranscriptEntryRef,
@@ -1999,7 +2005,7 @@ pub enum ModelConversationMessage {
 
 pub struct PreparedModelOperation { /* private */ }
 impl PreparedModelOperation {
-    // accessors: request(), messages()
+    // accessors: request(), credential_reference(), messages()
 }
 
 pub enum ModelFrontierRenderingError {
@@ -2014,7 +2020,10 @@ pub enum ModelFrontierRenderingError {
 pub enum PrepareModelCallOutcome {
     NoWork,
     Checkpointed(ModelCallId),
-    Ready(Box<PreparedModelCallRequest>),
+    Ready {
+        request: Box<PreparedModelCallRequest>,
+        credential_reference: ModelCallCredentialReference,
+    },
     TargetUnavailable(Box<FailedModelCallTurn>),
     PendingSteering { accepted_input: AcceptedInputId },
 }
@@ -2627,11 +2636,11 @@ impl<
 | **signalbox-domain total**            | **198 (+1 free fn)** |
 | application: create_session           | 8 (incl. 2 traits)   |
 | application: load_session             | 2 (incl. 1 trait)    |
-| application: model_execution          | 27 (incl. 7 traits)  |
+| application: model_execution          | 28 (incl. 7 traits)  |
 | application: operator_failure         | 2 (incl. 1 trait)    |
 | application: replace_session_defaults | 4 (incl. 1 trait)    |
 | application: scheduler                | 12 (incl. 4 traits)  |
 | application: start_eligible_turn      | 5 (incl. 2 traits)   |
 | application: startup_scan             | 7 (incl. 2 traits)   |
 | application: submit_input             | 7 (incl. 2 traits)   |
-| **signalbox-application total**       | **74**               |
+| **signalbox-application total**       | **75**               |

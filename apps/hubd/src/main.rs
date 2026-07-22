@@ -14,8 +14,9 @@ use std::{
 
 use signalbox_application::{
     ClassifyOperatorFailure, EligibilityPass, EligibilityWorkSource, InProcessAttemptDispatchGate,
-    InProcessEligibilityWorkSource, OperatorFailureClass, SchedulerLoop, StartEligibleTurnService,
-    StartupScanService, UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
+    InProcessEligibilityWorkSource, ModelCallCredentialReference, OperatorFailureClass,
+    SchedulerLoop, StartEligibleTurnService, StartupScanService,
+    UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
 };
 use signalbox_domain::{SessionId, TurnId};
 use signalbox_hubd::{
@@ -269,14 +270,12 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
         configuration.anthropic_api_key_file(),
         CredentialReference::new(ANTHROPIC_CREDENTIAL_REFERENCE),
     );
-    let credential_reference = credential_access.credential_reference();
+    let credential_reference =
+        ModelCallCredentialReference::new(credential_access.credential_reference().as_str());
     let anthropic = AnthropicRuntime::new(AnthropicConfig::new(), credential_access)
         .map_err(|_| HubRuntimeError::infrastructure(RuntimePhase::Configuration))?;
-    let provider = RuntimeModelCallProvider::new(
-        anthropic,
-        model_configuration.runtime_model_catalog(),
-        credential_reference,
-    );
+    let provider =
+        RuntimeModelCallProvider::new(anthropic, model_configuration.runtime_model_catalog());
     let model_targets = model_configuration.target_catalog();
     let pool = connect_production(configuration.database_url())
         .await
@@ -328,7 +327,11 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
             let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
             let (execution, fatal_execution) =
                 FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
-                    PostgresModelCallRepository::new(scheduler_pool.clone(), model_targets),
+                    PostgresModelCallRepository::new(
+                        scheduler_pool.clone(),
+                        model_targets,
+                        credential_reference,
+                    ),
                     InProcessAttemptDispatchGate::default(),
                     provider,
                 ));

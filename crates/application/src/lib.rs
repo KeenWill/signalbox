@@ -23,13 +23,13 @@ pub use model_execution::{
     AttemptDispatchGate, AuthorizeModelCallOutcome, AuthorizeModelCallTransaction,
     CommitModelCallObservationTransaction, FailPreparedModelCallTransaction,
     InProcessAttemptDispatchGate, InProcessAttemptDispatchPermit, ModelCallAuthorizationReread,
-    ModelCallCapabilityPreparation, ModelCallExecutionError, ModelCallExecutionIdGenerator,
-    ModelCallExecutionOutcome, ModelCallExecutionService, ModelCallProvider,
-    ModelConversationMessage, ModelFrontierRenderingError, PrepareModelCallOutcome,
-    PrepareModelCallTransaction, PreparedModelOperation, RetainedCapabilityFailureStatus,
-    RetainedModelCallExecutionState, RetainedModelCallObservationStatus,
-    ScriptedModelCallCapability, ScriptedModelCallError, ScriptedModelCallProvider,
-    ScriptedModelCallStep, UuidV7ModelCallExecutionIdGenerator,
+    ModelCallCapabilityPreparation, ModelCallCredentialReference, ModelCallExecutionError,
+    ModelCallExecutionIdGenerator, ModelCallExecutionOutcome, ModelCallExecutionService,
+    ModelCallProvider, ModelConversationMessage, ModelFrontierRenderingError,
+    PrepareModelCallOutcome, PrepareModelCallTransaction, PreparedModelOperation,
+    RetainedCapabilityFailureStatus, RetainedModelCallExecutionState,
+    RetainedModelCallObservationStatus, ScriptedModelCallCapability, ScriptedModelCallError,
+    ScriptedModelCallProvider, ScriptedModelCallStep, UuidV7ModelCallExecutionIdGenerator,
 };
 pub use operator_failure::{ClassifyOperatorFailure, OperatorFailureClass};
 pub use replace_session_defaults::{
