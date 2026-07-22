@@ -1956,8 +1956,8 @@ async fn persist_failed(
         failed.turn(),
         "failed",
         failed.terminal_snapshot().frontier().snapshot(),
-        None,
-        None,
+        Some(failed.attempt().id()),
+        failed.call().map(signalbox_domain::EndedModelCall::id),
     )
     .await?;
     if let Some(call) = failed.call() {

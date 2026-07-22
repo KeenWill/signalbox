@@ -922,6 +922,7 @@ pub enum AcceptedInputTurnSchedulingRecordState {
     TerminalFailed {
         starting_lineage: AcceptedInputStartingLineage,
         starting_frontier: ContextFrontierId,
+        terminal_execution: Option<FailedTurnExecutionReconstitutionInput>,
         terminal_frontier: ContextFrontierId,
     },
     TerminalCompleted {
@@ -940,6 +941,22 @@ pub enum AcceptedInputTurnSchedulingRecordState {
         refusing_call: ModelCallId,
         terminal_frontier: ContextFrontierId,
     },
+}
+
+pub struct FailedTurnExecutionReconstitutionInput { /* private */ }
+impl FailedTurnExecutionReconstitutionInput {
+    pub const fn attempt_only(
+        owning_turn: TurnId,
+        ended_attempt: TurnAttemptId,
+        attempt_disposition: UnstoppedAttemptDisposition,
+    ) -> Self;
+    pub const fn with_call(
+        owning_turn: TurnId,
+        ended_attempt: TurnAttemptId,
+        attempt_disposition: UnstoppedAttemptDisposition,
+        ended_call: ModelCallId,
+    ) -> Self;
+    // accessors: owning_turn(), ended_attempt(), attempt_disposition(), ended_call()
 }
 
 pub struct ActiveTurnSchedulingReconstitutionInput { /* private */ }
@@ -1087,6 +1104,8 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
     MissingFailureEntry { turn: TurnId },
     MissingCompletionEntry { turn: TurnId },
     CurrentAttemptOwnershipMismatch { turn: TurnId, attempt: TurnAttemptId },
+    TerminalAttemptOwnershipMismatch { turn: TurnId, attempt: TurnAttemptId },
+    TerminalAttemptEndMismatch { turn: TurnId, attempt: TurnAttemptId },
     DuplicateCurrentAttempt { attempt: TurnAttemptId },
     ActivePhaseEvidenceMismatch {
         turn: TurnId,
@@ -2623,7 +2642,7 @@ impl<
 | domain: submit_input                  | 15                   |
 | domain: queue_order                   | 5 (+1 free fn)       |
 | domain: turn_lifecycle                | 10                   |
-| domain: turn_eligibility              | 22                   |
+| domain: turn_eligibility              | 23                   |
 | domain: turn_attempt                  | 13                   |
 | domain: model_call                    | 12                   |
 | domain: model_execution               | 33                   |
@@ -2633,7 +2652,7 @@ impl<
 | domain: applied_interrupt             | 2                    |
 | domain: fatal_mismatch                | 0                    |
 | domain: replace_session_defaults      | 13                   |
-| **signalbox-domain total**            | **198 (+1 free fn)** |
+| **signalbox-domain total**            | **199 (+1 free fn)** |
 | application: create_session           | 8 (incl. 2 traits)   |
 | application: load_session             | 2 (incl. 1 trait)    |
 | application: model_execution          | 28 (incl. 7 traits)  |

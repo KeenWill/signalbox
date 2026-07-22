@@ -970,11 +970,12 @@ async fn embedded_migrator_connects_and_is_idempotent() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// ADR-0045: an uncertain capability-failure closure is reconciled from exact
-/// durable Prepared or complete known-failure state before any resubmission.
+/// ADR-0045 / INV-006: an uncertain capability-failure closure is reconciled
+/// from exact durable Prepared or complete known-failure state, including its
+/// terminal attempt and call provenance, before any resubmission.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn model_call_capability_failure_reread_distinguishes_pending_and_committed()
+async fn inv006_model_call_capability_failure_reread_distinguishes_pending_and_committed()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7000;
@@ -988,6 +989,31 @@ async fn model_call_capability_failure_reread_distinguishes_pending_and_committe
     .expect("one restart fixture target forms a catalog");
     let repository =
         PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
+
+    let mut call_only = pool.begin().await?;
+    let call_only_error = sqlx::query(
+        "UPDATE turn_lifecycle
+            SET state_kind = 'terminal',
+                terminal_frontier_id = starting_frontier_id,
+                active_phase_kind = NULL,
+                current_attempt_id = NULL,
+                terminal_disposition_kind = 'failed',
+                terminal_attempt_id = NULL,
+                terminal_model_call_id = $1
+          WHERE turn_id = $2",
+    )
+    .bind(fixture.call.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .execute(&mut *call_only)
+    .await
+    .expect_err("a failed lifecycle cannot retain call-only provenance");
+    assert_eq!(
+        call_only_error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("turn_lifecycle_state_payload_shape")
+    );
+    call_only.rollback().await?;
 
     assert_eq!(
         repository
@@ -1016,6 +1042,41 @@ async fn model_call_capability_failure_reread_distinguishes_pending_and_committe
             .await?,
         RetainedCapabilityFailureStatus::AlreadyCommitted
     );
+    let terminal_execution: (Uuid, Uuid) = sqlx::query_as(
+        "SELECT terminal_attempt_id, terminal_model_call_id
+           FROM turn_lifecycle
+          WHERE turn_id = $1
+            AND state_kind = 'terminal'
+            AND terminal_disposition_kind = 'failed'",
+    )
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        terminal_execution,
+        (fixture.attempt.into_uuid(), fixture.call.into_uuid())
+    );
+
+    // A new durable input forces the scheduling loader to reconstruct the
+    // complete failed prefix before it can append queued work.
+    assert!(matches!(
+        SubmitInputRepository::new(pool.clone())
+            .handle(
+                start_input(
+                    seed + 16,
+                    seed + 1,
+                    "work after failed model call",
+                    1,
+                    ModelSelectionOverride::UseSessionDefault,
+                ),
+                AcceptedInputId::from_uuid(Uuid::from_u128(seed + 17)),
+                Some(TurnId::from_uuid(Uuid::from_u128(seed + 18))),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::TurnOrigin(_)
+        ))
+    ));
 
     sqlx::query("ALTER TABLE turn_failed_outbox_event DISABLE TRIGGER USER")
         .execute(&pool)
@@ -1683,13 +1744,14 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
     Ok(())
 }
 
-/// S03 / S04 / S08 / INV-014 / INV-016 / INV-034: the production startup repository applies
-/// call-aware recovery under its session lock: Prepared is known-failed while
+/// S03 / S04 / S08 / INV-006 / INV-014 / INV-016 / INV-034: the production
+/// startup repository applies call-aware recovery under its session lock:
+/// Prepared is known-failed with exact terminal execution provenance while
 /// reclassifying newly observed steering, an issued call becomes an exact
 /// ambiguity wait, and replay changes neither.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s03_s04_inv014_inv034_startup_scan_classifies_prepared_and_issued_model_calls()
+async fn s03_s04_inv006_inv014_inv034_startup_scan_classifies_prepared_and_issued_model_calls()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, database_url) = migrated_postgres().await?;
     let prepared = checkpoint_restart_model_call(&pool, 0x2000, false).await?;
@@ -1765,12 +1827,14 @@ async fn s03_s04_inv014_inv034_startup_scan_classifies_prepared_and_issued_model
     assert!(first.is_complete());
     assert_eq!(first.recovered_turn_count(), 1);
 
-    let prepared_state: (String, String, String, String, String) = sqlx::query_as(
+    let prepared_state: (String, String, String, String, String, Uuid, Uuid) = sqlx::query_as(
         "SELECT call.state_kind,
                 call.terminal_disposition_kind,
                 attempt.state_kind,
                 attempt.end_disposition,
-                turn.state_kind
+                turn.state_kind,
+                turn.terminal_attempt_id,
+                turn.terminal_model_call_id
            FROM model_call AS call
            JOIN turn_attempt AS attempt
              ON attempt.turn_attempt_id = call.turn_attempt_id
@@ -1789,6 +1853,8 @@ async fn s03_s04_inv014_inv034_startup_scan_classifies_prepared_and_issued_model
             "ended".into(),
             "lost".into(),
             "terminal".into(),
+            prepared.attempt.into_uuid(),
+            prepared.call.into_uuid(),
         )
     );
 
@@ -7986,13 +8052,13 @@ async fn inv016_pending_steering_and_source_terminalization_serialize() -> Resul
     Ok(())
 }
 
-/// S03 / S04 / INV-034: after a real pool restart, startup atomically ends the
-/// prior-process attempt as Lost, appends `TurnFailed`, terminalizes Failed,
-/// remains idempotent on replay, and exposes the queued successor to the
-/// ordinary scheduler path.
+/// S03 / S04 / INV-006 / INV-034: after a real pool restart, startup atomically
+/// ends the prior-process attempt as Lost, retains it as attempt-only terminal
+/// provenance, appends `TurnFailed`, terminalizes Failed, remains idempotent on
+/// replay, and exposes the queued successor to the ordinary scheduler path.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s03_s04_inv034_restart_scan_recovers_lost_attempt_once_and_unblocks_successor()
+async fn s03_s04_inv006_inv034_restart_scan_recovers_lost_attempt_once_and_unblocks_successor()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, database_url) = migrated_postgres().await?;
     let session_uuid = Uuid::from_u128(0x7b1);
@@ -8063,13 +8129,24 @@ async fn s03_s04_inv034_restart_scan_recovers_lost_attempt_once_and_unblocks_suc
     assert_eq!(first.recovered_turn_count(), 1);
     assert!(first.pending_steering_sessions().is_empty());
 
-    let recovered: (String, String, String, String, String, Option<Uuid>) = sqlx::query_as(
+    let recovered: (
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<Uuid>,
+        Uuid,
+        Option<Uuid>,
+    ) = sqlx::query_as(
         "SELECT attempt.state_kind,
                 attempt.end_variant,
                 attempt.end_disposition,
                 turn.state_kind,
                 turn.terminal_disposition_kind,
-                turn.current_attempt_id
+                turn.current_attempt_id,
+                turn.terminal_attempt_id,
+                turn.terminal_model_call_id
            FROM turn_attempt AS attempt
            JOIN turn_lifecycle AS turn
              ON turn.turn_id = attempt.turn_id
@@ -8087,6 +8164,8 @@ async fn s03_s04_inv034_restart_scan_recovers_lost_attempt_once_and_unblocks_suc
             "lost".into(),
             "terminal".into(),
             "failed".into(),
+            None,
+            attempt_uuid,
             None,
         )
     );
@@ -8906,13 +8985,13 @@ async fn inv007_inv009_inv015_malformed_atomic_start_rolls_back_every_fact()
     Ok(())
 }
 
-/// INV-001 / INV-005 / INV-009 / INV-015: the initial semantic variants
+/// INV-001 / INV-005 / INV-006 / INV-009 / INV-015: the initial semantic variants
 /// preserve globally unique identities and exact source correlations; eligible
 /// failure records origin then failure without putting the later failure
 /// marker in the starting frontier.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv005_inv009_inv015_initial_semantic_entries_are_turn_correlated()
+async fn inv005_inv006_inv009_inv015_initial_semantic_entries_are_turn_correlated()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     CreateSessionRepository::new(pool.clone())
@@ -9218,8 +9297,9 @@ async fn inv005_inv009_inv015_initial_semantic_entries_are_turn_correlated()
     .await?;
     failure.commit().await?;
 
-    let semantic_shape: (String, i64, i64, i64, i64, i64) = sqlx::query_as(
-        "SELECT
+    let semantic_shape: (String, i64, i64, i64, i64, i64, Option<Uuid>, Option<Uuid>) =
+        sqlx::query_as(
+            "SELECT
             turn.state_kind,
             (SELECT count(*)
                FROM semantic_transcript_entry
@@ -9236,7 +9316,9 @@ async fn inv005_inv009_inv015_initial_semantic_entries_are_turn_correlated()
                 AND entry.semantic_entry_id = member.semantic_entry_id
               WHERE member.owning_session_id = $1
                 AND member.context_frontier_id = $2
-                AND entry.payload_kind = 'turn_failed')
+                AND entry.payload_kind = 'turn_failed'),
+            turn.terminal_attempt_id,
+            turn.terminal_model_call_id
          FROM turn_lifecycle AS turn
          JOIN context_frontier AS starting
            ON starting.owning_session_id = turn.session_id
@@ -9245,13 +9327,16 @@ async fn inv005_inv009_inv015_initial_semantic_entries_are_turn_correlated()
            ON terminal.owning_session_id = turn.session_id
           AND terminal.context_frontier_id = turn.terminal_frontier_id
          WHERE turn.turn_id = $3",
-    )
-    .bind(session)
-    .bind(starting_frontier)
-    .bind(turn)
-    .fetch_one(&pool)
-    .await?;
-    assert_eq!(semantic_shape, ("terminal".to_owned(), 2, 0, 1, 2, 0));
+        )
+        .bind(session)
+        .bind(starting_frontier)
+        .bind(turn)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(
+        semantic_shape,
+        ("terminal".to_owned(), 2, 0, 1, 2, 0, None, None)
+    );
 
     let late_attempt = sqlx::query(
         "INSERT INTO turn_attempt

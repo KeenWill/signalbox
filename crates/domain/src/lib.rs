@@ -118,7 +118,8 @@ pub use turn_eligibility::{
     AcceptedInputTurnSchedulingProjection, AcceptedInputTurnSchedulingRecord,
     AcceptedInputTurnSchedulingRecordState, AcceptedInputTurnSchedulingStatus,
     ActivatedAcceptedInputTurn, ActiveTurnSchedulingReconstitutionInput, FailedAcceptedInputTurn,
-    PendingSteeringInput, PreparedAcceptedInputTurnActivation, PreparedAcceptedInputTurnFailure,
+    FailedTurnExecutionReconstitutionInput, PendingSteeringInput,
+    PreparedAcceptedInputTurnActivation, PreparedAcceptedInputTurnFailure,
     SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
 };
 pub use turn_lifecycle::{
