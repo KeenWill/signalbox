@@ -9,7 +9,7 @@ use std::{error::Error, fmt, future::Future};
 use signalbox_application::{
     ClassifyOperatorFailure, EligibilityPass, InProcessAttemptDispatchGate,
     ModelCallExecutionError, ModelCallExecutionOutcome, ModelCallExecutionService,
-    ScriptedModelCallError, ScriptedModelCallProvider, ScriptedModelCallStep,
+    OperatorFailureClass, ScriptedModelCallError, ScriptedModelCallProvider, ScriptedModelCallStep,
     StartEligibleTurnIdGenerator, StartEligibleTurnOutcome, StartEligibleTurnService,
     StartEligibleTurnTransaction, UuidV7ModelCallExecutionIdGenerator,
 };
@@ -119,14 +119,107 @@ where
 async fn reconcile_retained_once<Outcome, ExecutionError, Execution>(
     original_error: ExecutionError,
     execution: Execution,
-) -> Result<Outcome, ExecutionError>
+) -> Result<Outcome, RetainedModelExecutionError<ExecutionError>>
 where
     Execution: Future<Output = Result<Outcome, ExecutionError>>,
 {
     match execution.await {
         Ok(outcome) => Ok(outcome),
-        Err(_reconciliation_error) => Err(original_error),
+        Err(reconciliation_error) => Err(RetainedModelExecutionError::Reconciliation {
+            original: original_error,
+            reconciliation: reconciliation_error,
+        }),
     }
+}
+
+/// Execution failure retaining both the causal stage error and a failed
+/// same-incarnation retained-state reconciliation.
+#[derive(Debug)]
+pub enum RetainedModelExecutionError<ExecutionError> {
+    /// Execution failed without a retained-state reconciliation failure.
+    Primary(ExecutionError),
+    /// The causal stage failed and its one authoritative reconciliation also
+    /// failed.
+    Reconciliation {
+        /// Failure that created the retained evidence obligation.
+        original: ExecutionError,
+        /// Failure discovered by the authoritative reconciliation pass.
+        reconciliation: ExecutionError,
+    },
+}
+
+impl<ExecutionError> RetainedModelExecutionError<ExecutionError> {
+    /// Borrows the causal stage failure.
+    pub const fn original(&self) -> &ExecutionError {
+        match self {
+            Self::Primary(error)
+            | Self::Reconciliation {
+                original: error, ..
+            } => error,
+        }
+    }
+
+    /// Borrows the later reconciliation failure when one occurred.
+    pub const fn reconciliation(&self) -> Option<&ExecutionError> {
+        match self {
+            Self::Primary(_) => None,
+            Self::Reconciliation { reconciliation, .. } => Some(reconciliation),
+        }
+    }
+}
+
+impl<ExecutionError> fmt::Display for RetainedModelExecutionError<ExecutionError>
+where
+    ExecutionError: fmt::Display,
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Primary(error) => error.fmt(formatter),
+            Self::Reconciliation {
+                original,
+                reconciliation,
+            } => write!(
+                formatter,
+                "{original}; retained-state reconciliation also failed: {reconciliation}"
+            ),
+        }
+    }
+}
+
+impl<ExecutionError> Error for RetainedModelExecutionError<ExecutionError>
+where
+    ExecutionError: Error + 'static,
+{
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(self.original())
+    }
+}
+
+impl<ExecutionError> ClassifyOperatorFailure for RetainedModelExecutionError<ExecutionError>
+where
+    ExecutionError: ClassifyOperatorFailure,
+{
+    fn operator_failure_class(&self) -> OperatorFailureClass {
+        let original = self.original().operator_failure_class();
+        let Some(reconciliation) = self
+            .reconciliation()
+            .map(ClassifyOperatorFailure::operator_failure_class)
+        else {
+            return original;
+        };
+        if is_fatal_failure_class(reconciliation) {
+            reconciliation
+        } else {
+            original
+        }
+    }
+}
+
+const fn is_fatal_failure_class(failure: OperatorFailureClass) -> bool {
+    matches!(
+        failure,
+        OperatorFailureClass::FailClosedCorruption | OperatorFailureClass::CallerOrHubBug
+    )
 }
 
 struct FatalOnIncompleteExecution(Option<watch::Sender<bool>>);
@@ -288,13 +381,18 @@ where
 }
 
 /// Concrete error from the scripted PostgreSQL execution composition.
-pub type PostgresScriptedModelExecutionError = ModelCallExecutionError<
+type PostgresScriptedModelExecutionStageError = ModelCallExecutionError<
     ModelCallRepositoryError,
     ModelCallRepositoryError,
     ModelCallRepositoryError,
     ScriptedModelCallError,
     ModelCallRepositoryError,
 >;
+
+/// Classified failure from scripted PostgreSQL execution, including a failed
+/// same-incarnation retained-state reconciliation when one occurred.
+pub type PostgresScriptedModelExecutionError =
+    RetainedModelExecutionError<PostgresScriptedModelExecutionStageError>;
 
 /// Debug/test-only execution factory using the deterministic scripted provider.
 #[derive(Clone, Debug)]
@@ -356,7 +454,7 @@ impl ActivatedTurnExecution for PostgresScriptedModelExecution {
                         // error that created the retained obligation.
                         reconcile_retained_once(error, service.execute(session)).await?
                     }
-                    Err(error) => return Err(error),
+                    Err(error) => return Err(RetainedModelExecutionError::Primary(error)),
                 };
                 match outcome {
                     ModelCallExecutionOutcome::Checkpointed(_) => continue,
@@ -430,6 +528,37 @@ mod tests {
         fn operator_failure_class(&self) -> OperatorFailureClass {
             OperatorFailureClass::Infrastructure {
                 commit_ambiguous: true,
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum StagedExecutionFailure {
+        Infrastructure,
+        Corruption,
+        CallerBug,
+    }
+
+    impl fmt::Display for StagedExecutionFailure {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str(match self {
+                Self::Infrastructure => "initial infrastructure failure",
+                Self::Corruption => "reconciliation corruption",
+                Self::CallerBug => "reconciliation caller bug",
+            })
+        }
+    }
+
+    impl std::error::Error for StagedExecutionFailure {}
+
+    impl ClassifyOperatorFailure for StagedExecutionFailure {
+        fn operator_failure_class(&self) -> OperatorFailureClass {
+            match self {
+                Self::Infrastructure => OperatorFailureClass::Infrastructure {
+                    commit_ambiguous: false,
+                },
+                Self::Corruption => OperatorFailureClass::FailClosedCorruption,
+                Self::CallerBug => OperatorFailureClass::CallerOrHubBug,
             }
         }
     }
@@ -597,15 +726,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retained_reconciliation_failure_preserves_the_original_error() {
-        assert_eq!(
-            reconcile_retained_once(
-                "original stage",
-                ready(Err::<(), _>("reconciliation stage")),
+    async fn retained_reconciliation_preserves_cause_and_reports_fatal_classification() {
+        for (reconciliation, expected_class) in [
+            (
+                StagedExecutionFailure::Corruption,
+                OperatorFailureClass::FailClosedCorruption,
+            ),
+            (
+                StagedExecutionFailure::CallerBug,
+                OperatorFailureClass::CallerOrHubBug,
+            ),
+        ] {
+            let error = reconcile_retained_once(
+                StagedExecutionFailure::Infrastructure,
+                ready(Err::<(), _>(reconciliation)),
             )
-            .await,
-            Err("original stage")
-        );
+            .await
+            .expect_err("the retained-state reconciliation also fails");
+
+            assert_eq!(error.original(), &StagedExecutionFailure::Infrastructure);
+            assert_eq!(error.reconciliation(), Some(&reconciliation));
+            assert_eq!(error.operator_failure_class(), expected_class);
+        }
     }
 
     #[tokio::test]

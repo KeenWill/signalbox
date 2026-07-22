@@ -2437,7 +2437,7 @@ mod tests {
     /// rolled back to Prepared, the unconsumed scripted interaction action can
     /// prepare again and still produces exactly one physical interaction.
     #[tokio::test]
-    async fn authorization_rollback_reprepares_one_scripted_interaction_action() {
+    async fn s02_inv014_authorization_rollback_reprepares_one_scripted_interaction_action() {
         let (request, authorized) = prepared_fixture();
         let session = request.session();
         let mut service = ModelCallExecutionService::new(
