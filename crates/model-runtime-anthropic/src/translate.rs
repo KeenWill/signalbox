@@ -38,6 +38,11 @@ pub(crate) fn build_request<C>(
             detail: "max_output_tokens must be at least 1".to_string(),
         });
     }
+    if operation.settings.stop_sequences.len() > 4 {
+        return Err(PreparationFailure::UnsupportedOperation {
+            detail: "Anthropic accepts at most four stop sequences".to_string(),
+        });
+    }
     // serde_json serializes a non-finite f64 as null, and the provider only
     // accepts sampling controls in the inclusive unit interval. Reject both
     // cases during preparation rather than relying on a post-send 4xx.
@@ -53,6 +58,7 @@ pub(crate) fn build_request<C>(
             });
         }
     }
+    validate_tool_names(operation)?;
     validate_tool_history(&operation.messages)?;
     let (tools, tool_choice) = tools_and_choice(operation)?;
     Ok(MessagesRequest {
@@ -71,6 +77,40 @@ pub(crate) fn build_request<C>(
         tool_choice,
         stream: operation.delivery == DeliveryMode::Streamed,
     })
+}
+
+fn validate_tool_names<C>(operation: &ModelOperation<C>) -> Result<(), PreparationFailure> {
+    for tool in &operation.tools {
+        validate_tool_name(tool.name.as_str(), "tool")?;
+    }
+    if let Some(contract) = &operation.output_contract {
+        validate_tool_name(contract.name.as_str(), "structured-output contract")?;
+    }
+    for message in &operation.messages {
+        for part in &message.parts {
+            if let MessagePart::ToolCall(call) = part {
+                validate_tool_name(call.name.as_str(), "replayed tool call")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_tool_name(name: &str, subject: &str) -> Result<(), PreparationFailure> {
+    let valid = !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'));
+    if valid {
+        Ok(())
+    } else {
+        Err(PreparationFailure::UnsupportedOperation {
+            detail: format!(
+                "Anthropic {subject} name must contain 1 through 64 ASCII letters, digits, underscores, or hyphens"
+            ),
+        })
+    }
 }
 
 fn validate_tool_history(messages: &[ConversationMessage]) -> Result<(), PreparationFailure> {
@@ -497,6 +537,71 @@ mod tests {
     fn an_empty_conversation_is_rejected_before_any_send() {
         let mut operation = operation("call-empty-conversation");
         operation.messages.clear();
+
+        assert!(matches!(
+            build_request(&operation),
+            Err(PreparationFailure::UnsupportedOperation { .. })
+        ));
+    }
+
+    #[test]
+    fn more_than_four_stop_sequences_are_rejected_before_any_send() {
+        let mut operation = operation("call-too-many-stops");
+        operation.settings.stop_sequences = vec![
+            "one".to_string(),
+            "two".to_string(),
+            "three".to_string(),
+            "four".to_string(),
+            "five".to_string(),
+        ];
+
+        assert!(matches!(
+            build_request(&operation),
+            Err(PreparationFailure::UnsupportedOperation { .. })
+        ));
+    }
+
+    #[test]
+    fn an_empty_tool_name_is_rejected_before_any_send() {
+        let mut operation = operation("call-empty-tool-name");
+        operation.tools = vec![ToolDefinition::with_schema(
+            "",
+            "An invalid tool.",
+            serde_json::json!({"type": "object"}),
+        )];
+
+        assert!(matches!(
+            build_request(&operation),
+            Err(PreparationFailure::UnsupportedOperation { .. })
+        ));
+    }
+
+    #[test]
+    fn an_overlong_contract_name_is_rejected_before_any_send() {
+        let mut operation = operation("call-overlong-contract-name");
+        operation.output_contract = Some(StructuredOutputContract {
+            name: ToolName::new("a".repeat(65)),
+            description: "An invalid contract.".to_string(),
+            schema: serde_json::json!({"type": "object"}),
+        });
+
+        assert!(matches!(
+            build_request(&operation),
+            Err(PreparationFailure::UnsupportedOperation { .. })
+        ));
+    }
+
+    #[test]
+    fn invalid_replayed_tool_name_characters_are_rejected_before_any_send() {
+        let mut operation = operation("call-invalid-replayed-tool-name");
+        operation.messages = vec![ConversationMessage {
+            role: ConversationRole::Assistant,
+            parts: vec![MessagePart::ToolCall(ToolCallProposal {
+                id: ToolCallId::new("toolu_1"),
+                name: ToolName::new("not/a/tool"),
+                arguments_json: "{}".to_string(),
+            })],
+        }];
 
         assert!(matches!(
             build_request(&operation),
