@@ -5,20 +5,26 @@
 //! post-effect observation commit. No method holds a database transaction
 //! across provider work.
 
-use std::{collections::BTreeSet, error::Error, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    fmt,
+};
 
 use rust_decimal::Decimal;
 use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
 use signalbox_domain::{
-    AcceptedInputId, AmbiguousModelCallTurn, AuthorizedModelCall, CompletedModelCallTurn,
-    CorrelatedModelCallTerminalObservation, DirectModelSelection, FailedModelCallTurn,
-    FailedModelCallTurnIdentities, FrozenAliasDefinition, FrozenModelSelection, ModelAlias,
-    ModelCallDisposition, ModelCallExecution, ModelCallExecutionReconstitutionFailure,
-    ModelCallExecutionReconstitutionInput, ModelCallId, ModelCallOriginContent,
-    ModelCallPreparationFailure, ModelCallReconstitutionInput, ModelCallReconstitutionState,
-    ModelCallTerminalIdentities, ModelCallTerminalOutcome, ModelTargetCatalog,
-    PreparedModelCallRequest, ProviderModelIdentity, RefusedModelCallTurn, ResolvedProviderTarget,
-    SemanticTranscriptEntry, SemanticTranscriptEntryPayload, SessionId, TurnId,
+    AcceptedInputDisposition, AcceptedInputId, AmbiguousModelCallTurn, AuthorizedModelCall,
+    CompletedModelCallTurn, CorrelatedModelCallTerminalObservation, DirectModelSelection,
+    FailedModelCallTurn, FailedModelCallTurnIdentities, FrozenAliasDefinition,
+    FrozenModelSelection, ModelAlias, ModelCallDisposition, ModelCallExecution,
+    ModelCallExecutionReconstitutionFailure, ModelCallExecutionReconstitutionInput, ModelCallId,
+    ModelCallOriginContent, ModelCallPreparationFailure, ModelCallReconstitutionInput,
+    ModelCallReconstitutionState, ModelCallTerminalIdentities, ModelCallTerminalOutcome,
+    ModelTargetCatalog, PinnedProviderTargetReconstitutionInput, PreparedModelCallRequest,
+    ProviderModelIdentity, ReclassifiedPendingSteeringTurn, RefusedModelCallTurn,
+    ResolvedProviderTarget, SemanticTranscriptEntry, SemanticTranscriptEntryPayload, SessionId,
+    TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -27,8 +33,8 @@ use crate::{
     outbox::{self, ModelCallOutboxState, OutboxEvent},
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
     submit_input::{
-        SubmitInputCorruption, SubmitInputRepositoryError, load_scheduling_projection,
-        require_recorded_batch,
+        StoredTurnOriginKey, SubmitInputCorruption, SubmitInputRepositoryError,
+        load_scheduling_projection, load_turn_origin_graph,
     },
 };
 
@@ -41,6 +47,8 @@ pub enum ModelCallIdentityCollision {
     SemanticEntry,
     /// The proposed terminal-frontier identity already exists.
     TerminalFrontier,
+    /// A proposed reclassified successor-turn identity already exists.
+    ReclassifiedTurn,
 }
 
 impl fmt::Display for ModelCallIdentityCollision {
@@ -49,6 +57,7 @@ impl fmt::Display for ModelCallIdentityCollision {
             Self::ModelCall => "model-call",
             Self::SemanticEntry => "semantic-entry",
             Self::TerminalFrontier => "context-frontier",
+            Self::ReclassifiedTurn => "reclassified successor-turn",
         };
         write!(formatter, "{identity} identity already exists")
     }
@@ -468,7 +477,8 @@ async fn require_live_execution(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let origin_contents = load_origin_contents(connection, &frontier_entries).await?;
-    let calls = load_live_turn_calls(connection, requested_session, active_turn.turn()).await?;
+    let (pinned_target, calls) =
+        load_live_turn_calls(connection, requested_session, active_turn.turn()).await?;
 
     ModelCallExecutionReconstitutionInput::new(
         active_turn,
@@ -476,6 +486,7 @@ async fn require_live_execution(
         starting_snapshot,
         frontier_entries,
         origin_contents,
+        pinned_target,
         calls,
     )
     .reconstitute()
@@ -505,7 +516,7 @@ async fn load_origin_contents(
         return Ok(Vec::new());
     }
     let rows = sqlx::query(
-        "SELECT accepted_input_id, accepting_command_id
+        "SELECT accepted_input_id, session_id, origin_turn_id
            FROM accepted_input
           WHERE accepted_input_id = ANY($1)
           ORDER BY accepted_input_id",
@@ -517,26 +528,40 @@ async fn load_origin_contents(
         return Err(ModelCallCorruption::Missing("origin accepted input receipt").into());
     }
     let mut loaded = BTreeSet::new();
-    let mut commands = Vec::with_capacity(rows.len());
+    let mut roots = BTreeSet::<StoredTurnOriginKey>::new();
+    let mut origin_by_accepted = BTreeMap::new();
     for row in rows {
         let accepted: Uuid = required(&row, "accepted_input_id")?;
         if !accepted_inputs.contains(&accepted) || !loaded.insert(accepted) {
             return Err(ModelCallCorruption::Inconsistent("origin receipt inventory").into());
         }
-        let command: Uuid = required(&row, "accepting_command_id")?;
-        commands.push(
-            crate::mapping::durable_command_id_from_uuid(command)
-                .map_err(|_| ModelCallCorruption::Inconsistent("origin command identity"))?,
+        let key = (
+            required(&row, "session_id")?,
+            required(&row, "origin_turn_id")?,
         );
+        roots.insert(key);
+        if origin_by_accepted.insert(accepted, key).is_some() {
+            return Err(ModelCallCorruption::Inconsistent("origin receipt inventory").into());
+        }
     }
-    let recorded = require_recorded_batch(connection, &commands)
+    let origins = load_turn_origin_graph(connection, &roots)
         .await
         .map_err(map_scheduling_error)?;
-    recorded
-        .values()
-        .map(|receipt| {
-            ModelCallOriginContent::from_recorded_submit(receipt)
-                .ok_or_else(|| ModelCallCorruption::Inconsistent("origin receipt result").into())
+    accepted_inputs
+        .into_iter()
+        .map(|accepted| {
+            let key = origin_by_accepted
+                .get(&accepted)
+                .ok_or(ModelCallCorruption::Missing("origin turn correlation"))?;
+            let origin = origins
+                .get(key)
+                .ok_or(ModelCallCorruption::Missing("origin turn graph"))?;
+            let content = ModelCallOriginContent::from_reconstituted_turn_origin(origin)
+                .ok_or(ModelCallCorruption::Inconsistent("origin turn content"))?;
+            if content.accepted_input().into_uuid() != accepted {
+                return Err(ModelCallCorruption::Inconsistent("origin content identity").into());
+            }
+            Ok(content)
         })
         .collect()
 }
@@ -545,7 +570,31 @@ async fn load_live_turn_calls(
     connection: &mut PgConnection,
     session: SessionId,
     turn: TurnId,
-) -> Result<Vec<ModelCallReconstitutionInput>, ModelCallRepositoryError> {
+) -> Result<
+    (
+        Option<PinnedProviderTargetReconstitutionInput>,
+        Vec<ModelCallReconstitutionInput>,
+    ),
+    ModelCallRepositoryError,
+> {
+    let lifecycle = sqlx::query(
+        "SELECT pinned_provider_model_identity_id
+           FROM turn_lifecycle
+          WHERE session_id = $1
+            AND turn_id = $2",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .fetch_optional(&mut *connection)
+    .await?
+    .ok_or(ModelCallCorruption::Missing("live turn lifecycle"))?;
+    let pinned_identity: Option<Uuid> = lifecycle.try_get("pinned_provider_model_identity_id")?;
+    let pinned_target = pinned_identity.map(|identity| {
+        PinnedProviderTargetReconstitutionInput::new(
+            turn,
+            ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(identity)),
+        )
+    });
     let rows = sqlx::query(
         "SELECT model_call_id, turn_id, turn_attempt_id,
                 selection_kind, direct_model_selection_id,
@@ -561,7 +610,12 @@ async fn load_live_turn_calls(
     .bind(turn_id_to_uuid(turn))
     .fetch_all(&mut *connection)
     .await?;
-    rows.into_iter().map(decode_model_call).collect()
+    Ok((
+        pinned_target,
+        rows.into_iter()
+            .map(decode_model_call)
+            .collect::<Result<_, _>>()?,
+    ))
 }
 
 fn decode_model_call(row: PgRow) -> Result<ModelCallReconstitutionInput, ModelCallRepositoryError> {
@@ -667,6 +721,24 @@ async fn insert_prepared_call(
 ) -> Result<(), ModelCallRepositoryError> {
     let call = prepared.call();
     let (kind, direct, alias, alias_selected) = encode_selection(call.selection());
+    let pinned_rows = sqlx::query(
+        "UPDATE turn_lifecycle
+            SET pinned_provider_model_identity_id = $1
+          WHERE turn_id = $2
+            AND session_id = $3
+            AND current_attempt_id = $4
+            AND state_kind = 'active'
+            AND active_phase_kind = 'running'
+            AND pinned_provider_model_identity_id IS NULL",
+    )
+    .bind(call.target().identity().into_uuid())
+    .bind(turn_id_to_uuid(prepared.turn()))
+    .bind(session_id_to_uuid(prepared.session()))
+    .bind(prepared.attempt().into_uuid())
+    .execute(&mut *connection)
+    .await?
+    .rows_affected();
+    require_single(pinned_rows, "turn-level provider target pin")?;
     sqlx::query(
         "INSERT INTO model_call
             (model_call_id, turn_id, session_id, turn_attempt_id,
@@ -825,6 +897,13 @@ async fn persist_completed(
     .execute(&mut *connection)
     .await?;
     insert_snapshot(connection, completed.terminal_snapshot()).await?;
+    persist_reclassified_pending_steering(
+        connection,
+        completed.session(),
+        completed.turn(),
+        completed.reclassified_pending_steering(),
+    )
+    .await?;
     terminalize_lifecycle(
         connection,
         completed.session(),
@@ -888,6 +967,13 @@ async fn persist_failed(
     .execute(&mut *connection)
     .await?;
     insert_snapshot(connection, failed.terminal_snapshot()).await?;
+    persist_reclassified_pending_steering(
+        connection,
+        failed.session(),
+        failed.turn(),
+        failed.reclassified_pending_steering(),
+    )
+    .await?;
     terminalize_lifecycle(
         connection,
         failed.session(),
@@ -933,6 +1019,13 @@ async fn persist_refused(
     )
     .await?;
     insert_snapshot(connection, refused.terminal_snapshot()).await?;
+    persist_reclassified_pending_steering(
+        connection,
+        refused.session(),
+        refused.turn(),
+        refused.reclassified_pending_steering(),
+    )
+    .await?;
     terminalize_lifecycle(
         connection,
         refused.session(),
@@ -960,6 +1053,140 @@ async fn persist_refused(
         },
     )
     .await?;
+    Ok(())
+}
+
+async fn persist_reclassified_pending_steering(
+    connection: &mut PgConnection,
+    session: SessionId,
+    source_turn: TurnId,
+    successors: &[ReclassifiedPendingSteeringTurn],
+) -> Result<(), ModelCallRepositoryError> {
+    for successor in successors {
+        let AcceptedInputDisposition::ReclassifiedAsTurnOrigin { turn, .. } =
+            successor.accepted_input().disposition()
+        else {
+            return Err(ModelCallCorruption::Inconsistent(
+                "reclassified accepted-input disposition",
+            )
+            .into());
+        };
+        if successor.session() != session
+            || successor.source_turn() != source_turn
+            || successor.binding().source_turn() != source_turn
+            || *turn != successor.turn()
+        {
+            return Err(
+                ModelCallCorruption::Inconsistent("reclassified successor correlation").into(),
+            );
+        }
+
+        let accepted_rows = sqlx::query(
+            "UPDATE accepted_input
+                SET disposition_kind = 'reclassified_as_turn_origin',
+                    origin_turn_id = $1
+              WHERE accepted_input_id = $2
+                AND session_id = $3
+                AND acceptance_position = $4
+                AND delivery_kind = 'next_safe_point'
+                AND expected_active_turn_id = $5
+                AND disposition_kind = 'pending_steering'
+                AND origin_turn_id IS NULL",
+        )
+        .bind(turn_id_to_uuid(successor.turn()))
+        .bind(successor.accepted_input().id().into_uuid())
+        .bind(session_id_to_uuid(session))
+        .bind(crate::mapping::input_position_to_numeric(
+            successor.order().acceptance_position(),
+        ))
+        .bind(turn_id_to_uuid(source_turn))
+        .execute(&mut *connection)
+        .await?
+        .rows_affected();
+        require_single(accepted_rows, "pending-steering reclassification")?;
+
+        let (frozen_kind, frozen_direct, frozen_alias, frozen_alias_selected) =
+            match successor.effective_configuration().model() {
+                FrozenModelSelection::Direct(selection) => {
+                    ("direct", Some(selection.into_uuid()), None, None)
+                }
+                FrozenModelSelection::FrozenAlias { alias, definition } => (
+                    "frozen_alias",
+                    None,
+                    Some(alias.into_uuid()),
+                    Some(definition.selected().into_uuid()),
+                ),
+            };
+        let queue_rows = sqlx::query(
+            "WITH RECURSIVE source_configuration AS (
+                SELECT stored.*
+                  FROM queued_input_origin AS stored
+                 WHERE stored.turn_id = $5
+                   AND stored.session_id = $3
+                UNION
+                SELECT ancestor.*
+                  FROM source_configuration AS current
+                  JOIN queued_input_origin AS ancestor
+                    ON ancestor.turn_id = current.source_configuration_turn_id
+                   AND ancestor.session_id = current.session_id
+             )
+             INSERT INTO queued_input_origin
+                (turn_id, accepted_input_id, session_id, acceptance_position,
+                 priority_kind, source_configuration_turn_id)
+             SELECT
+                $1, accepted.accepted_input_id, accepted.session_id,
+                accepted.acceptance_position, 'ordinary', source.turn_id
+               FROM accepted_input AS accepted
+               JOIN queued_input_origin AS source
+                 ON source.turn_id = $5
+                AND source.session_id = accepted.session_id
+               JOIN source_configuration AS resolved
+                 ON resolved.source_configuration_turn_id IS NULL
+              WHERE accepted.accepted_input_id = $2
+                AND accepted.session_id = $3
+                AND accepted.acceptance_position = $4
+                AND accepted.disposition_kind = 'reclassified_as_turn_origin'
+                AND accepted.origin_turn_id = $1
+                AND accepted.expected_active_turn_id = $5
+                AND source.acceptance_position < accepted.acceptance_position
+                AND resolved.frozen_model_kind = $6
+                AND resolved.frozen_direct_model_selection_id IS NOT DISTINCT FROM $7
+                AND resolved.frozen_model_alias_id IS NOT DISTINCT FROM $8
+                AND resolved.frozen_alias_selected_direct_id IS NOT DISTINCT FROM $9",
+        )
+        .bind(turn_id_to_uuid(successor.turn()))
+        .bind(successor.accepted_input().id().into_uuid())
+        .bind(session_id_to_uuid(session))
+        .bind(crate::mapping::input_position_to_numeric(
+            successor.order().acceptance_position(),
+        ))
+        .bind(turn_id_to_uuid(source_turn))
+        .bind(frozen_kind)
+        .bind(frozen_direct)
+        .bind(frozen_alias)
+        .bind(frozen_alias_selected)
+        .execute(&mut *connection)
+        .await?
+        .rows_affected();
+        require_single(queue_rows, "reclassified successor queue")?;
+
+        let lifecycle_rows = sqlx::query(
+            "INSERT INTO turn_lifecycle
+                (turn_id, session_id, origin_accepted_input_id,
+                 acceptance_position, state_kind)
+             VALUES ($1, $2, $3, $4, 'queued')",
+        )
+        .bind(turn_id_to_uuid(successor.turn()))
+        .bind(session_id_to_uuid(session))
+        .bind(successor.accepted_input().id().into_uuid())
+        .bind(crate::mapping::input_position_to_numeric(
+            successor.order().acceptance_position(),
+        ))
+        .execute(&mut *connection)
+        .await?
+        .rows_affected();
+        require_single(lifecycle_rows, "reclassified successor lifecycle")?;
+    }
     Ok(())
 }
 
@@ -1283,6 +1510,11 @@ fn identity_collision(error: &sqlx::Error) -> Option<ModelCallIdentityCollision>
         Some("context_frontier_pk" | "context_frontier_id_global") => {
             Some(ModelCallIdentityCollision::TerminalFrontier)
         }
+        Some(
+            "accepted_input_origin_turn_id_key"
+            | "queued_input_origin_pkey"
+            | "turn_lifecycle_pkey",
+        ) => Some(ModelCallIdentityCollision::ReclassifiedTurn),
         _ => None,
     }
 }

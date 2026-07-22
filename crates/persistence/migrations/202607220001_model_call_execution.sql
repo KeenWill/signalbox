@@ -5,6 +5,269 @@
 -- rows record the Prepared checkpoint, send authorization, terminal evidence,
 -- and atomic conversational outcome that surround that work.
 
+-- A pending steering receipt keeps its immutable NextSafePoint delivery and
+-- command result when terminalization makes it ordinary successor work. Only
+-- its current disposition and fresh origin turn change; the source binding
+-- remains in expected_active_turn_id.
+ALTER TABLE accepted_input
+    DROP CONSTRAINT accepted_input_delivery_shape,
+    DROP CONSTRAINT accepted_input_disposition_closed,
+    DROP CONSTRAINT accepted_input_command_result_fk;
+
+-- The immutable command receipt continues to own accepted-input identity and
+-- session. Its original result turn remains authoritative for direct origins,
+-- while a pending-steering receipt deliberately has no result turn to copy
+-- when later terminalization gives the accepted input a successor turn.
+ALTER TABLE submit_input_command
+    ADD CONSTRAINT submit_input_command_accepted_result_key
+        UNIQUE (command_id, result_accepted_input_id, result_session_id);
+
+ALTER TABLE accepted_input
+    ADD CONSTRAINT accepted_input_command_result_fk
+        FOREIGN KEY (accepting_command_id, accepted_input_id, session_id)
+        REFERENCES submit_input_command (
+            command_id,
+            result_accepted_input_id,
+            result_session_id
+        )
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED;
+
+ALTER TABLE accepted_input
+    ADD CONSTRAINT accepted_input_delivery_shape
+    CHECK (
+        (
+            disposition_kind = 'origin_of'
+            AND delivery_kind IN (
+                'start_when_no_active_turn',
+                'after_current_turn'
+            )
+            AND (
+                (
+                    delivery_kind = 'start_when_no_active_turn'
+                    AND expected_active_turn_id IS NULL
+                )
+                OR
+                (
+                    delivery_kind = 'after_current_turn'
+                    AND expected_active_turn_id IS NOT NULL
+                )
+            )
+            AND expected_defaults_version IS NOT NULL
+            AND model_override_kind IS NOT NULL
+            AND origin_turn_id IS NOT NULL
+        )
+        OR
+        (
+            disposition_kind = 'pending_steering'
+            AND delivery_kind = 'next_safe_point'
+            AND expected_active_turn_id IS NOT NULL
+            AND expected_defaults_version IS NULL
+            AND model_override_kind IS NULL
+            AND replacement_model_kind IS NULL
+            AND replacement_direct_model_selection_id IS NULL
+            AND replacement_model_alias_id IS NULL
+            AND origin_turn_id IS NULL
+        )
+        OR
+        (
+            disposition_kind = 'reclassified_as_turn_origin'
+            AND delivery_kind = 'next_safe_point'
+            AND expected_active_turn_id IS NOT NULL
+            AND expected_defaults_version IS NULL
+            AND model_override_kind IS NULL
+            AND replacement_model_kind IS NULL
+            AND replacement_direct_model_selection_id IS NULL
+            AND replacement_model_alias_id IS NULL
+            AND origin_turn_id IS NOT NULL
+        )
+    ),
+    ADD CONSTRAINT accepted_input_disposition_closed
+    CHECK (
+        disposition_kind IN (
+            'origin_of',
+            'pending_steering',
+            'reclassified_as_turn_origin'
+        )
+    );
+
+DROP TRIGGER accepted_input_is_append_only ON accepted_input;
+
+CREATE FUNCTION reject_invalid_accepted_input_change()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'accepted_input is not deletable'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF OLD.disposition_kind = 'pending_steering'
+       AND NEW.disposition_kind = 'reclassified_as_turn_origin'
+       AND OLD.origin_turn_id IS NULL
+       AND NEW.origin_turn_id IS NOT NULL
+       AND ROW(
+            OLD.accepted_input_id,
+            OLD.accepting_command_id,
+            OLD.session_id,
+            OLD.content_kind,
+            OLD.content_text,
+            OLD.delivery_kind,
+            OLD.expected_active_turn_id,
+            OLD.expected_defaults_version,
+            OLD.model_override_kind,
+            OLD.replacement_model_kind,
+            OLD.replacement_direct_model_selection_id,
+            OLD.replacement_model_alias_id,
+            OLD.acceptance_position
+       ) IS NOT DISTINCT FROM ROW(
+            NEW.accepted_input_id,
+            NEW.accepting_command_id,
+            NEW.session_id,
+            NEW.content_kind,
+            NEW.content_text,
+            NEW.delivery_kind,
+            NEW.expected_active_turn_id,
+            NEW.expected_defaults_version,
+            NEW.model_override_kind,
+            NEW.replacement_model_kind,
+            NEW.replacement_direct_model_selection_id,
+            NEW.replacement_model_alias_id,
+            NEW.acceptance_position
+       )
+    THEN
+        RETURN NEW;
+    END IF;
+
+    RAISE EXCEPTION 'accepted_input is immutable outside pending-steering reclassification'
+        USING ERRCODE = '23514';
+END;
+$$;
+
+CREATE TRIGGER accepted_input_is_append_only
+BEFORE UPDATE OR DELETE ON accepted_input
+FOR EACH ROW
+EXECUTE FUNCTION reject_invalid_accepted_input_change();
+
+-- Reclassified steering inherits the effective configuration of its canonical
+-- source turn. Its queue row stores only that source reference; it never
+-- duplicates configuration values that could compete with the source fact.
+ALTER TABLE queued_input_origin
+    ADD COLUMN source_configuration_turn_id uuid,
+    ALTER COLUMN defaults_version DROP NOT NULL,
+    ALTER COLUMN requested_model_kind DROP NOT NULL,
+    ALTER COLUMN frozen_model_kind DROP NOT NULL,
+    ALTER COLUMN model_parameters DROP NOT NULL,
+    ALTER COLUMN known_provider_failure_retry DROP NOT NULL,
+    ALTER COLUMN model_fallback DROP NOT NULL,
+    DROP CONSTRAINT queued_input_origin_defaults_version_positive_u64,
+    DROP CONSTRAINT queued_input_origin_requested_model_shape,
+    DROP CONSTRAINT queued_input_origin_frozen_model_shape,
+    DROP CONSTRAINT queued_input_origin_model_parameters_closed,
+    DROP CONSTRAINT queued_input_origin_known_failure_retry_closed,
+    DROP CONSTRAINT queued_input_origin_model_fallback_closed;
+
+ALTER TABLE queued_input_origin
+    ADD CONSTRAINT queued_input_origin_configuration_provenance_shape
+        CHECK (
+            (
+                source_configuration_turn_id IS NULL
+                AND defaults_version IS NOT NULL
+                AND requested_model_kind IS NOT NULL
+                AND frozen_model_kind IS NOT NULL
+                AND model_parameters IS NOT NULL
+                AND known_provider_failure_retry IS NOT NULL
+                AND model_fallback IS NOT NULL
+            )
+            OR
+            (
+                source_configuration_turn_id IS NOT NULL
+                AND defaults_version IS NULL
+                AND requested_model_kind IS NULL
+                AND requested_direct_model_selection_id IS NULL
+                AND requested_model_alias_id IS NULL
+                AND frozen_model_kind IS NULL
+                AND frozen_direct_model_selection_id IS NULL
+                AND frozen_model_alias_id IS NULL
+                AND frozen_alias_selected_direct_id IS NULL
+                AND model_parameters IS NULL
+                AND known_provider_failure_retry IS NULL
+                AND model_fallback IS NULL
+            )
+        ),
+    ADD CONSTRAINT queued_input_origin_defaults_version_positive_u64
+        CHECK (
+            defaults_version IS NULL
+            OR (
+                defaults_version >= 1
+                AND defaults_version <= 18446744073709551615
+            )
+        ),
+    ADD CONSTRAINT queued_input_origin_requested_model_shape
+        CHECK (
+            source_configuration_turn_id IS NOT NULL
+            OR (
+                requested_model_kind = 'direct'
+                AND requested_direct_model_selection_id IS NOT NULL
+                AND requested_model_alias_id IS NULL
+            )
+            OR (
+                requested_model_kind = 'alias'
+                AND requested_direct_model_selection_id IS NULL
+                AND requested_model_alias_id IS NOT NULL
+            )
+        ),
+    ADD CONSTRAINT queued_input_origin_frozen_model_shape
+        CHECK (
+            source_configuration_turn_id IS NOT NULL
+            OR (
+                frozen_model_kind = 'direct'
+                AND frozen_direct_model_selection_id IS NOT NULL
+                AND frozen_model_alias_id IS NULL
+                AND frozen_alias_selected_direct_id IS NULL
+            )
+            OR (
+                frozen_model_kind = 'frozen_alias'
+                AND frozen_direct_model_selection_id IS NULL
+                AND frozen_model_alias_id IS NOT NULL
+                AND frozen_alias_selected_direct_id IS NOT NULL
+            )
+        ),
+    ADD CONSTRAINT queued_input_origin_model_parameters_closed
+        CHECK (
+            source_configuration_turn_id IS NOT NULL
+            OR model_parameters = 'provider_defaults'
+        ),
+    ADD CONSTRAINT queued_input_origin_known_failure_retry_closed
+        CHECK (
+            source_configuration_turn_id IS NOT NULL
+            OR known_provider_failure_retry = 'disabled'
+        ),
+    ADD CONSTRAINT queued_input_origin_model_fallback_closed
+        CHECK (
+            source_configuration_turn_id IS NOT NULL
+            OR model_fallback = 'disabled'
+        ),
+    ADD CONSTRAINT queued_input_origin_source_not_self
+        CHECK (source_configuration_turn_id IS DISTINCT FROM turn_id),
+    ADD CONSTRAINT queued_input_origin_turn_session_key
+        UNIQUE (turn_id, session_id),
+    ADD CONSTRAINT queued_input_origin_configuration_source_fk
+        FOREIGN KEY (source_configuration_turn_id, session_id)
+        REFERENCES queued_input_origin (turn_id, session_id)
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED;
+
+-- ADR-0042 makes the provider target a turn-level pin established before any
+-- physical call. Calls reference this fact rather than serving as its storage.
+ALTER TABLE turn_lifecycle
+    ADD COLUMN pinned_provider_model_identity_id uuid,
+    ADD CONSTRAINT turn_lifecycle_pinned_target_key
+        UNIQUE (turn_id, session_id, pinned_provider_model_identity_id);
+
 CREATE TABLE model_call (
     model_call_id uuid PRIMARY KEY,
     turn_id uuid NOT NULL,
@@ -78,6 +341,20 @@ CREATE TABLE model_call (
     CONSTRAINT model_call_attempt_fk
         FOREIGN KEY (turn_attempt_id, turn_id, session_id)
         REFERENCES turn_attempt (turn_attempt_id, turn_id, session_id)
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT model_call_pinned_target_fk
+        FOREIGN KEY (
+            turn_id,
+            session_id,
+            resolved_provider_model_identity_id
+        )
+        REFERENCES turn_lifecycle (
+            turn_id,
+            session_id,
+            pinned_provider_model_identity_id
+        )
         ON UPDATE RESTRICT
         ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED,
@@ -405,6 +682,11 @@ BEGIN
             RAISE EXCEPTION 'turn lifecycle must be inserted without attempt history'
                 USING ERRCODE = '23514';
         END IF;
+
+        IF NEW.pinned_provider_model_identity_id IS NOT NULL THEN
+            RAISE EXCEPTION 'queued turn lifecycle cannot begin with a provider target pin'
+                USING ERRCODE = '23514';
+        END IF;
         RETURN NEW;
     END IF;
 
@@ -440,6 +722,29 @@ BEGIN
        )
     THEN
         RAISE EXCEPTION 'turn start is write-once'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF OLD.pinned_provider_model_identity_id IS NOT NULL
+       AND NEW.pinned_provider_model_identity_id
+           IS DISTINCT FROM OLD.pinned_provider_model_identity_id
+    THEN
+        RAISE EXCEPTION 'turn-level provider target pin is immutable'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF OLD.pinned_provider_model_identity_id IS NULL
+       AND NEW.pinned_provider_model_identity_id IS NOT NULL
+       AND (
+            OLD.state_kind IS DISTINCT FROM 'active'
+            OR NEW.state_kind IS DISTINCT FROM 'active'
+            OR OLD.active_phase_kind IS DISTINCT FROM 'running'
+            OR NEW.active_phase_kind IS DISTINCT FROM 'running'
+            OR OLD.current_attempt_id IS NULL
+            OR NEW.current_attempt_id IS DISTINCT FROM OLD.current_attempt_id
+       )
+    THEN
+        RAISE EXCEPTION 'provider target can be pinned only for the current running attempt'
             USING ERRCODE = '23514';
     END IF;
 
@@ -508,6 +813,7 @@ DECLARE
     checked_direct_id uuid;
     checked_alias_id uuid;
     checked_alias_selected_id uuid;
+    checked_target_id uuid;
     checked_frontier_id uuid;
     checked_state text;
     checked_disposition text;
@@ -515,6 +821,7 @@ DECLARE
     origin_direct_id uuid;
     origin_alias_id uuid;
     origin_alias_selected_id uuid;
+    pinned_target_id uuid;
     attempt_state text;
     attempt_disposition text;
     turn_state text;
@@ -534,6 +841,7 @@ BEGIN
         direct_model_selection_id,
         frozen_model_alias_id,
         frozen_alias_selected_direct_id,
+        resolved_provider_model_identity_id,
         context_frontier_id,
         state_kind,
         terminal_disposition_kind
@@ -545,6 +853,7 @@ BEGIN
         checked_direct_id,
         checked_alias_id,
         checked_alias_selected_id,
+        checked_target_id,
         checked_frontier_id,
         checked_state,
         checked_disposition
@@ -555,11 +864,24 @@ BEGIN
         RETURN;
     END IF;
 
+    WITH RECURSIVE configuration_origin AS (
+        SELECT stored.*
+          FROM queued_input_origin AS stored
+         WHERE stored.turn_id = checked_turn_id
+           AND stored.session_id = checked_session_id
+        UNION
+        SELECT source.*
+          FROM configuration_origin AS current
+          JOIN queued_input_origin AS source
+            ON source.turn_id = current.source_configuration_turn_id
+           AND source.session_id = current.session_id
+    )
     SELECT
         origin.frozen_model_kind,
         origin.frozen_direct_model_selection_id,
         origin.frozen_model_alias_id,
         origin.frozen_alias_selected_direct_id,
+        lifecycle.pinned_provider_model_identity_id,
         lifecycle.state_kind,
         lifecycle.active_phase_kind,
         lifecycle.current_attempt_id,
@@ -573,6 +895,7 @@ BEGIN
         origin_direct_id,
         origin_alias_id,
         origin_alias_selected_id,
+        pinned_target_id,
         turn_state,
         active_phase,
         current_attempt,
@@ -582,9 +905,9 @@ BEGIN
         terminal_disposition,
         starting_frontier
       FROM turn_lifecycle AS lifecycle
-      JOIN queued_input_origin AS origin
-        ON origin.turn_id = lifecycle.turn_id
-       AND origin.session_id = lifecycle.session_id
+      JOIN configuration_origin AS origin
+        ON origin.session_id = lifecycle.session_id
+       AND origin.source_configuration_turn_id IS NULL
      WHERE lifecycle.turn_id = checked_turn_id
        AND lifecycle.session_id = checked_session_id;
 
@@ -605,6 +928,11 @@ BEGIN
         origin_alias_selected_id
     ) THEN
         RAISE EXCEPTION 'model call selection differs from its frozen turn selection'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF pinned_target_id IS DISTINCT FROM checked_target_id THEN
+        RAISE EXCEPTION 'model call target differs from its independent turn-level pin'
             USING ERRCODE = '23514';
     END IF;
 
@@ -1042,9 +1370,15 @@ BEGIN
        AND terminal_member.member_position IS NULL;
 
     IF checked_terminal_disposition = 'failed' THEN
+        IF contradictory_failed_attempt_count <> 0 THEN
+            RAISE EXCEPTION
+                'failed terminal turn % permits only known_failure or lost ended attempts',
+                checked_turn_id
+                USING ERRCODE = '23514';
+        END IF;
+
         IF failure_entry_count <> 1
            OR completion_entry_count <> 0
-           OR contradictory_failed_attempt_count <> 0
            OR EXISTS (
                 SELECT 1
                   FROM model_call
@@ -1173,6 +1507,7 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     checked_payload_kind text;
+    checked_source_session_id uuid;
     checked_origin_input_id uuid;
     checked_failed_turn_id uuid;
     checked_producing_call_id uuid;
@@ -1181,12 +1516,14 @@ DECLARE
 BEGIN
     IF TG_OP = 'DELETE' THEN
         checked_payload_kind := OLD.payload_kind;
+        checked_source_session_id := OLD.source_session_id;
         checked_origin_input_id := OLD.origin_accepted_input_id;
         checked_failed_turn_id := OLD.failed_turn_id;
         checked_producing_call_id := OLD.producing_model_call_id;
         checked_completed_turn_id := OLD.completed_turn_id;
     ELSE
         checked_payload_kind := NEW.payload_kind;
+        checked_source_session_id := NEW.source_session_id;
         checked_origin_input_id := NEW.origin_accepted_input_id;
         checked_failed_turn_id := NEW.failed_turn_id;
         checked_producing_call_id := NEW.producing_model_call_id;
@@ -1198,7 +1535,20 @@ BEGIN
             SELECT origin_turn_id
               INTO checked_turn_id
               FROM accepted_input
-             WHERE accepted_input_id = checked_origin_input_id;
+             WHERE accepted_input_id = checked_origin_input_id
+               AND session_id = checked_source_session_id
+               AND disposition_kind IN (
+                    'origin_of',
+                    'reclassified_as_turn_origin'
+               )
+               AND origin_turn_id IS NOT NULL;
+
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'semantic origin input % is not a turn origin', checked_origin_input_id
+                    USING
+                        ERRCODE = '23514',
+                        CONSTRAINT = 'semantic_transcript_entry_origin_disposition';
+            END IF;
         WHEN 'turn_failed' THEN
             checked_turn_id := checked_failed_turn_id;
         WHEN 'turn_completed' THEN

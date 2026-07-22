@@ -14,18 +14,19 @@ use signalbox_domain::{
     DeliveryRequest, DirectModelSelection, DurableCommandId, FrozenAliasDefinition,
     FrozenModelSelection, ModelAlias, ModelCallDisposition, ModelCallId,
     ModelCallReconstitutionInput, ModelCallReconstitutionState, ModelSelectionOverride,
-    ModelSelectionRequest, NonEmptyUnicodeTextFailure, PerInputConfigurationChoices,
-    PreparedSubmitInput, ProviderModelIdentity, ReconstitutedSubmitInput,
-    ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget, SemanticTranscriptEntryId,
+    ModelSelectionRequest, NonEmptyUnicodeTextFailure, OriginConfiguration,
+    PerInputConfigurationChoices, PinnedProviderTargetReconstitutionInput, PreparedSubmitInput,
+    ProviderModelIdentity, ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput,
+    ResolvedProviderTarget, SemanticTranscriptEntryId,
     SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session,
     SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
     SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
-    SessionInputPosition, SteeringBinding, SubmitInput, SubmitInputAppliedResult,
-    SubmitInputPreparationFailure, SubmitInputReconstitutionFailure,
+    SessionInputPosition, SteeringBinding, SteeringReclassificationReason, SubmitInput,
+    SubmitInputAppliedResult, SubmitInputPreparationFailure, SubmitInputReconstitutionFailure,
     SubmitInputReconstitutionInput, SubmitInputRejectedResult, SubmitInputResult,
-    SubmitInputTurnOriginReconstitutionInput, ToolRequestId, TurnAttemptId, TurnId,
-    UnstoppedAttemptDisposition, UserContent,
+    SubmitInputTerminalSourceReconstitutionInput, SubmitInputTurnOriginReconstitutionInput,
+    ToolRequestId, TurnAttemptId, TurnId, UnstoppedAttemptDisposition, UserContent,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -46,14 +47,51 @@ const STORAGE_VERSION: i16 = 1;
 const APPLIED: &str = "applied";
 const REJECTED: &str = "rejected";
 
-type StoredTurnOriginKey = (Uuid, Uuid);
+pub(crate) type StoredTurnOriginKey = (Uuid, Uuid);
 
 #[derive(Clone, Copy)]
 struct StoredTurnOriginLink {
     command_id: DurableCommandId,
-    predecessor: Option<StoredTurnOriginKey>,
+    kind: StoredTurnOriginKind,
     accepted_input: AcceptedInputId,
     queue_order: AcceptedInputQueueOrder,
+}
+
+#[derive(Clone, Copy)]
+enum StoredTurnOriginKind {
+    Direct {
+        predecessor: Option<StoredTurnOriginKey>,
+    },
+    Reclassified {
+        source: StoredTurnOriginKey,
+        source_disposition: StoredTerminalTurnDisposition,
+    },
+}
+
+impl StoredTurnOriginKind {
+    const fn dependency(self) -> Option<StoredTurnOriginKey> {
+        match self {
+            Self::Direct { predecessor } => predecessor,
+            Self::Reclassified { source, .. } => Some(source),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum StoredTerminalTurnDisposition {
+    Completed,
+    Refused,
+    Failed,
+}
+
+impl StoredTerminalTurnDisposition {
+    const fn domain(self) -> signalbox_domain::TurnDisposition {
+        match self {
+            Self::Completed => signalbox_domain::TurnDisposition::Completed,
+            Self::Refused => signalbox_domain::TurnDisposition::Refused,
+            Self::Failed => signalbox_domain::TurnDisposition::Failed,
+        }
+    }
 }
 
 fn turn_origin_dependency_order(
@@ -685,6 +723,32 @@ pub(crate) async fn load_scheduling_projection(
             accepted.session_id AS accepted_session_id,
             accepted.disposition_kind,
             accepted.origin_turn_id,
+            accepted.expected_active_turn_id AS accepted_source_turn_id,
+            queued.source_configuration_turn_id,
+            (
+                queued.defaults_version IS NULL
+                AND queued.requested_model_kind IS NULL
+                AND queued.requested_direct_model_selection_id IS NULL
+                AND queued.requested_model_alias_id IS NULL
+                AND queued.frozen_model_kind IS NULL
+                AND queued.frozen_direct_model_selection_id IS NULL
+                AND queued.frozen_model_alias_id IS NULL
+                AND queued.frozen_alias_selected_direct_id IS NULL
+                AND queued.model_parameters IS NULL
+                AND queued.known_provider_failure_retry IS NULL
+                AND queued.model_fallback IS NULL
+            ) AS queued_configuration_values_absent,
+            queued.defaults_version AS queued_defaults_version,
+            queued.requested_model_kind,
+            queued.requested_direct_model_selection_id,
+            queued.requested_model_alias_id,
+            queued.frozen_model_kind,
+            queued.frozen_direct_model_selection_id,
+            queued.frozen_model_alias_id,
+            queued.frozen_alias_selected_direct_id,
+            queued.model_parameters,
+            queued.known_provider_failure_retry,
+            queued.model_fallback,
             turn.turn_id AS lifecycle_turn_id,
             turn.session_id AS lifecycle_session_id,
             turn.state_kind AS lifecycle_state_kind,
@@ -694,6 +758,7 @@ pub(crate) async fn load_scheduling_projection(
             turn.terminal_frontier_id,
             turn.active_phase_kind,
             turn.current_attempt_id,
+            turn.pinned_provider_model_identity_id,
             turn.recovery_model_call_id,
             turn.terminal_attempt_id,
             turn.terminal_model_call_id,
@@ -732,6 +797,8 @@ pub(crate) async fn load_scheduling_projection(
     let recorded_commands = require_recorded_batch(connection, &accepting_commands).await?;
 
     let mut turns = Vec::with_capacity(rows.len());
+    let mut turn_configurations = BTreeMap::<TurnId, OriginConfiguration>::new();
+    let mut pinned_target_identities = BTreeMap::new();
     let mut required_frontiers = BTreeSet::new();
     let mut required_model_calls = BTreeSet::new();
     for (row, accepting_command) in rows.into_iter().zip(accepting_commands) {
@@ -744,8 +811,9 @@ pub(crate) async fn load_scheduling_projection(
 
         let accepted_input = accepted_input_id_from_uuid(required(&row, "accepted_input_id")?);
         let accepted_session = session_id_from_uuid(required(&row, "accepted_session_id")?);
-        require_spelling(&row, "disposition_kind", "origin_of")?;
+        let disposition_kind: String = required(&row, "disposition_kind")?;
         let origin_turn = turn_id_from_uuid(required(&row, "origin_turn_id")?);
+        let accepted_source_turn: Option<Uuid> = row.try_get("accepted_source_turn_id")?;
 
         let lifecycle_turn = turn_id_from_uuid(required(&row, "lifecycle_turn_id")?);
         let lifecycle_session = session_id_from_uuid(required(&row, "lifecycle_session_id")?);
@@ -762,24 +830,82 @@ pub(crate) async fn load_scheduling_projection(
         let recorded = recorded_commands
             .get(&accepting_command)
             .ok_or(SubmitInputCorruption::Missing("batched origin receipt"))?;
-        let (origin_delivery, origin_configuration) = match recorded.result() {
-            SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(applied))
-                if applied.accepted_input() == accepted_input
-                    && applied.session() == accepted_session
-                    && applied.turn() == queued_turn =>
-            {
+        let (accepted_lifecycle, origin_delivery, origin_configuration, binding) =
+            match (disposition_kind.as_str(), recorded.result()) {
                 (
-                    recorded.command().delivery(),
-                    applied.origin_configuration().clone(),
-                )
-            }
-            _ => {
-                return Err(SubmitInputCorruption::Inconsistent(
-                    "scheduling origin command result",
-                )
-                .into());
-            }
-        };
+                    "origin_of",
+                    SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(applied)),
+                ) if applied.accepted_input() == accepted_input
+                    && applied.session() == accepted_session
+                    && applied.turn() == queued_turn
+                    && accepted_source_turn
+                        == accepted_origin_source_turn(recorded.command().delivery())
+                            .map(TurnId::into_uuid) =>
+                {
+                    (
+                        AcceptedInputLifecycle::new(
+                            accepted_input,
+                            AcceptedInputDisposition::OriginOf(origin_turn),
+                        ),
+                        recorded.command().delivery(),
+                        applied.origin_configuration().clone(),
+                        None,
+                    )
+                }
+                (
+                    "reclassified_as_turn_origin",
+                    SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(applied)),
+                ) if applied.accepted_input() == accepted_input
+                    && applied.session() == accepted_session
+                    && applied.binding().source_turn().into_uuid()
+                        == accepted_source_turn.ok_or(SubmitInputCorruption::Missing(
+                            "reclassified source turn",
+                        ))? =>
+                {
+                    let source_turn = applied.binding().source_turn();
+                    let source_configuration =
+                        turn_configurations.get(&source_turn).cloned().ok_or(
+                            SubmitInputCorruption::Missing("reclassified source configuration"),
+                        )?;
+                    (
+                        AcceptedInputLifecycle::new(
+                            accepted_input,
+                            AcceptedInputDisposition::ReclassifiedAsTurnOrigin {
+                                turn: origin_turn,
+                                reason: SteeringReclassificationReason::NoSafePointBeforeTerminal,
+                            },
+                        ),
+                        recorded.command().delivery(),
+                        source_configuration,
+                        Some(applied.binding()),
+                    )
+                }
+                ("origin_of" | "reclassified_as_turn_origin", _) => {
+                    return Err(SubmitInputCorruption::Inconsistent(
+                        "scheduling origin command result",
+                    )
+                    .into());
+                }
+                (value, _) => {
+                    return Err(SubmitInputCorruption::Unsupported {
+                        field: "scheduling accepted-input disposition_kind",
+                        value: value.to_owned(),
+                    }
+                    .into());
+                }
+            };
+        match binding {
+            Some(binding) => require_stored_inherited_configuration(&row, binding.source_turn())?,
+            None => require_stored_origin_configuration(&row, &origin_configuration)?,
+        }
+        if turn_configurations
+            .insert(queued_turn, origin_configuration.clone())
+            .is_some()
+        {
+            return Err(
+                SubmitInputCorruption::Inconsistent("duplicate scheduling configuration").into(),
+            );
+        }
 
         let state_kind: String = required(&row, "lifecycle_state_kind")?;
         let lineage_kind: Option<String> = row.try_get("start_lineage_kind")?;
@@ -788,6 +914,7 @@ pub(crate) async fn load_scheduling_projection(
         let terminal_frontier: Option<Uuid> = row.try_get("terminal_frontier_id")?;
         let active_phase: Option<String> = row.try_get("active_phase_kind")?;
         let current_attempt: Option<Uuid> = row.try_get("current_attempt_id")?;
+        let pinned_target: Option<Uuid> = row.try_get("pinned_provider_model_identity_id")?;
         let recovery_model_call: Option<Uuid> = row.try_get("recovery_model_call_id")?;
         let terminal_attempt: Option<Uuid> = row.try_get("terminal_attempt_id")?;
         let terminal_model_call: Option<Uuid> = row.try_get("terminal_model_call_id")?;
@@ -1072,21 +1199,42 @@ pub(crate) async fn load_scheduling_projection(
             }
         };
 
-        turns.push(AcceptedInputTurnSchedulingRecord::new(
-            lifecycle_session,
-            lifecycle_turn,
-            accepted_session,
-            AcceptedInputLifecycle::new(
-                accepted_input,
-                AcceptedInputDisposition::OriginOf(origin_turn),
+        if let Some(identity) = pinned_target
+            && pinned_target_identities
+                .insert(queued_turn, identity)
+                .is_some()
+        {
+            return Err(SubmitInputCorruption::Inconsistent("duplicate turn target pin").into());
+        }
+
+        let record = match binding {
+            Some(binding) => AcceptedInputTurnSchedulingRecord::reclassified(
+                lifecycle_session,
+                lifecycle_turn,
+                accepted_session,
+                accepted_lifecycle,
+                queued_session,
+                queued_turn,
+                AcceptedInputQueueOrder::ordinary(queued_position),
+                origin_delivery,
+                binding,
+                origin_configuration,
+                state,
             ),
-            queued_session,
-            queued_turn,
-            AcceptedInputQueueOrder::ordinary(queued_position),
-            origin_delivery,
-            origin_configuration,
-            state,
-        ));
+            None => AcceptedInputTurnSchedulingRecord::new(
+                lifecycle_session,
+                lifecycle_turn,
+                accepted_session,
+                accepted_lifecycle,
+                queued_session,
+                queued_turn,
+                AcceptedInputQueueOrder::ordinary(queued_position),
+                origin_delivery,
+                origin_configuration,
+                state,
+            ),
+        };
+        turns.push(record);
     }
 
     let active_acceptance_tail =
@@ -1117,6 +1265,8 @@ pub(crate) async fn load_scheduling_projection(
     .fetch_all(&mut *connection)
     .await?;
     let mut model_calls = Vec::with_capacity(model_call_rows.len());
+    let mut pinned_targets = Vec::with_capacity(model_call_rows.len());
+    let mut loaded_pinned_turns = BTreeSet::new();
     let mut loaded_model_calls = BTreeSet::new();
     for row in model_call_rows {
         let call_uuid: Uuid = required(&row, "model_call_id")?;
@@ -1124,6 +1274,18 @@ pub(crate) async fn load_scheduling_projection(
             return Err(SubmitInputCorruption::Inconsistent("duplicate model call").into());
         }
         let frontier_uuid: Uuid = required(&row, "context_frontier_id")?;
+        let turn_uuid: Uuid = required(&row, "turn_id")?;
+        let turn = turn_id_from_uuid(turn_uuid);
+        let pinned_identity = pinned_target_identities
+            .get(&turn)
+            .copied()
+            .ok_or(SubmitInputCorruption::Missing("model call turn target pin"))?;
+        if loaded_pinned_turns.insert(turn) {
+            pinned_targets.push(PinnedProviderTargetReconstitutionInput::new(
+                turn,
+                ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(pinned_identity)),
+            ));
+        }
         required_frontiers.insert(frontier_uuid);
         let state_kind: String = required(&row, "state_kind")?;
         let terminal_disposition: Option<String> = row.try_get("terminal_disposition_kind")?;
@@ -1147,7 +1309,7 @@ pub(crate) async fn load_scheduling_projection(
         };
         model_calls.push(ModelCallReconstitutionInput::new(
             ModelCallId::from_uuid(call_uuid),
-            turn_id_from_uuid(required(&row, "turn_id")?),
+            turn,
             TurnAttemptId::from_uuid(required(&row, "turn_attempt_id")?),
             decode_frozen_model(
                 required(&row, "selection_kind")?,
@@ -1397,12 +1559,73 @@ pub(crate) async fn load_scheduling_projection(
         snapshots,
         active_acceptance_tail,
     )
-    .with_model_calls(model_calls)
+    .with_model_call_facts(pinned_targets, model_calls)
     .reconstitute()
     .map_err(|error| {
         let (_, failure) = error.into_parts();
         SubmitInputCorruption::Scheduling(failure).into()
     })
+}
+
+fn accepted_origin_source_turn(delivery: DeliveryRequest) -> Option<TurnId> {
+    match delivery {
+        DeliveryRequest::AfterCurrentTurn {
+            expected_active_turn,
+            ..
+        } => Some(expected_active_turn),
+        DeliveryRequest::StartWhenNoActiveTurn { .. }
+        | DeliveryRequest::Interrupt { .. }
+        | DeliveryRequest::NextSafePoint { .. } => None,
+    }
+}
+
+fn require_stored_origin_configuration(
+    row: &PgRow,
+    expected: &OriginConfiguration,
+) -> Result<(), SubmitInputRepositoryError> {
+    let source: Option<Uuid> = row.try_get("source_configuration_turn_id")?;
+    if source.is_some() {
+        return Err(
+            SubmitInputCorruption::Inconsistent("explicit configuration source reference").into(),
+        );
+    }
+    require_spelling(row, "model_parameters", "provider_defaults")?;
+    require_spelling(row, "known_provider_failure_retry", "disabled")?;
+    require_spelling(row, "model_fallback", "disabled")?;
+    let defaults_version = decode_defaults_version(row, "queued_defaults_version")?;
+    let requested = decode_model_selection(
+        required(row, "requested_model_kind")?,
+        row.try_get("requested_direct_model_selection_id")?,
+        row.try_get("requested_model_alias_id")?,
+        "scheduling requested model",
+    )?;
+    let frozen = decode_frozen_model(
+        required(row, "frozen_model_kind")?,
+        row.try_get("frozen_direct_model_selection_id")?,
+        row.try_get("frozen_model_alias_id")?,
+        row.try_get("frozen_alias_selected_direct_id")?,
+    )?;
+    if defaults_version != expected.session_defaults_version()
+        || requested != expected.requested().model()
+        || frozen != *expected.effective().model()
+    {
+        return Err(SubmitInputCorruption::Inconsistent("scheduling origin configuration").into());
+    }
+    Ok(())
+}
+
+fn require_stored_inherited_configuration(
+    row: &PgRow,
+    expected_source: TurnId,
+) -> Result<(), SubmitInputRepositoryError> {
+    let source: Option<Uuid> = row.try_get("source_configuration_turn_id")?;
+    let values_absent: bool = required(row, "queued_configuration_values_absent")?;
+    if source != Some(expected_source.into_uuid()) || !values_absent {
+        return Err(
+            SubmitInputCorruption::Inconsistent("inherited configuration provenance").into(),
+        );
+    }
+    Ok(())
 }
 
 async fn load_active_acceptance_tail(
@@ -1476,7 +1699,15 @@ async fn load_active_acceptance_tail(
             ) => AcceptedInputDisposition::PendingSteering {
                 binding: SteeringBinding::new(expected_active_turn),
             },
-            ("origin_of" | "pending_steering", _, _) => {
+            (
+                "reclassified_as_turn_origin",
+                Some(origin),
+                DeliveryRequest::NextSafePoint { .. },
+            ) => AcceptedInputDisposition::ReclassifiedAsTurnOrigin {
+                turn: turn_id_from_uuid(origin),
+                reason: SteeringReclassificationReason::NoSafePointBeforeTerminal,
+            },
+            ("origin_of" | "pending_steering" | "reclassified_as_turn_origin", _, _) => {
                 return Err(SubmitInputCorruption::Inconsistent(
                     "active acceptance-tail disposition",
                 )
@@ -2212,7 +2443,7 @@ fn related_turn_origin_key(
     Ok(Some((required(row, "result_session_id")?, source_turn)))
 }
 
-async fn load_turn_origin_graph(
+pub(crate) async fn load_turn_origin_graph(
     connection: &mut PgConnection,
     roots: &BTreeSet<StoredTurnOriginKey>,
 ) -> Result<
@@ -2233,7 +2464,13 @@ async fn load_turn_origin_graph(
             SELECT root.session_id, root.turn_id
               FROM UNNEST($1::uuid[], $2::uuid[]) AS root(session_id, turn_id)
             UNION
-            SELECT current.session_id, command.expected_active_turn_id
+            SELECT
+                current.session_id,
+                CASE accepted.disposition_kind
+                    WHEN 'reclassified_as_turn_origin'
+                        THEN accepted.expected_active_turn_id
+                    ELSE command.expected_active_turn_id
+                END
               FROM origin_turn AS current
               JOIN turn_lifecycle AS turn
                 ON turn.turn_id = current.turn_id
@@ -2246,21 +2483,34 @@ async fn load_turn_origin_graph(
                 ON accepted.accepted_input_id = queued.accepted_input_id
                AND accepted.session_id = turn.session_id
                AND accepted.origin_turn_id = turn.turn_id
-               AND accepted.disposition_kind = 'origin_of'
+               AND accepted.disposition_kind IN (
+                    'origin_of',
+                    'reclassified_as_turn_origin'
+               )
               JOIN submit_input_command AS command
                 ON command.command_id = accepted.accepting_command_id
-             WHERE command.delivery_kind = 'after_current_turn'
-               AND command.expected_active_turn_id IS NOT NULL
+             WHERE (
+                    accepted.disposition_kind = 'reclassified_as_turn_origin'
+                    AND accepted.expected_active_turn_id IS NOT NULL
+               ) OR (
+                    accepted.disposition_kind = 'origin_of'
+                    AND command.delivery_kind = 'after_current_turn'
+                    AND command.expected_active_turn_id IS NOT NULL
+               )
         )
         SELECT
             current.session_id AS origin_session_id,
             current.turn_id AS origin_turn_id,
             accepted.accepting_command_id AS origin_command_id,
             accepted.accepted_input_id AS origin_accepted_input_id,
+            accepted.disposition_kind AS origin_disposition_kind,
+            accepted.expected_active_turn_id AS reclassified_source_turn_id,
             queued.acceptance_position AS origin_acceptance_position,
             queued.priority_kind AS origin_priority_kind,
             command.delivery_kind AS origin_delivery_kind,
-            command.expected_active_turn_id AS origin_predecessor_turn_id
+            command.expected_active_turn_id AS origin_predecessor_turn_id,
+            source.state_kind AS source_state_kind,
+            source.terminal_disposition_kind AS source_terminal_disposition_kind
           FROM origin_turn AS current
           JOIN turn_lifecycle AS turn
             ON turn.turn_id = current.turn_id
@@ -2273,9 +2523,15 @@ async fn load_turn_origin_graph(
             ON accepted.accepted_input_id = queued.accepted_input_id
            AND accepted.session_id = turn.session_id
            AND accepted.origin_turn_id = turn.turn_id
-           AND accepted.disposition_kind = 'origin_of'
+           AND accepted.disposition_kind IN (
+                'origin_of',
+                'reclassified_as_turn_origin'
+           )
           JOIN submit_input_command AS command
             ON command.command_id = accepted.accepting_command_id
+          LEFT JOIN turn_lifecycle AS source
+            ON source.turn_id = accepted.expected_active_turn_id
+           AND source.session_id = accepted.session_id
          ORDER BY current.session_id, current.turn_id",
     )
     .bind(&source_sessions)
@@ -2297,20 +2553,63 @@ async fn load_turn_origin_graph(
             accepted_input_id_from_uuid(required(&row, "origin_accepted_input_id")?);
         let queue_position = decode_position(&row, "origin_acceptance_position")?;
         require_spelling(&row, "origin_priority_kind", "ordinary")?;
+        let disposition_kind: String = required(&row, "origin_disposition_kind")?;
         let delivery_kind: String = required(&row, "origin_delivery_kind")?;
         let predecessor_turn: Option<Uuid> = row.try_get("origin_predecessor_turn_id")?;
-        let predecessor = match (delivery_kind.as_str(), predecessor_turn) {
-            ("start_when_no_active_turn", None) => None,
-            ("after_current_turn", Some(turn)) => Some((key.0, turn)),
-            ("start_when_no_active_turn" | "after_current_turn", _) => {
+        let reclassified_source: Option<Uuid> = row.try_get("reclassified_source_turn_id")?;
+        let source_state: Option<String> = row.try_get("source_state_kind")?;
+        let source_disposition: Option<String> = row.try_get("source_terminal_disposition_kind")?;
+        let kind = match (
+            disposition_kind.as_str(),
+            delivery_kind.as_str(),
+            predecessor_turn,
+            reclassified_source,
+        ) {
+            ("origin_of", "start_when_no_active_turn", None, None) => {
+                StoredTurnOriginKind::Direct { predecessor: None }
+            }
+            ("origin_of", "after_current_turn", Some(turn), Some(source)) if turn == source => {
+                StoredTurnOriginKind::Direct {
+                    predecessor: Some((key.0, turn)),
+                }
+            }
+            ("reclassified_as_turn_origin", "next_safe_point", Some(source), Some(binding))
+                if source == binding && source_state.as_deref() == Some("terminal") =>
+            {
+                let source_disposition = match source_disposition.as_deref() {
+                    Some("completed") => StoredTerminalTurnDisposition::Completed,
+                    Some("refused") => StoredTerminalTurnDisposition::Refused,
+                    Some("failed") => StoredTerminalTurnDisposition::Failed,
+                    Some(value) => {
+                        return Err(SubmitInputCorruption::Unsupported {
+                            field: "reclassified source terminal disposition",
+                            value: value.to_owned(),
+                        }
+                        .into());
+                    }
+                    None => {
+                        return Err(SubmitInputCorruption::Missing(
+                            "reclassified source terminal disposition",
+                        )
+                        .into());
+                    }
+                };
+                StoredTurnOriginKind::Reclassified {
+                    source: (key.0, source),
+                    source_disposition,
+                }
+            }
+            ("origin_of" | "reclassified_as_turn_origin", _, _, _) => {
                 return Err(
                     SubmitInputCorruption::Inconsistent("turn origin predecessor shape").into(),
                 );
             }
-            _ => {
-                return Err(
-                    SubmitInputCorruption::Inconsistent("turn origin command delivery").into(),
-                );
+            (value, _, _, _) => {
+                return Err(SubmitInputCorruption::Unsupported {
+                    field: "turn origin accepted-input disposition_kind",
+                    value: value.to_owned(),
+                }
+                .into());
             }
         };
         if links
@@ -2318,7 +2617,7 @@ async fn load_turn_origin_graph(
                 key,
                 StoredTurnOriginLink {
                     command_id,
-                    predecessor,
+                    kind,
                     accepted_input,
                     queue_order: AcceptedInputQueueOrder::ordinary(queue_position),
                 },
@@ -2340,8 +2639,8 @@ async fn load_turn_origin_graph(
         }
     }
     for link in links.values() {
-        if let Some(predecessor) = link.predecessor
-            && !links.contains_key(&predecessor)
+        if let Some(dependency) = link.kind.dependency()
+            && !links.contains_key(&dependency)
         {
             return Err(SubmitInputCorruption::Missing("turn origin predecessor").into());
         }
@@ -2367,11 +2666,14 @@ async fn load_turn_origin_graph(
         return Err(SubmitInputCorruption::Missing("turn origin command").into());
     }
 
-    let decode_order =
-        turn_origin_dependency_order(links.iter().map(|(key, link)| (*key, link.predecessor)))
-            .ok_or(SubmitInputCorruption::Inconsistent(
-                "turn origin predecessor cycle",
-            ))?;
+    let decode_order = turn_origin_dependency_order(
+        links
+            .iter()
+            .map(|(key, link)| (*key, link.kind.dependency())),
+    )
+    .ok_or(SubmitInputCorruption::Inconsistent(
+        "turn origin predecessor cycle",
+    ))?;
     let mut decoded = BTreeMap::new();
     for ready in decode_order {
         #[expect(
@@ -2385,8 +2687,9 @@ async fn load_turn_origin_graph(
         let row = rows_by_command
             .remove(&command_uuid)
             .ok_or(SubmitInputCorruption::Missing("turn origin command"))?;
-        let predecessor = link
-            .predecessor
+        let dependency = link
+            .kind
+            .dependency()
             .map(|key| {
                 decoded
                     .get(&key)
@@ -2394,31 +2697,80 @@ async fn load_turn_origin_graph(
                     .ok_or(SubmitInputCorruption::Missing("turn origin predecessor"))
             })
             .transpose()?;
-        let origin = decode_complete(row, link.command_id, predecessor)?;
-        let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(applied)) =
-            origin.result()
-        else {
-            return Err(SubmitInputCorruption::Inconsistent("turn origin command result").into());
-        };
-        if session_id_to_uuid(applied.session()) != ready.0
-            || turn_id_to_uuid(applied.turn()) != ready.1
-        {
-            return Err(SubmitInputCorruption::Inconsistent("turn origin correlation").into());
-        }
-        decoded.insert(
-            ready,
-            SubmitInputTurnOriginReconstitutionInput::new(
-                origin,
-                AcceptedInputLifecycle::new(
+        let receipt = decode_complete(row, link.command_id, dependency.clone())?;
+        let reconstructed = match link.kind {
+            StoredTurnOriginKind::Direct { .. } => {
+                let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(applied)) =
+                    receipt.result()
+                else {
+                    return Err(
+                        SubmitInputCorruption::Inconsistent("turn origin command result").into(),
+                    );
+                };
+                if session_id_to_uuid(applied.session()) != ready.0
+                    || turn_id_to_uuid(applied.turn()) != ready.1
+                {
+                    return Err(
+                        SubmitInputCorruption::Inconsistent("turn origin correlation").into(),
+                    );
+                }
+                SubmitInputTurnOriginReconstitutionInput::new(
+                    receipt,
+                    AcceptedInputLifecycle::new(
+                        link.accepted_input,
+                        AcceptedInputDisposition::OriginOf(turn_id_from_uuid(ready.1)),
+                    ),
                     link.accepted_input,
-                    AcceptedInputDisposition::OriginOf(turn_id_from_uuid(ready.1)),
-                ),
-                link.accepted_input,
-                session_id_from_uuid(ready.0),
-                turn_id_from_uuid(ready.1),
-                link.queue_order,
-            ),
-        );
+                    session_id_from_uuid(ready.0),
+                    turn_id_from_uuid(ready.1),
+                    link.queue_order,
+                )
+            }
+            StoredTurnOriginKind::Reclassified {
+                source,
+                source_disposition,
+            } => {
+                let SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(applied)) =
+                    receipt.result()
+                else {
+                    return Err(SubmitInputCorruption::Inconsistent(
+                        "reclassified origin command result",
+                    )
+                    .into());
+                };
+                if session_id_to_uuid(applied.session()) != ready.0
+                    || applied.accepted_input() != link.accepted_input
+                    || applied.binding().source_turn() != turn_id_from_uuid(source.1)
+                {
+                    return Err(SubmitInputCorruption::Inconsistent(
+                        "reclassified origin correlation",
+                    )
+                    .into());
+                }
+                let source_origin = dependency
+                    .ok_or(SubmitInputCorruption::Missing("reclassified source origin"))?;
+                SubmitInputTurnOriginReconstitutionInput::reclassified(
+                    receipt,
+                    AcceptedInputLifecycle::new(
+                        link.accepted_input,
+                        AcceptedInputDisposition::ReclassifiedAsTurnOrigin {
+                            turn: turn_id_from_uuid(ready.1),
+                            reason: SteeringReclassificationReason::NoSafePointBeforeTerminal,
+                        },
+                    ),
+                    link.accepted_input,
+                    session_id_from_uuid(ready.0),
+                    turn_id_from_uuid(ready.1),
+                    link.queue_order,
+                    SubmitInputTerminalSourceReconstitutionInput::new(
+                        source_origin,
+                        turn_id_from_uuid(source.1),
+                        source_disposition.domain(),
+                    ),
+                )
+            }
+        };
+        decoded.insert(ready, reconstructed);
     }
     debug_assert!(links.is_empty());
 
@@ -2517,14 +2869,7 @@ fn decode_complete(
                         related_turn_origin,
                     )?
                 }
-                // The reclassification slice must widen this
-                // `queued_effect_count == 0` decode (and the migration-0005
-                // active-source trigger) or replay of the original
-                // `PendingSteering` command fails closed as corruption after
-                // reclassification adds its queued-origin row; tracked in
-                // `docs/decisions.md`, "Post-milestone-2 audit corrections and
-                // tracked obligations" (2026-07-19).
-                (None, Some(source_turn)) if queued_effect_count == 0 => {
+                (None, Some(source_turn)) if queued_effect_count <= 1 => {
                     let source_turn_origin = related_turn_origin.ok_or(
                         SubmitInputCorruption::Missing("pending steering source turn origin"),
                     )?;

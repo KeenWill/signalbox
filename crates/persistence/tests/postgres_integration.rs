@@ -23,13 +23,14 @@ use signalbox_domain::{
     CurrentTurnAttemptState, DeliveryRequest, DurableCommandId, FailedModelCallTurnIdentities,
     ModelAlias, ModelCallId, ModelCallTerminalIdentities, ModelCallTerminalObservation,
     ModelCallTerminalOutcome, ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog,
-    ModelTargetDefinition, PerInputConfigurationChoices, PreparedCreateSession,
-    ProviderModelIdentity, ReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult,
-    ReplaceSessionDefaultsResult, ResolvedProviderTarget, SemanticTranscriptEntryId,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
-    SessionCreationProvenance, SessionId, SubmitInput, SubmitInputAppliedResult,
-    SubmitInputReconstitutionFailure, SubmitInputRejectedResult, SubmitInputResult,
-    TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
+    ModelTargetDefinition, PendingSteeringReclassificationIdentity, PerInputConfigurationChoices,
+    PreparedCreateSession, ProviderModelIdentity, ReplaceSessionDefaults,
+    ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult, ResolvedProviderTarget,
+    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
+    SessionCreationCause, SessionCreationProvenance, SessionId, SubmitInput,
+    SubmitInputAppliedResult, SubmitInputReconstitutionFailure, SubmitInputRejectedResult,
+    SubmitInputResult, TranscriptAncestry, TurnAttemptId, TurnConfigurationProvenance, TurnId,
+    UserContent,
 };
 use signalbox_persistence::{
     MIGRATOR,
@@ -937,7 +938,7 @@ async fn s01_s20_s21_inv014_inv015_inv032_model_call_transactions_complete_first
         }
     );
 
-    let durable_shape: (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+    let durable_shape: (i64, i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
             (SELECT count(*) FROM model_call
               WHERE model_call_id = $1
@@ -969,7 +970,10 @@ async fn s01_s20_s21_inv014_inv015_inv032_model_call_transactions_complete_first
               WHERE turn_id = $5
                 AND model_call_id = $1
                 AND completion_entry_id = $4
-                AND terminal_frontier_id = $6)",
+                AND terminal_frontier_id = $6),
+            (SELECT count(*) FROM turn_lifecycle
+              WHERE turn_id = $5
+                AND pinned_provider_model_identity_id = $7)",
     )
     .bind(call.into_uuid())
     .bind(attempt.into_uuid())
@@ -977,9 +981,228 @@ async fn s01_s20_s21_inv014_inv015_inv032_model_call_transactions_complete_first
     .bind(completion_entry.into_uuid())
     .bind(turn.into_uuid())
     .bind(terminal_frontier.into_uuid())
+    .bind(provider_identity.into_uuid())
     .fetch_one(&pool)
     .await?;
-    assert_eq!(durable_shape, (1, 1, 1, 1, 1, 3, 1));
+    assert_eq!(durable_shape, (1, 1, 1, 1, 1, 3, 1, 1));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S04 / S08 / S09 / INV-016: steering accepted after send authorization is
+/// atomically reclassified when the source completes. Its immutable command
+/// still replays PendingSteering, while the inherited successor enters the
+/// ordinary scheduler and activates after the terminal source.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s04_s08_s09_inv016_terminal_call_reclassifies_and_schedules_pending_steering()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = SessionId::from_uuid(Uuid::from_u128(0x8e4));
+    let selection = signalbox_domain::DirectModelSelection::from_uuid(Uuid::from_u128(0xce4));
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(
+            0x4e4,
+            0x8e4,
+            ModelSelectionRequest::Direct(selection),
+        ))
+        .await?;
+
+    let source_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x9e4));
+    let source_turn = TurnId::from_uuid(Uuid::from_u128(0xae4));
+    let inputs = SubmitInputRepository::new(pool.clone());
+    inputs
+        .handle(
+            start_input(
+                0x4e5,
+                0x8e4,
+                "source request",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            source_input,
+            Some(source_turn),
+        )
+        .await?;
+    let source_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(0xbe4));
+    let mut source_activation = StartEligibleTurnService::new(
+        FixedStartEligibleTurnIds::new(
+            [SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde4))],
+            [ContextFrontierId::from_uuid(Uuid::from_u128(0xee4))],
+            [source_attempt],
+        ),
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    assert!(matches!(
+        source_activation.execute(session).await?,
+        StartEligibleTurnOutcome::Activated(_)
+    ));
+
+    let provider = ProviderModelIdentity::from_uuid(Uuid::from_u128(0xfe4));
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        ResolvedProviderTarget::naming(provider),
+    )])
+    .expect("one target is a valid catalog");
+    let calls = PostgresModelCallRepository::new(pool.clone(), targets);
+    let call = ModelCallId::from_uuid(Uuid::from_u128(0xce5));
+    assert!(matches!(
+        calls
+            .prepare_initial_call(
+                session,
+                call,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdf4)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(0xef4)),
+                ),
+            )
+            .await?,
+        PrepareInitialModelCallOutcome::Checkpointed(checkpointed) if checkpointed == call
+    ));
+    let authorized = calls.authorize_send(session, call).await?;
+
+    let steering_command = DurableCommandId::from_uuid(Uuid::from_u128(0x4e6));
+    let steering_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x9e5));
+    let recorded = inputs
+        .handle(
+            SubmitInput::new(
+                steering_command,
+                session,
+                UserContent::try_text("follow-up steering".to_owned())
+                    .expect("fixture content is valid"),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: source_turn,
+                },
+            ),
+            steering_input,
+            None,
+        )
+        .await?;
+    assert!(matches!(
+        recorded,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::PendingSteering(_)
+        ))
+    ));
+
+    let successor = TurnId::from_uuid(Uuid::from_u128(0xae5));
+    let terminal_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0xee5));
+    let outcome = calls
+        .apply_terminal_observation(
+            session,
+            authorized
+                .observation_correlation()
+                .bind_terminal_observation(ModelCallTerminalObservation::Completed {
+                    assistant_text: vec![
+                        AssistantText::try_new("source reply".to_owned())
+                            .expect("fixture assistant content is valid"),
+                    ],
+                }),
+            ModelCallTerminalIdentities::Completed(
+                CompletedModelCallIdentities::new(
+                    vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde5))],
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde6)),
+                    terminal_frontier,
+                )
+                .with_pending_steering_reclassifications(vec![
+                    PendingSteeringReclassificationIdentity::new(steering_input, successor),
+                ]),
+            ),
+        )
+        .await?;
+    let ModelCallTerminalOutcome::Completed(completed) = outcome else {
+        panic!("the source call must complete");
+    };
+    assert_eq!(completed.reclassified_pending_steering().len(), 1);
+    assert_eq!(
+        completed.reclassified_pending_steering()[0].turn(),
+        successor
+    );
+
+    let durable: (String, Uuid, Uuid, String, i64) = sqlx::query_as(
+        "SELECT accepted.disposition_kind,
+                accepted.expected_active_turn_id,
+                accepted.origin_turn_id,
+                successor.state_kind,
+                (SELECT count(*)
+                   FROM queued_input_origin AS queued
+                  WHERE queued.turn_id = $3
+                    AND queued.accepted_input_id = $1
+                    AND queued.source_configuration_turn_id = $4
+                    AND queued.defaults_version IS NULL
+                    AND queued.requested_model_kind IS NULL
+                    AND queued.frozen_model_kind IS NULL
+                    AND queued.model_parameters IS NULL
+                    AND queued.known_provider_failure_retry IS NULL
+                    AND queued.model_fallback IS NULL)
+           FROM accepted_input AS accepted
+           JOIN turn_lifecycle AS successor
+             ON successor.turn_id = accepted.origin_turn_id
+          WHERE accepted.accepted_input_id = $1
+            AND accepted.session_id = $2",
+    )
+    .bind(steering_input.into_uuid())
+    .bind(session.into_uuid())
+    .bind(successor.into_uuid())
+    .bind(source_turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        durable,
+        (
+            "reclassified_as_turn_origin".into(),
+            source_turn.into_uuid(),
+            successor.into_uuid(),
+            "queued".into(),
+            1,
+        )
+    );
+
+    let replay = inputs
+        .load(steering_command)
+        .await?
+        .expect("the immutable command receipt must remain readable");
+    assert!(matches!(
+        replay.result(),
+        SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(pending))
+            if pending.accepted_input() == steering_input
+                && pending.binding().source_turn() == source_turn
+    ));
+    let (eligible, continuation) = PostgresEligibilitySweep::new(pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
+    assert!(!continuation);
+    assert_eq!(eligible, vec![session]);
+
+    let mut successor_activation = StartEligibleTurnService::new(
+        FixedStartEligibleTurnIds::new(
+            [SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde7))],
+            [ContextFrontierId::from_uuid(Uuid::from_u128(0xee6))],
+            [TurnAttemptId::from_uuid(Uuid::from_u128(0xbe5))],
+        ),
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    let StartEligibleTurnOutcome::Activated(activated) =
+        successor_activation.execute(session).await?
+    else {
+        panic!("the reclassified successor must activate");
+    };
+    assert_eq!(activated.turn(), successor);
+    assert_eq!(
+        activated.start().lineage(),
+        AcceptedInputStartingLineage::After {
+            immediate_predecessor: source_turn,
+        }
+    );
+    assert_eq!(
+        activated.configuration_provenance(),
+        &TurnConfigurationProvenance::InheritedForReclassifiedSteering(
+            signalbox_domain::SteeringBinding::new(source_turn),
+        )
+    );
 
     pool.close().await;
     drop(container);
@@ -5202,7 +5425,7 @@ async fn s01_inv006_inv009_inv015_turn_storage_enforces_lifecycle_consistency()
     .bind(first_attempt)
     .execute(&mut *unavailable_continuation)
     .await?;
-    sqlx::query(
+    let replacement_error = sqlx::query(
         "UPDATE turn_lifecycle
             SET current_attempt_id = $1
           WHERE turn_id = $2",
@@ -5210,17 +5433,20 @@ async fn s01_inv006_inv009_inv015_turn_storage_enforces_lifecycle_consistency()
     .bind(successor_attempt)
     .bind(first_turn)
     .execute(&mut *unavailable_continuation)
-    .await?;
-    let unavailable_continuation_error = unavailable_continuation
-        .commit()
-        .await
-        .expect_err("even an ended predecessor cannot admit continuation yet");
+    .await
+    .expect_err("a running turn cannot replace its sealed current attempt");
     assert_eq!(
-        unavailable_continuation_error
+        replacement_error
             .as_database_error()
-            .and_then(|error| error.constraint()),
-        Some("turn_attempt_continuation_unavailable")
+            .and_then(|error| error.code()),
+        Some("23514".into())
     );
+    assert!(replacement_error.as_database_error().is_some_and(|error| {
+        error
+            .message()
+            .contains("running turn cannot replace its current attempt")
+    }));
+    unavailable_continuation.rollback().await?;
 
     let failure_entry = Uuid::from_u128(0xd03);
     let terminal_frontier = Uuid::from_u128(0xe03);
