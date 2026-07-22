@@ -1,0 +1,16 @@
+# Single source of truth for the Markdown formatting toolchain. Both CI
+# (.github/workflows/rust.yml) and the devenv environment (devenv.nix)
+# install exactly this set; nothing floats. A plugin-less mdformat (for
+# example a system or Homebrew install without the GFM plugin) silently
+# corrupts GFM tables under .mdformat.toml's wrap=80, so never substitute
+# another install for this one.
+#
+# Fully frozen from a clean venv after `pip install mdformat==1.0.0
+# mdformat-gfm==1.0.0`; regenerate the same way when bumping versions and
+# verify `mdformat --check *.md docs/` still passes from the repository root.
+markdown-it-py==4.2.0
+mdformat==1.0.0
+mdformat-gfm==1.0.0
+mdit-py-plugins==0.6.1
+mdurl==0.1.2
+wcwidth==0.8.2

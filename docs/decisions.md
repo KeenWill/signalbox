@@ -9,6 +9,29 @@ that constrains several components — require a full record under
 [decisions/](decisions/README.md) instead. Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-21 — One pinned Markdown toolchain for local use and CI
+
+**Context.** CI pinned mdformat and its GFM plugin inline while contributor
+tooling was unmanaged, and transitive Python dependencies remained floating.
+That allowed local formatting to differ from CI and made the required versions
+hard to update coherently.
+
+**Decision.** Make `tooling/requirements-mdformat.txt` the fully frozen source
+for mdformat in both CI's virtual environment and the local devenv environment,
+superseding the 0.7.22/0.4.1 pins with mdformat 1.0.0 and mdformat-gfm 1.0.0.
+Require the devenv CLI version to match the locked modules. Keep Rust under
+`rustup` and keep Postgres under testcontainers rather than duplicating either
+inside devenv.
+
+**Rejected alternatives.** Keeping inline CI pins leaves local tools
+uncontrolled. Supplying Rust through both rustup and devenv creates competing
+toolchains. A devenv Postgres service would be unused by the testcontainers
+suite. Floating the devenv CLI permits CLI/module incompatibility.
+
+**Affects.** The devenv and direnv entry points, the Markdown requirements file,
+the CI Markdown job, contributor tooling guidance, and the formatter-version
+record. It does not move CI to Nix or change Rust and database-test ownership.
+
 ## 2026-07-20 — Hand-roll the typed model-runtime substrate
 
 **Context.** [ADR-0047](decisions/0047-typed-model-runtime-substrate.md) fixes
