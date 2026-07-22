@@ -419,6 +419,7 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
                         &mut decoder,
                         correlation,
                         sink,
+                        cancellation,
                     ) {
                         return evidence;
                     }
@@ -456,6 +457,7 @@ fn process_streamed_chunk<C: Clone>(
     decoder: &mut StreamDecoder,
     correlation: &C,
     sink: &mut (dyn ObservationSink<C> + Send),
+    cancellation: &mut CancellationSignal,
 ) -> Option<TerminalEvidence> {
     let (accepted, exceeded) = streamed_response_prefix_len(*streamed_bytes, bytes.len());
     *streamed_bytes += accepted;
@@ -463,7 +465,10 @@ fn process_streamed_chunk<C: Clone>(
     // framing or aggregate-size failure. A terminal marker in that prefix
     // must not be lost because trailing bytes share its transport chunk.
     let outcome = framing.push(&bytes[..accepted]);
-    for record in outcome.records {
+    for (index, record) in outcome.records.into_iter().enumerate() {
+        if index > 0 && already_fired(cancellation) {
+            return Some(decoder.cancelled());
+        }
         match decoder.apply(&record, correlation, sink) {
             StreamStep::Continue => {}
             StreamStep::Terminal(evidence) => return Some(evidence),
@@ -920,14 +925,12 @@ fn redact_complete_credentials_and_hold_prefix(
     if credential.is_empty() {
         return (text, String::new());
     }
-    let tail_start = text
-        .rfind(credential)
-        .map_or(0, |position| position + credential.len());
-    let tail = &text[tail_start..];
+    // Include suffixes that overlap the last full match: a self-overlapping
+    // credential must not leave bytes that the next provider chunk completes.
     let longest_prefix = (1..credential.len())
         .rev()
         .filter(|length| credential.is_char_boundary(*length))
-        .find(|length| tail.ends_with(&credential[..*length]));
+        .find(|length| text.ends_with(&credential[..*length]));
     let split = longest_prefix.map_or(text.len(), |length| text.len() - length);
     let pending = text.split_off(split);
     (text.replace(credential, "[redacted]"), pending)
@@ -1531,9 +1534,10 @@ fn sensitive_bearer(api_key: &CredentialValue) -> Option<HeaderValue> {
 mod tests {
     use serde::Serialize;
     use signalbox_model_runtime::{
-        AssistantPart, CompletionEvidence, CompletionFinish, CredentialValue, ExchangeFacts,
-        Observation, ObservationFact, ObservationSink, PreparationDefect, RefusalEvidence,
-        SseFraming, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
+        AssistantPart, CancellationSignal, CompletionEvidence, CompletionFinish, CredentialValue,
+        ExchangeFacts, LossCause, Observation, ObservationFact, ObservationSink, PreparationDefect,
+        RefusalEvidence, SseFraming, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal,
+        ToolName,
     };
 
     use super::{
@@ -1575,6 +1579,39 @@ mod tests {
             })
             .collect::<String>();
         assert_eq!(text, "[redacted]");
+    }
+
+    #[test]
+    fn inv_035_overlapping_credential_prefixes_stay_held_between_deltas() {
+        let credential = CredentialValue::new(b"aaaa".to_vec());
+        let mut observed = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed, &credential);
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::TextDelta {
+                index: 0,
+                text: "aaaaa".to_string(),
+            },
+        });
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::TextDelta {
+                index: 0,
+                text: "aaab".to_string(),
+            },
+        });
+        sink.flush();
+        drop(sink);
+
+        let emitted = observed
+            .iter()
+            .filter_map(|observation| match &observation.fact {
+                ObservationFact::TextDelta { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert!(!emitted.contains("aaaa"));
+        assert!(emitted.contains("[redacted]"));
     }
 
     #[test]
@@ -1866,6 +1903,7 @@ mod tests {
         let mut framing = SseFraming::new(1024);
         let mut decoder = StreamDecoder::new(ExchangeFacts::default(), false);
         let mut observations = Vec::new();
+        let mut cancellation = CancellationSignal::never();
 
         let evidence = process_streamed_chunk(
             &bytes,
@@ -1874,8 +1912,66 @@ mod tests {
             &mut decoder,
             &"call-1".to_string(),
             &mut observations,
+            &mut cancellation,
         );
 
         assert!(matches!(evidence, Some(TerminalEvidence::Completed(_))));
+    }
+
+    struct CancelOnModel {
+        observations: Vec<Observation<String>>,
+        sender: Option<tokio::sync::oneshot::Sender<()>>,
+    }
+
+    impl ObservationSink<String> for CancelOnModel {
+        fn observe(&mut self, observation: Observation<String>) {
+            if matches!(observation.fact, ObservationFact::ProviderModelReported(_))
+                && let Some(sender) = self.sender.take()
+            {
+                let _ = sender.send(());
+            }
+            self.observations.push(observation);
+        }
+    }
+
+    #[test]
+    fn cancellation_is_rechecked_between_coalesced_sse_records() {
+        let bytes = b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
+            \"model\":\"model-exact-1\",\"choices\":[{\"index\":0,\
+            \"delta\":{\"role\":\"assistant\"}}]}\n\n\
+            data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
+            \"choices\":[{\"index\":0,\"delta\":{\"content\":\"late\"}}]}\n\n";
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let mut cancellation = CancellationSignal::when(async move {
+            let _ = receiver.await;
+        });
+        let mut streamed_bytes = 0;
+        let mut framing = SseFraming::new(1024);
+        let mut decoder = StreamDecoder::new(ExchangeFacts::default(), false);
+        let mut sink = CancelOnModel {
+            observations: Vec::new(),
+            sender: Some(sender),
+        };
+
+        let evidence = process_streamed_chunk(
+            bytes,
+            &mut streamed_bytes,
+            &mut framing,
+            &mut decoder,
+            &"call-1".to_string(),
+            &mut sink,
+            &mut cancellation,
+        );
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = evidence else {
+            panic!("cancellation after the first record must pause the coalesced chunk");
+        };
+        assert_eq!(loss.cause, LossCause::CancellationRequested);
+        assert!(
+            !sink
+                .observations
+                .iter()
+                .any(|observation| matches!(observation.fact, ObservationFact::TextDelta { .. }))
+        );
     }
 }

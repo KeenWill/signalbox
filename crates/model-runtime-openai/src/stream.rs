@@ -310,12 +310,12 @@ impl StreamDecoder {
     }
 
     /// Evidence for a caller cancellation observed mid-stream.
-    pub(crate) fn cancelled(self) -> TerminalEvidence {
+    pub(crate) fn cancelled(&self) -> TerminalEvidence {
         TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
             cause: LossCause::CancellationRequested,
-            exchange: self.exchange,
-            reported_model: self.reported_model,
-            finish_reported: self.finish,
+            exchange: self.exchange.clone(),
+            reported_model: self.reported_model.clone(),
+            finish_reported: self.finish.clone(),
             usage: self.usage,
         })
     }

@@ -75,6 +75,11 @@ pub(crate) fn build_request<C>(
     for message in &operation.messages {
         wire_messages(message, &mut messages)?;
     }
+    if messages.is_empty() {
+        return Err(PreparationFailure::UnsupportedOperation {
+            detail: "Chat Completions requires at least one message".to_string(),
+        });
+    }
     validate_tool_history(&operation.messages)?;
     let streamed = operation.delivery == DeliveryMode::Streamed;
     Ok(ChatRequest {
@@ -586,6 +591,27 @@ mod tests {
               "stream": false
             }"#]]
         .assert_eq(&request_json(&operation("call-4")));
+    }
+
+    #[test]
+    fn an_empty_message_list_is_rejected_before_any_send() {
+        let mut operation = operation("call-empty-messages");
+        operation.messages.clear();
+
+        assert!(matches!(
+            build_request(&operation),
+            Err(PreparationFailure::UnsupportedOperation { .. })
+        ));
+    }
+
+    #[test]
+    fn a_system_message_satisfies_the_wire_message_cardinality() {
+        let mut operation = operation("call-system-only");
+        operation.messages.clear();
+        operation.system = Some("System only.".to_string());
+
+        let request = build_request(&operation).expect("one system message is representable");
+        assert_eq!(request.messages.len(), 1);
     }
 
     #[test]
