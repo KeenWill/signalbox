@@ -10,15 +10,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    AcceptedInputId, AcceptedInputTurnStart, ActivatedAcceptedInputTurn, ActiveTurnPhase,
-    AssistantText, ContextFrontierId, CurrentModelCall, CurrentModelCallState, CurrentTurnAttempt,
-    CurrentTurnAttemptState, DirectModelSelection, EndedModelCall, EndedTurnAttempt,
-    FrozenModelSelection, ModelCallDisposition, ModelCallId, ModelCallReconstitutionInput,
-    NonEmptyIssuedOperationRefs, OriginConfiguration, PinnedProviderTarget, ReconstitutedModelCall,
-    ReconstitutedSubmitInput, ResolvedContextFrontierSnapshot, ResolvedProviderTarget,
-    SemanticTranscriptEntry, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload, SessionId,
-    SubmitInputAppliedResult, SubmitInputResult, TurnAttemptId, TurnDisposition, TurnId,
-    UnstoppedAttemptDisposition, UserContent,
+    AcceptedInputDisposition, AcceptedInputId, AcceptedInputLifecycle, AcceptedInputQueueOrder,
+    AcceptedInputTurnStart, ActivatedAcceptedInputTurn, ActiveTurnPhase, AssistantText,
+    ContextFrontierId, CurrentModelCall, CurrentModelCallState, CurrentTurnAttempt,
+    CurrentTurnAttemptState, DirectModelSelection, EffectiveConfiguration, EndedModelCall,
+    EndedTurnAttempt, FrozenModelSelection, ModelCallDisposition, ModelCallId,
+    ModelCallReconstitutionInput, NonEmptyIssuedOperationRefs, OriginConfiguration,
+    PinnedProviderTarget, ReconstitutedModelCall, ReconstitutedSubmitInput,
+    ResolvedContextFrontierSnapshot, ResolvedProviderTarget, SemanticTranscriptEntry,
+    SemanticTranscriptEntryId, SemanticTranscriptEntryPayload, SessionId, SteeringBinding,
+    SteeringReclassificationReason, SubmitInputAppliedResult, SubmitInputResult, TurnAttemptId,
+    TurnDisposition, TurnId, UnstoppedAttemptDisposition, UserContent,
 };
 
 /// One immutable configured direct-selection to exact-target definition.
@@ -356,7 +358,12 @@ impl ModelCallExecution {
                 ModelCallPreparationFailure::AttemptIsNotPrepared,
             ));
         }
-        if let Some(accepted_input) = self.active_turn.pending_steering().first().copied() {
+        if let Some(accepted_input) = self
+            .active_turn
+            .pending_steering()
+            .first()
+            .map(crate::PendingSteeringInput::accepted_input)
+        {
             return Err(ModelCallPreparationError::new(
                 self,
                 ModelCallPreparationFailure::PendingSteering { accepted_input },
@@ -473,14 +480,26 @@ impl ModelCallExecution {
         {
             return Err(ModelCallClosureError::CallStateMismatch);
         }
+        let reclassified_pending_steering =
+            if observation.observation.disposition() == ModelCallDisposition::Ambiguous {
+                Box::new([])
+            } else {
+                reclassify_pending_steering(
+                    &self.active_turn,
+                    identities.pending_steering_reclassifications(),
+                )?
+            };
         apply_terminal_observation(
-            self.session,
-            self.turn,
+            ModelCallTurnScope {
+                session: self.session,
+                turn: self.turn,
+            },
             self.current_attempt,
             call,
             self.frontier_entries,
             observation.observation,
             identities,
+            reclassified_pending_steering,
         )
     }
 
@@ -499,14 +518,21 @@ impl ModelCallExecution {
         {
             return Err(ModelCallClosureError::TargetResolutionMismatch);
         }
+        let reclassified_pending_steering = reclassify_pending_steering(
+            &self.active_turn,
+            &identities.pending_steering_reclassifications,
+        )?;
         close_failed_turn(
-            self.session,
-            self.turn,
+            ModelCallTurnScope {
+                session: self.session,
+                turn: self.turn,
+            },
             self.current_attempt,
             None,
             self.starting_snapshot,
             identities,
             UnstoppedAttemptDisposition::KnownFailure,
+            reclassified_pending_steering,
         )
     }
 
@@ -521,17 +547,24 @@ impl ModelCallExecution {
         if call.state() != CurrentModelCallState::Prepared {
             return Err(ModelCallClosureError::CallStateMismatch);
         }
+        let reclassified_pending_steering = reclassify_pending_steering(
+            &self.active_turn,
+            &identities.pending_steering_reclassifications,
+        )?;
         let ended_call = call
             .end_classified(ModelCallDisposition::KnownFailed)
             .map_err(|_| ModelCallClosureError::CallStateMismatch)?;
         close_failed_turn(
-            self.session,
-            self.turn,
+            ModelCallTurnScope {
+                session: self.session,
+                turn: self.turn,
+            },
             self.current_attempt,
             Some(ended_call),
             self.starting_snapshot,
             identities,
             UnstoppedAttemptDisposition::KnownFailure,
+            reclassified_pending_steering,
         )
     }
 
@@ -546,17 +579,24 @@ impl ModelCallExecution {
         };
         match call.state() {
             CurrentModelCallState::Prepared => {
+                let reclassified_pending_steering = reclassify_pending_steering(
+                    &self.active_turn,
+                    &failure_identities.pending_steering_reclassifications,
+                )?;
                 let call = call
                     .end_classified(ModelCallDisposition::KnownFailed)
                     .map_err(|_| ModelCallClosureError::CallStateMismatch)?;
                 close_failed_turn(
-                    self.session,
-                    self.turn,
+                    ModelCallTurnScope {
+                        session: self.session,
+                        turn: self.turn,
+                    },
                     self.current_attempt,
                     Some(call),
                     self.starting_snapshot,
                     failure_identities,
                     UnstoppedAttemptDisposition::Lost,
+                    reclassified_pending_steering,
                 )
                 .map(ModelCallTerminalOutcome::Failed)
             }
@@ -897,15 +937,22 @@ impl CorrelatedModelCallTerminalObservation {
     }
 }
 
-fn apply_terminal_observation(
+#[derive(Clone, Copy)]
+struct ModelCallTurnScope {
     session: SessionId,
     turn: TurnId,
+}
+
+fn apply_terminal_observation(
+    scope: ModelCallTurnScope,
     attempt: CurrentTurnAttempt,
     call: CurrentModelCall,
     frontier_entries: Box<[SemanticTranscriptEntry]>,
     observation: ModelCallTerminalObservation,
     identities: ModelCallTerminalIdentities,
+    reclassified_pending_steering: Box<[ReclassifiedPendingSteeringTurn]>,
 ) -> Result<ModelCallTerminalOutcome, ModelCallClosureError> {
+    let ModelCallTurnScope { session, turn } = scope;
     let disposition = observation.disposition();
     let source_frontier = call.frontier();
     let ended_call = call
@@ -920,13 +967,13 @@ fn apply_terminal_observation(
                 .end_without_stop(UnstoppedAttemptDisposition::TurnCompleted)
                 .map_err(|_| ModelCallClosureError::AttemptStateMismatch)?;
             let completed = complete_turn(
-                session,
-                turn,
+                scope,
                 ended_call,
                 ended_attempt,
                 frontier_entries.into_vec(),
                 assistant_text,
                 identities,
+                reclassified_pending_steering,
             )?;
             Ok(ModelCallTerminalOutcome::Completed(completed))
         }
@@ -935,8 +982,7 @@ fn apply_terminal_observation(
                 return Err(ModelCallClosureError::IdentityShapeMismatch);
             };
             let failed = close_failed_turn(
-                session,
-                turn,
+                scope,
                 attempt,
                 Some(ended_call),
                 ResolvedContextFrontierSnapshot::try_from_candidate(
@@ -950,6 +996,7 @@ fn apply_terminal_observation(
                 .map_err(|_| ModelCallClosureError::FrontierDerivationFailed)?,
                 identities,
                 UnstoppedAttemptDisposition::KnownFailure,
+                reclassified_pending_steering,
             )?;
             Ok(ModelCallTerminalOutcome::Failed(failed))
         }
@@ -979,6 +1026,7 @@ fn apply_terminal_observation(
                 attempt: ended_attempt,
                 disposition: TurnDisposition::Refused,
                 terminal_snapshot,
+                reclassified_pending_steering,
             }))
         }
         ModelCallTerminalObservation::Ambiguous => {
@@ -1037,12 +1085,40 @@ impl ModelCallTerminalObservation {
     }
 }
 
+/// One fresh turn identity correlated to an exact pending steering input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PendingSteeringReclassificationIdentity {
+    accepted_input: AcceptedInputId,
+    turn: TurnId,
+}
+
+impl PendingSteeringReclassificationIdentity {
+    /// Associates one pending accepted input with its proposed successor turn.
+    pub const fn new(accepted_input: AcceptedInputId, turn: TurnId) -> Self {
+        Self {
+            accepted_input,
+            turn,
+        }
+    }
+
+    /// Returns the pending accepted input being reclassified.
+    pub const fn accepted_input(&self) -> AcceptedInputId {
+        self.accepted_input
+    }
+
+    /// Returns the fresh turn proposed for that input.
+    pub const fn turn(&self) -> TurnId {
+        self.turn
+    }
+}
+
 /// Fresh identities for a successful text-only outcome transaction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompletedModelCallIdentities {
     assistant_entries: Vec<SemanticTranscriptEntryId>,
     completion_entry: SemanticTranscriptEntryId,
     terminal_frontier: ContextFrontierId,
+    pending_steering_reclassifications: Vec<PendingSteeringReclassificationIdentity>,
 }
 
 impl CompletedModelCallIdentities {
@@ -1056,40 +1132,77 @@ impl CompletedModelCallIdentities {
             assistant_entries,
             completion_entry,
             terminal_frontier,
+            pending_steering_reclassifications: Vec::new(),
         }
+    }
+
+    /// Supplies one fresh successor identity per pending steering input, in
+    /// session acceptance order.
+    pub fn with_pending_steering_reclassifications(
+        mut self,
+        identities: Vec<PendingSteeringReclassificationIdentity>,
+    ) -> Self {
+        self.pending_steering_reclassifications = identities;
+        self
     }
 }
 
 /// Fresh identities for a failed-turn outcome transaction.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FailedModelCallTurnIdentities {
     failure_entry: SemanticTranscriptEntryId,
     terminal_frontier: ContextFrontierId,
+    pending_steering_reclassifications: Vec<PendingSteeringReclassificationIdentity>,
 }
 
 impl FailedModelCallTurnIdentities {
     /// Supplies the failure marker and terminal-frontier identities.
-    pub const fn new(
+    pub fn new(
         failure_entry: SemanticTranscriptEntryId,
         terminal_frontier: ContextFrontierId,
     ) -> Self {
         Self {
             failure_entry,
             terminal_frontier,
+            pending_steering_reclassifications: Vec::new(),
         }
+    }
+
+    /// Supplies one fresh successor identity per pending steering input, in
+    /// session acceptance order.
+    pub fn with_pending_steering_reclassifications(
+        mut self,
+        identities: Vec<PendingSteeringReclassificationIdentity>,
+    ) -> Self {
+        self.pending_steering_reclassifications = identities;
+        self
     }
 }
 
 /// Fresh identity for a refusal terminal frontier.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RefusedModelCallTurnIdentities {
     terminal_frontier: ContextFrontierId,
+    pending_steering_reclassifications: Vec<PendingSteeringReclassificationIdentity>,
 }
 
 impl RefusedModelCallTurnIdentities {
     /// Supplies the new equal-content terminal frontier identity.
-    pub const fn new(terminal_frontier: ContextFrontierId) -> Self {
-        Self { terminal_frontier }
+    pub fn new(terminal_frontier: ContextFrontierId) -> Self {
+        Self {
+            terminal_frontier,
+            pending_steering_reclassifications: Vec::new(),
+        }
+    }
+
+    /// Supplies one fresh successor identity per pending steering input, in
+    /// session acceptance order.
+    pub fn with_pending_steering_reclassifications(
+        mut self,
+        identities: Vec<PendingSteeringReclassificationIdentity>,
+    ) -> Self {
+        self.pending_steering_reclassifications = identities;
+        self
     }
 }
 
@@ -1119,6 +1232,67 @@ pub enum ModelCallTerminalOutcome {
     AwaitingRecovery(AmbiguousModelCallTurn),
 }
 
+impl ModelCallTerminalIdentities {
+    fn pending_steering_reclassifications(&self) -> &[PendingSteeringReclassificationIdentity] {
+        match self {
+            Self::Completed(identities) => &identities.pending_steering_reclassifications,
+            Self::Failed(identities) => &identities.pending_steering_reclassifications,
+            Self::Refused(identities) => &identities.pending_steering_reclassifications,
+            Self::Ambiguous => &[],
+        }
+    }
+}
+
+/// One pending steering input atomically reclassified when its source turn
+/// terminalizes before another model-call safe point.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReclassifiedPendingSteeringTurn {
+    session: SessionId,
+    source_turn: TurnId,
+    accepted_input: AcceptedInputLifecycle,
+    turn: TurnId,
+    order: AcceptedInputQueueOrder,
+    binding: SteeringBinding,
+    effective_configuration: EffectiveConfiguration,
+}
+
+impl ReclassifiedPendingSteeringTurn {
+    /// Returns the owning session.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    /// Returns the terminal source turn.
+    pub const fn source_turn(&self) -> TurnId {
+        self.source_turn
+    }
+
+    /// Borrows the accepted input with its reclassified disposition.
+    pub const fn accepted_input(&self) -> &AcceptedInputLifecycle {
+        &self.accepted_input
+    }
+
+    /// Returns the fresh queued turn originated by the input.
+    pub const fn turn(&self) -> TurnId {
+        self.turn
+    }
+
+    /// Returns ordinary queue order at the input's original position.
+    pub const fn order(&self) -> AcceptedInputQueueOrder {
+        self.order
+    }
+
+    /// Returns inherited provenance binding the new origin to its source.
+    pub const fn binding(&self) -> SteeringBinding {
+        self.binding
+    }
+
+    /// Borrows the source turn's exact inherited effective configuration.
+    pub const fn effective_configuration(&self) -> &EffectiveConfiguration {
+        &self.effective_configuration
+    }
+}
+
 /// One successful completed-turn commit candidate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompletedModelCallTurn {
@@ -1130,6 +1304,7 @@ pub struct CompletedModelCallTurn {
     assistant_entries: Box<[SemanticTranscriptEntry]>,
     completion_entry: SemanticTranscriptEntry,
     terminal_snapshot: ResolvedContextFrontierSnapshot,
+    reclassified_pending_steering: Box<[ReclassifiedPendingSteeringTurn]>,
 }
 
 impl CompletedModelCallTurn {
@@ -1165,6 +1340,10 @@ impl CompletedModelCallTurn {
     pub const fn terminal_snapshot(&self) -> &ResolvedContextFrontierSnapshot {
         &self.terminal_snapshot
     }
+    /// Returns queued turns created from every pending steering input.
+    pub fn reclassified_pending_steering(&self) -> &[ReclassifiedPendingSteeringTurn] {
+        &self.reclassified_pending_steering
+    }
 }
 
 /// One failed-turn commit candidate, with an optional physical call.
@@ -1177,6 +1356,7 @@ pub struct FailedModelCallTurn {
     disposition: TurnDisposition,
     failure_entry: SemanticTranscriptEntry,
     terminal_snapshot: ResolvedContextFrontierSnapshot,
+    reclassified_pending_steering: Box<[ReclassifiedPendingSteeringTurn]>,
 }
 
 impl FailedModelCallTurn {
@@ -1208,6 +1388,10 @@ impl FailedModelCallTurn {
     pub const fn terminal_snapshot(&self) -> &ResolvedContextFrontierSnapshot {
         &self.terminal_snapshot
     }
+    /// Returns queued turns created from every pending steering input.
+    pub fn reclassified_pending_steering(&self) -> &[ReclassifiedPendingSteeringTurn] {
+        &self.reclassified_pending_steering
+    }
 }
 
 /// One refused-turn commit candidate.
@@ -1219,6 +1403,7 @@ pub struct RefusedModelCallTurn {
     attempt: EndedTurnAttempt,
     disposition: TurnDisposition,
     terminal_snapshot: ResolvedContextFrontierSnapshot,
+    reclassified_pending_steering: Box<[ReclassifiedPendingSteeringTurn]>,
 }
 
 impl RefusedModelCallTurn {
@@ -1245,6 +1430,10 @@ impl RefusedModelCallTurn {
     /// Borrows the terminal frontier.
     pub const fn terminal_snapshot(&self) -> &ResolvedContextFrontierSnapshot {
         &self.terminal_snapshot
+    }
+    /// Returns queued turns created from every pending steering input.
+    pub fn reclassified_pending_steering(&self) -> &[ReclassifiedPendingSteeringTurn] {
+        &self.reclassified_pending_steering
     }
 }
 
@@ -1297,6 +1486,9 @@ pub enum ModelCallClosureError {
     TargetResolutionMismatch,
     /// Assistant text and entry identity counts differ.
     AssistantIdentityCountMismatch,
+    /// Pending steering and proposed successor identities are not exact,
+    /// ordered, distinct, and source-turn-safe.
+    PendingSteeringReclassificationMismatch,
     /// The exact terminal frontier could not preserve its source prefix.
     FrontierDerivationFailed,
     /// The exact nonempty ambiguity set could not be constructed.
@@ -1463,15 +1655,61 @@ fn reconstitute(
     })
 }
 
+fn reclassify_pending_steering(
+    active_turn: &ActivatedAcceptedInputTurn,
+    identities: &[PendingSteeringReclassificationIdentity],
+) -> Result<Box<[ReclassifiedPendingSteeringTurn]>, ModelCallClosureError> {
+    let pending = active_turn.pending_steering();
+    if pending.len() != identities.len() {
+        return Err(ModelCallClosureError::PendingSteeringReclassificationMismatch);
+    }
+
+    let mut turns = BTreeSet::new();
+    let mut reclassified = Vec::with_capacity(pending.len());
+    for (pending, identity) in pending.iter().zip(identities) {
+        let AcceptedInputDisposition::PendingSteering { binding } =
+            pending.lifecycle().disposition()
+        else {
+            return Err(ModelCallClosureError::PendingSteeringReclassificationMismatch);
+        };
+        if pending.accepted_input() != identity.accepted_input
+            || binding.source_turn() != active_turn.turn()
+            || identity.turn == active_turn.turn()
+            || !turns.insert(identity.turn)
+        {
+            return Err(ModelCallClosureError::PendingSteeringReclassificationMismatch);
+        }
+        let accepted_input = pending
+            .lifecycle()
+            .clone()
+            .reclassify_as_turn_origin(
+                identity.turn,
+                SteeringReclassificationReason::NoSafePointBeforeTerminal,
+            )
+            .map_err(|_| ModelCallClosureError::PendingSteeringReclassificationMismatch)?;
+        reclassified.push(ReclassifiedPendingSteeringTurn {
+            session: active_turn.session(),
+            source_turn: active_turn.turn(),
+            accepted_input,
+            turn: identity.turn,
+            order: AcceptedInputQueueOrder::ordinary(pending.acceptance_position()),
+            binding: *binding,
+            effective_configuration: active_turn.configuration().effective().clone(),
+        });
+    }
+    Ok(reclassified.into_boxed_slice())
+}
+
 fn complete_turn(
-    session: SessionId,
-    turn: TurnId,
+    scope: ModelCallTurnScope,
     call: EndedModelCall,
     attempt: EndedTurnAttempt,
     frontier_entries: Vec<SemanticTranscriptEntry>,
     assistant_text: Vec<AssistantText>,
     identities: CompletedModelCallIdentities,
+    reclassified_pending_steering: Box<[ReclassifiedPendingSteeringTurn]>,
 ) -> Result<CompletedModelCallTurn, ModelCallClosureError> {
+    let ModelCallTurnScope { session, turn } = scope;
     if assistant_text.len() != identities.assistant_entries.len() {
         return Err(ModelCallClosureError::AssistantIdentityCountMismatch);
     }
@@ -1533,18 +1771,20 @@ fn complete_turn(
         assistant_entries: assistant_entries.into_boxed_slice(),
         completion_entry,
         terminal_snapshot,
+        reclassified_pending_steering,
     })
 }
 
 fn close_failed_turn(
-    session: SessionId,
-    turn: TurnId,
+    scope: ModelCallTurnScope,
     attempt: CurrentTurnAttempt,
     call: Option<EndedModelCall>,
     source: ResolvedContextFrontierSnapshot,
     identities: FailedModelCallTurnIdentities,
     attempt_disposition: UnstoppedAttemptDisposition,
+    reclassified_pending_steering: Box<[ReclassifiedPendingSteeringTurn]>,
 ) -> Result<FailedModelCallTurn, ModelCallClosureError> {
+    let ModelCallTurnScope { session, turn } = scope;
     let ended_attempt = attempt
         .end_without_stop(attempt_disposition)
         .map_err(|_| ModelCallClosureError::AttemptStateMismatch)?;
@@ -1567,6 +1807,7 @@ fn close_failed_turn(
         disposition: TurnDisposition::Failed,
         failure_entry,
         terminal_snapshot,
+        reclassified_pending_steering,
     })
 }
 
@@ -1790,6 +2031,61 @@ mod tests {
         }
     }
 
+    fn with_pending_steering(
+        mut execution: ModelCallExecution,
+        pending: AcceptedInputId,
+    ) -> ModelCallExecution {
+        execution.active_turn = execution.active_turn.with_pending_steering_for_test(
+            vec![(
+                pending,
+                crate::SessionInputPosition::try_from_u64(2)
+                    .expect("the test steering position is positive"),
+            )]
+            .into_boxed_slice(),
+        );
+        execution
+    }
+
+    fn one_reclassification(
+        pending: AcceptedInputId,
+        turn: TurnId,
+    ) -> Vec<PendingSteeringReclassificationIdentity> {
+        vec![PendingSteeringReclassificationIdentity::new(pending, turn)]
+    }
+
+    fn assert_one_reclassified_turn(
+        reclassified: &[ReclassifiedPendingSteeringTurn],
+        pending: AcceptedInputId,
+        source_turn: TurnId,
+        successor: TurnId,
+    ) {
+        assert_eq!(reclassified.len(), 1);
+        let reclassified = &reclassified[0];
+        assert_eq!(reclassified.session(), session_id(1));
+        assert_eq!(reclassified.source_turn(), source_turn);
+        assert_eq!(reclassified.accepted_input().id(), pending);
+        assert_eq!(reclassified.turn(), successor);
+        assert_eq!(
+            reclassified.accepted_input().disposition(),
+            &AcceptedInputDisposition::ReclassifiedAsTurnOrigin {
+                turn: successor,
+                reason: SteeringReclassificationReason::NoSafePointBeforeTerminal,
+            }
+        );
+        assert_eq!(reclassified.binding().source_turn(), source_turn);
+        assert_eq!(
+            reclassified.order(),
+            AcceptedInputQueueOrder::ordinary(
+                crate::SessionInputPosition::try_from_u64(2)
+                    .expect("the test steering position is positive")
+            )
+        );
+        assert_eq!(
+            reclassified.effective_configuration().model(),
+            &FrozenModelSelection::Direct(direct(2))
+        );
+    }
+
     /// S02 / INV-005 / INV-015: a complete frontier read must preserve exact
     /// semantic order, not merely the same entry membership.
     #[test]
@@ -1972,9 +2268,14 @@ mod tests {
     fn s08_inv016_preparation_requires_an_empty_checked_steering_inventory() {
         let mut execution = active_execution();
         let pending = accepted_input_id(20);
-        execution.active_turn = execution
-            .active_turn
-            .with_pending_steering_for_test(vec![pending].into_boxed_slice());
+        execution.active_turn = execution.active_turn.with_pending_steering_for_test(
+            vec![(
+                pending,
+                crate::SessionInputPosition::try_from_u64(2)
+                    .expect("the test steering position is positive"),
+            )]
+            .into_boxed_slice(),
+        );
 
         let error = execution
             .prepare_initial_call(model_call_id(9))
@@ -2198,6 +2499,125 @@ mod tests {
         );
     }
 
+    /// S08 / INV-016: a definitive response terminalizes its source only
+    /// together with ordered, visible reclassification of pending steering.
+    #[test]
+    fn s08_inv016_completion_reclassifies_pending_steering_atomically() {
+        let pending = accepted_input_id(20);
+        let successor = turn_id(21);
+        let execution = with_pending_steering(in_flight_execution(), pending);
+        let observation = correlated_observation(
+            &execution,
+            ModelCallTerminalObservation::Completed {
+                assistant_text: vec![
+                    AssistantText::try_new("reply".to_owned()).expect("nonempty text"),
+                ],
+            },
+        );
+        let identities = CompletedModelCallIdentities::new(
+            vec![semantic_transcript_entry_id(10)],
+            semantic_transcript_entry_id(11),
+            context_frontier_id(12),
+        )
+        .with_pending_steering_reclassifications(one_reclassification(pending, successor));
+
+        let outcome = execution
+            .apply_terminal_observation(
+                observation,
+                ModelCallTerminalIdentities::Completed(identities),
+            )
+            .expect("terminal completion may reclassify complete steering facts");
+        let ModelCallTerminalOutcome::Completed(completed) = outcome else {
+            panic!("completed evidence selects completed outcome");
+        };
+
+        assert_one_reclassified_turn(
+            completed.reclassified_pending_steering(),
+            pending,
+            turn_id(3),
+            successor,
+        );
+    }
+
+    /// S08 / INV-016: terminal observation cannot release the source while a
+    /// pending input lacks its exact reclassified successor identity.
+    #[test]
+    fn s08_inv016_terminal_observation_rejects_missing_reclassification() {
+        let pending = accepted_input_id(20);
+        let execution = with_pending_steering(in_flight_execution(), pending);
+        let observation =
+            correlated_observation(&execution, ModelCallTerminalObservation::KnownFailed);
+
+        let error = execution
+            .apply_terminal_observation(
+                observation,
+                ModelCallTerminalIdentities::Failed(FailedModelCallTurnIdentities::new(
+                    semantic_transcript_entry_id(10),
+                    context_frontier_id(11),
+                )),
+            )
+            .expect_err("pending steering cannot disappear at terminalization");
+
+        assert_eq!(
+            error,
+            ModelCallClosureError::PendingSteeringReclassificationMismatch
+        );
+    }
+
+    /// S08 / INV-016: a refusal reclassifies pending steering without adding
+    /// response content to the refused turn's terminal frontier.
+    #[test]
+    fn s08_inv016_refusal_reclassifies_pending_steering_atomically() {
+        let pending = accepted_input_id(20);
+        let successor = turn_id(21);
+        let execution = with_pending_steering(in_flight_execution(), pending);
+        let observation = correlated_observation(&execution, ModelCallTerminalObservation::Refused);
+        let identities = RefusedModelCallTurnIdentities::new(context_frontier_id(10))
+            .with_pending_steering_reclassifications(one_reclassification(pending, successor));
+
+        let outcome = execution
+            .apply_terminal_observation(
+                observation,
+                ModelCallTerminalIdentities::Refused(identities),
+            )
+            .expect("terminal refusal may reclassify complete steering facts");
+        let ModelCallTerminalOutcome::Refused(refused) = outcome else {
+            panic!("refused evidence selects refused outcome");
+        };
+
+        assert_one_reclassified_turn(
+            refused.reclassified_pending_steering(),
+            pending,
+            turn_id(3),
+            successor,
+        );
+    }
+
+    /// S08 / INV-016: trustworthy pre-send failure releases its source only
+    /// together with pending-steering reclassification.
+    #[test]
+    fn s08_inv016_prepared_failure_reclassifies_pending_steering_atomically() {
+        let pending = accepted_input_id(20);
+        let successor = turn_id(21);
+        let execution = with_pending_steering(prepared_execution(), pending);
+        let identities = FailedModelCallTurnIdentities::new(
+            semantic_transcript_entry_id(10),
+            context_frontier_id(11),
+        )
+        .with_pending_steering_reclassifications(one_reclassification(pending, successor));
+
+        let failed = execution
+            .fail_prepared_call(identities)
+            .expect("pre-send failure may reclassify complete steering facts");
+
+        assert_one_reclassified_turn(
+            failed.reclassified_pending_steering(),
+            pending,
+            turn_id(3),
+            successor,
+        );
+    }
+
     /// S04 / INV-025 / INV-026: ambiguous physical completion ends the live
     /// attempt and retains the exact call in a durable recovery wait.
     #[test]
@@ -2223,15 +2643,21 @@ mod tests {
         );
     }
 
-    /// S04 / INV-034: startup converts an unsent prepared call to known
-    /// failure while recording that the prior-process attempt was lost.
+    /// S04 / S08 / INV-016 / INV-034: startup converts an unsent prepared call
+    /// to known failure, records the lost attempt, and reclassifies steering
+    /// before releasing the source.
     #[test]
-    fn s04_inv034_restart_closes_prepared_call_as_known_failed_and_attempt_lost() {
-        let outcome = prepared_execution()
-            .recover_after_restart(FailedModelCallTurnIdentities::new(
-                semantic_transcript_entry_id(10),
-                context_frontier_id(11),
-            ))
+    fn s04_s08_inv016_inv034_restart_closes_prepared_call_and_reclassifies_steering() {
+        let pending = accepted_input_id(20);
+        let successor = turn_id(21);
+        let execution = with_pending_steering(prepared_execution(), pending);
+        let identities = FailedModelCallTurnIdentities::new(
+            semantic_transcript_entry_id(10),
+            context_frontier_id(11),
+        )
+        .with_pending_steering_reclassifications(one_reclassification(pending, successor));
+        let outcome = execution
+            .recover_after_restart(identities)
             .expect("startup may close an unsent prepared call");
         let ModelCallTerminalOutcome::Failed(failed) = outcome else {
             panic!("a prior-process prepared call selects failed outcome");
@@ -2250,6 +2676,12 @@ mod tests {
                 disposition: UnstoppedAttemptDisposition::Lost,
             }
         ));
+        assert_one_reclassified_turn(
+            failed.reclassified_pending_steering(),
+            pending,
+            turn_id(3),
+            successor,
+        );
     }
 
     /// S04 / INV-025 / INV-026 / INV-034: startup cannot infer the fate of an

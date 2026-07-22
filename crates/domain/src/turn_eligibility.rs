@@ -24,8 +24,8 @@ use crate::{
     ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
     SemanticTranscriptEntry, SemanticTranscriptEntryId, SemanticTranscriptEntryReconstitutionInput,
     SemanticTranscriptEntryRef, Session, SessionId, SessionInputPosition, TranscriptAncestry,
-    TurnAttemptId, TurnDisposition, TurnId, UnstoppedAttemptDisposition,
-    derive_accepted_input_total_order,
+    TurnAttemptId, TurnConfigurationProvenance, TurnDisposition, TurnId,
+    UnstoppedAttemptDisposition, derive_accepted_input_total_order,
 };
 
 /// The lifecycle fact stored for one accepted-input scheduling record.
@@ -321,6 +321,34 @@ pub(crate) struct SessionAcceptanceTailEntry {
     delivery: DeliveryRequest,
 }
 
+/// One pending steering input proven by the complete active-session tail.
+///
+/// Construction stays inside checked scheduling reconstitution so an input's
+/// identity, source-turn binding, and immutable acceptance position cannot be
+/// cross-wired at an execution or terminalization boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingSteeringInput {
+    accepted_input: AcceptedInputLifecycle,
+    acceptance_position: SessionInputPosition,
+}
+
+impl PendingSteeringInput {
+    /// Returns the accepted input awaiting disposition.
+    pub const fn accepted_input(&self) -> AcceptedInputId {
+        self.accepted_input.id()
+    }
+
+    /// Borrows the exact checked pending lifecycle.
+    pub const fn lifecycle(&self) -> &AcceptedInputLifecycle {
+        &self.accepted_input
+    }
+
+    /// Returns the immutable session acceptance position.
+    pub const fn acceptance_position(&self) -> SessionInputPosition {
+        self.acceptance_position
+    }
+}
+
 /// Canonical complete accepted-input interval for one active turn.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SessionAcceptanceTail {
@@ -351,6 +379,7 @@ pub struct AcceptedInputTurnSchedulingRecord {
     order: AcceptedInputQueueOrder,
     origin_delivery: DeliveryRequest,
     origin_configuration: OriginConfiguration,
+    configuration_provenance: TurnConfigurationProvenance,
     state: AcceptedInputTurnSchedulingRecordState,
 }
 
@@ -378,7 +407,44 @@ impl AcceptedInputTurnSchedulingRecord {
             queue_turn,
             order,
             origin_delivery,
+            configuration_provenance: TurnConfigurationProvenance::ExplicitOrigin(
+                origin_configuration.clone(),
+            ),
             origin_configuration,
+            state,
+        }
+    }
+
+    /// Supplies a reclassified steering origin using its immutable receipt,
+    /// original position, source binding, and source-derived configuration.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reclassified(
+        stored_session: SessionId,
+        turn: TurnId,
+        accepted_input_session: SessionId,
+        accepted_input: AcceptedInputLifecycle,
+        queue_session: SessionId,
+        queue_turn: TurnId,
+        order: AcceptedInputQueueOrder,
+        binding: crate::SteeringBinding,
+        source_configuration: OriginConfiguration,
+        state: AcceptedInputTurnSchedulingRecordState,
+    ) -> Self {
+        Self {
+            stored_session,
+            turn,
+            accepted_input_session,
+            accepted_input,
+            queue_session,
+            queue_turn,
+            order,
+            origin_delivery: DeliveryRequest::NextSafePoint {
+                expected_active_turn: binding.source_turn(),
+            },
+            origin_configuration: source_configuration,
+            configuration_provenance: TurnConfigurationProvenance::InheritedForReclassifiedSteering(
+                binding,
+            ),
             state,
         }
     }
@@ -423,9 +489,15 @@ impl AcceptedInputTurnSchedulingRecord {
         self.origin_delivery
     }
 
-    /// Borrows the complete frozen origin configuration.
+    /// Borrows the complete canonical configuration, whether explicit or
+    /// inherited from reclassified steering's source turn.
     pub const fn origin_configuration(&self) -> &OriginConfiguration {
         &self.origin_configuration
+    }
+
+    /// Borrows the checked explicit or inherited configuration provenance.
+    pub const fn configuration_provenance(&self) -> &TurnConfigurationProvenance {
+        &self.configuration_provenance
     }
 
     /// Returns the stored lifecycle projection.
@@ -890,6 +962,7 @@ pub struct AcceptedInputTurnSchedulingProjection {
     accepted_input: AcceptedInputLifecycle,
     order: AcceptedInputQueueOrder,
     origin_configuration: OriginConfiguration,
+    configuration_provenance: TurnConfigurationProvenance,
     state: ReconstitutedSchedulingState,
 }
 
@@ -917,6 +990,11 @@ impl AcceptedInputTurnSchedulingProjection {
     /// Borrows the complete frozen origin configuration.
     pub const fn origin_configuration(&self) -> &OriginConfiguration {
         &self.origin_configuration
+    }
+
+    /// Borrows the explicit or inherited configuration provenance.
+    pub const fn configuration_provenance(&self) -> &TurnConfigurationProvenance {
+        &self.configuration_provenance
     }
 
     /// Returns the scheduling-visible lifecycle classification.
@@ -962,7 +1040,7 @@ impl AcceptedInputTurnSchedulingProjection {
 
     fn active_turn_execution_with_pending(
         &self,
-        pending_steering: Box<[AcceptedInputId]>,
+        pending_steering: Box<[PendingSteeringInput]>,
     ) -> Option<ActivatedAcceptedInputTurn> {
         let ReconstitutedSchedulingState::Active { start, phase } = &self.state else {
             return None;
@@ -973,6 +1051,7 @@ impl AcceptedInputTurnSchedulingProjection {
             accepted_input: self.accepted_input.clone(),
             order: self.order,
             configuration: self.origin_configuration.clone(),
+            configuration_provenance: self.configuration_provenance.clone(),
             start: *start,
             phase: phase.clone(),
             pending_steering,
@@ -1058,12 +1137,15 @@ impl AcceptedInputSchedulingProjection {
         let pending_steering = tail
             .entries
             .iter()
-            .filter_map(|entry| {
+            .filter(|entry| {
                 matches!(
                     entry.accepted_input.disposition(),
                     AcceptedInputDisposition::PendingSteering { .. }
                 )
-                .then_some(entry.accepted_input.id())
+            })
+            .map(|entry| PendingSteeringInput {
+                accepted_input: entry.accepted_input.clone(),
+                acceptance_position: entry.position,
             })
             .collect::<Vec<_>>()
             .into_boxed_slice();
@@ -1157,7 +1239,8 @@ impl AcceptedInputTurnActivationIdentities {
 /// ```compile_fail
 /// use signalbox_domain::{
 ///     AcceptedInputLifecycle, AcceptedInputQueueOrder, AcceptedInputTurnStart,
-///     ActivatedAcceptedInputTurn, ActiveTurnPhase, OriginConfiguration, SessionId, TurnId,
+///     ActivatedAcceptedInputTurn, ActiveTurnPhase, OriginConfiguration, SessionId,
+///     TurnConfigurationProvenance, TurnId,
 /// };
 ///
 /// fn raw_facts_are_not_an_activation(
@@ -1166,9 +1249,10 @@ impl AcceptedInputTurnActivationIdentities {
 ///     accepted_input: AcceptedInputLifecycle,
 ///     order: AcceptedInputQueueOrder,
 ///     configuration: OriginConfiguration,
+///     configuration_provenance: TurnConfigurationProvenance,
 ///     start: AcceptedInputTurnStart,
 ///     phase: ActiveTurnPhase,
-///     pending_steering: Box<[AcceptedInputId]>,
+///     pending_steering: Box<[PendingSteeringInput]>,
 /// ) {
 ///     let _ = ActivatedAcceptedInputTurn {
 ///         session,
@@ -1176,6 +1260,7 @@ impl AcceptedInputTurnActivationIdentities {
 ///         accepted_input,
 ///         order,
 ///         configuration,
+///         configuration_provenance,
 ///         start,
 ///         phase,
 ///         pending_steering,
@@ -1189,9 +1274,10 @@ pub struct ActivatedAcceptedInputTurn {
     accepted_input: AcceptedInputLifecycle,
     order: AcceptedInputQueueOrder,
     configuration: OriginConfiguration,
+    configuration_provenance: TurnConfigurationProvenance,
     start: AcceptedInputTurnStart,
     phase: ActiveTurnPhase,
-    pending_steering: Box<[AcceptedInputId]>,
+    pending_steering: Box<[PendingSteeringInput]>,
 }
 
 impl ActivatedAcceptedInputTurn {
@@ -1220,6 +1306,11 @@ impl ActivatedAcceptedInputTurn {
         &self.configuration
     }
 
+    /// Borrows the explicit or inherited configuration provenance.
+    pub const fn configuration_provenance(&self) -> &TurnConfigurationProvenance {
+        &self.configuration_provenance
+    }
+
     /// Returns the exact eligibility-fixed lineage and frontier.
     pub const fn start(&self) -> AcceptedInputTurnStart {
         self.start
@@ -1230,9 +1321,9 @@ impl ActivatedAcceptedInputTurn {
         &self.phase
     }
 
-    /// Returns the complete accepted-input identities that still await this
-    /// turn's next model-call safe point.
-    pub fn pending_steering(&self) -> &[AcceptedInputId] {
+    /// Returns the complete accepted inputs that still await this turn's next
+    /// model-call safe point or terminal reclassification.
+    pub fn pending_steering(&self) -> &[PendingSteeringInput] {
         &self.pending_steering
     }
 
@@ -1244,6 +1335,7 @@ impl ActivatedAcceptedInputTurn {
             accepted_input: self.accepted_input.clone(),
             order: self.order,
             configuration: self.configuration.clone(),
+            configuration_provenance: self.configuration_provenance.clone(),
             start: self.start,
             phase,
             pending_steering: self.pending_steering.clone(),
@@ -1258,6 +1350,7 @@ impl ActivatedAcceptedInputTurn {
             accepted_input: self.accepted_input.clone(),
             order: self.order,
             configuration: self.configuration.clone(),
+            configuration_provenance: self.configuration_provenance.clone(),
             start,
             phase: self.phase.clone(),
             pending_steering: self.pending_steering.clone(),
@@ -1267,14 +1360,31 @@ impl ActivatedAcceptedInputTurn {
     #[cfg(test)]
     pub(crate) fn with_pending_steering_for_test(
         &self,
-        pending_steering: Box<[AcceptedInputId]>,
+        pending_steering: Box<[(AcceptedInputId, SessionInputPosition)]>,
     ) -> Self {
+        let pending_steering = pending_steering
+            .into_vec()
+            .into_iter()
+            .map(
+                |(accepted_input, acceptance_position)| PendingSteeringInput {
+                    accepted_input: AcceptedInputLifecycle::new(
+                        accepted_input,
+                        AcceptedInputDisposition::PendingSteering {
+                            binding: crate::SteeringBinding::new(self.turn),
+                        },
+                    ),
+                    acceptance_position,
+                },
+            )
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
         Self {
             session: self.session,
             turn: self.turn,
             accepted_input: self.accepted_input.clone(),
             order: self.order,
             configuration: self.configuration.clone(),
+            configuration_provenance: self.configuration_provenance.clone(),
             start: self.start,
             phase: self.phase.clone(),
             pending_steering,
@@ -2202,6 +2312,7 @@ fn reconstitute_inner(
             accepted_input: record.accepted_input.clone(),
             order: record.order,
             origin_configuration: record.origin_configuration.clone(),
+            configuration_provenance: record.configuration_provenance.clone(),
             state,
         });
     }
@@ -2355,9 +2466,10 @@ fn reconstitute_active_acceptance_tail(
         }
 
         let disposition_valid = match entry.accepted_input.disposition() {
-            AcceptedInputDisposition::OriginOf(origin) => {
+            AcceptedInputDisposition::OriginOf(origin)
+            | AcceptedInputDisposition::ReclassifiedAsTurnOrigin { turn: origin, .. } => {
                 records_by_turn.get(origin).is_some_and(|record| {
-                    record.accepted_input.id() == accepted_input
+                    record.accepted_input == entry.accepted_input
                         && record.order.acceptance_position() == entry.position
                         && entry.delivery == record.origin_delivery
                         && origin_delivery_matches_record(
@@ -2378,13 +2490,10 @@ fn reconstitute_active_acceptance_tail(
                             && expected_active_turn == active
                     )
             }
-            AcceptedInputDisposition::ConsumedAsSteering { .. }
-            | AcceptedInputDisposition::ReclassifiedAsTurnOrigin { .. } => false,
+            AcceptedInputDisposition::ConsumedAsSteering { .. } => false,
         };
         if !disposition_valid
-            || (index == 0
-                && entry.accepted_input.disposition()
-                    != &AcceptedInputDisposition::OriginOf(active))
+            || (index == 0 && entry.accepted_input != active_record.accepted_input)
         {
             return Err(
                 AcceptedInputSchedulingReconstitutionFailure::AcceptanceTailDispositionMismatch {
@@ -2448,6 +2557,27 @@ fn origin_delivery_matches_record(
     record: &AcceptedInputTurnSchedulingRecord,
     records_by_turn: &BTreeMap<TurnId, &AcceptedInputTurnSchedulingRecord>,
 ) -> bool {
+    if let TurnConfigurationProvenance::InheritedForReclassifiedSteering(binding) =
+        &record.configuration_provenance
+    {
+        let source = records_by_turn.get(&binding.source_turn());
+        return matches!(
+            delivery,
+            DeliveryRequest::NextSafePoint {
+                expected_active_turn,
+            } if expected_active_turn == binding.source_turn()
+        ) && record.order.priority() == AcceptedInputQueuePriority::Ordinary
+            && source.is_some_and(|source| {
+                source.order.acceptance_position() < record.order.acceptance_position()
+                    && !matches!(
+                        source.state,
+                        AcceptedInputTurnSchedulingRecordState::Queued
+                            | AcceptedInputTurnSchedulingRecordState::Active { .. }
+                    )
+                    && source.origin_configuration == record.origin_configuration
+            });
+    }
+
     if !origin_configuration_matches_delivery(delivery, &record.origin_configuration) {
         return false;
     }
@@ -2551,7 +2681,21 @@ fn validate_record_correlations(
             AcceptedInputSchedulingReconstitutionFailure::QueueTurnMismatch { turn: record.turn },
         );
     }
-    if record.accepted_input.disposition() != &AcceptedInputDisposition::OriginOf(record.turn) {
+    let accepted_input_matches = match &record.configuration_provenance {
+        TurnConfigurationProvenance::ExplicitOrigin(configuration) => {
+            configuration == &record.origin_configuration
+                && record.accepted_input.disposition()
+                    == &AcceptedInputDisposition::OriginOf(record.turn)
+        }
+        TurnConfigurationProvenance::InheritedForReclassifiedSteering(_) => matches!(
+            record.accepted_input.disposition(),
+            AcceptedInputDisposition::ReclassifiedAsTurnOrigin {
+                turn,
+                reason: crate::SteeringReclassificationReason::NoSafePointBeforeTerminal,
+            } if *turn == record.turn
+        ),
+    };
+    if !accepted_input_matches {
         return Err(
             AcceptedInputSchedulingReconstitutionFailure::AcceptedInputOriginMismatch {
                 turn: record.turn,
@@ -2897,6 +3041,7 @@ fn prepare_earliest_queued_activation(
         accepted_input: queued.accepted_input.clone(),
         order: queued.order,
         configuration: queued.origin_configuration.clone(),
+        configuration_provenance: queued.configuration_provenance.clone(),
         start,
         phase: ActiveTurnPhase::Running {
             current_attempt: CurrentTurnAttempt::prepared(identities.initial_attempt),
@@ -3962,7 +4107,11 @@ mod tests {
         let execution = projection
             .active_turn_execution()
             .expect("the active execution retains its complete steering inventory");
-        assert_eq!(execution.pending_steering(), &[pending.accepted_input()]);
+        assert_eq!(execution.pending_steering().len(), 1);
+        assert_eq!(
+            execution.pending_steering()[0].accepted_input(),
+            pending.accepted_input()
+        );
 
         let error = projection
             .clone()
@@ -4807,6 +4956,79 @@ mod tests {
                 predecessor_failure_entry.reference(&session),
                 activation.origin_entry().reference(&session),
             ]
+        );
+    }
+
+    /// S08 / S09 / INV-008 / INV-009 / INV-016: terminally reclassified
+    /// steering becomes ordinary queued work at its original position and
+    /// inherits the source turn's canonical configuration.
+    #[test]
+    fn s08_s09_inv008_inv009_inv016_reclassified_steering_becomes_eligible_work() {
+        let session = current_session();
+        let predecessor = accepted_origin(1);
+        let successor = accepted_origin(2);
+        let predecessor_origin_entry = semantic_entry(30);
+        let predecessor_failure_entry = semantic_entry(31);
+        let predecessor_starting_frontier = frontier(40);
+        let predecessor_terminal_frontier = frontier(41);
+        let activation = activation(1);
+        let source_configuration = configuration(&session);
+        let binding = crate::SteeringBinding::new(predecessor.turn());
+        let predecessor_record = predecessor.record(
+            &session,
+            AcceptedInputTurnSchedulingRecordState::TerminalFailed {
+                starting_lineage: AcceptedInputStartingLineage::FirstInSession,
+                starting_frontier: predecessor_starting_frontier.id(),
+                terminal_frontier: predecessor_terminal_frontier.id(),
+            },
+        );
+        let successor_record = AcceptedInputTurnSchedulingRecord::reclassified(
+            session.id(),
+            successor.turn(),
+            session.id(),
+            AcceptedInputLifecycle::new(
+                successor.accepted_input(),
+                AcceptedInputDisposition::ReclassifiedAsTurnOrigin {
+                    turn: successor.turn(),
+                    reason: crate::SteeringReclassificationReason::NoSafePointBeforeTerminal,
+                },
+            ),
+            session.id(),
+            successor.turn(),
+            successor.ordinary_order(),
+            binding,
+            source_configuration.clone(),
+            AcceptedInputTurnSchedulingRecordState::Queued,
+        );
+        let projection = AcceptedInputSchedulingReconstitutionInput::new(
+            session.clone(),
+            vec![successor_record, predecessor_record],
+            vec![
+                predecessor_failure_entry.failed_turn(&session, predecessor),
+                predecessor.entry(&session, predecessor_origin_entry),
+            ],
+            vec![
+                predecessor_terminal_frontier.snapshot(
+                    &session,
+                    &[predecessor_origin_entry, predecessor_failure_entry],
+                ),
+                predecessor_starting_frontier.snapshot(&session, &[predecessor_origin_entry]),
+            ],
+            None,
+        )
+        .reconstitute()
+        .expect("reclassified steering is correlated to its terminal source");
+
+        let candidate = projection
+            .prepare_earliest_queued_activation(activation.identities())
+            .expect("the reclassified successor is eligible after its source");
+
+        assert_eq!(candidate.turn().turn(), successor.turn());
+        assert_eq!(candidate.turn().order(), successor.ordinary_order());
+        assert_eq!(candidate.turn().configuration(), &source_configuration);
+        assert_eq!(
+            candidate.turn().configuration_provenance(),
+            &TurnConfigurationProvenance::InheritedForReclassifiedSteering(binding)
         );
     }
 

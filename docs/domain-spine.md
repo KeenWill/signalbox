@@ -987,6 +987,12 @@ impl SessionAcceptanceTailReconstitutionInput {
     // accessors: session(), anchor(), observed_last_position(), entries()
 }
 
+pub struct PendingSteeringInput { /* private */ }
+// sealed: checked AcceptedInputSchedulingProjection::active_turn_execution
+impl PendingSteeringInput {
+    // accessors: accepted_input(), lifecycle(), acceptance_position()
+}
+
 pub struct AcceptedInputTurnSchedulingRecord { /* private */ }
 impl AcceptedInputTurnSchedulingRecord {
     pub fn new(
@@ -1001,9 +1007,21 @@ impl AcceptedInputTurnSchedulingRecord {
         origin_configuration: OriginConfiguration,
         state: AcceptedInputTurnSchedulingRecordState,
     ) -> Self;
+    pub fn reclassified(
+        stored_session: SessionId,
+        turn: TurnId,
+        accepted_input_session: SessionId,
+        accepted_input: AcceptedInputLifecycle,
+        queue_session: SessionId,
+        queue_turn: TurnId,
+        order: AcceptedInputQueueOrder,
+        binding: SteeringBinding,
+        source_configuration: OriginConfiguration,
+        state: AcceptedInputTurnSchedulingRecordState,
+    ) -> Self;
     // accessors: stored_session(), turn(), accepted_input_session(),
     // accepted_input(), queue_session(), queue_turn(), order(),
-    // origin_delivery(), origin_configuration(), state()
+    // origin_delivery(), origin_configuration(), configuration_provenance(), state()
 }
 
 pub struct AcceptedInputSchedulingReconstitutionInput { /* private */ }
@@ -1133,7 +1151,7 @@ pub struct AcceptedInputTurnSchedulingProjection { /* private */ }
 // sealed: AcceptedInputSchedulingReconstitutionInput::reconstitute
 impl AcceptedInputTurnSchedulingProjection {
     // accessors: session(), turn(), accepted_input(), order(),
-    // origin_configuration(), status(), start(), active_phase(),
+    // origin_configuration(), configuration_provenance(), status(), start(), active_phase(),
     // failed_terminal_frontier(), terminal_frontier()
 }
 
@@ -1176,7 +1194,7 @@ pub struct ActivatedAcceptedInputTurn { /* private */ }
 // sealed: PreparedAcceptedInputTurnActivation or checked active scheduling projection
 impl ActivatedAcceptedInputTurn {
     // accessors: session(), turn(), accepted_input(), order(), configuration(),
-    // start(), phase(), pending_steering()
+    // configuration_provenance(), start(), phase(), pending_steering()
 }
 
 pub struct PreparedAcceptedInputTurnActivation { /* private */ }
@@ -1512,9 +1530,17 @@ pub enum ModelCallTerminalObservation {
     Cancelled,
     Ambiguous,
 }
+pub struct PendingSteeringReclassificationIdentity { /* private */ }
+impl PendingSteeringReclassificationIdentity {
+    pub const fn new(accepted_input: AcceptedInputId, turn: TurnId) -> Self;
+    // accessors: accepted_input(), turn()
+}
 pub struct CompletedModelCallIdentities { /* private */ }
+// constructor plus with_pending_steering_reclassifications(...)
 pub struct FailedModelCallTurnIdentities { /* private */ }
+// constructor plus with_pending_steering_reclassifications(...)
 pub struct RefusedModelCallTurnIdentities { /* private */ }
+// constructor plus with_pending_steering_reclassifications(...)
 pub enum ModelCallTerminalIdentities {
     Completed(CompletedModelCallIdentities),
     Failed(FailedModelCallTurnIdentities),
@@ -1530,6 +1556,13 @@ pub enum ModelCallTerminalOutcome {
 pub struct CompletedModelCallTurn { /* private */ }
 pub struct FailedModelCallTurn { /* private */ }
 pub struct RefusedModelCallTurn { /* private */ }
+// each terminal turn exposes reclassified_pending_steering()
+pub struct ReclassifiedPendingSteeringTurn { /* private */ }
+// sealed: successful model-call terminalization with exact pending identities
+impl ReclassifiedPendingSteeringTurn {
+    // accessors: session(), source_turn(), accepted_input(), turn(), order(),
+    // binding(), effective_configuration()
+}
 pub struct AmbiguousModelCallTurn { /* private */ }
 pub enum ModelCallClosureError {
     IdentityShapeMismatch,
@@ -1538,6 +1571,7 @@ pub enum ModelCallClosureError {
     AttemptStateMismatch,
     TargetResolutionMismatch,
     AssistantIdentityCountMismatch,
+    PendingSteeringReclassificationMismatch,
     FrontierDerivationFailed,
     AmbiguityConstructionFailed,
 }
@@ -2247,17 +2281,17 @@ impl<
 | domain: submit_input                  | 15                   |
 | domain: queue_order                   | 5 (+1 free fn)       |
 | domain: turn_lifecycle                | 10                   |
-| domain: turn_eligibility              | 21                   |
+| domain: turn_eligibility              | 22                   |
 | domain: turn_attempt                  | 13                   |
 | domain: model_call                    | 11                   |
-| domain: model_execution               | 31                   |
+| domain: model_execution               | 33                   |
 | domain: context_frontier              | 6                    |
 | domain: semantic_entry                | 4                    |
 | domain: provider_evidence             | 5                    |
 | domain: applied_interrupt             | 2                    |
 | domain: fatal_mismatch                | 0                    |
 | domain: replace_session_defaults      | 13                   |
-| **signalbox-domain total**            | **194 (+1 free fn)** |
+| **signalbox-domain total**            | **197 (+1 free fn)** |
 | application: create_session           | 8 (incl. 2 traits)   |
 | application: load_session             | 2 (incl. 1 trait)    |
 | application: operator_failure         | 2 (incl. 1 trait)    |
