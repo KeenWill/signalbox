@@ -435,7 +435,7 @@ impl PostgresModelCallRepository {
                 identities,
                 &execution,
                 &mut next_reclassified_turn,
-            );
+            )?;
             let outcome = execution
                 .apply_terminal_observation(observation, identities)
                 .map_err(|_| {
@@ -469,7 +469,7 @@ impl PostgresModelCallRepository {
                 call,
             )?;
             let reclassifications =
-                pending_reclassification_candidates(&execution, &mut next_reclassified_turn);
+                pending_reclassification_candidates(&execution, &mut next_reclassified_turn)?;
             let failed = execution
                 .fail_prepared_call(
                     identities.with_pending_steering_reclassifications(reclassifications),
@@ -497,7 +497,7 @@ impl PostgresModelCallRepository {
         let result = async {
             lock_session(&mut transaction, session).await?;
             let execution = require_exact_call(
-                require_live_execution(&mut transaction, session, &self.targets).await?,
+                require_live_execution_for_restart(&mut transaction, session).await?,
                 call,
             )?;
             let outcome = execution.recover_after_restart(identities).map_err(|_| {
@@ -516,28 +516,44 @@ impl PostgresModelCallRepository {
 fn pending_reclassification_candidates(
     execution: &ModelCallExecution,
     next_turn: &mut impl FnMut(AcceptedInputId) -> TurnId,
-) -> Vec<PendingSteeringReclassificationIdentity> {
-    execution
-        .active_turn()
-        .pending_steering()
-        .iter()
-        .map(|pending| {
-            let accepted_input = pending.accepted_input();
-            PendingSteeringReclassificationIdentity::new(accepted_input, next_turn(accepted_input))
-        })
-        .collect()
+) -> Result<Vec<PendingSteeringReclassificationIdentity>, ModelCallRepositoryError> {
+    let mut proposed_turns = BTreeSet::new();
+    let mut reclassifications = Vec::new();
+    for pending in execution.active_turn().pending_steering() {
+        let accepted_input = pending.accepted_input();
+        let proposed_turn = next_turn(accepted_input);
+        record_reclassified_turn_candidate(execution.turn(), proposed_turn, &mut proposed_turns)?;
+        reclassifications.push(PendingSteeringReclassificationIdentity::new(
+            accepted_input,
+            proposed_turn,
+        ));
+    }
+    Ok(reclassifications)
+}
+
+fn record_reclassified_turn_candidate(
+    source_turn: TurnId,
+    proposed_turn: TurnId,
+    proposed_turns: &mut BTreeSet<TurnId>,
+) -> Result<(), ModelCallRepositoryError> {
+    if proposed_turn == source_turn || !proposed_turns.insert(proposed_turn) {
+        return Err(ModelCallRepositoryError::IdentityCollision(
+            ModelCallIdentityCollision::ReclassifiedTurn,
+        ));
+    }
+    Ok(())
 }
 
 fn attach_pending_reclassification_candidates(
     identities: ModelCallTerminalIdentities,
     execution: &ModelCallExecution,
     next_turn: &mut impl FnMut(AcceptedInputId) -> TurnId,
-) -> ModelCallTerminalIdentities {
+) -> Result<ModelCallTerminalIdentities, ModelCallRepositoryError> {
     if matches!(identities, ModelCallTerminalIdentities::Ambiguous) {
-        return identities;
+        return Ok(identities);
     }
-    let reclassifications = pending_reclassification_candidates(execution, next_turn);
-    match identities {
+    let reclassifications = pending_reclassification_candidates(execution, next_turn)?;
+    Ok(match identities {
         ModelCallTerminalIdentities::Completed(identities) => {
             ModelCallTerminalIdentities::Completed(
                 identities.with_pending_steering_reclassifications(reclassifications),
@@ -550,7 +566,7 @@ fn attach_pending_reclassification_candidates(
             identities.with_pending_steering_reclassifications(reclassifications),
         ),
         ModelCallTerminalIdentities::Ambiguous => ModelCallTerminalIdentities::Ambiguous,
-    }
+    })
 }
 
 fn prepared_matches_authorized(
@@ -1723,12 +1739,50 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{borrow::Cow, error::Error, fmt, io};
+    use std::{borrow::Cow, collections::BTreeSet, error::Error, fmt, io};
 
     use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
+    use signalbox_domain::TurnId;
     use sqlx::error::{DatabaseError, ErrorKind};
+    use sqlx::types::Uuid;
 
-    use super::{ModelCallRepositoryError, commit_failure_is_ambiguous};
+    use super::{
+        ModelCallIdentityCollision, ModelCallRepositoryError, commit_failure_is_ambiguous,
+        record_reclassified_turn_candidate,
+    };
+
+    /// ADR-0045: a source-turn successor candidate is a retryable minted-ID
+    /// collision, not a caller transition defect.
+    #[test]
+    fn generated_successor_source_candidate_is_a_retryable_collision() {
+        let source = TurnId::from_uuid(Uuid::from_u128(1));
+        let mut proposed = BTreeSet::new();
+
+        assert!(matches!(
+            record_reclassified_turn_candidate(source, source, &mut proposed),
+            Err(ModelCallRepositoryError::IdentityCollision(
+                ModelCallIdentityCollision::ReclassifiedTurn
+            ))
+        ));
+    }
+
+    /// ADR-0045: a duplicate successor candidate is a retryable minted-ID
+    /// collision, not a caller transition defect.
+    #[test]
+    fn generated_successor_duplicate_is_a_retryable_collision() {
+        let source = TurnId::from_uuid(Uuid::from_u128(1));
+        let successor = TurnId::from_uuid(Uuid::from_u128(2));
+        let mut proposed = BTreeSet::new();
+
+        record_reclassified_turn_candidate(source, successor, &mut proposed)
+            .expect("the first source-safe successor is accepted");
+        assert!(matches!(
+            record_reclassified_turn_candidate(source, successor, &mut proposed),
+            Err(ModelCallRepositoryError::IdentityCollision(
+                ModelCallIdentityCollision::ReclassifiedTurn
+            ))
+        ));
+    }
 
     #[derive(Debug)]
     struct ServerCommitFailure {

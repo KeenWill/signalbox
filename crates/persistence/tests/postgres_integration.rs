@@ -1317,6 +1317,54 @@ async fn s03_s04_inv014_inv034_startup_scan_classifies_prepared_and_issued_model
     Ok(())
 }
 
+/// S04 / INV-014 / INV-034: restart recovery reconstructs a committed call
+/// from its durable provider target even after deployment configuration remaps
+/// the selected model.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s04_inv014_inv034_restart_recovery_preserves_durable_target_after_catalog_remap()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7000;
+    let fixture = checkpoint_restart_model_call(&pool, seed, false).await?;
+    let selection = signalbox_domain::DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5));
+    let durable_provider = ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6));
+    let remapped_provider = ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 20));
+    let remapped_targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        ResolvedProviderTarget::naming(remapped_provider),
+    )])
+    .expect("one remapped target forms a catalog");
+    let repository = PostgresModelCallRepository::new(pool.clone(), remapped_targets);
+
+    let outcome = repository
+        .recover_after_restart(
+            fixture.session,
+            fixture.call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 30)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 31)),
+            ),
+        )
+        .await?;
+    let ModelCallTerminalOutcome::Failed(failed) = outcome else {
+        panic!("the durable Prepared call must recover as known failure");
+    };
+    assert_eq!(
+        failed
+            .call()
+            .expect("restart recovery retains the physical call")
+            .target()
+            .identity(),
+        durable_provider
+    );
+    assert_ne!(durable_provider, remapped_provider);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S04 / S08 / S09 / INV-016: steering accepted after send authorization is
 /// atomically reclassified when the source completes. Its immutable command
 /// still replays PendingSteering, while the inherited successor enters the
