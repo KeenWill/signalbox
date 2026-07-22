@@ -63,7 +63,8 @@ developer-managed database would make the end-to-end test stateful and
 non-hermetic.
 
 **Affects.** `apps/hubd/Cargo.toml`, its debug executable and end-to-end tests,
-the workspace lockfile, and the PostgreSQL CI job. No domain or application API,
+the workspace lockfile, the PostgreSQL CI job, and the public application
+activation method used by the hub-owned asynchronous pass. No domain API,
 schema, provider choice, or production credential source changes.
 
 ## 2026-07-22 — Render the initial model frontier by semantic entry role

@@ -30,11 +30,11 @@ pub trait ActivatedTurnExecution {
         activated: Box<ActivatedAcceptedInputTurn>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static;
 
-    /// Reports a hub-detected failure after durable activation.
+    /// Reports that durable activation may require startup recovery.
     fn report_post_activation_failure(&self) {}
 }
 
-/// Cloneable signal raised when execution fails after a turn activates.
+/// Cloneable signal raised when an activated turn may require recovery.
 #[derive(Clone, Debug)]
 pub struct FatalExecutionSignal {
     triggered: watch::Receiver<bool>,
@@ -57,7 +57,7 @@ impl FatalExecutionSignal {
     }
 }
 
-/// Raises a fatal runtime signal for any post-activation execution failure.
+/// Raises a fatal runtime signal when durable activation may require recovery.
 ///
 /// The hub composition root uses the signal to stop scheduling and exit, so
 /// startup recovery can regain authority over the active durable turn.
@@ -211,10 +211,21 @@ where
         let activation = self.activation.execute_with_cloned_transaction(session);
         let execution = self.execution.clone();
         async move {
-            match activation
-                .await
-                .map_err(ActivatedTurnPassError::Activation)?
-            {
+            let outcome = match activation.await {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    if matches!(
+                        error.operator_failure_class(),
+                        signalbox_application::OperatorFailureClass::Infrastructure {
+                            commit_ambiguous: true
+                        }
+                    ) {
+                        execution.report_post_activation_failure();
+                    }
+                    return Err(ActivatedTurnPassError::Activation(error));
+                }
+            };
+            match outcome {
                 StartEligibleTurnOutcome::NoEligibleTurn => Ok(()),
                 StartEligibleTurnOutcome::Activated(activated) => {
                     if !activation_session_matches(&execution, session, activated.session()) {
@@ -361,6 +372,25 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct CommitAmbiguousActivationFailure;
+
+    impl fmt::Display for CommitAmbiguousActivationFailure {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("activation commit acknowledgement was lost")
+        }
+    }
+
+    impl std::error::Error for CommitAmbiguousActivationFailure {}
+
+    impl ClassifyOperatorFailure for CommitAmbiguousActivationFailure {
+        fn operator_failure_class(&self) -> OperatorFailureClass {
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true,
+            }
+        }
+    }
+
     #[derive(Debug)]
     struct AdvancingIds {
         next: u128,
@@ -414,6 +444,21 @@ mod tests {
     }
 
     #[derive(Clone, Copy, Debug)]
+    struct CommitAmbiguousTransaction;
+
+    impl StartEligibleTurnTransaction for CommitAmbiguousTransaction {
+        type Error = CommitAmbiguousActivationFailure;
+
+        fn handle(
+            &mut self,
+            _session: SessionId,
+            _identities: AcceptedInputTurnActivationIdentities,
+        ) -> impl Future<Output = Result<StartEligibleTurnOutcome, Self::Error>> + Send {
+            ready(Err(CommitAmbiguousActivationFailure))
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
     struct NoopExecution;
 
     impl ActivatedTurnExecution for NoopExecution {
@@ -443,6 +488,26 @@ mod tests {
         let observed = observed.lock().expect("recording transaction lock");
         assert_eq!(observed.len(), 2);
         assert_ne!(observed[0], observed[1]);
+    }
+
+    #[tokio::test]
+    async fn inv034_commit_ambiguous_activation_raises_the_fatal_recovery_signal() {
+        let (execution, signal) = FatalExecutionSupervisor::new(NoopExecution);
+        let mut pass = ActivatedTurnPass::new(
+            StartEligibleTurnService::new(AdvancingIds::new(), CommitAmbiguousTransaction),
+            execution,
+        );
+
+        let error = pass
+            .run(SessionId::from_uuid(Uuid::from_u128(9)))
+            .await
+            .expect_err("a lost commit acknowledgement remains an activation failure");
+
+        assert!(matches!(
+            error,
+            super::ActivatedTurnPassError::Activation(CommitAmbiguousActivationFailure)
+        ));
+        assert!(signal.is_triggered());
     }
 
     #[test]
