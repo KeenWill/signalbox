@@ -315,6 +315,7 @@ impl StreamDecoder {
             if let Some(token) = choice.finish_reason {
                 let mut finish = map_finish(&token, self.stop_sequences_declared);
                 if matches!(finish, FinishReason::Unrecognized { .. }) {
+                    self.finish = Some(finish);
                     return self.violation("stream carries an unrecognized finish_reason");
                 }
                 if !self.refusal_text.is_empty() {
@@ -733,7 +734,15 @@ mod tests {
               \"finish_reason\":\"length\"}]}\n\n",
         ]);
 
-        assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("ambiguous finish must remain boundary-loss evidence");
+        };
+        assert_eq!(
+            loss.finish_reported,
+            Some(FinishReason::Unrecognized {
+                provider_token: "length".to_string(),
+            })
+        );
     }
 
     #[test]
@@ -1179,7 +1188,15 @@ mod tests {
             true,
         );
 
-        assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("ambiguous finish must remain boundary-loss evidence");
+        };
+        assert_eq!(
+            loss.finish_reported,
+            Some(FinishReason::Unrecognized {
+                provider_token: "stop".to_string(),
+            })
+        );
     }
 
     #[test]

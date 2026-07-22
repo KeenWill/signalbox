@@ -20,6 +20,7 @@ pub(crate) fn classify_error(status: u16, code: Option<&str>) -> ProviderErrorKi
     }
     match code {
         Some("invalid_api_key") => ProviderErrorKind::CredentialRejected,
+        Some("invalid_request_error") => ProviderErrorKind::InvalidRequest,
         Some("model_not_found") => ProviderErrorKind::TargetNotFound,
         Some("insufficient_quota") => ProviderErrorKind::QuotaExhausted,
         Some("context_length_exceeded") => ProviderErrorKind::RequestTooLarge,
@@ -119,6 +120,7 @@ mod tests {
     fn documented_codes_take_precedence_and_statuses_are_the_fallback() {
         let rows = classification_rows(&[
             (401, "invalid_api_key"),
+            (0, "invalid_request_error"),
             (404, "model_not_found"),
             (429, "insufficient_quota"),
             (400, "context_length_exceeded"),
@@ -143,6 +145,7 @@ mod tests {
             │ status │ code                    │ kind               │
             ├────────┼─────────────────────────┼────────────────────┤
             │    401 │ invalid_api_key         │ CredentialRejected │
+            │      0 │ invalid_request_error   │ InvalidRequest     │
             │    404 │ model_not_found         │ TargetNotFound     │
             │    429 │ insufficient_quota      │ QuotaExhausted     │
             │    400 │ context_length_exceeded │ RequestTooLarge    │
@@ -170,6 +173,14 @@ mod tests {
         assert_eq!(
             classify_error_envelope(429, Some("new_gateway_code"), Some("insufficient_quota")),
             ProviderErrorKind::QuotaExhausted
+        );
+    }
+
+    #[test]
+    fn statusless_invalid_request_type_is_typed() {
+        assert_eq!(
+            classify_error_envelope(0, None, Some("invalid_request_error")),
+            ProviderErrorKind::InvalidRequest
         );
     }
 }

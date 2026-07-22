@@ -1148,6 +1148,7 @@ fn redact_evidence(evidence: TerminalEvidence, api_key: &CredentialValue) -> Ter
     let redact = move |text: String| -> String { redact_text(text, key_text) };
     let redact_native = |mut native: NativeErrorFacts| -> NativeErrorFacts {
         native.error_token = native.error_token.map(redact);
+        native.error_code = native.error_code.map(redact);
         native.message = native
             .message
             .map(|message| redact_native_message(message, key_text));
@@ -1266,8 +1267,9 @@ mod tests {
     use serde::Serialize;
     use signalbox_model_runtime::{
         AssistantPart, CancellationSignal, CompletionEvidence, CompletionFinish, CredentialValue,
-        ExchangeFacts, LossCause, Observation, ObservationFact, ObservationSink, PreparationDefect,
-        RefusalEvidence, SseFraming, TerminalEvidence, TokenUsage,
+        ExchangeFacts, LossCause, NativeErrorFacts, Observation, ObservationFact, ObservationSink,
+        PreparationDefect, ProviderErrorEvidence, ProviderErrorKind, RefusalEvidence, SseFraming,
+        TerminalEvidence, TokenUsage,
     };
 
     use super::{
@@ -1336,6 +1338,26 @@ mod tests {
         assert!(redacted.ends_with(" … [truncated]"));
         assert!(!redacted.contains(r"key_\u006coop"));
         assert!(!redacted.contains("key_loop"));
+    }
+
+    #[test]
+    fn inv_035_native_error_code_is_credential_sanitized() {
+        let credential = CredentialValue::new(b"key_loop".to_vec());
+        let evidence = TerminalEvidence::ProviderError(ProviderErrorEvidence {
+            exchange: ExchangeFacts::default(),
+            reported_model: None,
+            kind: ProviderErrorKind::Unrecognized,
+            native: NativeErrorFacts {
+                error_token: None,
+                error_code: Some("echo-key_loop".to_string()),
+                message: None,
+            },
+        });
+
+        let TerminalEvidence::ProviderError(error) = redact_evidence(evidence, &credential) else {
+            panic!("provider error remains provider error");
+        };
+        assert_eq!(error.native.error_code.as_deref(), Some("echo-[redacted]"));
     }
 
     #[test]

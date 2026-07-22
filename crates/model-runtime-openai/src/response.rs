@@ -239,10 +239,11 @@ pub(crate) fn decode_buffered_response<C: Clone>(
     };
     let mut finish = map_finish(finish_token, stop_sequences_declared);
     if matches!(finish, FinishReason::Unrecognized { .. }) {
-        return unintelligible(
+        return unintelligible_after_finish(
             "success response carries an unrecognized finish_reason".to_string(),
             exchange,
             reported_model,
+            finish,
             usage,
         );
     }
@@ -313,6 +314,22 @@ fn unintelligible(
         exchange,
         reported_model,
         finish_reported: None,
+        usage,
+    })
+}
+
+fn unintelligible_after_finish(
+    detail: String,
+    exchange: ExchangeFacts,
+    reported_model: Option<ProviderReportedModel>,
+    finish_reported: FinishReason,
+    usage: TokenUsage,
+) -> TerminalEvidence {
+    TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+        cause: LossCause::ResponseUnintelligible { detail },
+        exchange,
+        reported_model,
+        finish_reported: Some(finish_reported),
         usage,
     })
 }
@@ -566,7 +583,15 @@ mod tests {
                 "arguments":"{\"city\":"}}]},"finish_reason":"length"}]}"#,
         );
 
-        assert!(matches!(evidence, TerminalEvidence::BoundaryLoss(_)));
+        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
+            panic!("ambiguous finish must remain boundary-loss evidence");
+        };
+        assert_eq!(
+            loss.finish_reported,
+            Some(FinishReason::Unrecognized {
+                provider_token: "length".to_string(),
+            })
+        );
     }
 
     #[test]
@@ -766,11 +791,15 @@ mod tests {
             true,
         );
 
-        assert!(matches!(evidence, TerminalEvidence::BoundaryLoss(_)));
-        assert!(matches!(
-            map_finish("stop", true),
-            FinishReason::Unrecognized { provider_token } if provider_token == "stop"
-        ));
+        let TerminalEvidence::BoundaryLoss(loss) = evidence else {
+            panic!("ambiguous finish must remain boundary-loss evidence");
+        };
+        assert_eq!(
+            loss.finish_reported,
+            Some(FinishReason::Unrecognized {
+                provider_token: "stop".to_string(),
+            })
+        );
     }
 
     #[derive(Debug)]

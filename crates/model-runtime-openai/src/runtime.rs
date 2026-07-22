@@ -544,7 +544,9 @@ fn without_unproven_refusal(evidence: TerminalEvidence) -> TerminalEvidence {
                 reported_model: refusal.reported_model,
                 kind: ProviderErrorKind::Unrecognized,
                 native: NativeErrorFacts {
-                    error_token: Some("refusal".to_string()),
+                    // Refusal came from `finish_reason` or `message.refusal`,
+                    // not from a native error-envelope token.
+                    error_token: None,
                     error_code: None,
                     message: None,
                 },
@@ -1535,9 +1537,9 @@ mod tests {
     use serde::Serialize;
     use signalbox_model_runtime::{
         AssistantPart, CancellationSignal, CompletionEvidence, CompletionFinish, CredentialValue,
-        ExchangeFacts, LossCause, Observation, ObservationFact, ObservationSink, PreparationDefect,
-        RefusalEvidence, SseFraming, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal,
-        ToolName,
+        ExchangeFacts, LossCause, NativeErrorFacts, Observation, ObservationFact, ObservationSink,
+        PreparationDefect, RefusalEvidence, SseFraming, TerminalEvidence, TokenUsage, ToolCallId,
+        ToolCallProposal, ToolName,
     };
 
     use super::{
@@ -1838,7 +1840,7 @@ mod tests {
         let TerminalEvidence::ProviderError(error) = without_unproven_refusal(refusal) else {
             panic!("unproven refusal must use the non-refusal known-failure mapping");
         };
-        assert_eq!(error.native.error_token.as_deref(), Some("refusal"));
+        assert_eq!(error.native, NativeErrorFacts::default());
     }
 
     struct SerializationFails;
