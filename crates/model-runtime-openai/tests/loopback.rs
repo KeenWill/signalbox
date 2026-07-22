@@ -265,9 +265,9 @@ async fn buffered_completion_end_to_end_sends_the_documented_request_shape() {
 async fn streamed_completion_end_to_end_emits_deltas_and_gates_on_done() {
     let sse: &[u8] = b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_loop_2\",\"model\":\"model-exact-1\",\
         \"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n\
-        data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n\
-        data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
-        data: {\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2}}\n\n\
+        data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_loop_2\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n\
+        data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_loop_2\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+        data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_loop_2\",\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2}}\n\n\
         data: [DONE]\n\n";
     let server = CannedServer::serving(vec![http_response(
         "200 OK",
@@ -314,8 +314,8 @@ async fn streamed_completion_end_to_end_emits_deltas_and_gates_on_done() {
 async fn prepared_capability_keeps_its_originating_stream_settings() {
     let sse: &[u8] = b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_origin\",\"model\":\"model-exact-1\",\
         \"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"}}]}\n\n\
-        data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
-        data: {\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n\
+        data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_origin\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+        data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_origin\",\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n\
         data: [DONE]\n\n";
     let server = CannedServer::serving(vec![http_response(
         "200 OK",
@@ -351,6 +351,27 @@ async fn prepared_capability_keeps_its_originating_stream_settings() {
         vec![AssistantPart::Text("hi".to_string())]
     );
     assert_eq!(server.recorded_requests().len(), 1);
+}
+
+#[tokio::test]
+async fn declared_stop_sequence_keeps_the_stop_finish_ambiguous() {
+    let body = br#"{"id":"chatcmpl-stop","object":"chat.completion","model":"model-exact-1",
+        "choices":[{"index":0,"message":{"role":"assistant","content":"partial"},
+        "finish_reason":"stop"}]}"#;
+    let server = CannedServer::serving(vec![http_response("200 OK", &[], body)]).await;
+    let runtime = runtime_for(&server.base_url);
+    let mut stopped = operation("call-stop-ambiguity");
+    stopped.settings.stop_sequences = vec!["END".to_string()];
+
+    let (report, _) = execute(&runtime, stopped, CancellationSignal::never()).await;
+
+    let TerminalEvidence::BoundaryLoss(loss) = report.evidence else {
+        panic!("the provider does not distinguish natural and caller-declared stops");
+    };
+    assert!(matches!(
+        loss.cause,
+        LossCause::ResponseUnintelligible { .. }
+    ));
 }
 
 #[tokio::test]
@@ -801,7 +822,7 @@ async fn inv_035_api_key_rotation_is_visible_to_the_next_preparation() {
 
 #[tokio::test]
 async fn execution_redacts_with_the_exact_credential_captured_by_preparation() {
-    let body = br#"{"object":"chat.completion","model":"model-exact-1","choices":[{
+    let body = br#"{"id":"chatcmpl-captured","object":"chat.completion","model":"model-exact-1","choices":[{
         "index":0,"message":{"role":"assistant","content":"echo key_before"},
         "finish_reason":"stop"}]}"#;
     let server = CannedServer::serving(vec![http_response("200 OK", &[], body)]).await;
@@ -951,8 +972,8 @@ async fn successful_content_reflecting_the_key_is_redacted() {
 async fn streamed_observations_reflecting_the_key_are_redacted() {
     let body: &[u8] = b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl-key_loop\",\"model\":\"model-key_loop\",\
         \"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"key_loop\"}}]}\n\n\
-        data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
-        data: {\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2}}\n\n\
+        data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl-key_loop\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+        data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl-key_loop\",\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2}}\n\n\
         data: [DONE]\n\n";
     let server = CannedServer::serving(vec![http_response(
         "200 OK",
@@ -972,13 +993,13 @@ async fn streamed_observations_reflecting_the_key_are_redacted() {
 
 #[tokio::test]
 async fn json_escaped_streamed_tool_arguments_are_redacted_before_observation() {
-    let body: &[u8] = br#"data: {"object":"chat.completion.chunk","id":"chatcmpl-tool","model":"model-exact-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"token\":\"key_\\u00"}}]}}]}
+    let body: &[u8] = br#"data: {"object":"chat.completion.chunk","id":"chatcmpl-tool","model":"model-exact-1","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"token\":\"key_\\u00"}}]}}]}
 
-data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"6coop\"}"}}]}}]}
+data: {"object":"chat.completion.chunk","id":"chatcmpl-tool","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"6coop\"}"}}]}}]}
 
-data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+data: {"object":"chat.completion.chunk","id":"chatcmpl-tool","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
 
-data: {"object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":4,"completion_tokens":2}}
+data: {"object":"chat.completion.chunk","id":"chatcmpl-tool","choices":[],"usage":{"prompt_tokens":4,"completion_tokens":2}}
 
 data: [DONE]
 

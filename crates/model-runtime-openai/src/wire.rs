@@ -81,8 +81,7 @@ pub(crate) struct WireFunctionDefinition {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ChatCompletion {
-    #[serde(rename = "id")]
-    pub _id: Option<String>,
+    pub id: Option<String>,
     pub object: Option<String>,
     pub model: Option<String>,
     #[serde(default)]

@@ -72,6 +72,7 @@ struct PreparedTransport {
 struct ExecutionSettings {
     delivery: DeliveryMode,
     sse_record_limit: usize,
+    stop_sequences_declared: bool,
 }
 
 impl<A> std::fmt::Debug for OpenAiRuntime<A> {
@@ -248,6 +249,7 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
             };
         };
         let delivery = operation.delivery;
+        let stop_sequences_declared = !operation.settings.stop_sequences.is_empty();
         let request = match build_http_request(
             self.client
                 .post(self.completions_url.clone())
@@ -270,6 +272,7 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
                 settings: ExecutionSettings {
                     delivery,
                     sse_record_limit: self.sse_record_limit,
+                    stop_sequences_declared,
                 },
             },
             correlation,
@@ -311,8 +314,15 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
         if status.as_u16() == 200 {
             match settings.delivery {
                 DeliveryMode::Buffered => {
-                    self.finish_buffered(response, exchange, correlation, sink, cancellation)
-                        .await
+                    self.finish_buffered(
+                        response,
+                        exchange,
+                        correlation,
+                        sink,
+                        cancellation,
+                        settings.stop_sequences_declared,
+                    )
+                    .await
                 }
                 DeliveryMode::Streamed => {
                     self.finish_streamed(
@@ -321,7 +331,7 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
                         correlation,
                         sink,
                         cancellation,
-                        settings.sse_record_limit,
+                        &settings,
                     )
                     .await
                 }
@@ -350,13 +360,14 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
         correlation: &C,
         sink: &mut (dyn ObservationSink<C> + Send),
         cancellation: &mut CancellationSignal,
+        stop_sequences_declared: bool,
     ) -> TerminalEvidence {
         let body = match collect_response_body(response, cancellation).await {
             None => return exchange_loss(LossCause::CancellationRequested, exchange),
             Some(Err(cause)) => return exchange_loss(cause, exchange),
             Some(Ok(bytes)) => bytes,
         };
-        decode_buffered_response(&body, exchange, correlation, sink)
+        decode_buffered_response(&body, exchange, correlation, sink, stop_sequences_declared)
     }
 
     async fn finish_streamed<C: Clone + Send + Sync>(
@@ -366,10 +377,10 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
         correlation: &C,
         sink: &mut (dyn ObservationSink<C> + Send),
         cancellation: &mut CancellationSignal,
-        sse_record_limit: usize,
+        settings: &ExecutionSettings,
     ) -> TerminalEvidence {
-        let mut framing = SseFraming::new(sse_record_limit);
-        let mut decoder = StreamDecoder::new(exchange);
+        let mut framing = SseFraming::new(settings.sse_record_limit);
+        let mut decoder = StreamDecoder::new(exchange, settings.stop_sequences_declared);
         let mut body = response.bytes_stream();
         let mut streamed_bytes = 0usize;
         loop {
@@ -1449,9 +1460,33 @@ fn json_escapes_decode_to_credential(raw: &str, credential: &str) -> bool {
             't' => decoded.push('\t'),
             'u' => {
                 let digits: String = chars.by_ref().take(4).collect();
-                if digits.len() == 4
-                    && let Ok(codepoint) = u32::from_str_radix(&digits, 16)
-                    && let Some(decoded_character) = char::from_u32(codepoint)
+                if digits.len() != 4 {
+                    continue;
+                }
+                let Ok(first) = u16::from_str_radix(&digits, 16) else {
+                    continue;
+                };
+                if (0xd800..=0xdbff).contains(&first) {
+                    let mut pair = chars.clone();
+                    if pair.next() != Some('\\') || pair.next() != Some('u') {
+                        continue;
+                    }
+                    let low_digits: String = pair.by_ref().take(4).collect();
+                    let Ok(second) = u16::from_str_radix(&low_digits, 16) else {
+                        continue;
+                    };
+                    if !(0xdc00..=0xdfff).contains(&second) {
+                        continue;
+                    }
+                    let scalar = 0x1_0000
+                        + ((u32::from(first) - 0xd800) << 10)
+                        + (u32::from(second) - 0xdc00);
+                    if let Some(decoded_character) = char::from_u32(scalar) {
+                        decoded.push(decoded_character);
+                        chars = pair;
+                    }
+                } else if !(0xdc00..=0xdfff).contains(&first)
+                    && let Some(decoded_character) = char::from_u32(u32::from(first))
                 {
                     decoded.push(decoded_character);
                 }
@@ -1642,6 +1677,16 @@ mod tests {
     }
 
     #[test]
+    fn surrogate_pair_credential_in_a_malformed_fallback_body_is_redacted() {
+        let credential = CredentialValue::new("key_🔑".as_bytes().to_vec());
+
+        assert_eq!(
+            redact_native_message(r#"gateway key_\ud83d\udd11"#.to_string(), &credential),
+            r#""[redacted]""#
+        );
+    }
+
+    #[test]
     fn inv_035_split_json_escaped_credentials_are_redacted_before_tool_deltas_leave() {
         let credential = CredentialValue::new(b"key_loop".to_vec());
         let mut observed = Vec::new();
@@ -1809,9 +1854,9 @@ mod tests {
     #[test]
     fn terminal_record_in_budget_wins_over_coalesced_trailing_bytes() {
         let mut bytes = b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
-            \"model\":\"model-exact-1\",\"choices\":[{\"index\":0,\"delta\":{},\
+            \"model\":\"model-exact-1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\
             \"finish_reason\":\"stop\"}]}\n\n\
-            data: {\"object\":\"chat.completion.chunk\",\"choices\":[],\
+            data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[],\
             \"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n\
             data: [DONE]\n\n"
             .to_vec();
@@ -1819,7 +1864,7 @@ mod tests {
         bytes.extend_from_slice(b"coalesced trailing bytes");
         let mut streamed_bytes = MAX_STREAMED_RESPONSE_BYTES - terminal_len;
         let mut framing = SseFraming::new(1024);
-        let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+        let mut decoder = StreamDecoder::new(ExchangeFacts::default(), false);
         let mut observations = Vec::new();
 
         let evidence = process_streamed_chunk(

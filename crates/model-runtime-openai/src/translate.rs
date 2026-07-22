@@ -37,6 +37,7 @@ pub(crate) fn build_request<C>(
             detail: error.to_string(),
         });
     }
+    validate_function_names(operation)?;
     if operation.settings.max_output_tokens == 0 {
         return Err(PreparationFailure::UnsupportedOperation {
             detail: "max_output_tokens must be at least 1".to_string(),
@@ -91,6 +92,40 @@ pub(crate) fn build_request<C>(
             include_usage: true,
         }),
     })
+}
+
+fn validate_function_names<C>(operation: &ModelOperation<C>) -> Result<(), PreparationFailure> {
+    for tool in &operation.tools {
+        validate_function_name(tool.name.as_str(), "tool")?;
+    }
+    if let Some(contract) = &operation.output_contract {
+        validate_function_name(contract.name.as_str(), "structured-output contract")?;
+    }
+    for message in &operation.messages {
+        for part in &message.parts {
+            if let MessagePart::ToolCall(call) = part {
+                validate_function_name(call.name.as_str(), "replayed tool call")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_function_name(name: &str, subject: &str) -> Result<(), PreparationFailure> {
+    let valid = !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'));
+    if valid {
+        Ok(())
+    } else {
+        Err(PreparationFailure::UnsupportedOperation {
+            detail: format!(
+                "OpenAI {subject} name must contain 1 through 64 ASCII letters, digits, underscores, or hyphens"
+            ),
+        })
+    }
 }
 
 fn validate_tool_history(messages: &[ConversationMessage]) -> Result<(), PreparationFailure> {
@@ -643,6 +678,54 @@ mod tests {
         assert!(matches!(
             failure,
             PreparationFailure::UnsupportedOperation { .. }
+        ));
+    }
+
+    #[test]
+    fn an_empty_tool_name_is_rejected_before_any_send() {
+        let mut operation = operation("call-empty-tool-name");
+        operation.tools = vec![ToolDefinition::with_schema(
+            "",
+            "Invalid empty name.",
+            serde_json::json!({"type": "object"}),
+        )];
+
+        assert!(matches!(
+            build_request(&operation),
+            Err(PreparationFailure::UnsupportedOperation { .. })
+        ));
+    }
+
+    #[test]
+    fn an_overlong_contract_name_is_rejected_before_any_send() {
+        let mut operation = operation("call-long-contract-name");
+        operation.output_contract = Some(StructuredOutputContract {
+            name: ToolName::new("a".repeat(65)),
+            description: "Invalid overlong name.".to_string(),
+            schema: serde_json::json!({"type": "object"}),
+        });
+
+        assert!(matches!(
+            build_request(&operation),
+            Err(PreparationFailure::UnsupportedOperation { .. })
+        ));
+    }
+
+    #[test]
+    fn invalid_replayed_function_name_characters_are_rejected_before_any_send() {
+        let mut operation = operation("call-invalid-replayed-name");
+        operation.messages = vec![ConversationMessage {
+            role: ConversationRole::Assistant,
+            parts: vec![MessagePart::ToolCall(ToolCallProposal {
+                id: ToolCallId::new("call_a1"),
+                name: ToolName::new("not/a/function"),
+                arguments_json: "{}".to_string(),
+            })],
+        }];
+
+        assert!(matches!(
+            build_request(&operation),
+            Err(PreparationFailure::UnsupportedOperation { .. })
         ));
     }
 

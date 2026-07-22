@@ -47,6 +47,8 @@ pub(crate) struct StreamDecoder {
     exchange: ExchangeFacts,
     completion_id: Option<String>,
     reported_model: Option<ProviderReportedModel>,
+    stop_sequences_declared: bool,
+    saw_assistant_role: bool,
     usage: TokenUsage,
     finish: Option<FinishReason>,
     content_text: String,
@@ -57,11 +59,13 @@ pub(crate) struct StreamDecoder {
 }
 
 impl StreamDecoder {
-    pub(crate) fn new(exchange: ExchangeFacts) -> Self {
+    pub(crate) fn new(exchange: ExchangeFacts, stop_sequences_declared: bool) -> Self {
         Self {
             exchange,
             completion_id: None,
             reported_model: None,
+            stop_sequences_declared,
+            saw_assistant_role: false,
             usage: TokenUsage::unreported(),
             finish: None,
             content_text: String::new(),
@@ -110,14 +114,15 @@ impl StreamDecoder {
             ));
         }
         let usage_only = chunk.choices.is_empty();
-        if let Some(id) = chunk.id {
-            match &self.completion_id {
-                None => self.completion_id = Some(id),
-                Some(existing) if existing != &id => {
-                    return self.violation("stream chunks report conflicting completion ids");
-                }
-                Some(_) => {}
+        let Some(id) = chunk.id else {
+            return self.violation("stream chunk carries no completion id");
+        };
+        match &self.completion_id {
+            None => self.completion_id = Some(id),
+            Some(existing) if existing != &id => {
+                return self.violation("stream chunks report conflicting completion ids");
             }
+            Some(_) => {}
         }
         if let Some(model) = chunk.model {
             let model = ProviderReportedModel::new(model);
@@ -165,12 +170,13 @@ impl StreamDecoder {
                 ));
             }
             if let Some(delta) = choice.delta {
-                if let Some(role) = delta.role
-                    && role != "assistant"
-                {
-                    return self.violation(format!(
-                        "stream delta carries role {role:?}; assistant is required"
-                    ));
+                if let Some(role) = delta.role {
+                    if role != "assistant" {
+                        return self.violation(format!(
+                            "stream delta carries role {role:?}; assistant is required"
+                        ));
+                    }
+                    self.saw_assistant_role = true;
                 }
                 if let Some(text) = delta.content
                     && !text.is_empty()
@@ -263,7 +269,7 @@ impl StreamDecoder {
                 }
             }
             if let Some(token) = choice.finish_reason {
-                let mut finish = map_finish(&token);
+                let mut finish = map_finish(&token, self.stop_sequences_declared);
                 if matches!(finish, FinishReason::Unrecognized { .. }) {
                     return self.violation("stream carries an unrecognized finish_reason");
                 }
@@ -405,6 +411,9 @@ impl StreamDecoder {
     }
 
     fn apply_done(&mut self) -> StreamStep {
+        if !self.saw_assistant_role {
+            return self.violation("stream terminated without establishing the assistant role");
+        }
         if self.reported_model.is_none() {
             return self.violation("stream terminated without a model identity");
         }
@@ -482,8 +491,15 @@ mod tests {
     /// Runs byte chunks through real SSE framing and the decoder, exactly as
     /// the runtime does, correlating to `"call-1"`.
     fn drive(chunks: &[&[u8]]) -> (Option<TerminalEvidence>, Vec<Observation<String>>) {
+        drive_with_stop_sequences(chunks, false)
+    }
+
+    fn drive_with_stop_sequences(
+        chunks: &[&[u8]],
+        stop_sequences_declared: bool,
+    ) -> (Option<TerminalEvidence>, Vec<Observation<String>>) {
         let mut framing = SseFraming::new(1024 * 1024);
-        let mut decoder = StreamDecoder::new(exchange());
+        let mut decoder = StreamDecoder::new(exchange(), stop_sequences_declared);
         let mut observations: Vec<Observation<String>> = Vec::new();
         let correlation = "call-1".to_string();
         let mut terminal = None;
@@ -507,7 +523,7 @@ mod tests {
     /// loss evidence for the resulting decoder state.
     fn drive_to_eof(chunks: &[&[u8]]) -> (TerminalEvidence, Vec<Observation<String>>) {
         let mut framing = SseFraming::new(1024 * 1024);
-        let mut decoder = StreamDecoder::new(exchange());
+        let mut decoder = StreamDecoder::new(exchange(), false);
         let mut observations: Vec<Observation<String>> = Vec::new();
         let correlation = "call-1".to_string();
         for chunk in chunks {
@@ -530,7 +546,7 @@ mod tests {
     }
 
     fn final_usage_chunk() -> &'static [u8] {
-        b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[],\
+        b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[],\
           \"usage\":{\"prompt_tokens\":25,\"completion_tokens\":7}}\n\n"
     }
 
@@ -549,10 +565,10 @@ mod tests {
     fn content_stream_gated_on_done_completes_with_assembled_content() {
         let (terminal, observations) = drive(&[
             first_chunk(),
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hel\"}}]}\n\n",
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"}}]}\n\n",
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":25,\"completion_tokens\":7}}\n\n",
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hel\"}}]}\n\n",
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"}}]}\n\n",
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[],\"usage\":{\"prompt_tokens\":25,\"completion_tokens\":7}}\n\n",
             b"data: [DONE]\n\n",
         ]);
 
@@ -623,14 +639,14 @@ mod tests {
     fn tool_arguments_accumulate_across_chunks_into_one_proposal() {
         let (terminal, observations) = drive(&[
             first_chunk(),
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
               \"id\":\"call_1\",\"type\":\"function\",\
               \"function\":{\"name\":\"lookup\",\"arguments\":\"\"}}]}}]}\n\n",
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
               \"function\":{\"arguments\":\"{\\\"city\\\":\"}}]}}]}\n\n",
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
               \"function\":{\"arguments\":\"\\\"Oslo\\\"}\"}}]}}]}\n\n",
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{},\
               \"finish_reason\":\"tool_calls\"}]}\n\n",
             final_usage_chunk(),
             b"data: [DONE]\n\n",
@@ -666,10 +682,10 @@ mod tests {
     fn ambiguous_length_finish_is_a_protocol_violation() {
         let (terminal, _) = drive(&[
             first_chunk(),
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
               \"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\
               \"arguments\":\"{\\\"city\\\":\"}}]}}]}\n\n",
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{},\
               \"finish_reason\":\"length\"}]}\n\n",
         ]);
 
@@ -680,7 +696,7 @@ mod tests {
     fn eof_without_done_is_explicit_incomplete_stream_evidence_with_partials() {
         let (evidence, _) = drive_to_eof(&[
             first_chunk(),
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n",
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n",
         ]);
 
         let TerminalEvidence::BoundaryLoss(loss) = evidence else {
@@ -705,7 +721,7 @@ mod tests {
         // finish reason must still classify as incomplete, not success.
         let (evidence, _) = drive_to_eof(&[
             first_chunk(),
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done-ish\"},\
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done-ish\"},\
               \"finish_reason\":\"stop\"}]}\n\n",
         ]);
 
@@ -751,8 +767,8 @@ mod tests {
     fn refusal_deltas_accumulate_into_refusal_evidence_at_done() {
         let (terminal, _) = drive(&[
             first_chunk(),
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"refusal\":\"I cannot \"}}]}\n\n",
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"refusal\":\"help with that.\"},\
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"refusal\":\"I cannot \"}}]}\n\n",
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"refusal\":\"help with that.\"},\
               \"finish_reason\":\"stop\"}]}\n\n",
             final_usage_chunk(),
             b"data: [DONE]\n\n",
@@ -771,7 +787,7 @@ mod tests {
     fn content_filter_finish_is_refusal_evidence_at_done() {
         let (terminal, _) = drive(&[
             first_chunk(),
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\
               \"finish_reason\":\"content_filter\"}]}\n\n",
             final_usage_chunk(),
             b"data: [DONE]\n\n",
@@ -850,7 +866,7 @@ mod tests {
     fn a_second_choice_index_is_a_protocol_violation() {
         let (terminal, _) = drive(&[
             first_chunk(),
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":1,\"delta\":{\"content\":\"ghost\"}}]}\n\n",
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":1,\"delta\":{\"content\":\"ghost\"}}]}\n\n",
         ]);
 
         let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
@@ -866,7 +882,7 @@ mod tests {
     fn a_missing_choice_index_is_a_protocol_violation() {
         let (terminal, _) = drive(&[
             first_chunk(),
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\"ghost\"}}]}\n\n",
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"delta\":{\"content\":\"ghost\"}}]}\n\n",
         ]);
 
         let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
@@ -882,10 +898,10 @@ mod tests {
     fn malformed_streamed_tool_arguments_are_preserved_for_typed_decoding() {
         let (terminal, _) = drive(&[
             first_chunk(),
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
               \"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\
               \"arguments\":\"{\\\"city\\\":\"}}]}}]}\n\n",
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{},\
               \"finish_reason\":\"tool_calls\"}]}\n\n",
             final_usage_chunk(),
             b"data: [DONE]\n\n",
@@ -916,7 +932,7 @@ mod tests {
     fn a_streamed_tool_call_with_an_unrecognized_type_is_a_protocol_violation() {
         let (terminal, _) = drive(&[
             first_chunk(),
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
               \"id\":\"call_1\",\"type\":\"custom\",\
               \"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]}}]}\n\n",
         ]);
@@ -934,8 +950,8 @@ mod tests {
     fn streamed_refusal_finish_observation_matches_the_terminal_outcome() {
         let (terminal, observations) = drive(&[
             first_chunk(),
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"refusal\":\"No.\"}}]}\n\n",
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"refusal\":\"No.\"}}]}\n\n",
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
             final_usage_chunk(),
             b"data: [DONE]\n\n",
         ]);
@@ -955,9 +971,9 @@ mod tests {
     fn tool_proposals_are_observed_before_the_finish_fact() {
         let (_, observations) = drive(&[
             first_chunk(),
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
               \"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"ping\",\"arguments\":\"{}\"}}]}}]}\n\n",
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{},\
               \"finish_reason\":\"tool_calls\"}]}\n\n",
             b"data: [DONE]\n\n",
         ]);
@@ -1011,10 +1027,20 @@ mod tests {
     }
 
     #[test]
+    fn a_stream_chunk_without_a_completion_id_is_a_protocol_violation() {
+        let (terminal, _) = drive(&[
+            b"data: {\"object\":\"chat.completion.chunk\",\"model\":\"model-exact-1\",\
+              \"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n",
+        ]);
+
+        assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
+    }
+
+    #[test]
     fn a_non_assistant_streamed_role_is_a_protocol_violation() {
         let (terminal, _) = drive(&[
             first_chunk(),
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"user\"}}]}\n\n",
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"user\"}}]}\n\n",
         ]);
 
         let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
@@ -1027,11 +1053,39 @@ mod tests {
     }
 
     #[test]
+    fn a_stream_without_an_assistant_role_is_a_protocol_violation() {
+        let (terminal, _) = drive(&[
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
+              \"model\":\"model-exact-1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n",
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\
+              \"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            final_usage_chunk(),
+            b"data: [DONE]\n\n",
+        ]);
+
+        assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
+    }
+
+    #[test]
+    fn stop_with_a_declared_sequence_is_a_protocol_violation() {
+        let (terminal, _) = drive_with_stop_sequences(
+            &[
+                first_chunk(),
+                b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
+                  \"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            ],
+            true,
+        );
+
+        assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
+    }
+
+    #[test]
     fn choice_material_after_the_finish_reason_is_a_protocol_violation() {
         let (terminal, _) = drive(&[
             first_chunk(),
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"late\"}}]}\n\n",
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"late\"}}]}\n\n",
         ]);
 
         let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
@@ -1047,9 +1101,9 @@ mod tests {
     fn content_after_tool_fragments_is_a_protocol_violation() {
         let (terminal, _) = drive(&[
             first_chunk(),
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
               \"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]}}]}\n\n",
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"late text\"}}]}\n\n",
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"late text\"}}]}\n\n",
         ]);
 
         let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
@@ -1065,9 +1119,9 @@ mod tests {
     fn empty_streamed_tool_arguments_are_preserved_raw_for_typed_decoding() {
         let (terminal, _) = drive(&[
             first_chunk(),
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
               \"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"ping\",\"arguments\":\"\"}}]}}]}\n\n",
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{},\
               \"finish_reason\":\"tool_calls\"}]}\n\n",
             final_usage_chunk(),
             b"data: [DONE]\n\n",
@@ -1090,9 +1144,9 @@ mod tests {
     fn absent_streamed_tool_arguments_are_a_protocol_violation() {
         let (terminal, _) = drive(&[
             first_chunk(),
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
               \"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"ping\"}}]}}]}\n\n",
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
         ]);
 
         let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
@@ -1108,7 +1162,7 @@ mod tests {
     fn a_streamed_tool_call_without_an_index_is_a_protocol_violation() {
         let (terminal, _) = drive(&[
             first_chunk(),
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\
               \"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"ping\",\
               \"arguments\":\"{}\"}}]}}]}\n\n",
         ]);
@@ -1120,14 +1174,14 @@ mod tests {
     fn streamed_tool_content_and_finish_reason_must_agree() {
         let (tool_with_stop, _) = drive(&[
             first_chunk(),
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
               \"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"ping\",\
               \"arguments\":\"{}\"}}]}}]}\n\n",
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
         ]);
         let (tool_finish_without_tool, _) = drive(&[
             first_chunk(),
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{},\
               \"finish_reason\":\"tool_calls\"}]}\n\n",
         ]);
 
@@ -1145,9 +1199,9 @@ mod tests {
     fn nonfinal_partial_usage_chunk_reports_usage_and_keeps_streaming() {
         let (terminal, observations) = drive(&[
             first_chunk(),
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":9,\
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[],\"usage\":{\"prompt_tokens\":9,\
               \"prompt_tokens_details\":{\"cached_tokens\":4}}}\n\n",
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
             final_usage_chunk(),
             b"data: [DONE]\n\n",
         ]);
@@ -1167,7 +1221,7 @@ mod tests {
     #[test]
     fn multiple_choices_in_one_chunk_are_a_protocol_violation() {
         let (terminal, _) = drive(&[
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"first\"}},{\"index\":0,\"delta\":{\"content\":\"second\"}}]}\n\n",
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"first\"}},{\"index\":0,\"delta\":{\"content\":\"second\"}}]}\n\n",
         ]);
 
         assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
@@ -1184,7 +1238,7 @@ mod tests {
     fn done_without_final_usage_chunk_is_a_protocol_violation() {
         let (terminal, _) = drive(&[
             first_chunk(),
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
             b"data: [DONE]\n\n",
         ]);
 
@@ -1194,7 +1248,7 @@ mod tests {
     #[test]
     fn done_without_model_identity_is_a_protocol_violation() {
         let (terminal, _) = drive(&[
-            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
             final_usage_chunk(),
             b"data: [DONE]\n\n",
         ]);

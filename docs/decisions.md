@@ -9,6 +9,30 @@ that constrains several components — require a full record under
 [decisions/](decisions/README.md) instead. Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-21 — Distinct provider error type and code evidence
+
+**Context.** Provider error envelopes can carry both a categorical type token
+and a separate machine-readable code. OpenAI uses both fields and either may
+carry the only useful native classification fact, while Anthropic currently
+exposes only one native type token. The provider-neutral runtime evidence needs
+to preserve that distinction without implying that every adapter reports both.
+
+**Decision.** `NativeErrorFacts` carries independent optional `error_token` and
+`error_code` fields. Adapters retain each native field in its matching slot and
+leave an absent provider concept as `None`; classification may consult the
+provider fields in its documented precedence order without collapsing their
+evidence representation.
+
+**Rejected alternatives.** Combining both values into one token would discard
+their source distinction and make contradictory envelopes impossible to audit.
+Adding an OpenAI-only terminal evidence type would leak provider wire shape into
+the neutral runtime contract. Treating absence as an empty string would invent a
+reported value.
+
+**Affects.** `signalbox-model-runtime::NativeErrorFacts`, Anthropic and OpenAI
+error evidence construction, redaction, classification tests, and adapter
+loopback tests. It changes no provider-error category or retry policy.
+
 ## 2026-07-21 — OpenAI adapter HTTP and codec dependencies
 
 **Context.** The OpenAI Chat Completions adapter needs the same narrow physical

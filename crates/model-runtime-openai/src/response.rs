@@ -16,15 +16,16 @@ use crate::wire::{ChatCompletion, WireResponseToolCall, WireUsage};
 /// the output, which is its refusal outcome, and the response's `refusal`
 /// payload (when present) is carried as refusal evidence. The provider does
 /// not distinguish a natural stop from a caller stop-sequence hit — both
-/// arrive as `stop` — so [`FinishReason::StopSequence`] is never produced
-/// here. `length` is also left unrecognized because OpenAI uses the same
+/// arrive as `stop` — so a `stop` is normalized to [`FinishReason::EndTurn`]
+/// only when the request declared no stop sequences. Otherwise its native
+/// token is preserved as unrecognized boundary loss. `length` is also left unrecognized because OpenAI uses the same
 /// token for either the requested output ceiling or the model context limit;
 /// collapsing those distinct dispositions would invent evidence. The legacy
 /// `function_call` token is unrecognized because this adapter never requests
 /// legacy functions.
-pub(crate) fn map_finish(token: &str) -> FinishReason {
+pub(crate) fn map_finish(token: &str, stop_sequences_declared: bool) -> FinishReason {
     match token {
-        "stop" => FinishReason::EndTurn,
+        "stop" if !stop_sequences_declared => FinishReason::EndTurn,
         "tool_calls" => FinishReason::ToolUse,
         "content_filter" => FinishReason::Refusal,
         other => FinishReason::Unrecognized {
@@ -92,6 +93,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
     exchange: ExchangeFacts,
     correlation: &C,
     sink: &mut (dyn ObservationSink<C> + Send),
+    stop_sequences_declared: bool,
 ) -> TerminalEvidence {
     let completion: ChatCompletion = match serde_json::from_slice(body) {
         Ok(completion) => completion,
@@ -110,6 +112,18 @@ pub(crate) fn decode_buffered_response<C: Clone>(
                 "success response carries object {:?}; chat.completion is required",
                 completion.object.as_deref().unwrap_or("<absent>")
             ),
+            exchange,
+            completion.model.map(ProviderReportedModel::new),
+            completion
+                .usage
+                .as_ref()
+                .map(convert_usage)
+                .unwrap_or_default(),
+        );
+    }
+    if completion.id.is_none() {
+        return unintelligible(
+            "success response carries no completion id".to_string(),
             exchange,
             completion.model.map(ProviderReportedModel::new),
             completion
@@ -223,7 +237,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             usage,
         );
     };
-    let mut finish = map_finish(finish_token);
+    let mut finish = map_finish(finish_token, stop_sequences_declared);
     if matches!(finish, FinishReason::Unrecognized { .. }) {
         return unintelligible(
             "success response carries an unrecognized finish_reason".to_string(),
@@ -308,9 +322,9 @@ mod tests {
     use expect_test::expect;
     use signalbox_expect_table::table;
     use signalbox_model_runtime::{
-        AssistantPart, CompletionFinish, ExchangeFacts, LossCause, Observation, ObservationFact,
-        ProviderReportedModel, ProviderRequestId, TerminalEvidence, TokenUsage, ToolCallId,
-        ToolCallProposal, ToolName,
+        AssistantPart, CompletionFinish, ExchangeFacts, FinishReason, LossCause, Observation,
+        ObservationFact, ProviderReportedModel, ProviderRequestId, TerminalEvidence, TokenUsage,
+        ToolCallId, ToolCallProposal, ToolName,
     };
 
     use super::{decode_buffered_response, map_finish};
@@ -325,12 +339,20 @@ mod tests {
     /// Decodes the body against canonical exchange facts, collecting
     /// observations correlated to `"call-1"`.
     fn decode(body: &str) -> (TerminalEvidence, Vec<Observation<String>>) {
+        decode_with_stop_sequences(body, false)
+    }
+
+    fn decode_with_stop_sequences(
+        body: &str,
+        stop_sequences_declared: bool,
+    ) -> (TerminalEvidence, Vec<Observation<String>>) {
         let mut observations: Vec<Observation<String>> = Vec::new();
         let evidence = decode_buffered_response(
             body.as_bytes(),
             exchange(),
             &"call-1".to_string(),
             &mut observations,
+            stop_sequences_declared,
         );
         (evidence, observations)
     }
@@ -515,14 +537,14 @@ mod tests {
     #[test]
     fn tool_content_and_finish_reason_must_agree() {
         let (tool_with_stop, _) = decode(
-            r#"{"object":"chat.completion","model":"model-exact-1",
+            r#"{"id":"chatcmpl_1","object":"chat.completion","model":"model-exact-1",
                 "choices":[{"index":0,
                 "message":{"role":"assistant","tool_calls":[{"id":"call_1",
                 "type":"function","function":{"name":"ping","arguments":"{}"}}]},
                 "finish_reason":"stop"}]}"#,
         );
         let (tool_finish_without_tool, _) = decode(
-            r#"{"object":"chat.completion","model":"model-exact-1",
+            r#"{"id":"chatcmpl_1","object":"chat.completion","model":"model-exact-1",
                 "choices":[{"index":0,
                 "message":{"role":"assistant","content":"hi"},
                 "finish_reason":"tool_calls"}]}"#,
@@ -538,7 +560,7 @@ mod tests {
     #[test]
     fn ambiguous_length_finish_is_boundary_loss_even_with_partial_tool_material() {
         let (evidence, _) = decode(
-            r#"{"object":"chat.completion","model":"model-exact-1","choices":[{
+            r#"{"id":"chatcmpl_1","object":"chat.completion","model":"model-exact-1","choices":[{
                 "index":0,"message":{"role":"assistant","tool_calls":[{
                 "id":"call_1","type":"function","function":{"name":"lookup",
                 "arguments":"{\"city\":"}}]},"finish_reason":"length"}]}"#,
@@ -679,6 +701,7 @@ mod tests {
     fn a_success_response_without_model_identity_is_boundary_loss() {
         let (evidence, observations) = decode(
             r#"{
+                "id": "chatcmpl_1",
                 "object": "chat.completion",
                 "choices": [{
                     "index": 0,
@@ -710,7 +733,7 @@ mod tests {
     #[test]
     fn duplicate_tool_call_ids_are_boundary_loss() {
         let (evidence, _) = decode(
-            r#"{"object":"chat.completion","model":"model-exact-1",
+            r#"{"id":"chatcmpl_1","object":"chat.completion","model":"model-exact-1",
                 "choices":[{"index":0,
                 "message":{"role":"assistant","tool_calls":[
                     {"id":"call_1","type":"function",
@@ -721,6 +744,33 @@ mod tests {
         );
 
         assert!(matches!(evidence, TerminalEvidence::BoundaryLoss(_)));
+    }
+
+    #[test]
+    fn a_success_response_without_a_completion_id_is_boundary_loss() {
+        let (evidence, _) = decode(
+            r#"{"object":"chat.completion","model":"model-exact-1","choices":[{
+                "index":0,"message":{"role":"assistant","content":"hi"},
+                "finish_reason":"stop"}]}"#,
+        );
+
+        assert!(matches!(evidence, TerminalEvidence::BoundaryLoss(_)));
+    }
+
+    #[test]
+    fn stop_with_a_declared_sequence_preserves_boundary_ambiguity() {
+        let (evidence, _) = decode_with_stop_sequences(
+            r#"{"id":"chatcmpl_1","object":"chat.completion","model":"model-exact-1",
+                "choices":[{"index":0,"message":{"role":"assistant","content":"partial"},
+                "finish_reason":"stop"}]}"#,
+            true,
+        );
+
+        assert!(matches!(evidence, TerminalEvidence::BoundaryLoss(_)));
+        assert!(matches!(
+            map_finish("stop", true),
+            FinishReason::Unrecognized { provider_token } if provider_token == "stop"
+        ));
     }
 
     #[derive(Debug)]
@@ -739,7 +789,7 @@ mod tests {
             .iter()
             .map(|token| FinishRow {
                 token,
-                finish: format!("{:?}", map_finish(token)),
+                finish: format!("{:?}", map_finish(token, false)),
             })
             .collect()
     }
