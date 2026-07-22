@@ -266,10 +266,11 @@ pub(crate) fn decode_buffered_response<C: Clone>(
     if (matches!(finish, FinishReason::ToolUse) && !has_tool_calls)
         || (has_tool_calls && !matches!(finish, FinishReason::ToolUse))
     {
-        return unintelligible(
+        return unintelligible_after_finish(
             "tool-call content does not match the reported finish_reason".to_string(),
             exchange,
             reported_model,
+            finish,
             usage,
         );
     }
@@ -573,11 +574,19 @@ mod tests {
                 "finish_reason":"tool_calls"}]}"#,
         );
 
-        assert!(matches!(tool_with_stop, TerminalEvidence::BoundaryLoss(_)));
-        assert!(matches!(
-            tool_finish_without_tool,
-            TerminalEvidence::BoundaryLoss(_)
-        ));
+        let TerminalEvidence::BoundaryLoss(tool_with_stop) = tool_with_stop else {
+            panic!("tool content with a stop finish must be boundary loss");
+        };
+        assert_eq!(tool_with_stop.finish_reported, Some(FinishReason::EndTurn));
+
+        let TerminalEvidence::BoundaryLoss(tool_finish_without_tool) = tool_finish_without_tool
+        else {
+            panic!("a tool finish without tool content must be boundary loss");
+        };
+        assert_eq!(
+            tool_finish_without_tool.finish_reported,
+            Some(FinishReason::ToolUse)
+        );
     }
 
     #[test]

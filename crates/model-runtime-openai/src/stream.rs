@@ -94,6 +94,12 @@ impl StreamDecoder {
             }
         };
         if chunk.error.is_some()
+            && let (Some(existing), Some(reported)) = (&self.completion_id, &chunk.id)
+            && existing != reported
+        {
+            return self.violation("stream chunks report conflicting completion ids");
+        }
+        if chunk.error.is_some()
             && let Some(terminal) =
                 self.apply_reported_model(chunk.model.as_deref(), correlation, sink)
         {
@@ -318,6 +324,7 @@ impl StreamDecoder {
                     // evidence (the buffered path normalizes identically).
                     finish = FinishReason::Refusal;
                 }
+                self.finish = Some(finish.clone());
                 let has_tool_calls = !self.tool_builders.is_empty();
                 if (matches!(finish, FinishReason::ToolUse) && !has_tool_calls)
                     || (has_tool_calls && !matches!(finish, FinishReason::ToolUse))
@@ -330,7 +337,6 @@ impl StreamDecoder {
                 if let Some(step) = self.finalize_tools(correlation, sink) {
                     return step;
                 }
-                self.finish = Some(finish.clone());
                 Self::emit(correlation, sink, ObservationFact::FinishReported(finish));
             }
         }
@@ -1010,6 +1016,23 @@ mod tests {
     }
 
     #[test]
+    fn a_conflicting_completion_id_on_an_error_record_is_protocol_loss() {
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"id\":\"chatcmpl_other\",\"error\":{\"message\":\"quota exhausted\",\
+              \"type\":\"insufficient_quota\",\"code\":\"insufficient_quota\"}}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("a conflicting error completion must not become ordinary provider failure");
+        };
+        assert!(matches!(
+            loss.cause,
+            LossCause::StreamProtocolViolation { .. }
+        ));
+    }
+
+    #[test]
     fn mid_stream_error_type_classifies_when_code_is_absent() {
         let (terminal, _) = drive(&[
             first_chunk(),
@@ -1407,14 +1430,20 @@ mod tests {
               \"finish_reason\":\"tool_calls\"}]}\n\n",
         ]);
 
-        assert!(matches!(
-            tool_with_stop,
-            Some(TerminalEvidence::BoundaryLoss(_))
-        ));
-        assert!(matches!(
-            tool_finish_without_tool,
-            Some(TerminalEvidence::BoundaryLoss(_))
-        ));
+        let Some(TerminalEvidence::BoundaryLoss(tool_with_stop)) = tool_with_stop else {
+            panic!("tool content with a stop finish must be boundary loss");
+        };
+        assert_eq!(tool_with_stop.finish_reported, Some(FinishReason::EndTurn));
+
+        let Some(TerminalEvidence::BoundaryLoss(tool_finish_without_tool)) =
+            tool_finish_without_tool
+        else {
+            panic!("a tool finish without tool content must be boundary loss");
+        };
+        assert_eq!(
+            tool_finish_without_tool.finish_reported,
+            Some(FinishReason::ToolUse)
+        );
     }
 
     #[test]

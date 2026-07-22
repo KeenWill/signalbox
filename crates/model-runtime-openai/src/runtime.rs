@@ -952,12 +952,19 @@ fn redact_complete_credentials_and_hold_prefix(
     if credential.is_empty() {
         return (text, String::new());
     }
-    // Include suffixes that overlap the last full match: a self-overlapping
-    // credential must not leave bytes that the next provider chunk completes.
+    // Only the tail after the last complete, non-overlapping match can become
+    // a credential when the next provider chunk arrives. A proper suffix that
+    // starts inside an already-complete match must be redacted with that match,
+    // not retained and emitted later.
+    let unmatched_tail_start = text
+        .match_indices(credential)
+        .last()
+        .map_or(0, |(start, matched)| start + matched.len());
+    let unmatched_tail = &text[unmatched_tail_start..];
     let longest_prefix = (1..credential.len())
         .rev()
         .filter(|length| credential.is_char_boundary(*length))
-        .find(|length| text.ends_with(&credential[..*length]));
+        .find(|length| unmatched_tail.ends_with(&credential[..*length]));
     let split = longest_prefix.map_or(text.len(), |length| text.len() - length);
     let pending = text.split_off(split);
     (text.replace(credential, "[redacted]"), pending)
@@ -1624,6 +1631,38 @@ mod tests {
             .collect::<String>();
         assert!(!emitted.contains("aaaa"));
         assert!(emitted.contains("[redacted]"));
+    }
+
+    #[test]
+    fn inv_035_complete_self_overlapping_credentials_are_redacted_before_suffix_retention() {
+        let credential = CredentialValue::new(b"abcab".to_vec());
+        let mut observed = Vec::new();
+        let mut sink = RedactingSink::new(&mut observed, &credential);
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::TextDelta {
+                index: 0,
+                text: "abcab".to_string(),
+            },
+        });
+        sink.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::TextDelta {
+                index: 0,
+                text: "!".to_string(),
+            },
+        });
+        sink.flush();
+        drop(sink);
+
+        let emitted = observed
+            .iter()
+            .filter_map(|observation| match &observation.fact {
+                ObservationFact::TextDelta { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(emitted, "[redacted]!");
     }
 
     #[test]
