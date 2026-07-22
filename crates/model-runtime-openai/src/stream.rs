@@ -91,7 +91,8 @@ impl StreamDecoder {
         if let Some(error) = chunk.error {
             // A mid-stream error record is a definitive provider error;
             // with no HTTP status of its own it classifies by native code.
-            let kind = classify_error(0, error.code_text().as_deref());
+            let code = error.code_text();
+            let kind = classify_error(0, code.as_deref().or(error.error_type.as_deref()));
             return StreamStep::Terminal(TerminalEvidence::ProviderError(ProviderErrorEvidence {
                 exchange: self.exchange.clone(),
                 reported_model: self.reported_model.clone(),
@@ -396,6 +397,9 @@ impl StreamDecoder {
     }
 
     fn apply_done(&mut self) -> StreamStep {
+        if self.reported_model.is_none() {
+            return self.violation("stream terminated without a model identity");
+        }
         if !self.final_usage_reported {
             return self.violation("stream terminated without the requested final usage chunk");
         }
@@ -768,6 +772,20 @@ mod tests {
     }
 
     #[test]
+    fn mid_stream_error_type_classifies_when_code_is_absent() {
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"error\":{\"message\":\"quota exhausted\",\"type\":\"insufficient_quota\"}}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::ProviderError(error)) = terminal else {
+            panic!("a mid-stream error record is definitive provider error evidence");
+        };
+        assert_eq!(error.kind, ProviderErrorKind::QuotaExhausted);
+        assert_eq!(error.native.error_code, None);
+    }
+
+    #[test]
     fn a_second_choice_index_is_a_protocol_violation() {
         let (terminal, _) = drive(&[
             first_chunk(),
@@ -1105,6 +1123,17 @@ mod tests {
         let (terminal, _) = drive(&[
             first_chunk(),
             b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            b"data: [DONE]\n\n",
+        ]);
+
+        assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
+    }
+
+    #[test]
+    fn done_without_model_identity_is_a_protocol_violation() {
+        let (terminal, _) = drive(&[
+            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            final_usage_chunk(),
             b"data: [DONE]\n\n",
         ]);
 

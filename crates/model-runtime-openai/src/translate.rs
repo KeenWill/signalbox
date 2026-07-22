@@ -48,6 +48,11 @@ pub(crate) fn build_request<C>(
             });
         }
     }
+    if operation.settings.stop_sequences.len() > 4 {
+        return Err(PreparationFailure::UnsupportedOperation {
+            detail: "Chat Completions accepts at most four stop sequences".to_string(),
+        });
+    }
     let (tools, tool_choice, parallel_tool_calls) = tools_and_choice(operation)?;
     let mut messages = Vec::new();
     if let Some(system) = &operation.system {
@@ -158,6 +163,7 @@ fn wire_messages(
     };
     let mut pending_text: Option<String> = None;
     let mut pending_tool_calls: Vec<WireRequestToolCall> = Vec::new();
+    let mut user_text_seen = false;
     for part in &message.parts {
         match part {
             MessagePart::Text(text) => {
@@ -175,6 +181,9 @@ fn wire_messages(
                 match &mut pending_text {
                     Some(pending) => pending.push_str(text),
                     None => pending_text = Some(text.clone()),
+                }
+                if role == "user" {
+                    user_text_seen = true;
                 }
             }
             MessagePart::ToolCall(proposal) => {
@@ -215,6 +224,12 @@ fn wire_messages(
                         detail: "the Chat Completions wire contract cannot mark a replayed \
                                  tool result as failed; state the failure in the result \
                                  content"
+                            .to_string(),
+                    });
+                }
+                if user_text_seen {
+                    return Err(PreparationFailure::UnsupportedOperation {
+                        detail: "Chat Completions requires replayed tool results before user text"
                             .to_string(),
                     });
                 }
@@ -605,6 +620,44 @@ mod tests {
 
         let failure = build_request(&operation)
             .expect_err("serde_json would serialize a non-finite setting as null");
+
+        assert!(matches!(
+            failure,
+            PreparationFailure::UnsupportedOperation { .. }
+        ));
+    }
+
+    #[test]
+    fn more_than_four_stop_sequences_are_rejected_before_any_send() {
+        let mut operation = operation("call-too-many-stops");
+        operation.settings.stop_sequences = (0..5).map(|index| format!("stop-{index}")).collect();
+
+        let failure = build_request(&operation)
+            .expect_err("the provider accepts no more than four stop sequences");
+
+        assert!(matches!(
+            failure,
+            PreparationFailure::UnsupportedOperation { .. }
+        ));
+    }
+
+    #[test]
+    fn replayed_tool_result_after_user_text_is_rejected_before_any_send() {
+        let mut operation = operation("call-text-before-result");
+        operation.messages = vec![ConversationMessage {
+            role: ConversationRole::User,
+            parts: vec![
+                MessagePart::Text("first".to_string()),
+                MessagePart::ToolResult(ToolResultRecord {
+                    tool_call_id: ToolCallId::new("call_a1"),
+                    content: "result".to_string(),
+                    is_error: false,
+                }),
+            ],
+        }];
+
+        let failure = build_request(&operation)
+            .expect_err("splitting the user turn would reorder its stated parts");
 
         assert!(matches!(
             failure,

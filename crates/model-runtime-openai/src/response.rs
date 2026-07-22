@@ -117,13 +117,24 @@ pub(crate) fn decode_buffered_response<C: Clone>(
                 .unwrap_or_default(),
         );
     }
-    let reported_model = completion.model.map(ProviderReportedModel::new);
-    if let Some(model) = &reported_model {
-        sink.observe(Observation {
-            correlation: correlation.clone(),
-            fact: ObservationFact::ProviderModelReported(model.clone()),
-        });
-    }
+    let Some(model) = completion.model else {
+        return unintelligible(
+            "success response carries no model identity".to_string(),
+            exchange,
+            None,
+            completion
+                .usage
+                .as_ref()
+                .map(convert_usage)
+                .unwrap_or_default(),
+        );
+    };
+    let model = ProviderReportedModel::new(model);
+    let reported_model = Some(model.clone());
+    sink.observe(Observation {
+        correlation: correlation.clone(),
+        fact: ObservationFact::ProviderModelReported(model),
+    });
     let usage = completion
         .usage
         .as_ref()
@@ -628,6 +639,23 @@ mod tests {
                 .iter()
                 .any(|observation| matches!(observation.fact, ObservationFact::UsageReported(_)))
         );
+    }
+
+    #[test]
+    fn a_success_response_without_model_identity_is_boundary_loss() {
+        let (evidence, observations) = decode(
+            r#"{
+                "object": "chat.completion",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "hi"},
+                    "finish_reason": "stop"
+                }]
+            }"#,
+        );
+
+        assert!(matches!(evidence, TerminalEvidence::BoundaryLoss(_)));
+        assert!(observations.is_empty());
     }
 
     #[test]
