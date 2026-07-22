@@ -431,6 +431,7 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
                         &mut decoder,
                         correlation,
                         sink,
+                        cancellation,
                     ) {
                         return evidence;
                     }
@@ -468,6 +469,7 @@ fn process_streamed_chunk<C: Clone>(
     decoder: &mut StreamDecoder,
     correlation: &C,
     sink: &mut (dyn ObservationSink<C> + Send),
+    cancellation: &mut CancellationSignal,
 ) -> Option<TerminalEvidence> {
     let (accepted, exceeded) = streamed_response_prefix_len(*streamed_bytes, bytes.len());
     *streamed_bytes += accepted;
@@ -477,7 +479,10 @@ fn process_streamed_chunk<C: Clone>(
     // in-budget prefix so a terminal marker in it wins over coalesced trailing
     // data.
     let outcome = framing.push(&bytes[..accepted]);
-    for record in outcome.records {
+    for (index, record) in outcome.records.into_iter().enumerate() {
+        if index > 0 && already_fired(cancellation) {
+            return Some(decoder.cancelled());
+        }
         match decoder.apply(&record, correlation, sink) {
             StreamStep::Continue => {}
             StreamStep::Terminal(evidence) => return Some(evidence),
@@ -948,18 +953,13 @@ fn redact_complete_credentials_and_hold_prefix(
     if credential.is_empty() {
         return (text, String::new());
     }
-    // Only the suffix after the last complete credential can contain a
-    // trailing credential prefix. Locate that suffix once, then perform one
-    // linear replacement over the emitted prefix instead of repeatedly
-    // allocating the unprocessed remainder.
-    let tail_start = text
-        .rfind(credential)
-        .map_or(0, |position| position + credential.len());
-    let tail = &text[tail_start..];
+    // Search the complete suffix, including bytes that overlap the last full
+    // credential match. Otherwise a self-overlapping credential can leave an
+    // emitted suffix that a later provider chunk completes.
     let longest_prefix = (1..credential.len())
         .rev()
         .filter(|length| credential.is_char_boundary(*length))
-        .find(|length| tail.ends_with(&credential[..*length]));
+        .find(|length| text.ends_with(&credential[..*length]));
     let split = longest_prefix.map_or(text.len(), |length| text.len() - length);
     let pending = text.split_off(split);
     (text.replace(credential, "[redacted]"), pending)
@@ -1253,9 +1253,9 @@ fn redact_evidence(evidence: TerminalEvidence, api_key: &CredentialValue) -> Ter
 mod tests {
     use serde::Serialize;
     use signalbox_model_runtime::{
-        AssistantPart, CompletionEvidence, CompletionFinish, CredentialValue, ExchangeFacts,
-        Observation, ObservationFact, ObservationSink, PreparationDefect, RefusalEvidence,
-        SseFraming, TerminalEvidence, TokenUsage,
+        AssistantPart, CancellationSignal, CompletionEvidence, CompletionFinish, CredentialValue,
+        ExchangeFacts, LossCause, Observation, ObservationFact, ObservationSink, PreparationDefect,
+        RefusalEvidence, SseFraming, TerminalEvidence, TokenUsage,
     };
 
     use super::{
@@ -1442,6 +1442,39 @@ mod tests {
     }
 
     #[test]
+    fn inv_035_overlapping_credential_prefixes_stay_held_between_deltas() {
+        let mut observed = Vec::new();
+        let credential = CredentialValue::new(b"aaaa".to_vec());
+        let mut redacting = RedactingObservationSink::new(&mut observed, &credential);
+        redacting.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::TextDelta {
+                index: 0,
+                text: "aaaaa".to_string(),
+            },
+        });
+        redacting.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::TextDelta {
+                index: 0,
+                text: "aaab".to_string(),
+            },
+        });
+        redacting.flush();
+        drop(redacting);
+
+        let emitted = observed
+            .iter()
+            .filter_map(|observation| match &observation.fact {
+                ObservationFact::TextDelta { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert!(!emitted.contains("aaaa"));
+        assert!(emitted.contains("[redacted]"));
+    }
+
+    #[test]
     fn json_escaped_credential_is_redacted_before_a_tool_delta_is_forwarded() {
         let mut observed = Vec::new();
         let credential = CredentialValue::new(b"key_loop".to_vec());
@@ -1562,6 +1595,7 @@ mod tests {
         let mut framing = SseFraming::new(1024);
         let mut decoder = StreamDecoder::with_stop_sequences(ExchangeFacts::default(), Vec::new());
         let mut observations = Vec::new();
+        let mut cancellation = CancellationSignal::never();
 
         let evidence = process_streamed_chunk(
             &bytes,
@@ -1570,8 +1604,68 @@ mod tests {
             &mut decoder,
             &"call-1".to_string(),
             &mut observations,
+            &mut cancellation,
         );
 
         assert!(matches!(evidence, Some(TerminalEvidence::Completed(_))));
+    }
+
+    struct CancelOnModel {
+        observations: Vec<Observation<String>>,
+        sender: Option<tokio::sync::oneshot::Sender<()>>,
+    }
+
+    impl ObservationSink<String> for CancelOnModel {
+        fn observe(&mut self, observation: Observation<String>) {
+            if matches!(observation.fact, ObservationFact::ProviderModelReported(_))
+                && let Some(sender) = self.sender.take()
+            {
+                let _ = sender.send(());
+            }
+            self.observations.push(observation);
+        }
+    }
+
+    #[test]
+    fn cancellation_is_rechecked_between_coalesced_sse_records() {
+        let bytes = b"event: message_start\n\
+            data: {\"type\":\"message_start\",\"message\":{\"type\":\"message\",\
+            \"role\":\"assistant\",\"id\":\"msg_1\",\"model\":\"model-exact-1\",\
+            \"content\":[],\"usage\":{\"input_tokens\":1}}}\n\n\
+            event: content_block_start\n\
+            data: {\"type\":\"content_block_start\",\"index\":0,\
+            \"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n";
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let mut cancellation = CancellationSignal::when(async move {
+            let _ = receiver.await;
+        });
+        let mut streamed_bytes = 0;
+        let mut framing = SseFraming::new(1024);
+        let mut decoder = StreamDecoder::with_stop_sequences(ExchangeFacts::default(), Vec::new());
+        let mut sink = CancelOnModel {
+            observations: Vec::new(),
+            sender: Some(sender),
+        };
+
+        let evidence = process_streamed_chunk(
+            bytes,
+            &mut streamed_bytes,
+            &mut framing,
+            &mut decoder,
+            &"call-1".to_string(),
+            &mut sink,
+            &mut cancellation,
+        );
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = evidence else {
+            panic!("cancellation after the first record must pause the coalesced chunk");
+        };
+        assert_eq!(loss.cause, LossCause::CancellationRequested);
+        assert!(
+            !sink
+                .observations
+                .iter()
+                .any(|observation| matches!(observation.fact, ObservationFact::TextDelta { .. }))
+        );
     }
 }
