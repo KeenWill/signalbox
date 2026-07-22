@@ -58,6 +58,63 @@ retry policy, fallback behavior, provider outcome semantics, or live credential
 source beyond the contracts already owned by ADR-0005, ADR-0017, ADR-0043, and
 ADR-0047.
 
+## 2026-07-21 — Conservative Renovate policy with release-age gates
+
+**Context.** Dependency versions currently move only when a slice hand-bumps
+them, and newly published crate versions are riskiest in their first days, when
+compromised releases of legitimate crates are typically discovered and yanked.
+The
+[adversarial-audit corrective package](#2026-07-20--adversarial-audit-corrective-package)
+added the cargo-deny gate but nothing schedules updates.
+
+**Decision.** Adopt Renovate through a commented root `renovate.json5`: the
+cargo manager waits 7 days before patch and minor updates and 14 days before
+major ones, requires trustworthy release timestamps
+(`minimumReleaseAgeBehaviour: "timestamp-required"`), filters pending versions
+strictly, and maintains a dependency-dashboard issue. Vulnerability-alert pull
+requests keep Renovate defaults and bypass the age gates. Major updates never
+automerge. Patch updates automerge once CI passes — a deliberate, narrow
+exception to the owner-merges-every-pull-request norm, applying only to Renovate
+patch pull requests with green CI. Before enabling the inert Mend Renovate
+GitHub App, the owner must require the Rust and supply-chain status checks in
+branch protection so platform automerge cannot bypass them. The cargo-deny gate
+gains its missing `bans` check (`deny.toml` `[bans]` plus the workflow
+invocation), completing the advisories/bans/licenses/sources set.
+
+**Rejected alternatives.** Adopting new versions immediately: maximizes exposure
+inside the post-publish compromise window. Applying the same delay to security
+fixes: leaves known-vulnerable versions in place precisely when speed matters.
+Automerging minor updates too: pre-1.0 crates routinely change behavior in minor
+releases. Waiving the age gate when a registry lacks release timestamps: an
+unverifiable age is not evidence of maturity.
+
+**Affects.** `renovate.json5` (new), `deny.toml`, `.github/workflows/deny.yml`,
+and this log; no crate code, manifests, or runtime behavior. Renovate acts only
+after the owner installs the app.
+
+## 2026-07-21 — One pinned Markdown toolchain for local use and CI
+
+**Context.** CI pinned mdformat and its GFM plugin inline while contributor
+tooling was unmanaged, and transitive Python dependencies remained floating.
+That allowed local formatting to differ from CI and made the required versions
+hard to update coherently.
+
+**Decision.** Make `tooling/requirements-mdformat.txt` the fully frozen source
+for mdformat in both CI's virtual environment and the local devenv environment,
+superseding the 0.7.22/0.4.1 pins with mdformat 1.0.0 and mdformat-gfm 1.0.0.
+Require the devenv CLI version to match the locked modules. Keep Rust under
+`rustup` and keep Postgres under testcontainers rather than duplicating either
+inside devenv.
+
+**Rejected alternatives.** Keeping inline CI pins leaves local tools
+uncontrolled. Supplying Rust through both rustup and devenv creates competing
+toolchains. A devenv Postgres service would be unused by the testcontainers
+suite. Floating the devenv CLI permits CLI/module incompatibility.
+
+**Affects.** The devenv and direnv entry points, the Markdown requirements file,
+the CI Markdown job, contributor tooling guidance, and the formatter-version
+record. It does not move CI to Nix or change Rust and database-test ownership.
+
 ## 2026-07-20 — Hand-roll the typed model-runtime substrate
 
 **Context.** [ADR-0047](decisions/0047-typed-model-runtime-substrate.md) fixes

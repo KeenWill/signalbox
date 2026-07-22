@@ -125,9 +125,12 @@ cargo metadata --no-deps --format-version 1
 git diff --check
 ```
 
-The Markdown check needs `pip install mdformat==0.7.22 mdformat-gfm==0.4.1` (the
-versions CI pins); drop `--check` to rewrap in place. Wrapping rules live in
-`.mdformat.toml`.
+Repository tool commands such as mdformat run inside the devenv environment
+(`devenv shell` to enter it, or one-off as
+`devenv shell -- mdformat --check *.md docs/`), never via system or Homebrew
+binaries: a plugin-less mdformat silently corrupts GFM tables. The environment
+installs the pinned toolchain CI uses from `tooling/requirements-mdformat.txt`;
+drop `--check` to rewrap in place. Wrapping rules live in `.mdformat.toml`.
 
 For documentation changes, also check repository-relative links and review the
 rendered Markdown. Put future path-specific instructions in the nearest

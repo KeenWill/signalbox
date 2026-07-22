@@ -74,6 +74,12 @@ coding agents in [AGENTS.md](AGENTS.md).
 Install [rustup](https://rustup.rs/). The repository's `rust-toolchain.toml`
 makes rustup select the pinned minimal stable toolchain with rustfmt and Clippy.
 
+Non-cargo tooling comes from the [devenv](https://devenv.sh/) environment. With
+Nix and the devenv CLI installed, use `devenv shell` to enter it; direnv users
+can instead allow the committed `.envrc`. The Postgres integration suite still
+needs a running Docker daemon. See [AGENTS.md](AGENTS.md) for the authoritative
+tooling, formatting, and validation workflow.
+
 The workspace contains the dependency chain `apps/hubd` → `crates/application` →
 `crates/domain`, with `crates/persistence` depending on both
 `crates/application` and `crates/domain`, and the dev-only `crates/expect-table`
