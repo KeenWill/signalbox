@@ -2360,8 +2360,9 @@ mod tests {
         );
     }
 
-    /// S08 / INV-016: the initial-call slice cannot omit acknowledged pending
-    /// steering while its concrete semantic projection remains reserved.
+    /// S08 / INV-016: the accepted M3 boundary fails call preparation closed
+    /// rather than omitting pending steering while its semantic projection is
+    /// reserved.
     #[test]
     fn s08_inv016_preparation_requires_an_empty_checked_steering_inventory() {
         let mut execution = active_execution();
