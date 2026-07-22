@@ -1188,7 +1188,7 @@ fn reconstitute(
     let current_call = if let Some(call) = input.calls.first() {
         if call.turn() != input.turn
             || call.attempt() != current_attempt.id()
-            || call.frontier() != input.starting_snapshot.frontier()
+            || call.frontier() != input.starting_snapshot.frontier().snapshot()
         {
             return Err(fail(
                 input,
@@ -1493,7 +1493,7 @@ mod tests {
                 prepared.call().attempt(),
                 prepared.call().selection(),
                 prepared.call().target(),
-                prepared.call().frontier(),
+                prepared.call().frontier().snapshot(),
                 ModelCallReconstitutionState::Prepared,
             )],
         )
@@ -1529,7 +1529,7 @@ mod tests {
                 authorized.call.attempt(),
                 authorized.call.selection(),
                 authorized.call.target(),
-                authorized.call.frontier(),
+                authorized.call.frontier().snapshot(),
                 ModelCallReconstitutionState::InFlight,
             )],
         )

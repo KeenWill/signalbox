@@ -1436,7 +1436,7 @@ impl ModelCallReconstitutionInput {
         attempt: TurnAttemptId,
         selection: FrozenModelSelection,
         target: ResolvedProviderTarget,
-        frontier: ContextFrontier,
+        frontier: ContextFrontierId,
         state: ModelCallReconstitutionState,
     ) -> Self;
     // accessors: id(), turn(), attempt(), selection(), target(), frontier(), state()

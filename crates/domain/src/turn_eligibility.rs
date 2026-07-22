@@ -1688,7 +1688,7 @@ fn reconstitute_inner(
     let mut model_calls = BTreeMap::new();
     for candidate in &input.model_calls {
         let call = candidate.id();
-        let snapshot = snapshots.get(&candidate.frontier().snapshot()).ok_or(
+        let snapshot = snapshots.get(&candidate.frontier()).ok_or(
             AcceptedInputSchedulingReconstitutionFailure::ModelCallSnapshotMissing { call },
         )?;
         let reconstituted = candidate
@@ -4718,7 +4718,7 @@ mod tests {
             turn_attempt_id(60),
             FrozenModelSelection::Direct(direct(1)),
             ResolvedProviderTarget::naming(provider_model_identity(51)),
-            resolved_starting.frontier(),
+            resolved_starting.frontier().snapshot(),
             ModelCallReconstitutionState::Terminal(ModelCallDisposition::Completed),
         );
         let projection = AcceptedInputSchedulingReconstitutionInput::new(
@@ -4792,7 +4792,7 @@ mod tests {
             turn_attempt_id(60),
             FrozenModelSelection::Direct(direct(1)),
             ResolvedProviderTarget::naming(provider_model_identity(51)),
-            resolved_starting.frontier(),
+            resolved_starting.frontier().snapshot(),
             ModelCallReconstitutionState::Terminal(ModelCallDisposition::Ambiguous),
         );
         let projection = AcceptedInputSchedulingReconstitutionInput::new(

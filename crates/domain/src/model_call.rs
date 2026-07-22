@@ -9,7 +9,7 @@
 //! separate slices. A standalone value is not proof that aggregate guards held.
 
 use crate::{
-    AppliedInterruptProof, ContextFrontier, FrozenModelSelection, ModelCallId,
+    AppliedInterruptProof, ContextFrontier, ContextFrontierId, FrozenModelSelection, ModelCallId,
     ResolvedContextFrontierSnapshot, TurnAttemptId, TurnId,
 };
 
@@ -465,7 +465,7 @@ pub struct ModelCallReconstitutionInput {
     attempt: TurnAttemptId,
     selection: FrozenModelSelection,
     target: ResolvedProviderTarget,
-    frontier: ContextFrontier,
+    frontier: ContextFrontierId,
     state: ModelCallReconstitutionState,
 }
 
@@ -477,7 +477,7 @@ impl ModelCallReconstitutionInput {
         attempt: TurnAttemptId,
         selection: FrozenModelSelection,
         target: ResolvedProviderTarget,
-        frontier: ContextFrontier,
+        frontier: ContextFrontierId,
         state: ModelCallReconstitutionState,
     ) -> Self {
         Self {
@@ -517,7 +517,7 @@ impl ModelCallReconstitutionInput {
     }
 
     /// Returns the stored context frontier.
-    pub const fn frontier(&self) -> ContextFrontier {
+    pub const fn frontier(&self) -> ContextFrontierId {
         self.frontier
     }
 
@@ -530,7 +530,7 @@ impl ModelCallReconstitutionInput {
         &self,
         snapshot: &ResolvedContextFrontierSnapshot,
     ) -> Result<ReconstitutedModelCall, ModelCallReconstitutionFailure> {
-        if self.frontier != snapshot.frontier() {
+        if self.frontier != snapshot.frontier().snapshot() {
             return Err(ModelCallReconstitutionFailure::FrontierMismatch);
         }
         let pinned = PinnedProviderTarget::pinned(self.turn, self.target);
