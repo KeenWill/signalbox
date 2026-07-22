@@ -311,6 +311,49 @@ async fn streamed_completion_end_to_end_emits_deltas_and_gates_on_done() {
 }
 
 #[tokio::test]
+async fn prepared_capability_keeps_its_originating_stream_settings() {
+    let sse: &[u8] = b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_origin\",\"model\":\"model-exact-1\",\
+        \"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"}}]}\n\n\
+        data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+        data: {\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\n\
+        data: [DONE]\n\n";
+    let server = CannedServer::serving(vec![http_response(
+        "200 OK",
+        &[("content-type", "text/event-stream")],
+        sse,
+    )])
+    .await;
+
+    let mut preparing_config = OpenAiConfig::new();
+    preparing_config.base_url = server.base_url.clone();
+    preparing_config.sse_record_limit = 1024;
+    let preparing_runtime =
+        OpenAiRuntime::new(preparing_config, FixedKey).expect("preparing configuration constructs");
+    let mut executing_config = OpenAiConfig::new();
+    executing_config.base_url = "http://127.0.0.1:1".to_string();
+    executing_config.sse_record_limit = 1;
+    let executing_runtime =
+        OpenAiRuntime::new(executing_config, FixedKey).expect("executing configuration constructs");
+    let mut streamed = operation("call-origin-settings");
+    streamed.delivery = DeliveryMode::Streamed;
+    let prepared = prepare(&preparing_runtime, streamed, CancellationSignal::never()).await;
+
+    let mut observations = Vec::new();
+    let report = executing_runtime
+        .execute(prepared, &mut observations, CancellationSignal::never())
+        .await;
+
+    let TerminalEvidence::Completed(completion) = report.evidence else {
+        panic!("execution retains the originating runtime's client and stream limit");
+    };
+    assert_eq!(
+        completion.content,
+        vec![AssistantPart::Text("hi".to_string())]
+    );
+    assert_eq!(server.recorded_requests().len(), 1);
+}
+
+#[tokio::test]
 async fn credential_rejection_is_typed_provider_error_evidence() {
     let body = br#"{"error":{"message":"Incorrect API key provided.",
                     "type":"invalid_request_error","code":"invalid_api_key"}}"#;

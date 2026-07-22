@@ -52,16 +52,26 @@ pub struct OpenAiRuntime<A> {
 
 /// An opaque, one-shot OpenAI request capability prepared under ADR-0045.
 ///
-/// The private fields bind the complete authenticated request, caller
-/// correlation, delivery mode, and exact credential value needed to sanitize
-/// provider-controlled evidence. The type deliberately implements neither
-/// `Clone`, serialization, nor diagnostic formatting.
+/// The private fields bind the complete authenticated request, its originating
+/// HTTP client and execution settings, caller correlation, and exact credential
+/// value needed to sanitize provider-controlled evidence. The type deliberately
+/// implements neither `Clone`, serialization, nor diagnostic formatting.
 #[must_use]
 pub struct OpenAiPreparedRequest<C> {
-    request: reqwest::Request,
+    transport: PreparedTransport,
     correlation: C,
-    delivery: DeliveryMode,
     credential: CredentialValue,
+}
+
+struct PreparedTransport {
+    request: reqwest::Request,
+    client: Client,
+    settings: ExecutionSettings,
+}
+
+struct ExecutionSettings {
+    delivery: DeliveryMode,
+    sse_record_limit: usize,
 }
 
 impl<A> std::fmt::Debug for OpenAiRuntime<A> {
@@ -254,23 +264,33 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
             }
         };
         PreparationOutcome::Prepared(OpenAiPreparedRequest {
-            request,
+            transport: PreparedTransport {
+                request,
+                client: self.client.clone(),
+                settings: ExecutionSettings {
+                    delivery,
+                    sse_record_limit: self.sse_record_limit,
+                },
+            },
             correlation,
-            delivery,
             credential: api_key,
         })
     }
 
     async fn exchange<C: Clone + Send + Sync>(
         &self,
-        request: reqwest::Request,
-        delivery: DeliveryMode,
+        transport: PreparedTransport,
         correlation: &C,
         sink: &mut (dyn ObservationSink<C> + Send),
         cancellation: &mut CancellationSignal,
     ) -> TerminalEvidence {
+        let PreparedTransport {
+            request,
+            client,
+            settings,
+        } = transport;
         emit(correlation, sink, ObservationFact::SendCommenced);
-        let send = self.client.execute(request);
+        let send = client.execute(request);
         let response = match with_cancellation(cancellation, send).await {
             None => return pre_exchange_loss(LossCause::CancellationRequested),
             Some(Err(error)) => return classify_send_error(&error),
@@ -289,14 +309,21 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
         // The Chat Completions success contract is specifically HTTP 200;
         // another 2xx is not recognized terminal-success evidence.
         if status.as_u16() == 200 {
-            match delivery {
+            match settings.delivery {
                 DeliveryMode::Buffered => {
                     self.finish_buffered(response, exchange, correlation, sink, cancellation)
                         .await
                 }
                 DeliveryMode::Streamed => {
-                    self.finish_streamed(response, exchange, correlation, sink, cancellation)
-                        .await
+                    self.finish_streamed(
+                        response,
+                        exchange,
+                        correlation,
+                        sink,
+                        cancellation,
+                        settings.sse_record_limit,
+                    )
+                    .await
                 }
             }
         } else if status.is_client_error() || status.is_server_error() {
@@ -339,8 +366,9 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
         correlation: &C,
         sink: &mut (dyn ObservationSink<C> + Send),
         cancellation: &mut CancellationSignal,
+        sse_record_limit: usize,
     ) -> TerminalEvidence {
-        let mut framing = SseFraming::new(self.sse_record_limit);
+        let mut framing = SseFraming::new(sse_record_limit);
         let mut decoder = StreamDecoder::new(exchange);
         let mut body = response.bytes_stream();
         let mut streamed_bytes = 0usize;
@@ -458,9 +486,8 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelRuntime<C> for OpenAiRunt
         mut cancellation: CancellationSignal,
     ) -> TerminalReport<C> {
         let OpenAiPreparedRequest {
-            request,
+            transport,
             correlation,
-            delivery,
             credential,
         } = prepared;
         if already_fired(&mut cancellation) {
@@ -472,8 +499,7 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelRuntime<C> for OpenAiRunt
         let mut redacting_sink = RedactingSink::new(sink, &credential);
         let evidence = self
             .exchange(
-                request,
-                delivery,
+                transport,
                 &correlation,
                 &mut redacting_sink,
                 &mut cancellation,
