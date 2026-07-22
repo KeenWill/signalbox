@@ -6,6 +6,7 @@ members = [
     "crates/expect-table",
     "crates/model-runtime",
     "crates/model-runtime-anthropic",
+    "crates/model-runtime-openai",
     "crates/persistence",
 ]
 resolver = "3"

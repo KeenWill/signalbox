@@ -1,0 +1,32 @@
+[package]
+name = "signalbox-model-runtime-openai"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+futures-util = { version = "0.3.31", default-features = false, features = ["std"] }
+reqwest = { version = "0.12.24", default-features = false, features = [
+    "rustls-tls-native-roots",
+    "stream",
+] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = { version = "1.0.140", features = ["raw_value"] }
+signalbox-model-runtime = { path = "../model-runtime" }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+expect-test = "1.5.1"
+signalbox-expect-table = { path = "../expect-table" }
+tokio = { version = "1.53.0", default-features = false, features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "io-util",
+    "time",
+] }

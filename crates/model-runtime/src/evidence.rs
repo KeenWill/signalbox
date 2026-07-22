@@ -248,6 +248,8 @@ pub struct ProviderErrorEvidence {
     /// The provider's native error material, retained verbatim as evidence.
     /// Classification never reads it.
     pub native: NativeErrorFacts,
+    /// Provider-reported usage observed before or with the error.
+    pub usage: TokenUsage,
 }
 
 /// The adapter's classification of a definitive provider error response.
@@ -288,6 +290,9 @@ pub enum ProviderErrorKind {
 pub struct NativeErrorFacts {
     /// The provider's native error-type token, when the payload carried one.
     pub error_token: Option<String>,
+    /// The provider's native error code, when the payload carried one
+    /// distinct from the type token.
+    pub error_code: Option<String>,
     /// The provider's rendered error message, when the payload carried one.
     pub message: Option<String>,
 }

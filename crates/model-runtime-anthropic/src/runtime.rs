@@ -493,7 +493,7 @@ fn process_streamed_chunk<C: Clone>(
         }
         match decoder.apply(&record, correlation, sink) {
             StreamStep::Continue => {}
-            StreamStep::Terminal(evidence) => return Some(evidence),
+            StreamStep::Terminal(evidence) => return Some(*evidence),
         }
     }
     if let Some(error) = outcome.error {
@@ -568,8 +568,10 @@ fn without_unproven_refusal(evidence: TerminalEvidence) -> TerminalEvidence {
                 kind: ProviderErrorKind::Unrecognized,
                 native: NativeErrorFacts {
                     error_token: Some("refusal".to_string()),
+                    error_code: None,
                     message: None,
                 },
+                usage: refusal.usage,
             })
         }
         evidence => evidence,
@@ -600,6 +602,7 @@ async fn finish_error(
             reported_model: None,
             kind,
             native: error.into_native_facts(),
+            usage: TokenUsage::unreported(),
         });
     }
     // A complete terminal error status whose body is not the documented
@@ -611,6 +614,7 @@ async fn finish_error(
         kind: classify_error_status(status),
         native: NativeErrorFacts {
             error_token: None,
+            error_code: None,
             // Preserve the complete bounded body until the execution
             // boundary can sanitize JSON escapes with the exact prepared
             // credential. Truncating first could make valid JSON
@@ -618,6 +622,7 @@ async fn finish_error(
             // from JSON-aware redaction.
             message: Some(String::from_utf8_lossy(&body).into_owned()),
         },
+        usage: TokenUsage::unreported(),
     })
 }
 
@@ -1146,6 +1151,7 @@ fn redact_evidence(evidence: TerminalEvidence, api_key: &CredentialValue) -> Ter
     let redact = move |text: String| -> String { redact_text(text, key_text) };
     let redact_native = |mut native: NativeErrorFacts| -> NativeErrorFacts {
         native.error_token = native.error_token.map(redact);
+        native.error_code = native.error_code.map(redact);
         native.message = native
             .message
             .map(|message| redact_native_message(message, key_text));
@@ -1264,8 +1270,9 @@ mod tests {
     use serde::Serialize;
     use signalbox_model_runtime::{
         AssistantPart, CancellationSignal, CompletionEvidence, CompletionFinish, CredentialValue,
-        ExchangeFacts, LossCause, Observation, ObservationFact, ObservationSink, PreparationDefect,
-        RefusalEvidence, SseFraming, TerminalEvidence, TokenUsage,
+        ExchangeFacts, LossCause, NativeErrorFacts, Observation, ObservationFact, ObservationSink,
+        PreparationDefect, ProviderErrorEvidence, ProviderErrorKind, RefusalEvidence, SseFraming,
+        TerminalEvidence, TokenUsage,
     };
 
     use super::{
@@ -1337,6 +1344,27 @@ mod tests {
     }
 
     #[test]
+    fn inv_035_native_error_code_is_credential_sanitized() {
+        let credential = CredentialValue::new(b"key_loop".to_vec());
+        let evidence = TerminalEvidence::ProviderError(ProviderErrorEvidence {
+            exchange: ExchangeFacts::default(),
+            reported_model: None,
+            kind: ProviderErrorKind::Unrecognized,
+            native: NativeErrorFacts {
+                error_token: None,
+                error_code: Some("echo-key_loop".to_string()),
+                message: None,
+            },
+            usage: TokenUsage::unreported(),
+        });
+
+        let TerminalEvidence::ProviderError(error) = redact_evidence(evidence, &credential) else {
+            panic!("provider error remains provider error");
+        };
+        assert_eq!(error.native.error_code.as_deref(), Some("echo-[redacted]"));
+    }
+
+    #[test]
     fn inv_035_final_content_cannot_reconstruct_a_credential_across_parts() {
         let credential = CredentialValue::new(b"key_loop".to_vec());
         let evidence = TerminalEvidence::Completed(CompletionEvidence {
@@ -1374,13 +1402,20 @@ mod tests {
             message_id: None,
             reported_model: None,
             content: Vec::new(),
-            usage: TokenUsage::unreported(),
+            usage: TokenUsage {
+                input_tokens: Some(13),
+                output_tokens: Some(5),
+                cache_creation_input_tokens: Some(2),
+                cache_read_input_tokens: Some(3),
+            },
         });
 
         let TerminalEvidence::ProviderError(error) = without_unproven_refusal(refusal) else {
             panic!("unproven refusal must use the non-refusal known-failure mapping");
         };
         assert_eq!(error.native.error_token.as_deref(), Some("refusal"));
+        assert_eq!(error.usage.input_tokens, Some(13));
+        assert_eq!(error.usage.output_tokens, Some(5));
     }
 
     struct SerializationFails;

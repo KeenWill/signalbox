@@ -207,10 +207,12 @@ pub(crate) struct WireError {
 }
 
 impl WireError {
-    /// Retains the native error material verbatim as neutral evidence.
+    /// Retains the native error material verbatim as neutral evidence. The
+    /// Messages error envelope carries no code distinct from its type token.
     pub(crate) fn into_native_facts(self) -> signalbox_model_runtime::NativeErrorFacts {
         signalbox_model_runtime::NativeErrorFacts {
             error_token: self.error_type,
+            error_code: None,
             message: self.message,
         }
     }
