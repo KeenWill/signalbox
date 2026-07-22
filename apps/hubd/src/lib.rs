@@ -727,27 +727,40 @@ mod tests {
 
     #[tokio::test]
     async fn retained_reconciliation_preserves_cause_and_reports_fatal_classification() {
-        for (reconciliation, expected_class) in [
-            (
-                StagedExecutionFailure::Corruption,
-                OperatorFailureClass::FailClosedCorruption,
-            ),
-            (
-                StagedExecutionFailure::CallerBug,
-                OperatorFailureClass::CallerOrHubBug,
-            ),
-        ] {
-            let error = reconcile_retained_once(
-                StagedExecutionFailure::Infrastructure,
-                ready(Err::<(), _>(reconciliation)),
-            )
-            .await
-            .expect_err("the retained-state reconciliation also fails");
+        let corruption = reconcile_retained_once(
+            StagedExecutionFailure::Infrastructure,
+            ready(Err::<(), _>(StagedExecutionFailure::Corruption)),
+        )
+        .await
+        .expect_err("the corruption reconciliation also fails");
+        assert_reconciliation_preserves_cause_and_reports_classification(
+            corruption,
+            StagedExecutionFailure::Corruption,
+            OperatorFailureClass::FailClosedCorruption,
+        );
 
-            assert_eq!(error.original(), &StagedExecutionFailure::Infrastructure);
-            assert_eq!(error.reconciliation(), Some(&reconciliation));
-            assert_eq!(error.operator_failure_class(), expected_class);
-        }
+        let caller_bug = reconcile_retained_once(
+            StagedExecutionFailure::Infrastructure,
+            ready(Err::<(), _>(StagedExecutionFailure::CallerBug)),
+        )
+        .await
+        .expect_err("the caller-bug reconciliation also fails");
+        assert_reconciliation_preserves_cause_and_reports_classification(
+            caller_bug,
+            StagedExecutionFailure::CallerBug,
+            OperatorFailureClass::CallerOrHubBug,
+        );
+    }
+
+    #[track_caller]
+    fn assert_reconciliation_preserves_cause_and_reports_classification(
+        error: super::RetainedModelExecutionError<StagedExecutionFailure>,
+        reconciliation: StagedExecutionFailure,
+        expected_class: OperatorFailureClass,
+    ) {
+        assert_eq!(error.original(), &StagedExecutionFailure::Infrastructure);
+        assert_eq!(error.reconciliation(), Some(&reconciliation));
+        assert_eq!(error.operator_failure_class(), expected_class);
     }
 
     #[tokio::test]
