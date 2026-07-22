@@ -17,12 +17,4 @@
       requirements = ./tooling/requirements-mdformat.txt;
     };
   };
-
-  # Rust deliberately stays out of this environment: the toolchain comes
-  # from rustup via rust-toolchain.toml — the same mechanism CI uses — and a
-  # second devenv-provided toolchain would compete with it.
-  #
-  # Postgres also stays out: the integration suite starts its own ephemeral
-  # database via testcontainers, so it needs a running Docker daemon, not a
-  # local Postgres service.
 }
