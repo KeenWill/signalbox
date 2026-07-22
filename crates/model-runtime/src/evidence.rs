@@ -248,6 +248,8 @@ pub struct ProviderErrorEvidence {
     /// The provider's native error material, retained verbatim as evidence.
     /// Classification never reads it.
     pub native: NativeErrorFacts,
+    /// Provider-reported usage observed before or with the error.
+    pub usage: TokenUsage,
 }
 
 /// The adapter's classification of a definitive provider error response.

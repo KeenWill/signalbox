@@ -471,7 +471,7 @@ fn process_streamed_chunk<C: Clone>(
         }
         match decoder.apply(&record, correlation, sink) {
             StreamStep::Continue => {}
-            StreamStep::Terminal(evidence) => return Some(evidence),
+            StreamStep::Terminal(evidence) => return Some(*evidence),
         }
     }
     if let Some(error) = outcome.error {
@@ -550,6 +550,7 @@ fn without_unproven_refusal(evidence: TerminalEvidence) -> TerminalEvidence {
                     error_code: None,
                     message: None,
                 },
+                usage: refusal.usage,
             })
         }
         evidence => evidence,
@@ -576,6 +577,7 @@ async fn finish_error(
             reported_model: None,
             kind,
             native: error.into_native_facts(),
+            usage: TokenUsage::unreported(),
         });
     }
     // A complete terminal error status whose body is not the documented
@@ -590,6 +592,7 @@ async fn finish_error(
             error_code: None,
             message: Some(lossy_truncated(&body)),
         },
+        usage: TokenUsage::unreported(),
     })
 }
 
@@ -1891,13 +1894,21 @@ mod tests {
             message_id: None,
             reported_model: None,
             content: Vec::new(),
-            usage: TokenUsage::unreported(),
+            usage: TokenUsage {
+                input_tokens: Some(11),
+                output_tokens: Some(2),
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: Some(3),
+            },
         });
 
         let TerminalEvidence::ProviderError(error) = without_unproven_refusal(refusal) else {
             panic!("unproven refusal must use the non-refusal known-failure mapping");
         };
         assert_eq!(error.native, NativeErrorFacts::default());
+        assert_eq!(error.usage.input_tokens, Some(11));
+        assert_eq!(error.usage.output_tokens, Some(2));
+        assert_eq!(error.usage.cache_read_input_tokens, Some(3));
     }
 
     struct SerializationFails;

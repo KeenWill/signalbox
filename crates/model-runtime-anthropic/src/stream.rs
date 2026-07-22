@@ -35,7 +35,7 @@ pub(crate) enum StreamStep {
     /// Keep reading.
     Continue,
     /// The stream reached typed terminal evidence; stop reading.
-    Terminal(TerminalEvidence),
+    Terminal(Box<TerminalEvidence>),
 }
 
 enum BlockBuilder {
@@ -153,7 +153,7 @@ impl StreamDecoder {
     }
 
     fn violation(&self, detail: impl Into<String>) -> StreamStep {
-        StreamStep::Terminal(self.violation_evidence(detail))
+        StreamStep::Terminal(Box::new(self.violation_evidence(detail)))
     }
 
     fn parse<'a, T: serde::Deserialize<'a>>(
@@ -193,12 +193,15 @@ impl StreamDecoder {
             .as_deref()
             .map(classify_error_token)
             .unwrap_or(signalbox_model_runtime::ProviderErrorKind::Unrecognized);
-        StreamStep::Terminal(TerminalEvidence::ProviderError(ProviderErrorEvidence {
-            exchange: self.exchange.clone(),
-            reported_model: self.reported_model.clone(),
-            kind,
-            native: error.into_native_facts(),
-        }))
+        StreamStep::Terminal(Box::new(TerminalEvidence::ProviderError(
+            ProviderErrorEvidence {
+                exchange: self.exchange.clone(),
+                reported_model: self.reported_model.clone(),
+                kind,
+                native: error.into_native_facts(),
+                usage: self.usage,
+            },
+        )))
     }
 
     fn apply_message_start<C: Clone>(
@@ -609,7 +612,7 @@ impl StreamDecoder {
                 usage: self.usage,
             }),
         };
-        StreamStep::Terminal(evidence)
+        StreamStep::Terminal(Box::new(evidence))
     }
 }
 
@@ -660,7 +663,7 @@ mod tests {
                 );
                 match decoder.apply(&record, &correlation, &mut observations) {
                     StreamStep::Continue => {}
-                    StreamStep::Terminal(evidence) => terminal = Some(evidence),
+                    StreamStep::Terminal(evidence) => terminal = Some(*evidence),
                 }
             }
         }
@@ -1141,6 +1144,7 @@ mod tests {
             Some("overloaded_error".to_string())
         );
         assert_eq!(error.exchange, exchange());
+        assert_eq!(error.usage.input_tokens, Some(25));
     }
 
     #[test]

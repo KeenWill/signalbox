@@ -31,7 +31,7 @@ pub(crate) enum StreamStep {
     /// Keep reading.
     Continue,
     /// The stream reached typed terminal evidence; stop reading.
-    Terminal(TerminalEvidence),
+    Terminal(Box<TerminalEvidence>),
 }
 
 #[derive(Default)]
@@ -98,12 +98,15 @@ impl StreamDecoder {
             // with no HTTP status of its own it classifies by native code.
             let code = error.code_text();
             let kind = classify_error_envelope(0, code.as_deref(), error.error_type.as_deref());
-            return StreamStep::Terminal(TerminalEvidence::ProviderError(ProviderErrorEvidence {
-                exchange: self.exchange.clone(),
-                reported_model: self.reported_model.clone(),
-                kind,
-                native: error.into_native_facts(),
-            }));
+            return StreamStep::Terminal(Box::new(TerminalEvidence::ProviderError(
+                ProviderErrorEvidence {
+                    exchange: self.exchange.clone(),
+                    reported_model: self.reported_model.clone(),
+                    kind,
+                    native: error.into_native_facts(),
+                    usage: self.usage,
+                },
+            )));
         }
         if self.final_usage_reported {
             return self.violation("stream record follows the requested final usage chunk");
@@ -380,7 +383,7 @@ impl StreamDecoder {
     }
 
     fn violation(&self, detail: impl Into<String>) -> StreamStep {
-        StreamStep::Terminal(self.violation_evidence(detail))
+        StreamStep::Terminal(Box::new(self.violation_evidence(detail)))
     }
 
     fn emit<C: Clone>(
@@ -508,7 +511,7 @@ impl StreamDecoder {
                 usage: self.usage,
             }),
         };
-        StreamStep::Terminal(evidence)
+        StreamStep::Terminal(Box::new(evidence))
     }
 }
 
@@ -563,7 +566,7 @@ mod tests {
                 );
                 match decoder.apply(&record, &correlation, &mut observations) {
                     StreamStep::Continue => {}
-                    StreamStep::Terminal(evidence) => terminal = Some(evidence),
+                    StreamStep::Terminal(evidence) => terminal = Some(*evidence),
                 }
             }
         }
@@ -864,6 +867,8 @@ mod tests {
             panic!("a definitive error record outranks weaker post-usage protocol loss");
         };
         assert_eq!(error.kind, ProviderErrorKind::QuotaExhausted);
+        assert_eq!(error.usage.input_tokens, Some(25));
+        assert_eq!(error.usage.output_tokens, Some(7));
     }
 
     #[test]
