@@ -1400,12 +1400,11 @@ async fn s01_s20_s21_inv014_inv015_inv032_model_call_transactions_complete_first
     let assistant_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde2));
     let completion_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde3));
     let terminal_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0xee2));
+    let assistant_text = AssistantText::try_new("exact assistant reply".to_owned())
+        .expect("fixture assistant content is admitted");
     let observation = observation_correlation.bind_terminal_observation(
         ModelCallTerminalObservation::Completed {
-            assistant_text: vec![
-                AssistantText::try_new("exact assistant reply".to_owned())
-                    .expect("fixture assistant content is admitted"),
-            ],
+            assistant_text: vec![assistant_text.clone()],
         },
     );
     assert_eq!(
@@ -1441,8 +1440,7 @@ async fn s01_s20_s21_inv014_inv015_inv032_model_call_transactions_complete_first
         completed.assistant_entries()[0].payload(),
         &signalbox_domain::SemanticTranscriptEntryPayload::AssistantText {
             producing_call: call,
-            value: AssistantText::try_new("exact assistant reply".to_owned())
-                .expect("fixture assistant content is admitted"),
+            value: assistant_text.clone(),
         }
     );
 
@@ -1459,7 +1457,7 @@ async fn s01_s20_s21_inv014_inv015_inv032_model_call_transactions_complete_first
             (SELECT count(*) FROM semantic_transcript_entry
               WHERE semantic_entry_id = $3
                 AND payload_kind = 'assistant_text'
-                AND assistant_text_value = 'exact assistant reply'
+                AND assistant_text_value = $8
                 AND producing_model_call_id = $1),
             (SELECT count(*) FROM semantic_transcript_entry
               WHERE semantic_entry_id = $4
@@ -1490,9 +1488,29 @@ async fn s01_s20_s21_inv014_inv015_inv032_model_call_transactions_complete_first
     .bind(turn.into_uuid())
     .bind(terminal_frontier.into_uuid())
     .bind(provider_identity.into_uuid())
+    .bind(assistant_text.as_str())
     .fetch_one(&pool)
     .await?;
     assert_eq!(durable_shape, (1, 1, 1, 1, 1, 3, 1, 1));
+
+    sqlx::query("ALTER TABLE turn_completed_outbox_event DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM turn_completed_outbox_event WHERE turn_id = $1")
+        .bind(turn.into_uuid())
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE turn_completed_outbox_event ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    assert!(matches!(
+        repository
+            .reread_terminal_observation(session, &observation)
+            .await,
+        Err(ModelCallRepositoryError::InvalidTransition(
+            "retained observation terminal closure changed"
+        ))
+    ));
 
     pool.close().await;
     drop(container);
@@ -1560,6 +1578,8 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
     let assistant_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1de4));
     let completion_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1de5));
     let terminal_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0x1ee4));
+    let assistant_text = AssistantText::try_new(String::from("service assistant reply"))
+        .expect("fixture assistant content is admitted");
     let mut service = ModelCallExecutionService::new(
         FixedModelCallExecutionIds::new(
             [call, unused_call],
@@ -1582,10 +1602,7 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
         repository,
         ScriptedModelCallProvider::new([ScriptedModelCallStep::Return(
             ModelCallTerminalObservation::Completed {
-                assistant_text: vec![
-                    AssistantText::try_new(String::from("service assistant reply"))
-                        .expect("fixture assistant content is admitted"),
-                ],
+                assistant_text: vec![assistant_text.clone()],
             },
         )]),
         InProcessAttemptDispatchGate::default(),
@@ -1608,8 +1625,7 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
         completed.assistant_entries()[0].payload(),
         &signalbox_domain::SemanticTranscriptEntryPayload::AssistantText {
             producing_call: call,
-            value: AssistantText::try_new(String::from("service assistant reply"))
-                .expect("fixture assistant content is admitted"),
+            value: assistant_text,
         }
     );
     let (_, _, _, _, _, provider, _, _) = service.into_parts();

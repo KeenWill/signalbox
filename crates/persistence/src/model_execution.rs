@@ -887,14 +887,37 @@ async fn completed_terminal_closure_matches(
     )
     .await?;
     let terminal_members = load_terminal_frontier(connection, session, terminal_frontier).await?;
-    Ok(completed_terminal_frontier_matches(
+    if !completed_terminal_frontier_matches(
         &source_frontier,
         &terminal_members,
         session_id_to_uuid(session),
         turn_id_to_uuid(observation.correlation().turn()),
         observation.call().into_uuid(),
         assistant_text,
-    ))
+    ) {
+        return Ok(false);
+    }
+    let Some(completion_entry) = terminal_members.last().map(|member| member.entry) else {
+        return Ok(false);
+    };
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+            SELECT 1
+              FROM turn_completed_outbox_event
+             WHERE session_id = $1
+               AND turn_id = $2
+               AND model_call_id = $3
+               AND completion_entry_id = $4
+               AND terminal_frontier_id = $5
+        )",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(observation.correlation().turn()))
+    .bind(observation.call().into_uuid())
+    .bind(completion_entry)
+    .bind(terminal_frontier)
+    .fetch_one(&mut *connection)
+    .await?)
 }
 
 async fn failed_terminal_closure_matches(
