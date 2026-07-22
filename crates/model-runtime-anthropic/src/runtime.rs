@@ -718,10 +718,13 @@ impl<C: Clone> ObservationSink<C> for RedactingObservationSink<'_, C> {
                     )),
                 });
             }
-            fact => self.inner.observe(Observation {
-                correlation: observation.correlation,
-                fact: redact_observation_fact(fact, self.credential),
-            }),
+            fact => {
+                self.flush();
+                self.inner.observe(Observation {
+                    correlation: observation.correlation,
+                    fact: redact_observation_fact(fact, self.credential),
+                });
+            }
         }
     }
 }
@@ -802,8 +805,53 @@ fn redact_completion_finish(finish: CompletionFinish, credential: &str) -> Compl
 fn redact_proposal(mut proposal: ToolCallProposal, credential: &str) -> ToolCallProposal {
     proposal.id = ToolCallId::new(redact_text(proposal.id.as_str().to_string(), credential));
     proposal.name = ToolName::new(redact_text(proposal.name.as_str().to_string(), credential));
-    proposal.arguments_json = redact_text(proposal.arguments_json, credential);
+    proposal.arguments_json = redact_json(proposal.arguments_json, credential);
     proposal
+}
+
+fn redact_json(raw: String, credential: &str) -> String {
+    if credential.is_empty() {
+        return raw;
+    }
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return redact_text(raw, credential);
+    };
+    if !redact_json_value(&mut value, credential) {
+        return raw;
+    }
+    serde_json::to_string(&value).unwrap_or_else(|_| "\"[redacted]\"".to_string())
+}
+
+fn redact_json_value(value: &mut serde_json::Value, credential: &str) -> bool {
+    match value {
+        serde_json::Value::String(text) => {
+            let redacted = text.replace(credential, "[redacted]");
+            let changed = redacted != *text;
+            *text = redacted;
+            changed
+        }
+        serde_json::Value::Array(values) => {
+            let mut changed = false;
+            for value in values {
+                changed |= redact_json_value(value, credential);
+            }
+            changed
+        }
+        serde_json::Value::Object(fields) => {
+            let old = std::mem::take(fields);
+            let mut changed = false;
+            for (key, mut value) in old {
+                let redacted_key = key.replace(credential, "[redacted]");
+                changed |= redacted_key != key;
+                changed |= redact_json_value(&mut value, credential);
+                fields.insert(redacted_key, value);
+            }
+            changed
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            false
+        }
+    }
 }
 
 fn redact_part(part: AssistantPart, credential: &str) -> AssistantPart {
@@ -975,5 +1023,52 @@ fn redact_evidence(evidence: TerminalEvidence, api_key: &CredentialValue) -> Ter
             };
             TerminalEvidence::BoundaryLoss(loss)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use signalbox_model_runtime::{
+        CredentialValue, Observation, ObservationFact, ObservationSink, TokenUsage,
+    };
+
+    use super::{RedactingObservationSink, redact_json};
+
+    #[test]
+    fn inv_035_json_escaped_credentials_are_redacted_from_tool_arguments() {
+        let redacted = redact_json(r#"{"token":"key_\u006coop"}"#.to_string(), "key_loop");
+
+        assert_eq!(redacted, r#"{"token":"[redacted]"}"#);
+    }
+
+    #[test]
+    fn buffered_prefix_is_flushed_before_later_metadata() {
+        let mut observed = Vec::new();
+        let credential = CredentialValue::new(b"key_loop".to_vec());
+        let mut redacting = RedactingObservationSink::new(&mut observed, &credential);
+        redacting.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::TextDelta {
+                index: 0,
+                text: "safe key_".to_string(),
+            },
+        });
+        redacting.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::UsageReported(TokenUsage::unreported()),
+        });
+
+        let metadata_index = observed
+            .iter()
+            .position(|observation| matches!(observation.fact, ObservationFact::UsageReported(_)))
+            .expect("usage is forwarded");
+        let text = observed[..metadata_index]
+            .iter()
+            .filter_map(|observation| match &observation.fact {
+                ObservationFact::TextDelta { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(text, "safe key_");
     }
 }

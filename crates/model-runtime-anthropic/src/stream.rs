@@ -62,6 +62,8 @@ pub(crate) struct StreamDecoder {
     message_id: Option<ProviderMessageId>,
     reported_model: Option<ProviderReportedModel>,
     usage: TokenUsage,
+    input_usage_reported: bool,
+    final_output_usage_reported: bool,
     finish: Option<FinishReason>,
     open_blocks: BTreeMap<u32, BlockBuilder>,
     closed: BTreeMap<u32, AssistantPart>,
@@ -75,6 +77,8 @@ impl StreamDecoder {
             message_id: None,
             reported_model: None,
             usage: TokenUsage::unreported(),
+            input_usage_reported: false,
+            final_output_usage_reported: false,
             finish: None,
             open_blocks: BTreeMap::new(),
             closed: BTreeMap::new(),
@@ -226,7 +230,11 @@ impl StreamDecoder {
         ) else {
             return self.violation("message_start is missing required fields (id, model, usage)");
         };
+        if usage.input_tokens.is_none() {
+            return self.violation("message_start usage is missing input_tokens");
+        }
         self.started = true;
+        self.input_usage_reported = true;
         self.message_id = Some(ProviderMessageId::new(id));
         let model = ProviderReportedModel::new(model);
         self.reported_model = Some(model.clone());
@@ -468,6 +476,9 @@ impl StreamDecoder {
             Self::emit(correlation, sink, ObservationFact::FinishReported(finish));
         }
         if let Some(usage) = event.usage.as_ref() {
+            if usage.output_tokens.is_some() {
+                self.final_output_usage_reported = true;
+            }
             let usage = convert_usage(usage);
             self.usage.absorb(usage);
             Self::emit(correlation, sink, ObservationFact::UsageReported(usage));
@@ -487,11 +498,21 @@ impl StreamDecoder {
         if !self.open_blocks.is_empty() {
             return self.violation("message_stop with open content blocks");
         }
+        if !self.input_usage_reported || !self.final_output_usage_reported {
+            return self.violation("message_stop before required usage counts were reported");
+        }
         let Some(finish) = self.finish.clone() else {
             return self.violation("message_stop without a reported stop_reason");
         };
         if self.closed.keys().copied().ne(0..self.closed.len() as u32) {
             return self.violation("message_stop with sparse content-block indices");
+        }
+        let has_tool_calls = self
+            .closed
+            .values()
+            .any(|part| matches!(part, AssistantPart::ToolCall(_)));
+        if has_tool_calls != matches!(finish, FinishReason::ToolUse) {
+            return self.violation("stream content contradicts its stop_reason");
         }
         let evidence = match finish.completion_finish() {
             None => TerminalEvidence::Refused(RefusalEvidence {
@@ -706,7 +727,8 @@ mod tests {
             b"event: content_block_stop\n\
               data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
             b"event: message_delta\n\
-              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
+              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\
+              \"usage\":{\"output_tokens\":7}}\n\n",
             b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
         ]);
 
@@ -740,7 +762,8 @@ mod tests {
             b"event: content_block_stop\n\
               data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
             b"event: message_delta\n\
-              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
+              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\
+              \"usage\":{\"output_tokens\":1}}\n\n",
             b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
         ]);
 
@@ -870,6 +893,43 @@ mod tests {
     }
 
     #[test]
+    fn message_stop_without_final_output_usage_is_a_protocol_violation() {
+        let (terminal, _) = drive(&[
+            message_start(),
+            b"event: message_delta\n\
+              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("completion without final output usage must be rejected");
+        };
+        assert!(matches!(
+            loss.cause,
+            LossCause::StreamProtocolViolation { .. }
+        ));
+    }
+
+    #[test]
+    fn tool_use_stop_without_a_tool_block_is_a_protocol_violation() {
+        let (terminal, _) = drive(&[
+            message_start(),
+            b"event: message_delta\n\
+              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\
+              \"usage\":{\"output_tokens\":1}}\n\n",
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("tool_use without a tool proposal must be rejected");
+        };
+        assert!(matches!(
+            loss.cause,
+            LossCause::StreamProtocolViolation { .. }
+        ));
+    }
+
+    #[test]
     fn malformed_known_event_payload_is_a_protocol_violation() {
         let (terminal, _) = drive(&[
             message_start(),
@@ -892,7 +952,8 @@ mod tests {
             b"event: ping\ndata: {\"type\":\"ping\"}\n\n",
             b"event: content_block_heartbeat\ndata: {\"type\":\"content_block_heartbeat\"}\n\n",
             b"event: message_delta\n\
-              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\
+              \"usage\":{\"output_tokens\":0}}\n\n",
             b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
         ]);
 
@@ -1151,7 +1212,8 @@ mod tests {
             b"event: content_block_stop\n\
               data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
             b"event: message_delta\n\
-              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\
+              \"usage\":{\"output_tokens\":2}}\n\n",
             b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
         ]);
 
@@ -1183,7 +1245,8 @@ mod tests {
             b"event: content_block_stop\n\
               data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
             b"event: message_delta\n\
-              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\
+              \"usage\":{\"output_tokens\":2}}\n\n",
             b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
         ]);
 
