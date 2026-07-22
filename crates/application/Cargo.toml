@@ -19,6 +19,7 @@ tracing = { version = "0.1.41", default-features = false }
 uuid = { version = "1.24.0", default-features = false, features = ["std", "v7"] }
 
 [dev-dependencies]
+expect-test = "1.5.1"
 tokio = { version = "1.53.0", default-features = false, features = [
     "rt",
     "test-util",
