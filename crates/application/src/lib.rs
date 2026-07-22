@@ -20,12 +20,13 @@ pub use create_session::{
 };
 pub use load_session::{LoadSessionService, SessionReader};
 pub use model_execution::{
-    AttemptDispatchGate, AuthorizeModelCallTransaction, CommitModelCallObservationTransaction,
-    FailPreparedModelCallTransaction, InProcessAttemptDispatchGate, InProcessAttemptDispatchPermit,
-    ModelCallAuthorizationReread, ModelCallCapabilityPreparation, ModelCallExecutionError,
-    ModelCallExecutionIdGenerator, ModelCallExecutionOutcome, ModelCallExecutionService,
-    ModelCallProvider, ModelConversationMessage, ModelFrontierRenderingError,
-    PrepareModelCallOutcome, PrepareModelCallTransaction, PreparedModelOperation,
+    AttemptDispatchGate, AuthorizeModelCallOutcome, AuthorizeModelCallTransaction,
+    CommitModelCallObservationTransaction, FailPreparedModelCallTransaction,
+    InProcessAttemptDispatchGate, InProcessAttemptDispatchPermit, ModelCallAuthorizationReread,
+    ModelCallCapabilityPreparation, ModelCallExecutionError, ModelCallExecutionIdGenerator,
+    ModelCallExecutionOutcome, ModelCallExecutionService, ModelCallProvider,
+    ModelConversationMessage, ModelFrontierRenderingError, PrepareModelCallOutcome,
+    PrepareModelCallTransaction, PreparedModelOperation, RetainedModelCallExecutionState,
     RetainedModelCallObservationStatus, ScriptedModelCallCapability, ScriptedModelCallError,
     ScriptedModelCallProvider, ScriptedModelCallStep, UuidV7ModelCallExecutionIdGenerator,
 };

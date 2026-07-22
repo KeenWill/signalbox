@@ -210,7 +210,7 @@ pub trait AuthorizeModelCallTransaction {
         &mut self,
         session: SessionId,
         call: ModelCallId,
-    ) -> impl Future<Output = Result<AuthorizedModelCall, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<AuthorizeModelCallOutcome, Self::Error>> + Send;
 
     /// Rereads an authorization whose commit acknowledgement was lost.
     fn reread_after_ambiguous_commit(
@@ -218,6 +218,15 @@ pub trait AuthorizeModelCallTransaction {
         session: SessionId,
         prepared: &PreparedModelCallRequest,
     ) -> impl Future<Output = Result<ModelCallAuthorizationReread, Self::Error>> + Send;
+}
+
+/// Result of freshly rechecking one send-authorization hint.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AuthorizeModelCallOutcome {
+    /// The exact prepared authority is stale or has stopped; no send may begin.
+    NoSend,
+    /// The exact prepared call committed `InFlight` and may enter its provider.
+    Authorized(Box<AuthorizedModelCall>),
 }
 
 /// Authoritative state after an ambiguous send-authorization commit.
@@ -263,6 +272,36 @@ pub enum RetainedModelCallObservationStatus {
     Pending,
     /// The exact observation is already represented durably.
     AlreadyCommitted,
+}
+
+/// Same-incarnation evidence retained across a failed orchestration stage.
+///
+/// This state prevents a later service invocation or explicit composition
+/// handoff from repeating credential work, losing proof that provider entry
+/// never occurred, or dropping an unchanged terminal observation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RetainedModelCallExecutionState {
+    /// Capability preparation proved an ordinary pre-send known failure.
+    CapabilityKnownFailure {
+        /// Session owning the exact prepared call.
+        session: SessionId,
+        /// Prepared call whose guarded known-failure closure remains pending.
+        call: ModelCallId,
+    },
+    /// Ambiguous authorization still has same-incarnation proof of no send.
+    AuthorizationNonConsumption {
+        /// Session owning the exact prepared request.
+        session: SessionId,
+        /// Unchanged request used to reread whether authorization committed.
+        prepared: Box<PreparedModelCallRequest>,
+    },
+    /// One unchanged provider observation awaits authoritative reconciliation.
+    TerminalObservation {
+        /// Session owning the exact issued call.
+        session: SessionId,
+        /// Unchanged correlated observation returned by provider work.
+        observation: CorrelatedModelCallTerminalObservation,
+    },
 }
 
 /// Adapter-local result of credential lookup and capability preparation.
@@ -424,6 +463,8 @@ pub enum ModelCallExecutionError<
         /// The failure to establish whether authorization committed.
         reread_error: AuthorizationError,
     },
+    /// A later pass still could not reconcile retained non-consumption proof.
+    AuthorizationReconciliation(AuthorizationError),
     /// Provider work produced no trustworthy observation.
     Provider(ProviderError),
     /// The terminal-observation transaction failed.
@@ -470,6 +511,12 @@ where
                 write!(
                     formatter,
                     "model-call authorization reread failed: {reread_error}"
+                )
+            }
+            Self::AuthorizationReconciliation(error) => {
+                write!(
+                    formatter,
+                    "model-call authorization reconciliation failed: {error}"
                 )
             }
             Self::Provider(error) => write!(formatter, "model-call provider stage failed: {error}"),
@@ -523,6 +570,7 @@ where
             Self::CapabilityFailureCommit(error) => error.operator_failure_class(),
             Self::Authorization(error) => error.operator_failure_class(),
             Self::AuthorizationReread { reread_error, .. } => reread_error.operator_failure_class(),
+            Self::AuthorizationReconciliation(error) => error.operator_failure_class(),
             Self::ObservationCommit { error, .. } => error.operator_failure_class(),
         }
     }
@@ -545,7 +593,7 @@ pub struct ModelCallExecutionService<
     observation: Observation,
     provider: Provider,
     gate: Gate,
-    retained_observation: Option<(SessionId, CorrelatedModelCallTerminalObservation)>,
+    retained_state: Option<RetainedModelCallExecutionState>,
 }
 
 impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
@@ -569,7 +617,31 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
             observation,
             provider,
             gate,
-            retained_observation: None,
+            retained_state: None,
+        }
+    }
+
+    /// Reconstitutes an explicitly decomposed service without losing evidence.
+    #[allow(clippy::too_many_arguments)]
+    pub const fn from_parts(
+        ids: Ids,
+        prepare: Prepare,
+        failure: Failure,
+        authorization: Authorization,
+        observation: Observation,
+        provider: Provider,
+        gate: Gate,
+        retained_state: Option<RetainedModelCallExecutionState>,
+    ) -> Self {
+        Self {
+            ids,
+            prepare,
+            failure,
+            authorization,
+            observation,
+            provider,
+            gate,
+            retained_state,
         }
     }
 
@@ -584,6 +656,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         Observation,
         Provider,
         Gate,
+        Option<RetainedModelCallExecutionState>,
     ) {
         (
             self.ids,
@@ -593,14 +666,27 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
             self.observation,
             self.provider,
             self.gate,
+            self.retained_state,
         )
+    }
+
+    /// Borrows same-incarnation evidence awaiting reconciliation.
+    pub const fn retained_state(&self) -> Option<&RetainedModelCallExecutionState> {
+        self.retained_state.as_ref()
     }
 
     /// Borrows the exact observation awaiting authoritative reconciliation.
     pub fn retained_observation(&self) -> Option<&CorrelatedModelCallTerminalObservation> {
-        self.retained_observation
-            .as_ref()
-            .map(|(_, observation)| observation)
+        match self.retained_state.as_ref() {
+            Some(RetainedModelCallExecutionState::TerminalObservation { observation, .. }) => {
+                Some(observation)
+            }
+            Some(
+                RetainedModelCallExecutionState::CapabilityKnownFailure { .. }
+                | RetainedModelCallExecutionState::AuthorizationNonConsumption { .. },
+            )
+            | None => None,
+        }
     }
 }
 
@@ -623,7 +709,7 @@ where
     /// invokes the provider once, and commits its correlated observation.
     pub async fn execute(
         &mut self,
-        session: SessionId,
+        mut session: SessionId,
     ) -> Result<
         ModelCallExecutionOutcome,
         ModelCallExecutionError<
@@ -634,29 +720,70 @@ where
             Observation::Error,
         >,
     > {
-        if let Some((retained_session, retained)) = self.retained_observation.take() {
-            match self
-                .observation
-                .reread_observation(retained_session, &retained)
-                .await
-            {
-                Ok(RetainedModelCallObservationStatus::AlreadyCommitted) => {
-                    return Ok(ModelCallExecutionOutcome::ObservationAlreadyCommitted(
-                        retained.call(),
-                    ));
+        if let Some(retained) = self.retained_state.take() {
+            match retained {
+                RetainedModelCallExecutionState::CapabilityKnownFailure { session, call } => {
+                    return self.commit_capability_known_failure(session, call).await;
                 }
-                Ok(RetainedModelCallObservationStatus::Pending) => {
-                    return self
-                        .commit_terminal_observation(retained_session, retained)
-                        .await;
-                }
-                Err(error) => {
-                    self.retained_observation = Some((retained_session, retained.clone()));
-                    return Err(ModelCallExecutionError::ObservationCommit {
-                        error,
-                        retained_observation: retained,
-                    });
-                }
+                RetainedModelCallExecutionState::AuthorizationNonConsumption {
+                    session: retained_session,
+                    prepared,
+                } => match self
+                    .authorization
+                    .reread_after_ambiguous_commit(retained_session, &prepared)
+                    .await
+                {
+                    Ok(ModelCallAuthorizationReread::Prepared) => {
+                        session = retained_session;
+                    }
+                    Ok(ModelCallAuthorizationReread::InFlight(authorized)) => {
+                        let non_consumption = authorized
+                            .observation_correlation()
+                            .bind_terminal_observation(ModelCallTerminalObservation::KnownFailed);
+                        return self
+                            .commit_terminal_observation(retained_session, non_consumption)
+                            .await;
+                    }
+                    Err(error) => {
+                        self.retained_state = Some(
+                            RetainedModelCallExecutionState::AuthorizationNonConsumption {
+                                session: retained_session,
+                                prepared,
+                            },
+                        );
+                        return Err(ModelCallExecutionError::AuthorizationReconciliation(error));
+                    }
+                },
+                RetainedModelCallExecutionState::TerminalObservation {
+                    session: retained_session,
+                    observation: retained,
+                } => match self
+                    .observation
+                    .reread_observation(retained_session, &retained)
+                    .await
+                {
+                    Ok(RetainedModelCallObservationStatus::AlreadyCommitted) => {
+                        return Ok(ModelCallExecutionOutcome::ObservationAlreadyCommitted(
+                            retained.call(),
+                        ));
+                    }
+                    Ok(RetainedModelCallObservationStatus::Pending) => {
+                        return self
+                            .commit_terminal_observation(retained_session, retained)
+                            .await;
+                    }
+                    Err(error) => {
+                        self.retained_state =
+                            Some(RetainedModelCallExecutionState::TerminalObservation {
+                                session: retained_session,
+                                observation: retained.clone(),
+                            });
+                        return Err(ModelCallExecutionError::ObservationCommit {
+                            error,
+                            retained_observation: retained,
+                        });
+                    }
+                },
             }
         }
 
@@ -698,31 +825,9 @@ where
             PreparedModelOperation::render(*prepared).map_err(ModelCallExecutionError::Render)?;
         let capability = match self.provider.prepare_capability(operation).await {
             Ok(ModelCallCapabilityPreparation::Ready(capability)) => capability,
-            Ok(ModelCallCapabilityPreparation::KnownFailure) => loop {
-                let identities = self.next_failed_identities();
-                let ids = &mut self.ids;
-                let next_turn = move |_| ids.next_turn_id();
-                match self
-                    .failure
-                    .fail_prepared(session, call, identities, next_turn)
-                    .await
-                {
-                    Ok(failed) => {
-                        return Ok(ModelCallExecutionOutcome::CapabilityKnownFailure(Box::new(
-                            failed,
-                        )));
-                    }
-                    Err(error)
-                        if error.operator_failure_class()
-                            == OperatorFailureClass::IdentityCollision =>
-                    {
-                        continue;
-                    }
-                    Err(error) => {
-                        return Err(ModelCallExecutionError::CapabilityFailureCommit(error));
-                    }
-                }
-            },
+            Ok(ModelCallCapabilityPreparation::KnownFailure) => {
+                return self.commit_capability_known_failure(session, call).await;
+            }
             Err(error) => {
                 return Err(ModelCallExecutionError::CapabilityPreparation(error));
             }
@@ -731,7 +836,12 @@ where
         let permit = self.gate.acquire(attempt).await;
         let authorized = loop {
             match self.authorization.authorize(session, call).await {
-                Ok(authorized) => break authorized,
+                Ok(AuthorizeModelCallOutcome::NoSend) => {
+                    drop(capability);
+                    drop(permit);
+                    return Ok(ModelCallExecutionOutcome::NoWork);
+                }
+                Ok(AuthorizeModelCallOutcome::Authorized(authorized)) => break *authorized,
                 Err(error)
                     if error.operator_failure_class()
                         == OperatorFailureClass::IdentityCollision =>
@@ -771,6 +881,12 @@ where
                         Err(reread_error) => {
                             drop(capability);
                             drop(permit);
+                            self.retained_state = Some(
+                                RetainedModelCallExecutionState::AuthorizationNonConsumption {
+                                    session,
+                                    prepared: Box::new(prepared_request),
+                                },
+                            );
                             return Err(ModelCallExecutionError::AuthorizationReread {
                                 authorization_error: error,
                                 reread_error,
@@ -789,6 +905,52 @@ where
         let observation = observation.map_err(ModelCallExecutionError::Provider)?;
 
         self.commit_terminal_observation(session, observation).await
+    }
+
+    async fn commit_capability_known_failure(
+        &mut self,
+        session: SessionId,
+        call: ModelCallId,
+    ) -> Result<
+        ModelCallExecutionOutcome,
+        ModelCallExecutionError<
+            Prepare::Error,
+            Failure::Error,
+            Authorization::Error,
+            Provider::Error,
+            Observation::Error,
+        >,
+    > {
+        loop {
+            let identities = self.next_failed_identities();
+            let ids = &mut self.ids;
+            let next_turn = move |_| ids.next_turn_id();
+            match self
+                .failure
+                .fail_prepared(session, call, identities, next_turn)
+                .await
+            {
+                Ok(failed) => {
+                    return Ok(ModelCallExecutionOutcome::CapabilityKnownFailure(Box::new(
+                        failed,
+                    )));
+                }
+                Err(error)
+                    if error.operator_failure_class()
+                        == OperatorFailureClass::IdentityCollision =>
+                {
+                    continue;
+                }
+                Err(error) => {
+                    self.retained_state =
+                        Some(RetainedModelCallExecutionState::CapabilityKnownFailure {
+                            session,
+                            call,
+                        });
+                    return Err(ModelCallExecutionError::CapabilityFailureCommit(error));
+                }
+            }
+        }
     }
 
     async fn commit_terminal_observation(
@@ -826,7 +988,11 @@ where
                     continue;
                 }
                 Err(error) => {
-                    self.retained_observation = Some((session, observation.clone()));
+                    self.retained_state =
+                        Some(RetainedModelCallExecutionState::TerminalObservation {
+                            session,
+                            observation: observation.clone(),
+                        });
                     return Err(ModelCallExecutionError::ObservationCommit {
                         error,
                         retained_observation: observation,
@@ -1336,6 +1502,33 @@ mod tests {
     }
 
     #[derive(Debug)]
+    struct FakeFailure {
+        errors: VecDeque<FakeError>,
+        calls: usize,
+    }
+
+    impl FailPreparedModelCallTransaction for FakeFailure {
+        type Error = FakeError;
+
+        async fn fail_prepared<NextTurn>(
+            &mut self,
+            _session: SessionId,
+            _call: ModelCallId,
+            _identities: FailedModelCallTurnIdentities,
+            _next_reclassified_turn: NextTurn,
+        ) -> Result<FailedModelCallTurn, Self::Error>
+        where
+            NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+        {
+            self.calls += 1;
+            Err(self
+                .errors
+                .pop_front()
+                .expect("one fake failure-commit error"))
+        }
+    }
+
+    #[derive(Debug)]
     struct FakeAuthorization {
         outcomes: VecDeque<Result<AuthorizedModelCall, FakeError>>,
         rereads: VecDeque<Result<ModelCallAuthorizationReread, FakeError>>,
@@ -1350,11 +1543,12 @@ mod tests {
             &mut self,
             _session: SessionId,
             _call: ModelCallId,
-        ) -> Result<AuthorizedModelCall, Self::Error> {
+        ) -> Result<AuthorizeModelCallOutcome, Self::Error> {
             self.calls += 1;
             self.outcomes
                 .pop_front()
                 .expect("one fake authorization outcome")
+                .map(|authorized| AuthorizeModelCallOutcome::Authorized(Box::new(authorized)))
         }
 
         async fn reread_after_ambiguous_commit(
@@ -1379,7 +1573,7 @@ mod tests {
             &mut self,
             _session: SessionId,
             _call: ModelCallId,
-        ) -> Result<AuthorizedModelCall, Self::Error> {
+        ) -> Result<AuthorizeModelCallOutcome, Self::Error> {
             panic!("unused authorization transaction")
         }
 
@@ -1389,6 +1583,32 @@ mod tests {
             _prepared: &PreparedModelCallRequest,
         ) -> Result<ModelCallAuthorizationReread, Self::Error> {
             panic!("unused authorization reread")
+        }
+    }
+
+    #[derive(Debug)]
+    struct NoSendAuthorization {
+        calls: usize,
+    }
+
+    impl AuthorizeModelCallTransaction for NoSendAuthorization {
+        type Error = FakeError;
+
+        async fn authorize(
+            &mut self,
+            _session: SessionId,
+            _call: ModelCallId,
+        ) -> Result<AuthorizeModelCallOutcome, Self::Error> {
+            self.calls += 1;
+            Ok(AuthorizeModelCallOutcome::NoSend)
+        }
+
+        async fn reread_after_ambiguous_commit(
+            &mut self,
+            _session: SessionId,
+            _prepared: &PreparedModelCallRequest,
+        ) -> Result<ModelCallAuthorizationReread, Self::Error> {
+            panic!("a known no-send result needs no reread")
         }
     }
 
@@ -1609,6 +1829,113 @@ mod tests {
         assert_eq!(prepare.calls, 2);
     }
 
+    /// ADR-0045: a trustworthy capability failure survives a failed guarded
+    /// closure and explicit service decomposition, then resubmits without
+    /// repeating capability preparation.
+    #[tokio::test]
+    async fn capability_failure_commit_retains_evidence_across_handoff() {
+        let (request, _) = prepared_fixture();
+        let session = request.session();
+        let call = request.call().id();
+        let mut service = ModelCallExecutionService::new(
+            FixedIds::baseline(),
+            FakePrepare {
+                outcomes: [Ok(PrepareModelCallOutcome::Ready(Box::new(request)))].into(),
+                calls: 0,
+            },
+            FakeFailure {
+                errors: [FakeError::Infrastructure, FakeError::Infrastructure].into(),
+                calls: 0,
+            },
+            UnusedAuthorization,
+            UnusedObservation,
+            ScriptedModelCallProvider::new([ScriptedModelCallStep::CapabilityKnownFailure]),
+            InProcessAttemptDispatchGate::default(),
+        );
+
+        assert!(matches!(
+            service.execute(session).await,
+            Err(ModelCallExecutionError::CapabilityFailureCommit(
+                FakeError::Infrastructure
+            ))
+        ));
+        assert!(matches!(
+            service.retained_state(),
+            Some(RetainedModelCallExecutionState::CapabilityKnownFailure {
+                session: retained_session,
+                call: retained_call,
+            }) if *retained_session == session && *retained_call == call
+        ));
+
+        let (ids, prepare, failure, authorization, observation, provider, gate, retained) =
+            service.into_parts();
+        assert_eq!(prepare.calls, 1);
+        assert_eq!(failure.calls, 1);
+        assert_eq!(provider.capability_preparation_count(), 1);
+        let mut resumed = ModelCallExecutionService::from_parts(
+            ids,
+            prepare,
+            failure,
+            authorization,
+            observation,
+            provider,
+            gate,
+            retained,
+        );
+        assert!(matches!(
+            resumed.execute(identity(99, SessionId::from_uuid)).await,
+            Err(ModelCallExecutionError::CapabilityFailureCommit(
+                FakeError::Infrastructure
+            ))
+        ));
+        let (_, prepare, failure, _, _, provider, _, retained) = resumed.into_parts();
+        assert_eq!(prepare.calls, 1);
+        assert_eq!(failure.calls, 2);
+        assert_eq!(provider.capability_preparation_count(), 1);
+        assert!(matches!(
+            retained,
+            Some(RetainedModelCallExecutionState::CapabilityKnownFailure {
+                session: retained_session,
+                call: retained_call,
+            }) if retained_session == session && retained_call == call
+        ));
+    }
+
+    /// ADR-0045: stale or stopped authority is an ordinary no-send result,
+    /// not a caller/hub defect and never provider entry.
+    #[tokio::test]
+    async fn stale_authorization_returns_no_work_without_provider_entry() {
+        let (request, _) = prepared_fixture();
+        let session = request.session();
+        let mut service = ModelCallExecutionService::new(
+            FixedIds::baseline(),
+            FakePrepare {
+                outcomes: [Ok(PrepareModelCallOutcome::Ready(Box::new(request)))].into(),
+                calls: 0,
+            },
+            UnusedFailure,
+            NoSendAuthorization { calls: 0 },
+            UnusedObservation,
+            ScriptedModelCallProvider::new([ScriptedModelCallStep::Return(
+                ModelCallTerminalObservation::KnownFailed,
+            )]),
+            InProcessAttemptDispatchGate::default(),
+        );
+
+        assert_eq!(
+            service
+                .execute(session)
+                .await
+                .expect("stale authority is a normal no-send result"),
+            ModelCallExecutionOutcome::NoWork
+        );
+        let (_, _, _, authorization, _, provider, _, retained) = service.into_parts();
+        assert_eq!(authorization.calls, 1);
+        assert_eq!(provider.capability_preparation_count(), 1);
+        assert_eq!(provider.interaction_count(), 0);
+        assert!(retained.is_none());
+    }
+
     /// A resumed prepared call constructs one opaque
     /// capability, commits InFlight first, and invokes the provider once. An
     /// operator failure produces no fabricated observation commit.
@@ -1640,7 +1967,7 @@ mod tests {
             error,
             ModelCallExecutionError::Provider(ScriptedModelCallError::InteractionOperatorFailure)
         ));
-        let (_, prepare, _, authorization, _, provider, _) = service.into_parts();
+        let (_, prepare, _, authorization, _, provider, _, _) = service.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(authorization.calls, 1);
         assert_eq!(provider.capability_preparation_count(), 1);
@@ -1720,7 +2047,7 @@ mod tests {
             ModelCallExecutionOutcome::ObservationAlreadyCommitted(call)
         );
         assert!(service.retained_observation().is_none());
-        let (_, _, _, authorization, observation, provider, _) = service.into_parts();
+        let (_, _, _, authorization, observation, provider, _, _) = service.into_parts();
         assert_eq!(authorization.calls, 1);
         assert_eq!(authorization.reread_calls, 0);
         assert_eq!(observation.commit_calls, 2);
@@ -1789,13 +2116,117 @@ mod tests {
             retained.observation(),
             &ModelCallTerminalObservation::KnownFailed
         );
-        let (_, _, _, authorization, observation, provider, _) = service.into_parts();
+        let (_, _, _, authorization, observation, provider, _, _) = service.into_parts();
         assert_eq!(authorization.calls, 1);
         assert_eq!(authorization.reread_calls, 1);
         assert_eq!(observation.commit_calls, 1);
         assert_eq!(observation.observed, vec![retained]);
         assert_eq!(provider.capability_preparation_count(), 1);
         assert_eq!(provider.interaction_count(), 0);
+    }
+
+    /// ADR-0045: a failed ambiguous-authorization reread retains the exact
+    /// non-consumption proof across handoff and later classifies a committed
+    /// `InFlight` authorization without invoking the provider.
+    #[tokio::test]
+    async fn ambiguous_authorization_reread_retains_non_consumption_across_handoff() {
+        let (request, authorized) = prepared_fixture();
+        let session = request.session();
+        let call = request.call().id();
+        let mut service = ModelCallExecutionService::new(
+            FixedIds::baseline(),
+            FakePrepare {
+                outcomes: [Ok(PrepareModelCallOutcome::Ready(Box::new(
+                    request.clone(),
+                )))]
+                .into(),
+                calls: 0,
+            },
+            UnusedFailure,
+            FakeAuthorization {
+                outcomes: [Err(FakeError::CommitAmbiguous)].into(),
+                rereads: [
+                    Err(FakeError::Infrastructure),
+                    Ok(ModelCallAuthorizationReread::InFlight(Box::new(authorized))),
+                ]
+                .into(),
+                calls: 0,
+                reread_calls: 0,
+            },
+            FakeObservation {
+                commit_errors: [FakeError::Infrastructure].into(),
+                rereads: VecDeque::new(),
+                observed: Vec::new(),
+                commit_calls: 0,
+                reread_calls: 0,
+            },
+            ScriptedModelCallProvider::new([ScriptedModelCallStep::Return(
+                ModelCallTerminalObservation::Completed {
+                    assistant_text: vec![
+                        AssistantText::try_new(String::from("must not be sent"))
+                            .expect("fixture text is valid"),
+                    ],
+                },
+            )]),
+            InProcessAttemptDispatchGate::default(),
+        );
+
+        assert!(matches!(
+            service.execute(session).await,
+            Err(ModelCallExecutionError::AuthorizationReread {
+                authorization_error: FakeError::CommitAmbiguous,
+                reread_error: FakeError::Infrastructure,
+            })
+        ));
+        assert!(matches!(
+            service.retained_state(),
+            Some(RetainedModelCallExecutionState::AuthorizationNonConsumption {
+                session: retained_session,
+                prepared,
+            }) if *retained_session == session && **prepared == request
+        ));
+
+        let (ids, prepare, failure, authorization, observation, provider, gate, retained) =
+            service.into_parts();
+        let mut resumed = ModelCallExecutionService::from_parts(
+            ids,
+            prepare,
+            failure,
+            authorization,
+            observation,
+            provider,
+            gate,
+            retained,
+        );
+        let error = resumed
+            .execute(identity(99, SessionId::from_uuid))
+            .await
+            .expect_err("the retained known-failure observation commit is visible");
+        let retained_observation = match error {
+            ModelCallExecutionError::ObservationCommit {
+                error: FakeError::Infrastructure,
+                retained_observation,
+            } => retained_observation,
+            error => panic!("unexpected reconciliation error: {error}"),
+        };
+        assert_eq!(retained_observation.call(), call);
+        assert_eq!(
+            retained_observation.observation(),
+            &ModelCallTerminalObservation::KnownFailed
+        );
+        let (_, prepare, _, authorization, observation, provider, _, retained) =
+            resumed.into_parts();
+        assert_eq!(prepare.calls, 1);
+        assert_eq!(authorization.calls, 1);
+        assert_eq!(authorization.reread_calls, 2);
+        assert_eq!(observation.commit_calls, 1);
+        assert_eq!(provider.capability_preparation_count(), 1);
+        assert_eq!(provider.interaction_count(), 0);
+        assert!(matches!(
+            retained,
+            Some(RetainedModelCallExecutionState::TerminalObservation { observation, .. })
+                if observation == retained_observation
+        ));
     }
 
     /// S02 / INV-009 / INV-014: the attempt gate transfers into the provider
@@ -1852,7 +2283,7 @@ mod tests {
                 Err(ModelCallExecutionError::Provider(FakeError::Infrastructure))
             ));
         }
-        let (_, _, _, _, _, provider, _) = service.into_parts();
+        let (_, _, _, _, _, provider, _, _) = service.into_parts();
         assert_eq!(provider.interaction_count, 1);
     }
 

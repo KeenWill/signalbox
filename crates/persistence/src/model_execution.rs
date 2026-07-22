@@ -13,9 +13,10 @@ use std::{
 
 use rust_decimal::Decimal;
 use signalbox_application::{
-    AuthorizeModelCallTransaction, ClassifyOperatorFailure, CommitModelCallObservationTransaction,
-    FailPreparedModelCallTransaction, ModelCallAuthorizationReread, OperatorFailureClass,
-    PrepareModelCallOutcome, PrepareModelCallTransaction, RetainedModelCallObservationStatus,
+    AuthorizeModelCallOutcome, AuthorizeModelCallTransaction, ClassifyOperatorFailure,
+    CommitModelCallObservationTransaction, FailPreparedModelCallTransaction,
+    ModelCallAuthorizationReread, OperatorFailureClass, PrepareModelCallOutcome,
+    PrepareModelCallTransaction, RetainedModelCallObservationStatus,
 };
 use signalbox_domain::{
     AcceptedInputDisposition, AcceptedInputId, AmbiguousModelCallTurn, AssistantText,
@@ -324,22 +325,45 @@ impl PostgresModelCallRepository {
         &self,
         session: SessionId,
         call: ModelCallId,
-    ) -> Result<AuthorizedModelCall, ModelCallRepositoryError> {
+    ) -> Result<AuthorizeModelCallOutcome, ModelCallRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let result = async {
-            lock_session(&mut transaction, session).await?;
-            let execution = require_exact_call(
-                require_live_execution(&mut transaction, session, &self.targets).await?,
-                call,
-            )?;
+            if let Err(error) = lock_session(&mut transaction, session).await {
+                return match error {
+                    ModelCallRepositoryError::NoLiveExecution => {
+                        Ok((false, AuthorizeModelCallOutcome::NoSend))
+                    }
+                    error => Err(error),
+                };
+            }
+            let execution =
+                match require_live_execution(&mut transaction, session, &self.targets).await {
+                    Ok(execution) => execution,
+                    Err(ModelCallRepositoryError::NoLiveExecution) => {
+                        return Ok((false, AuthorizeModelCallOutcome::NoSend));
+                    }
+                    Err(error) => return Err(error),
+                };
+            if !matches!(
+                execution.current_call(),
+                Some(current)
+                    if current.id() == call
+                        && current.state()
+                            == signalbox_domain::CurrentModelCallState::Prepared
+            ) {
+                return Ok((false, AuthorizeModelCallOutcome::NoSend));
+            }
             let authorized = execution.authorize_send().map_err(|_| {
-                ModelCallRepositoryError::InvalidTransition("send authorization requires Prepared")
+                ModelCallCorruption::Inconsistent("checked Prepared call could not authorize send")
             })?;
             persist_authorization(&mut transaction, &authorized).await?;
-            Ok(authorized)
+            Ok((
+                true,
+                AuthorizeModelCallOutcome::Authorized(Box::new(authorized)),
+            ))
         }
         .await;
-        finish_commit(transaction, result).await
+        finish_optional_commit(transaction, result).await
     }
 
     /// Freshly reloads issued authority and commits one terminal observation.
@@ -626,7 +650,7 @@ impl AuthorizeModelCallTransaction for PostgresModelCallRepository {
         &mut self,
         session: SessionId,
         call: ModelCallId,
-    ) -> Result<AuthorizedModelCall, Self::Error> {
+    ) -> Result<AuthorizeModelCallOutcome, Self::Error> {
         self.authorize_send(session, call).await
     }
 
@@ -674,32 +698,120 @@ async fn terminal_content_matches(
     else {
         return Ok(true);
     };
-    let stored = sqlx::query_scalar::<_, String>(
-        "SELECT entry.assistant_text_value
-           FROM turn_lifecycle AS turn
-           JOIN context_frontier_member AS member
-             ON member.owning_session_id = turn.session_id
-            AND member.context_frontier_id = turn.terminal_frontier_id
-           JOIN semantic_transcript_entry AS entry
-             ON entry.source_session_id = member.source_session_id
-            AND entry.semantic_entry_id = member.semantic_entry_id
-          WHERE turn.session_id = $1
-            AND turn.turn_id = $2
-            AND turn.state_kind = 'terminal'
-            AND turn.terminal_model_call_id = $3
-            AND entry.payload_kind = 'assistant_text'
-            AND entry.producing_model_call_id = $3
-          ORDER BY member.member_position",
+    let terminal_frontier = sqlx::query_scalar::<_, Uuid>(
+        "SELECT terminal_frontier_id
+           FROM turn_lifecycle
+          WHERE session_id = $1
+            AND turn_id = $2
+            AND state_kind = 'terminal'
+            AND terminal_disposition_kind = 'completed'
+            AND terminal_model_call_id = $3",
     )
     .bind(session_id_to_uuid(session))
     .bind(turn_id_to_uuid(observation.correlation().turn()))
     .bind(observation.call().into_uuid())
-    .fetch_all(connection)
+    .fetch_optional(&mut *connection)
     .await?;
-    Ok(stored
+    let Some(terminal_frontier) = terminal_frontier else {
+        return Ok(false);
+    };
+    let source_frontier = sqlx::query_as::<_, (Uuid, Uuid)>(
+        "SELECT source_session_id, semantic_entry_id
+           FROM context_frontier_member
+          WHERE owning_session_id = $1
+            AND context_frontier_id = $2
+          ORDER BY member_position",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(observation.correlation().frontier().into_uuid())
+    .fetch_all(&mut *connection)
+    .await?;
+    let terminal_members = sqlx::query(
+        "SELECT member.source_session_id, member.semantic_entry_id,
+                entry.payload_kind, entry.assistant_text_value,
+                entry.producing_model_call_id, entry.completed_turn_id
+           FROM context_frontier_member AS member
+           JOIN semantic_transcript_entry AS entry
+             ON entry.source_session_id = member.source_session_id
+            AND entry.semantic_entry_id = member.semantic_entry_id
+          WHERE member.owning_session_id = $1
+            AND member.context_frontier_id = $2
+          ORDER BY member.member_position",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(terminal_frontier)
+    .fetch_all(&mut *connection)
+    .await?
+    .into_iter()
+    .map(|row| {
+        Ok(StoredTerminalFrontierMember {
+            source_session: required(&row, "source_session_id")?,
+            entry: required(&row, "semantic_entry_id")?,
+            payload_kind: required(&row, "payload_kind")?,
+            assistant_text: row.try_get("assistant_text_value")?,
+            producing_call: row.try_get("producing_model_call_id")?,
+            completed_turn: row.try_get("completed_turn_id")?,
+        })
+    })
+    .collect::<Result<Vec<_>, ModelCallRepositoryError>>()?;
+    Ok(completed_terminal_frontier_matches(
+        &source_frontier,
+        &terminal_members,
+        session_id_to_uuid(session),
+        turn_id_to_uuid(observation.correlation().turn()),
+        observation.call().into_uuid(),
+        assistant_text,
+    ))
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct StoredTerminalFrontierMember {
+    source_session: Uuid,
+    entry: Uuid,
+    payload_kind: String,
+    assistant_text: Option<String>,
+    producing_call: Option<Uuid>,
+    completed_turn: Option<Uuid>,
+}
+
+fn completed_terminal_frontier_matches(
+    source_frontier: &[(Uuid, Uuid)],
+    terminal_frontier: &[StoredTerminalFrontierMember],
+    session: Uuid,
+    turn: Uuid,
+    call: Uuid,
+    assistant_text: &[AssistantText],
+) -> bool {
+    if terminal_frontier.len() != source_frontier.len() + assistant_text.len() + 1 {
+        return false;
+    }
+    if terminal_frontier
         .iter()
-        .map(String::as_str)
-        .eq(assistant_text.iter().map(AssistantText::as_str)))
+        .zip(source_frontier)
+        .any(|(stored, expected)| (stored.source_session, stored.entry) != *expected)
+    {
+        return false;
+    }
+    let assistant_start = source_frontier.len();
+    if terminal_frontier[assistant_start..assistant_start + assistant_text.len()]
+        .iter()
+        .zip(assistant_text)
+        .any(|(stored, expected)| {
+            stored.source_session != session
+                || stored.payload_kind != "assistant_text"
+                || stored.assistant_text.as_deref() != Some(expected.as_str())
+                || stored.producing_call != Some(call)
+                || stored.completed_turn.is_some()
+        })
+    {
+        return false;
+    }
+    let completion = &terminal_frontier[assistant_start + assistant_text.len()];
+    completion.source_session == session
+        && completion.payload_kind == "turn_completed"
+        && completion.assistant_text.is_none()
+        && completion.producing_call.is_none()
+        && completion.completed_turn == Some(turn)
 }
 
 fn pending_reclassification_candidates(
@@ -1931,12 +2043,15 @@ mod tests {
     use std::{borrow::Cow, collections::BTreeSet, error::Error, fmt, io};
 
     use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
-    use signalbox_domain::TurnId;
-    use sqlx::error::{DatabaseError, ErrorKind};
-    use sqlx::types::Uuid;
+    use signalbox_domain::{AssistantText, TurnId};
+    use sqlx::{
+        error::{DatabaseError, ErrorKind},
+        types::Uuid,
+    };
 
     use super::{
-        ModelCallIdentityCollision, ModelCallRepositoryError, commit_failure_is_ambiguous,
+        ModelCallIdentityCollision, ModelCallRepositoryError, StoredTerminalFrontierMember,
+        commit_failure_is_ambiguous, completed_terminal_frontier_matches,
         record_reclassified_turn_candidate,
     };
 
@@ -1972,7 +2087,6 @@ mod tests {
             ))
         ));
     }
-
     #[derive(Debug)]
     struct ServerCommitFailure {
         code: &'static str,
@@ -2051,5 +2165,71 @@ mod tests {
             let error = sqlx::Error::Database(Box::new(ServerCommitFailure { code }));
             assert!(commit_failure_is_ambiguous(&error));
         }
+    }
+
+    /// ADR-0042: a retained completed observation is present only when the
+    /// terminal frontier is the exact source prefix, assistant sequence, and
+    /// final `TurnCompleted` marker.
+    #[test]
+    fn completed_reread_requires_exact_terminal_frontier_shape() {
+        let session = Uuid::from_u128(1);
+        let turn = Uuid::from_u128(2);
+        let call = Uuid::from_u128(3);
+        let source = vec![(Uuid::from_u128(4), Uuid::from_u128(5))];
+        let assistant = vec![
+            AssistantText::try_new(String::from("exact reply")).expect("fixture text is admitted"),
+        ];
+        let prefix = StoredTerminalFrontierMember {
+            source_session: source[0].0,
+            entry: source[0].1,
+            payload_kind: String::from("origin_accepted_input"),
+            assistant_text: None,
+            producing_call: None,
+            completed_turn: None,
+        };
+        let assistant_member = StoredTerminalFrontierMember {
+            source_session: session,
+            entry: Uuid::from_u128(6),
+            payload_kind: String::from("assistant_text"),
+            assistant_text: Some(String::from("exact reply")),
+            producing_call: Some(call),
+            completed_turn: None,
+        };
+        let completion = StoredTerminalFrontierMember {
+            source_session: session,
+            entry: Uuid::from_u128(7),
+            payload_kind: String::from("turn_completed"),
+            assistant_text: None,
+            producing_call: None,
+            completed_turn: Some(turn),
+        };
+        let exact = vec![prefix.clone(), assistant_member.clone(), completion.clone()];
+        assert!(completed_terminal_frontier_matches(
+            &source, &exact, session, turn, call, &assistant,
+        ));
+
+        assert!(!completed_terminal_frontier_matches(
+            &source,
+            &[prefix.clone(), assistant_member.clone()],
+            session,
+            turn,
+            call,
+            &assistant,
+        ));
+        let mut extra = exact.clone();
+        extra.insert(1, prefix.clone());
+        assert!(!completed_terminal_frontier_matches(
+            &source, &extra, session, turn, call, &assistant,
+        ));
+        let mut wrong_marker = completion;
+        wrong_marker.completed_turn = Some(Uuid::from_u128(8));
+        assert!(!completed_terminal_frontier_matches(
+            &source,
+            &[prefix, assistant_member, wrong_marker],
+            session,
+            turn,
+            call,
+            &assistant,
+        ));
     }
 }

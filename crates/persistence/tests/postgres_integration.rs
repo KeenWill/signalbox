@@ -9,9 +9,9 @@ use std::{collections::VecDeque, error::Error, future::Future, sync::Arc};
 
 use rust_decimal::Decimal;
 use signalbox_application::{
-    CommitModelCallObservationTransaction, CreateSessionError, CreateSessionOutcome,
-    CreateSessionRequest, CreateSessionService, EligibilityNudge, EligibilityNudgeOutcome,
-    EligibilitySweep, InProcessAttemptDispatchGate, LoadSessionService,
+    AuthorizeModelCallOutcome, CommitModelCallObservationTransaction, CreateSessionError,
+    CreateSessionOutcome, CreateSessionRequest, CreateSessionService, EligibilityNudge,
+    EligibilityNudgeOutcome, EligibilitySweep, InProcessAttemptDispatchGate, LoadSessionService,
     ModelCallAuthorizationReread, ModelCallExecutionIdGenerator, ModelCallExecutionOutcome,
     ModelCallExecutionService, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
     ReplaceSessionDefaultsService, RetainedModelCallObservationStatus, ScriptedModelCallProvider,
@@ -890,7 +890,10 @@ async fn checkpoint_restart_model_call(
         PrepareInitialModelCallOutcome::Checkpointed(checkpointed) if checkpointed == call
     ));
     if authorize {
-        repository.authorize_send(session, call).await?;
+        assert!(matches!(
+            repository.authorize_send(session, call).await?,
+            AuthorizeModelCallOutcome::Authorized(_)
+        ));
     }
 
     Ok(RestartModelCallFixture {
@@ -1042,7 +1045,16 @@ async fn s01_s20_s21_inv014_inv015_inv032_model_call_transactions_complete_first
         ModelCallAuthorizationReread::Prepared
     );
 
-    let authorized = repository.authorize_send(session, call).await?;
+    let AuthorizeModelCallOutcome::Authorized(authorized) =
+        repository.authorize_send(session, call).await?
+    else {
+        panic!("the exact Prepared call must authorize")
+    };
+    let authorized = *authorized;
+    assert_eq!(
+        repository.authorize_send(session, call).await?,
+        AuthorizeModelCallOutcome::NoSend
+    );
     assert_eq!(
         repository
             .reread_ambiguous_authorization(session, &prepared)
@@ -1294,7 +1306,7 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
                 .expect("fixture assistant content is admitted"),
         }
     );
-    let (_, _, _, _, _, provider, _) = service.into_parts();
+    let (_, _, _, _, _, provider, _, _) = service.into_parts();
     assert_eq!(provider.capability_preparation_count(), 1);
     assert_eq!(provider.interaction_count(), 1);
 
@@ -1643,7 +1655,12 @@ async fn s04_s08_s09_inv016_terminal_call_reclassifies_and_schedules_pending_ste
             .await?,
         PrepareInitialModelCallOutcome::Checkpointed(checkpointed) if checkpointed == call
     ));
-    let authorized = calls.authorize_send(session, call).await?;
+    let AuthorizeModelCallOutcome::Authorized(authorized) =
+        calls.authorize_send(session, call).await?
+    else {
+        panic!("the exact Prepared call must authorize")
+    };
+    let authorized = *authorized;
 
     let steering_command = DurableCommandId::from_uuid(Uuid::from_u128(0x4e6));
     let steering_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x9e5));

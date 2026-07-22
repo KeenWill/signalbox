@@ -2048,12 +2048,17 @@ pub trait AuthorizeModelCallTransaction {
         &mut self,
         session: SessionId,
         call: ModelCallId,
-    ) -> impl Future<Output = Result<AuthorizedModelCall, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<AuthorizeModelCallOutcome, Self::Error>> + Send;
     fn reread_after_ambiguous_commit(
         &mut self,
         session: SessionId,
         prepared: &PreparedModelCallRequest,
     ) -> impl Future<Output = Result<ModelCallAuthorizationReread, Self::Error>> + Send;
+}
+
+pub enum AuthorizeModelCallOutcome {
+    NoSend,
+    Authorized(Box<AuthorizedModelCall>),
 }
 
 pub enum ModelCallAuthorizationReread {
@@ -2082,6 +2087,21 @@ pub trait CommitModelCallObservationTransaction {
 pub enum RetainedModelCallObservationStatus {
     Pending,
     AlreadyCommitted,
+}
+
+pub enum RetainedModelCallExecutionState {
+    CapabilityKnownFailure {
+        session: SessionId,
+        call: ModelCallId,
+    },
+    AuthorizationNonConsumption {
+        session: SessionId,
+        prepared: Box<PreparedModelCallRequest>,
+    },
+    TerminalObservation {
+        session: SessionId,
+        observation: CorrelatedModelCallTerminalObservation,
+    },
 }
 
 pub enum ModelCallCapabilityPreparation<Capability> {
@@ -2150,6 +2170,7 @@ pub enum ModelCallExecutionError<
         authorization_error: AuthorizationError,
         reread_error: AuthorizationError,
     },
+    AuthorizationReconciliation(AuthorizationError),
     Provider(ProviderError),
     ObservationCommit {
         error: ObservationError,
@@ -2187,9 +2208,29 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         provider: Provider,
         gate: Gate,
     ) -> Self;
+    pub const fn from_parts(
+        ids: Ids,
+        prepare: Prepare,
+        failure: Failure,
+        authorization: Authorization,
+        observation: Observation,
+        provider: Provider,
+        gate: Gate,
+        retained_state: Option<RetainedModelCallExecutionState>,
+    ) -> Self;
     pub fn into_parts(
         self,
-    ) -> (Ids, Prepare, Failure, Authorization, Observation, Provider, Gate);
+    ) -> (
+        Ids,
+        Prepare,
+        Failure,
+        Authorization,
+        Observation,
+        Provider,
+        Gate,
+        Option<RetainedModelCallExecutionState>,
+    );
+    pub const fn retained_state(&self) -> Option<&RetainedModelCallExecutionState>;
     pub fn retained_observation(&self) -> Option<&CorrelatedModelCallTerminalObservation>;
     pub async fn execute(
         &mut self,
@@ -2577,11 +2618,11 @@ impl<
 | **signalbox-domain total**            | **198 (+1 free fn)** |
 | application: create_session           | 8 (incl. 2 traits)   |
 | application: load_session             | 2 (incl. 1 trait)    |
-| application: model_execution          | 24 (incl. 7 traits)  |
+| application: model_execution          | 26 (incl. 7 traits)  |
 | application: operator_failure         | 2 (incl. 1 trait)    |
 | application: replace_session_defaults | 4 (incl. 1 trait)    |
 | application: scheduler                | 12 (incl. 4 traits)  |
 | application: start_eligible_turn      | 5 (incl. 2 traits)   |
 | application: startup_scan             | 7 (incl. 2 traits)   |
 | application: submit_input             | 7 (incl. 2 traits)   |
-| **signalbox-application total**       | **71**               |
+| **signalbox-application total**       | **73**               |
