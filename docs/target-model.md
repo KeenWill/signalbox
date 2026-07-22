@@ -399,6 +399,12 @@ update subscription is not an ordinary tool attempt: it needs its own decision
 for registration identity, lifetime, callback delivery, and conversion of later
 events into session input, recorded under [decisions/](decisions/README.md).
 
+### An app-facing SDK (target)
+
+The app-facing SDK remains a directional target only. Its deferral gate and
+non-decisions are owned by
+[ADR-0047](decisions/0047-typed-model-runtime-substrate.md#anti-goals).
+
 ## Concept status map
 
 Statuses: **Implemented** (accepted decision plus code in tree), **Accepted**

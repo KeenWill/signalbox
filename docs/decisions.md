@@ -9,7 +9,7 @@ that constrains several components — require a full record under
 [decisions/](decisions/README.md) instead. Unresolved questions live in
 [open-questions.md](open-questions.md).
 
-## 2026-07-20 — Conservative Renovate policy with release-age gates
+## 2026-07-21 — Conservative Renovate policy with release-age gates
 
 **Context.** Dependency versions currently move only when a slice hand-bumps
 them, and newly published crate versions are riskiest in their first days, when
@@ -42,6 +42,58 @@ unverifiable age is not evidence of maturity.
 **Affects.** `renovate.json5` (new), `deny.toml`, `.github/workflows/deny.yml`,
 and this log; no crate code, manifests, or runtime behavior. Renovate acts only
 after the owner installs the app.
+
+## 2026-07-21 — One pinned Markdown toolchain for local use and CI
+
+**Context.** CI pinned mdformat and its GFM plugin inline while contributor
+tooling was unmanaged, and transitive Python dependencies remained floating.
+That allowed local formatting to differ from CI and made the required versions
+hard to update coherently.
+
+**Decision.** Make `tooling/requirements-mdformat.txt` the fully frozen source
+for mdformat in both CI's virtual environment and the local devenv environment,
+superseding the 0.7.22/0.4.1 pins with mdformat 1.0.0 and mdformat-gfm 1.0.0.
+Require the devenv CLI version to match the locked modules. Keep Rust under
+`rustup` and keep Postgres under testcontainers rather than duplicating either
+inside devenv.
+
+**Rejected alternatives.** Keeping inline CI pins leaves local tools
+uncontrolled. Supplying Rust through both rustup and devenv creates competing
+toolchains. A devenv Postgres service would be unused by the testcontainers
+suite. Floating the devenv CLI permits CLI/module incompatibility.
+
+**Affects.** The devenv and direnv entry points, the Markdown requirements file,
+the CI Markdown job, contributor tooling guidance, and the formatter-version
+record. It does not move CI to Nix or change Rust and database-test ownership.
+
+## 2026-07-20 — Hand-roll the typed model-runtime substrate
+
+**Context.** [ADR-0047](decisions/0047-typed-model-runtime-substrate.md) fixes
+the isolation and dependency rules for a provider-neutral runtime but leaves the
+Phase-0 audit outcome, replacement strategy, and exact crate decomposition to a
+later recorded decision. The audit found that the trustworthy send, error, and
+stream-terminal paths require semantic reversal, while the useful wire and
+framing ideas are small enough to reproduce directly.
+
+**Decision.** Hand-roll `signalbox-model-runtime` as the provider-neutral core
+crate, with one separately named workspace crate per provider adapter. Use
+SerdesAI only as a design reference; copy no code. Keep retry, fallback,
+agent-loop, registry, and tool-execution machinery out. Use `serde` and
+`serde_json` for typed JSON decoding and `schemars` for Rust-derived JSON
+Schema; provider HTTP clients and wire dependencies remain decisions of their
+adapter slices.
+
+**Rejected alternatives.** Vendoring the eight-crate SerdesAI closure imports
+retry and agent semantics Signalbox would immediately replace. Depending on
+upstream releases makes accepted behavior contingent on those conflicting
+semantics. Combining every provider in the core crate weakens ADR-0047's
+dependency isolation and feature accounting.
+
+**Affects.** The workspace member `crates/model-runtime`, its typed operation,
+observation, evidence, tool, structured-output, and SSE APIs, and the separate
+provider-adapter crates stacked above it. This closes ADR-0047's audit-outcome
+and decomposition question; application-side port shape remains owned by
+ADR-0045 and its implementation slices.
 
 ## 2026-07-20 — Startup failure seam and pending-steering blocker
 
