@@ -14,9 +14,10 @@ use signalbox_application::{
     EligibilityNudgeOutcome, EligibilitySweep, InProcessAttemptDispatchGate, LoadSessionService,
     ModelCallAuthorizationReread, ModelCallExecutionIdGenerator, ModelCallExecutionOutcome,
     ModelCallExecutionService, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
-    ReplaceSessionDefaultsService, RetainedModelCallObservationStatus, ScriptedModelCallProvider,
-    ScriptedModelCallStep, SessionIdGenerator, StartEligibleTurnIdGenerator,
-    StartEligibleTurnOutcome, StartEligibleTurnService, StartupScanIdGenerator, StartupScanService,
+    ReplaceSessionDefaultsService, RetainedCapabilityFailureStatus,
+    RetainedModelCallObservationStatus, ScriptedModelCallProvider, ScriptedModelCallStep,
+    SessionIdGenerator, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
+    StartEligibleTurnService, StartupScanIdGenerator, StartupScanService,
     StartupScanSessionOutcome, SubmitInputIdGenerator, SubmitInputOutcome, SubmitInputRequest,
     SubmitInputRequestError, SubmitInputService,
 };
@@ -915,6 +916,57 @@ async fn embedded_migrator_connects_and_is_idempotent() -> Result<(), Box<dyn Er
     pool.close().await;
     drop(container);
 
+    Ok(())
+}
+
+/// ADR-0045: an uncertain capability-failure closure is reconciled from exact
+/// durable Prepared or complete known-failure state before any resubmission.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn model_call_capability_failure_reread_distinguishes_pending_and_committed()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7000;
+    let fixture = checkpoint_restart_model_call(&pool, seed, false).await?;
+    let selection = signalbox_domain::DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5));
+    let provider = ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6));
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        ResolvedProviderTarget::naming(provider),
+    )])
+    .expect("one restart fixture target forms a catalog");
+    let repository = PostgresModelCallRepository::new(pool.clone(), targets);
+
+    assert_eq!(
+        repository
+            .reread_capability_failure(fixture.session, fixture.call)
+            .await?,
+        RetainedCapabilityFailureStatus::Pending
+    );
+    let failed = repository
+        .fail_prepared_call(
+            fixture.session,
+            fixture.call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 14)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 15)),
+            ),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+    assert_eq!(
+        failed.call().expect("the prepared call closes").id(),
+        fixture.call
+    );
+    assert_eq!(
+        repository
+            .reread_capability_failure(fixture.session, fixture.call)
+            .await?,
+        RetainedCapabilityFailureStatus::AlreadyCommitted
+    );
+
+    pool.close().await;
+    drop(container);
     Ok(())
 }
 

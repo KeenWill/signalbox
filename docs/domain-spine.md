@@ -2040,6 +2040,16 @@ pub trait FailPreparedModelCallTransaction {
     ) -> impl Future<Output = Result<FailedModelCallTurn, Self::Error>> + Send
     where
         NextTurn: FnMut(AcceptedInputId) -> TurnId + Send;
+    fn reread_failure(
+        &mut self,
+        session: SessionId,
+        call: ModelCallId,
+    ) -> impl Future<Output = Result<RetainedCapabilityFailureStatus, Self::Error>> + Send;
+}
+
+pub enum RetainedCapabilityFailureStatus {
+    Pending,
+    AlreadyCommitted,
 }
 
 pub trait AuthorizeModelCallTransaction {
@@ -2150,6 +2160,7 @@ pub enum ModelCallExecutionOutcome {
     TargetUnavailable(Box<FailedModelCallTurn>),
     PendingSteering { accepted_input: AcceptedInputId },
     CapabilityKnownFailure(Box<FailedModelCallTurn>),
+    CapabilityFailureAlreadyCommitted(ModelCallId),
     ObservationCommitted(Box<ModelCallTerminalOutcome>),
     ObservationAlreadyCommitted(ModelCallId),
 }
@@ -2165,6 +2176,7 @@ pub enum ModelCallExecutionError<
     Render(ModelFrontierRenderingError),
     CapabilityPreparation(ProviderError),
     CapabilityFailureCommit(FailureError),
+    CapabilityFailureReread(FailureError),
     Authorization(AuthorizationError),
     AuthorizationReread {
         authorization_error: AuthorizationError,
@@ -2618,11 +2630,11 @@ impl<
 | **signalbox-domain total**            | **198 (+1 free fn)** |
 | application: create_session           | 8 (incl. 2 traits)   |
 | application: load_session             | 2 (incl. 1 trait)    |
-| application: model_execution          | 26 (incl. 7 traits)  |
+| application: model_execution          | 27 (incl. 7 traits)  |
 | application: operator_failure         | 2 (incl. 1 trait)    |
 | application: replace_session_defaults | 4 (incl. 1 trait)    |
 | application: scheduler                | 12 (incl. 4 traits)  |
 | application: start_eligible_turn      | 5 (incl. 2 traits)   |
 | application: startup_scan             | 7 (incl. 2 traits)   |
 | application: submit_input             | 7 (incl. 2 traits)   |
-| **signalbox-application total**       | **73**               |
+| **signalbox-application total**       | **74**               |

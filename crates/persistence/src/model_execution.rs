@@ -16,7 +16,8 @@ use signalbox_application::{
     AuthorizeModelCallOutcome, AuthorizeModelCallTransaction, ClassifyOperatorFailure,
     CommitModelCallObservationTransaction, FailPreparedModelCallTransaction,
     ModelCallAuthorizationReread, OperatorFailureClass, PrepareModelCallOutcome,
-    PrepareModelCallTransaction, RetainedModelCallObservationStatus,
+    PrepareModelCallTransaction, RetainedCapabilityFailureStatus,
+    RetainedModelCallObservationStatus,
 };
 use signalbox_domain::{
     AcceptedInputDisposition, AcceptedInputId, AmbiguousModelCallTurn, AssistantText,
@@ -439,6 +440,106 @@ impl PostgresModelCallRepository {
         finish_commit(transaction, result).await
     }
 
+    /// Rereads whether an unchanged pre-send capability failure committed.
+    pub async fn reread_capability_failure(
+        &self,
+        session: SessionId,
+        call: ModelCallId,
+    ) -> Result<RetainedCapabilityFailureStatus, ModelCallRepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        let result = async {
+            lock_session(&mut transaction, session).await?;
+            let stored = sqlx::query_as::<_, (Uuid, Uuid, String, Option<String>)>(
+                "SELECT turn_id, turn_attempt_id, state_kind,
+                        terminal_disposition_kind
+                   FROM model_call
+                  WHERE session_id = $1
+                    AND model_call_id = $2",
+            )
+            .bind(session_id_to_uuid(session))
+            .bind(call.into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(ModelCallCorruption::Missing(
+                "retained capability-failure model call",
+            ))?;
+            let (turn, attempt, state, disposition) = stored;
+            match (state.as_str(), disposition.as_deref()) {
+                ("prepared", None) => {
+                    let execution = require_exact_call(
+                        require_live_execution(&mut transaction, session, &self.targets).await?,
+                        call,
+                    )?;
+                    execution.resume_prepared_call().map_err(|_| {
+                        ModelCallRepositoryError::InvalidTransition(
+                            "retained capability failure could not resume Prepared",
+                        )
+                    })?;
+                    Ok(RetainedCapabilityFailureStatus::Pending)
+                }
+                ("terminal", Some("known_failed")) => {
+                    let closure_is_complete = sqlx::query_scalar::<_, bool>(
+                        "SELECT
+                            EXISTS (
+                                SELECT 1
+                                  FROM turn_attempt
+                                 WHERE session_id = $1
+                                   AND turn_id = $2
+                                   AND turn_attempt_id = $3
+                                   AND state_kind = 'ended'
+                                   AND end_variant = 'without_stop'
+                                   AND end_disposition = 'known_failure'
+                            )
+                            AND EXISTS (
+                                SELECT 1
+                                  FROM turn_lifecycle
+                                 WHERE session_id = $1
+                                   AND turn_id = $2
+                                   AND state_kind = 'terminal'
+                                   AND terminal_disposition_kind = 'failed'
+                            )
+                            AND EXISTS (
+                                SELECT 1
+                                  FROM turn_lifecycle AS turn
+                                  JOIN context_frontier AS frontier
+                                    ON frontier.owning_session_id = turn.session_id
+                                   AND frontier.context_frontier_id = turn.terminal_frontier_id
+                                  JOIN context_frontier_member AS member
+                                    ON member.owning_session_id = frontier.owning_session_id
+                                   AND member.context_frontier_id = frontier.context_frontier_id
+                                   AND member.member_position = frontier.member_count
+                                  JOIN semantic_transcript_entry AS entry
+                                    ON entry.source_session_id = member.source_session_id
+                                   AND entry.semantic_entry_id = member.semantic_entry_id
+                                 WHERE turn.session_id = $1
+                                   AND turn.turn_id = $2
+                                   AND entry.payload_kind = 'turn_failed'
+                                   AND entry.failed_turn_id = $2
+                            )",
+                    )
+                    .bind(session_id_to_uuid(session))
+                    .bind(turn)
+                    .bind(attempt)
+                    .fetch_one(&mut *transaction)
+                    .await?;
+                    if closure_is_complete {
+                        Ok(RetainedCapabilityFailureStatus::AlreadyCommitted)
+                    } else {
+                        Err(ModelCallRepositoryError::InvalidTransition(
+                            "retained capability failure durable closure is incomplete",
+                        ))
+                    }
+                }
+                _ => Err(ModelCallRepositoryError::InvalidTransition(
+                    "retained capability failure durable state changed",
+                )),
+            }
+        }
+        .await;
+        transaction.rollback().await?;
+        result
+    }
+
     /// Rereads exact durable authority after an ambiguous authorization commit.
     pub async fn reread_ambiguous_authorization(
         &self,
@@ -640,6 +741,14 @@ impl FailPreparedModelCallTransaction for PostgresModelCallRepository {
             next_reclassified_turn,
         )
         .await
+    }
+
+    async fn reread_failure(
+        &mut self,
+        session: SessionId,
+        call: ModelCallId,
+    ) -> Result<RetainedCapabilityFailureStatus, Self::Error> {
+        self.reread_capability_failure(session, call).await
     }
 }
 
