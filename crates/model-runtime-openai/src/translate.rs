@@ -117,12 +117,7 @@ fn validate_function_names<C>(operation: &ModelOperation<C>) -> Result<(), Prepa
 }
 
 fn validate_function_name(name: &str, subject: &str) -> Result<(), PreparationFailure> {
-    let valid = !name.is_empty()
-        && name.len() <= 64
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'));
-    if valid {
+    if is_valid_function_name(name) {
         Ok(())
     } else {
         Err(PreparationFailure::UnsupportedOperation {
@@ -131,6 +126,16 @@ fn validate_function_name(name: &str, subject: &str) -> Result<(), PreparationFa
             ),
         })
     }
+}
+
+/// Whether a function name satisfies the grammar shared by request and
+/// response tool material.
+pub(crate) fn is_valid_function_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
 fn validate_tool_history(messages: &[ConversationMessage]) -> Result<(), PreparationFailure> {

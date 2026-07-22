@@ -23,6 +23,7 @@ use signalbox_model_runtime::{
 
 use crate::response::{convert_usage, map_finish};
 use crate::status::classify_error_envelope;
+use crate::translate::is_valid_function_name;
 use crate::wire::ChatChunk;
 
 /// The decoder's verdict on one record.
@@ -423,6 +424,11 @@ impl StreamDecoder {
                     "tool call at index {index} terminated without an id and name"
                 )));
             };
+            if !is_valid_function_name(&name) {
+                return Some(self.violation(format!(
+                    "tool call at index {index} carries invalid function name {name:?}"
+                )));
+            }
             if !tool_ids.insert(id.clone()) {
                 return Some(
                     self.violation(format!("streamed tool calls repeat identifier {id:?}")),
@@ -1050,6 +1056,25 @@ mod tests {
 
         let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
             panic!("non-function tool material must not assemble into an ordinary proposal");
+        };
+        assert!(matches!(
+            loss.cause,
+            LossCause::StreamProtocolViolation { .. }
+        ));
+    }
+
+    #[test]
+    fn an_invalid_streamed_function_name_is_a_protocol_violation() {
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
+              \"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"has space\",\"arguments\":\"{}\"}}]}}]}\n\n",
+            b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\"choices\":[{\"index\":0,\"delta\":{},\
+              \"finish_reason\":\"tool_calls\"}]}\n\n",
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("an invalid function name must not become a proposal");
         };
         assert!(matches!(
             loss.cause,

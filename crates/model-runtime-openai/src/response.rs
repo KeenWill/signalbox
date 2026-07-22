@@ -8,7 +8,10 @@ use signalbox_model_runtime::{
     RefusalEvidence, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
 };
 
-use crate::wire::{ChatCompletion, WireResponseToolCall, WireUsage};
+use crate::{
+    translate::is_valid_function_name,
+    wire::{ChatCompletion, WireResponseToolCall, WireUsage},
+};
 
 /// Maps the provider's `finish_reason` token to the normalized vocabulary.
 ///
@@ -66,6 +69,9 @@ pub(crate) fn convert_tool_call(call: &WireResponseToolCall) -> Result<ToolCallP
     let Some(name) = &function.name else {
         return Err("tool call is missing its function name".to_string());
     };
+    if !is_valid_function_name(name) {
+        return Err(format!("tool call carries invalid function name {name:?}"));
+    }
     let Some(arguments) = &function.arguments else {
         // The documented function payload always carries arguments;
         // fabricating bytes the provider never produced could turn a
@@ -636,6 +642,24 @@ mod tests {
             loss.cause,
             LossCause::ResponseUnintelligible { .. }
         ));
+    }
+
+    #[test]
+    fn invalid_response_function_names_are_boundary_loss() {
+        for name in ["", "has space", &"x".repeat(65)] {
+            let body = format!(
+                r#"{{"id":"chatcmpl_1","object":"chat.completion","model":"model-exact-1",
+                    "choices":[{{"index":0,"message":{{"role":"assistant","tool_calls":[{{
+                    "id":"call_1","type":"function","function":{{"name":{name:?},
+                    "arguments":"{{}}"}}}}]}},"finish_reason":"tool_calls"}}]}}"#
+            );
+            let (evidence, _) = decode(&body);
+
+            assert!(
+                matches!(evidence, TerminalEvidence::BoundaryLoss(_)),
+                "invalid name {name:?} must not become a proposal"
+            );
+        }
     }
 
     #[test]

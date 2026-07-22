@@ -1066,23 +1066,31 @@ fn redact_json_stream_fragment(raw: String, credential: &str) -> (String, String
     }
 
     let mut matches = Vec::new();
+    let mut start_unit_index = 0;
+    let mut end_unit_index = 0;
     for (decoded_start, _) in decoded.match_indices(credential) {
         let decoded_end = decoded_start + credential.len();
-        let Some(raw_start) = units
-            .iter()
-            .find(|unit| unit.decoded_start == decoded_start)
-            .map(|unit| unit.raw_start)
+        while start_unit_index < units.len()
+            && units[start_unit_index].decoded_start < decoded_start
+        {
+            start_unit_index += 1;
+        }
+        let Some(start_unit) = units
+            .get(start_unit_index)
+            .filter(|unit| unit.decoded_start == decoded_start)
         else {
             return fallback(raw);
         };
-        let Some(raw_end) = units
-            .iter()
-            .find(|unit| unit.decoded_end == decoded_end)
-            .map(|unit| unit.raw_end)
+        while end_unit_index < units.len() && units[end_unit_index].decoded_end < decoded_end {
+            end_unit_index += 1;
+        }
+        let Some(end_unit) = units
+            .get(end_unit_index)
+            .filter(|unit| unit.decoded_end == decoded_end)
         else {
             return fallback(raw);
         };
-        matches.push((raw_start, raw_end));
+        matches.push((start_unit.raw_start, end_unit.raw_end));
     }
 
     let tail_start = decoded
@@ -1370,15 +1378,15 @@ fn redact_json(raw: String, credential: &CredentialValue) -> String {
         return raw;
     }
     if serde_json::value::RawValue::from_string(raw.clone()).is_err() {
-        // A partial or malformed JSON value can encode a credential with
-        // escapes that literal replacement cannot see. Fail closed only when
-        // the escape-decoded material contains the credential; otherwise
-        // preserve malformed provider bytes for typed decoding to classify.
-        return if json_escapes_decode_to_credential(&raw, key) {
-            "\"[redacted]\"".to_string()
-        } else {
-            redact_text(raw, credential)
-        };
+        // A partial or malformed JSON value can encode a credential or its
+        // trailing prefix with escapes that literal replacement cannot see.
+        // Reuse the streaming decoder, then fail closed on any held prefix;
+        // other malformed provider bytes remain for typed decoding to judge.
+        let (mut redacted, pending) = redact_json_stream_fragment(raw, key);
+        if !pending.is_empty() {
+            redacted.push_str("[redacted]");
+        }
+        return redacted;
     }
 
     let mut redacted = String::with_capacity(raw.len());
@@ -1544,8 +1552,8 @@ mod tests {
 
     use super::{
         MAX_STREAMED_RESPONSE_BYTES, RedactingSink, build_http_request, process_streamed_chunk,
-        redact_evidence, redact_json, redact_native_message, serialize_request,
-        streamed_response_prefix_len, without_unproven_refusal,
+        redact_evidence, redact_json, redact_json_stream_fragment, redact_native_message,
+        serialize_request, streamed_response_prefix_len, without_unproven_refusal,
     };
     use crate::stream::StreamDecoder;
 
@@ -1825,6 +1833,55 @@ mod tests {
 
         assert_eq!(joined, "safe [redacted]loop tail");
         assert!(!joined.contains("key_loop"));
+    }
+
+    #[test]
+    fn inv_035_malformed_tool_arguments_cannot_reconstruct_a_credential_across_parts() {
+        let credential = CredentialValue::new(b"key_loop".to_vec());
+        let evidence = TerminalEvidence::Completed(CompletionEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: None,
+            finish: CompletionFinish::ToolUse,
+            content: vec![
+                AssistantPart::ToolCall(ToolCallProposal {
+                    id: ToolCallId::new("call_1"),
+                    name: ToolName::new("lookup"),
+                    arguments_json: r#"safe key_\u006c"#.to_string(),
+                }),
+                AssistantPart::ToolCall(ToolCallProposal {
+                    id: ToolCallId::new("call_2"),
+                    name: ToolName::new("lookup"),
+                    arguments_json: "oop".to_string(),
+                }),
+            ],
+            usage: TokenUsage::unreported(),
+        });
+
+        let TerminalEvidence::Completed(completion) = redact_evidence(evidence, &credential) else {
+            panic!("completion remains completion");
+        };
+        let joined = completion
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                AssistantPart::ToolCall(proposal) => Some(proposal.arguments_json.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+
+        assert_eq!(joined, "safe [redacted]oop");
+        assert!(!joined.contains("key_loop"));
+    }
+
+    #[test]
+    fn streamed_argument_redaction_handles_many_matches_in_one_forward_pass() {
+        let raw = r#"\u006b\u0065\u0079"#.repeat(512);
+
+        let (emitted, pending) = redact_json_stream_fragment(raw, "key");
+
+        assert_eq!(emitted, "[redacted]".repeat(512));
+        assert!(pending.is_empty());
     }
 
     #[test]
