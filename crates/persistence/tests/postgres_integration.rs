@@ -19,10 +19,13 @@ use signalbox_application::{
 };
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputStartingLineage, ActivatedAcceptedInputTurn, ActiveTurnPhase,
-    ContextFrontierId, CreateSession, CurrentTurnAttemptState, DeliveryRequest, DurableCommandId,
-    ModelAlias, ModelSelectionOverride, ModelSelectionRequest, PerInputConfigurationChoices,
-    PreparedCreateSession, ReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult,
-    ReplaceSessionDefaultsResult, SemanticTranscriptEntryId, SessionConfigurationDefaults,
+    AssistantText, CompletedModelCallIdentities, ContextFrontierId, CreateSession,
+    CurrentTurnAttemptState, DeliveryRequest, DurableCommandId, ModelAlias, ModelCallId,
+    ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
+    ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition,
+    PerInputConfigurationChoices, PreparedCreateSession, ProviderModelIdentity,
+    ReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult,
+    ResolvedProviderTarget, SemanticTranscriptEntryId, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
     SessionId, SubmitInput, SubmitInputAppliedResult, SubmitInputReconstitutionFailure,
     SubmitInputRejectedResult, SubmitInputResult, TranscriptAncestry, TurnAttemptId, TurnId,
@@ -35,6 +38,7 @@ use signalbox_persistence::{
         CreateSessionRepositoryError,
     },
     local_test_connection_options, migrate,
+    model_execution::{PostgresModelCallRepository, PrepareInitialModelCallOutcome},
     replace_session_defaults::{
         ReplaceSessionDefaultsCorruption, ReplaceSessionDefaultsHandlingOutcome,
         ReplaceSessionDefaultsRepository, ReplaceSessionDefaultsRepositoryError,
@@ -762,6 +766,197 @@ async fn embedded_migrator_connects_and_is_idempotent() -> Result<(), Box<dyn Er
     pool.close().await;
     drop(container);
 
+    Ok(())
+}
+
+/// S01 / S20 / S21 / INV-014 / INV-015 / INV-032: the production persistence
+/// chain checkpoints Prepared, separately authorizes send, and atomically
+/// commits exact assistant content, completion, terminal frontier, lifecycle,
+/// call, attempt, and typed outbox records.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s01_s20_s21_inv014_inv015_inv032_model_call_transactions_complete_first_reply()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = SessionId::from_uuid(Uuid::from_u128(0x8e1));
+    let direct_selection =
+        signalbox_domain::DirectModelSelection::from_uuid(Uuid::from_u128(0xce1));
+    let mut create_service = CreateSessionService::new(
+        FixedSessionIds::new([session]),
+        CreateSessionRepository::new(pool.clone()),
+    );
+    let CreateSessionOutcome::Applied(_) = create_service
+        .execute(CreateSessionRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::from_u128(0x4e1)),
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(direct_selection)),
+        )?)
+        .await?
+    else {
+        panic!("the model-call fixture session must be created");
+    };
+
+    let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x9e1));
+    let turn = TurnId::from_uuid(Uuid::from_u128(0xae1));
+    let mut submit_service = SubmitInputService::new(
+        FixedSubmitInputIds::new([accepted_input], [turn]),
+        SubmitInputRepository::new(pool.clone()),
+        AcceptingEligibilityNudge,
+    );
+    let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::TurnOrigin(origin),
+    )) = submit_service
+        .execute(SubmitInputRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::from_u128(0x4e2)),
+            session,
+            UserContent::try_text("exact user request".to_owned())
+                .expect("fixture user content is admitted"),
+            DeliveryRequest::StartWhenNoActiveTurn {
+                configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+            },
+        )?)
+        .await?
+    else {
+        panic!("the model-call fixture input must be accepted");
+    };
+    assert_eq!(origin.accepted_input(), accepted_input);
+    assert_eq!(origin.turn(), turn);
+
+    let starting_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0xee1));
+    let attempt = TurnAttemptId::from_uuid(Uuid::from_u128(0xbe1));
+    let mut activation_service = StartEligibleTurnService::new(
+        FixedStartEligibleTurnIds::new(
+            [SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde1))],
+            [starting_frontier],
+            [attempt],
+        ),
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    let StartEligibleTurnOutcome::Activated(activated) =
+        activation_service.execute(session).await?
+    else {
+        panic!("the model-call fixture turn must activate");
+    };
+    assert_eq!(activated.turn(), turn);
+
+    let provider_identity = ProviderModelIdentity::from_uuid(Uuid::from_u128(0xfe1));
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        direct_selection,
+        ResolvedProviderTarget::naming(provider_identity),
+    )])
+    .expect("one immutable direct target forms a catalog");
+    let repository = PostgresModelCallRepository::new(pool.clone(), targets);
+    let call = ModelCallId::from_uuid(Uuid::from_u128(0xce2));
+    let PrepareInitialModelCallOutcome::Prepared(prepared) =
+        repository.prepare_initial_call(session, call).await?
+    else {
+        panic!("the configured target must prepare");
+    };
+    assert_eq!(prepared.session(), session);
+    assert_eq!(prepared.turn(), turn);
+    assert_eq!(prepared.attempt(), attempt);
+    assert_eq!(prepared.call().id(), call);
+    assert_eq!(prepared.call().target().identity(), provider_identity);
+    assert_eq!(prepared.frontier_entries().len(), 1);
+    assert_eq!(
+        prepared
+            .origin_content(accepted_input)
+            .expect("the frontier origin must carry its checked receipt content")
+            .text()
+            .as_str(),
+        "exact user request"
+    );
+
+    let authorized = repository.authorize_send(session, call).await?;
+    assert_eq!(authorized.call().id(), call);
+    assert_eq!(
+        authorized.call().state(),
+        signalbox_domain::CurrentModelCallState::InFlight
+    );
+    assert_eq!(
+        authorized.attempt().state(),
+        &CurrentTurnAttemptState::Running
+    );
+
+    let assistant_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde2));
+    let completion_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde3));
+    let terminal_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0xee2));
+    let outcome = repository
+        .apply_terminal_observation(
+            session,
+            call,
+            ModelCallTerminalObservation::Completed {
+                assistant_text: vec![
+                    AssistantText::try_new("exact assistant reply".to_owned())
+                        .expect("fixture assistant content is admitted"),
+                ],
+            },
+            ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                vec![assistant_entry],
+                completion_entry,
+                terminal_frontier,
+            )),
+        )
+        .await?;
+    let ModelCallTerminalOutcome::Completed(completed) = outcome else {
+        panic!("the definitive response must complete the turn");
+    };
+    assert_eq!(completed.turn(), turn);
+    assert_eq!(completed.assistant_entries().len(), 1);
+    assert_eq!(
+        completed.assistant_entries()[0].payload(),
+        &signalbox_domain::SemanticTranscriptEntryPayload::AssistantText {
+            producing_call: call,
+            value: AssistantText::try_new("exact assistant reply".to_owned())
+                .expect("fixture assistant content is admitted"),
+        }
+    );
+
+    let durable_shape: (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM model_call
+              WHERE model_call_id = $1
+                AND state_kind = 'terminal'
+                AND terminal_disposition_kind = 'completed'),
+            (SELECT count(*) FROM turn_attempt
+              WHERE turn_attempt_id = $2
+                AND state_kind = 'ended'
+                AND end_disposition = 'turn_completed'),
+            (SELECT count(*) FROM semantic_transcript_entry
+              WHERE semantic_entry_id = $3
+                AND payload_kind = 'assistant_text'
+                AND assistant_text_value = 'exact assistant reply'
+                AND producing_model_call_id = $1),
+            (SELECT count(*) FROM semantic_transcript_entry
+              WHERE semantic_entry_id = $4
+                AND payload_kind = 'turn_completed'
+                AND completed_turn_id = $5),
+            (SELECT count(*) FROM turn_lifecycle
+              WHERE turn_id = $5
+                AND state_kind = 'terminal'
+                AND terminal_disposition_kind = 'completed'
+                AND terminal_frontier_id = $6
+                AND terminal_attempt_id = $2
+                AND terminal_model_call_id = $1),
+            (SELECT count(*) FROM model_call_transition_outbox_event
+              WHERE model_call_id = $1),
+            (SELECT count(*) FROM turn_completed_outbox_event
+              WHERE turn_id = $5
+                AND model_call_id = $1
+                AND completion_entry_id = $4
+                AND terminal_frontier_id = $6)",
+    )
+    .bind(call.into_uuid())
+    .bind(attempt.into_uuid())
+    .bind(assistant_entry.into_uuid())
+    .bind(completion_entry.into_uuid())
+    .bind(turn.into_uuid())
+    .bind(terminal_frontier.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(durable_shape, (1, 1, 1, 1, 1, 3, 1));
+
+    pool.close().await;
+    drop(container);
     Ok(())
 }
 

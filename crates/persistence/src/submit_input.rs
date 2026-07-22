@@ -10,11 +10,13 @@ use signalbox_domain::{
     AcceptedInputSchedulingProjection, AcceptedInputSchedulingReconstitutionFailure,
     AcceptedInputSchedulingReconstitutionInput, AcceptedInputStartingLineage,
     AcceptedInputTurnSchedulingRecord, AcceptedInputTurnSchedulingRecordState,
-    ActiveTurnSchedulingReconstitutionInput, Actor, ContextFrontierId, DeliveryRequest,
-    DirectModelSelection, DurableCommandId, FrozenAliasDefinition, FrozenModelSelection,
-    ModelAlias, ModelSelectionOverride, ModelSelectionRequest, NonEmptyUnicodeTextFailure,
-    PerInputConfigurationChoices, PreparedSubmitInput, ReconstitutedSubmitInput,
-    ResolvedContextFrontierReconstitutionInput, SemanticTranscriptEntryId,
+    ActiveTurnSchedulingReconstitutionInput, Actor, AssistantText, ContextFrontierId,
+    DeliveryRequest, DirectModelSelection, DurableCommandId, FrozenAliasDefinition,
+    FrozenModelSelection, ModelAlias, ModelCallDisposition, ModelCallId,
+    ModelCallReconstitutionInput, ModelCallReconstitutionState, ModelSelectionOverride,
+    ModelSelectionRequest, NonEmptyUnicodeTextFailure, PerInputConfigurationChoices,
+    PreparedSubmitInput, ProviderModelIdentity, ReconstitutedSubmitInput,
+    ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget, SemanticTranscriptEntryId,
     SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session,
     SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
@@ -22,7 +24,8 @@ use signalbox_domain::{
     SessionInputPosition, SteeringBinding, SubmitInput, SubmitInputAppliedResult,
     SubmitInputPreparationFailure, SubmitInputReconstitutionFailure,
     SubmitInputReconstitutionInput, SubmitInputRejectedResult, SubmitInputResult,
-    SubmitInputTurnOriginReconstitutionInput, ToolRequestId, TurnAttemptId, TurnId, UserContent,
+    SubmitInputTurnOriginReconstitutionInput, ToolRequestId, TurnAttemptId, TurnId,
+    UnstoppedAttemptDisposition, UserContent,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -447,7 +450,7 @@ async fn require_recorded(
         .ok_or_else(|| SubmitInputCorruption::Inconsistent("registry entry disappeared").into())
 }
 
-async fn require_recorded_batch(
+pub(crate) async fn require_recorded_batch(
     connection: &mut PgConnection,
     command_ids: &[DurableCommandId],
 ) -> Result<BTreeMap<DurableCommandId, ReconstitutedSubmitInput>, SubmitInputRepositoryError> {
@@ -691,6 +694,9 @@ pub(crate) async fn load_scheduling_projection(
             turn.terminal_frontier_id,
             turn.active_phase_kind,
             turn.current_attempt_id,
+            turn.recovery_model_call_id,
+            turn.terminal_attempt_id,
+            turn.terminal_model_call_id,
             turn.terminal_disposition_kind,
             attempt.turn_attempt_id,
             attempt.turn_id AS attempt_turn_id,
@@ -705,7 +711,10 @@ pub(crate) async fn load_scheduling_projection(
          LEFT JOIN turn_lifecycle AS turn
            ON turn.turn_id = queued.turn_id
          LEFT JOIN turn_attempt AS attempt
-           ON attempt.turn_attempt_id = turn.current_attempt_id
+           ON attempt.turn_attempt_id = COALESCE(
+                turn.current_attempt_id,
+                turn.terminal_attempt_id
+              )
         WHERE queued.session_id = $1
         ORDER BY queued.acceptance_position",
     )
@@ -724,6 +733,7 @@ pub(crate) async fn load_scheduling_projection(
 
     let mut turns = Vec::with_capacity(rows.len());
     let mut required_frontiers = BTreeSet::new();
+    let mut required_model_calls = BTreeSet::new();
     for (row, accepting_command) in rows.into_iter().zip(accepting_commands) {
         let queued_turn = turn_id_from_uuid(required(&row, "queued_turn_id")?);
         let queued_accepted =
@@ -778,6 +788,9 @@ pub(crate) async fn load_scheduling_projection(
         let terminal_frontier: Option<Uuid> = row.try_get("terminal_frontier_id")?;
         let active_phase: Option<String> = row.try_get("active_phase_kind")?;
         let current_attempt: Option<Uuid> = row.try_get("current_attempt_id")?;
+        let recovery_model_call: Option<Uuid> = row.try_get("recovery_model_call_id")?;
+        let terminal_attempt: Option<Uuid> = row.try_get("terminal_attempt_id")?;
+        let terminal_model_call: Option<Uuid> = row.try_get("terminal_model_call_id")?;
         let terminal_disposition: Option<String> = row.try_get("terminal_disposition_kind")?;
         let state = match state_kind.as_str() {
             "queued" => {
@@ -787,6 +800,9 @@ pub(crate) async fn load_scheduling_projection(
                     || terminal_frontier.is_some()
                     || active_phase.is_some()
                     || current_attempt.is_some()
+                    || recovery_model_call.is_some()
+                    || terminal_attempt.is_some()
+                    || terminal_model_call.is_some()
                     || terminal_disposition.is_some()
                 {
                     return Err(
@@ -796,8 +812,9 @@ pub(crate) async fn load_scheduling_projection(
                 AcceptedInputTurnSchedulingRecordState::Queued
             }
             "active" => {
-                if active_phase.as_deref() != Some("running")
-                    || terminal_frontier.is_some()
+                if terminal_frontier.is_some()
+                    || terminal_attempt.is_some()
+                    || terminal_model_call.is_some()
                     || terminal_disposition.is_some()
                 {
                     return Err(
@@ -819,27 +836,84 @@ pub(crate) async fn load_scheduling_projection(
                     || attempt_turn != lifecycle_turn
                     || attempt_session != lifecycle_session
                     || continued_from.is_some()
-                    || end_variant.is_some()
-                    || end_disposition.is_some()
                 {
                     return Err(
                         SubmitInputCorruption::Inconsistent("active current attempt").into(),
                     );
                 }
-                let phase = match attempt_state.as_str() {
-                    "prepared" => ActiveTurnSchedulingReconstitutionInput::prepared(
-                        lifecycle_turn,
-                        attempt_id,
-                    ),
-                    "running" => {
-                        ActiveTurnSchedulingReconstitutionInput::running(lifecycle_turn, attempt_id)
+                let phase = match active_phase.as_deref() {
+                    Some("running") if recovery_model_call.is_none() => {
+                        if end_variant.is_some() || end_disposition.is_some() {
+                            return Err(SubmitInputCorruption::Inconsistent(
+                                "active live attempt end",
+                            )
+                            .into());
+                        }
+                        match attempt_state.as_str() {
+                            "prepared" => ActiveTurnSchedulingReconstitutionInput::prepared(
+                                lifecycle_turn,
+                                attempt_id,
+                            ),
+                            "running" => ActiveTurnSchedulingReconstitutionInput::running(
+                                lifecycle_turn,
+                                attempt_id,
+                            ),
+                            value => {
+                                return Err(SubmitInputCorruption::Unsupported {
+                                    field: "active attempt state_kind",
+                                    value: value.to_owned(),
+                                }
+                                .into());
+                            }
+                        }
                     }
-                    value => {
+                    Some("awaiting_model_call_recovery") => {
+                        let recovery_call = recovery_model_call
+                            .ok_or(SubmitInputCorruption::Missing("recovery_model_call_id"))?;
+                        if attempt_state != "ended"
+                            || end_variant.as_deref() != Some("without_stop")
+                        {
+                            return Err(SubmitInputCorruption::Inconsistent(
+                                "model-call recovery attempt end",
+                            )
+                            .into());
+                        }
+                        required_model_calls.insert(recovery_call);
+                        match end_disposition.as_deref() {
+                            Some("ambiguous") => ActiveTurnSchedulingReconstitutionInput::awaiting_model_call_recovery(
+                                lifecycle_turn,
+                                attempt_id,
+                                ModelCallId::from_uuid(recovery_call),
+                            ),
+                            Some("lost") => ActiveTurnSchedulingReconstitutionInput::awaiting_model_call_recovery_after_restart(
+                                lifecycle_turn,
+                                attempt_id,
+                                ModelCallId::from_uuid(recovery_call),
+                            ),
+                            Some(value) => {
+                                return Err(SubmitInputCorruption::Unsupported {
+                                    field: "model-call recovery attempt end_disposition",
+                                    value: value.to_owned(),
+                                }
+                                .into());
+                            }
+                            None => {
+                                return Err(SubmitInputCorruption::Missing(
+                                    "model-call recovery attempt end_disposition",
+                                )
+                                .into());
+                            }
+                        }
+                    }
+                    Some(value) => {
                         return Err(SubmitInputCorruption::Unsupported {
-                            field: "active attempt state_kind",
+                            field: "active phase kind",
                             value: value.to_owned(),
                         }
                         .into());
+                    }
+                    None => {
+                        return Err(SubmitInputCorruption::Missing("active_phase_kind").into());
                     }
                 };
                 let starting_frontier = starting_frontier
@@ -854,7 +928,7 @@ pub(crate) async fn load_scheduling_projection(
             "terminal" => {
                 if active_phase.is_some()
                     || current_attempt.is_some()
-                    || terminal_disposition.as_deref() != Some("failed")
+                    || recovery_model_call.is_some()
                 {
                     return Err(SubmitInputCorruption::Inconsistent(
                         "terminal scheduling lifecycle",
@@ -867,10 +941,106 @@ pub(crate) async fn load_scheduling_projection(
                     .ok_or(SubmitInputCorruption::Missing("terminal_frontier_id"))?;
                 required_frontiers.insert(starting_frontier);
                 required_frontiers.insert(terminal_frontier);
-                AcceptedInputTurnSchedulingRecordState::TerminalFailed {
-                    starting_lineage: decode_starting_lineage(lineage_kind, predecessor)?,
-                    starting_frontier: ContextFrontierId::from_uuid(starting_frontier),
-                    terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
+                let starting_lineage = decode_starting_lineage(lineage_kind, predecessor)?;
+                match terminal_disposition.as_deref() {
+                    Some("failed")
+                        if terminal_attempt.is_none() && terminal_model_call.is_none() =>
+                    {
+                        AcceptedInputTurnSchedulingRecordState::TerminalFailed {
+                            starting_lineage,
+                            starting_frontier: ContextFrontierId::from_uuid(starting_frontier),
+                            terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
+                        }
+                    }
+                    Some("completed" | "refused") => {
+                        let terminal_attempt = terminal_attempt
+                            .ok_or(SubmitInputCorruption::Missing("terminal_attempt_id"))?;
+                        let terminal_call = terminal_model_call
+                            .ok_or(SubmitInputCorruption::Missing("terminal_model_call_id"))?;
+                        let stored_attempt_id =
+                            TurnAttemptId::from_uuid(required(&row, "turn_attempt_id")?);
+                        let attempt_turn = turn_id_from_uuid(required(&row, "attempt_turn_id")?);
+                        let attempt_session =
+                            session_id_from_uuid(required(&row, "attempt_session_id")?);
+                        let continued_from: Option<Uuid> =
+                            row.try_get("continued_from_attempt_id")?;
+                        let attempt_state: String = required(&row, "attempt_state_kind")?;
+                        let end_variant: Option<String> = row.try_get("end_variant")?;
+                        let end_disposition: Option<String> = row.try_get("end_disposition")?;
+                        if stored_attempt_id.into_uuid() != terminal_attempt
+                            || attempt_turn != lifecycle_turn
+                            || attempt_session != lifecycle_session
+                            || continued_from.is_some()
+                            || attempt_state != "ended"
+                            || end_variant.as_deref() != Some("without_stop")
+                        {
+                            return Err(SubmitInputCorruption::Inconsistent(
+                                "terminal model-call attempt",
+                            )
+                            .into());
+                        }
+                        required_model_calls.insert(terminal_call);
+                        match terminal_disposition.as_deref() {
+                            Some("completed")
+                                if end_disposition.as_deref() == Some("turn_completed") =>
+                            {
+                                AcceptedInputTurnSchedulingRecordState::TerminalCompleted {
+                                    starting_lineage,
+                                    starting_frontier: ContextFrontierId::from_uuid(
+                                        starting_frontier,
+                                    ),
+                                    completing_attempt: stored_attempt_id,
+                                    completing_attempt_disposition:
+                                        UnstoppedAttemptDisposition::TurnCompleted,
+                                    completing_call: ModelCallId::from_uuid(terminal_call),
+                                    terminal_frontier: ContextFrontierId::from_uuid(
+                                        terminal_frontier,
+                                    ),
+                                }
+                            }
+                            Some("refused")
+                                if end_disposition.as_deref() == Some("turn_refused") =>
+                            {
+                                AcceptedInputTurnSchedulingRecordState::TerminalRefused {
+                                    starting_lineage,
+                                    starting_frontier: ContextFrontierId::from_uuid(
+                                        starting_frontier,
+                                    ),
+                                    refusing_attempt: stored_attempt_id,
+                                    refusing_attempt_disposition:
+                                        UnstoppedAttemptDisposition::TurnRefused,
+                                    refusing_call: ModelCallId::from_uuid(terminal_call),
+                                    terminal_frontier: ContextFrontierId::from_uuid(
+                                        terminal_frontier,
+                                    ),
+                                }
+                            }
+                            _ => {
+                                return Err(SubmitInputCorruption::Inconsistent(
+                                    "terminal model-call disposition",
+                                )
+                                .into());
+                            }
+                        }
+                    }
+                    Some("failed") => {
+                        return Err(SubmitInputCorruption::Inconsistent(
+                            "failed terminal call correlation",
+                        )
+                        .into());
+                    }
+                    Some(value) => {
+                        return Err(SubmitInputCorruption::Unsupported {
+                            field: "terminal disposition kind",
+                            value: value.to_owned(),
+                        }
+                        .into());
+                    }
+                    None => {
+                        return Err(
+                            SubmitInputCorruption::Missing("terminal_disposition_kind").into()
+                        );
+                    }
                 }
             }
             value => {
@@ -901,6 +1071,81 @@ pub(crate) async fn load_scheduling_projection(
 
     let active_acceptance_tail =
         load_active_acceptance_tail(connection, session_id, &turns).await?;
+
+    let required_model_call_ids = required_model_calls.iter().copied().collect::<Vec<_>>();
+    let model_call_rows = sqlx::query(
+        "SELECT
+            model_call_id,
+            turn_id,
+            session_id,
+            turn_attempt_id,
+            selection_kind,
+            direct_model_selection_id,
+            frozen_model_alias_id,
+            frozen_alias_selected_direct_id,
+            resolved_provider_model_identity_id,
+            context_frontier_id,
+            state_kind,
+            terminal_disposition_kind
+           FROM model_call
+          WHERE session_id = $1
+            AND model_call_id = ANY($2)
+          ORDER BY model_call_id",
+    )
+    .bind(session_id_to_uuid(session_id))
+    .bind(&required_model_call_ids)
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut model_calls = Vec::with_capacity(model_call_rows.len());
+    let mut loaded_model_calls = BTreeSet::new();
+    for row in model_call_rows {
+        let call_uuid: Uuid = required(&row, "model_call_id")?;
+        if !loaded_model_calls.insert(call_uuid) {
+            return Err(SubmitInputCorruption::Inconsistent("duplicate model call").into());
+        }
+        let frontier_uuid: Uuid = required(&row, "context_frontier_id")?;
+        required_frontiers.insert(frontier_uuid);
+        let state_kind: String = required(&row, "state_kind")?;
+        let terminal_disposition: Option<String> = row.try_get("terminal_disposition_kind")?;
+        let state = match (state_kind.as_str(), terminal_disposition.as_deref()) {
+            ("prepared", None) => ModelCallReconstitutionState::Prepared,
+            ("in_flight", None) => ModelCallReconstitutionState::InFlight,
+            ("cancellation_requested", None) => ModelCallReconstitutionState::CancellationRequested,
+            ("terminal", Some(disposition)) => {
+                ModelCallReconstitutionState::Terminal(decode_model_call_disposition(disposition)?)
+            }
+            ("prepared" | "in_flight" | "cancellation_requested" | "terminal", _) => {
+                return Err(SubmitInputCorruption::Inconsistent("model call state payload").into());
+            }
+            (value, _) => {
+                return Err(SubmitInputCorruption::Unsupported {
+                    field: "model call state_kind",
+                    value: value.to_owned(),
+                }
+                .into());
+            }
+        };
+        model_calls.push(ModelCallReconstitutionInput::new(
+            ModelCallId::from_uuid(call_uuid),
+            turn_id_from_uuid(required(&row, "turn_id")?),
+            TurnAttemptId::from_uuid(required(&row, "turn_attempt_id")?),
+            decode_frozen_model(
+                required(&row, "selection_kind")?,
+                row.try_get("direct_model_selection_id")?,
+                row.try_get("frozen_model_alias_id")?,
+                row.try_get("frozen_alias_selected_direct_id")?,
+            )?,
+            ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(required(
+                &row,
+                "resolved_provider_model_identity_id",
+            )?)),
+            ContextFrontierId::from_uuid(frontier_uuid),
+            state,
+        ));
+    }
+    if loaded_model_calls != required_model_calls {
+        return Err(SubmitInputCorruption::Missing("scheduling model call").into());
+    }
 
     let required_frontier_ids = required_frontiers.iter().copied().collect::<Vec<_>>();
     let frontier_rows = sqlx::query(
@@ -960,9 +1205,14 @@ pub(crate) async fn load_scheduling_projection(
             semantic_entry_id,
             payload_kind,
             origin_accepted_input_id,
-            failed_turn_id
+            failed_turn_id,
+            assistant_text_value,
+            producing_model_call_id,
+            assistant_tool_request_id,
+            completed_turn_id
          FROM semantic_transcript_entry
-        WHERE (source_session_id, semantic_entry_id) IN (
+        WHERE source_session_id = $3
+           OR (source_session_id, semantic_entry_id) IN (
             SELECT required.source_session_id, required.semantic_entry_id
               FROM UNNEST($1::uuid[], $2::uuid[])
                 AS required(source_session_id, semantic_entry_id)
@@ -971,6 +1221,7 @@ pub(crate) async fn load_scheduling_projection(
     )
     .bind(&semantic_source_sessions)
     .bind(&semantic_entry_ids)
+    .bind(session_id_to_uuid(session_id))
     .fetch_all(&mut *connection)
     .await?;
     let mut semantic_entries = Vec::with_capacity(semantic_rows.len());
@@ -986,21 +1237,67 @@ pub(crate) async fn load_scheduling_projection(
         let payload_kind: String = required(&row, "payload_kind")?;
         let origin: Option<Uuid> = row.try_get("origin_accepted_input_id")?;
         let failed_turn: Option<Uuid> = row.try_get("failed_turn_id")?;
-        let payload = match (payload_kind.as_str(), origin, failed_turn) {
-            ("origin_accepted_input", Some(origin), None) => {
+        let assistant_text: Option<String> = row.try_get("assistant_text_value")?;
+        let producing_call: Option<Uuid> = row.try_get("producing_model_call_id")?;
+        let tool_request: Option<Uuid> = row.try_get("assistant_tool_request_id")?;
+        let completed_turn: Option<Uuid> = row.try_get("completed_turn_id")?;
+        let payload = match (
+            payload_kind.as_str(),
+            origin,
+            failed_turn,
+            assistant_text,
+            producing_call,
+            tool_request,
+            completed_turn,
+        ) {
+            ("origin_accepted_input", Some(origin), None, None, None, None, None) => {
                 InitialSemanticTranscriptEntryPayload::OriginAcceptedInput {
                     accepted_input: accepted_input_id_from_uuid(origin),
                 }
             }
-            ("turn_failed", None, Some(turn)) => {
+            ("turn_failed", None, Some(turn), None, None, None, None) => {
                 InitialSemanticTranscriptEntryPayload::TurnFailed {
                     turn: turn_id_from_uuid(turn),
                 }
             }
-            ("origin_accepted_input" | "turn_failed", _, _) => {
+            ("assistant_text", None, None, Some(text), Some(call), None, None) => {
+                InitialSemanticTranscriptEntryPayload::AssistantText {
+                    producing_call: ModelCallId::from_uuid(call),
+                    value: AssistantText::try_new(text).map_err(|error| {
+                        SubmitInputCorruption::InvalidContent {
+                            field: "assistant_text_value",
+                            failure: error.failure(),
+                        }
+                    })?,
+                }
+            }
+            ("assistant_tool_use", None, None, None, Some(call), Some(request), None) => {
+                InitialSemanticTranscriptEntryPayload::AssistantToolUse {
+                    producing_call: ModelCallId::from_uuid(call),
+                    request: ToolRequestId::from_uuid(request),
+                }
+            }
+            ("turn_completed", None, None, None, None, None, Some(turn)) => {
+                InitialSemanticTranscriptEntryPayload::TurnCompleted {
+                    turn: turn_id_from_uuid(turn),
+                }
+            }
+            (
+                "origin_accepted_input"
+                | "turn_failed"
+                | "assistant_text"
+                | "assistant_tool_use"
+                | "turn_completed",
+                _,
+                _,
+                _,
+                _,
+                _,
+                _,
+            ) => {
                 return Err(SubmitInputCorruption::Inconsistent("semantic entry payload").into());
             }
-            (value, _, _) => {
+            (value, _, _, _, _, _, _) => {
                 return Err(SubmitInputCorruption::Unsupported {
                     field: "semantic entry payload_kind",
                     value: value.to_owned(),
@@ -1014,7 +1311,7 @@ pub(crate) async fn load_scheduling_projection(
             payload,
         ));
     }
-    if loaded_semantic_entries != required_semantic_entries {
+    if !required_semantic_entries.is_subset(&loaded_semantic_entries) {
         return Err(SubmitInputCorruption::Missing("context frontier semantic entry").into());
     }
 
@@ -1080,6 +1377,7 @@ pub(crate) async fn load_scheduling_projection(
         snapshots,
         active_acceptance_tail,
     )
+    .with_model_calls(model_calls)
     .reconstitute()
     .map_err(|error| {
         let (_, failure) = error.into_parts();
@@ -2951,6 +3249,23 @@ fn decode_frozen_model(
         _ => Err(SubmitInputCorruption::Unsupported {
             field: "frozen_model_kind",
             value: kind,
+        }
+        .into()),
+    }
+}
+
+fn decode_model_call_disposition(
+    value: &str,
+) -> Result<ModelCallDisposition, SubmitInputRepositoryError> {
+    match value {
+        "completed" => Ok(ModelCallDisposition::Completed),
+        "known_failed" => Ok(ModelCallDisposition::KnownFailed),
+        "refused" => Ok(ModelCallDisposition::Refused),
+        "cancelled" => Ok(ModelCallDisposition::Cancelled),
+        "ambiguous" => Ok(ModelCallDisposition::Ambiguous),
+        value => Err(SubmitInputCorruption::Unsupported {
+            field: "model call terminal_disposition_kind",
+            value: value.to_owned(),
         }
         .into()),
     }
