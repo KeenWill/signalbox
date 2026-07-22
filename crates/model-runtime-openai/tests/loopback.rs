@@ -25,7 +25,9 @@ use signalbox_model_runtime::{
     CredentialAccess, CredentialAccessError, CredentialAccessFailure, CredentialReference,
     CredentialValue,
 };
-use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiPreparedRequest, OpenAiRuntime};
+use signalbox_model_runtime_openai::{
+    OpenAiConfig, OpenAiConstructionError, OpenAiPreparedRequest, OpenAiRuntime,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -334,6 +336,35 @@ async fn credential_rejection_is_typed_provider_error_evidence() {
 }
 
 #[tokio::test]
+async fn buffered_error_type_classifies_when_code_is_absent() {
+    let body = br#"{"error":{"message":"quota exhausted","type":"insufficient_quota"}}"#;
+    let server = CannedServer::serving(vec![http_response(
+        "429 Too Many Requests",
+        &[("content-type", "application/json")],
+        body,
+    )])
+    .await;
+    let runtime = runtime_for(&server.base_url);
+
+    let (report, _) = execute(
+        &runtime,
+        operation("call-error-type"),
+        CancellationSignal::never(),
+    )
+    .await;
+
+    let TerminalEvidence::ProviderError(error) = report.evidence else {
+        panic!("a complete error envelope is definitive provider evidence");
+    };
+    assert_eq!(error.kind, ProviderErrorKind::QuotaExhausted);
+    assert_eq!(
+        error.native.error_token.as_deref(),
+        Some("insufficient_quota")
+    );
+    assert_eq!(error.native.error_code, None);
+}
+
+#[tokio::test]
 async fn an_empty_credential_is_rejected_before_send() {
     let mut config = OpenAiConfig::new();
     config.base_url = "http://127.0.0.1:1".to_string();
@@ -619,28 +650,35 @@ async fn ordinary_validation_and_credential_failures_are_preparation_outcomes() 
 #[tokio::test]
 async fn unusable_credential_is_an_ordinary_preparation_failure() {
     let server = CannedServer::serving(vec![http_response("200 OK", &[], b"{}")]).await;
-    let resolutions = Arc::new(AtomicUsize::new(0));
+    for value in [b"invalid\nkey".as_slice(), b"non-utf8-\xff".as_slice()] {
+        let resolutions = Arc::new(AtomicUsize::new(0));
+        let mut config = OpenAiConfig::new();
+        config.base_url = server.base_url.clone();
+        let runtime = OpenAiRuntime::new(config, CountingKey { resolutions, value })
+            .expect("configuration constructs");
+
+        assert!(matches!(
+            runtime
+                .prepare(operation("call-unusable"), CancellationSignal::never())
+                .await,
+            PreparationOutcome::Failed {
+                failure: PreparationFailure::CredentialUnusable { .. },
+                ..
+            }
+        ));
+    }
+    assert!(server.recorded_requests().is_empty());
+}
+
+#[test]
+fn base_url_user_information_is_rejected_at_construction() {
     let mut config = OpenAiConfig::new();
-    config.base_url = server.base_url.clone();
-    let runtime = OpenAiRuntime::new(
-        config,
-        CountingKey {
-            resolutions,
-            value: b"invalid\nkey",
-        },
-    )
-    .expect("configuration constructs");
+    config.base_url = "https://user:password@example.com".to_string();
 
     assert!(matches!(
-        runtime
-            .prepare(operation("call-unusable"), CancellationSignal::never())
-            .await,
-        PreparationOutcome::Failed {
-            failure: PreparationFailure::CredentialUnusable { .. },
-            ..
-        }
+        OpenAiRuntime::new(config, FixedKey),
+        Err(OpenAiConstructionError::InvalidBaseUrl { .. })
     ));
-    assert!(server.recorded_requests().is_empty());
 }
 
 #[derive(Debug)]

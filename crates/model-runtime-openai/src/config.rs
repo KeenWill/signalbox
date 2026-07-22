@@ -11,7 +11,8 @@ use std::time::Duration;
 #[derive(Debug, Clone)]
 pub struct OpenAiConfig {
     /// Base URL of the API; the adapter appends `/v1/chat/completions`. The
-    /// scheme must be `http` or `https`, with no query or fragment.
+    /// scheme must be `http` or `https`, with no user information, query, or
+    /// fragment.
     pub base_url: String,
     /// Connection-establishment timeout, when the caller sets one. A connect
     /// timeout fires before any request byte is written, so it classifies as

@@ -17,12 +17,14 @@ use crate::wire::{ChatCompletion, WireResponseToolCall, WireUsage};
 /// payload (when present) is carried as refusal evidence. The provider does
 /// not distinguish a natural stop from a caller stop-sequence hit — both
 /// arrive as `stop` — so [`FinishReason::StopSequence`] is never produced
-/// here. The legacy `function_call` token is deliberately left in the
-/// unrecognized branch: this adapter never requests legacy functions.
+/// here. `length` is also left unrecognized because OpenAI uses the same
+/// token for either the requested output ceiling or the model context limit;
+/// collapsing those distinct dispositions would invent evidence. The legacy
+/// `function_call` token is unrecognized because this adapter never requests
+/// legacy functions.
 pub(crate) fn map_finish(token: &str) -> FinishReason {
     match token {
         "stop" => FinishReason::EndTurn,
-        "length" => FinishReason::MaxOutputTokens,
         "tool_calls" => FinishReason::ToolUse,
         "content_filter" => FinishReason::Refusal,
         other => FinishReason::Unrecognized {
@@ -222,6 +224,14 @@ pub(crate) fn decode_buffered_response<C: Clone>(
         );
     };
     let mut finish = map_finish(finish_token);
+    if matches!(finish, FinishReason::Unrecognized { .. }) {
+        return unintelligible(
+            "success response carries an unrecognized finish_reason".to_string(),
+            exchange,
+            reported_model,
+            usage,
+        );
+    }
     let refusal_payload = message
         .refusal
         .clone()
@@ -233,11 +243,7 @@ pub(crate) fn decode_buffered_response<C: Clone>(
         .iter()
         .any(|part| matches!(part, AssistantPart::ToolCall(_)));
     if (matches!(finish, FinishReason::ToolUse) && !has_tool_calls)
-        || (has_tool_calls
-            && !matches!(
-                finish,
-                FinishReason::ToolUse | FinishReason::MaxOutputTokens
-            ))
+        || (has_tool_calls && !matches!(finish, FinishReason::ToolUse))
     {
         return unintelligible(
             "tool-call content does not match the reported finish_reason".to_string(),
@@ -481,8 +487,10 @@ mod tests {
 
     #[test]
     fn zero_choices_is_boundary_loss() {
-        let (evidence, _) =
-            decode(r#"{"id": "chatcmpl_1", "model": "model-exact-1", "choices": []}"#);
+        let (evidence, _) = decode(
+            r#"{"id":"chatcmpl_1","object":"chat.completion",
+                "model":"model-exact-1","choices":[]}"#,
+        );
 
         let TerminalEvidence::BoundaryLoss(loss) = evidence else {
             panic!("a response without the one requested choice is not definitive");
@@ -507,13 +515,15 @@ mod tests {
     #[test]
     fn tool_content_and_finish_reason_must_agree() {
         let (tool_with_stop, _) = decode(
-            r#"{"object":"chat.completion","choices":[{"index":0,
+            r#"{"object":"chat.completion","model":"model-exact-1",
+                "choices":[{"index":0,
                 "message":{"role":"assistant","tool_calls":[{"id":"call_1",
                 "type":"function","function":{"name":"ping","arguments":"{}"}}]},
                 "finish_reason":"stop"}]}"#,
         );
         let (tool_finish_without_tool, _) = decode(
-            r#"{"object":"chat.completion","choices":[{"index":0,
+            r#"{"object":"chat.completion","model":"model-exact-1",
+                "choices":[{"index":0,
                 "message":{"role":"assistant","content":"hi"},
                 "finish_reason":"tool_calls"}]}"#,
         );
@@ -526,7 +536,7 @@ mod tests {
     }
 
     #[test]
-    fn max_token_completion_retains_a_partial_tool_call() {
+    fn ambiguous_length_finish_is_boundary_loss_even_with_partial_tool_material() {
         let (evidence, _) = decode(
             r#"{"object":"chat.completion","model":"model-exact-1","choices":[{
                 "index":0,"message":{"role":"assistant","tool_calls":[{
@@ -534,20 +544,14 @@ mod tests {
                 "arguments":"{\"city\":"}}]},"finish_reason":"length"}]}"#,
         );
 
-        let TerminalEvidence::Completed(completion) = evidence else {
-            panic!("token exhaustion with partial tool material is definitive completion");
-        };
-        assert_eq!(completion.finish, CompletionFinish::MaxOutputTokens);
-        assert!(matches!(
-            completion.content.as_slice(),
-            [AssistantPart::ToolCall(_)]
-        ));
+        assert!(matches!(evidence, TerminalEvidence::BoundaryLoss(_)));
     }
 
     #[test]
     fn a_non_assistant_buffered_message_is_boundary_loss() {
         let (evidence, _) = decode(
-            r#"{"id":"chatcmpl_1","model":"model-exact-1","choices":[{
+            r#"{"id":"chatcmpl_1","object":"chat.completion",
+                "model":"model-exact-1","choices":[{
                 "index":0,"message":{"role":"user","content":"not assistant output"},
                 "finish_reason":"stop"}]}"#,
         );
@@ -566,8 +570,10 @@ mod tests {
         let (evidence, _) = decode(
             r#"{
                 "id": "chatcmpl_1",
+                "object": "chat.completion",
                 "model": "model-exact-1",
                 "choices": [{
+                    "index": 0,
                     "message": {"role": "assistant",
                                 "tool_calls": [{"id": "call_1", "type": "custom",
                                                 "custom": {"name": "x", "input": "y"}}]},
@@ -590,6 +596,7 @@ mod tests {
         let (evidence, _) = decode(
             r#"{
                 "id": "chatcmpl_1",
+                "object": "chat.completion",
                 "model": "model-exact-1",
                 "choices": [{
                     "index": 1,
@@ -611,7 +618,8 @@ mod tests {
     #[test]
     fn a_choice_without_an_index_is_boundary_loss() {
         let (evidence, _) = decode(
-            r#"{"id":"chatcmpl_1","model":"model-exact-1","choices":[{
+            r#"{"id":"chatcmpl_1","object":"chat.completion",
+                "model":"model-exact-1","choices":[{
                 "message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}"#,
         );
 
@@ -623,6 +631,7 @@ mod tests {
         let (evidence, _) = decode(
             r#"{
                 "id": "chatcmpl_1",
+                "object": "chat.completion",
                 "model": "model-exact-1",
                 "choices": [{
                     "index": 0,
@@ -701,7 +710,8 @@ mod tests {
     #[test]
     fn duplicate_tool_call_ids_are_boundary_loss() {
         let (evidence, _) = decode(
-            r#"{"object":"chat.completion","choices":[{"index":0,
+            r#"{"object":"chat.completion","model":"model-exact-1",
+                "choices":[{"index":0,
                 "message":{"role":"assistant","tool_calls":[
                     {"id":"call_1","type":"function",
                      "function":{"name":"first","arguments":"{}"}},
@@ -749,7 +759,7 @@ mod tests {
             │ token          │ finish                                             │
             ├────────────────┼────────────────────────────────────────────────────┤
             │ stop           │ EndTurn                                            │
-            │ length         │ MaxOutputTokens                                    │
+            │ length         │ Unrecognized { provider_token: \"length\" }        │
             │ tool_calls     │ ToolUse                                            │
             │ content_filter │ Refusal                                            │
             │ function_call  │ Unrecognized { provider_token: \"function_call\" } │

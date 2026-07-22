@@ -1,5 +1,7 @@
 //! Operation-to-wire translation.
 
+use std::collections::BTreeSet;
+
 use signalbox_model_runtime::{
     ConversationMessage, ConversationRole, DeliveryMode, MessagePart, ModelOperation,
     PreparationFailure, ToolChoice,
@@ -12,8 +14,9 @@ use crate::wire::{
 
 /// Builds the wire request for one operation.
 ///
-/// Pure translation: any failure is a [`PreparationFailure`] the runtime
-/// reports as proven-unsent evidence — nothing has touched the network.
+/// Pure translation: any failure is a trustworthy [`PreparationFailure`]
+/// returned before a one-shot capability exists. Nothing has touched the
+/// network.
 ///
 /// A structured-output contract is realized as a forced function call — the
 /// same mechanism the Anthropic adapter uses — so the provider-independent
@@ -34,19 +37,24 @@ pub(crate) fn build_request<C>(
             detail: error.to_string(),
         });
     }
-    // serde_json serializes a non-finite f64 as null, which would silently
-    // drop the caller's stated setting; reject during preparation instead.
-    for (name, value) in [
-        ("temperature", operation.settings.temperature),
-        ("top_p", operation.settings.top_p),
-    ] {
-        if let Some(value) = value
-            && !value.is_finite()
-        {
-            return Err(PreparationFailure::UnsupportedOperation {
-                detail: format!("{name} must be a finite number"),
-            });
-        }
+    if operation.settings.max_output_tokens == 0 {
+        return Err(PreparationFailure::UnsupportedOperation {
+            detail: "max_output_tokens must be at least 1".to_string(),
+        });
+    }
+    if let Some(value) = operation.settings.temperature
+        && !(0.0..=2.0).contains(&value)
+    {
+        return Err(PreparationFailure::UnsupportedOperation {
+            detail: "temperature must be a finite number from 0 through 2".to_string(),
+        });
+    }
+    if let Some(value) = operation.settings.top_p
+        && !(0.0..=1.0).contains(&value)
+    {
+        return Err(PreparationFailure::UnsupportedOperation {
+            detail: "top_p must be a finite number from 0 through 1".to_string(),
+        });
     }
     if operation.settings.stop_sequences.len() > 4 {
         return Err(PreparationFailure::UnsupportedOperation {
@@ -66,6 +74,7 @@ pub(crate) fn build_request<C>(
     for message in &operation.messages {
         wire_messages(message, &mut messages)?;
     }
+    validate_tool_history(&operation.messages)?;
     let streamed = operation.delivery == DeliveryMode::Streamed;
     Ok(ChatRequest {
         model: operation.resolved_target.as_str().to_string(),
@@ -82,6 +91,64 @@ pub(crate) fn build_request<C>(
             include_usage: true,
         }),
     })
+}
+
+fn validate_tool_history(messages: &[ConversationMessage]) -> Result<(), PreparationFailure> {
+    let mut pending_calls: Option<BTreeSet<&str>> = None;
+    for message in messages {
+        let mut results = BTreeSet::new();
+        for part in &message.parts {
+            if let MessagePart::ToolResult(result) = part
+                && !results.insert(result.tool_call_id.as_str())
+            {
+                return Err(PreparationFailure::UnsupportedOperation {
+                    detail: format!(
+                        "tool result {} appears more than once",
+                        result.tool_call_id.as_str()
+                    ),
+                });
+            }
+        }
+
+        if let Some(expected) = pending_calls.take() {
+            if message.role != ConversationRole::User || results != expected {
+                return Err(PreparationFailure::UnsupportedOperation {
+                    detail: "Chat Completions requires one matching tool result for every tool \
+                             call in the immediately following user message"
+                        .to_string(),
+                });
+            }
+        } else if !results.is_empty() {
+            return Err(PreparationFailure::UnsupportedOperation {
+                detail: "Chat Completions tool results must answer calls from the immediately \
+                         preceding assistant message"
+                    .to_string(),
+            });
+        }
+
+        if message.role == ConversationRole::Assistant {
+            let mut calls = BTreeSet::new();
+            for part in &message.parts {
+                if let MessagePart::ToolCall(call) = part
+                    && !calls.insert(call.id.as_str())
+                {
+                    return Err(PreparationFailure::UnsupportedOperation {
+                        detail: format!("tool call {} appears more than once", call.id.as_str()),
+                    });
+                }
+            }
+            if !calls.is_empty() {
+                pending_calls = Some(calls);
+            }
+        }
+    }
+    if pending_calls.is_some() {
+        return Err(PreparationFailure::UnsupportedOperation {
+            detail: "Chat Completions requires tool calls to be followed by matching results"
+                .to_string(),
+        });
+    }
+    Ok(())
 }
 
 type ToolsAndChoice = (
@@ -195,6 +262,17 @@ fn wire_messages(
                         detail: "the Chat Completions wire contract permits tool calls only \
                                  in assistant history"
                             .to_string(),
+                    });
+                }
+                if let Err(error) =
+                    serde_json::from_str::<serde_json::Value>(&proposal.arguments_json)
+                {
+                    return Err(PreparationFailure::UnsupportedOperation {
+                        detail: format!(
+                            "replayed tool call {} carries arguments that are not valid JSON: \
+                             {error}",
+                            proposal.id.as_str()
+                        ),
                     });
                 }
                 pending_tool_calls.push(WireRequestToolCall {
@@ -624,6 +702,112 @@ mod tests {
         assert!(matches!(
             failure,
             PreparationFailure::UnsupportedOperation { .. }
+        ));
+    }
+
+    #[test]
+    fn provider_numeric_domains_are_enforced_before_send() {
+        for value in [-0.1, 2.1, f64::INFINITY] {
+            let mut candidate = operation("call-temperature");
+            candidate.settings.temperature = Some(value);
+            assert!(matches!(
+                build_request(&candidate),
+                Err(PreparationFailure::UnsupportedOperation { .. })
+            ));
+        }
+        for value in [-0.1, 1.1, f64::INFINITY] {
+            let mut candidate = operation("call-top-p");
+            candidate.settings.top_p = Some(value);
+            assert!(matches!(
+                build_request(&candidate),
+                Err(PreparationFailure::UnsupportedOperation { .. })
+            ));
+        }
+        let mut candidate = operation("call-zero-tokens");
+        candidate.settings.max_output_tokens = 0;
+        assert!(matches!(
+            build_request(&candidate),
+            Err(PreparationFailure::UnsupportedOperation { .. })
+        ));
+    }
+
+    #[test]
+    fn tool_results_must_match_the_immediately_preceding_tool_calls() {
+        let result = |id: &str| {
+            MessagePart::ToolResult(ToolResultRecord {
+                tool_call_id: ToolCallId::new(id),
+                content: "done".to_string(),
+                is_error: false,
+            })
+        };
+        let call = MessagePart::ToolCall(ToolCallProposal {
+            id: ToolCallId::new("call_a1"),
+            name: ToolName::new("lookup"),
+            arguments_json: "{}".to_string(),
+        });
+
+        let mut orphan = operation("call-orphan");
+        orphan.messages = vec![ConversationMessage {
+            role: ConversationRole::User,
+            parts: vec![result("call_a1")],
+        }];
+        assert!(matches!(
+            build_request(&orphan),
+            Err(PreparationFailure::UnsupportedOperation { .. })
+        ));
+
+        let mut missing = operation("call-missing");
+        missing.messages = vec![ConversationMessage {
+            role: ConversationRole::Assistant,
+            parts: vec![call.clone()],
+        }];
+        assert!(matches!(
+            build_request(&missing),
+            Err(PreparationFailure::UnsupportedOperation { .. })
+        ));
+
+        let mut mismatched = operation("call-mismatch");
+        mismatched.messages = vec![
+            ConversationMessage {
+                role: ConversationRole::Assistant,
+                parts: vec![call],
+            },
+            ConversationMessage {
+                role: ConversationRole::User,
+                parts: vec![result("call_other")],
+            },
+        ];
+        assert!(matches!(
+            build_request(&mismatched),
+            Err(PreparationFailure::UnsupportedOperation { .. })
+        ));
+    }
+
+    #[test]
+    fn replayed_tool_arguments_must_be_valid_json() {
+        let mut operation = operation("call-invalid-json");
+        operation.messages = vec![
+            ConversationMessage {
+                role: ConversationRole::Assistant,
+                parts: vec![MessagePart::ToolCall(ToolCallProposal {
+                    id: ToolCallId::new("call_a1"),
+                    name: ToolName::new("lookup"),
+                    arguments_json: "{not json".to_string(),
+                })],
+            },
+            ConversationMessage {
+                role: ConversationRole::User,
+                parts: vec![MessagePart::ToolResult(ToolResultRecord {
+                    tool_call_id: ToolCallId::new("call_a1"),
+                    content: "done".to_string(),
+                    is_error: false,
+                })],
+            },
+        ];
+
+        assert!(matches!(
+            build_request(&operation),
+            Err(PreparationFailure::UnsupportedOperation { .. })
         ));
     }
 

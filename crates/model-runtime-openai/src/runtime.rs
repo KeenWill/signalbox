@@ -17,13 +17,13 @@ use reqwest::redirect::Policy;
 use reqwest::{Client, Url};
 
 use signalbox_model_runtime::{
-    AssistantPart, BoundaryLossEvidence, CancellationSignal, DeliveryMode, ExchangeFacts,
-    FinishReason, LossCause, ModelOperation, ModelRuntime, NativeErrorFacts, Observation,
-    ObservationFact, ObservationSink, PreparationDefect, PreparationFailure, PreparationOutcome,
-    ProvenUnsentEvidence, ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId,
-    ProviderReportedModel, ProviderRequestId, SseFraming, StreamInterruption, TerminalEvidence,
-    TerminalReport, TokenUsage, ToolCallId, ToolCallProposal, ToolName, TransportFacts,
-    UnsentCause,
+    AssistantPart, BoundaryLossEvidence, CancellationSignal, CompletionFinish, DeliveryMode,
+    ExchangeFacts, FinishReason, LossCause, ModelOperation, ModelRuntime, NativeErrorFacts,
+    Observation, ObservationFact, ObservationSink, PreparationDefect, PreparationFailure,
+    PreparationOutcome, ProvenUnsentEvidence, ProviderErrorEvidence, ProviderErrorKind,
+    ProviderMessageId, ProviderReportedModel, ProviderRequestId, SseFraming, StreamInterruption,
+    TerminalEvidence, TerminalReport, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
+    TransportFacts, UnsentCause,
 };
 
 use signalbox_model_runtime::{CredentialAccess, CredentialValue};
@@ -82,7 +82,7 @@ impl<A> std::fmt::Debug for OpenAiRuntime<A> {
 /// no operation exists yet, so nothing is reported as unsent.
 #[derive(Debug)]
 pub enum OpenAiConstructionError {
-    /// The configured base URL does not parse as an absolute URL.
+    /// The configured base URL is not an acceptable absolute HTTP(S) URL.
     InvalidBaseUrl {
         /// The parser's rendered description.
         detail: String,
@@ -150,6 +150,11 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
             // fragment would route the request somewhere else entirely.
             return Err(OpenAiConstructionError::InvalidBaseUrl {
                 detail: "base URL must not carry a query or fragment".to_string(),
+            });
+        }
+        if !completions_url.username().is_empty() || completions_url.password().is_some() {
+            return Err(OpenAiConstructionError::InvalidBaseUrl {
+                detail: "base URL must not carry user information".to_string(),
             });
         }
         if !matches!(completions_url.scheme(), "http" | "https") {
@@ -520,7 +525,8 @@ async fn finish_error(
         Some(Ok(bytes)) => bytes,
     };
     if let Ok(ErrorEnvelope { error: Some(error) }) = serde_json::from_slice(&body) {
-        let kind = classify_error(status, error.code_text().as_deref());
+        let code = error.code_text();
+        let kind = classify_error(status, code.as_deref().or(error.error_type.as_deref()));
         return TerminalEvidence::ProviderError(ProviderErrorEvidence {
             exchange,
             // The Chat Completions error envelope reports no model identity.
@@ -829,23 +835,17 @@ fn redact_complete_credentials_and_hold_prefix(
     if credential.is_empty() {
         return (text, String::new());
     }
-    let mut redacted = String::new();
-    while let Some(position) = text.find(credential) {
-        redacted.push_str(&text[..position]);
-        redacted.push_str("[redacted]");
-        text = text[(position + credential.len())..].to_string();
-    }
+    let tail_start = text
+        .rfind(credential)
+        .map_or(0, |position| position + credential.len());
+    let tail = &text[tail_start..];
     let longest_prefix = (1..credential.len())
         .rev()
         .filter(|length| credential.is_char_boundary(*length))
-        .find(|length| text.ends_with(&credential[..*length]));
-    if let Some(length) = longest_prefix {
-        let split = text.len() - length;
-        redacted.push_str(&text[..split]);
-        return (redacted, text[split..].to_string());
-    }
-    redacted.push_str(&text);
-    (redacted, String::new())
+        .find(|length| tail.ends_with(&credential[..*length]));
+    let split = longest_prefix.map_or(text.len(), |length| text.len() - length);
+    let pending = text.split_off(split);
+    (text.replace(credential, "[redacted]"), pending)
 }
 
 fn redact_observation_fact(fact: ObservationFact, credential: &CredentialValue) -> ObservationFact {
@@ -900,7 +900,9 @@ fn redact_evidence(evidence: TerminalEvidence, api_key: &CredentialValue) -> Ter
     let redact_native = |mut native: NativeErrorFacts| -> NativeErrorFacts {
         native.error_token = native.error_token.map(redact);
         native.error_code = native.error_code.map(redact);
-        native.message = native.message.map(redact);
+        native.message = native
+            .message
+            .map(|message| redact_native_message(message, key_text));
         native
     };
     let redact_transport =
@@ -988,6 +990,7 @@ fn redact_evidence(evidence: TerminalEvidence, api_key: &CredentialValue) -> Ter
             completion.reported_model = completion.reported_model.map(|model| {
                 ProviderReportedModel::new(redact_text(model.as_str().to_string(), api_key))
             });
+            completion.finish = redact_completion_finish(completion.finish, api_key);
             completion.content = completion
                 .content
                 .into_iter()
@@ -1032,6 +1035,40 @@ fn redact_bounded_text(text: String, credential: &CredentialValue) -> String {
         redacted.push_str("[redacted]");
     }
     redacted
+}
+
+fn redact_native_message(text: String, credential: &str) -> String {
+    const TRUNCATION_SUFFIX: &str = " … [truncated]";
+    if let Some(body) = text.strip_suffix(TRUNCATION_SUFFIX) {
+        let (mut redacted, pending) =
+            redact_complete_credentials_and_hold_prefix(body.to_string(), credential);
+        if !pending.is_empty() {
+            redacted.push_str("[redacted]");
+        }
+        redacted.push_str(TRUNCATION_SUFFIX);
+        redacted
+    } else {
+        let (mut redacted, pending) = redact_complete_credentials_and_hold_prefix(text, credential);
+        if !pending.is_empty() {
+            redacted.push_str("[redacted]");
+        }
+        redacted
+    }
+}
+
+fn redact_completion_finish(
+    finish: CompletionFinish,
+    credential: &CredentialValue,
+) -> CompletionFinish {
+    match finish {
+        CompletionFinish::StopSequence { sequence } => CompletionFinish::StopSequence {
+            sequence: sequence.map(|value| redact_text(value, credential)),
+        },
+        CompletionFinish::Unrecognized { provider_token } => CompletionFinish::Unrecognized {
+            provider_token: redact_text(provider_token, credential),
+        },
+        finish => finish,
+    }
 }
 
 fn redact_exchange(mut exchange: ExchangeFacts, credential: &CredentialValue) -> ExchangeFacts {
@@ -1134,8 +1171,15 @@ fn redact_json_value(value: &mut serde_json::Value, credential: &str) -> bool {
             }
             changed
         }
-        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
-            false
+        value @ (serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)) => {
+            if value.to_string().contains(credential) {
+                *value = serde_json::Value::String("[redacted]".to_string());
+                true
+            } else {
+                false
+            }
         }
     }
 }
@@ -1160,7 +1204,7 @@ fn redact_assistant_part(part: AssistantPart, credential: &CredentialValue) -> A
 /// when its bytes cannot form one. The value never appears in errors or
 /// logs.
 fn sensitive_bearer(api_key: &CredentialValue) -> Option<HeaderValue> {
-    if api_key.expose_bytes().is_empty() {
+    if api_key.expose_bytes().is_empty() || std::str::from_utf8(api_key.expose_bytes()).is_err() {
         return None;
     }
     let mut bytes = b"Bearer ".to_vec();
@@ -1181,8 +1225,8 @@ mod tests {
 
     use super::{
         MAX_STREAMED_RESPONSE_BYTES, RedactingSink, build_http_request, process_streamed_chunk,
-        redact_evidence, redact_json, serialize_request, streamed_response_prefix_len,
-        without_unproven_refusal,
+        redact_evidence, redact_json, redact_native_message, serialize_request,
+        streamed_response_prefix_len, without_unproven_refusal,
     };
     use crate::stream::StreamDecoder;
 
@@ -1225,6 +1269,54 @@ mod tests {
             redact_json(r#"{"city":"#.to_string(), &credential),
             r#"{"city":"#,
             "malformed non-secret bytes remain available for typed decoding"
+        );
+    }
+
+    #[test]
+    fn credential_reflected_as_a_json_primitive_is_redacted() {
+        for (raw, key) in [
+            (r#"{"value":1234}"#, b"23".as_slice()),
+            (r#"{"value":true}"#, b"true".as_slice()),
+            (r#"{"value":null}"#, b"null".as_slice()),
+        ] {
+            let credential = CredentialValue::new(key.to_vec());
+            assert_eq!(
+                redact_json(raw.to_string(), &credential),
+                r#"{"value":"[redacted]"}"#
+            );
+        }
+    }
+
+    #[test]
+    fn unrecognized_completion_finish_is_credential_sanitized() {
+        let credential = CredentialValue::new(b"key_loop".to_vec());
+        let evidence = TerminalEvidence::Completed(CompletionEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: None,
+            finish: CompletionFinish::Unrecognized {
+                provider_token: "echo-key_loop".to_string(),
+            },
+            content: Vec::new(),
+            usage: TokenUsage::unreported(),
+        });
+
+        let TerminalEvidence::Completed(completion) = redact_evidence(evidence, &credential) else {
+            panic!("completion remains completion evidence");
+        };
+        assert_eq!(
+            completion.finish,
+            CompletionFinish::Unrecognized {
+                provider_token: "echo-[redacted]".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn truncated_native_body_redacts_a_credential_prefix_at_the_cut() {
+        assert_eq!(
+            redact_native_message("safe key_ … [truncated]".to_string(), "key_loop"),
+            "safe [redacted] … [truncated]"
         );
     }
 

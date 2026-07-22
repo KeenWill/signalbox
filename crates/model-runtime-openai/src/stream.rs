@@ -261,6 +261,9 @@ impl StreamDecoder {
             }
             if let Some(token) = choice.finish_reason {
                 let mut finish = map_finish(&token);
+                if matches!(finish, FinishReason::Unrecognized { .. }) {
+                    return self.violation("stream carries an unrecognized finish_reason");
+                }
                 if !self.refusal_text.is_empty() {
                     // Accumulated refusal material is the provider's refusal
                     // outcome; the observation must match the terminal
@@ -269,11 +272,7 @@ impl StreamDecoder {
                 }
                 let has_tool_calls = !self.tool_builders.is_empty();
                 if (matches!(finish, FinishReason::ToolUse) && !has_tool_calls)
-                    || (has_tool_calls
-                        && !matches!(
-                            finish,
-                            FinishReason::ToolUse | FinishReason::MaxOutputTokens
-                        ))
+                    || (has_tool_calls && !matches!(finish, FinishReason::ToolUse))
                 {
                     return self
                         .violation("tool-call content does not match the reported finish_reason");
@@ -650,7 +649,7 @@ mod tests {
     }
 
     #[test]
-    fn max_token_stream_retains_a_partial_tool_call() {
+    fn ambiguous_length_finish_is_a_protocol_violation() {
         let (terminal, _) = drive(&[
             first_chunk(),
             b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
@@ -658,18 +657,9 @@ mod tests {
               \"arguments\":\"{\\\"city\\\":\"}}]}}]}\n\n",
             b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\
               \"finish_reason\":\"length\"}]}\n\n",
-            final_usage_chunk(),
-            b"data: [DONE]\n\n",
         ]);
 
-        let Some(TerminalEvidence::Completed(completion)) = terminal else {
-            panic!("token exhaustion with partial tool material is definitive completion");
-        };
-        assert_eq!(completion.finish, CompletionFinish::MaxOutputTokens);
-        assert!(matches!(
-            completion.content.as_slice(),
-            [AssistantPart::ToolCall(_)]
-        ));
+        assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
     }
 
     #[test]
