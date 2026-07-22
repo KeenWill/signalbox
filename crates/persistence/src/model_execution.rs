@@ -225,6 +225,8 @@ impl ModelCallRepositoryError {
 /// Result of the load-and-prepare transaction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PrepareInitialModelCallOutcome {
+    /// The scheduling hint no longer identifies runnable work.
+    NoWork,
     /// A new exact Prepared call was committed; this invocation must stop.
     Checkpointed(ModelCallId),
     /// A previously committed Prepared request is safe for capability setup.
@@ -263,14 +265,24 @@ impl PostgresModelCallRepository {
             lock_session(&mut transaction, session).await?;
             let execution =
                 require_live_execution(&mut transaction, session, &self.targets).await?;
-            if execution.current_call().is_some() {
-                let request = execution.resume_prepared_call().map_err(|_| {
-                    ModelCallRepositoryError::InvalidTransition("existing call is not Prepared")
-                })?;
-                return Ok((
-                    false,
-                    PrepareInitialModelCallOutcome::Ready(Box::new(request)),
-                ));
+            if let Some(current_call) = execution.current_call() {
+                return match current_call.state() {
+                    signalbox_domain::CurrentModelCallState::Prepared => {
+                        let request = execution.resume_prepared_call().map_err(|_| {
+                            ModelCallRepositoryError::InvalidTransition(
+                                "Prepared call could not resume",
+                            )
+                        })?;
+                        Ok((
+                            false,
+                            PrepareInitialModelCallOutcome::Ready(Box::new(request)),
+                        ))
+                    }
+                    signalbox_domain::CurrentModelCallState::InFlight
+                    | signalbox_domain::CurrentModelCallState::CancellationRequested => {
+                        Ok((false, PrepareInitialModelCallOutcome::NoWork))
+                    }
+                };
             }
 
             let prepared = match execution.prepare_initial_call(call) {

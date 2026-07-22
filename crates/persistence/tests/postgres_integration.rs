@@ -1010,6 +1010,19 @@ async fn s01_s20_s21_inv014_inv015_inv032_model_call_transactions_complete_first
             .await?,
         ModelCallAuthorizationReread::InFlight(Box::new(authorized.clone()))
     );
+    assert_eq!(
+        repository
+            .prepare_initial_call(
+                session,
+                ModelCallId::from_uuid(Uuid::from_u128(0xce4)),
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdea)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(0xeea)),
+                ),
+            )
+            .await?,
+        PrepareInitialModelCallOutcome::NoWork
+    );
 
     let assistant_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde2));
     let completion_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde3));
@@ -1113,31 +1126,46 @@ async fn s03_s04_inv014_inv034_startup_scan_classifies_prepared_and_issued_model
     let issued = checkpoint_restart_model_call(&pool, 0x3000, true).await?;
     let prepared_steering = AcceptedInputId::from_uuid(Uuid::from_u128(0x6100));
     let issued_steering = AcceptedInputId::from_uuid(Uuid::from_u128(0x6101));
-    for (seed, fixture, accepted_input) in [
-        (0x4100, prepared, prepared_steering),
-        (0x4200, issued, issued_steering),
-    ] {
-        assert!(matches!(
-            SubmitInputRepository::new(pool.clone())
-                .handle(
-                    SubmitInput::new(
-                        DurableCommandId::from_uuid(Uuid::from_u128(seed)),
-                        fixture.session,
-                        UserContent::try_text(String::from("steering accepted before restart"))
-                            .expect("fixture steering content is admitted"),
-                        DeliveryRequest::NextSafePoint {
-                            expected_active_turn: fixture.turn,
-                        },
-                    ),
-                    accepted_input,
-                    None,
-                )
-                .await?,
-            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
-                SubmitInputAppliedResult::PendingSteering(_)
-            ))
-        ));
-    }
+    assert!(matches!(
+        SubmitInputRepository::new(pool.clone())
+            .handle(
+                SubmitInput::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(0x4100)),
+                    prepared.session,
+                    UserContent::try_text(String::from("steering accepted before restart"))
+                        .expect("fixture steering content is admitted"),
+                    DeliveryRequest::NextSafePoint {
+                        expected_active_turn: prepared.turn,
+                    },
+                ),
+                prepared_steering,
+                None,
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::PendingSteering(_)
+        ))
+    ));
+    assert!(matches!(
+        SubmitInputRepository::new(pool.clone())
+            .handle(
+                SubmitInput::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(0x4200)),
+                    issued.session,
+                    UserContent::try_text(String::from("steering accepted before restart"))
+                        .expect("fixture steering content is admitted"),
+                    DeliveryRequest::NextSafePoint {
+                        expected_active_turn: issued.turn,
+                    },
+                ),
+                issued_steering,
+                None,
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::PendingSteering(_)
+        ))
+    ));
 
     pool.close().await;
     let restarted_pool = PgPoolOptions::new()
@@ -1159,7 +1187,7 @@ async fn s03_s04_inv014_inv034_startup_scan_classifies_prepared_and_issued_model
                 ContextFrontierId::from_uuid(Uuid::from_u128(0x5004)),
             ],
         )
-        .with_reclassified_turns([TurnId::from_uuid(Uuid::from_u128(0x6201))]),
+        .with_reclassified_turns([prepared.turn, TurnId::from_uuid(Uuid::from_u128(0x6201))]),
         PostgresStartupScanRepository::new(restarted_pool.clone()),
     );
 
@@ -1224,9 +1252,9 @@ async fn s03_s04_inv014_inv034_startup_scan_classifies_prepared_and_issued_model
     );
     let steering_state: (String, Option<Uuid>, String, Option<Uuid>) = sqlx::query_as(
         "SELECT prepared.disposition_kind,
-                prepared.result_turn_id,
+                prepared.origin_turn_id,
                 issued.disposition_kind,
-                issued.result_turn_id
+                issued.origin_turn_id
            FROM accepted_input AS prepared
            CROSS JOIN accepted_input AS issued
           WHERE prepared.accepted_input_id = $1

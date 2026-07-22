@@ -1,6 +1,6 @@
 //! Atomic PostgreSQL recovery of prior-process active attempts.
 
-use std::{error::Error, fmt};
+use std::{collections::BTreeSet, error::Error, fmt};
 
 use rust_decimal::Decimal;
 use signalbox_application::{
@@ -382,18 +382,21 @@ where
             identities.terminal_frontier(),
         );
         if call_state == CurrentModelCallState::Prepared {
-            let reclassifications = model_execution
-                .active_turn()
-                .pending_steering()
-                .iter()
-                .map(|pending| {
-                    let accepted_input = pending.accepted_input();
-                    PendingSteeringReclassificationIdentity::new(
-                        accepted_input,
-                        next_reclassified_turn(accepted_input),
-                    )
-                })
-                .collect();
+            let mut proposed_turns = BTreeSet::new();
+            let mut reclassifications = Vec::new();
+            for pending in model_execution.active_turn().pending_steering() {
+                let accepted_input = pending.accepted_input();
+                let proposed_turn = next_reclassified_turn(accepted_input);
+                record_reclassified_turn_candidate(
+                    model_execution.turn(),
+                    proposed_turn,
+                    &mut proposed_turns,
+                )?;
+                reclassifications.push(PendingSteeringReclassificationIdentity::new(
+                    accepted_input,
+                    proposed_turn,
+                ));
+            }
             failure_identities =
                 failure_identities.with_pending_steering_reclassifications(reclassifications);
         }
@@ -645,6 +648,19 @@ fn map_model_call_error(error: ModelCallRepositoryError) -> StartupScanRepositor
     }
 }
 
+fn record_reclassified_turn_candidate(
+    source_turn: TurnId,
+    proposed_turn: TurnId,
+    proposed_turns: &mut BTreeSet<TurnId>,
+) -> Result<(), StartupScanRepositoryError> {
+    if proposed_turn == source_turn || !proposed_turns.insert(proposed_turn) {
+        return Err(StartupScanRepositoryError::IdentityCollision(
+            StartupScanIdentityCollision::ReclassifiedTurn,
+        ));
+    }
+    Ok(())
+}
+
 fn identity_collision(error: &sqlx::Error) -> Option<StartupScanIdentityCollision> {
     match error
         .as_database_error()
@@ -671,14 +687,50 @@ fn commit_failure_is_ambiguous(error: &sqlx::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{borrow::Cow, error::Error, fmt, io};
+    use std::{borrow::Cow, collections::BTreeSet, error::Error, fmt, io};
 
     use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
     use signalbox_domain::TurnId;
     use sqlx::error::{DatabaseError, ErrorKind};
     use sqlx::types::Uuid;
 
-    use super::{StartupScanCorruption, StartupScanRepositoryError, commit_failure_is_ambiguous};
+    use super::{
+        StartupScanCorruption, StartupScanIdentityCollision, StartupScanRepositoryError,
+        commit_failure_is_ambiguous, record_reclassified_turn_candidate,
+    };
+
+    /// INV-034: a generated source-turn identity is a retryable collision, not
+    /// durable corruption.
+    #[test]
+    fn inv034_generated_successor_source_candidate_is_a_retryable_collision() {
+        let source = TurnId::from_uuid(Uuid::from_u128(1));
+        let mut proposed = BTreeSet::new();
+
+        assert!(matches!(
+            record_reclassified_turn_candidate(source, source, &mut proposed),
+            Err(StartupScanRepositoryError::IdentityCollision(
+                StartupScanIdentityCollision::ReclassifiedTurn
+            ))
+        ));
+    }
+
+    /// INV-034: a duplicate generated successor is a retryable collision, not
+    /// durable corruption.
+    #[test]
+    fn inv034_generated_successor_duplicate_is_a_retryable_collision() {
+        let source = TurnId::from_uuid(Uuid::from_u128(1));
+        let successor = TurnId::from_uuid(Uuid::from_u128(2));
+        let mut proposed = BTreeSet::new();
+
+        record_reclassified_turn_candidate(source, successor, &mut proposed)
+            .expect("the first source-safe successor is accepted");
+        assert!(matches!(
+            record_reclassified_turn_candidate(source, successor, &mut proposed),
+            Err(StartupScanRepositoryError::IdentityCollision(
+                StartupScanIdentityCollision::ReclassifiedTurn
+            ))
+        ));
+    }
 
     #[derive(Debug)]
     struct ServerCommitFailure {
