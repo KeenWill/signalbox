@@ -604,7 +604,8 @@ async fn inv_035_streamed_delta_reflecting_the_key_is_redacted_before_observatio
         event: content_block_stop\n\
         data: {\"type\":\"content_block_stop\",\"index\":0}\n\n\
         event: message_delta\n\
-        data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n\
+        data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\
+        \"usage\":{\"output_tokens\":2}}\n\n\
         event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
     let server = CannedServer::serving(vec![http_response("200 OK", &[], sse)]).await;
     let runtime = runtime_for(&server.base_url);

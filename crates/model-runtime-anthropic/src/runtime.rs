@@ -32,6 +32,7 @@ use crate::wire::ErrorEnvelope;
 /// A response body is provider-controlled input. Keep complete buffered
 /// responses bounded independently of the requested output-token ceiling.
 const MAX_BUFFERED_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_STREAMED_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 /// The Anthropic Messages adapter.
 ///
@@ -338,6 +339,7 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
         let mut framing = SseFraming::new(self.sse_record_limit);
         let mut decoder = StreamDecoder::new(exchange);
         let mut body = response.bytes_stream();
+        let mut streamed_bytes = 0usize;
         loop {
             let chunk = match with_cancellation(cancellation, body.next()).await {
                 None => return decoder.cancelled(),
@@ -366,6 +368,11 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
                     return decoder.lost(interruption);
                 }
                 Some(Ok(bytes)) => {
+                    streamed_bytes =
+                        match checked_streamed_response_len(streamed_bytes, bytes.len()) {
+                            Ok(next_len) => next_len,
+                            Err(detail) => return decoder.violation_evidence(detail),
+                        };
                     // Records completed before a framing failure are applied
                     // first, so evidence they carry is never lost to how the
                     // transport batched bytes.
@@ -383,6 +390,18 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
             }
         }
     }
+}
+
+fn checked_streamed_response_len(current: usize, chunk: usize) -> Result<usize, String> {
+    let Some(next_len) = current.checked_add(chunk) else {
+        return Err("streamed response byte count overflowed".to_string());
+    };
+    if next_len > MAX_STREAMED_RESPONSE_BYTES {
+        return Err(format!(
+            "streamed response exceeded the {MAX_STREAMED_RESPONSE_BYTES}-byte adapter limit"
+        ));
+    }
+    Ok(next_len)
 }
 
 impl<C: Clone + Send + Sync, A: CredentialAccess> ModelRuntime<C> for AnthropicRuntime<A> {
@@ -617,7 +636,6 @@ struct RedactingObservationSink<'a, C> {
 enum StreamField {
     Text,
     Thinking,
-    ToolArguments,
 }
 
 struct PendingStreamText<C> {
@@ -643,7 +661,11 @@ impl<'a, C: Clone> RedactingObservationSink<'a, C> {
                 field,
                 index,
                 pending.correlation,
-                redact_text(pending.text, self.credential),
+                // The pending bytes are exactly a credential prefix. Once a
+                // non-delta fact must cross the boundary, retaining stream
+                // ordering and retaining those bytes are incompatible; fail
+                // closed by replacing the possible secret prefix.
+                "[redacted]".to_string(),
             );
         }
     }
@@ -655,10 +677,6 @@ impl<'a, C: Clone> RedactingObservationSink<'a, C> {
         let fact = match field {
             StreamField::Text => ObservationFact::TextDelta { index, text },
             StreamField::Thinking => ObservationFact::ThinkingDelta { index, text },
-            StreamField::ToolArguments => ObservationFact::ToolArgumentsDelta {
-                index,
-                fragment: text,
-            },
         };
         self.inner.observe(Observation { correlation, fact });
     }
@@ -702,12 +720,15 @@ impl<C: Clone> ObservationSink<C> for RedactingObservationSink<'_, C> {
                 observation.correlation,
                 text,
             ),
-            ObservationFact::ToolArgumentsDelta { index, fragment } => self.redact_stream_delta(
-                StreamField::ToolArguments,
-                index,
-                observation.correlation,
-                fragment,
-            ),
+            ObservationFact::ToolArgumentsDelta { index, fragment } => {
+                self.inner.observe(Observation {
+                    correlation: observation.correlation,
+                    fact: ObservationFact::ToolArgumentsDelta {
+                        index,
+                        fragment: redact_json(fragment, self.credential),
+                    },
+                });
+            }
             ObservationFact::ToolCallProposed(proposal) => {
                 self.flush();
                 self.inner.observe(Observation {
@@ -889,7 +910,7 @@ fn redact_observation_fact(fact: ObservationFact, credential: &str) -> Observati
         ObservationFact::ToolArgumentsDelta { index, fragment } => {
             ObservationFact::ToolArgumentsDelta {
                 index,
-                fragment: redact_text(fragment, credential),
+                fragment: redact_json(fragment, credential),
             }
         }
         ObservationFact::ToolCallProposed(proposal) => {
@@ -1032,7 +1053,10 @@ mod tests {
         CredentialValue, Observation, ObservationFact, ObservationSink, TokenUsage,
     };
 
-    use super::{RedactingObservationSink, redact_json};
+    use super::{
+        MAX_STREAMED_RESPONSE_BYTES, RedactingObservationSink, checked_streamed_response_len,
+        redact_json,
+    };
 
     #[test]
     fn inv_035_json_escaped_credentials_are_redacted_from_tool_arguments() {
@@ -1042,7 +1066,7 @@ mod tests {
     }
 
     #[test]
-    fn buffered_prefix_is_flushed_before_later_metadata() {
+    fn buffered_prefix_is_redacted_before_metadata_and_cannot_join_a_later_tail() {
         let mut observed = Vec::new();
         let credential = CredentialValue::new(b"key_loop".to_vec());
         let mut redacting = RedactingObservationSink::new(&mut observed, &credential);
@@ -1057,18 +1081,67 @@ mod tests {
             correlation: "call-1".to_string(),
             fact: ObservationFact::UsageReported(TokenUsage::unreported()),
         });
+        redacting.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::TextDelta {
+                index: 0,
+                text: "loop".to_string(),
+            },
+        });
+        redacting.flush();
+        drop(redacting);
 
         let metadata_index = observed
             .iter()
             .position(|observation| matches!(observation.fact, ObservationFact::UsageReported(_)))
             .expect("usage is forwarded");
-        let text = observed[..metadata_index]
+        let text_before_metadata = observed[..metadata_index]
             .iter()
             .filter_map(|observation| match &observation.fact {
                 ObservationFact::TextDelta { text, .. } => Some(text.as_str()),
                 _ => None,
             })
             .collect::<String>();
-        assert_eq!(text, "safe key_");
+        let all_text = observed
+            .iter()
+            .filter_map(|observation| match &observation.fact {
+                ObservationFact::TextDelta { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(text_before_metadata, "safe [redacted]");
+        assert_eq!(all_text, "safe [redacted]loop");
+        assert!(!all_text.contains("key_loop"));
+    }
+
+    #[test]
+    fn json_escaped_credential_is_redacted_before_a_tool_delta_is_forwarded() {
+        let mut observed = Vec::new();
+        let credential = CredentialValue::new(b"key_loop".to_vec());
+        let mut redacting = RedactingObservationSink::new(&mut observed, &credential);
+        redacting.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ToolArgumentsDelta {
+                index: 0,
+                fragment: r#"{"token":"key_\u006coop"}"#.to_string(),
+            },
+        });
+        drop(redacting);
+
+        assert!(observed.iter().any(|observation| matches!(
+            &observation.fact,
+            ObservationFact::ToolArgumentsDelta { fragment, .. }
+                if fragment == r#"{"token":"[redacted]"}"#
+        )));
+    }
+
+    #[test]
+    fn streamed_response_budget_rejects_aggregate_overflow() {
+        assert_eq!(
+            checked_streamed_response_len(MAX_STREAMED_RESPONSE_BYTES - 1, 1),
+            Ok(MAX_STREAMED_RESPONSE_BYTES)
+        );
+        assert!(checked_streamed_response_len(MAX_STREAMED_RESPONSE_BYTES, 1).is_err());
+        assert!(checked_streamed_response_len(usize::MAX, 1).is_err());
     }
 }

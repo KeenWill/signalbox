@@ -253,6 +253,9 @@ impl StreamDecoder {
         if !self.started {
             return self.violation("content_block_start before message_start");
         }
+        if self.finish.is_some() {
+            return self.violation("content_block_start after the stop_reason");
+        }
         let event: ContentBlockStartEvent = match self.parse(record, "content_block_start") {
             Ok(event) => event,
             Err(step) => return *step,
@@ -271,12 +274,24 @@ impl StreamDecoder {
         };
         let builder = match content_block {
             WireResponseBlock::Text { text } => BlockBuilder::Text(text),
-            WireResponseBlock::ToolUse { id, name, input } => BlockBuilder::ToolUse {
-                id,
-                name,
-                start_input: input.get().to_string(),
-                accumulated: String::new(),
-            },
+            WireResponseBlock::ToolUse { id, name, input } => {
+                let start_input = input.get().to_string();
+                let documented_empty_input =
+                    serde_json::from_str::<serde_json::Value>(&start_input).is_ok_and(|value| {
+                        value.as_object().is_some_and(serde_json::Map::is_empty)
+                    });
+                if !documented_empty_input {
+                    return self.violation(
+                        "streamed tool_use block start must carry the documented empty input object",
+                    );
+                }
+                BlockBuilder::ToolUse {
+                    id,
+                    name,
+                    start_input,
+                    accumulated: String::new(),
+                }
+            }
             WireResponseBlock::Thinking {
                 thinking,
                 signature,
@@ -304,6 +319,9 @@ impl StreamDecoder {
     ) -> StreamStep {
         if !self.started {
             return self.violation("content_block_delta before message_start");
+        }
+        if self.finish.is_some() {
+            return self.violation("content_block_delta after the stop_reason");
         }
         let event: ContentBlockDeltaEvent = match self.parse(record, "content_block_delta") {
             Ok(event) => event,
@@ -350,14 +368,6 @@ impl StreamDecoder {
             }
             (BlockBuilder::ToolUse { accumulated, .. }, WireDelta::InputJson { partial_json }) => {
                 accumulated.push_str(&partial_json);
-                Self::emit(
-                    correlation,
-                    sink,
-                    ObservationFact::ToolArgumentsDelta {
-                        index,
-                        fragment: partial_json,
-                    },
-                );
                 StreamStep::Continue
             }
             // Additive delta evolution is tolerated on any block type.
@@ -376,6 +386,9 @@ impl StreamDecoder {
     ) -> StreamStep {
         if !self.started {
             return self.violation("content_block_stop before message_start");
+        }
+        if self.finish.is_some() {
+            return self.violation("content_block_stop after the stop_reason");
         }
         let event: ContentBlockStopEvent = match self.parse(record, "content_block_stop") {
             Ok(event) => event,
@@ -425,6 +438,18 @@ impl StreamDecoder {
                         event.index
                     ));
                 }
+                // Partial JSON cannot be safely decoded for credential
+                // redaction. Emit one complete delta only after validation;
+                // the boundary sink can then decode JSON escapes before any
+                // argument bytes leave the adapter.
+                Self::emit(
+                    correlation,
+                    sink,
+                    ObservationFact::ToolArgumentsDelta {
+                        index: event.index,
+                        fragment: arguments_json.clone(),
+                    },
+                );
                 let proposal = ToolCallProposal {
                     id: ToolCallId::new(id),
                     name: ToolName::new(name),
@@ -453,6 +478,9 @@ impl StreamDecoder {
         if !self.started {
             return self.violation("message_delta before message_start");
         }
+        if self.finish.is_some() {
+            return self.violation("message_delta after the stop_reason");
+        }
         let event: MessageDeltaEvent = match self.parse(record, "message_delta") {
             Ok(event) => event,
             Err(step) => return *step,
@@ -463,22 +491,28 @@ impl StreamDecoder {
         if let Some(delta) = event.delta
             && let Some(stop_reason) = delta.stop_reason
         {
-            if self.finish.is_some() {
-                // The stop reason is terminal outcome metadata; a second
-                // report must not silently replace the first disposition.
-                return self.violation("message_delta reports a second stop_reason");
+            if !self.open_blocks.is_empty() {
+                return self
+                    .violation("message_delta reports a stop_reason with open content blocks");
+            }
+            if event
+                .usage
+                .as_ref()
+                .and_then(|usage| usage.output_tokens)
+                .is_none()
+            {
+                return self
+                    .violation("message_delta reports a stop_reason without final output usage");
             }
             let finish = map_finish(&stop_reason, delta.stop_sequence);
             self.finish = Some(finish.clone());
             if matches!(finish, FinishReason::Unrecognized { .. }) {
                 return self.violation("message_delta carries an unrecognized stop_reason");
             }
+            self.final_output_usage_reported = true;
             Self::emit(correlation, sink, ObservationFact::FinishReported(finish));
         }
         if let Some(usage) = event.usage.as_ref() {
-            if usage.output_tokens.is_some() {
-                self.final_output_usage_reported = true;
-            }
             let usage = convert_usage(usage);
             self.usage.absorb(usage);
             Self::emit(correlation, sink, ObservationFact::UsageReported(usage));
@@ -749,6 +783,13 @@ mod tests {
             correlation: "call-1".to_string(),
             fact: ObservationFact::ToolCallProposed(proposal),
         }));
+        assert!(observations.contains(&Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ToolArgumentsDelta {
+                index: 0,
+                fragment: r#"{"city":"Oslo"}"#.to_string(),
+            },
+        }));
     }
 
     #[test]
@@ -834,7 +875,8 @@ mod tests {
         let (evidence, _) = drive_to_eof(&[
             message_start(),
             b"event: message_delta\n\
-              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\"}}\n\n",
+              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\"},\
+              \"usage\":{\"output_tokens\":2}}\n\n",
         ]);
 
         let TerminalEvidence::BoundaryLoss(loss) = evidence else {
@@ -877,6 +919,19 @@ mod tests {
     }
 
     #[test]
+    fn earlier_output_usage_does_not_satisfy_the_terminal_delta() {
+        let (terminal, _) = drive(&[
+            message_start(),
+            b"event: message_delta\n\
+              data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":11}}\n\n",
+            b"event: message_delta\n\
+              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+        ]);
+
+        assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
+    }
+
+    #[test]
     fn message_stop_without_stop_reason_is_a_protocol_violation() {
         let (terminal, _) = drive(&[
             message_start(),
@@ -898,7 +953,6 @@ mod tests {
             message_start(),
             b"event: message_delta\n\
               data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
-            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
         ]);
 
         let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
@@ -999,19 +1053,19 @@ mod tests {
     }
 
     #[test]
-    fn message_stop_with_an_open_block_is_a_protocol_violation() {
+    fn stop_reason_with_an_open_block_is_a_protocol_violation() {
         let (terminal, _) = drive(&[
             message_start(),
             b"event: content_block_start\n\
               data: {\"type\":\"content_block_start\",\"index\":0,\
               \"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
             b"event: message_delta\n\
-              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
-            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\
+              \"usage\":{\"output_tokens\":1}}\n\n",
         ]);
 
         let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
-            panic!("message_stop with an open block must surface as a protocol violation");
+            panic!("a stop reason with an open block must surface as a protocol violation");
         };
         assert!(matches!(
             loss.cause,
@@ -1071,6 +1125,19 @@ mod tests {
     }
 
     #[test]
+    fn nonempty_streamed_tool_start_input_is_a_protocol_violation() {
+        let (terminal, _) = drive(&[
+            message_start(),
+            b"event: content_block_start\n\
+              data: {\"type\":\"content_block_start\",\"index\":0,\
+              \"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\
+              \"name\":\"lookup\",\"input\":{\"city\":\"Oslo\"}}}\n\n",
+        ]);
+
+        assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
+    }
+
+    #[test]
     fn message_start_without_the_documented_envelope_is_a_protocol_violation() {
         let (terminal, _) = drive(&[b"event: message_start\n\
               data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\
@@ -1107,9 +1174,11 @@ mod tests {
         let (terminal, _) = drive(&[
             message_start(),
             b"event: message_delta\n\
-              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\"}}\n\n",
+              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\"},\
+              \"usage\":{\"output_tokens\":1}}\n\n",
             b"event: message_delta\n\
-              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\
+              \"usage\":{\"output_tokens\":1}}\n\n",
         ]);
 
         let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
@@ -1122,11 +1191,27 @@ mod tests {
     }
 
     #[test]
+    fn content_events_after_the_stop_reason_are_a_protocol_violation() {
+        let (terminal, _) = drive(&[
+            message_start(),
+            b"event: message_delta\n\
+              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\
+              \"usage\":{\"output_tokens\":1}}\n\n",
+            b"event: content_block_start\n\
+              data: {\"type\":\"content_block_start\",\"index\":0,\
+              \"content_block\":{\"type\":\"text\",\"text\":\"late\"}}\n\n",
+        ]);
+
+        assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
+    }
+
+    #[test]
     fn malformed_message_stop_payload_is_a_protocol_violation() {
         let (terminal, _) = drive(&[
             message_start(),
             b"event: message_delta\n\
-              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\
+              \"usage\":{\"output_tokens\":1}}\n\n",
             b"event: message_stop\ndata: {\n\n",
         ]);
 
@@ -1144,7 +1229,8 @@ mod tests {
         let (terminal, _) = drive(&[
             message_start(),
             b"event: message_delta\n\
-              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\
+              \"usage\":{\"output_tokens\":1}}\n\n",
             b"event: message_stop\ndata: {\"type\":\"ping\"}\n\n",
         ]);
 
@@ -1184,7 +1270,8 @@ mod tests {
             b"event: content_block_stop\n\
               data: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
             b"event: message_delta\n\
-              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\
+              \"usage\":{\"output_tokens\":1}}\n\n",
             b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
         ]);
 
