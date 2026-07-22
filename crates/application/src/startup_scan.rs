@@ -8,7 +8,8 @@ use std::{error::Error, fmt, future::Future};
 
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputTurnFailureIdentities, ContextFrontierId,
-    FailedAcceptedInputTurn, SemanticTranscriptEntryId, SessionId,
+    FailedAcceptedInputTurn, ModelCallTerminalOutcome, SemanticTranscriptEntryId, SessionId,
+    TurnId,
 };
 
 use crate::{ClassifyOperatorFailure, OperatorFailureClass};
@@ -20,6 +21,10 @@ pub trait StartupScanIdGenerator {
 
     /// Generates one terminal context-frontier identity.
     fn next_terminal_frontier_id(&mut self) -> ContextFrontierId;
+
+    /// Generates one successor turn for a pending steering input reclassified
+    /// by call-aware restart recovery.
+    fn next_reclassified_turn_id(&mut self, accepted_input: AcceptedInputId) -> TurnId;
 }
 
 /// Production UUIDv7 generator for startup-recovery identities.
@@ -34,6 +39,10 @@ impl StartupScanIdGenerator for UuidV7StartupScanIdGenerator {
     fn next_terminal_frontier_id(&mut self) -> ContextFrontierId {
         ContextFrontierId::from_uuid(uuid::Uuid::now_v7())
     }
+
+    fn next_reclassified_turn_id(&mut self, _accepted_input: AcceptedInputId) -> TurnId {
+        TurnId::from_uuid(uuid::Uuid::now_v7())
+    }
 }
 
 /// Result of one authoritative session recovery transaction.
@@ -43,6 +52,8 @@ pub enum StartupScanSessionOutcome {
     NoActiveTurn,
     /// The prior-process attempt and logical turn terminalized atomically.
     Recovered(Box<FailedAcceptedInputTurn>),
+    /// A durable model call received its call-aware restart classification.
+    RecoveredModelCall(Box<ModelCallTerminalOutcome>),
     /// Pending steering keeps the source turn active until reclassification.
     DeferredPendingSteering {
         /// The accepted input that visibly blocks terminalization.
@@ -62,11 +73,14 @@ pub trait StartupScanRepository {
     ) -> impl Future<Output = Result<Box<[SessionId]>, Self::Error>> + Send;
 
     /// Locks and reconstitutes one session, then commits failure atomically.
-    fn recover(
+    fn recover<NextTurn>(
         &mut self,
         session: SessionId,
         identities: AcceptedInputTurnFailureIdentities,
-    ) -> impl Future<Output = Result<StartupScanSessionOutcome, Self::Error>> + Send;
+        next_reclassified_turn: NextTurn,
+    ) -> impl Future<Output = Result<StartupScanSessionOutcome, Self::Error>> + Send
+    where
+        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send;
 }
 
 /// Complete result of scanning the startup inventory once.
@@ -182,7 +196,7 @@ impl<Generator, Repository> StartupScanService<Generator, Repository> {
 
 impl<Generator, Repository> StartupScanService<Generator, Repository>
 where
-    Generator: StartupScanIdGenerator,
+    Generator: StartupScanIdGenerator + Send,
     Repository: StartupScanRepository,
 {
     /// Scans the initial inventory and retries only fresh-identity collisions.
@@ -207,10 +221,23 @@ where
                     self.ids.next_failure_entry_id(),
                     self.ids.next_terminal_frontier_id(),
                 );
-                match self.repository.recover(session, identities).await {
+                let ids = &mut self.ids;
+                match self
+                    .repository
+                    .recover(session, identities, |accepted_input| {
+                        ids.next_reclassified_turn_id(accepted_input)
+                    })
+                    .await
+                {
                     Ok(StartupScanSessionOutcome::NoActiveTurn) => break,
                     Ok(StartupScanSessionOutcome::Recovered(_)) => {
                         recovered_turn_count += 1;
+                        break;
+                    }
+                    Ok(StartupScanSessionOutcome::RecoveredModelCall(outcome)) => {
+                        if !matches!(*outcome, ModelCallTerminalOutcome::AwaitingRecovery(_)) {
+                            recovered_turn_count += 1;
+                        }
                         break;
                     }
                     Ok(StartupScanSessionOutcome::DeferredPendingSteering { .. }) => {
@@ -274,6 +301,12 @@ mod tests {
             self.next += 1;
             ContextFrontierId::from_uuid(Uuid::from_u128(self.next))
         }
+
+        fn next_reclassified_turn_id(&mut self, _accepted_input: AcceptedInputId) -> TurnId {
+            self.calls += 1;
+            self.next += 1;
+            TurnId::from_uuid(Uuid::from_u128(self.next))
+        }
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -309,11 +342,15 @@ mod tests {
             ready(self.inventory.take().expect("one inventory response"))
         }
 
-        fn recover(
+        fn recover<NextTurn>(
             &mut self,
             session: SessionId,
             _identities: AcceptedInputTurnFailureIdentities,
-        ) -> impl Future<Output = Result<StartupScanSessionOutcome, Self::Error>> + Send {
+            _next_reclassified_turn: NextTurn,
+        ) -> impl Future<Output = Result<StartupScanSessionOutcome, Self::Error>> + Send
+        where
+            NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+        {
             self.observed.push(session);
             ready(self.responses.pop_front().expect("one recovery response"))
         }
