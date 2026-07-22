@@ -51,15 +51,27 @@ pub struct AnthropicRuntime<A> {
 /// An opaque, one-shot Anthropic request capability prepared under ADR-0045.
 ///
 /// The private fields bind the complete authenticated request, caller
-/// correlation, delivery mode, and exact credential value needed to sanitize
+/// correlation, delivery mode, originating client and stream settings,
+/// declared stop sequences, and exact credential value needed to sanitize
 /// provider-controlled evidence. The type deliberately implements neither
 /// `Clone`, serialization, nor diagnostic formatting.
 #[must_use]
 pub struct AnthropicPreparedRequest<C> {
-    request: reqwest::Request,
+    transport: PreparedTransport,
     correlation: C,
-    delivery: DeliveryMode,
     credential: CredentialValue,
+}
+
+struct PreparedTransport {
+    request: reqwest::Request,
+    client: Client,
+    settings: ExecutionSettings,
+}
+
+struct ExecutionSettings {
+    delivery: DeliveryMode,
+    sse_record_limit: usize,
+    stop_sequences: Vec<String>,
 }
 
 impl<A> std::fmt::Debug for AnthropicRuntime<A> {
@@ -248,6 +260,7 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
             };
         };
         let delivery = operation.delivery;
+        let stop_sequences = operation.settings.stop_sequences.clone();
         let request = match build_http_request(
             self.client
                 .post(self.messages_url.clone())
@@ -265,23 +278,34 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
             }
         };
         PreparationOutcome::Prepared(AnthropicPreparedRequest {
-            request,
+            transport: PreparedTransport {
+                request,
+                client: self.client.clone(),
+                settings: ExecutionSettings {
+                    delivery,
+                    sse_record_limit: self.sse_record_limit,
+                    stop_sequences,
+                },
+            },
             correlation,
-            delivery,
             credential: api_key,
         })
     }
 
     async fn exchange<C: Clone + Send + Sync>(
         &self,
-        request: reqwest::Request,
-        delivery: DeliveryMode,
+        transport: PreparedTransport,
         correlation: &C,
         sink: &mut (dyn ObservationSink<C> + Send),
         cancellation: &mut CancellationSignal,
     ) -> TerminalEvidence {
+        let PreparedTransport {
+            request,
+            client,
+            settings,
+        } = transport;
         emit(correlation, sink, ObservationFact::SendCommenced);
-        let send = self.client.execute(request);
+        let send = client.execute(request);
         let response = match with_cancellation(cancellation, send).await {
             None => return pre_exchange_loss(LossCause::CancellationRequested),
             Some(Err(error)) => return classify_send_error(&error),
@@ -300,14 +324,28 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
         // The Messages success contract is specifically HTTP 200; another
         // 2xx is not recognized terminal-success evidence.
         if status.as_u16() == 200 {
-            match delivery {
+            match settings.delivery {
                 DeliveryMode::Buffered => {
-                    self.finish_buffered(response, exchange, correlation, sink, cancellation)
-                        .await
+                    self.finish_buffered(
+                        response,
+                        exchange,
+                        &settings,
+                        correlation,
+                        sink,
+                        cancellation,
+                    )
+                    .await
                 }
                 DeliveryMode::Streamed => {
-                    self.finish_streamed(response, exchange, correlation, sink, cancellation)
-                        .await
+                    self.finish_streamed(
+                        response,
+                        exchange,
+                        &settings,
+                        correlation,
+                        sink,
+                        cancellation,
+                    )
+                    .await
                 }
             }
         } else if status.is_client_error() || status.is_server_error() {
@@ -331,6 +369,7 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
         &self,
         response: reqwest::Response,
         exchange: ExchangeFacts,
+        settings: &ExecutionSettings,
         correlation: &C,
         sink: &mut (dyn ObservationSink<C> + Send),
         cancellation: &mut CancellationSignal,
@@ -340,19 +379,21 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
             Some(Err(cause)) => return exchange_loss(cause, exchange),
             Some(Ok(bytes)) => bytes,
         };
-        decode_buffered_response(&body, exchange, correlation, sink)
+        decode_buffered_response(&body, exchange, &settings.stop_sequences, correlation, sink)
     }
 
     async fn finish_streamed<C: Clone + Send + Sync>(
         &self,
         response: reqwest::Response,
         exchange: ExchangeFacts,
+        settings: &ExecutionSettings,
         correlation: &C,
         sink: &mut (dyn ObservationSink<C> + Send),
         cancellation: &mut CancellationSignal,
     ) -> TerminalEvidence {
-        let mut framing = SseFraming::new(self.sse_record_limit);
-        let mut decoder = StreamDecoder::new(exchange);
+        let mut framing = SseFraming::new(settings.sse_record_limit);
+        let mut decoder =
+            StreamDecoder::with_stop_sequences(exchange, settings.stop_sequences.clone());
         let mut body = response.bytes_stream();
         let mut streamed_bytes = 0usize;
         loop {
@@ -470,9 +511,8 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelRuntime<C> for AnthropicR
         mut cancellation: CancellationSignal,
     ) -> TerminalReport<C> {
         let AnthropicPreparedRequest {
-            request,
+            transport,
             correlation,
-            delivery,
             credential,
         } = prepared;
         if already_fired(&mut cancellation) {
@@ -484,8 +524,7 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelRuntime<C> for AnthropicR
         let mut redacting_sink = RedactingObservationSink::new(sink, &credential);
         let evidence = self
             .exchange(
-                request,
-                delivery,
+                transport,
                 &correlation,
                 &mut redacting_sink,
                 &mut cancellation,
@@ -882,9 +921,17 @@ fn redact_bounded_text(text: String, credential: &str) -> String {
 fn redact_native_message(text: String, credential: &str) -> String {
     const TRUNCATION_SUFFIX: &str = " … [truncated]";
     if let Some(body) = text.strip_suffix(TRUNCATION_SUFFIX) {
-        let mut redacted = redact_bounded_text(body.to_string(), credential);
+        let mut redacted = redact_native_body(body.to_string(), credential);
         redacted.push_str(TRUNCATION_SUFFIX);
         redacted
+    } else {
+        redact_native_body(text, credential)
+    }
+}
+
+fn redact_native_body(text: String, credential: &str) -> String {
+    if serde_json::value::RawValue::from_string(text.clone()).is_ok() {
+        redact_json(text, credential)
     } else {
         redact_bounded_text(text, credential)
     }
@@ -1260,6 +1307,14 @@ mod tests {
     }
 
     #[test]
+    fn json_escaped_credential_in_a_fallback_error_body_is_redacted() {
+        assert_eq!(
+            redact_native_message(r#"{"message":"key_\u006coop"}"#.to_string(), "key_loop"),
+            r#"{"message":"[redacted]"}"#
+        );
+    }
+
+    #[test]
     fn inv_035_final_content_cannot_reconstruct_a_credential_across_parts() {
         let credential = CredentialValue::new(b"key_loop".to_vec());
         let evidence = TerminalEvidence::Completed(CompletionEvidence {
@@ -1505,7 +1560,7 @@ mod tests {
         bytes.extend_from_slice(b"coalesced trailing bytes");
         let mut streamed_bytes = MAX_STREAMED_RESPONSE_BYTES - terminal_len;
         let mut framing = SseFraming::new(1024);
-        let mut decoder = StreamDecoder::new(ExchangeFacts::default());
+        let mut decoder = StreamDecoder::with_stop_sequences(ExchangeFacts::default(), Vec::new());
         let mut observations = Vec::new();
 
         let evidence = process_streamed_chunk(

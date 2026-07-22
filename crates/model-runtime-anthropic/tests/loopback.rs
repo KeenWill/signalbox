@@ -303,6 +303,47 @@ async fn streamed_completion_end_to_end_emits_deltas_and_gates_on_message_stop()
 }
 
 #[tokio::test]
+async fn prepared_capability_retains_its_originating_runtime_settings() {
+    let sse: &[u8] = b"event: message_start\n\
+        data: {\"type\":\"message_start\",\"message\":{\"type\":\"message\",\"role\":\"assistant\",\
+        \"id\":\"msg_origin\",\"model\":\"model-exact-1\",\"content\":[],\
+        \"usage\":{\"input_tokens\":1}}}\n\n\
+        event: content_block_start\n\
+        data: {\"type\":\"content_block_start\",\"index\":0,\
+        \"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n\
+        event: content_block_delta\n\
+        data: {\"type\":\"content_block_delta\",\"index\":0,\
+        \"delta\":{\"type\":\"text_delta\",\"text\":\"done\"}}\n\n\
+        event: content_block_stop\n\
+        data: {\"type\":\"content_block_stop\",\"index\":0}\n\n\
+        event: message_delta\n\
+        data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\
+        \"usage\":{\"output_tokens\":1}}\n\n\
+        event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+    let server = CannedServer::serving(vec![http_response("200 OK", &[], sse)]).await;
+    let mut preparing_config = AnthropicConfig::new();
+    preparing_config.base_url = server.base_url.clone();
+    preparing_config.sse_record_limit = 1024;
+    let preparing_runtime =
+        AnthropicRuntime::new(preparing_config, FixedKey).expect("configuration constructs");
+    let mut executing_config = AnthropicConfig::new();
+    executing_config.base_url = server.base_url.clone();
+    executing_config.sse_record_limit = 16;
+    let executing_runtime =
+        AnthropicRuntime::new(executing_config, FixedKey).expect("configuration constructs");
+    let mut streamed = operation("call-origin-runtime");
+    streamed.delivery = DeliveryMode::Streamed;
+    let prepared = prepare(&preparing_runtime, streamed, CancellationSignal::never()).await;
+
+    let mut observations = Vec::new();
+    let report = executing_runtime
+        .execute(prepared, &mut observations, CancellationSignal::never())
+        .await;
+
+    assert!(matches!(report.evidence, TerminalEvidence::Completed(_)));
+}
+
+#[tokio::test]
 async fn credential_rejection_is_typed_provider_error_evidence() {
     let body = br#"{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#;
     let server = CannedServer::serving(vec![http_response(
@@ -615,29 +656,83 @@ async fn ordinary_validation_and_credential_failures_are_preparation_outcomes() 
 }
 
 #[tokio::test]
-async fn unusable_credential_is_an_ordinary_preparation_failure() {
+async fn empty_credential_is_an_ordinary_preparation_failure() {
     let server = CannedServer::serving(vec![http_response("200 OK", &[], b"{}")]).await;
-    for value in [
-        b"".as_slice(),
-        b"invalid\nkey".as_slice(),
-        b"non-utf8-\xff".as_slice(),
-    ] {
-        let resolutions = Arc::new(AtomicUsize::new(0));
-        let mut config = AnthropicConfig::new();
-        config.base_url = server.base_url.clone();
-        let runtime = AnthropicRuntime::new(config, CountingKey { resolutions, value })
-            .expect("loopback configuration constructs");
+    let resolutions = Arc::new(AtomicUsize::new(0));
+    let mut config = AnthropicConfig::new();
+    config.base_url = server.base_url.clone();
+    let runtime = AnthropicRuntime::new(
+        config,
+        CountingKey {
+            resolutions,
+            value: b"",
+        },
+    )
+    .expect("loopback configuration constructs");
 
-        assert!(matches!(
-            runtime
-                .prepare(operation("call-unusable"), CancellationSignal::never())
-                .await,
-            PreparationOutcome::Failed {
-                failure: PreparationFailure::CredentialUnusable { .. },
-                ..
-            }
-        ));
-    }
+    assert!(matches!(
+        runtime
+            .prepare(operation("call-unusable"), CancellationSignal::never())
+            .await,
+        PreparationOutcome::Failed {
+            failure: PreparationFailure::CredentialUnusable { .. },
+            ..
+        }
+    ));
+    assert!(server.recorded_requests().is_empty());
+}
+
+#[tokio::test]
+async fn credential_with_invalid_header_bytes_is_an_ordinary_preparation_failure() {
+    let server = CannedServer::serving(vec![http_response("200 OK", &[], b"{}")]).await;
+    let resolutions = Arc::new(AtomicUsize::new(0));
+    let mut config = AnthropicConfig::new();
+    config.base_url = server.base_url.clone();
+    let runtime = AnthropicRuntime::new(
+        config,
+        CountingKey {
+            resolutions,
+            value: b"invalid\nkey",
+        },
+    )
+    .expect("loopback configuration constructs");
+
+    assert!(matches!(
+        runtime
+            .prepare(operation("call-unusable"), CancellationSignal::never())
+            .await,
+        PreparationOutcome::Failed {
+            failure: PreparationFailure::CredentialUnusable { .. },
+            ..
+        }
+    ));
+    assert!(server.recorded_requests().is_empty());
+}
+
+#[tokio::test]
+async fn non_utf8_credential_is_an_ordinary_preparation_failure() {
+    let server = CannedServer::serving(vec![http_response("200 OK", &[], b"{}")]).await;
+    let resolutions = Arc::new(AtomicUsize::new(0));
+    let mut config = AnthropicConfig::new();
+    config.base_url = server.base_url.clone();
+    let runtime = AnthropicRuntime::new(
+        config,
+        CountingKey {
+            resolutions,
+            value: b"non-utf8-\xff",
+        },
+    )
+    .expect("loopback configuration constructs");
+
+    assert!(matches!(
+        runtime
+            .prepare(operation("call-unusable"), CancellationSignal::never())
+            .await,
+        PreparationOutcome::Failed {
+            failure: PreparationFailure::CredentialUnusable { .. },
+            ..
+        }
+    ));
     assert!(server.recorded_requests().is_empty());
 }
 
@@ -792,6 +887,33 @@ async fn inv_035_provider_error_text_reflecting_the_key_is_redacted() {
         "the key value must never leave the adapter"
     );
     assert!(message.contains("[redacted]"));
+}
+
+#[tokio::test]
+async fn json_escaped_credential_in_fallback_error_body_is_redacted() {
+    let body = br#"{"message":"key_\u006coop"}"#;
+    let server = CannedServer::serving(vec![http_response(
+        "500 Internal Server Error",
+        &[("content-type", "application/json")],
+        body,
+    )])
+    .await;
+    let runtime = runtime_for(&server.base_url);
+
+    let (report, _) = execute(
+        &runtime,
+        operation("call-encoded-error"),
+        CancellationSignal::never(),
+    )
+    .await;
+
+    let TerminalEvidence::ProviderError(error) = report.evidence else {
+        panic!("a complete error status remains definitive provider evidence");
+    };
+    assert_eq!(
+        error.native.message,
+        Some(r#"{"message":"[redacted]"}"#.to_string())
+    );
 }
 
 #[tokio::test]
