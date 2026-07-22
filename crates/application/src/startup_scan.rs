@@ -8,7 +8,7 @@ use std::{error::Error, fmt, future::Future};
 
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputTurnFailureIdentities, ContextFrontierId,
-    FailedAcceptedInputTurn, SemanticTranscriptEntryId, SessionId,
+    FailedAcceptedInputTurn, ModelCallTerminalOutcome, SemanticTranscriptEntryId, SessionId,
 };
 
 use crate::{ClassifyOperatorFailure, OperatorFailureClass};
@@ -43,6 +43,8 @@ pub enum StartupScanSessionOutcome {
     NoActiveTurn,
     /// The prior-process attempt and logical turn terminalized atomically.
     Recovered(Box<FailedAcceptedInputTurn>),
+    /// A durable model call received its call-aware restart classification.
+    RecoveredModelCall(Box<ModelCallTerminalOutcome>),
     /// Pending steering keeps the source turn active until reclassification.
     DeferredPendingSteering {
         /// The accepted input that visibly blocks terminalization.
@@ -211,6 +213,12 @@ where
                     Ok(StartupScanSessionOutcome::NoActiveTurn) => break,
                     Ok(StartupScanSessionOutcome::Recovered(_)) => {
                         recovered_turn_count += 1;
+                        break;
+                    }
+                    Ok(StartupScanSessionOutcome::RecoveredModelCall(outcome)) => {
+                        if !matches!(*outcome, ModelCallTerminalOutcome::AwaitingRecovery(_)) {
+                            recovered_turn_count += 1;
+                        }
                         break;
                     }
                     Ok(StartupScanSessionOutcome::DeferredPendingSteering { .. }) => {

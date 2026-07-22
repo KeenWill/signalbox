@@ -8,7 +8,7 @@ use signalbox_application::{
 };
 use signalbox_domain::{
     AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities, AttemptEnd,
-    PreparedAcceptedInputTurnFailure,
+    FailedModelCallTurnIdentities, ModelCallTerminalOutcome, PreparedAcceptedInputTurnFailure,
     SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload, SessionId,
     TurnDisposition, TurnId, UnstoppedAttemptDisposition,
 };
@@ -18,6 +18,10 @@ use crate::{
     mapping::{
         input_position_to_numeric, session_id_from_uuid, session_id_to_uuid, turn_id_from_uuid,
         turn_id_to_uuid,
+    },
+    model_execution::{
+        ModelCallCorruption, ModelCallIdentityCollision, ModelCallRepositoryError,
+        persist_terminal_outcome, require_live_execution_for_restart,
     },
     outbox,
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
@@ -56,6 +60,8 @@ pub enum StartupScanCorruption {
     CurrentSession(SessionCorruption),
     /// Complete scheduling records fail checked persistence mapping.
     Scheduling(SubmitInputCorruption),
+    /// Complete model-call records fail checked persistence mapping.
+    ModelCall(ModelCallCorruption),
 }
 
 impl fmt::Display for StartupScanCorruption {
@@ -77,6 +83,7 @@ impl fmt::Display for StartupScanCorruption {
                     "startup-scan scheduling projection is invalid: {error}"
                 )
             }
+            Self::ModelCall(error) => error.fmt(formatter),
         }
     }
 }
@@ -320,6 +327,50 @@ async fn recover_locked_session(
         .await
         .map_err(map_scheduling_error)?;
 
+    if let Some(active_turn) = scheduling.active_turn_execution() {
+        if !matches!(
+            active_turn.phase(),
+            signalbox_domain::ActiveTurnPhase::Running { .. }
+        ) {
+            return Ok(TransactionDecision::Rollback(
+                StartupScanSessionOutcome::NoActiveTurn,
+            ));
+        }
+        if let Some(pending) = active_turn.pending_steering().first() {
+            return Ok(TransactionDecision::Rollback(
+                StartupScanSessionOutcome::DeferredPendingSteering {
+                    accepted_input: pending.accepted_input(),
+                },
+            ));
+        }
+    }
+
+    let model_execution = require_live_execution_for_restart(connection, requested_session)
+        .await
+        .map_err(map_model_call_error)?;
+    if model_execution.current_call().is_some() {
+        let outcome = model_execution
+            .recover_after_restart(FailedModelCallTurnIdentities::new(
+                identities.failure_entry(),
+                identities.terminal_frontier(),
+            ))
+            .map_err(|_| {
+                StartupScanCorruption::Inconsistent("model-call restart classification")
+            })?;
+        if !matches!(
+            outcome,
+            ModelCallTerminalOutcome::Failed(_) | ModelCallTerminalOutcome::AwaitingRecovery(_)
+        ) {
+            return Err(StartupScanCorruption::Inconsistent("model-call restart outcome").into());
+        }
+        persist_terminal_outcome(connection, &outcome)
+            .await
+            .map_err(map_model_call_error)?;
+        return Ok(TransactionDecision::Commit(
+            StartupScanSessionOutcome::RecoveredModelCall(Box::new(outcome)),
+        ));
+    }
+
     let prepared = match scheduling.prepare_active_turn_lost_failure(identities) {
         Ok(prepared) => prepared,
         Err(error) => match error.failure() {
@@ -510,6 +561,32 @@ fn map_scheduling_error(error: SubmitInputRepositoryError) -> StartupScanReposit
         }
         SubmitInputRepositoryError::InterruptApplicationUnavailable { .. } => {
             StartupScanCorruption::Inconsistent("origin command application").into()
+        }
+    }
+}
+
+fn map_model_call_error(error: ModelCallRepositoryError) -> StartupScanRepositoryError {
+    match error {
+        ModelCallRepositoryError::Database { source, .. } => source.into(),
+        ModelCallRepositoryError::Corruption(source) => {
+            StartupScanCorruption::ModelCall(source).into()
+        }
+        ModelCallRepositoryError::IdentityCollision(ModelCallIdentityCollision::SemanticEntry) => {
+            StartupScanRepositoryError::IdentityCollision(
+                StartupScanIdentityCollision::FailureEntry,
+            )
+        }
+        ModelCallRepositoryError::IdentityCollision(
+            ModelCallIdentityCollision::TerminalFrontier,
+        ) => StartupScanRepositoryError::IdentityCollision(
+            StartupScanIdentityCollision::TerminalFrontier,
+        ),
+        ModelCallRepositoryError::IdentityCollision(
+            ModelCallIdentityCollision::ModelCall | ModelCallIdentityCollision::ReclassifiedTurn,
+        )
+        | ModelCallRepositoryError::NoLiveExecution
+        | ModelCallRepositoryError::InvalidTransition(_) => {
+            StartupScanCorruption::Inconsistent("model-call recovery transition").into()
         }
     }
 }

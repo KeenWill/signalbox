@@ -2197,6 +2197,7 @@ pub struct UuidV7StartupScanIdGenerator;
 pub enum StartupScanSessionOutcome {
     NoActiveTurn,
     Recovered(Box<FailedAcceptedInputTurn>),
+    RecoveredModelCall(Box<ModelCallTerminalOutcome>),
     DeferredPendingSteering { accepted_input: AcceptedInputId },
 }
 

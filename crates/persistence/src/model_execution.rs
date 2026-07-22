@@ -21,10 +21,10 @@ use signalbox_domain::{
     ModelCallExecutionReconstitutionFailure, ModelCallExecutionReconstitutionInput, ModelCallId,
     ModelCallOriginContent, ModelCallPreparationFailure, ModelCallReconstitutionInput,
     ModelCallReconstitutionState, ModelCallTerminalIdentities, ModelCallTerminalOutcome,
-    ModelTargetCatalog, PinnedProviderTargetReconstitutionInput, PreparedModelCallRequest,
-    ProviderModelIdentity, ReclassifiedPendingSteeringTurn, RefusedModelCallTurn,
-    ResolvedProviderTarget, SemanticTranscriptEntry, SemanticTranscriptEntryPayload, SessionId,
-    TurnId,
+    ModelTargetCatalog, ModelTargetDefinition, PendingSteeringReclassificationIdentity,
+    PinnedProviderTargetReconstitutionInput, PreparedModelCallRequest, ProviderModelIdentity,
+    ReclassifiedPendingSteeringTurn, RefusedModelCallTurn, ResolvedProviderTarget,
+    SemanticTranscriptEntry, SemanticTranscriptEntryPayload, SessionId, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -341,12 +341,16 @@ impl PostgresModelCallRepository {
     }
 
     /// Freshly reloads issued authority and commits one terminal observation.
-    pub async fn apply_terminal_observation(
+    pub async fn apply_terminal_observation<NextTurn>(
         &self,
         session: SessionId,
         observation: CorrelatedModelCallTerminalObservation,
         identities: ModelCallTerminalIdentities,
-    ) -> Result<ModelCallTerminalOutcome, ModelCallRepositoryError> {
+        mut next_reclassified_turn: NextTurn,
+    ) -> Result<ModelCallTerminalOutcome, ModelCallRepositoryError>
+    where
+        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+    {
         let mut transaction = self.pool.begin().await?;
         let result = async {
             lock_session(&mut transaction, session).await?;
@@ -354,6 +358,11 @@ impl PostgresModelCallRepository {
                 require_live_execution(&mut transaction, session, &self.targets).await?,
                 observation.call(),
             )?;
+            let identities = attach_pending_reclassification_candidates(
+                identities,
+                &execution,
+                &mut next_reclassified_turn,
+            );
             let outcome = execution
                 .apply_terminal_observation(observation, identities)
                 .map_err(|_| {
@@ -369,12 +378,16 @@ impl PostgresModelCallRepository {
     }
 
     /// Atomically closes a trustworthy capability failure before send.
-    pub async fn fail_prepared_call(
+    pub async fn fail_prepared_call<NextTurn>(
         &self,
         session: SessionId,
         call: ModelCallId,
         identities: FailedModelCallTurnIdentities,
-    ) -> Result<FailedModelCallTurn, ModelCallRepositoryError> {
+        mut next_reclassified_turn: NextTurn,
+    ) -> Result<FailedModelCallTurn, ModelCallRepositoryError>
+    where
+        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+    {
         let mut transaction = self.pool.begin().await?;
         let result = async {
             lock_session(&mut transaction, session).await?;
@@ -382,11 +395,17 @@ impl PostgresModelCallRepository {
                 require_live_execution(&mut transaction, session, &self.targets).await?,
                 call,
             )?;
-            let failed = execution.fail_prepared_call(identities).map_err(|_| {
-                ModelCallRepositoryError::InvalidTransition(
-                    "capability failure requires a Prepared call",
+            let reclassifications =
+                pending_reclassification_candidates(&execution, &mut next_reclassified_turn);
+            let failed = execution
+                .fail_prepared_call(
+                    identities.with_pending_steering_reclassifications(reclassifications),
                 )
-            })?;
+                .map_err(|_| {
+                    ModelCallRepositoryError::InvalidTransition(
+                        "capability failure requires a Prepared call",
+                    )
+                })?;
             persist_failed(&mut transaction, &failed).await?;
             Ok(failed)
         }
@@ -421,6 +440,46 @@ impl PostgresModelCallRepository {
     }
 }
 
+fn pending_reclassification_candidates(
+    execution: &ModelCallExecution,
+    next_turn: &mut impl FnMut(AcceptedInputId) -> TurnId,
+) -> Vec<PendingSteeringReclassificationIdentity> {
+    execution
+        .active_turn()
+        .pending_steering()
+        .iter()
+        .map(|pending| {
+            let accepted_input = pending.accepted_input();
+            PendingSteeringReclassificationIdentity::new(accepted_input, next_turn(accepted_input))
+        })
+        .collect()
+}
+
+fn attach_pending_reclassification_candidates(
+    identities: ModelCallTerminalIdentities,
+    execution: &ModelCallExecution,
+    next_turn: &mut impl FnMut(AcceptedInputId) -> TurnId,
+) -> ModelCallTerminalIdentities {
+    if matches!(identities, ModelCallTerminalIdentities::Ambiguous) {
+        return identities;
+    }
+    let reclassifications = pending_reclassification_candidates(execution, next_turn);
+    match identities {
+        ModelCallTerminalIdentities::Completed(identities) => {
+            ModelCallTerminalIdentities::Completed(
+                identities.with_pending_steering_reclassifications(reclassifications),
+            )
+        }
+        ModelCallTerminalIdentities::Failed(identities) => ModelCallTerminalIdentities::Failed(
+            identities.with_pending_steering_reclassifications(reclassifications),
+        ),
+        ModelCallTerminalIdentities::Refused(identities) => ModelCallTerminalIdentities::Refused(
+            identities.with_pending_steering_reclassifications(reclassifications),
+        ),
+        ModelCallTerminalIdentities::Ambiguous => ModelCallTerminalIdentities::Ambiguous,
+    }
+}
+
 async fn lock_session(
     connection: &mut PgConnection,
     session: SessionId,
@@ -442,6 +501,21 @@ async fn require_live_execution(
     connection: &mut PgConnection,
     requested_session: SessionId,
     targets: &ModelTargetCatalog,
+) -> Result<ModelCallExecution, ModelCallRepositoryError> {
+    require_live_execution_with_targets(connection, requested_session, Some(targets)).await
+}
+
+pub(crate) async fn require_live_execution_for_restart(
+    connection: &mut PgConnection,
+    requested_session: SessionId,
+) -> Result<ModelCallExecution, ModelCallRepositoryError> {
+    require_live_execution_with_targets(connection, requested_session, None).await
+}
+
+async fn require_live_execution_with_targets(
+    connection: &mut PgConnection,
+    requested_session: SessionId,
+    configured_targets: Option<&ModelTargetCatalog>,
 ) -> Result<ModelCallExecution, ModelCallRepositoryError> {
     let session = match load_session_from_connection(connection, requested_session).await {
         Ok(Some(session)) => session,
@@ -479,10 +553,24 @@ async fn require_live_execution(
     let origin_contents = load_origin_contents(connection, &frontier_entries).await?;
     let (pinned_target, calls) =
         load_live_turn_calls(connection, requested_session, active_turn.turn()).await?;
+    let recovered_targets;
+    let targets = if let Some(targets) = configured_targets {
+        targets.clone()
+    } else {
+        recovered_targets = ModelTargetCatalog::try_from_definitions(calls.iter().map(|call| {
+            let direct = match call.selection() {
+                FrozenModelSelection::Direct(direct) => direct,
+                FrozenModelSelection::FrozenAlias { definition, .. } => definition.selected(),
+            };
+            ModelTargetDefinition::new(direct, call.target())
+        }))
+        .map_err(|_| ModelCallCorruption::Inconsistent("recovery model-target catalog"))?;
+        recovered_targets
+    };
 
     ModelCallExecutionReconstitutionInput::new(
         active_turn,
-        targets.clone(),
+        targets,
         starting_snapshot,
         frontier_entries,
         origin_contents,
@@ -824,7 +912,7 @@ async fn persist_authorization(
     Ok(())
 }
 
-async fn persist_terminal_outcome(
+pub(crate) async fn persist_terminal_outcome(
     connection: &mut PgConnection,
     outcome: &ModelCallTerminalOutcome,
 ) -> Result<(), ModelCallRepositoryError> {
