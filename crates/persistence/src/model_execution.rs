@@ -417,7 +417,7 @@ async fn lock_session(
     session: SessionId,
 ) -> Result<(), ModelCallRepositoryError> {
     let (session_exists, scheduler): (bool, Option<Uuid>) =
-        sqlx::query_as(crate::lock_inventory::MODEL_CALL_EXECUTION)
+        sqlx::query_as(crate::lock_inventory::START_ELIGIBLE_TURN)
             .bind(session_id_to_uuid(session))
             .fetch_one(connection)
             .await?;
