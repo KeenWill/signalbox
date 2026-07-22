@@ -322,6 +322,7 @@ impl ActivatedTurnExecution for PostgresScriptedModelExecution {
                     | ModelCallExecutionOutcome::TargetUnavailable(_)
                     | ModelCallExecutionOutcome::PendingSteering { .. }
                     | ModelCallExecutionOutcome::CapabilityKnownFailure(_)
+                    | ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(_)
                     | ModelCallExecutionOutcome::ObservationCommitted(_)
                     | ModelCallExecutionOutcome::ObservationAlreadyCommitted(_) => return Ok(()),
                 }
