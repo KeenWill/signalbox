@@ -891,6 +891,7 @@ async fn s01_s20_s21_inv014_inv015_inv032_model_call_transactions_complete_first
     );
 
     let authorized = repository.authorize_send(session, call).await?;
+    let observation_correlation = authorized.observation_correlation();
     assert_eq!(authorized.call().id(), call);
     assert_eq!(
         authorized.call().state(),
@@ -907,13 +908,14 @@ async fn s01_s20_s21_inv014_inv015_inv032_model_call_transactions_complete_first
     let outcome = repository
         .apply_terminal_observation(
             session,
-            call,
-            ModelCallTerminalObservation::Completed {
-                assistant_text: vec![
-                    AssistantText::try_new("exact assistant reply".to_owned())
-                        .expect("fixture assistant content is admitted"),
-                ],
-            },
+            observation_correlation.bind_terminal_observation(
+                ModelCallTerminalObservation::Completed {
+                    assistant_text: vec![
+                        AssistantText::try_new("exact assistant reply".to_owned())
+                            .expect("fixture assistant content is admitted"),
+                    ],
+                },
+            ),
             ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
                 vec![assistant_entry],
                 completion_entry,

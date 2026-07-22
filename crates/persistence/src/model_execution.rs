@@ -10,15 +10,15 @@ use std::{collections::BTreeSet, error::Error, fmt};
 use rust_decimal::Decimal;
 use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
 use signalbox_domain::{
-    AmbiguousModelCallTurn, AuthorizedModelCall, CompletedModelCallTurn, DirectModelSelection,
-    FailedModelCallTurn, FailedModelCallTurnIdentities, FrozenAliasDefinition,
-    FrozenModelSelection, ModelAlias, ModelCallDisposition, ModelCallExecution,
-    ModelCallExecutionReconstitutionFailure, ModelCallExecutionReconstitutionInput, ModelCallId,
-    ModelCallOriginContent, ModelCallPreparationFailure, ModelCallReconstitutionInput,
-    ModelCallReconstitutionState, ModelCallTerminalIdentities, ModelCallTerminalObservation,
-    ModelCallTerminalOutcome, ModelTargetCatalog, PreparedModelCallRequest, ProviderModelIdentity,
-    RefusedModelCallTurn, ResolvedProviderTarget, SemanticTranscriptEntry,
-    SemanticTranscriptEntryPayload, SessionId, TurnId,
+    AcceptedInputId, AmbiguousModelCallTurn, AuthorizedModelCall, CompletedModelCallTurn,
+    CorrelatedModelCallTerminalObservation, DirectModelSelection, FailedModelCallTurn,
+    FailedModelCallTurnIdentities, FrozenAliasDefinition, FrozenModelSelection, ModelAlias,
+    ModelCallDisposition, ModelCallExecution, ModelCallExecutionReconstitutionFailure,
+    ModelCallExecutionReconstitutionInput, ModelCallId, ModelCallOriginContent,
+    ModelCallPreparationFailure, ModelCallReconstitutionInput, ModelCallReconstitutionState,
+    ModelCallTerminalIdentities, ModelCallTerminalOutcome, ModelTargetCatalog,
+    PreparedModelCallRequest, ProviderModelIdentity, RefusedModelCallTurn, ResolvedProviderTarget,
+    SemanticTranscriptEntry, SemanticTranscriptEntryPayload, SessionId, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -213,6 +213,11 @@ pub enum PrepareInitialModelCallOutcome {
     Ready(Box<PreparedModelCallRequest>),
     /// Immutable target resolution failed and the turn closed atomically.
     TargetUnavailable(Box<FailedModelCallTurn>),
+    /// Acknowledged steering remains pending, so no call was prepared.
+    PendingSteering {
+        /// The earliest accepted input proving the safe point is not empty.
+        accepted_input: AcceptedInputId,
+    },
 }
 
 /// PostgreSQL adapter for the initial model-call execution transactions.
@@ -252,6 +257,15 @@ impl PostgresModelCallRepository {
 
             let prepared = match execution.prepare_initial_call(call) {
                 Ok(prepared) => prepared,
+                Err(error)
+                    if let ModelCallPreparationFailure::PendingSteering { accepted_input } =
+                        error.failure() =>
+                {
+                    return Ok((
+                        false,
+                        PrepareInitialModelCallOutcome::PendingSteering { accepted_input },
+                    ));
+                }
                 Err(error) if error.failure() == ModelCallPreparationFailure::TargetUnavailable => {
                     let resolution = error.target_resolution_error().ok_or(
                         ModelCallRepositoryError::InvalidTransition(
@@ -321,8 +335,7 @@ impl PostgresModelCallRepository {
     pub async fn apply_terminal_observation(
         &self,
         session: SessionId,
-        call: ModelCallId,
-        observation: ModelCallTerminalObservation,
+        observation: CorrelatedModelCallTerminalObservation,
         identities: ModelCallTerminalIdentities,
     ) -> Result<ModelCallTerminalOutcome, ModelCallRepositoryError> {
         let mut transaction = self.pool.begin().await?;
@@ -330,7 +343,7 @@ impl PostgresModelCallRepository {
             lock_session(&mut transaction, session).await?;
             let execution = require_exact_call(
                 require_live_execution(&mut transaction, session, &self.targets).await?,
-                call,
+                observation.call(),
             )?;
             let outcome = execution
                 .apply_terminal_observation(observation, identities)
@@ -432,14 +445,9 @@ async fn require_live_execution(
     let scheduling = load_scheduling_projection(connection, session)
         .await
         .map_err(map_scheduling_error)?;
-    let active = scheduling
-        .active_turn()
-        .ok_or(ModelCallRepositoryError::NoLiveExecution)?;
-    let active_turn = active
+    let active_turn = scheduling
         .active_turn_execution()
-        .ok_or(ModelCallCorruption::Inconsistent(
-            "active execution witness",
-        ))?;
+        .ok_or(ModelCallRepositoryError::NoLiveExecution)?;
     if !matches!(
         active_turn.phase(),
         signalbox_domain::ActiveTurnPhase::Running { .. }
