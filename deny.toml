@@ -11,6 +11,21 @@ all-features = true
 # comment stating the advisory ID and the reason it is acceptable.
 ignore = []
 
+[bans]
+# No crate is banned today; the list exists so a compromised or rejected
+# crate can be blocked by name in one reviewed line, with a comment stating
+# the reason, in the pull request that discovers the problem.
+deny = []
+# Duplicate versions of one crate add audit surface but appear routinely
+# while transitive dependencies converge; surface them without failing CI.
+multiple-versions = "warn"
+# A bare "*" requirement accepts whatever version happens to resolve,
+# defeating review of what actually builds. Workspace-internal path
+# dependencies are exempt: every workspace crate is private
+# (publish = false), so a path dependency without a version is harmless.
+wildcards = "deny"
+allow-wildcard-paths = true
+
 [licenses]
 # Exact allow-list for the current dependency tree (every dependency is
 # MIT, Apache-2.0, or an OR-expression satisfiable by this list, plus the
