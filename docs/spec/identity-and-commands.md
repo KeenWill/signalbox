@@ -1,0 +1,309 @@
+# Identity, commands, and telemetry correlation
+
+This page describes the implemented identity, durable-command, and telemetry
+correlation behavior of Signalbox as verified against `main` at commit
+`6567423`. The behavior lives in `crates/domain` (identity newtypes, command
+payloads, actor attribution, replay equality), `crates/application` (identity
+generation, command boundaries), `crates/persistence` (the owner-global command
+registry and typed record families), and `apps/hubd` (telemetry wiring). Storage
+transaction mechanics, locking, and the reconstitution seam are owned by
+[persistence-protocol](persistence-protocol.md); per-command product semantics
+are owned by [sessions-and-transcript](sessions-and-transcript.md),
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), and
+[configuration-and-credentials](configuration-and-credentials.md).
+
+## Identity model
+
+Every semantic identity is a distinct, opaque, UUID-backed newtype built by the
+`define_identity!` macro in `crates/domain/src/lib.rs`: `DurableCommandId`,
+`SessionId`, `AcceptedInputId`, `TurnId`, `TurnAttemptId`, `ModelCallId`,
+`ProviderTargetEvidenceId`, `ToolRequestId`, and `ToolAttemptId` there, plus
+`SemanticTranscriptEntryId` and `ContextFrontierId` (`context_frontier.rs`),
+`DirectModelSelection` and `ModelAlias` (`configuration.rs`), and
+`ProviderModelIdentity` (`model_call.rs`). Each exposes only `from_uuid`,
+`as_uuid`, and `into_uuid`; the macro derives value semantics and `Debug` but no
+storage or serialization traits, so every storage boundary maps explicitly
+(INV-001, INV-002). The derived `Debug` is the one logging-reachable render path
+(see Encoding).
+
+Identities fall into three supply classes:
+
+- **Caller-supplied idempotency identity** — `DurableCommandId` only. Each
+  application request constructor accepts the caller-supplied value, and the hub
+  accepts any RFC 9562 UUID without checking its version bits. Why: idempotency
+  correctness comes from the owner-global durable claim plus canonical payload
+  comparison, never from trusting a caller's clock or version bits (INV-012).
+- **Hub-minted durable-fact identity** — `SessionId`, `AcceptedInputId`,
+  `TurnId`, `TurnAttemptId`, `SemanticTranscriptEntryId`, and
+  `ContextFrontierId` today; `ModelCallId`, `ProviderTargetEvidenceId`,
+  `ToolRequestId`, and `ToolAttemptId` are assigned here but not yet minted (see
+  Open edges). All production generators mint UUIDv7 (`uuid::Uuid::now_v7()`).
+  Why: ADR-0033's recorded rationale is UUIDv7 insertion locality for
+  append-heavy Postgres B-tree keys without changing the 128-bit storage shape;
+  no index-level artifact measures this.
+- **Configuration reference key** — `DirectModelSelection` and `ModelAlias`.
+  Callers supply them inside command payloads to name owner-configured model
+  selections; they persist in `uuid` columns (`direct_model_selection_id`,
+  `model_alias_id`), and alias meaning resolves through a definition lookup at
+  domain preparation, so an unknown alias becomes a recorded rejection, not an
+  accepted identity.
+
+`ProviderModelIdentity` names the hub's normalized provider/model value space.
+It is not persisted and has no production supply seam; how provider-reported
+data normalizes into it is the open ADR-0007 question (see Open edges).
+
+UUID contents are never semantic. No code derives acceptance order, queue order,
+lifecycle precedence, ancestry, ownership, or authorization from UUID bytes or
+embedded timestamps; those facts live in purpose-specific domain values and
+records (INV-001, INV-004).
+
+The nil and max UUIDs are rejected as `DurableCommandId` values at two
+boundaries: application request construction (`try_new` on
+`CreateSessionRequest`, `ReplaceSessionDefaultsRequest`, and
+`SubmitInputRequest` in `crates/application`) and persistence decoding
+(`durable_command_id_from_uuid` in `crates/persistence/src/mapping.rs`).
+Rejection occurs before canonical command construction and claims no identifier.
+Why: sentinel-like values are common accidental defaults and would otherwise
+become permanent owner-global claims.
+
+## Generation and minting boundary
+
+UUID generation is an application-layer effect. `crates/domain` depends on
+`uuid` with `default-features = false` and no generation feature: the domain
+crate cannot mint an identity. `crates/application` enables the `v7` feature and
+defines one generator trait per orchestration slice, each with a production
+UUIDv7 implementation:
+
+| Generator                            | Mints                                                             |
+| ------------------------------------ | ----------------------------------------------------------------- |
+| `UuidV7SessionIdGenerator`           | `SessionId`                                                       |
+| `UuidV7SubmitInputIdGenerator`       | `AcceptedInputId`, `TurnId`                                       |
+| `UuidV7StartEligibleTurnIdGenerator` | `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnAttemptId` |
+| `UuidV7StartupScanIdGenerator`       | `SemanticTranscriptEntryId`, `ContextFrontierId`                  |
+
+`ModelCallId`, `ProviderTargetEvidenceId`, `ToolRequestId`, and `ToolAttemptId`
+exist as domain types but have no production minting seam yet; their generators
+land with their owning slices.
+
+Orchestration generates a fresh candidate immediately before the domain
+transition that creates the fact, and the persistence adapter maps
+already-minted values only — no Postgres column has an identity-generating
+default (verified across all migrations). Why: the domain transition needs the
+typed identity before persistence, and keeping the domain generation-free keeps
+it deterministic. A transaction that aborts leaves an unused candidate but no
+durable fact. Recovery reconstitutes committed facts under their stored
+identities; the startup scan's generator mints identities only for the new
+`TurnFailed` semantic entry and terminal frontier facts it records (INV-007). On
+equal command replay the recorded receipt is returned, which may name a
+different identity than the fresh candidate generated for that invocation — the
+candidate is discarded.
+
+## Encoding
+
+Every persisted UUID-backed identity uses native Postgres `uuid` columns.
+Identity kind is carried by table, column, and foreign key — never by UUID
+contents (INV-002). `crates/persistence/src/mapping.rs` defines named conversion
+functions for `DurableCommandId`, `SessionId`, `AcceptedInputId`, and `TurnId`;
+the remaining persisted kinds (`TurnAttemptId`, `ContextFrontierId`,
+`SemanticTranscriptEntryId`, `DirectModelSelection`, `ModelAlias`,
+`ToolRequestId`) cross the SQL boundary through inline `from_uuid`/`into_uuid`
+calls at typed repository call sites (for example
+`crates/persistence/src/submit_input.rs` and `start_eligible_turn.rs`). Every
+crossing is explicit; none is derive-generated. Version ordinals and queue
+positions use checked `numeric(20, 0)` mappings in `mapping.rs` and are not
+identities.
+
+Telemetry renders identities in two forms. Application sites render the
+lowercase hyphenated RFC 9562 form (`session_id = %session.as_uuid()` in
+`crates/application/src/scheduler.rs`), with the structured field name
+identifying the kind. The hubd startup-failure site logs
+`session_id = ?error.session` and `turn_id = ?error.turn` — the derived `Debug`
+of `Option<SessionId>`/`Option<TurnId>`, which renders `Some(SessionId(..))` or
+`None`, not bare canonical UUID text (`apps/hubd/src/main.rs`).
+
+No wire encoding exists: there is no protocol surface, and commands enter only
+through in-process application services. Wire field types remain reserved (see
+Open edges).
+
+## Durable command records
+
+All claimed command identifiers live in one owner-global, append-only
+`durable_command` registry (migration `202607180001` and successors): primary
+key `command_id`, a closed `command_kind` discriminator (`create_session`,
+`replace_session_defaults`, `submit_input`), a `storage_version` (currently 1
+for all kinds), and `claimed_at` (`transaction_timestamp()`), which is
+non-semantic operational metadata. No command kind, session, or client has a
+separate command-ID namespace.
+
+Each admitted kind has one purpose-specific typed record family
+(`create_session_command`, `replace_session_defaults_command`,
+`submit_input_command`) keyed one-to-one by `command_id`, storing every
+caller-supplied semantic field, the terminal `applied`/`rejected` result
+discriminator, and the typed result fields, all under `CHECK` constraints and
+foreign keys. Kind and version agreement between the registry row and its typed
+record is enforced by a composite foreign key, and a deferred constraint trigger
+(`require_durable_command_typed_record`) requires exactly one typed record per
+claim at every transaction boundary. Why: typed relational records keep each
+command's comparison payload and result reviewable and constraint-checked
+instead of delegating meaning to a serializer; there is no universal JSONB or
+byte-blob payload anywhere.
+
+For `SubmitInput`, a second deferred constraint trigger
+(`submit_input_command_requires_correlated_effect`, migration `202607180003`,
+redefined for occupied-slot pending steering in `202607180005`) enforces effect
+correlation at every transaction boundary: an `applied` row must agree
+field-by-field with exactly one committed `accepted_input` plus
+`queued_input_origin` effect, including the frozen model configuration; a
+`rejected` row must have no accepted-input effect; and an `unknown_model_alias`
+rejection must match real alias evidence in `session_defaults_version`. Why:
+replay returns recorded results as truth, so an applied record without its exact
+committed effect must be unable to commit.
+
+All registry and typed-record tables are append-only, enforced by
+`reject_immutable_record_change` triggers. Why: a claimed identifier's recorded
+meaning must never be rewritten, or replay would stop being truthful.
+
+A claimed registry row whose typed record is missing, duplicated, of a
+mismatched kind, or undecodable is classified as storage corruption
+(`RegistryCorruption` in `crates/persistence/src/command_registry.rs` and
+per-kind `*Corruption` types), never as an unseen command. Why: treating an
+undecodable claim as unseen would let one identifier acquire a second meaning
+(INV-012). Corruption is a distinct error family from infrastructure failure and
+from recorded domain rejection.
+
+`CreateSession` v1 records applied results only (its one preparation failure is
+an error, not a recorded rejection); `ReplaceSessionDefaults` and `SubmitInput`
+record both applied results and closed, typed rejection discriminators.
+Rejections claim the identifier exactly as applied results do.
+
+## Replay and equality
+
+The canonical command payload is the typed domain value constructed at the
+boundary before registry lookup — not a serialization. Structural equality
+(hand-written `PartialEq` on `CreateSession`, `ReplaceSessionDefaults`, and
+`SubmitInput` in `crates/domain`) covers every caller-supplied semantic field
+and excludes `DurableCommandId`. Why: the identifier is the lookup key that
+names the payload, not part of the meaning it names.
+
+Every command repository (`crates/persistence/src/create_session.rs`,
+`replace_session_defaults.rs`, `submit_input.rs`) follows one claim protocol,
+with registry lookup as the first durable operation, before any current-state
+validation (INV-012):
+
+1. Inspect the registry. If the identifier is claimed by the same kind, load and
+   reconstruct the recorded typed payload and result through domain-owned
+   reconstitution, compare structurally, and roll back: equal replay returns the
+   recorded terminal result; any difference — including a different kind — is
+   conflicting reuse, returned without disturbing the recorded meaning.
+2. If unclaimed, `INSERT ... ON CONFLICT DO NOTHING` claims the registry row. A
+   lost race re-inspects and resolves against the winner's committed record; a
+   winner row that cannot then be read is corruption.
+3. First handling commits the registry row, the typed payload record, the
+   terminal result, and every applied domain effect in one transaction. No
+   applied result is returned before commit, and a failed transaction claims no
+   identifier.
+
+First handling may re-derive the terminal result inside the claim transaction:
+`ReplaceSessionDefaults` applies through a compare-and-set `UPDATE` on
+`session_current_defaults`, and a CAS lost to a concurrent commit re-prepares
+against the winner's committed state and records the re-derived rejection as the
+terminal result; a CAS lost without a version change is corruption
+(`crates/persistence/src/replace_session_defaults.rs`).
+
+Each application service calls its atomic transaction port exactly once and
+surfaces infrastructure failure to its caller without retry or receipt
+reconstruction (the `CreateSessionTransaction` contract in
+`crates/application/src/create_session.rs`;
+`s01_inv012_transaction_failure_is_returned_without_retry` tests in all three
+services). Because a failed transaction claims no identifier, retransmitting
+under the same `DurableCommandId` is the caller's retry path and replays or
+claims cleanly.
+
+Reconstructed-then-compare ordering means a storage representation change can
+never turn an equal command into conflicting reuse; unknown kinds and storage
+versions fail explicitly as corruption. Equal semantic content never merges
+distinct commands, and callers needing corrected intent after a recorded
+rejection must use a new identifier.
+
+## Actor attribution
+
+`Actor` (`crates/domain/src/actor.rs`) is the closed typed provenance of a
+durable command's initiating agency: `Owner`, `Model { turn: TurnId }`,
+`Recovery`, or `Tool { request: ToolRequestId }`. Equality is structural; a
+carried identity is a validated reference, not minting authority, and
+attribution confers no lifecycle, authorization, or approval authority (INV-001,
+INV-020).
+
+`SubmitInput` is the one command kind whose payload carries an `actor` field.
+Its constructor fixes `Actor::Owner` — no caller can supply another variant, and
+no code path constructs a non-owner command issuer. The actor participates in
+replay equality and hashing: replaying a claimed identifier under a different
+actor is conflicting reuse (INV-012). Why: attribution recorded outside equality
+could be laundered by replaying one claimed identifier under a different claimed
+agency. The field is constant `Owner` today; carrying it anyway keeps the
+truthful-`Owner`-backfill window open for kinds added before non-owner agencies
+exist.
+
+Storage follows the closed-discriminator convention: `actor_kind`
+(`owner`/`model`/`recovery`/`tool`) plus `actor_turn_id` and
+`actor_tool_request_id` reference columns with a `CHECK`-enforced variant shape
+in `submit_input_command`. Unknown or malformed stored spellings fail decoding
+as corruption, and domain reconstitution independently compares the stored actor
+against the canonical command's actor (`StoredActorMismatch`), so a stored
+non-owner actor fails closed.
+
+`CreateSession` and `ReplaceSessionDefaults` v1 carry no actor field in payload
+or storage, and no recorded-transition family (including startup-scan
+terminalizations) has adopted an attribution field. See Open edges. Actor
+answers who issued one command; `SessionCreationCause` answers why a session
+exists — they are independent facts, and neither substitutes for the other (see
+[sessions-and-transcript](sessions-and-transcript.md)).
+
+## Durable-command telemetry correlation
+
+Operational telemetry is emitted through the `tracing` facade by
+`crates/application` and `apps/hubd`; `crates/persistence` and `crates/domain`
+have no `tracing` dependency and emit none. Subscriber selection and
+installation live only in `apps/hubd` (see
+[runtime-substrate](runtime-substrate.md) for the runtime and the operator
+failure taxonomy). Telemetry events correlate durable failures with hub-minted
+aggregate identifiers — `session_id`, turn identities, phase, and failure-class
+fields — in the two render forms described under Encoding.
+
+No telemetry site emits a caller-supplied `DurableCommandId` in any form: no raw
+UUID, prefix, digest, or token appears in any `tracing` call in the codebase.
+Typed error `Debug`/`Display` representations may contain a raw command
+identifier (for example `DifferentCommandKind` in the persistence repositories)
+and are treated as internal values; the telemetry paths log classification
+fields, not formatted errors. The keyed correlation-token scheme that would
+restore per-command telemetry correlation is designed (ADR-0046) but not
+implemented; command-scoped events currently carry no command correlation at
+all. See Open edges.
+
+## Open edges
+
+- The ADR-0046 durable-command telemetry token (`dc1` HMAC epoch scheme, mounted
+  epoch document, fail-closed startup validation, sanitized panic hook) is
+  entirely unimplemented; telemetry currently omits durable-command correlation
+  rather than tokenizing it.
+- `ReplaceSessionDefaults` v1 payload and storage carry no `actor` field despite
+  ADR-0039's adoption path expecting one from the kind's first accepted version;
+  the truthful `Owner` backfill via a kind-scoped storage version remains
+  available but unexercised.
+- `CreateSession` actor adoption remains an explicit owner choice (ADR-0039); v1
+  leaves its attribution implicit.
+- No recorded-transition record family has adopted actor attribution;
+  startup-scan terminalizations do not yet record a `Recovery` actor.
+- Wire field types and public identity encodings remain reserved
+  (ADR-0019/ADR-0021); no protocol surface exists and commands enter only
+  through in-process application services.
+- `ModelCallId`, `ProviderTargetEvidenceId`, `ToolRequestId`, and
+  `ToolAttemptId` have assigned supply classes but no production minting seam;
+  generators land with their owning slices. `ProviderModelIdentity` additionally
+  has no persistence and no supply seam; how provider-reported data normalizes
+  into it remains open (ADR-0007).
+- UUIDv7 timestamp disclosure and namespace scope must be reassessed before
+  identities are exposed outside the single-owner boundary or treated as
+  capabilities.
+- Which command kinds may admit non-owner actors, and under what verification,
+  remains with reserved delegation and authorization decisions.

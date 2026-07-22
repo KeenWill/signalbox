@@ -1,0 +1,378 @@
+# Persistence protocol
+
+This page describes the implemented persistence protocol of the Signalbox hub as
+it exists in `crates/persistence` (source and migrations) at commit `6567423` on
+`main`. It covers the Postgres representation, migration discipline, durable
+command storage and replay equality, the fail-closed reconstitution boundary,
+the lock protocol, pending-steering durable state, the corruption taxonomy,
+commit-ambiguity handling, and the transactional outbox. Session aggregate
+semantics live in [sessions-and-transcript](sessions-and-transcript.md), turn
+and attempt lifecycle in
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), identity
+kinds and command construction in
+[identity-and-commands](identity-and-commands.md), and runtime wiring in
+[runtime-substrate](runtime-substrate.md); those four companion pages are
+drafted in this same specification wave and are not yet in the repository tree.
+Invariant text is normative in [docs/invariants.md](../invariants.md); this page
+cites rows by tag.
+
+## Stack and boundaries
+
+The persistence crate uses SQLx (Postgres driver, `PgPool`, embedded migrator)
+on Tokio. Queries are static SQL through the runtime query API with hand-written
+decoding (`Row::try_get`); there are no query macros, `FromRow` derives, or
+ORM-generated types. Domain types gain no SQLx or serialization traits; each
+adapter module decodes its own rows through explicit fallible functions
+(`decode_complete` and kin in `session.rs`, `create_session.rs`,
+`submit_input.rs`, `replace_session_defaults.rs`), built on the shared identity
+and ordinal scalar conversions in `crates/persistence/src/mapping.rs` (INV-002).
+Why: one coherent driver/pool/migration stack minimizes dependency surface while
+the module boundary, not the driver, enforces the record/domain split.
+
+Concrete mapping rules:
+
+- Identity newtypes map to native `uuid` columns through kind-specific
+  conversion functions; kind is carried by table and column position, never by
+  value inspection. `DurableCommandId` decoding rejects the nil and max sentinel
+  UUIDs (`DurableCommandIdMappingError::SentinelUuid`); the other identity
+  conversions are infallible. Identity supply and encoding semantics:
+  [identity-and-commands](identity-and-commands.md).
+- `u64` domain ordinals (acceptance position, defaults version) map to
+  `numeric(20, 0)`. Decoding rejects non-positive, fractional, and
+  out-of-`u64`-range values (`PositiveOrdinalMappingError`). Why: `bigint` is
+  signed and silently narrows valid ordinals above `i64::MAX`; `numeric(20, 0)`
+  preserves the full range and its ordering.
+
+Connection options are explicit: production parsing forces
+`PgSslMode::VerifyFull`; the ephemeral-test helper forces `Disable`. Pool sizing
+remains at SQLx defaults until an operational slice selects limits.
+
+## Migrations
+
+Schema change is a forward-only, versioned SQL file set in
+`crates/persistence/migrations/` — nine files, `202607180001` through
+`202607210001` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
+records applied files with checksums (the integration tests read the ledger
+directly); serialization of concurrent migration runs is SQLx dependency
+behavior, relied on but not demonstrated in this repo. `.gitattributes` pins
+migration files to LF so checksums do not vary by platform, and a build script
+re-embeds the set whenever a file changes. The production binary wires the
+required ordering (INV-034): `apps/hubd` (`migrate_scan_then_schedule`) runs
+`migrate` as its first startup phase, then the startup scan, then the scheduler.
+Why: checksummed forward-only files make every schema change a reviewed,
+immutable artifact, so a deployed database's history is never silently edited.
+
+Container-backed integration tests (`postgres-integration` feature, ignored by
+default, failing loudly when Docker is absent) exercise the real constraints,
+triggers, locks, and races described below against a pinned Postgres image.
+
+## Relational representation
+
+Storage is a normalized, purpose-specific relational schema of current-state
+rows and append-only immutable facts. There is no event store: the guarded row
+is the durable statement of record, and no state is rebuilt by replaying events
+(INV-005). Why: the database-level invariants (INV-009, INV-012) are declarative
+constraints over current-state rows; an event log would move them back into
+projection code.
+
+Implemented table families (across the nine migrations):
+
+- `durable_command` plus typed command records (`create_session_command`,
+  `replace_session_defaults_command`, `submit_input_command`);
+- `session`, `session_defaults_version`, `session_current_defaults`,
+  `session_scheduler`;
+- `accepted_input`, `queued_input_origin`, `turn_lifecycle`, `turn_attempt`;
+- `semantic_transcript_entry`, `context_frontier`, `context_frontier_member`;
+- the outbox family (below).
+
+Representation rules, all enforced in the schema:
+
+- Closed variant sets are `text` discriminators under `CHECK` constraints, with
+  variant payload columns constrained present exactly when the discriminator
+  requires them (for example `turn_lifecycle_state_payload_shape`). The
+  implemented sets are exactly the admitted slices: turn state
+  `queued`/`active`/`terminal`, active phase `running` only, terminal
+  disposition `failed` only, attempt state `prepared`/`running`/`ended` with end
+  variant `without_stop` and six end dispositions.
+- Immutable fact tables carry `BEFORE UPDATE OR DELETE` triggers that raise
+  (`reject_immutable_record_change`), making append-only a database property,
+  not a convention. Mutable lifecycle tables carry guard triggers instead:
+  `turn_lifecycle` rows must be inserted `queued`, transition only
+  monotonically, keep identity/origin/order and written starts write-once, and
+  become immutable at `terminal`; `turn_attempt` rows are inserted `prepared`
+  and an `ended` attempt is immutable. Why: restart trusts durable rows as
+  evidence, so the schema itself must forbid rewriting them (INV-006, INV-007).
+- INV-009 is database-level: partial unique indexes
+  `turn_lifecycle_one_active_per_session`, `turn_attempt_one_live_per_turn`, and
+  `turn_attempt_one_initial_per_turn` reject a second active turn, second live
+  attempt, or second initial attempt regardless of process memory.
+- Pending steering is durable current state (migration `202607180005`): an
+  `accepted_input` row with disposition `pending_steering` records a
+  `next_safe_point` delivery and names its expected active source turn, with
+  origin and defaults fields constrained absent. Deferred constraint triggers
+  correlate it both ways at commit:
+  `accepted_input_pending_requires_active_source` requires the named turn to be
+  `active`, taking `FOR UPDATE` on that `turn_lifecycle` row, and
+  `turn_terminal_requires_closed_pending_steering` rejects a terminal transition
+  while pending steering naming the turn remains
+  (`turn_lifecycle_pending_steering_closed`).
+- Cross-table completeness uses deferrable-initially-deferred foreign keys and
+  constraint triggers so rows of one atomic fact can be inserted in any order
+  inside a transaction while every commit boundary sees the complete shape: each
+  claimed registry row has exactly one typed command record, each
+  `submit_input_command` terminal result correlates with exactly its committed
+  effects, each `context_frontier` header has complete contiguous ordered
+  membership, and turn/attempt/semantic-entry writes re-assert the complete turn
+  final state (origin entry, frontier prefix relationships, live-attempt
+  cardinality, failure-entry correlation).
+- Accepted user text is bounded to 1 MiB of UTF-8 in both the command record and
+  `accepted_input` (`octet_length(convert_to(...))` checks), independent of the
+  application admission bound.
+
+Some rules are deliberately enforced twice — typed domain transitions and
+database constraints — for the database-level invariants; a passing SQL row set
+can still fail domain correlation (see reconstitution below). One current-state
+row sits below the guarded tier: the mutable `session_current_defaults` pointer
+carries no guard trigger, so beyond its range `CHECK` and deferred foreign key
+into `session_defaults_version`, pointer discipline rests solely on the
+application-side compare-and-set in `replace_session_defaults.rs`.
+
+## Durable command storage and replay equality
+
+One append-only, owner-global `durable_command` registry claims every command
+identifier: `command_id` is the primary key across all kinds and sessions
+(INV-012), with a `CHECK`-closed kind set (`create_session`,
+`replace_session_defaults`, `submit_input`) and `storage_version` (currently
+`1`). Each kind has one typed subordinate record keyed by `command_id` that
+stores every caller-supplied semantic field in typed, `CHECK`-constrained
+columns, plus the terminal `applied`/`rejected` result and its typed result
+fields; result-shape `CHECK` constraints tie each rejection kind to exactly its
+fields, and deferred reverse constraints require exactly one typed record per
+claimed registry row at commit. Why: typed per-kind records keep replay
+semantics reviewable and constraint-checked, where a universal serialized
+payload would make the serializer a second semantic authority.
+
+The handling protocol, identical across the three implemented commands:
+
+1. Inspect the registry first, before any current-state read.
+2. Unseen identifier: claim it with `INSERT ... ON CONFLICT DO NOTHING`; a
+   concurrent loser rereads the winner. Why: the primary-key claim makes
+   duplicate concurrent submission a database conflict rather than an
+   application race.
+3. First handling prepares the typed result against locked current state and
+   commits the registry row, typed record, and every domain effect in one
+   transaction; acknowledgement follows commit (INV-007). Authoritative
+   rejections also claim the identifier and commit their typed record.
+4. Claimed identifier: reconstruct the recorded typed command from its
+   subordinate record and compare it to the received command by structural
+   domain equality. Equal replay returns the recorded result before any
+   current-state validation; any difference — or a claim by another command kind
+   — is `ConflictingReuse`. Why: equality over reconstructed domain values, not
+   stored bytes, means a storage-version migration or equivalent spelling can
+   never turn an equal command into conflicting reuse.
+
+`load` operations return `None` only for an unseen identifier; a claimed row
+that cannot be reconstructed is corruption, never an unclaimed identifier.
+
+## Lock protocol
+
+Every application-issued SQL statement that takes an explicit row lock lives in
+`crates/persistence/src/lock_inventory.rs`. One explicit lock lives in the
+schema instead of the inventory: the deferred pending-steering source-turn
+trigger (migration `202607180005`) takes `FOR UPDATE` on the named
+`turn_lifecycle` row when a pending-steering `accepted_input` insert reaches
+commit. Why: a single reviewed inventory makes lock ordering auditable instead
+of scattered through query strings; the trigger-resident lock is recorded here
+because it fires outside the inventory's view.
+
+Locks per transaction, in acquisition order:
+
+- **SubmitInput** (`prepare_against_locked_state`): session row
+  `FOR NO KEY UPDATE`, then `session_scheduler` row `FOR UPDATE`, then
+  `session_current_defaults` row `FOR UPDATE`; only then does it read the
+  scheduling projection and assign the next acceptance position. A
+  pending-steering acceptance additionally locks the named active
+  `turn_lifecycle` row `FOR UPDATE` at commit time, inside the deferred
+  source-turn trigger.
+- **StartEligibleTurn** and **startup recovery**: the `session_scheduler` row
+  `FOR UPDATE` is the only explicit lock (session existence is checked with a
+  bare `EXISTS`). The session row is locked only `KEY SHARE`, implicitly, by the
+  inserts' foreign keys, and the candidate `turn_lifecycle` row is locked by the
+  guarded `UPDATE` itself.
+- **ReplaceSessionDefaults**: no explicit pre-lock; the compare-and-set `UPDATE`
+  on the `session_current_defaults` pointer row is the serialization point, and
+  its `session_defaults_version` insert takes `FOR KEY SHARE` on the session row
+  through the non-deferrable session foreign key.
+
+Two standing constraints (recorded beside the code):
+
+1. Every turn-lifecycle writer acquires the scheduler-row lock before touching
+   `turn_lifecycle` rows. Why: one session-scoped lock serializes activation,
+   recovery, and acceptance against each other so guarded predicates race on
+   rows, not on process memory (INV-009, INV-010).
+2. No production path may take `FOR UPDATE` (the strongest mode) on the session
+   row. Why: submit orders session-then-pointer while defaults replacement holds
+   the pointer and requests FK `KEY SHARE` on the session row; `FOR UPDATE`
+   conflicts with `KEY SHARE` and closes that cycle into a 40P01 deadlock, while
+   `FOR NO KEY UPDATE` stays self-exclusive — still serializing per-session
+   position assignment — without conflicting with referential-integrity locks.
+
+## Reconstitution
+
+Reconstitution is domain-owned and fail-closed (ADR-0035 pattern, implemented
+for the session, command-receipt, and scheduling projections). The adapter
+performs only the boundary step — decode columns, check discriminators and
+ordinals, assemble the complete checked input — and the domain performs pure
+validation and returns one canonical value or a typed failure (INV-001, INV-002,
+INV-006). Concretely: `SessionReconstitutionInput` for the current session,
+`SubmitInputReconstitutionInput` (with turn-origin and acceptance-tail inputs)
+for command receipts, and `AcceptedInputSchedulingProjection` for the session's
+complete queue and lifecycle state. The scheduling load proves its own
+completeness — it counts `queued_input_origin` against `turn_lifecycle` and
+fails on mismatch — rather than trusting whichever rows a filter returned.
+Active-phase and acceptance-tail validation semantics are owned by
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md).
+
+Persisted data is never normalized into a nearby valid state; malformed durable
+rows produce typed corruption errors, authorize no effect, and are not repaired
+or dropped on load. Load paths do not panic on durable data; one acknowledged
+`expect` remains on the interrupt-unavailable path in `submit_input.rs`, a
+marked temporary site reachable only if the checked active-projection contract
+is broken. Startup recovery operates only on successfully reconstituted
+projections (INV-034), and a successful reconstitution does not waive the
+guarded compare-and-set when a later transaction commits: every guarded write
+that matches zero rows is either benign staleness (reload and rederive) or,
+where the transaction's own premises made a match mandatory, corruption. Why:
+the dangerous corruption cases are rows that look individually valid while their
+cross-record correlations are not, so authority comes only from complete
+validated projections, never from raw identifiers.
+
+Startup recovery terminalizes a lost active turn as failed, with one deferral
+branch: when a durable pending-steering row names the active turn, the domain
+refuses the failure preparation, the recovery transaction rolls back with
+`StartupScanSessionOutcome::DeferredPendingSteering` (`startup.rs`), and
+`apps/hubd` refuses to enter scheduling (`recovery_blocked`) rather than run
+with an unrecovered session. The schema guard
+(`turn_lifecycle_pending_steering_closed`) enforces the same refusal
+independently at commit. Why: a pending-steering row is an accepted delivery
+obligation with no implemented closure; terminalizing its source turn would
+strand it, so recovery fails closed instead.
+
+## Corruption taxonomy
+
+Each adapter has a purpose-specific corruption enum with a shared vocabulary:
+
+- `Missing(record)` — a required row or field is absent;
+- `Unsupported { field, value }` — a closed discriminator or storage version has
+  no admitted mapping (unknown values fail; they are never coerced);
+- `Inconsistent(relationship)` — correlated durable records disagree;
+- `InvalidOrdinal` / `InvalidContent` — checked scalar decoding failed;
+- nested `CurrentSession(...)`, `Domain(...)`, `Scheduling(...)` — a subordinate
+  projection failed its own boundary or domain validation.
+
+Registry inspection has its own closed set (`RegistryCorruption`):
+`UnsupportedKind`, `UnsupportedVersion`, `MissingTypedRecord`,
+`ConflictingTypedRecords`.
+
+Three error families implement the shared operator taxonomy
+(`ClassifyOperatorFailure`, classifying into `OperatorFailureClass`): startup
+scan (`StartupScanRepositoryError`), turn activation
+(`StartEligibleTurnRepositoryError`), and the eligibility sweep
+(`PostgresEligibilitySweepError`). The classes:
+`Infrastructure { commit_ambiguous }` (the operation did not complete;
+retryable), `FailClosedCorruption` (committed rows cannot construct the accepted
+domain value; nothing proceeds), `IdentityCollision` (a fresh hub-minted
+identity collided with a durable one; detected either by the domain seam or by
+mapping the violated unique constraint out of the database error), and
+`CallerOrHubBug`. The command-handling error families draw the same
+corruption/infrastructure distinctions in their variants but implement no
+operator classification yet (open edge). Startup-scan corruption additionally
+carries the scoped active turn so operational policy can isolate the affected
+session while remaining fail-closed.
+
+## Commit-ambiguity handling
+
+Transactions whose effects cannot be re-derived from a caller-held command
+identifier classify commit failures. `commit_failure_is_ambiguous` (in
+`start_eligible_turn.rs` and `startup.rs`) treats a database-reported error as
+ambiguous only for SQLSTATE `08007` (transaction resolution unknown) and `40003`
+(statement completion unknown); any non-database failure awaiting the commit
+response (lost connection, IO error) is ambiguous; every other database-reported
+commit rejection is a definite failure. The flag surfaces as
+`Infrastructure { commit_ambiguous: true }` so the caller knows durable state
+may or may not include the transaction. Why: activation and recovery mint fresh
+identities instead of claiming a command identifier, so a lost commit response
+cannot be resolved by replay and must be reported as ambiguous rather than
+guessed.
+
+Command-handling adapters carry no ambiguity flag: retrying the same
+`DurableCommandId` replays through the registry and either returns the recorded
+result (the commit won) or handles the command fresh (it never claimed), which
+resolves the ambiguity exactly (INV-012).
+
+## Transactional outbox
+
+Committed client-observable transitions become update events only through the
+ADR-0040 outbox family (INV-032 mechanism; observation semantics are protocol
+scope). Implemented storage:
+
+- `outbox_event` header (allocator-owned `event_sequence`, closed `event_kind`,
+  `storage_version`, `session_id`) plus one typed record table per kind —
+  `session_created_outbox_event` and `turn_failed_outbox_event` — with a
+  deferred trigger requiring exactly one typed record per header. The header and
+  typed record tables are append-only (`reject_immutable_record_change`), and
+  all five outbox tables reject `TRUNCATE`.
+- `outbox_sequence_state`, a mutable singleton row (deletion rejected): a
+  `BEFORE INSERT` trigger on the header allocates `last_sequence + 1` by
+  updating the singleton, whose row lock is held to transaction end, and a
+  deferred trigger requires the event row for every advance. Why: holding the
+  allocator row lock until commit makes committed sequences contiguous and
+  commit-ordered, so a delivered prefix can never be discovered to have skipped
+  a lower in-flight sequence.
+- `outbox_delivery_state`, a mutable singleton delivered-through cursor
+  (deletion rejected) whose trigger permits advancing by exactly one committed
+  sequence at a time and forbids mixing delivery with event production in one
+  transaction (and vice versa).
+
+Appends happen only through the crate-private `outbox::append` on the caller's
+existing connection; it never begins or commits a transaction, so the
+state-changing adapter owns the atomic boundary and no post-commit publish step
+exists in application code. Implemented appends: CreateSession handling appends
+`session_created`; startup recovery's terminalization appends `turn_failed` (a
+pending-steering deferral rolls back and appends nothing). A guarded transition
+that changes zero rows appends zero events. Why: writing the event in the
+committing transaction makes the dual-write failure (state without event, or
+event without state) unrepresentable.
+
+## Open edges
+
+- No outbox publisher, drain task, or subscription layer exists;
+  `outbox_delivery_state` is advanced only by integration tests.
+- The outbox event-kind set is only `session_created` and `turn_failed`; input
+  acceptance, activation, and defaults replacement commit no events yet, pending
+  the protocol projections that define client visibility.
+- Outbox retention and pruning of delivered rows are undecided (ADR-0040).
+- Attempt continuation is deliberately blocked: a `turn_attempt` with a
+  predecessor is rejected (`turn_attempt_continuation_unavailable`) until
+  durable wait/closure storage exists.
+- Pending-steering closure is unimplemented: no path consumes a
+  `pending_steering` row, so its guards block the source turn's terminalization
+  and block hub startup recovery (`recovery_blocked`) until safe-point
+  application exists.
+- Frontier lineage checks in migration `202607180004` assume `none` ancestry and
+  `ordinary` priority only; fork ancestry and interrupt priority must replace
+  them by migration.
+- Interrupt application is unavailable: a matched interrupt fails explicitly
+  (`InterruptApplicationUnavailable`) without claiming its identifier.
+- ADR-0022 aggregate-map rows for model calls, provider evidence, authority
+  transfers, cancellation intent, interrupt-proof storage, and tool tables are
+  not yet in the schema.
+- Command-handling error families implement no `ClassifyOperatorFailure`;
+  operator classification covers only startup scan, turn activation, and the
+  eligibility sweep.
+- Submit-path scaling: the complete scheduling projection (content included)
+  loads under the session lock per submission; a bounded-read representation
+  remains undesigned (docs/open-questions.md).
+- Database-role separation remains a deployment choice; migration invocation
+  itself is wired in `apps/hubd`.

@@ -1,0 +1,356 @@
+# Sessions and the transcript
+
+This page specifies the implemented behavior of session creation and ancestry,
+session-level configuration defaults and their replacement, the long-lived
+session aggregate, semantic transcript entries, accepted-input user content, and
+actor attribution. It was verified against the working tree at commit `6567423`
+(current `main`): `crates/domain` (`session.rs`, `configuration.rs`,
+`replace_session_defaults.rs`, `semantic_entry.rs`, `turn_eligibility.rs`,
+`user_content.rs`, `actor.rs`, `submit_input.rs`), `crates/application`
+(`create_session.rs`, `load_session.rs`, `replace_session_defaults.rs`,
+`submit_input.rs`), and `crates/persistence` (sources and migrations). Where a
+law is cited as `INV-NNN`, [invariants.md](../invariants.md) is the catalog of
+record; where mechanics owned by another decision are summarized, the owning ADR
+under [docs/decisions](../decisions) is cited inline.
+
+## Session identity and creation provenance
+
+A session is one durable, independently browsable conversation with its own
+`SessionId`, distinct from every other identity kind (INV-001). Every session
+records two required, independent, immutable creation facts, paired as
+`SessionCreationProvenance` (INV-003):
+
+- **Creation cause** — why the session exists. The only constructible variant is
+  `OwnerInitiated`. Reserved causes (application, schedule, delegation) are not
+  represented as placeholder variants.
+- **Transcript ancestry** — where initial semantic context came from: `None`
+  (explicitly no prior transcript) or `SingleSource` naming one source
+  `SessionId` and one opaque `TranscriptFrontier`. `TranscriptFrontier` has no
+  public constructor; no implemented slice can produce one.
+
+Why: deriving one fact from the other would make ordinary forks look delegated
+and force delegated children to inherit transcripts.
+
+Neither fact can be rewritten after creation, and later source-session activity
+cannot change a descendant's recorded ancestry (INV-030). The `session` table
+stores cause and ancestry as independently constrained columns and is
+append-only.
+
+## Session creation
+
+`CreateSession` carries the durable command identity, the provenance pair, and
+one complete unversioned initial defaults value. Structural equality excludes
+only the command identifier (INV-012); durable-command storage and
+structural-equality doctrine is
+[ADR-0034](../decisions/0034-durable-command-storage-and-equality.md), and
+identity generation, supply, and encoding is
+[ADR-0033](../decisions/0033-identity-generation-supply-and-encoding.md).
+
+Application orchestration (`crates/application/src/create_session.rs`):
+
+- rejects nil/max sentinel command identities before canonical construction;
+- fixes cause `OwnerInitiated` and ancestry `None` — the request type has no
+  cause or ancestry inputs;
+- mints one fresh UUIDv7 `SessionId` candidate per invocation (the UUID
+  timestamp confers no domain order or authority); and
+- calls one atomic transaction port exactly once, with no retry.
+
+Domain preparation admits only the owner-initiated, no-ancestry pair. A
+`SingleSource` command is a valid canonical value but fails preparation with
+`TranscriptAncestryUnavailable` — a nonterminal error that claims no command
+identifier. Forks are therefore typed but not yet creatable.
+
+The committing transaction atomically inserts the session row, the scheduler
+registration (`session_scheduler`), defaults version one, the current-defaults
+pointer, the typed command record, and the owner-global registry claim.
+Completeness at every commit boundary is enforced by deferred reverse foreign
+keys (`session_current_defaults_fk`, `session_create_command_fk`,
+`session_scheduler_row_fk`) plus one deferred constraint trigger,
+`durable_command_requires_typed_record`, which migration
+`202607180002_replace_session_defaults.sql` installed in place of the dropped
+reverse foreign key (migrations `202607180001_create_session.sql`,
+`202607180004_turn_lifecycle_storage.sql`; INV-008, INV-012). Every table in
+this set is append-only except `session_current_defaults`: its one row per
+session is the deliberately mutable pointer that defaults replacement later
+moves in place. The same transaction appends a `session_created` update event to
+the outbox ([ADR-0040](../decisions/0040-transactional-outbox.md)).
+
+Command claim and replay are fail-closed in the adapter
+(`crates/persistence/src/create_session.rs`). The owner-global registry is
+inspected first; an identifier already recorded under a different command kind
+resolves as `ConflictingReuse`, and losing the claim race resolves against the
+winner's committed record. Equal replay never trusts a partial row: the adapter
+reconstitutes the complete recorded command — registry inspection, typed-record
+load, then domain reconstitution — and compares it structurally against the
+canonical command, so a corrupt recorded fact surfaces as typed corruption,
+never as a receipt. Equal replay returns the recorded receipt, which may name a
+different session than the freshly minted candidate; the unused candidate is
+simply discarded.
+
+Why (append-only, one exception): provenance, defaults versions, command
+receipts, and scheduler registration are historical facts; in-place mutation
+would rewrite recorded intent and the context that later work consumed. The
+current-defaults pointer alone is mutable because "current" is a present choice,
+not a historical fact.
+
+## Session defaults and replacement
+
+Session configuration defaults are model-selection-only in the baseline; the
+selection algebra, configuration freeze at acceptance, and per-turn effective
+configuration are owned by
+[ADR-0027](../decisions/0027-input-delivery-lifecycle.md). Defaults are
+immutable versions with a positive `u64` ordinal:
+
+- session creation establishes version one;
+- each replacement installs the checked successor ordinal as a new immutable row
+  and moves the session's single current pointer; and
+- an exhausted ordinal (`u64::MAX`) is a typed recorded rejection
+  (`VersionExhausted`), not a panic or wraparound.
+
+An installed version affects only origin input accepted afterward; it never
+rewrites creation provenance or queued, active, or completed work (INV-008).
+Configuration-free steering inherits from its source turn rather than reading
+defaults (ADR-0027).
+
+`ReplaceSessionDefaults` carries exactly command identity, target session,
+expected current version, and the complete replacement; equality excludes only
+the command identifier. The handling transaction loads the authoritative session
+and compare-and-sets the expected version:
+
+- expected differs from current → recorded `CurrentVersionMismatch`;
+- absent session → recorded `SessionNotFound`;
+- no representable successor → recorded `VersionExhausted`;
+- otherwise the applied result carries the complete installed version.
+
+The expected-version check is enforced twice inside the one transaction
+(`crates/persistence/src/replace_session_defaults.rs`). Domain preparation runs
+against a load of the authoritative session; when it yields the applied result,
+the adapter moves the pointer with a SQL compare-and-set conditioned on the
+expected version. Zero affected rows re-derives the result against current state
+in the same transaction and records the typed rejection; a re-derivation that
+still reports applied — a CAS loss without a version change — fails closed as
+corruption, as does an update affecting more than one row. Equal replay and
+cross-kind identifier reuse resolve through the same fail-closed
+reconstitute-and-compare path as `CreateSession` (INV-012).
+
+Why (compare-and-set): the caller names the version its intent was formed
+against, so a racing replacement surfaces as a typed rejection instead of a
+silent lost update.
+
+A supplied session that does not match the command target is a nonterminal
+preparation error, not a recorded rejection. Application orchestration
+constructs the canonical command once and calls its atomic port exactly once,
+with no preload and no retry.
+
+## The session aggregate
+
+The long-lived domain `Session` (`crates/domain/src/session.rs`) contains
+exactly three facts: `SessionId`, the immutable creation provenance, and the
+complete current defaults version selected by the durable pointer. It embeds
+nothing else — no transcript entries, accepted inputs, turns, queue facts,
+command history, evidence, or presentation state (INV-005). Those remain
+independently stored facts correlated by typed identity.
+
+Why (small aggregate): embedding session-associated collections would turn an
+ordinary session read into an unbounded reconstruction crossing several
+lifecycle and transaction boundaries, and possessing `Session` alone must never
+imply authority to perform a transition.
+
+A `Session` is an owned snapshot, not a live cache: any transition that depends
+on current defaults revalidates them inside its own transaction. The pre-commit
+candidate (`InitialSession`), the command receipt
+(`CreateSessionAppliedResult`), and the loaded `Session` are distinct types;
+loading never returns a receipt and command replay never returns a `Session`.
+
+### Loading and reconstitution
+
+`load_session(SessionId)` performs one statement-consistent read joining the
+session row, its one current-defaults pointer, and exactly the version that
+pointer names (`crates/persistence/src/session.rs`). The pointer is
+authoritative; a load never infers current defaults from version one, the
+greatest stored version, a caller-supplied version, or a cache.
+
+Why (pointer authority): append-only version existence does not mean
+installation; only the pointer records the accepted current choice.
+
+`None` is returned only when no session row exists in the read snapshot. Once
+the row exists, a missing pointer, missing selected version, ownership mismatch,
+pointer/record version disagreement, unknown discriminator, or invalid ordinal
+fails closed as typed corruption: the adapter's decode checks feed the
+domain-owned `SessionReconstitutionInput::reconstitute` seam, which accepts only
+complete agreeing domain values (INV-002). Reconstitution never yields `None`, a
+default, or a partial session.
+
+Why (fail closed): a fabricated or partial session would mask corruption and
+launder invalid durable state into valid-looking domain values.
+
+## Semantic transcript entries
+
+A semantic transcript entry is one immutable identified semantic-history fact:
+its own `SemanticTranscriptEntryId`, a source session, and a closed payload
+(`crates/domain/src/semantic_entry.rs`). The implemented payload set is complete
+and closed:
+
+- `OriginAcceptedInput { accepted_input }` — the exact accepted input whose
+  origin turn became eligible; and
+- `TurnFailed { turn }` — an explicit marker that the turn terminalized as
+  failed.
+
+There is no generic text, role, metadata, or "other" payload. Entry identity is
+distinct from accepted-input and turn identity (INV-001); equal content in two
+inputs yields distinct entries. Entry construction is sealed inside the domain
+crate — the checked constructor is `pub(crate)` — and has exactly three
+producers, all in `crates/domain/src/turn_eligibility.rs`: the eligibility
+activation, the lost-active-turn failure preparation that builds the
+`TurnFailed` marker, and checked scheduling reconstitution.
+
+`OriginAcceptedInput` references the accepted input's identity; it never copies
+content. Why: two authoritative content copies could diverge and would need an
+unnecessary precedence rule.
+
+Storage (`semantic_transcript_entry`, migration
+`202607180004_turn_lifecycle_storage.sql`) enforces globally unique entry
+identity, at most one origin entry per accepted input, at most one failed marker
+per turn, closed payload-shape checks, same-session references, and append-only
+rows (INV-005). The origin-disposition guard arrived later: migration
+`202607180005_occupied_slot_submit_input.sql` — the migration that first admits
+the `pending_steering` disposition — replaces the entry/turn-state trigger so an
+origin entry additionally requires its input's `origin_of` disposition
+(constraint `semantic_transcript_entry_origin_disposition`); pending steering
+can never appear as a semantic origin.
+
+### When entries come to exist
+
+An accepted input is durable at acceptance (INV-007) but becomes transcript
+history only at eligibility: the activation transaction commits the one origin
+entry together with the starting context snapshot, lineage, and activation facts
+(INV-009, INV-015). Before that commit no semantic entry exists for the queued
+turn — and none can exist: the schema rejects any entry for a queued turn, so
+the accepted-input record alone carries no semantic commitment.
+
+Why (entry at eligibility, not acceptance): queue acceptance has not fixed
+lineage or the snapshot that consumes the entry; eligibility fixes both
+atomically.
+
+Entry/turn-state agreement is a durable schema invariant, not only transactional
+practice. Deferred constraint triggers around
+`assert_turn_lifecycle_final_state` (migration `202607180004`) check every
+commit bidirectionally: a queued turn carries zero origin or failure entries; a
+started turn carries exactly one correlated origin entry, and its starting
+frontier ends with exactly that entry; a failed turn's terminal frontier is its
+starting frontier plus exactly its failure marker. A writer that diverges from
+the transactional practice above is rejected at the commit boundary.
+
+The one implemented `TurnFailed` producer is startup recovery: the scan's
+transaction that terminalizes a lost active turn as failed appends the marker
+after every earlier committed entry and emits a `turn_failed` update event
+atomically. A later successor's starting frontier retains the failed
+predecessor's exact terminal prefix, including that marker. Turn and attempt
+lifecycle doctrine is
+[ADR-0004](../decisions/0004-turn-and-attempt-lifecycle.md), the entry commit
+boundaries are
+[ADR-0036](../decisions/0036-initial-semantic-transcript-entries.md), and
+update-event delivery is [ADR-0040](../decisions/0040-transactional-outbox.md).
+
+## User content
+
+Accepted-input content is the closed one-variant algebra `UserContent`; its only
+variant is `Text { value: NonEmptyUnicodeText }`
+(`crates/domain/src/user_content.rs`). Construction rejects empty text and any
+text containing U+0000 (which PostgreSQL text cannot store); whitespace-only
+text is content. The domain applies no trimming, Unicode normalization, case
+folding, or any other rewriting, and equality is the exact ordered scalar
+sequence — normalization-distinct spellings are unequal. That exact value
+participates in `SubmitInput` replay equality (INV-012).
+
+Why (exact, unnormalized): replay equality must not depend on a normalization
+policy; search or display projections may normalize without changing accepted
+intent.
+
+The accepted input owns the one immutable authoritative content value; the
+`accepted_input` row is append-only, and semantic history references it rather
+than copying it (INV-005, INV-007).
+
+### Bounds
+
+The domain value is unbounded. Admission is bounded at the application boundary:
+`SubmitInputRequest::try_new` rejects text whose UTF-8 encoding exceeds
+`MAX_CONTENT_UTF8_BYTES` = 1,048,576 bytes before typed command construction, so
+no command identifier is claimed. The `OversizedContent` failure retains only
+the byte length, never the rejected content. Matching
+`octet_length(convert_to(content_text, 'UTF8'))` CHECK constraints protect both
+durable content columns (migration `202607200001_bounded_user_content.sql`).
+
+Why (bytes, at admission): byte measurement matches wire and storage cost and
+keeps the domain value exactly as accepted; rejecting before construction can
+never truncate or rewrite content.
+
+This is a provisional owner-decided floor (decision log, 2026-07-20), not the
+resource-governance policy.
+
+## Actor attribution
+
+`Actor` (`crates/domain/src/actor.rs`) is the closed typed provenance of a
+durable command or attributed transition: `Owner`, `Model { turn }`, `Recovery`,
+or `Tool { request }`. Equality is structural; a carried identity is a validated
+reference that mints nothing and grants no lifecycle authority (INV-001), and
+model agency can never compare equal to owner agency (INV-020). Attribution is
+provenance only — not authentication, authorization, or approval.
+
+In the implemented baseline, `SubmitInput` is the only command payload carrying
+an actor. Its constructor fixes `Actor::Owner`; callers cannot supply an actor,
+so no non-owner agency can claim a command through this boundary. The actor
+participates in structural replay equality — one claimed identifier under a
+different actor is conflicting reuse (INV-012) — and is stored as a closed
+discriminator plus reference columns (`submit_input_command.actor_kind` and its
+shape constraints in migration `202607180003_submit_input.sql`). Domain
+reconstitution compares the stored actor against the canonical command and fails
+closed on mismatch (`StoredActorMismatch`); the persistence adapter performs
+only decode-level spelling checks.
+
+Why (actor inside the comparison payload): attribution outside equality would
+let a claimed identifier be replayed under a different claimed agency, leaving
+the stored actor unverifiable metadata.
+
+Why (seeded while constant): `Owner` is currently the only truthful issuer, so
+seeding the field now preserves a truthful backfill; retrofitting after several
+agencies exist would force a semantic migration.
+
+`CreateSession` carries no actor; amending it remains an explicit owner choice
+that has not been taken. `Recovery`, `Model`, and `Tool` are representable but
+no implemented boundary constructs them.
+
+## Open edges
+
+- Fork creation is typed but unimplemented: `SingleSource` ancestry fails
+  preparation (`TranscriptAncestryUnavailable`) until a trusted
+  `TranscriptFrontier` producer exists; frontier representation and selectable
+  fork boundaries remain open (ADR-0003;
+  [open-questions.md](../open-questions.md), selectable transcript-frontier
+  boundaries).
+- Multi-source ancestry and transcript merge remain future decision scope, and
+  retention when an ancestry source is destructively deleted is undecided; both
+  are recorded as open questions in ADR-0003.
+- ADR-0027/ADR-0036's static eligible-failure path (terminalize at eligibility
+  without an attempt, committing origin plus failed marker in one transaction)
+  has no implemented producer; startup recovery is the only committed
+  `TurnFailed` source today.
+- Assistant-content and completed-turn semantic entries are accepted design
+  (ADR-0042) with no implementation; refusal, cancellation, reconciliation,
+  steering, tool, approval, and delegation entry variants remain open.
+- Provider-prompt and client transcript rendering projections over semantic
+  entries are not implemented.
+- `ReplaceSessionDefaults` carries no `actor` field although ADR-0039 slated it
+  for first-accepted-version adoption; its record family has since committed at
+  storage version 1 without one, so under ADR-0034's first-acceptance freeze
+  later adoption needs a kind-scoped storage version, while the truthful `Owner`
+  backfill ADR-0039 relies on still exists.
+- `CreateSession` actor attribution remains implicit pending an explicit owner
+  amendment choice (ADR-0039).
+- `Recovery`, `Model`, and `Tool` actor variants have no constructing boundary;
+  per-transition attribution adoption schedules remain open.
+- The 1 MiB content bound is a provisional owner floor; ADR-0037's
+  resource-governance limit question stays open, and non-text content kinds
+  remain unconstructible pending their owning decisions.
+- Session archive and retention lifecycle are absent from the aggregate and
+  reserved (ADR-0028/ADR-0029).

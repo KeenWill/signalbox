@@ -1,0 +1,350 @@
+# Model-call execution
+
+This page describes the implemented model-call orchestration chain as it exists
+on `origin/agent/m3-model-call-anthropic-runtime` (the M3 stack head): rendering
+a context frontier into provider messages, the staged prepare / authorize-send /
+commit-observation effects, assistant content and turn completion, provider
+failure classification into physical dispositions, and the retry prohibition.
+Turn and attempt lifecycle law lives in
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
+entries and frontiers in [sessions-and-transcript](sessions-and-transcript.md);
+storage protocol and the outbox in
+[persistence-protocol](persistence-protocol.md); the typed model-runtime layer
+and hub runtime in [runtime-substrate](runtime-substrate.md); model
+configuration and credentials in
+[configuration-and-credentials](configuration-and-credentials.md). (The
+companion pages cited here belong to this spec set and have not yet landed in
+the repository; links name their intended homes.) Distilled from ADR-0005,
+ADR-0042, ADR-0043, and ADR-0045; invariant tags cite
+[docs/invariants.md](../invariants.md).
+
+## Call records and lifecycle
+
+A model call is one durable hub authorization to attempt a provider interaction
+(INV-014). Its record (`crates/domain/src/model_call.rs`) fixes at creation:
+`ModelCallId`, owning turn and attempt, the exact frozen model selection, the
+turn-pinned resolved target, and the exact ordered context frontier it consumes
+(INV-015). Nonterminal states are `Prepared`, `InFlight`, and
+`CancellationRequested`; terminal history is a separate `EndedModelCall`
+carrying one of five physical dispositions — `Completed`, `KnownFailed`,
+`Refused`, `Cancelled`, `Ambiguous` — and exposes no transition back (INV-006).
+
+The predecessor matrix:
+
+- `Prepared -> InFlight` is the only send authorization.
+- `Prepared` classifies terminally only as `KnownFailed`; ending an unsent call
+  as `Cancelled` requires the exact applied-interrupt proof for the call's own
+  turn (INV-029). An unsent call cannot complete, refuse, or become ambiguous.
+- `InFlight` and `CancellationRequested` accept every disposition.
+- Terminal state never reopens. Why: terminal physical history is the record of
+  what was externally done, and rewriting it would let later facts silently
+  change that record.
+
+Storage enforces the matrix durably
+(`crates/persistence/migrations/202607220001_model_call_execution.sql`): the
+`model_call_changes_are_guarded` trigger rejects any insert whose state is not
+`Prepared`, any mutation of the ten authorization-fact columns, any
+non-monotonic transition, any rewrite of a terminal row, any unsent-terminal
+disposition other than `KnownFailed`/`Cancelled`, and any delete;
+`model_call_pinned_target_fk` forces every call row's resolved target to equal
+the turn's pinned target. Why: the schema backstops the aggregate against any
+buggy or racing writer, not just the audited one.
+
+The provider target is pinned as a turn-level fact before any call exists: the
+turn's frozen selection resolves through an immutable configured
+`ModelTargetCatalog` to one exact `ResolvedProviderTarget`, and every call in
+the turn must use it (the pin FK above is the durable form of "must").
+Resolution failure pins nothing, creates no call, and atomically fails the
+attempt and turn. Why: pinning before the first `ModelCallId` prevents a mutable
+alias or deployment change from being smuggled into a turn as recovery.
+
+## Aggregate and reconstitution
+
+`ModelCallExecution` (`crates/domain/src/model_execution.rs`) is the
+purpose-specific aggregate: one active accepted-input turn in its `Running`
+phase plus at most one initial call. Reconstitution is fail-closed: it rejects a
+non-running phase, session or snapshot mismatches, frontier entries that do not
+exactly back ordered membership, missing or unreferenced origin content, a call
+whose turn/attempt/frontier/selection/target contradict the checked turn facts,
+more than one call, and any attempt/call state pair outside `(Prepared, none)`,
+`(Prepared, Prepared)`, or `(Running, InFlight)`. Why: acting on a partially
+consistent projection could authorize a second provider effect against stale
+authority, so every invalid shape refuses rather than repairs. Sealed
+constructors (compile-fail-tested) prevent forging call records or terminal
+history outside the aggregate (INV-002).
+
+## Frontier rendering
+
+`PreparedModelOperation::render` (`crates/application/src/model_execution.rs`)
+projects the exact frontier order into provider-neutral messages:
+
+- `OriginAcceptedInput` renders as a user message with its checked accepted
+  input content;
+- `AssistantText` renders as an assistant message retaining its producing-call
+  provenance;
+- `TurnFailed` and `TurnCompleted` markers are skipped — they delimit history
+  and carry no model-visible content;
+- `AssistantToolUse` fails closed (operator error) until the reserved tool
+  decisions land.
+
+Every message keeps its source-qualified semantic-entry reference. Why:
+inherited entries need not come from a native turn in the current session, so
+role and provenance derive from the entry itself, never from turn grouping. The
+runtime bridge then maps these to provider wire messages; provider types never
+cross the application boundary (INV-002; ADR-0047).
+
+## Staged execution
+
+`ModelCallExecutionService::execute` runs one linear invocation over five
+composed roles (prepare, capability, authorize-send, provider,
+commit-observation) plus an id generator and a dispatch gate. No database
+transaction is ever open across credential I/O or provider work.
+
+1. **Prepare transaction.** Locks the session, reconstitutes the aggregate, and
+   either: reports no runnable work; creates and commits the exact `Prepared`
+   call, the turn-target pin, and a `ModelCallTransition` (`Prepared`) outbox
+   event, then stops the invocation (`Checkpointed`); reloads an
+   already-committed `Prepared` call read-only and returns its request material
+   (`Ready`); closes target-resolution failure as an atomic no-call
+   attempt-and-turn failure; or refuses because acknowledged steering is
+   pending. A new `Prepared` call is never advanced to `InFlight` in its
+   creating transaction. Why: committing durable call identity before any
+   external step means a crash can never produce a provider effect with nothing
+   durable to classify.
+2. **Capability preparation (no transaction).** The provider adapter resolves
+   its credential internally and builds an opaque, one-shot, call-bound send
+   capability; application and domain code only move the value and cannot
+   inspect, persist, or log it (INV-035;
+   [configuration-and-credentials](configuration-and-credentials.md)). Why: a
+   nonserializable one-shot value makes credential escape and capability reuse
+   structurally impossible rather than a review convention. A trustworthy
+   ordinary failure here commits the accepted `Prepared -> KnownFailed` closure
+   with attempt and turn failure in a separate guarded transaction; an adapter
+   defect is an operator failure and commits no provider-failure closure.
+3. **Authorize-send transaction.** After acquiring the process-shared
+   per-attempt dispatch gate, a distinct transaction reloads authority and
+   commits `Prepared -> InFlight` with the attempt's `Prepared -> Running` and a
+   `ModelCallTransition` (`InFlight`) outbox event — every durable physical
+   transition, not just the terminal one, is externally observable atomically
+   with its commit. The gate permit is retained into the send and released at
+   the runtime's first report that provider acceptance is possible
+   (`SendCommenced`); if no acceptance report ever arrives, it is released when
+   the provider interaction returns, and the ambiguous-authorization reread
+   paths drop it before returning. Why: holding the gate across the authorize
+   commit and send start prevents a stop transition and a new physical send from
+   passing one another in-process.
+4. **Provider interaction (no transaction).** The provider port is invoked at
+   most once per invocation, and exactly once only after the `InFlight` commit
+   is known. It consumes the capability exactly once and returns one
+   provider-neutral terminal observation bound to the sealed issued correlation
+   (session, turn, attempt, call, target, frontier).
+5. **Commit-observation transaction.** A fresh transaction reloads and
+   revalidates complete authority — it never trusts the pre-send projection —
+   checks the observation's correlation against fresh state, and atomically
+   commits the call disposition, attempt and turn transitions, semantic entries,
+   terminal frontier, and outbox rows.
+
+Failure keeps its stage: `ModelCallExecutionError` names which of prepare,
+render, capability, capability-failure commit, authorization, authorization
+reread, provider, or observation commit failed.
+
+### Identity minting and commit ambiguity
+
+The application owns all candidate identity minting (UUIDv7); persistence uses
+or discards candidates but never mints its own. Call, entry, and frontier
+candidates are minted immediately before each port call. The one exception is
+reclassified successor-turn ids: the service passes an application-owned
+generator closure that the persistence adapter invokes during the transaction,
+once per pending steering input found under the lock (startup recovery does the
+same). Why: how many successors exist is knowable only inside the locked
+transaction, so the count moves into the transaction while minting authority
+stays with the application. A proven hub-minted identity collision
+(unique-violation rollback on the call, entry, frontier, or reclassified-turn
+key) is the only same-invocation transaction retry, with fresh candidates and no
+repeated credential or provider work. Why: a proven unique-violation rollback is
+the one failure that guarantees the transaction had no effect, so retrying it
+cannot duplicate anything.
+
+Commit ambiguity has an explicit detection rule (`commit_failure_is_ambiguous`,
+`crates/persistence/src/model_execution.rs`): a database error with SQLSTATE
+08007 or 40003, or any non-database error while awaiting `COMMIT`, is ambiguous;
+a server-rejected commit is a plain non-ambiguous failure; and a unique
+violation surfacing only at `COMMIT` (the identity constraints are deferred) is
+still classified as an identity collision and retried.
+
+Ambiguous commits are never resolved by replay:
+
+- An ambiguous prepare-stage commit fails the invocation; authoritative state
+  must be reread before any later action.
+- An ambiguous authorize-send commit triggers a read-only reread: if the call is
+  still `Prepared`, the capability and permit are discarded and the error
+  returned; if `InFlight` committed, the unconsumed capability is proof of
+  non-send, and the service commits a `KnownFailed` observation for the issued
+  call without ever sending.
+- A failed terminal-observation commit retains the unchanged observation in
+  memory. A later pass rereads durable state first: `Pending` recommits the
+  identical observation; `AlreadyCommitted` (same disposition and content)
+  discards it. Any drift in correlation or content is rejected.
+
+### One call, one physical interaction
+
+Per durable authorization, at most one physical interaction may reach the
+provider-acceptance boundary. Storage backstops single-call-ness independently
+of the aggregate: `model_call_attempt_once UNIQUE (turn_attempt_id)` admits at
+most one call row per attempt against any buggy or racing writer. There is no
+automatic retry after a known failure and no automatic retry of an ambiguous
+outcome (INV-025, INV-026); a known failure fails the attempt and turn, and
+ambiguity parks the turn for recovery. A later scheduler pass never treats an
+issued unclassified call as fresh authorization. Why: a lost acknowledgement
+cannot prove the provider did not act, so repetition risks undisclosed duplicate
+provider effects and spend; honest ambiguity is preferred to an invented
+exactly-once claim.
+
+## Provider observation classification
+
+Classification is an adapter contract consuming ADR-0043's full-request-send
+boundary; the hub never reinterprets SDK errors by retryability or exception
+type. The runtime bridge (`crates/model-provider-runtime/src/lib.rs`) maps the
+runtime's typed terminal evidence ([runtime-substrate](runtime-substrate.md)
+owns how evidence is derived) to exactly one disposition:
+
+| Terminal evidence                       | Disposition   |
+| --------------------------------------- | ------------- |
+| `Completed` (text-only content)         | `Completed`   |
+| `Refused`                               | `Refused`     |
+| `ProviderError` (any kind, incl. rate   | `KnownFailed` |
+| limit, credential rejection, overload)  |               |
+| `ProvenUnsent` (proof of no acceptance) | `KnownFailed` |
+| `CancellationConfirmed`                 | `Cancelled`   |
+| `BoundaryLoss` (loss after possible     | `Ambiguous`   |
+| acceptance, incl. timeouts)             |               |
+
+The bridge maps `Refused` evidence unconditionally; that such evidence arises
+only from an authenticated complete exchange is the runtime layer's contract
+([runtime-substrate](runtime-substrate.md)), not rechecked here. Empty text
+blocks are dropped without creating invalid entries; thinking,
+redacted-thinking, or tool-call parts fail the adapter stage closed as operator
+errors (the text-only slice cannot represent them). A provider-reported model
+differing from the expected exact spelling — in early observations or terminal
+evidence — also fails the adapter stage closed rather than classifying, because
+ADR-0005's mismatch evidence is not yet representable durably (see Open edges).
+Scripted providers declare their exact terminal observation; nothing is inferred
+from timing or injected I/O errors (ADR-0043).
+
+## Terminal outcomes
+
+`apply_terminal_observation` derives one of four outcomes from fresh state, and
+persistence commits it atomically with its outbox rows
+([persistence-protocol](persistence-protocol.md)):
+
+- **Completed.** The call ends `Completed`; the attempt ends `TurnCompleted`;
+  one `AssistantText` semantic entry per text part is appended in final-response
+  order, each naming the producing call; the `TurnCompleted` marker is appended
+  last; the terminal frontier extends the call's exact source frontier with
+  those entries. The single implemented writer (`persist_completed`) commits
+  call disposition, attempt end, entries, marker, frontier, and turn lifecycle
+  in one transaction (ADR-0042's all-or-nothing boundary), so no committed state
+  carries a prefix of the sequence, a completed turn without its marker, or the
+  marker before its content; storage deduplicates the marker
+  (`semantic_transcript_entry_turn_completed_once`) but the
+  completed-turn-has-marker direction is transactional discipline, not a schema
+  constraint. Why: a physically completed call is not a completed turn, so
+  completion is an explicit aggregate fact rather than an inference from call
+  state.
+- **KnownFailed / Cancelled.** The call keeps its exact physical disposition;
+  the attempt ends `KnownFailure`; the turn fails with a `TurnFailed` entry and
+  terminal frontier. A physical cancellation without an applied-interrupt proof
+  is turn failure, not turn cancellation.
+- **Refused.** The call ends `Refused`; the attempt ends `TurnRefused`; the turn
+  terminalizes `Refused` atomically with an equal-content terminal frontier. No
+  refusal-content entry exists yet (INV-018; open edge).
+- **Ambiguous.** The call ends terminally `Ambiguous`; the attempt ends
+  `Ambiguous` (live) or `Lost` (startup); the turn enters the durable
+  `awaiting_model_call_recovery` phase carrying the exact wait set (that one
+  call) and retains the session slot. No semantic entry or frontier is created.
+
+Every non-ambiguous outcome atomically reclassifies each pending steering input
+into a fresh queued successor turn at its original acceptance position
+(`NoSafePointBeforeTerminal`), inheriting the source turn's effective
+configuration; see
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) (INV-016).
+
+## Serialization and locking
+
+Every model-call transaction — prepare, capability-failure closure,
+authorize-send, observation commit, both rereads, and startup recovery — issues
+the per-session `session_scheduler` row lock (`FOR UPDATE`,
+`crates/persistence/src/lock_inventory.rs`) as its first statement. The reviewed
+lock statement bundles a session-existence probe (startup's variant also reads
+the active turn) into the same SELECT, so lock-before-read is guaranteed at
+statement granularity, not within the statement. Why: one lock statement issued
+first in every transaction makes per-session serialization total and lock-order
+cycles impossible. The in-process per-attempt dispatch gate is the only other
+ordering primitive; in this slice the execution service is its sole consumer.
+
+## Crash, restart, and supervision
+
+hubd (`apps/hubd/src/lib.rs`, `main.rs`) wraps execution in
+`FatalExecutionSupervisor`: any post-activation stage failure raises a fatal
+signal, the scheduler stops, and the process exits nonzero so the next
+incarnation's startup scan regains authority. Why: startup recovery is the one
+audited path that classifies an issued call from durable evidence, so a live
+process that cannot construct a trustworthy result must stop rather than
+improvise.
+
+Startup recovery (`crates/persistence/src/startup.rs`), inside the same
+per-session locked transaction as the general scan (INV-034):
+
+- a durable `Prepared` call proves no send authorization existed; the call ends
+  `KnownFailed`, the abandoned attempt ends `Lost`, and the turn fails,
+  reclassifying pending steering;
+- a durable `InFlight` call with no surviving evidence ends `Ambiguous`, the
+  abandoned attempt ends `Lost`, and the turn parks in
+  `awaiting_model_call_recovery`.
+
+Recovery is configuration-independent: `require_live_execution_for_restart`
+passes no configured catalog and rebuilds target authority from the stored
+call's own selection and target facts, so a deployment-configuration change can
+never block or alter classification of an issued call. Recovery never resumes an
+attempt, redispatches a call, or assumes a request was or was not sent.
+
+## Composition and harness
+
+Production composition wires `PostgresModelCallRepository` (all four transaction
+roles), the in-process gate, and `RuntimeModelCallProvider` over the Anthropic
+runtime, with the domain target catalog and runtime model catalog built from one
+versioned static configuration file and a reread credential file
+([configuration-and-credentials](configuration-and-credentials.md)). The
+`signalbox-debug` binary (`apps/hubd/src/bin/signalbox-debug.rs`) drives one
+session through the real scheduler and PostgreSQL path with either a
+deterministic scripted reply or an explicit `--anthropic` smoke mode, then
+prints the semantic transcript; it is deliberately not the client protocol.
+
+## Open edges
+
+- Provider-target mismatch evidence (ADR-0005's `ProviderTargetEvidence`,
+  mismatch-selects-`KnownFailed`, and post-completion invalidation) is
+  unimplemented; the adapter fails closed with an operator error, so a
+  mismatched call is classified `Ambiguous` by restart rather than `KnownFailed`
+  live.
+- Ambiguity recovery is a parked state only: no owner decision,
+  `DuplicateRiskAccepted`, replacement call, or outcome-authority transfer is
+  implemented.
+- No path requests provider cancellation (`CancellationSignal::never()`);
+  `CancellationRequested` and the unsent-cancellation proof transition are
+  sealed, unwired domain seams.
+- Streaming deltas are collected but never delivered as transient drafts, and
+  ADR-0045's early-observation pause/commit/resume path is unimplemented.
+- The aggregate admits at most one call per turn (with the one-row-per-attempt
+  schema backstop); continuation calls and safe-point steering consumption are
+  unimplemented — pending steering blocks preparation and is reclassified at
+  terminalization.
+- A refused turn commits no refusal-content semantic entry; the variant remains
+  open under ADR-0042.
+- `AssistantToolUse` construction is schema-blocked pending the reserved tool
+  decisions.
+- Same-incarnation retained-observation reconciliation exists in the service but
+  production wiring escalates every stage failure fatally, so the drain path is
+  exercised only by tests.
+- No timeout budget bounds provider work; a hung stream blocks the attempt until
+  operator restart.
