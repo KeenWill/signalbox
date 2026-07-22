@@ -186,7 +186,8 @@ impl SemanticTranscriptEntryReconstitutionInput {
 mod tests {
     use super::*;
     use crate::test_support::{
-        accepted_input_id, semantic_transcript_entry_id, session_id, turn_id,
+        accepted_input_id, model_call_id, semantic_transcript_entry_id, session_id,
+        tool_request_id, turn_id,
     };
 
     /// One semantic entry with canonical identity and source-session plumbing;
@@ -200,15 +201,21 @@ mod tests {
     }
 
     /// INV-001 / INV-005: the initial semantic projection remains a closed
-    /// typed reference to its distinct accepted-input or turn subject.
+    /// typed reference to its distinct accepted-input, turn, or tool subject.
     #[test]
     fn initial_payload_variants_preserve_exact_typed_subjects() {
         let accepted_input = accepted_input_id(2);
         let turn = turn_id(3);
+        let producing_call = model_call_id(4);
+        let request = tool_request_id(5);
         let origin = semantic_entry(InitialSemanticTranscriptEntryPayload::OriginAcceptedInput {
             accepted_input,
         });
         let failed = semantic_entry(InitialSemanticTranscriptEntryPayload::TurnFailed { turn });
+        let tool_use = semantic_entry(InitialSemanticTranscriptEntryPayload::AssistantToolUse {
+            producing_call,
+            request,
+        });
 
         assert!(matches!(
             origin.payload(),
@@ -219,6 +226,13 @@ mod tests {
         assert!(matches!(
             failed.payload(),
             InitialSemanticTranscriptEntryPayload::TurnFailed { turn: actual } if *actual == turn
+        ));
+        assert!(matches!(
+            tool_use.payload(),
+            InitialSemanticTranscriptEntryPayload::AssistantToolUse {
+                producing_call: actual_call,
+                request: actual_request,
+            } if *actual_call == producing_call && *actual_request == request
         ));
     }
 

@@ -1603,8 +1603,8 @@ pub enum SemanticTranscriptEntryPayload {
 }
 
 pub struct SemanticTranscriptEntry { /* private */ }
-// sealed: checked scheduling reconstitution and live eligibility are the only
-// producers
+// sealed: checked scheduling reconstitution plus prepared eligibility and
+// model-execution candidates are the only producers
 impl SemanticTranscriptEntry {
     // accessors: identity(), source_session(), payload(), reference()
 }
