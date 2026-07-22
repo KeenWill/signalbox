@@ -220,25 +220,9 @@ impl StreamDecoder {
                 "message_start is missing its message/assistant envelope discriminators",
             );
         }
-        if !event.message.content.is_empty() {
-            return self.violation("message_start must not carry content blocks");
-        }
-        if event.message.stop_reason.is_some() || event.message.stop_sequence.is_some() {
-            return self.violation("message_start must not carry terminal metadata");
-        }
-        let (Some(id), Some(model), Some(usage)) = (
-            event.message.id,
-            event.message.model,
-            event.message.usage.as_ref(),
-        ) else {
-            return self.violation("message_start is missing required fields (id, model, usage)");
+        let Some(model) = event.message.model.as_deref() else {
+            return self.violation("message_start is missing required field model");
         };
-        if usage.input_tokens.is_none() {
-            return self.violation("message_start usage is missing input_tokens");
-        }
-        self.started = true;
-        self.input_usage_reported = true;
-        self.message_id = Some(ProviderMessageId::new(id));
         let model = ProviderReportedModel::new(model);
         self.reported_model = Some(model.clone());
         Self::emit(
@@ -246,6 +230,21 @@ impl StreamDecoder {
             sink,
             ObservationFact::ProviderModelReported(model),
         );
+        if !event.message.content.is_empty() {
+            return self.violation("message_start must not carry content blocks");
+        }
+        if event.message.stop_reason.is_some() || event.message.stop_sequence.is_some() {
+            return self.violation("message_start must not carry terminal metadata");
+        }
+        let (Some(id), Some(usage)) = (event.message.id, event.message.usage.as_ref()) else {
+            return self.violation("message_start is missing required fields (id, usage)");
+        };
+        if usage.input_tokens.is_none() {
+            return self.violation("message_start usage is missing input_tokens");
+        }
+        self.started = true;
+        self.input_usage_reported = true;
+        self.message_id = Some(ProviderMessageId::new(id));
         let usage = convert_usage(usage);
         self.usage.absorb(usage);
         Self::emit(correlation, sink, ObservationFact::UsageReported(usage));
@@ -491,9 +490,19 @@ impl StreamDecoder {
         if event.event_type != "message_delta" {
             return self.violation("message_delta payload has the wrong discriminator");
         }
-        if let Some(delta) = event.delta
-            && let Some(stop_reason) = delta.stop_reason
-        {
+        if let Some(delta) = event.delta {
+            let Some(stop_reason) = delta.stop_reason else {
+                if delta.stop_sequence.is_some() {
+                    return self
+                        .violation("message_delta carries a stop_sequence without a stop_reason");
+                }
+                if let Some(usage) = event.usage.as_ref() {
+                    let usage = convert_usage(usage);
+                    self.usage.absorb(usage);
+                    Self::emit(correlation, sink, ObservationFact::UsageReported(usage));
+                }
+                return StreamStep::Continue;
+            };
             if !self.open_blocks.is_empty() {
                 return self
                     .violation("message_delta reports a stop_reason with open content blocks");
@@ -506,6 +515,10 @@ impl StreamDecoder {
             {
                 return self
                     .violation("message_delta reports a stop_reason without final output usage");
+            }
+            if (stop_reason == "stop_sequence") != delta.stop_sequence.is_some() {
+                return self
+                    .violation("message_delta stop_reason contradicts its stop_sequence metadata");
             }
             let finish = map_finish(&stop_reason, delta.stop_sequence);
             self.finish = Some(finish.clone());
@@ -1200,7 +1213,7 @@ mod tests {
 
     #[test]
     fn message_start_with_terminal_metadata_is_a_protocol_violation() {
-        let (terminal, _) = drive(&[b"event: message_start\n\
+        let (terminal, observations) = drive(&[b"event: message_start\n\
               data: {\"type\":\"message_start\",\"message\":{\"type\":\"message\",\
               \"role\":\"assistant\",\"id\":\"msg_1\",\"model\":\"model-exact-1\",\
               \"content\":[],\"stop_reason\":\"refusal\",\"stop_sequence\":null,\
@@ -1213,6 +1226,31 @@ mod tests {
             loss.cause,
             LossCause::StreamProtocolViolation { .. }
         ));
+        assert_eq!(
+            loss.reported_model,
+            Some(ProviderReportedModel::new("model-exact-1"))
+        );
+        assert!(observations.iter().any(|observation| matches!(
+            &observation.fact,
+            ObservationFact::ProviderModelReported(model)
+                if model.as_str() == "model-exact-1"
+        )));
+    }
+
+    #[test]
+    fn contradictory_stop_sequence_metadata_is_a_protocol_violation() {
+        for delta in [
+            r#"{"stop_reason":"stop_sequence","stop_sequence":null}"#,
+            r#"{"stop_reason":"end_turn","stop_sequence":"END"}"#,
+            r#"{"stop_sequence":"END"}"#,
+        ] {
+            let event = format!(
+                "event: message_delta\ndata: {{\"type\":\"message_delta\",\
+                 \"delta\":{delta},\"usage\":{{\"output_tokens\":1}}}}\n\n"
+            );
+            let (terminal, _) = drive(&[message_start(), event.as_bytes()]);
+            assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
+        }
     }
 
     #[test]

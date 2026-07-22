@@ -159,6 +159,11 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
                 detail: "base URL must not carry a query or fragment".to_string(),
             });
         }
+        if !messages_url.username().is_empty() || messages_url.password().is_some() {
+            return Err(AnthropicConstructionError::InvalidBaseUrl {
+                detail: "base URL must not carry user information".to_string(),
+            });
+        }
         if !matches!(messages_url.scheme(), "http" | "https") {
             // A non-HTTP scheme would fail only inside send(), after
             // SendCommenced, and read as ambiguous transport loss; it is an
@@ -719,6 +724,9 @@ async fn with_cancellation<F: Future>(
 /// The credential as a sensitivity-marked header value, or `None` when its
 /// bytes cannot form one. The value never appears in errors or logs.
 fn sensitive_header(api_key: &CredentialValue) -> Option<HeaderValue> {
+    if api_key.expose_bytes().is_empty() || std::str::from_utf8(api_key.expose_bytes()).is_err() {
+        return None;
+    }
     let mut header = HeaderValue::from_bytes(api_key.expose_bytes()).ok()?;
     header.set_sensitive(true);
     Some(header)
@@ -819,6 +827,7 @@ impl<C: Clone> ObservationSink<C> for RedactingObservationSink<'_, C> {
                 text,
             ),
             ObservationFact::ToolArgumentsDelta { index, fragment } => {
+                self.flush();
                 self.inner.observe(Observation {
                     correlation: observation.correlation,
                     fact: ObservationFact::ToolArgumentsDelta {
@@ -867,6 +876,17 @@ fn redact_bounded_text(text: String, credential: &str) -> String {
     redacted
 }
 
+fn redact_native_message(text: String, credential: &str) -> String {
+    const TRUNCATION_SUFFIX: &str = " … [truncated]";
+    if let Some(body) = text.strip_suffix(TRUNCATION_SUFFIX) {
+        let mut redacted = redact_bounded_text(body.to_string(), credential);
+        redacted.push_str(TRUNCATION_SUFFIX);
+        redacted
+    } else {
+        redact_bounded_text(text, credential)
+    }
+}
+
 /// Redacts a complete credential and any trailing prefix of it. Provider
 /// chunk boundaries are arbitrary: removing a credential prefix at the end
 /// of every emitted delta prevents a later delta from completing the secret
@@ -878,23 +898,21 @@ fn redact_complete_credentials_and_hold_prefix(
     if credential.is_empty() {
         return (text, String::new());
     }
-    let mut redacted = String::new();
-    while let Some(position) = text.find(credential) {
-        redacted.push_str(&text[..position]);
-        redacted.push_str("[redacted]");
-        text = text[(position + credential.len())..].to_string();
-    }
+    // Only the suffix after the last complete credential can contain a
+    // trailing credential prefix. Locate that suffix once, then perform one
+    // linear replacement over the emitted prefix instead of repeatedly
+    // allocating the unprocessed remainder.
+    let tail_start = text
+        .rfind(credential)
+        .map_or(0, |position| position + credential.len());
+    let tail = &text[tail_start..];
     let longest_prefix = (1..credential.len())
         .rev()
         .filter(|length| credential.is_char_boundary(*length))
-        .find(|length| text.ends_with(&credential[..*length]));
-    if let Some(length) = longest_prefix {
-        let split = text.len() - length;
-        redacted.push_str(&text[..split]);
-        return (redacted, text[split..].to_string());
-    }
-    redacted.push_str(&text);
-    (redacted, String::new())
+        .find(|length| tail.ends_with(&credential[..*length]));
+    let split = longest_prefix.map_or(text.len(), |length| text.len() - length);
+    let pending = text.split_off(split);
+    (text.replace(credential, "[redacted]"), pending)
 }
 
 fn redact_exchange(mut exchange: ExchangeFacts, credential: &str) -> ExchangeFacts {
@@ -978,8 +996,15 @@ fn redact_json_value(value: &mut serde_json::Value, credential: &str) -> bool {
             }
             changed
         }
-        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
-            false
+        value @ (serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)) => {
+            if value.to_string().contains(credential) {
+                *value = serde_json::Value::String("[redacted]".to_string());
+                true
+            } else {
+                false
+            }
         }
     }
 }
@@ -1041,7 +1066,9 @@ fn redact_evidence(evidence: TerminalEvidence, api_key: &CredentialValue) -> Ter
     let redact = move |text: String| -> String { redact_text(text, key_text) };
     let redact_native = |mut native: NativeErrorFacts| -> NativeErrorFacts {
         native.error_token = native.error_token.map(redact);
-        native.message = native.message.map(redact);
+        native.message = native
+            .message
+            .map(|message| redact_native_message(message, key_text));
         native
     };
     let redact_transport =
@@ -1163,8 +1190,8 @@ mod tests {
 
     use super::{
         MAX_STREAMED_RESPONSE_BYTES, RedactingObservationSink, build_http_request,
-        process_streamed_chunk, redact_evidence, redact_json, serialize_request,
-        streamed_response_prefix_len, without_unproven_refusal,
+        process_streamed_chunk, redact_evidence, redact_json, redact_native_message,
+        serialize_request, streamed_response_prefix_len, without_unproven_refusal,
     };
     use crate::stream::StreamDecoder;
 
@@ -1173,6 +1200,30 @@ mod tests {
         let redacted = redact_json(r#"{"token":"key_\u006coop"}"#.to_string(), "key_loop");
 
         assert_eq!(redacted, r#"{"token":"[redacted]"}"#);
+    }
+
+    #[test]
+    fn credential_reflected_as_a_json_primitive_is_redacted() {
+        assert_eq!(
+            redact_json(r#"{"value":1234}"#.to_string(), "23"),
+            r#"{"value":"[redacted]"}"#
+        );
+        assert_eq!(
+            redact_json(r#"{"value":true}"#.to_string(), "true"),
+            r#"{"value":"[redacted]"}"#
+        );
+        assert_eq!(
+            redact_json(r#"{"value":null}"#.to_string(), "null"),
+            r#"{"value":"[redacted]"}"#
+        );
+    }
+
+    #[test]
+    fn truncated_native_body_redacts_a_credential_prefix_at_the_cut() {
+        assert_eq!(
+            redact_native_message("safe key_ … [truncated]".to_string(), "key_loop"),
+            "safe [redacted] … [truncated]"
+        );
     }
 
     #[test]
@@ -1321,6 +1372,41 @@ mod tests {
             ObservationFact::ToolArgumentsDelta { fragment, .. }
                 if fragment == r#"{"token":"[redacted]"}"#
         )));
+    }
+
+    #[test]
+    fn pending_text_is_flushed_before_a_tool_delta_is_forwarded() {
+        let mut observed = Vec::new();
+        let credential = CredentialValue::new(b"key_loop".to_vec());
+        let mut redacting = RedactingObservationSink::new(&mut observed, &credential);
+        redacting.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::TextDelta {
+                index: 0,
+                text: "safe key_".to_string(),
+            },
+        });
+        redacting.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ToolArgumentsDelta {
+                index: 1,
+                fragment: "{}".to_string(),
+            },
+        });
+        drop(redacting);
+
+        let text_before_tool = observed[..observed.len() - 1]
+            .iter()
+            .filter_map(|observation| match &observation.fact {
+                ObservationFact::TextDelta { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(text_before_tool, "safe [redacted]");
+        assert!(matches!(
+            observed.last().expect("tool delta is forwarded").fact,
+            ObservationFact::ToolArgumentsDelta { .. }
+        ));
     }
 
     #[test]

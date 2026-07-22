@@ -222,6 +222,18 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             usage,
         });
     };
+    if (stop_reason == "stop_sequence") != response.stop_sequence.is_some() {
+        return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            cause: LossCause::ResponseUnintelligible {
+                detail: "success response stop_reason contradicts its stop_sequence metadata"
+                    .to_string(),
+            },
+            exchange,
+            reported_model,
+            finish_reported: None,
+            usage,
+        });
+    }
     let finish = map_finish(&stop_reason, response.stop_sequence);
     if matches!(finish, FinishReason::Unrecognized { .. }) {
         return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
@@ -461,6 +473,23 @@ mod tests {
             Some(ProviderReportedModel::new("model-exact-1"))
         );
         assert_eq!(loss.usage.input_tokens, Some(3));
+    }
+
+    #[test]
+    fn contradictory_stop_sequence_metadata_is_boundary_loss() {
+        for terminal in [
+            r#""stop_reason":"stop_sequence","stop_sequence":null"#,
+            r#""stop_reason":"end_turn","stop_sequence":"END""#,
+        ] {
+            let body = format!(
+                r#"{{
+                    "id":"msg_1","type":"message","role":"assistant",
+                    "model":"model-exact-1","content":[],{terminal},
+                    "usage":{{"input_tokens":1,"output_tokens":1}}
+                }}"#
+            );
+            assert!(matches!(decode(&body).0, TerminalEvidence::BoundaryLoss(_)));
+        }
     }
 
     #[test]
