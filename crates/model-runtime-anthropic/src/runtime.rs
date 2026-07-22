@@ -81,7 +81,7 @@ impl<A> std::fmt::Debug for AnthropicRuntime<A> {
 /// no operation exists yet, so nothing is reported as unsent.
 #[derive(Debug)]
 pub enum AnthropicConstructionError {
-    /// The configured base URL does not parse as an absolute URL.
+    /// The configured base URL is not an acceptable absolute HTTP(S) URL.
     InvalidBaseUrl {
         /// The parser's rendered description.
         detail: String,
