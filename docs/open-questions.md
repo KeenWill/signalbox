@@ -27,7 +27,9 @@ accepted records; those numbers remain reserved for their topics.
   text, logical tool-use references, completed-turn markers, and their final
   response commit boundary. Refusal, cancellation, reconciliation, mismatch,
   accepted-risk, steering, tool-result, approval, and delegation variants remain
-  open together with rich assistant content and provider/client rendering.
+  open together with rich assistant content and provider/client rendering. The
+  M3 boundary and its reopening obligation are recorded in the
+  [pending-steering fail-closed decision](decisions.md#2026-07-22--m3-pending-steering-fail-closed-boundary).
   Blocks only those later semantic-history slices. (S02–S04, S08, S09, S17)
 - **Selectable transcript-frontier boundaries.** Which terminal semantic
   boundaries a client may select as a `TranscriptFrontier` remains open;

@@ -924,6 +924,22 @@ pub enum AcceptedInputTurnSchedulingRecordState {
         starting_frontier: ContextFrontierId,
         terminal_frontier: ContextFrontierId,
     },
+    TerminalCompleted {
+        starting_lineage: AcceptedInputStartingLineage,
+        starting_frontier: ContextFrontierId,
+        completing_attempt: TurnAttemptId,
+        completing_attempt_disposition: UnstoppedAttemptDisposition,
+        completing_call: ModelCallId,
+        terminal_frontier: ContextFrontierId,
+    },
+    TerminalRefused {
+        starting_lineage: AcceptedInputStartingLineage,
+        starting_frontier: ContextFrontierId,
+        refusing_attempt: TurnAttemptId,
+        refusing_attempt_disposition: UnstoppedAttemptDisposition,
+        refusing_call: ModelCallId,
+        terminal_frontier: ContextFrontierId,
+    },
 }
 
 pub struct ActiveTurnSchedulingReconstitutionInput { /* private */ }
@@ -935,6 +951,16 @@ impl ActiveTurnSchedulingReconstitutionInput {
     pub const fn running(
         owning_turn: TurnId,
         current_attempt: TurnAttemptId,
+    ) -> Self;
+    pub const fn awaiting_model_call_recovery(
+        owning_turn: TurnId,
+        ended_attempt: TurnAttemptId,
+        ambiguous_call: ModelCallId,
+    ) -> Self;
+    pub const fn awaiting_model_call_recovery_after_restart(
+        owning_turn: TurnId,
+        ended_attempt: TurnAttemptId,
+        ambiguous_call: ModelCallId,
     ) -> Self;
     // accessor: owning_turn()
 }
@@ -961,6 +987,12 @@ impl SessionAcceptanceTailReconstitutionInput {
     // accessors: session(), anchor(), observed_last_position(), entries()
 }
 
+pub struct PendingSteeringInput { /* private */ }
+// sealed: checked AcceptedInputSchedulingProjection::active_turn_execution
+impl PendingSteeringInput {
+    // accessors: accepted_input(), lifecycle(), acceptance_position()
+}
+
 pub struct AcceptedInputTurnSchedulingRecord { /* private */ }
 impl AcceptedInputTurnSchedulingRecord {
     pub fn new(
@@ -975,9 +1007,22 @@ impl AcceptedInputTurnSchedulingRecord {
         origin_configuration: OriginConfiguration,
         state: AcceptedInputTurnSchedulingRecordState,
     ) -> Self;
+    pub fn reclassified(
+        stored_session: SessionId,
+        turn: TurnId,
+        accepted_input_session: SessionId,
+        accepted_input: AcceptedInputLifecycle,
+        queue_session: SessionId,
+        queue_turn: TurnId,
+        order: AcceptedInputQueueOrder,
+        origin_delivery: DeliveryRequest,
+        binding: SteeringBinding,
+        source_configuration: OriginConfiguration,
+        state: AcceptedInputTurnSchedulingRecordState,
+    ) -> Self;
     // accessors: stored_session(), turn(), accepted_input_session(),
     // accepted_input(), queue_session(), queue_turn(), order(),
-    // origin_delivery(), origin_configuration(), state()
+    // origin_delivery(), origin_configuration(), configuration_provenance(), state()
 }
 
 pub struct AcceptedInputSchedulingReconstitutionInput { /* private */ }
@@ -994,8 +1039,13 @@ impl AcceptedInputSchedulingReconstitutionInput {
             AcceptedInputSchedulingProjection,
             AcceptedInputSchedulingReconstitutionError,
         >;
+    pub fn with_model_call_facts(
+        self,
+        pinned_targets: Vec<PinnedProviderTargetReconstitutionInput>,
+        model_calls: Vec<ModelCallReconstitutionInput>,
+    ) -> Self;
     // accessors: session(), turns(), semantic_entries(), snapshots(),
-    // active_acceptance_tail()
+    // pinned_targets(), model_calls(), active_acceptance_tail()
 }
 
 pub enum AcceptedInputSchedulingReconstitutionFailure {
@@ -1013,8 +1063,29 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
     SemanticEntrySubjectMissing { entry: SemanticTranscriptEntryId },
     SemanticEntryStateMismatch { entry: SemanticTranscriptEntryId },
     DuplicateSemanticEntryForSubject { entry: SemanticTranscriptEntryId },
+    UnsupportedSemanticEntry { entry: SemanticTranscriptEntryId },
+    SemanticEntryCallMissing {
+        entry: SemanticTranscriptEntryId,
+        call: ModelCallId,
+    },
+    SemanticEntryCallMismatch {
+        entry: SemanticTranscriptEntryId,
+        call: ModelCallId,
+    },
+    DuplicateModelCall { call: ModelCallId },
+    DuplicatePinnedTarget { turn: TurnId },
+    PinnedTargetMissing { call: ModelCallId },
+    UnreferencedPinnedTarget { turn: TurnId },
+    ModelCallSnapshotMissing { call: ModelCallId },
+    InvalidModelCall { call: ModelCallId },
+    UnreferencedModelCall { call: ModelCallId },
+    TerminalModelCallMissing { turn: TurnId, call: ModelCallId },
+    TerminalModelCallMismatch { turn: TurnId },
+    RecoveryModelCallMissing { turn: TurnId, call: ModelCallId },
+    RecoveryModelCallMismatch { turn: TurnId },
     MissingOriginEntry { turn: TurnId },
     MissingFailureEntry { turn: TurnId },
+    MissingCompletionEntry { turn: TurnId },
     CurrentAttemptOwnershipMismatch { turn: TurnId, attempt: TurnAttemptId },
     DuplicateCurrentAttempt { attempt: TurnAttemptId },
     ActivePhaseEvidenceMismatch {
@@ -1080,14 +1151,16 @@ pub enum AcceptedInputTurnSchedulingStatus {
     Queued,
     Active,
     TerminalFailed,
+    TerminalCompleted,
+    TerminalRefused,
 }
 
 pub struct AcceptedInputTurnSchedulingProjection { /* private */ }
 // sealed: AcceptedInputSchedulingReconstitutionInput::reconstitute
 impl AcceptedInputTurnSchedulingProjection {
     // accessors: session(), turn(), accepted_input(), order(),
-    // origin_configuration(), status(), start(), active_phase(),
-    // failed_terminal_frontier()
+    // origin_configuration(), configuration_provenance(), status(), start(), active_phase(),
+    // failed_terminal_frontier(), terminal_frontier()
 }
 
 pub struct AcceptedInputSchedulingProjection { /* private */ }
@@ -1101,6 +1174,7 @@ impl AcceptedInputSchedulingProjection {
         turn: TurnId,
     ) -> Option<&AcceptedInputTurnSchedulingProjection>;
     pub fn active_turn(&self) -> Option<&AcceptedInputTurnSchedulingProjection>;
+    pub fn active_turn_execution(&self) -> Option<ActivatedAcceptedInputTurn>;
     pub fn earliest_queued_turn(&self)
         -> Option<&AcceptedInputTurnSchedulingProjection>;
     pub fn prepare_earliest_queued_activation(
@@ -1125,10 +1199,10 @@ impl AcceptedInputTurnActivationIdentities {
 }
 
 pub struct ActivatedAcceptedInputTurn { /* private */ }
-// sealed: PreparedAcceptedInputTurnActivation
+// sealed: PreparedAcceptedInputTurnActivation or checked active scheduling projection
 impl ActivatedAcceptedInputTurn {
     // accessors: session(), turn(), accepted_input(), order(), configuration(),
-    // start(), phase()
+    // configuration_provenance(), start(), phase(), pending_steering()
 }
 
 pub struct PreparedAcceptedInputTurnActivation { /* private */ }
@@ -1350,6 +1424,12 @@ impl PinnedProviderTarget {
     // accessors: turn(), target()
 }
 
+pub struct PinnedProviderTargetReconstitutionInput { /* private */ }
+impl PinnedProviderTargetReconstitutionInput {
+    pub const fn new(turn: TurnId, target: ResolvedProviderTarget) -> Self;
+    // accessors: turn(), target()
+}
+
 pub enum ModelCallDisposition {
     Completed,
     KnownFailed,
@@ -1370,14 +1450,167 @@ pub struct CurrentModelCall { /* private */ }
 // (begin_in_flight, request_cancellation, end_classified,
 // end_cancelled_unsent) are crate-private, reserved for the turn aggregate
 impl CurrentModelCall {
-    // accessors: id(), pinned(), turn(), target(), frontier(), state()
+    // accessors: id(), attempt(), selection(), pinned(), turn(), target(), frontier(), state()
 }
 
 pub struct EndedModelCall { /* private */ }
 // sealed: crate-private end transitions on CurrentModelCall; terminal —
 // no transition back to a current call
 impl EndedModelCall {
-    // accessors: id(), pinned(), turn(), target(), frontier(), disposition()
+    // accessors: id(), attempt(), selection(), pinned(), turn(), target(), frontier(), disposition()
+}
+
+pub enum ModelCallReconstitutionState {
+    Prepared,
+    InFlight,
+    CancellationRequested,
+    Terminal(ModelCallDisposition),
+}
+
+pub struct ModelCallReconstitutionInput { /* private */ }
+impl ModelCallReconstitutionInput {
+    pub const fn new(
+        id: ModelCallId,
+        turn: TurnId,
+        attempt: TurnAttemptId,
+        selection: FrozenModelSelection,
+        target: ResolvedProviderTarget,
+        frontier: ContextFrontierId,
+        state: ModelCallReconstitutionState,
+    ) -> Self;
+    // accessors: id(), turn(), attempt(), selection(), target(), frontier(), state()
+}
+
+pub enum ReconstitutedModelCall {
+    Current(CurrentModelCall),
+    Ended(EndedModelCall),
+}
+
+pub enum ModelCallReconstitutionFailure {
+    FrontierMismatch,
+    PinnedTargetMismatch,
+    InvalidTransition,
+}
+```
+
+## domain: model_execution
+
+```rust
+pub struct ModelTargetDefinition { /* private */ }
+pub struct ModelTargetCatalog { /* private */ }
+pub enum ModelTargetCatalogError { DuplicateSelection { selection: DirectModelSelection } }
+pub struct ResolvedModelSelection { /* private */ }
+pub struct ModelTargetResolutionError { /* private */ }
+pub struct ModelCallOriginContent { /* private */ }
+impl ModelCallOriginContent {
+    pub fn from_recorded_submit(recorded: &ReconstitutedSubmitInput) -> Option<Self>;
+    pub fn from_reconstituted_turn_origin(
+        origin: &SubmitInputTurnOriginReconstitutionInput,
+    ) -> Option<Self>;
+    // accessors: accepted_input(), content()
+}
+
+pub struct ModelCallExecutionReconstitutionInput { /* private */ }
+impl ModelCallExecutionReconstitutionInput {
+    pub fn new(
+        active_turn: ActivatedAcceptedInputTurn,
+        targets: ModelTargetCatalog,
+        starting_snapshot: ResolvedContextFrontierSnapshot,
+        frontier_entries: Vec<SemanticTranscriptEntry>,
+        origin_contents: Vec<ModelCallOriginContent>,
+        pinned_target: Option<PinnedProviderTargetReconstitutionInput>,
+        calls: Vec<ModelCallReconstitutionInput>,
+    ) -> Self;
+    pub fn reconstitute(self) -> Result<ModelCallExecution, ModelCallExecutionReconstitutionError>;
+}
+pub enum ModelCallExecutionReconstitutionFailure {
+    TurnIsNotRunning,
+    StartingSnapshotSessionMismatch,
+    StartingSnapshotMismatch,
+    FrontierEntryMismatch,
+    MultipleCalls,
+    DuplicateOriginContent,
+    MissingOriginContent,
+    UnreferencedOriginContent,
+    CallOwnershipMismatch,
+    CallSelectionMismatch,
+    CallTargetMismatch,
+    PinnedTargetMissing,
+    PinnedTargetUnexpected,
+    PinnedTargetTurnMismatch,
+    InvalidCall,
+    LifecycleMismatch,
+}
+pub struct ModelCallExecutionReconstitutionError { /* private */ }
+
+pub struct ModelCallExecution { /* private */ }
+pub enum ModelCallPreparationFailure {
+    TargetUnavailable,
+    CallAlreadyExists,
+    AttemptIsNotPrepared,
+    PendingSteering { accepted_input: AcceptedInputId },
+}
+pub struct ModelCallPreparationError { /* private */ }
+pub struct PreparedInitialModelCall { /* private */ }
+pub struct PreparedModelCallRequest { /* private */ }
+pub enum ModelCallResumeFailure { CallMissing, CallIsNotPrepared, AttemptIsNotPrepared }
+pub enum ModelCallAuthorizationFailure { CallMissing, CallIsNotPrepared, AttemptIsNotPrepared }
+pub struct ModelCallAuthorizationError { /* private */ }
+pub struct AuthorizedModelCall { /* private */ }
+pub struct IssuedModelCallCorrelation { /* private */ }
+pub struct CorrelatedModelCallTerminalObservation { /* private */ }
+
+pub enum ModelCallTerminalObservation {
+    Completed { assistant_text: Vec<AssistantText> },
+    KnownFailed,
+    Refused,
+    Cancelled,
+    Ambiguous,
+}
+pub struct PendingSteeringReclassificationIdentity { /* private */ }
+impl PendingSteeringReclassificationIdentity {
+    pub const fn new(accepted_input: AcceptedInputId, turn: TurnId) -> Self;
+    // accessors: accepted_input(), turn()
+}
+pub struct CompletedModelCallIdentities { /* private */ }
+// constructor plus with_pending_steering_reclassifications(...)
+pub struct FailedModelCallTurnIdentities { /* private */ }
+// constructor plus with_pending_steering_reclassifications(...)
+pub struct RefusedModelCallTurnIdentities { /* private */ }
+// constructor plus with_pending_steering_reclassifications(...)
+pub enum ModelCallTerminalIdentities {
+    Completed(CompletedModelCallIdentities),
+    Failed(FailedModelCallTurnIdentities),
+    Refused(RefusedModelCallTurnIdentities),
+    Ambiguous,
+}
+pub enum ModelCallTerminalOutcome {
+    Completed(CompletedModelCallTurn),
+    Failed(FailedModelCallTurn),
+    Refused(RefusedModelCallTurn),
+    AwaitingRecovery(AmbiguousModelCallTurn),
+}
+pub struct CompletedModelCallTurn { /* private */ }
+pub struct FailedModelCallTurn { /* private */ }
+pub struct RefusedModelCallTurn { /* private */ }
+// each terminal turn exposes reclassified_pending_steering()
+pub struct ReclassifiedPendingSteeringTurn { /* private */ }
+// sealed: successful model-call terminalization with exact pending identities
+impl ReclassifiedPendingSteeringTurn {
+    // accessors: session(), source_turn(), accepted_input(), turn(), order(),
+    // binding(), effective_configuration()
+}
+pub struct AmbiguousModelCallTurn { /* private */ }
+pub enum ModelCallClosureError {
+    IdentityShapeMismatch,
+    CallStateMismatch,
+    ObservationCorrelationMismatch,
+    AttemptStateMismatch,
+    TargetResolutionMismatch,
+    AssistantIdentityCountMismatch,
+    PendingSteeringReclassificationMismatch,
+    FrontierDerivationFailed,
+    AmbiguityConstructionFailed,
 }
 ```
 
@@ -1412,8 +1645,7 @@ impl ResolvedContextFrontierReconstitutionInput {
 
 pub struct ResolvedContextFrontierSnapshot { /* private */ }
 // sealed: crate-private try_from_candidate and derive_appending_candidate,
-// consumed by the turn_eligibility scheduling and activation seams; the
-// call-preparation slice remains a future consumer
+// consumed by scheduling and model-call aggregate seams
 impl ResolvedContextFrontierSnapshot {
     pub fn entry_count(&self) -> usize;
     pub fn ordered_entries(
@@ -1430,14 +1662,24 @@ impl ResolvedContextFrontierSnapshot {
 ## domain: semantic_entry
 
 ```rust
-pub enum InitialSemanticTranscriptEntryPayload {
+pub struct AssistantText(/* private */);
+impl AssistantText {
+    pub fn try_new(value: String) -> Result<Self, NonEmptyUnicodeTextError>;
+    pub fn as_str(&self) -> &str;
+    pub fn into_string(self) -> String;
+}
+
+pub enum SemanticTranscriptEntryPayload {
     OriginAcceptedInput { accepted_input: AcceptedInputId },
     TurnFailed { turn: TurnId },
+    AssistantText { producing_call: ModelCallId, value: AssistantText },
+    AssistantToolUse { producing_call: ModelCallId, request: ToolRequestId },
+    TurnCompleted { turn: TurnId },
 }
 
 pub struct SemanticTranscriptEntry { /* private */ }
-// sealed: checked scheduling reconstitution and live eligibility are the only
-// producers
+// sealed: checked scheduling reconstitution plus prepared eligibility and
+// model-execution candidates are the only producers
 impl SemanticTranscriptEntry {
     // accessors: identity(), source_session(), payload(), reference()
 }
@@ -1445,10 +1687,10 @@ impl SemanticTranscriptEntry {
 pub struct SemanticTranscriptEntryReconstitutionInput { /* private */ }
 // inert input: cannot independently construct SemanticTranscriptEntry
 impl SemanticTranscriptEntryReconstitutionInput {
-    pub const fn new(
+    pub fn new(
         identity: SemanticTranscriptEntryId,
         source_session: SessionId,
-        payload: InitialSemanticTranscriptEntryPayload,
+        payload: SemanticTranscriptEntryPayload,
     ) -> Self;
     // accessors: identity(), source_session(), payload()
 }
@@ -2076,16 +2318,17 @@ impl<
 | domain: submit_input                  | 15                   |
 | domain: queue_order                   | 5 (+1 free fn)       |
 | domain: turn_lifecycle                | 10                   |
-| domain: turn_eligibility              | 21                   |
+| domain: turn_eligibility              | 22                   |
 | domain: turn_attempt                  | 13                   |
-| domain: model_call                    | 7                    |
+| domain: model_call                    | 12                   |
+| domain: model_execution               | 33                   |
 | domain: context_frontier              | 6                    |
-| domain: semantic_entry                | 3                    |
+| domain: semantic_entry                | 4                    |
 | domain: provider_evidence             | 5                    |
 | domain: applied_interrupt             | 2                    |
 | domain: fatal_mismatch                | 0                    |
 | domain: replace_session_defaults      | 13                   |
-| **signalbox-domain total**            | **158 (+1 free fn)** |
+| **signalbox-domain total**            | **198 (+1 free fn)** |
 | application: create_session           | 8 (incl. 2 traits)   |
 | application: load_session             | 2 (incl. 1 trait)    |
 | application: operator_failure         | 2 (incl. 1 trait)    |

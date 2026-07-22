@@ -8,7 +8,8 @@ use signalbox_application::{
 };
 use signalbox_domain::{
     AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities, AttemptEnd,
-    InitialSemanticTranscriptEntryPayload, PreparedAcceptedInputTurnFailure, SessionId,
+    PreparedAcceptedInputTurnFailure,
+    SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload, SessionId,
     TurnDisposition, TurnId, UnstoppedAttemptDisposition,
 };
 use sqlx::{PgConnection, PgPool, types::Uuid};
@@ -367,7 +368,7 @@ async fn insert_prepared_failure(
     let session = failed.session();
     let turn = failed.turn();
     if failure_entry.source_session() != session
-        || failure_entry.payload() != (InitialSemanticTranscriptEntryPayload::TurnFailed { turn })
+        || failure_entry.payload() != &(InitialSemanticTranscriptEntryPayload::TurnFailed { turn })
         || terminal_snapshot.frontier().owning_session() != session
         || terminal_snapshot.frontier().snapshot() != failed.terminal_frontier()
         || failed.disposition() != &TurnDisposition::Failed

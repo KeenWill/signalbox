@@ -9,6 +9,38 @@ that constrains several components — require a full record under
 [decisions/](decisions/README.md) instead. Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-22 — M3 pending-steering fail-closed boundary
+
+**Context.** The owner predecided the M3 boundary while the steering and
+cancellation milestone still owns the combined `StopRequested`, steering
+semantic-history, and reclassification design. A `NextSafePoint` input can be
+durably acknowledged after turn activation but before the first model call is
+prepared. The accepted ADRs require eventual atomic consumption, but the
+semantic payload, correlations, ordering, transaction, and restart semantics for
+that consumption remain deliberately open.
+
+**Decision.** M3 model-call preparation fails closed while any pending steering
+exists. The accepted cost is a liveness gap: the acknowledged input can strand
+the active turn's first call, but no input is dropped. Across a process restart,
+startup recovery retains the unchanged active turn, prepared attempt, and
+pending input; creates no failure entry, terminal frontier, or outbox event; and
+returns `DeferredPendingSteering`. The incomplete scan makes hub boot fail with
+the recovery-blocked outcome before scheduling starts. The steering and
+cancellation milestone must decide the deferred semantic entry and payload,
+accepted-input and source-turn correlations, multi-input ordering, atomic
+consume-and-prepare transaction, and restart/reconstitution behavior, then
+replace this guard with that atomic transition.
+
+**Rejected alternatives.** Inventing only an M3 steering entry or partial
+transaction would decide foundation semantics piecemeal. Ignoring the pending
+input or preparing from the old frontier would drop acknowledged work. Startup
+terminalization would treat steering as a stop cause and consume facts without
+the deferred authority.
+
+**Affects.** Initial model-call preparation, the INV-016 fail-closed test,
+startup-scan completion, hub boot, and the steering/cancellation milestone's
+reopening obligation.
+
 ## 2026-07-21 — Distinct provider error type and code evidence
 
 **Context.** Provider error envelopes can carry both a categorical type token
