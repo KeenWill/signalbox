@@ -47,6 +47,11 @@ pub(crate) fn convert_block(block: WireResponseBlock) -> Option<AssistantPart> {
     match block {
         WireResponseBlock::Text { text } => Some(AssistantPart::Text(text)),
         WireResponseBlock::ToolUse { id, name, input } => {
+            if !serde_json::from_str::<serde_json::Value>(input.get())
+                .is_ok_and(|value| value.is_object())
+            {
+                return None;
+            }
             Some(AssistantPart::ToolCall(ToolCallProposal {
                 id: ToolCallId::new(id),
                 name: ToolName::new(name),
@@ -81,6 +86,7 @@ pub(crate) fn convert_block(block: WireResponseBlock) -> Option<AssistantPart> {
 pub(crate) fn decode_buffered_response<C: Clone>(
     body: &[u8],
     exchange: ExchangeFacts,
+    declared_stop_sequences: &[String],
     correlation: &C,
     sink: &mut (dyn ObservationSink<C> + Send),
 ) -> TerminalEvidence {
@@ -167,9 +173,13 @@ pub(crate) fn decode_buffered_response<C: Clone>(
             }
         };
         match convert_block(block) {
-            Some(AssistantPart::Thinking {
-                signature: None, ..
-            }) => {
+            Some(part)
+                if matches!(
+                    &part,
+                    AssistantPart::Thinking { signature, .. }
+                        if signature.as_deref().is_none_or(str::is_empty)
+                ) =>
+            {
                 // The provider requires the integrity signature for any
                 // replay; completion material without it is not usable.
                 return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
@@ -226,6 +236,22 @@ pub(crate) fn decode_buffered_response<C: Clone>(
         return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
             cause: LossCause::ResponseUnintelligible {
                 detail: "success response stop_reason contradicts its stop_sequence metadata"
+                    .to_string(),
+            },
+            exchange,
+            reported_model,
+            finish_reported: None,
+            usage,
+        });
+    }
+    if let Some(sequence) = response.stop_sequence.as_deref()
+        && !declared_stop_sequences
+            .iter()
+            .any(|declared| declared == sequence)
+    {
+        return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            cause: LossCause::ResponseUnintelligible {
+                detail: "success response reports a stop sequence not declared by the request"
                     .to_string(),
             },
             exchange,
@@ -309,6 +335,7 @@ mod tests {
         let evidence = decode_buffered_response(
             body.as_bytes(),
             exchange(),
+            &["END".to_string()],
             &"call-1".to_string(),
             &mut observations,
         );
@@ -476,20 +503,65 @@ mod tests {
     }
 
     #[test]
-    fn contradictory_stop_sequence_metadata_is_boundary_loss() {
-        for terminal in [
-            r#""stop_reason":"stop_sequence","stop_sequence":null"#,
-            r#""stop_reason":"end_turn","stop_sequence":"END""#,
-        ] {
-            let body = format!(
-                r#"{{
-                    "id":"msg_1","type":"message","role":"assistant",
-                    "model":"model-exact-1","content":[],{terminal},
-                    "usage":{{"input_tokens":1,"output_tokens":1}}
-                }}"#
-            );
-            assert!(matches!(decode(&body).0, TerminalEvidence::BoundaryLoss(_)));
-        }
+    fn stop_sequence_reason_without_sequence_is_boundary_loss() {
+        let body = r#"{
+            "id":"msg_1","type":"message","role":"assistant",
+            "model":"model-exact-1","content":[],
+            "stop_reason":"stop_sequence","stop_sequence":null,
+            "usage":{"input_tokens":1,"output_tokens":1}
+        }"#;
+
+        assert!(matches!(decode(body).0, TerminalEvidence::BoundaryLoss(_)));
+    }
+
+    #[test]
+    fn sequence_metadata_with_a_different_reason_is_boundary_loss() {
+        let body = r#"{
+            "id":"msg_1","type":"message","role":"assistant",
+            "model":"model-exact-1","content":[],
+            "stop_reason":"end_turn","stop_sequence":"END",
+            "usage":{"input_tokens":1,"output_tokens":1}
+        }"#;
+
+        assert!(matches!(decode(body).0, TerminalEvidence::BoundaryLoss(_)));
+    }
+
+    #[test]
+    fn undeclared_stop_sequence_is_boundary_loss() {
+        let (evidence, _) = decode(
+            r#"{"id":"msg_1","type":"message","role":"assistant",
+                "model":"model-exact-1","content":[],
+                "stop_reason":"stop_sequence","stop_sequence":"OTHER",
+                "usage":{"input_tokens":1,"output_tokens":1}}"#,
+        );
+
+        assert!(matches!(evidence, TerminalEvidence::BoundaryLoss(_)));
+    }
+
+    #[test]
+    fn empty_thinking_signature_is_boundary_loss() {
+        let (evidence, _) = decode(
+            r#"{"id":"msg_1","type":"message","role":"assistant",
+                "model":"model-exact-1",
+                "content":[{"type":"thinking","thinking":"step","signature":""}],
+                "stop_reason":"end_turn","stop_sequence":null,
+                "usage":{"input_tokens":1,"output_tokens":1}}"#,
+        );
+
+        assert!(matches!(evidence, TerminalEvidence::BoundaryLoss(_)));
+    }
+
+    #[test]
+    fn non_object_tool_arguments_are_boundary_loss() {
+        let (evidence, _) = decode(
+            r#"{"id":"msg_1","type":"message","role":"assistant",
+                "model":"model-exact-1",
+                "content":[{"type":"tool_use","id":"toolu_1","name":"lookup","input":[]}],
+                "stop_reason":"tool_use","stop_sequence":null,
+                "usage":{"input_tokens":1,"output_tokens":1}}"#,
+        );
+
+        assert!(matches!(evidence, TerminalEvidence::BoundaryLoss(_)));
     }
 
     #[test]

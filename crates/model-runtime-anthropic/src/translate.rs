@@ -222,6 +222,16 @@ fn wire_message(message: &ConversationMessage) -> Result<WireMessage, Preparatio
                                 proposal.id.as_str()
                             ),
                         })?;
+                if !serde_json::from_str::<serde_json::Value>(input.get())
+                    .is_ok_and(|value| value.is_object())
+                {
+                    return Err(PreparationFailure::UnsupportedOperation {
+                        detail: format!(
+                            "replayed tool call {} carries arguments that are not a JSON object",
+                            proposal.id.as_str()
+                        ),
+                    });
+                }
                 Ok(WireRequestBlock::ToolUse {
                     id: proposal.id.as_str().to_string(),
                     name: proposal.name.as_str().to_string(),
@@ -292,6 +302,26 @@ mod tests {
         let request = build_request(operation).expect("translatable operation builds");
         let value = serde_json::to_value(&request).expect("wire request serializes");
         format!("{value:#}")
+    }
+
+    #[track_caller]
+    fn assert_temperature_is_rejected(value: f64) {
+        let mut candidate = operation("call-temperature");
+        candidate.settings.temperature = Some(value);
+        assert!(matches!(
+            build_request(&candidate),
+            Err(PreparationFailure::UnsupportedOperation { .. })
+        ));
+    }
+
+    #[track_caller]
+    fn assert_top_p_is_rejected(value: f64) {
+        let mut candidate = operation("call-top-p");
+        candidate.settings.top_p = Some(value);
+        assert!(matches!(
+            build_request(&candidate),
+            Err(PreparationFailure::UnsupportedOperation { .. })
+        ));
     }
 
     #[test]
@@ -545,6 +575,24 @@ mod tests {
     }
 
     #[test]
+    fn replayed_tool_call_with_non_object_arguments_fails_preparation() {
+        let mut operation = operation("call-non-object");
+        operation.messages = vec![ConversationMessage {
+            role: ConversationRole::Assistant,
+            parts: vec![MessagePart::ToolCall(ToolCallProposal {
+                id: ToolCallId::new("toolu_1"),
+                name: ToolName::new("lookup"),
+                arguments_json: "[]".to_string(),
+            })],
+        }];
+
+        assert!(matches!(
+            build_request(&operation),
+            Err(PreparationFailure::UnsupportedOperation { .. })
+        ));
+    }
+
+    #[test]
     fn replayed_tool_arguments_preserve_raw_json_verbatim() {
         let mut operation = operation("call-raw");
         let raw = r#"{"identifier":184467440737095516160,"duplicate":1,"duplicate":2}"#;
@@ -617,23 +665,21 @@ mod tests {
     }
 
     #[test]
-    fn provider_numeric_domains_are_enforced_before_send() {
-        for value in [-0.1, 1.1, f64::INFINITY] {
-            let mut candidate = operation("call-numeric");
-            candidate.settings.temperature = Some(value);
-            assert!(matches!(
-                build_request(&candidate),
-                Err(PreparationFailure::UnsupportedOperation { .. })
-            ));
+    fn temperature_outside_the_provider_domain_is_rejected_before_send() {
+        assert_temperature_is_rejected(-0.1);
+        assert_temperature_is_rejected(1.1);
+        assert_temperature_is_rejected(f64::INFINITY);
+    }
 
-            let mut candidate = operation("call-numeric");
-            candidate.settings.top_p = Some(value);
-            assert!(matches!(
-                build_request(&candidate),
-                Err(PreparationFailure::UnsupportedOperation { .. })
-            ));
-        }
+    #[test]
+    fn top_p_outside_the_provider_domain_is_rejected_before_send() {
+        assert_top_p_is_rejected(-0.1);
+        assert_top_p_is_rejected(1.1);
+        assert_top_p_is_rejected(f64::INFINITY);
+    }
 
+    #[test]
+    fn zero_output_token_limit_is_rejected_before_send() {
         let mut operation = operation("call-zero-tokens");
         operation.settings.max_output_tokens = 0;
         assert!(matches!(

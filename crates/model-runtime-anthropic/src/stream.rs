@@ -65,12 +65,16 @@ pub(crate) struct StreamDecoder {
     input_usage_reported: bool,
     final_output_usage_reported: bool,
     finish: Option<FinishReason>,
+    declared_stop_sequences: Vec<String>,
     open_blocks: BTreeMap<u32, BlockBuilder>,
     closed: BTreeMap<u32, AssistantPart>,
 }
 
 impl StreamDecoder {
-    pub(crate) fn new(exchange: ExchangeFacts) -> Self {
+    pub(crate) fn with_stop_sequences(
+        exchange: ExchangeFacts,
+        declared_stop_sequences: Vec<String>,
+    ) -> Self {
         Self {
             exchange,
             started: false,
@@ -80,6 +84,7 @@ impl StreamDecoder {
             input_usage_reported: false,
             final_output_usage_reported: false,
             finish: None,
+            declared_stop_sequences,
             open_blocks: BTreeMap::new(),
             closed: BTreeMap::new(),
         }
@@ -365,6 +370,12 @@ impl StreamDecoder {
                 BlockBuilder::Thinking { signature, .. },
                 WireDelta::Signature { signature: value },
             ) => {
+                if value.is_empty() {
+                    return self.violation("thinking block carries an empty signature delta");
+                }
+                if signature.is_some() {
+                    return self.violation("thinking block carries more than one signature");
+                }
                 *signature = Some(value);
                 StreamStep::Continue
             }
@@ -408,7 +419,7 @@ impl StreamDecoder {
         let part = match builder {
             BlockBuilder::Text(text) => AssistantPart::Text(text),
             BlockBuilder::Thinking { text, signature } => {
-                let Some(signature) = signature else {
+                let Some(signature) = signature.filter(|value| !value.is_empty()) else {
                     // The provider requires the integrity signature for any
                     // replay; a thinking block closing without one is not
                     // trustworthy completion material.
@@ -434,9 +445,11 @@ impl StreamDecoder {
                 } else {
                     accumulated
                 };
-                if serde_json::from_str::<serde_json::Value>(&arguments_json).is_err() {
+                if !serde_json::from_str::<serde_json::Value>(&arguments_json)
+                    .is_ok_and(|value| value.is_object())
+                {
                     return self.violation(format!(
-                        "tool_use block {} closed with invalid accumulated argument JSON",
+                        "tool_use block {} closed with arguments that are not a JSON object",
                         event.index
                     ));
                 }
@@ -519,6 +532,16 @@ impl StreamDecoder {
             if (stop_reason == "stop_sequence") != delta.stop_sequence.is_some() {
                 return self
                     .violation("message_delta stop_reason contradicts its stop_sequence metadata");
+            }
+            if let Some(sequence) = delta.stop_sequence.as_deref()
+                && !self
+                    .declared_stop_sequences
+                    .iter()
+                    .any(|declared| declared == sequence)
+            {
+                return self.violation(
+                    "message_delta reports a stop sequence not declared by the request",
+                );
             }
             let finish = map_finish(&stop_reason, delta.stop_sequence);
             self.finish = Some(finish.clone());
@@ -619,7 +642,7 @@ mod tests {
     /// observation log.
     fn drive(chunks: &[&[u8]]) -> (Option<TerminalEvidence>, Vec<Observation<String>>) {
         let mut framing = SseFraming::new(1024 * 1024);
-        let mut decoder = StreamDecoder::new(exchange());
+        let mut decoder = StreamDecoder::with_stop_sequences(exchange(), vec!["END".to_string()]);
         let mut observations: Vec<Observation<String>> = Vec::new();
         let correlation = "call-1".to_string();
         let mut terminal = None;
@@ -643,7 +666,7 @@ mod tests {
     /// loss evidence for the resulting decoder state.
     fn drive_to_eof(chunks: &[&[u8]]) -> (TerminalEvidence, Vec<Observation<String>>) {
         let mut framing = SseFraming::new(1024 * 1024);
-        let mut decoder = StreamDecoder::new(exchange());
+        let mut decoder = StreamDecoder::with_stop_sequences(exchange(), vec!["END".to_string()]);
         let mut observations: Vec<Observation<String>> = Vec::new();
         let correlation = "call-1".to_string();
         for chunk in chunks {
@@ -665,6 +688,16 @@ mod tests {
           data: {\"type\":\"message_start\",\"message\":{\"type\":\"message\",\
           \"role\":\"assistant\",\"id\":\"msg_1\",\
           \"model\":\"model-exact-1\",\"content\":[],\"usage\":{\"input_tokens\":25}}}\n\n"
+    }
+
+    #[track_caller]
+    fn assert_message_delta_is_a_protocol_violation(delta: &str) {
+        let event = format!(
+            "event: message_delta\ndata: {{\"type\":\"message_delta\",\
+             \"delta\":{delta},\"usage\":{{\"output_tokens\":1}}}}\n\n"
+        );
+        let (terminal, _) = drive(&[message_start(), event.as_bytes()]);
+        assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
     }
 
     #[test]
@@ -1238,19 +1271,67 @@ mod tests {
     }
 
     #[test]
-    fn contradictory_stop_sequence_metadata_is_a_protocol_violation() {
-        for delta in [
+    fn stop_sequence_reason_without_sequence_is_a_protocol_violation() {
+        assert_message_delta_is_a_protocol_violation(
             r#"{"stop_reason":"stop_sequence","stop_sequence":null}"#,
+        );
+    }
+
+    #[test]
+    fn sequence_metadata_with_a_different_reason_is_a_protocol_violation() {
+        assert_message_delta_is_a_protocol_violation(
             r#"{"stop_reason":"end_turn","stop_sequence":"END"}"#,
-            r#"{"stop_sequence":"END"}"#,
-        ] {
-            let event = format!(
-                "event: message_delta\ndata: {{\"type\":\"message_delta\",\
-                 \"delta\":{delta},\"usage\":{{\"output_tokens\":1}}}}\n\n"
-            );
-            let (terminal, _) = drive(&[message_start(), event.as_bytes()]);
-            assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
-        }
+        );
+    }
+
+    #[test]
+    fn stop_sequence_without_a_reason_is_a_protocol_violation() {
+        assert_message_delta_is_a_protocol_violation(r#"{"stop_sequence":"END"}"#);
+    }
+
+    #[test]
+    fn undeclared_stop_sequence_is_a_protocol_violation() {
+        let (terminal, _) = drive(&[
+            message_start(),
+            b"event: message_delta\n\
+              data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"stop_sequence\",\
+              \"stop_sequence\":\"OTHER\"},\"usage\":{\"output_tokens\":1}}\n\n",
+        ]);
+
+        assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
+    }
+
+    #[test]
+    fn empty_thinking_signature_delta_is_a_protocol_violation() {
+        let (terminal, _) = drive(&[
+            message_start(),
+            b"event: content_block_start\n\
+              data: {\"type\":\"content_block_start\",\"index\":0,\
+              \"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":null}}\n\n",
+            b"event: content_block_delta\n\
+              data: {\"type\":\"content_block_delta\",\"index\":0,\
+              \"delta\":{\"type\":\"signature_delta\",\"signature\":\"\"}}\n\n",
+        ]);
+
+        assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
+    }
+
+    #[test]
+    fn non_object_streamed_tool_arguments_are_a_protocol_violation() {
+        let (terminal, _) = drive(&[
+            message_start(),
+            b"event: content_block_start\n\
+              data: {\"type\":\"content_block_start\",\"index\":0,\
+              \"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\
+              \"name\":\"lookup\",\"input\":{}}}\n\n",
+            b"event: content_block_delta\n\
+              data: {\"type\":\"content_block_delta\",\"index\":0,\
+              \"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"[]\"}}\n\n",
+            b"event: content_block_stop\n\
+              data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        ]);
+
+        assert!(matches!(terminal, Some(TerminalEvidence::BoundaryLoss(_))));
     }
 
     #[test]
