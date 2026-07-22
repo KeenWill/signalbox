@@ -22,9 +22,6 @@ jobs:
         run: python3 scripts/check_domain_spine.py
       - name: Check formatting
         run: cargo fmt --all -- --check
-      # Single source of truth for the mdformat toolchain: CI and the devenv
-      # environment both install the fully frozen pin file, so local runs are
-      # byte-identical to this check.
       - name: Check Markdown formatting
         run: |
           python3 -m venv /tmp/mdformat-venv
