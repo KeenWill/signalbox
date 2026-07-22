@@ -2380,6 +2380,8 @@ dependencies = [
  "signalbox-application",
  "signalbox-domain",
  "signalbox-persistence",
+ "sqlx",
+ "testcontainers-modules",
  "tokio",
  "tracing",
  "tracing-subscriber",

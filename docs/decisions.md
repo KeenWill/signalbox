@@ -41,6 +41,31 @@ the deferred authority.
 startup-scan completion, hub boot, and the steering/cancellation milestone's
 reopening obligation.
 
+## 2026-07-22 — Direct dependencies for the offline hub driver
+
+**Context.** The smoke-critical composition slice adds a local executable that
+drives one exact session through the real PostgreSQL scheduler path, plus an
+end-to-end test that supplies its own PostgreSQL 18.4 instance. The hub package
+previously consumed database and UUID values only through narrower library
+interfaces, so those crates were not direct dependencies.
+
+**Decision.** Add narrowly featured SQLx PostgreSQL/Tokio support and UUIDv7 as
+direct `signalbox-hubd` dependencies for the local driver. Add the same focused
+testcontainers-modules PostgreSQL/ring feature set already used by persistence
+as a dev-dependency for its isolated end-to-end tests. Keep provider transport,
+retry, protocol, and production configuration dependencies out of this slice.
+
+**Rejected alternatives.** Re-exporting SQLx or UUID through persistence would
+blur crate ownership to avoid honest direct dependencies. Sharing the
+persistence integration-test crate is impossible across Cargo test targets and
+would couple hub composition assertions to persistence-private fixtures. A
+developer-managed database would make the end-to-end test stateful and
+non-hermetic.
+
+**Affects.** `apps/hubd/Cargo.toml`, its debug executable and end-to-end tests,
+the workspace lockfile, and the PostgreSQL CI job. No domain or application API,
+schema, provider choice, or production credential source changes.
+
 ## 2026-07-22 — Render the initial model frontier by semantic entry role
 
 **Context.** The first model-call application slice must project ADR-0030's

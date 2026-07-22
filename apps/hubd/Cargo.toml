@@ -11,6 +11,10 @@ publish.workspace = true
 signalbox-application = { path = "../../crates/application" }
 signalbox-domain = { path = "../../crates/domain" }
 signalbox-persistence = { path = "../../crates/persistence" }
+sqlx = { version = "0.9.0", default-features = false, features = [
+    "postgres",
+    "runtime-tokio",
+] }
 tokio = { version = "1.53.0", default-features = false, features = [
     "macros",
     "rt-multi-thread",
@@ -22,10 +26,14 @@ tracing = { version = "0.1.41", default-features = false }
 tracing-subscriber = { version = "0.3.20", default-features = false, features = [
     "fmt",
 ] }
+uuid = { version = "1.24.0", default-features = false, features = ["std", "v7"] }
 
 [dev-dependencies]
+testcontainers-modules = { version = "0.15.0", default-features = false, features = [
+    "postgres",
+    "ring",
+] }
 tokio = { version = "1.53.0", default-features = false, features = ["test-util"] }
-uuid = { version = "1.24.0", default-features = false, features = ["std"] }
 
 [lints]
 workspace = true

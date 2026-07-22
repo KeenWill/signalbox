@@ -1,0 +1,264 @@
+#![allow(
+    clippy::expect_used,
+    clippy::panic,
+    reason = "the standalone integration test uses assertion panics and explicit fixture expectations"
+)]
+
+use std::{error::Error, process::Command, time::Duration};
+
+use signalbox_application::{
+    CreateSessionOutcome, CreateSessionRequest, CreateSessionService, InProcessAttemptDispatchGate,
+    InProcessEligibilityWorkSource, SchedulerLoop, SchedulerLoopExit, StartEligibleTurnService,
+    SubmitInputOutcome, SubmitInputRequest, SubmitInputService, UuidV7SessionIdGenerator,
+    UuidV7StartEligibleTurnIdGenerator, UuidV7SubmitInputIdGenerator,
+};
+use signalbox_domain::{
+    AssistantText, DeliveryRequest, DirectModelSelection, DurableCommandId, ModelSelectionOverride,
+    ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition, PerInputConfigurationChoices,
+    ProviderModelIdentity, ResolvedProviderTarget, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionId, SubmitInputAppliedResult, SubmitInputResult,
+    TurnId, UserContent,
+};
+use signalbox_hubd::{ActivatedTurnPass, FatalExecutionSupervisor, PostgresScriptedModelExecution};
+use signalbox_persistence::{
+    create_session::CreateSessionRepository, local_test_connection_options, migrate,
+    model_execution::PostgresModelCallRepository, scheduler::PostgresEligibilitySweep,
+    start_eligible_turn::StartEligibleTurnRepository, submit_input::SubmitInputRepository,
+};
+use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
+use testcontainers_modules::{
+    postgres::Postgres,
+    testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
+};
+use tokio::time::timeout;
+
+const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
+const DATABASE_NAME: &str = "signalbox_hubd_e2e";
+const DATABASE_USER: &str = "signalbox";
+const DATABASE_PASSWORD: &str = "signalbox-test-only";
+
+async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>> {
+    let container = Postgres::default()
+        .with_db_name(DATABASE_NAME)
+        .with_user(DATABASE_USER)
+        .with_password(DATABASE_PASSWORD)
+        .with_fsync_enabled()
+        .with_tag(POSTGRES_IMAGE_TAG)
+        .start()
+        .await?;
+    let host = container.get_host().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let database_url =
+        format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect_with(local_test_connection_options(&database_url)?)
+        .await?;
+    migrate(&pool).await?;
+    Ok((container, pool, database_url))
+}
+
+async fn wait_for_terminal(pool: &PgPool, session: SessionId, turn: TurnId) {
+    loop {
+        let terminal: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1
+                  FROM turn_lifecycle
+                 WHERE session_id = $1
+                   AND turn_id = $2
+                   AND state_kind = 'terminal'
+            )",
+        )
+        .bind(session.into_uuid())
+        .bind(turn.into_uuid())
+        .fetch_one(pool)
+        .await
+        .unwrap_or(false);
+        if terminal {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// S01 / S02 / INV-014 / INV-015: the complete offline
+/// chain creates a session, submits input, lets the scheduler activate it,
+/// invokes the application provider port, and atomically persists the exact
+/// assistant reply plus completion and terminal lifecycle facts.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s01_s02_inv014_inv015_scheduler_persists_scripted_assistant_reply()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x2001));
+    let mut create = CreateSessionService::new(
+        UuidV7SessionIdGenerator,
+        CreateSessionRepository::new(pool.clone()),
+    );
+    let CreateSessionOutcome::Applied(created) = create
+        .execute(CreateSessionRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::from_u128(0x2002)),
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(selection)),
+        )?)
+        .await?
+    else {
+        panic!("the unique fixture command must create its session")
+    };
+    let session = created.session();
+
+    let sweep = PostgresEligibilitySweep::new(pool.clone());
+    let (nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
+    let mut submit = SubmitInputService::new(
+        UuidV7SubmitInputIdGenerator,
+        SubmitInputRepository::new(pool.clone()),
+        nudge,
+    );
+    let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::TurnOrigin(origin),
+    )) = submit
+        .execute(SubmitInputRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::from_u128(0x2003)),
+            session,
+            UserContent::try_text(String::from("offline user request"))
+                .expect("fixture user content is admitted"),
+            DeliveryRequest::StartWhenNoActiveTurn {
+                configuration: PerInputConfigurationChoices::new(
+                    SessionConfigurationDefaultsVersion::first(),
+                    ModelSelectionOverride::UseSessionDefault,
+                ),
+            },
+        )?)
+        .await?
+    else {
+        panic!("the unique fixture input must create queued origin work")
+    };
+    let turn = origin.turn();
+
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(0x2004))),
+    )])
+    .expect("one fixture target definition is unique");
+    let (execution, fatal_execution) =
+        FatalExecutionSupervisor::new(PostgresScriptedModelExecution::new(
+            PostgresModelCallRepository::new(pool.clone(), targets),
+            InProcessAttemptDispatchGate::default(),
+            AssistantText::try_new(String::from("offline assistant reply"))
+                .expect("fixture assistant content is admitted"),
+        ));
+    let pass = ActivatedTurnPass::new(
+        StartEligibleTurnService::new(
+            UuidV7StartEligibleTurnIdGenerator,
+            StartEligibleTurnRepository::new(pool.clone()),
+        ),
+        execution,
+    );
+    let mut scheduler = SchedulerLoop::new(work_source, pass);
+    let observation_pool = pool.clone();
+    let fatal_shutdown = fatal_execution.clone();
+    let shutdown = async move {
+        tokio::select! {
+            () = wait_for_terminal(&observation_pool, session, turn) => {}
+            () = fatal_shutdown.wait() => {}
+        }
+    };
+    assert_eq!(
+        timeout(Duration::from_secs(10), scheduler.run_until(shutdown)).await?,
+        SchedulerLoopExit::Shutdown
+    );
+    assert!(
+        !fatal_execution.is_triggered(),
+        "post-activation execution failure must stop this isolated scheduler"
+    );
+
+    let transcript = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+        "SELECT entry.payload_kind,
+                accepted.content_text,
+                entry.assistant_text_value
+           FROM turn_lifecycle AS lifecycle
+           JOIN context_frontier_member AS member
+             ON member.owning_session_id = lifecycle.session_id
+            AND member.context_frontier_id = lifecycle.terminal_frontier_id
+           JOIN semantic_transcript_entry AS entry
+             ON entry.source_session_id = member.source_session_id
+            AND entry.semantic_entry_id = member.semantic_entry_id
+           LEFT JOIN accepted_input AS accepted
+             ON accepted.session_id = entry.source_session_id
+            AND accepted.accepted_input_id = entry.origin_accepted_input_id
+          WHERE lifecycle.session_id = $1
+            AND lifecycle.turn_id = $2
+          ORDER BY member.member_position",
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        transcript,
+        vec![
+            (
+                String::from("origin_accepted_input"),
+                Some(String::from("offline user request")),
+                None,
+            ),
+            (
+                String::from("assistant_text"),
+                None,
+                Some(String::from("offline assistant reply")),
+            ),
+            (String::from("turn_completed"), None, None),
+        ]
+    );
+
+    let terminal_shape: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM turn_lifecycle
+              WHERE session_id = $1
+                AND turn_id = $2
+                AND state_kind = 'terminal'
+                AND terminal_disposition_kind = 'completed'),
+            (SELECT count(*) FROM turn_attempt
+              WHERE session_id = $1
+                AND turn_id = $2
+                AND state_kind = 'ended'
+                AND end_disposition = 'turn_completed'),
+            (SELECT count(*) FROM model_call
+              WHERE session_id = $1
+                AND turn_id = $2
+                AND state_kind = 'terminal'
+                AND terminal_disposition_kind = 'completed')",
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(terminal_shape, (1, 1, 1));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// The thin debug harness drives the same scheduler path and prints only the
+/// terminal semantic transcript requested by its caller.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn debug_driver_prints_the_scripted_terminal_transcript() -> Result<(), Box<dyn Error>> {
+    let (container, pool, database_url) = migrated_postgres().await?;
+    let output = Command::new(env!("CARGO_BIN_EXE_signalbox-debug"))
+        .env("SIGNALBOX_DEBUG_DATABASE_URL", database_url)
+        .args(["driver user request", "driver assistant reply"])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "debug driver must exit successfully"
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout)?,
+        "user: driver user request\nassistant: driver assistant reply\nevent: turn_completed\n"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
