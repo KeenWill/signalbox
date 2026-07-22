@@ -268,7 +268,13 @@ impl StreamDecoder {
                     finish = FinishReason::Refusal;
                 }
                 let has_tool_calls = !self.tool_builders.is_empty();
-                if has_tool_calls != matches!(finish, FinishReason::ToolUse) {
+                if (matches!(finish, FinishReason::ToolUse) && !has_tool_calls)
+                    || (has_tool_calls
+                        && !matches!(
+                            finish,
+                            FinishReason::ToolUse | FinishReason::MaxOutputTokens
+                        ))
+                {
                     return self
                         .violation("tool-call content does not match the reported finish_reason");
                 }
@@ -644,6 +650,29 @@ mod tests {
     }
 
     #[test]
+    fn max_token_stream_retains_a_partial_tool_call() {
+        let (terminal, _) = drive(&[
+            first_chunk(),
+            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\
+              \"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\
+              \"arguments\":\"{\\\"city\\\":\"}}]}}]}\n\n",
+            b"data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\
+              \"finish_reason\":\"length\"}]}\n\n",
+            final_usage_chunk(),
+            b"data: [DONE]\n\n",
+        ]);
+
+        let Some(TerminalEvidence::Completed(completion)) = terminal else {
+            panic!("token exhaustion with partial tool material is definitive completion");
+        };
+        assert_eq!(completion.finish, CompletionFinish::MaxOutputTokens);
+        assert!(matches!(
+            completion.content.as_slice(),
+            [AssistantPart::ToolCall(_)]
+        ));
+    }
+
+    #[test]
     fn eof_without_done_is_explicit_incomplete_stream_evidence_with_partials() {
         let (evidence, _) = drive_to_eof(&[
             first_chunk(),
@@ -783,6 +812,24 @@ mod tests {
         };
         assert_eq!(error.kind, ProviderErrorKind::QuotaExhausted);
         assert_eq!(error.native.error_code, None);
+    }
+
+    #[test]
+    fn statusless_stream_error_tokens_keep_their_native_classes() {
+        for (token, expected) in [
+            ("rate_limit_exceeded", ProviderErrorKind::RateLimited),
+            ("rate_limit_error", ProviderErrorKind::RateLimited),
+            ("server_error", ProviderErrorKind::ProviderInternal),
+            ("internal_server_error", ProviderErrorKind::ProviderInternal),
+        ] {
+            let record =
+                format!("data: {{\"error\":{{\"message\":\"failed\",\"type\":\"{token}\"}}}}\n\n");
+            let (terminal, _) = drive(&[first_chunk(), record.as_bytes()]);
+            let Some(TerminalEvidence::ProviderError(error)) = terminal else {
+                panic!("a statusless stream error is definitive provider evidence");
+            };
+            assert_eq!(error.kind, expected, "native token {token}");
+        }
     }
 
     #[test]

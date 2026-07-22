@@ -512,6 +512,7 @@ fn without_unproven_refusal(evidence: TerminalEvidence) -> TerminalEvidence {
                 kind: ProviderErrorKind::Unrecognized,
                 native: NativeErrorFacts {
                     error_token: Some("refusal".to_string()),
+                    error_code: None,
                     message: None,
                 },
             })

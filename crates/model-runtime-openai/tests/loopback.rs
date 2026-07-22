@@ -12,18 +12,20 @@
 //! real transport path — headers sent, redirect discipline, connect-failure
 //! classification, and stream-integrity evidence — deterministically.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, CompletionFinish, ConversationMessage, DeliveryMode,
     LossCause, ModelOperation, ModelRuntime, ModelSettings, Observation, ObservationFact,
-    ProviderErrorKind, ProviderRequestId, RequestedTarget, ResolvedTarget, StreamInterruption,
-    TerminalEvidence, TerminalReport, UnsentCause,
+    PreparationFailure, PreparationOutcome, ProviderErrorKind, ProviderRequestId, RequestedTarget,
+    ResolvedTarget, StreamInterruption, TerminalEvidence, TerminalReport, UnsentCause,
 };
 use signalbox_model_runtime::{
-    CredentialAccess, CredentialAccessError, CredentialReference, CredentialValue,
+    CredentialAccess, CredentialAccessError, CredentialAccessFailure, CredentialReference,
+    CredentialValue,
 };
-use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiRuntime};
+use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiPreparedRequest, OpenAiRuntime};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -166,10 +168,28 @@ async fn execute<A: CredentialAccess>(
     cancellation: CancellationSignal,
 ) -> (TerminalReport<String>, Vec<Observation<String>>) {
     let mut observations: Vec<Observation<String>> = Vec::new();
+    let prepared = prepare(runtime, operation, CancellationSignal::never()).await;
     let report = runtime
-        .execute(operation, &mut observations, cancellation)
+        .execute(prepared, &mut observations, cancellation)
         .await;
     (report, observations)
+}
+
+async fn prepare<A: CredentialAccess>(
+    runtime: &OpenAiRuntime<A>,
+    operation: ModelOperation<String>,
+    cancellation: CancellationSignal,
+) -> OpenAiPreparedRequest<String> {
+    match runtime.prepare(operation, cancellation).await {
+        PreparationOutcome::Prepared(prepared) => prepared,
+        PreparationOutcome::Cancelled { .. } => panic!("loopback preparation cancelled"),
+        PreparationOutcome::Failed { failure, .. } => {
+            panic!("loopback preparation failed: {failure:?}")
+        }
+        PreparationOutcome::Defect { defect, .. } => {
+            panic!("loopback preparation was defective: {defect:?}")
+        }
+    }
 }
 
 #[tokio::test]
@@ -319,22 +339,17 @@ async fn an_empty_credential_is_rejected_before_send() {
     config.base_url = "http://127.0.0.1:1".to_string();
     let runtime = OpenAiRuntime::new(config, EmptyKey).expect("configuration constructs");
 
-    let (report, observations) = execute(
-        &runtime,
-        operation("call-empty-key"),
-        CancellationSignal::never(),
-    )
-    .await;
+    let outcome = runtime
+        .prepare(operation("call-empty-key"), CancellationSignal::never())
+        .await;
 
-    let TerminalEvidence::ProvenUnsent(unsent) = report.evidence else {
-        panic!("an empty credential is locally unusable before send");
-    };
-    assert!(matches!(unsent.cause, UnsentCause::PreparationFailed(_)));
-    assert!(
-        !observations
-            .iter()
-            .any(|observation| matches!(observation.fact, ObservationFact::SendCommenced))
-    );
+    assert!(matches!(
+        outcome,
+        PreparationOutcome::Failed {
+            failure: PreparationFailure::CredentialUnusable { .. },
+            ..
+        }
+    ));
 }
 
 #[tokio::test]
@@ -449,15 +464,261 @@ async fn a_signal_cancelled_before_send_proves_the_request_unsent() {
         "a pre-send cancellation must reach the network never"
     );
     assert!(
-        observations
-            .iter()
-            .any(|observation| matches!(observation.fact, ObservationFact::RequestPrepared))
-    );
-    assert!(
         !observations
             .iter()
             .any(|observation| matches!(observation.fact, ObservationFact::SendCommenced))
     );
+}
+
+#[derive(Debug)]
+struct CountingKey {
+    resolutions: Arc<AtomicUsize>,
+    value: &'static [u8],
+}
+
+impl CredentialAccess for CountingKey {
+    async fn resolve(
+        &self,
+        _reference: &CredentialReference,
+    ) -> Result<CredentialValue, CredentialAccessError> {
+        self.resolutions.fetch_add(1, Ordering::SeqCst);
+        Ok(CredentialValue::new(self.value.to_vec()))
+    }
+}
+
+#[tokio::test]
+async fn preparation_resolves_once_sends_nothing_and_execution_does_not_resolve_again() {
+    let server = CannedServer::serving(vec![http_response("200 OK", &[], b"{}")]).await;
+    let resolutions = Arc::new(AtomicUsize::new(0));
+    let mut config = OpenAiConfig::new();
+    config.base_url = server.base_url.clone();
+    let runtime = OpenAiRuntime::new(
+        config,
+        CountingKey {
+            resolutions: Arc::clone(&resolutions),
+            value: b"key_once",
+        },
+    )
+    .expect("loopback configuration constructs");
+
+    let prepared = prepare(
+        &runtime,
+        operation("call-prepare-once"),
+        CancellationSignal::never(),
+    )
+    .await;
+
+    assert_eq!(resolutions.load(Ordering::SeqCst), 1);
+    assert!(server.recorded_requests().is_empty());
+
+    let mut observations = Vec::new();
+    runtime
+        .execute(prepared, &mut observations, CancellationSignal::never())
+        .await;
+
+    assert_eq!(resolutions.load(Ordering::SeqCst), 1);
+    assert_eq!(server.recorded_requests().len(), 1);
+}
+
+#[derive(Debug)]
+struct PendingKey;
+
+impl CredentialAccess for PendingKey {
+    async fn resolve(
+        &self,
+        _reference: &CredentialReference,
+    ) -> Result<CredentialValue, CredentialAccessError> {
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn cancellation_during_preparation_creates_no_capability_or_http_traffic() {
+    let server = CannedServer::serving(vec![http_response("200 OK", &[], b"{}")]).await;
+    let mut config = OpenAiConfig::new();
+    config.base_url = server.base_url.clone();
+    let runtime = OpenAiRuntime::new(config, PendingKey).expect("configuration constructs");
+
+    let outcome = runtime
+        .prepare(
+            operation("call-cancel-prepare"),
+            CancellationSignal::already_cancelled(),
+        )
+        .await;
+
+    assert!(matches!(
+        outcome,
+        PreparationOutcome::Cancelled { correlation }
+            if correlation == "call-cancel-prepare"
+    ));
+    assert!(server.recorded_requests().is_empty());
+}
+
+#[tokio::test]
+async fn a_ready_preparation_wins_a_same_poll_cancellation_race() {
+    let server = CannedServer::serving(vec![http_response("200 OK", &[], b"{}")]).await;
+    let runtime = runtime_for(&server.base_url);
+
+    let outcome = runtime
+        .prepare(
+            operation("call-work-first"),
+            CancellationSignal::already_cancelled(),
+        )
+        .await;
+
+    assert!(matches!(outcome, PreparationOutcome::Prepared(_)));
+    assert!(server.recorded_requests().is_empty());
+}
+
+#[derive(Debug)]
+struct UnavailableKey;
+
+impl CredentialAccess for UnavailableKey {
+    async fn resolve(
+        &self,
+        reference: &CredentialReference,
+    ) -> Result<CredentialValue, CredentialAccessError> {
+        Err(CredentialAccessError::new(
+            reference.clone(),
+            CredentialAccessFailure::Unavailable,
+        ))
+    }
+}
+
+#[tokio::test]
+async fn ordinary_validation_and_credential_failures_are_preparation_outcomes() {
+    let server = CannedServer::serving(vec![http_response("200 OK", &[], b"{}")]).await;
+    let mut invalid = operation("call-invalid");
+    invalid.settings.temperature = Some(f64::NAN);
+    let fixed = runtime_for(&server.base_url);
+
+    assert!(matches!(
+        fixed.prepare(invalid, CancellationSignal::never()).await,
+        PreparationOutcome::Failed {
+            failure: PreparationFailure::UnsupportedOperation { .. },
+            ..
+        }
+    ));
+
+    let mut config = OpenAiConfig::new();
+    config.base_url = server.base_url.clone();
+    let unavailable = OpenAiRuntime::new(config, UnavailableKey).expect("configuration constructs");
+    assert!(matches!(
+        unavailable
+            .prepare(operation("call-unavailable"), CancellationSignal::never())
+            .await,
+        PreparationOutcome::Failed {
+            failure: PreparationFailure::CredentialUnavailable { .. },
+            ..
+        }
+    ));
+
+    assert!(server.recorded_requests().is_empty());
+}
+
+#[tokio::test]
+async fn unusable_credential_is_an_ordinary_preparation_failure() {
+    let server = CannedServer::serving(vec![http_response("200 OK", &[], b"{}")]).await;
+    let resolutions = Arc::new(AtomicUsize::new(0));
+    let mut config = OpenAiConfig::new();
+    config.base_url = server.base_url.clone();
+    let runtime = OpenAiRuntime::new(
+        config,
+        CountingKey {
+            resolutions,
+            value: b"invalid\nkey",
+        },
+    )
+    .expect("configuration constructs");
+
+    assert!(matches!(
+        runtime
+            .prepare(operation("call-unusable"), CancellationSignal::never())
+            .await,
+        PreparationOutcome::Failed {
+            failure: PreparationFailure::CredentialUnusable { .. },
+            ..
+        }
+    ));
+    assert!(server.recorded_requests().is_empty());
+}
+
+#[derive(Debug)]
+struct RotatingKey(Arc<Mutex<String>>);
+
+impl CredentialAccess for RotatingKey {
+    async fn resolve(
+        &self,
+        reference: &CredentialReference,
+    ) -> Result<CredentialValue, CredentialAccessError> {
+        assert_eq!(reference.as_str(), "openai-primary");
+        Ok(CredentialValue::new(
+            self.0.lock().expect("key lock").clone().into_bytes(),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn inv_035_api_key_rotation_is_visible_to_the_next_preparation() {
+    let server = CannedServer::serving(vec![
+        http_response("200 OK", &[], b"{}"),
+        http_response("200 OK", &[], b"{}"),
+    ])
+    .await;
+    let value = Arc::new(Mutex::new("key_before".to_string()));
+    let mut config = OpenAiConfig::new();
+    config.base_url = server.base_url.clone();
+    let runtime = OpenAiRuntime::new(config, RotatingKey(Arc::clone(&value)))
+        .expect("configuration constructs");
+
+    let before = prepare(&runtime, operation("call-9"), CancellationSignal::never()).await;
+    *value.lock().expect("key lock") = "key_after".to_string();
+    let after = prepare(&runtime, operation("call-10"), CancellationSignal::never()).await;
+    let mut observations = Vec::new();
+    runtime
+        .execute(before, &mut observations, CancellationSignal::never())
+        .await;
+    runtime
+        .execute(after, &mut observations, CancellationSignal::never())
+        .await;
+
+    let requests = server.recorded_requests();
+    assert!(requests[0].contains("authorization: Bearer key_before\r\n"));
+    assert!(requests[1].contains("authorization: Bearer key_after\r\n"));
+}
+
+#[tokio::test]
+async fn execution_redacts_with_the_exact_credential_captured_by_preparation() {
+    let body = br#"{"object":"chat.completion","model":"model-exact-1","choices":[{
+        "index":0,"message":{"role":"assistant","content":"echo key_before"},
+        "finish_reason":"stop"}]}"#;
+    let server = CannedServer::serving(vec![http_response("200 OK", &[], body)]).await;
+    let value = Arc::new(Mutex::new("key_before".to_string()));
+    let mut config = OpenAiConfig::new();
+    config.base_url = server.base_url.clone();
+    let runtime = OpenAiRuntime::new(config, RotatingKey(Arc::clone(&value)))
+        .expect("configuration constructs");
+    let prepared = prepare(
+        &runtime,
+        operation("call-captured-key"),
+        CancellationSignal::never(),
+    )
+    .await;
+    *value.lock().expect("key lock") = "key_after".to_string();
+
+    let mut observations = Vec::new();
+    let report = runtime
+        .execute(prepared, &mut observations, CancellationSignal::never())
+        .await;
+
+    let TerminalEvidence::Completed(completion) = report.evidence else {
+        panic!("complete response remains completion evidence");
+    };
+    assert_eq!(
+        completion.content,
+        vec![AssistantPart::Text("echo [redacted]".to_string())]
+    );
+    assert!(server.recorded_requests()[0].contains("authorization: Bearer key_before\r\n"));
 }
 
 #[tokio::test]
@@ -544,6 +805,37 @@ async fn streamed_observations_reflecting_the_key_are_redacted() {
 
     assert!(!format!("{report:?}").contains("key_loop"));
     assert!(!format!("{observations:?}").contains("key_loop"));
+}
+
+#[tokio::test]
+async fn json_escaped_streamed_tool_arguments_are_redacted_before_observation() {
+    let body: &[u8] = br#"data: {"object":"chat.completion.chunk","id":"chatcmpl-tool","model":"model-exact-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"token\":\"key_\\u00"}}]}}]}
+
+data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"6coop\"}"}}]}}]}
+
+data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: {"object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":4,"completion_tokens":2}}
+
+data: [DONE]
+
+"#;
+    let server = CannedServer::serving(vec![http_response(
+        "200 OK",
+        &[("content-type", "text/event-stream")],
+        body,
+    )])
+    .await;
+    let runtime = runtime_for(&server.base_url);
+    let mut operation = operation("call-redacted-tool-stream");
+    operation.delivery = DeliveryMode::Streamed;
+
+    let (report, observations) = execute(&runtime, operation, CancellationSignal::never()).await;
+
+    assert!(matches!(report.evidence, TerminalEvidence::Completed(_)));
+    assert!(!format!("{report:?}").contains("key_loop"));
+    assert!(!format!("{observations:?}").contains("key_loop"));
+    assert!(format!("{observations:?}").contains("[redacted]"));
 }
 
 #[test]

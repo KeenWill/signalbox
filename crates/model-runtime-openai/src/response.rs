@@ -232,7 +232,13 @@ pub(crate) fn decode_buffered_response<C: Clone>(
     let has_tool_calls = content
         .iter()
         .any(|part| matches!(part, AssistantPart::ToolCall(_)));
-    if has_tool_calls != matches!(finish, FinishReason::ToolUse) {
+    if (matches!(finish, FinishReason::ToolUse) && !has_tool_calls)
+        || (has_tool_calls
+            && !matches!(
+                finish,
+                FinishReason::ToolUse | FinishReason::MaxOutputTokens
+            ))
+    {
         return unintelligible(
             "tool-call content does not match the reported finish_reason".to_string(),
             exchange,
@@ -516,6 +522,25 @@ mod tests {
         assert!(matches!(
             tool_finish_without_tool,
             TerminalEvidence::BoundaryLoss(_)
+        ));
+    }
+
+    #[test]
+    fn max_token_completion_retains_a_partial_tool_call() {
+        let (evidence, _) = decode(
+            r#"{"object":"chat.completion","model":"model-exact-1","choices":[{
+                "index":0,"message":{"role":"assistant","tool_calls":[{
+                "id":"call_1","type":"function","function":{"name":"lookup",
+                "arguments":"{\"city\":"}}]},"finish_reason":"length"}]}"#,
+        );
+
+        let TerminalEvidence::Completed(completion) = evidence else {
+            panic!("token exhaustion with partial tool material is definitive completion");
+        };
+        assert_eq!(completion.finish, CompletionFinish::MaxOutputTokens);
+        assert!(matches!(
+            completion.content.as_slice(),
+            [AssistantPart::ToolCall(_)]
         ));
     }
 

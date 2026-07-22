@@ -20,6 +20,8 @@ pub(crate) fn classify_error(status: u16, code: Option<&str>) -> ProviderErrorKi
         Some("model_not_found") => ProviderErrorKind::TargetNotFound,
         Some("insufficient_quota") => ProviderErrorKind::QuotaExhausted,
         Some("context_length_exceeded") => ProviderErrorKind::RequestTooLarge,
+        Some("rate_limit_exceeded" | "rate_limit_error") => ProviderErrorKind::RateLimited,
+        Some("server_error" | "internal_server_error") => ProviderErrorKind::ProviderInternal,
         _ => match status {
             400 => ProviderErrorKind::InvalidRequest,
             401 => ProviderErrorKind::CredentialRejected,
@@ -90,6 +92,10 @@ mod tests {
             (404, "model_not_found"),
             (429, "insufficient_quota"),
             (400, "context_length_exceeded"),
+            (0, "rate_limit_exceeded"),
+            (0, "rate_limit_error"),
+            (0, "server_error"),
+            (0, "internal_server_error"),
             (400, "-"),
             (401, "-"),
             (403, "-"),
@@ -110,6 +116,10 @@ mod tests {
             │    404 │ model_not_found         │ TargetNotFound     │
             │    429 │ insufficient_quota      │ QuotaExhausted     │
             │    400 │ context_length_exceeded │ RequestTooLarge    │
+            │      0 │ rate_limit_exceeded     │ RateLimited        │
+            │      0 │ rate_limit_error        │ RateLimited        │
+            │      0 │ server_error            │ ProviderInternal   │
+            │      0 │ internal_server_error   │ ProviderInternal   │
             │    400 │ -                       │ InvalidRequest     │
             │    401 │ -                       │ CredentialRejected │
             │    403 │ -                       │ PermissionDenied   │
