@@ -2379,12 +2379,26 @@ version = "0.0.0"
 dependencies = [
  "signalbox-application",
  "signalbox-domain",
+ "signalbox-model-provider-runtime",
+ "signalbox-model-runtime",
+ "signalbox-model-runtime-anthropic",
  "signalbox-persistence",
  "sqlx",
  "testcontainers-modules",
  "tokio",
+ "toml_edit",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "signalbox-model-provider-runtime"
+version = "0.0.0"
+dependencies = [
+ "signalbox-application",
+ "signalbox-domain",
+ "signalbox-model-runtime",
  "uuid",
 ]
 

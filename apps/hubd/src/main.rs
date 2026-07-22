@@ -3,21 +3,38 @@
 //! ADR-0044 keeps runtime, subscriber, deployment configuration, migration,
 //! startup ordering, and shutdown policy at this executable boundary.
 
-use std::{env, ffi::OsString, future::Future, process::ExitCode, time::Duration};
+use std::{
+    env,
+    ffi::OsString,
+    future::Future,
+    path::{Path, PathBuf},
+    process::ExitCode,
+    time::Duration,
+};
 
 use signalbox_application::{
-    ClassifyOperatorFailure, EligibilityPass, EligibilityWorkSource,
+    ClassifyOperatorFailure, EligibilityPass, EligibilityWorkSource, InProcessAttemptDispatchGate,
     InProcessEligibilityWorkSource, OperatorFailureClass, SchedulerLoop, StartEligibleTurnService,
     StartupScanService, UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
 };
 use signalbox_domain::{SessionId, TurnId};
+use signalbox_hubd::{
+    ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, FatalExecutionSupervisor,
+    FileCredentialAccess, HubModelConfiguration, PostgresProviderModelExecution,
+};
+use signalbox_model_provider_runtime::RuntimeModelCallProvider;
+use signalbox_model_runtime::CredentialReference;
+use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
 use signalbox_persistence::{
-    connect_production, migrate, scheduler::PostgresEligibilitySweep,
-    start_eligible_turn::StartEligibleTurnRepository, startup::PostgresStartupScanRepository,
+    connect_production, migrate, model_execution::PostgresModelCallRepository,
+    scheduler::PostgresEligibilitySweep, start_eligible_turn::StartEligibleTurnRepository,
+    startup::PostgresStartupScanRepository,
 };
 use tokio::{pin, select, sync::oneshot, time::timeout};
 
 const GRACEFUL_SHUTDOWN_WINDOW: Duration = Duration::from_secs(30);
+const MODEL_CONFIGURATION_FILE_ENVIRONMENT: &str = "SIGNALBOX_CONFIG_FILE";
+const ANTHROPIC_API_KEY_FILE_ENVIRONMENT: &str = "ANTHROPIC_API_KEY_FILE";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RuntimePhase {
@@ -89,27 +106,61 @@ impl HubRuntimeError {
 
 struct HubConfiguration {
     database_url: String,
+    model_configuration_file: PathBuf,
+    anthropic_api_key_file: PathBuf,
 }
 
 impl HubConfiguration {
     fn from_environment() -> Result<Self, HubRuntimeError> {
-        Self::from_database_url(env::var_os("DATABASE_URL"))
+        Self::from_values(
+            env::var_os("DATABASE_URL"),
+            env::var_os(MODEL_CONFIGURATION_FILE_ENVIRONMENT),
+            env::var_os(ANTHROPIC_API_KEY_FILE_ENVIRONMENT),
+        )
     }
 
-    fn from_database_url(value: Option<OsString>) -> Result<Self, HubRuntimeError> {
-        let database_url = value
+    fn from_values(
+        database_url: Option<OsString>,
+        model_configuration_file: Option<OsString>,
+        anthropic_api_key_file: Option<OsString>,
+    ) -> Result<Self, HubRuntimeError> {
+        let database_url = database_url
             .ok_or_else(|| HubRuntimeError::infrastructure(RuntimePhase::Configuration))?
             .into_string()
             .map_err(|_| HubRuntimeError::infrastructure(RuntimePhase::Configuration))?;
         if database_url.is_empty() {
             return Err(HubRuntimeError::infrastructure(RuntimePhase::Configuration));
         }
+        let model_configuration_file = required_path(model_configuration_file)?;
+        let anthropic_api_key_file = required_path(anthropic_api_key_file)?;
 
-        Ok(Self { database_url })
+        Ok(Self {
+            database_url,
+            model_configuration_file,
+            anthropic_api_key_file,
+        })
     }
 
     fn database_url(&self) -> &str {
         &self.database_url
+    }
+
+    fn model_configuration_file(&self) -> &Path {
+        &self.model_configuration_file
+    }
+
+    fn anthropic_api_key_file(&self) -> PathBuf {
+        self.anthropic_api_key_file.clone()
+    }
+}
+
+fn required_path(value: Option<OsString>) -> Result<PathBuf, HubRuntimeError> {
+    let value =
+        value.ok_or_else(|| HubRuntimeError::infrastructure(RuntimePhase::Configuration))?;
+    if value.is_empty() {
+        Err(HubRuntimeError::infrastructure(RuntimePhase::Configuration))
+    } else {
+        Ok(PathBuf::from(value))
     }
 }
 
@@ -118,10 +169,21 @@ enum ShutdownOutcome {
     Clean,
     GraceWindowExpired,
     SignalListenerFailed,
+    ExecutionFailed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SchedulerStopCause {
+    Requested,
+    SignalListenerFailed,
+    ExecutionFailed,
 }
 
 const fn should_close_pool(outcome: &Result<ShutdownOutcome, HubRuntimeError>) -> bool {
-    matches!(outcome, Ok(ShutdownOutcome::Clean) | Err(_))
+    matches!(
+        outcome,
+        Ok(ShutdownOutcome::Clean | ShutdownOutcome::ExecutionFailed) | Err(_)
+    )
 }
 
 async fn migrate_scan_then_schedule<Migration, Scan, Schedule, Runtime, Output>(
@@ -150,7 +212,7 @@ where
     Pass: EligibilityPass + Clone + Send + 'static,
     WorkSource::Error: ClassifyOperatorFailure,
     Pass::Error: ClassifyOperatorFailure + Send + 'static,
-    Shutdown: Future<Output = bool>,
+    Shutdown: Future<Output = SchedulerStopCause>,
 {
     let (shutdown_sender, shutdown_receiver) = oneshot::channel();
     let scheduler_run = scheduler.run_until(async move {
@@ -159,8 +221,8 @@ where
     pin!(scheduler_run);
     pin!(shutdown);
 
-    let listener_failed = select! {
-        listener_failed = &mut shutdown => listener_failed,
+    let stop_cause = select! {
+        stop_cause = &mut shutdown => stop_cause,
         _ = &mut scheduler_run => {
             return ShutdownOutcome::SignalListenerFailed;
         }
@@ -168,7 +230,10 @@ where
     let _ = shutdown_sender.send(());
 
     match timeout(grace_window, &mut scheduler_run).await {
-        _ if listener_failed => ShutdownOutcome::SignalListenerFailed,
+        _ if stop_cause == SchedulerStopCause::SignalListenerFailed => {
+            ShutdownOutcome::SignalListenerFailed
+        }
+        _ if stop_cause == SchedulerStopCause::ExecutionFailed => ShutdownOutcome::ExecutionFailed,
         Ok(_) => ShutdownOutcome::Clean,
         Err(_) => ShutdownOutcome::GraceWindowExpired,
     }
@@ -196,6 +261,21 @@ async fn shutdown_requested() -> bool {
 
 async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
     let configuration = HubConfiguration::from_environment()?;
+    let model_configuration = HubModelConfiguration::read(configuration.model_configuration_file())
+        .map_err(|_| HubRuntimeError::infrastructure(RuntimePhase::Configuration))?;
+    let credential_access = FileCredentialAccess::new(
+        configuration.anthropic_api_key_file(),
+        CredentialReference::new(ANTHROPIC_CREDENTIAL_REFERENCE),
+    );
+    let credential_reference = credential_access.credential_reference();
+    let anthropic = AnthropicRuntime::new(AnthropicConfig::new(), credential_access)
+        .map_err(|_| HubRuntimeError::infrastructure(RuntimePhase::Configuration))?;
+    let provider = RuntimeModelCallProvider::new(
+        anthropic,
+        model_configuration.runtime_model_catalog(),
+        credential_reference,
+    );
+    let model_targets = model_configuration.target_catalog();
     let pool = connect_production(configuration.database_url())
         .await
         .map_err(|_| HubRuntimeError::infrastructure(RuntimePhase::DatabaseConnection))?;
@@ -244,18 +324,39 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
         || async move {
             let sweep = PostgresEligibilitySweep::new(scheduler_pool.clone());
             let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
-            let pass = StartEligibleTurnService::new(
-                UuidV7StartEligibleTurnIdGenerator,
-                StartEligibleTurnRepository::new(scheduler_pool),
+            let (execution, fatal_execution) =
+                FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
+                    PostgresModelCallRepository::new(scheduler_pool.clone(), model_targets),
+                    InProcessAttemptDispatchGate::default(),
+                    provider,
+                ));
+            let pass = ActivatedTurnPass::new(
+                StartEligibleTurnService::new(
+                    UuidV7StartEligibleTurnIdGenerator,
+                    StartEligibleTurnRepository::new(scheduler_pool),
+                ),
+                execution,
             );
             let scheduler = SchedulerLoop::new(work_source, pass);
             tracing::info!(
                 phase = ?RuntimePhase::Scheduling,
                 "hub scheduler started"
             );
+            let fatal_shutdown = fatal_execution.clone();
             let outcome = run_scheduler_until_shutdown(
                 scheduler,
-                shutdown_requested(),
+                async move {
+                    select! {
+                        listener_failed = shutdown_requested() => {
+                            if listener_failed {
+                                SchedulerStopCause::SignalListenerFailed
+                            } else {
+                                SchedulerStopCause::Requested
+                            }
+                        }
+                        () = fatal_shutdown.wait() => SchedulerStopCause::ExecutionFailed,
+                    }
+                },
                 GRACEFUL_SHUTDOWN_WINDOW,
             )
             .await;
@@ -307,6 +408,15 @@ async fn main() -> ExitCode {
             );
             ExitCode::FAILURE
         }
+        Ok(ShutdownOutcome::ExecutionFailed) => {
+            let error = HubRuntimeError::infrastructure(RuntimePhase::Scheduling);
+            tracing::error!(
+                phase = ?error.phase,
+                failure_class = ?error.failure_class,
+                "activated-turn execution failed; stopping for startup recovery"
+            );
+            ExitCode::FAILURE
+        }
         Err(error) => {
             tracing::error!(
                 phase = ?error.phase,
@@ -342,7 +452,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        HubConfiguration, HubRuntimeError, RuntimePhase, ShutdownOutcome,
+        HubConfiguration, HubRuntimeError, RuntimePhase, SchedulerStopCause, ShutdownOutcome,
         migrate_scan_then_schedule, run_scheduler_until_shutdown, should_close_pool,
     };
 
@@ -404,20 +514,41 @@ mod tests {
     }
 
     #[test]
-    fn database_url_is_required_and_never_debug_rendered() {
+    fn deployment_paths_and_database_url_are_required() {
         assert_eq!(
-            HubConfiguration::from_database_url(None).err(),
+            HubConfiguration::from_values(
+                None,
+                Some(OsString::from("models.toml")),
+                Some(OsString::from("key")),
+            )
+            .err(),
             Some(HubRuntimeError::infrastructure(RuntimePhase::Configuration))
         );
         assert_eq!(
-            HubConfiguration::from_database_url(Some(OsString::from(""))).err(),
+            HubConfiguration::from_values(
+                Some(OsString::from("postgres://secret")),
+                Some(OsString::from("")),
+                Some(OsString::from("key")),
+            )
+            .err(),
             Some(HubRuntimeError::infrastructure(RuntimePhase::Configuration))
         );
 
-        let configuration =
-            HubConfiguration::from_database_url(Some(OsString::from("postgres://secret")))
-                .expect("nonempty deployment value is accepted before SQLx parsing");
+        let configuration = HubConfiguration::from_values(
+            Some(OsString::from("postgres://secret")),
+            Some(OsString::from("models.toml")),
+            Some(OsString::from("key")),
+        )
+        .expect("nonempty deployment values are accepted before I/O");
         assert_eq!(configuration.database_url(), "postgres://secret");
+        assert_eq!(
+            configuration.model_configuration_file(),
+            std::path::Path::new("models.toml")
+        );
+        assert_eq!(
+            configuration.anthropic_api_key_file(),
+            std::path::PathBuf::from("key")
+        );
     }
 
     #[test]
@@ -533,7 +664,7 @@ mod tests {
             scheduler,
             async move {
                 shutdown_receiver.await.expect("the test requests shutdown");
-                false
+                SchedulerStopCause::Requested
             },
             Duration::from_secs(5),
         ));
@@ -557,8 +688,28 @@ mod tests {
         let scheduler = SchedulerLoop::new(PendingWorkSource, ReadyPass);
 
         assert_eq!(
-            run_scheduler_until_shutdown(scheduler, ready(false), Duration::from_secs(1)).await,
+            run_scheduler_until_shutdown(
+                scheduler,
+                ready(SchedulerStopCause::Requested),
+                Duration::from_secs(1),
+            )
+            .await,
             ShutdownOutcome::Clean
+        );
+    }
+
+    #[tokio::test]
+    async fn post_activation_execution_failure_stops_the_scheduler() {
+        let scheduler = SchedulerLoop::new(PendingWorkSource, ReadyPass);
+
+        assert_eq!(
+            run_scheduler_until_shutdown(
+                scheduler,
+                ready(SchedulerStopCause::ExecutionFailed),
+                Duration::from_secs(1),
+            )
+            .await,
+            ShutdownOutcome::ExecutionFailed
         );
     }
 
@@ -581,7 +732,7 @@ mod tests {
                 shutdown_receiver
                     .await
                     .expect("the listener reports failure");
-                true
+                SchedulerStopCause::SignalListenerFailed
             },
             Duration::from_secs(5),
         ));
@@ -606,6 +757,7 @@ mod tests {
         assert!(!should_close_pool(&Ok(
             ShutdownOutcome::SignalListenerFailed
         )));
+        assert!(should_close_pool(&Ok(ShutdownOutcome::ExecutionFailed)));
         assert!(should_close_pool(&Ok(ShutdownOutcome::Clean)));
         assert!(should_close_pool(&Err(HubRuntimeError::infrastructure(
             RuntimePhase::Migration

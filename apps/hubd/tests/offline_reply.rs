@@ -13,13 +13,20 @@ use signalbox_application::{
     UuidV7StartEligibleTurnIdGenerator, UuidV7SubmitInputIdGenerator,
 };
 use signalbox_domain::{
-    AssistantText, DeliveryRequest, DirectModelSelection, DurableCommandId, ModelSelectionOverride,
+    DeliveryRequest, DirectModelSelection, DurableCommandId, ModelSelectionOverride,
     ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition, PerInputConfigurationChoices,
     ProviderModelIdentity, ResolvedProviderTarget, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionId, SubmitInputAppliedResult, SubmitInputResult,
     TurnId, UserContent,
 };
-use signalbox_hubd::{ActivatedTurnPass, FatalExecutionSupervisor, PostgresScriptedModelExecution};
+use signalbox_hubd::{ActivatedTurnPass, FatalExecutionSupervisor, PostgresProviderModelExecution};
+use signalbox_model_provider_runtime::{
+    RuntimeModelCallProvider, RuntimeModelCatalog, RuntimeModelDefinition,
+};
+use signalbox_model_runtime::{
+    AssistantPart, CompletionEvidence, CompletionFinish, CredentialReference, ExchangeFacts,
+    ProviderReportedModel, Script, ScriptedModel, TerminalEvidence, TokenUsage,
+};
 use signalbox_persistence::{
     create_session::CreateSessionRepository, local_test_connection_options, migrate,
     model_execution::PostgresModelCallRepository, scheduler::PostgresEligibilitySweep,
@@ -86,9 +93,11 @@ async fn wait_for_terminal(pool: &PgPool, session: SessionId, turn: TurnId) {
 /// invokes the application provider port, and atomically persists the exact
 /// selection, resolved target, consumed frontier, Prepared-to-InFlight
 /// checkpoint sequence, assistant reply, and terminal lifecycle facts.
+/// INV-026: the bridge receives a one-action runtime script, so any repeated
+/// physical interaction exhausts the script and fails the test.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s01_s02_inv014_inv015_scheduler_persists_scripted_assistant_reply()
+async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x2001));
@@ -136,17 +145,38 @@ async fn s01_s02_inv014_inv015_scheduler_persists_scripted_assistant_reply()
     let turn = origin.turn();
 
     let provider_identity = ProviderModelIdentity::from_uuid(Uuid::from_u128(0x2004));
-    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
-        selection,
-        ResolvedProviderTarget::naming(provider_identity),
-    )])
-    .expect("one fixture target definition is unique");
+    let target = ResolvedProviderTarget::naming(provider_identity);
+    let targets =
+        ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(selection, target)])
+            .expect("one fixture target definition is unique");
+    let runtime_models =
+        RuntimeModelCatalog::try_from_definitions([RuntimeModelDefinition::try_new(
+            target,
+            String::from("scripted-exact"),
+            64,
+        )
+        .expect("fixture runtime definition is valid")])
+        .expect("one fixture runtime target is unique");
+    let runtime = ScriptedModel::single(Script::delivering(TerminalEvidence::Completed(
+        CompletionEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: Some(ProviderReportedModel::new("scripted-exact")),
+            finish: CompletionFinish::EndTurn,
+            content: vec![AssistantPart::Text(String::from("offline assistant reply"))],
+            usage: TokenUsage::unreported(),
+        },
+    )));
+    let provider = RuntimeModelCallProvider::new(
+        runtime,
+        runtime_models,
+        CredentialReference::new("scripted-test"),
+    );
     let (execution, fatal_execution) =
-        FatalExecutionSupervisor::new(PostgresScriptedModelExecution::new(
+        FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
             PostgresModelCallRepository::new(pool.clone(), targets),
             InProcessAttemptDispatchGate::default(),
-            AssistantText::try_new(String::from("offline assistant reply"))
-                .expect("fixture assistant content is admitted"),
+            provider,
         ));
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(

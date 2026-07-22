@@ -41,6 +41,56 @@ the deferred authority.
 startup-scan completion, hub boot, and the steering/cancellation milestone's
 reopening obligation.
 
+## 2026-07-22 — Anthropic credentials come from one reread file
+
+**Context.** The first production Anthropic composition needs to resolve
+ADR-0017's non-secret credential reference during each request preparation,
+without putting the secret in process arguments, model configuration, durable
+records, telemetry, or tests. The owner selected the deployment channel for this
+milestone.
+
+**Decision.** Require `ANTHROPIC_API_KEY_FILE` at the hubd composition root.
+Bind its path to the non-secret `anthropic-primary` reference and reread the
+file as raw bytes for every request preparation, so file replacement rotates the
+credential without a restart. Neither the path nor bytes appear in shared
+diagnostics. The file must contain only the header-ready key bytes.
+
+**Rejected alternatives.** Reading key bytes directly from an environment
+variable exposes the secret through a broader process channel. Caching the file
+at startup hides rotation. Putting the path or value in model TOML mixes secret
+delivery with non-secret model policy.
+
+**Affects.** `apps/hubd` production and Anthropic debug composition,
+`FileCredentialAccess`, deployment documentation, and INV-035 tests; no test
+requires a credential or live provider.
+
+## 2026-07-22 — Versioned static model configuration maps durable keys to Anthropic
+
+**Context.** The earlier static-TOML decision deliberately left its layout open.
+Production model execution now needs one correlated source for immutable domain
+selection/target keys, exact Anthropic model spellings, the required
+output-token ceiling, and alias definitions.
+
+**Decision.** Require `SIGNALBOX_CONFIG_FILE` to name strict TOML version 1.
+Each `models` row supplies `selection_id`, `target_id`, provider `anthropic`, an
+unpadded nonempty `provider_model`, and a positive `max_output_tokens`; each
+optional `aliases` row maps `alias_id` to a configured `selection_id`. Reject
+unknown fields, duplicate selections or aliases, conflicting target meanings,
+dangling aliases, unsupported providers, and invalid values at startup. Use
+buffered delivery with otherwise unset runtime settings. Parse with narrowly
+featured `toml_edit`, already present in the resolved workspace dependency
+graph, and construct checked domain/runtime values explicitly.
+
+**Rejected alternatives.** Deriving durable UUIDs from provider strings would
+make normalization an implicit hash convention. Separate domain and runtime
+files could drift after target resolution. Environment variables per model do
+not provide a versioned, reviewable catalog. A hand-written TOML parser would
+duplicate syntax handling without strengthening the checked mappings.
+
+**Affects.** `apps/hubd` configuration and example file, the runtime-port bridge
+catalog, production target resolution, and the real-provider smoke command; no
+database schema or accepted ADR changes.
+
 ## 2026-07-22 — Direct dependencies for the offline hub driver
 
 **Context.** The smoke-critical composition slice adds a local executable that

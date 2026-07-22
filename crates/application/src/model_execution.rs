@@ -1241,6 +1241,7 @@ impl ModelCallProvider for ScriptedModelCallProvider {
             || prepared.turn() != authorized.turn()
             || prepared.attempt() != authorized.attempt().id()
             || prepared.call().id() != authorized.call().id()
+            || prepared.call().selection() != authorized.call().selection()
             || prepared.call().target() != authorized.call().target()
             || prepared.call().frontier() != authorized.call().frontier()
         {
