@@ -452,10 +452,8 @@ impl ModelCallExecution {
         let Some(call) = self.current_call else {
             return Err(ModelCallClosureError::CallStateMismatch);
         };
-        if !matches!(
-            call.state(),
-            CurrentModelCallState::InFlight | CurrentModelCallState::CancellationRequested
-        ) || self.current_attempt.state() != &CurrentTurnAttemptState::Running
+        if call.state() != CurrentModelCallState::InFlight
+            || self.current_attempt.state() != &CurrentTurnAttemptState::Running
         {
             return Err(ModelCallClosureError::CallStateMismatch);
         }
@@ -2093,6 +2091,53 @@ mod tests {
             waiting.call().disposition(),
             ModelCallDisposition::Ambiguous
         );
+    }
+
+    /// S02 / INV-006 / INV-014: cancellation-requested state lacks the
+    /// proof-bearing attempt facts required to authorize a live semantic
+    /// closure through this evidence-free aggregate; startup recovery remains
+    /// available through its conservative Lost path.
+    #[test]
+    fn s02_inv006_inv014_cancellation_requested_call_rejects_live_observation() {
+        let in_flight = in_flight_execution();
+        let cancellation_requested = in_flight
+            .current_call()
+            .expect("in-flight execution has one call")
+            .clone()
+            .request_cancellation()
+            .expect("an in-flight call may request cancellation");
+        let execution = reconstitution_input_with_calls(
+            &in_flight,
+            vec![ModelCallReconstitutionInput::new(
+                cancellation_requested.id(),
+                cancellation_requested.turn(),
+                cancellation_requested.attempt(),
+                cancellation_requested.selection(),
+                cancellation_requested.target(),
+                cancellation_requested.frontier().snapshot(),
+                ModelCallReconstitutionState::CancellationRequested,
+            )],
+        )
+        .reconstitute()
+        .expect("cancellation-requested facts remain available for recovery");
+
+        let error = execution
+            .apply_terminal_observation(
+                ModelCallTerminalObservation::Completed {
+                    assistant_text: vec![
+                        AssistantText::try_new("late completion".to_owned())
+                            .expect("test assistant text is nonempty"),
+                    ],
+                },
+                ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                    vec![semantic_transcript_entry_id(10)],
+                    semantic_transcript_entry_id(11),
+                    context_frontier_id(12),
+                )),
+            )
+            .expect_err("evidence-free live closure cannot discard stop authority");
+
+        assert_eq!(error, ModelCallClosureError::CallStateMismatch);
     }
 
     /// S02 / INV-006: definitive known failure closes the physical call and
