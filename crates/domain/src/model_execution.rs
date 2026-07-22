@@ -10,14 +10,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    AcceptedInputId, ActiveTurnPhase, AssistantText, ContextFrontierId, CurrentModelCall,
-    CurrentModelCallState, CurrentTurnAttempt, CurrentTurnAttemptState, DirectModelSelection,
-    EndedModelCall, EndedTurnAttempt, FrozenModelSelection, ModelCallDisposition, ModelCallId,
-    ModelCallReconstitutionInput, NonEmptyIssuedOperationRefs, OriginConfiguration,
-    PinnedProviderTarget, ReconstitutedModelCall, ResolvedContextFrontierSnapshot,
-    ResolvedProviderTarget, SemanticTranscriptEntry, SemanticTranscriptEntryId,
-    SemanticTranscriptEntryPayload, SessionId, TurnAttemptId, TurnDisposition, TurnId,
-    UnstoppedAttemptDisposition, UserContent,
+    AcceptedInputId, AcceptedInputTurnStart, ActiveTurnPhase, AssistantText, ContextFrontierId,
+    CurrentModelCall, CurrentModelCallState, CurrentTurnAttempt, CurrentTurnAttemptState,
+    DirectModelSelection, EndedModelCall, EndedTurnAttempt, FrozenModelSelection,
+    ModelCallDisposition, ModelCallId, ModelCallReconstitutionInput, NonEmptyIssuedOperationRefs,
+    OriginConfiguration, PinnedProviderTarget, ReconstitutedModelCall, ReconstitutedSubmitInput,
+    ResolvedContextFrontierSnapshot, ResolvedProviderTarget, SemanticTranscriptEntry,
+    SemanticTranscriptEntryId, SemanticTranscriptEntryPayload, SessionId, SubmitInputAppliedResult,
+    SubmitInputResult, TurnAttemptId, TurnDisposition, TurnId, UnstoppedAttemptDisposition,
+    UserContent,
 };
 
 /// One immutable configured direct-selection to exact-target definition.
@@ -130,13 +131,28 @@ pub struct ModelCallOriginContent {
 }
 
 impl ModelCallOriginContent {
-    /// Associates accepted immutable user content with its accepted-input
-    /// identity.
-    pub const fn new(accepted_input: AcceptedInputId, content: UserContent) -> Self {
+    #[cfg(test)]
+    pub(crate) const fn from_validated_parts(
+        accepted_input: AcceptedInputId,
+        content: UserContent,
+    ) -> Self {
         Self {
             accepted_input,
             content,
         }
+    }
+
+    /// Derives exact origin content from one checked durable input receipt.
+    pub fn from_recorded_submit(recorded: &ReconstitutedSubmitInput) -> Option<Self> {
+        let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(origin)) =
+            recorded.result()
+        else {
+            return None;
+        };
+        (origin.session() == recorded.command().session()).then(|| Self {
+            accepted_input: origin.accepted_input(),
+            content: recorded.command().content().clone(),
+        })
     }
 
     /// Returns the accepted input whose origin carries this content.
@@ -168,7 +184,9 @@ pub struct ModelCallExecutionReconstitutionInput {
     session: SessionId,
     turn: TurnId,
     configuration: OriginConfiguration,
+    start: AcceptedInputTurnStart,
     phase: ActiveTurnPhase,
+    targets: ModelTargetCatalog,
     starting_snapshot: ResolvedContextFrontierSnapshot,
     frontier_entries: Vec<SemanticTranscriptEntry>,
     origin_contents: Vec<ModelCallOriginContent>,
@@ -182,7 +200,9 @@ impl ModelCallExecutionReconstitutionInput {
         session: SessionId,
         turn: TurnId,
         configuration: OriginConfiguration,
+        start: AcceptedInputTurnStart,
         phase: ActiveTurnPhase,
+        targets: ModelTargetCatalog,
         starting_snapshot: ResolvedContextFrontierSnapshot,
         frontier_entries: Vec<SemanticTranscriptEntry>,
         origin_contents: Vec<ModelCallOriginContent>,
@@ -192,7 +212,9 @@ impl ModelCallExecutionReconstitutionInput {
             session,
             turn,
             configuration,
+            start,
             phase,
+            targets,
             starting_snapshot,
             frontier_entries,
             origin_contents,
@@ -213,6 +235,8 @@ pub enum ModelCallExecutionReconstitutionFailure {
     TurnIsNotRunning,
     /// The starting snapshot belongs to a different session.
     StartingSnapshotSessionMismatch,
+    /// The supplied snapshot is not the turn's eligibility-fixed start.
+    StartingSnapshotMismatch,
     /// The supplied frontier entries do not exactly back ordered membership.
     FrontierEntryMismatch,
     /// More than one model call was supplied to the initial-call slice.
@@ -228,6 +252,10 @@ pub enum ModelCallExecutionReconstitutionFailure {
     CallOwnershipMismatch,
     /// A call records a different frozen selection.
     CallSelectionMismatch,
+    /// A stored call target differs from immutable configured resolution.
+    CallTargetMismatch,
+    /// The stored selection has no immutable configured target.
+    CallTargetUnavailable,
     /// Stored call facts cannot reconstruct the accepted call lifecycle.
     InvalidCall,
     /// Attempt and call states do not form one accepted execution phase.
@@ -269,6 +297,8 @@ pub struct ModelCallExecution {
     session: SessionId,
     turn: TurnId,
     configuration: OriginConfiguration,
+    start: AcceptedInputTurnStart,
+    targets: ModelTargetCatalog,
     current_attempt: CurrentTurnAttempt,
     starting_snapshot: ResolvedContextFrontierSnapshot,
     frontier_entries: Box<[SemanticTranscriptEntry]>,
@@ -290,6 +320,11 @@ impl ModelCallExecution {
     /// Borrows the exact frozen origin configuration.
     pub const fn configuration(&self) -> &OriginConfiguration {
         &self.configuration
+    }
+
+    /// Returns the exact eligibility-fixed lineage and starting frontier.
+    pub const fn start(&self) -> AcceptedInputTurnStart {
+        self.start
     }
 
     /// Borrows the current physical attempt.
@@ -316,15 +351,14 @@ impl ModelCallExecution {
     pub fn prepare_initial_call(
         self,
         call: ModelCallId,
-        resolution: ResolvedModelSelection,
     ) -> Result<PreparedInitialModelCall, ModelCallPreparationError> {
         let frozen = *self.configuration.effective().model();
-        if resolution.selection != frozen {
-            return Err(ModelCallPreparationError::new(
-                self,
-                ModelCallPreparationFailure::ResolutionSelectionMismatch,
-            ));
-        }
+        let resolution = self.targets.resolve(frozen).map_err(|_| {
+            ModelCallPreparationError::new(
+                self.clone(),
+                ModelCallPreparationFailure::TargetUnavailable,
+            )
+        })?;
         if self.current_call.is_some() {
             return Err(ModelCallPreparationError::new(
                 self,
@@ -412,6 +446,37 @@ impl ModelCallExecution {
         })
     }
 
+    /// Applies one provider observation to freshly reloaded issued state.
+    ///
+    /// ADR-0045 requires the observation transaction to reconstruct current
+    /// authority after the provider effect rather than retaining the earlier
+    /// authorization projection across that effect.
+    pub fn apply_terminal_observation(
+        self,
+        observation: ModelCallTerminalObservation,
+        identities: ModelCallTerminalIdentities,
+    ) -> Result<ModelCallTerminalOutcome, ModelCallClosureError> {
+        let Some(call) = self.current_call else {
+            return Err(ModelCallClosureError::CallStateMismatch);
+        };
+        if !matches!(
+            call.state(),
+            CurrentModelCallState::InFlight | CurrentModelCallState::CancellationRequested
+        ) || self.current_attempt.state() != &CurrentTurnAttemptState::Running
+        {
+            return Err(ModelCallClosureError::CallStateMismatch);
+        }
+        apply_terminal_observation(
+            self.session,
+            self.turn,
+            self.current_attempt,
+            call,
+            self.frontier_entries,
+            observation,
+            identities,
+        )
+    }
+
     /// Closes target-resolution failure before a model call exists.
     pub fn fail_target_resolution(
         self,
@@ -481,7 +546,7 @@ impl ModelCallExecution {
                 )
                 .map(ModelCallTerminalOutcome::Failed)
             }
-            CurrentModelCallState::InFlight => {
+            CurrentModelCallState::InFlight | CurrentModelCallState::CancellationRequested => {
                 let call = call
                     .end_classified(ModelCallDisposition::Ambiguous)
                     .map_err(|_| ModelCallClosureError::CallStateMismatch)?;
@@ -504,9 +569,6 @@ impl ModelCallExecution {
                     },
                 ))
             }
-            CurrentModelCallState::CancellationRequested => {
-                Err(ModelCallClosureError::CallStateMismatch)
-            }
         }
     }
 }
@@ -514,8 +576,8 @@ impl ModelCallExecution {
 /// Why a fresh prepared checkpoint could not be derived.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelCallPreparationFailure {
-    /// The resolution belongs to a different frozen selection.
-    ResolutionSelectionMismatch,
+    /// The frozen selection has no immutable configured target.
+    TargetUnavailable,
     /// The initial call has already been durably created.
     CallAlreadyExists,
     /// The current physical attempt is no longer prepared.
@@ -704,114 +766,113 @@ impl AuthorizedModelCall {
     pub fn origin_content(&self, accepted_input: AcceptedInputId) -> Option<&UserContent> {
         self.origin_contents.get(&accepted_input)
     }
+}
 
-    /// Applies one explicitly classified terminal provider observation.
-    pub fn apply_terminal_observation(
-        self,
-        observation: ModelCallTerminalObservation,
-        identities: ModelCallTerminalIdentities,
-    ) -> Result<ModelCallTerminalOutcome, ModelCallClosureError> {
-        let disposition = observation.disposition();
-        let source_frontier = self.call.frontier();
-        let ended_call = self
-            .call
-            .end_classified(disposition)
-            .map_err(|_| ModelCallClosureError::CallStateMismatch)?;
-        match observation {
-            ModelCallTerminalObservation::Completed { assistant_text } => {
-                let ModelCallTerminalIdentities::Completed(identities) = identities else {
-                    return Err(ModelCallClosureError::IdentityShapeMismatch);
-                };
-                let ended_attempt = self
-                    .attempt
-                    .end_without_stop(UnstoppedAttemptDisposition::TurnCompleted)
-                    .map_err(|_| ModelCallClosureError::AttemptStateMismatch)?;
-                let completed = complete_turn(
-                    self.session,
-                    self.turn,
-                    ended_call,
-                    ended_attempt,
-                    self.frontier_entries.into_vec(),
-                    assistant_text,
-                    identities,
-                )?;
-                Ok(ModelCallTerminalOutcome::Completed(completed))
-            }
-            ModelCallTerminalObservation::KnownFailed | ModelCallTerminalObservation::Cancelled => {
-                let ModelCallTerminalIdentities::Failed(identities) = identities else {
-                    return Err(ModelCallClosureError::IdentityShapeMismatch);
-                };
-                let failed = close_failed_turn(
-                    self.session,
-                    self.turn,
-                    self.attempt,
-                    Some(ended_call),
-                    ResolvedContextFrontierSnapshot::try_from_candidate(
-                        self.session,
-                        source_frontier.snapshot(),
-                        self.frontier_entries
-                            .iter()
-                            .map(SemanticTranscriptEntry::reference)
-                            .collect(),
-                    )
-                    .map_err(|_| ModelCallClosureError::FrontierDerivationFailed)?,
-                    identities,
-                    UnstoppedAttemptDisposition::KnownFailure,
-                )?;
-                Ok(ModelCallTerminalOutcome::Failed(failed))
-            }
-            ModelCallTerminalObservation::Refused => {
-                let ModelCallTerminalIdentities::Refused(identities) = identities else {
-                    return Err(ModelCallClosureError::IdentityShapeMismatch);
-                };
-                let ended_attempt = self
-                    .attempt
-                    .end_without_stop(UnstoppedAttemptDisposition::TurnRefused)
-                    .map_err(|_| ModelCallClosureError::AttemptStateMismatch)?;
-                let source = ResolvedContextFrontierSnapshot::try_from_candidate(
-                    self.session,
+fn apply_terminal_observation(
+    session: SessionId,
+    turn: TurnId,
+    attempt: CurrentTurnAttempt,
+    call: CurrentModelCall,
+    frontier_entries: Box<[SemanticTranscriptEntry]>,
+    observation: ModelCallTerminalObservation,
+    identities: ModelCallTerminalIdentities,
+) -> Result<ModelCallTerminalOutcome, ModelCallClosureError> {
+    let disposition = observation.disposition();
+    let source_frontier = call.frontier();
+    let ended_call = call
+        .end_classified(disposition)
+        .map_err(|_| ModelCallClosureError::CallStateMismatch)?;
+    match observation {
+        ModelCallTerminalObservation::Completed { assistant_text } => {
+            let ModelCallTerminalIdentities::Completed(identities) = identities else {
+                return Err(ModelCallClosureError::IdentityShapeMismatch);
+            };
+            let ended_attempt = attempt
+                .end_without_stop(UnstoppedAttemptDisposition::TurnCompleted)
+                .map_err(|_| ModelCallClosureError::AttemptStateMismatch)?;
+            let completed = complete_turn(
+                session,
+                turn,
+                ended_call,
+                ended_attempt,
+                frontier_entries.into_vec(),
+                assistant_text,
+                identities,
+            )?;
+            Ok(ModelCallTerminalOutcome::Completed(completed))
+        }
+        ModelCallTerminalObservation::KnownFailed | ModelCallTerminalObservation::Cancelled => {
+            let ModelCallTerminalIdentities::Failed(identities) = identities else {
+                return Err(ModelCallClosureError::IdentityShapeMismatch);
+            };
+            let failed = close_failed_turn(
+                session,
+                turn,
+                attempt,
+                Some(ended_call),
+                ResolvedContextFrontierSnapshot::try_from_candidate(
+                    session,
                     source_frontier.snapshot(),
-                    self.frontier_entries
+                    frontier_entries
                         .iter()
                         .map(SemanticTranscriptEntry::reference)
                         .collect(),
                 )
+                .map_err(|_| ModelCallClosureError::FrontierDerivationFailed)?,
+                identities,
+                UnstoppedAttemptDisposition::KnownFailure,
+            )?;
+            Ok(ModelCallTerminalOutcome::Failed(failed))
+        }
+        ModelCallTerminalObservation::Refused => {
+            let ModelCallTerminalIdentities::Refused(identities) = identities else {
+                return Err(ModelCallClosureError::IdentityShapeMismatch);
+            };
+            let ended_attempt = attempt
+                .end_without_stop(UnstoppedAttemptDisposition::TurnRefused)
+                .map_err(|_| ModelCallClosureError::AttemptStateMismatch)?;
+            let source = ResolvedContextFrontierSnapshot::try_from_candidate(
+                session,
+                source_frontier.snapshot(),
+                frontier_entries
+                    .iter()
+                    .map(SemanticTranscriptEntry::reference)
+                    .collect(),
+            )
+            .map_err(|_| ModelCallClosureError::FrontierDerivationFailed)?;
+            let terminal_snapshot = source
+                .derive_appending_candidate(identities.terminal_frontier, Vec::new())
                 .map_err(|_| ModelCallClosureError::FrontierDerivationFailed)?;
-                let terminal_snapshot = source
-                    .derive_appending_candidate(identities.terminal_frontier, Vec::new())
-                    .map_err(|_| ModelCallClosureError::FrontierDerivationFailed)?;
-                Ok(ModelCallTerminalOutcome::Refused(RefusedModelCallTurn {
-                    session: self.session,
-                    turn: self.turn,
+            Ok(ModelCallTerminalOutcome::Refused(RefusedModelCallTurn {
+                session,
+                turn,
+                call: ended_call,
+                attempt: ended_attempt,
+                disposition: TurnDisposition::Refused,
+                terminal_snapshot,
+            }))
+        }
+        ModelCallTerminalObservation::Ambiguous => {
+            if !matches!(identities, ModelCallTerminalIdentities::Ambiguous) {
+                return Err(ModelCallClosureError::IdentityShapeMismatch);
+            }
+            let call_id = ended_call.id();
+            let ended_attempt = attempt
+                .end_without_stop(UnstoppedAttemptDisposition::Ambiguous)
+                .map_err(|_| ModelCallClosureError::AttemptStateMismatch)?;
+            let ambiguous_operations = NonEmptyIssuedOperationRefs::try_from_operations([
+                crate::IssuedOperationRef::ModelCall(call_id),
+            ])
+            .map_err(|_| ModelCallClosureError::AmbiguityConstructionFailed)?;
+            Ok(ModelCallTerminalOutcome::AwaitingRecovery(
+                AmbiguousModelCallTurn {
+                    session,
+                    turn,
                     call: ended_call,
                     attempt: ended_attempt,
-                    disposition: TurnDisposition::Refused,
-                    terminal_snapshot,
-                }))
-            }
-            ModelCallTerminalObservation::Ambiguous => {
-                if !matches!(identities, ModelCallTerminalIdentities::Ambiguous) {
-                    return Err(ModelCallClosureError::IdentityShapeMismatch);
-                }
-                let call_id = ended_call.id();
-                let ended_attempt = self
-                    .attempt
-                    .end_without_stop(UnstoppedAttemptDisposition::Ambiguous)
-                    .map_err(|_| ModelCallClosureError::AttemptStateMismatch)?;
-                let ambiguous_operations = NonEmptyIssuedOperationRefs::try_from_operations([
-                    crate::IssuedOperationRef::ModelCall(call_id),
-                ])
-                .map_err(|_| ModelCallClosureError::AmbiguityConstructionFailed)?;
-                Ok(ModelCallTerminalOutcome::AwaitingRecovery(
-                    AmbiguousModelCallTurn {
-                        session: self.session,
-                        turn: self.turn,
-                        call: ended_call,
-                        attempt: ended_attempt,
-                        ambiguous_operations,
-                    },
-                ))
-            }
+                    ambiguous_operations,
+                },
+            ))
         }
     }
 }
@@ -1127,17 +1188,17 @@ fn reconstitute(
             ModelCallExecutionReconstitutionFailure::StartingSnapshotSessionMismatch,
         ));
     }
-    let entries = input
+    if input.start.frontier() != input.starting_snapshot.frontier() {
+        return Err(fail(
+            input,
+            ModelCallExecutionReconstitutionFailure::StartingSnapshotMismatch,
+        ));
+    }
+    if input
         .frontier_entries
         .iter()
-        .map(|entry| (entry.reference(), entry))
-        .collect::<BTreeMap<_, _>>();
-    if entries.len() != input.frontier_entries.len()
-        || input
-            .starting_snapshot
-            .ordered_entries()
-            .any(|entry| !entries.contains_key(&entry))
-        || input.starting_snapshot.entry_count() != entries.len()
+        .map(SemanticTranscriptEntry::reference)
+        .ne(input.starting_snapshot.ordered_entries())
     {
         return Err(fail(
             input,
@@ -1201,6 +1262,18 @@ fn reconstitute(
                 ModelCallExecutionReconstitutionFailure::CallSelectionMismatch,
             ));
         }
+        let resolution = input.targets.resolve(call.selection()).map_err(|_| {
+            fail(
+                input.clone(),
+                ModelCallExecutionReconstitutionFailure::CallTargetUnavailable,
+            )
+        })?;
+        if call.target() != resolution.target() {
+            return Err(fail(
+                input,
+                ModelCallExecutionReconstitutionFailure::CallTargetMismatch,
+            ));
+        }
         match call.reconstitute(&input.starting_snapshot) {
             Ok(ReconstitutedModelCall::Current(call)) => Some(call),
             Ok(ReconstitutedModelCall::Ended(_)) | Err(_) => {
@@ -1227,6 +1300,10 @@ fn reconstitute(
                 CurrentTurnAttemptState::Running,
                 Some(CurrentModelCallState::InFlight)
             )
+            | (
+                CurrentTurnAttemptState::Running,
+                Some(CurrentModelCallState::CancellationRequested)
+            )
     );
     if !lifecycle_valid {
         return Err(fail(
@@ -1238,6 +1315,8 @@ fn reconstitute(
         session: input.session,
         turn: input.turn,
         configuration: input.configuration,
+        start: input.start,
+        targets: input.targets,
         current_attempt: current_attempt.clone(),
         starting_snapshot: input.starting_snapshot,
         frontier_entries: input.frontier_entries.into_boxed_slice(),
@@ -1442,10 +1521,12 @@ mod tests {
             turn.session(),
             turn.turn(),
             turn.configuration().clone(),
+            turn.start(),
             turn.phase().clone(),
+            targets(),
             snapshot,
             vec![origin],
-            vec![ModelCallOriginContent::new(
+            vec![ModelCallOriginContent::from_validated_parts(
                 accepted_input_id(4),
                 UserContent::try_text(String::from("hello")).expect("test content is valid"),
             )],
@@ -1455,36 +1536,36 @@ mod tests {
         .expect("activation facts reconstruct live execution")
     }
 
-    fn resolution() -> ResolvedModelSelection {
+    fn targets() -> ModelTargetCatalog {
         ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
             direct(2),
             ResolvedProviderTarget::naming(provider_model_identity(8)),
         )])
         .expect("one definition is unique")
-        .resolve(FrozenModelSelection::Direct(direct(2)))
-        .expect("configured selection resolves")
     }
 
     fn prepared_execution() -> ModelCallExecution {
         let initial = active_execution();
         let prepared = initial
             .clone()
-            .prepare_initial_call(model_call_id(9), resolution())
+            .prepare_initial_call(model_call_id(9))
             .expect("initial prepared checkpoint is valid");
         ModelCallExecutionReconstitutionInput::new(
             initial.session,
             initial.turn,
-            initial.configuration,
+            initial.configuration.clone(),
+            initial.start,
             ActiveTurnPhase::Running {
-                current_attempt: initial.current_attempt,
+                current_attempt: initial.current_attempt.clone(),
             },
+            initial.targets.clone(),
             initial.starting_snapshot.clone(),
-            initial.frontier_entries.into_vec(),
+            initial.frontier_entries.to_vec(),
             initial
                 .origin_contents
-                .into_iter()
+                .iter()
                 .map(|(accepted_input, content)| {
-                    ModelCallOriginContent::new(accepted_input, content)
+                    ModelCallOriginContent::from_validated_parts(*accepted_input, content.clone())
                 })
                 .collect(),
             vec![ModelCallReconstitutionInput::new(
@@ -1510,17 +1591,19 @@ mod tests {
         ModelCallExecutionReconstitutionInput::new(
             prepared.session,
             prepared.turn,
-            prepared.configuration,
+            prepared.configuration.clone(),
+            prepared.start,
             ActiveTurnPhase::Running {
-                current_attempt: authorized.attempt,
+                current_attempt: authorized.attempt.clone(),
             },
-            prepared.starting_snapshot,
-            prepared.frontier_entries.into_vec(),
+            prepared.targets.clone(),
+            prepared.starting_snapshot.clone(),
+            prepared.frontier_entries.to_vec(),
             prepared
                 .origin_contents
-                .into_iter()
+                .iter()
                 .map(|(accepted_input, content)| {
-                    ModelCallOriginContent::new(accepted_input, content)
+                    ModelCallOriginContent::from_validated_parts(*accepted_input, content.clone())
                 })
                 .collect(),
             vec![ModelCallReconstitutionInput::new(
@@ -1537,17 +1620,175 @@ mod tests {
         .expect("in-flight facts reconstruct")
     }
 
+    fn reconstitution_input_with_calls(
+        execution: &ModelCallExecution,
+        calls: Vec<ModelCallReconstitutionInput>,
+    ) -> ModelCallExecutionReconstitutionInput {
+        ModelCallExecutionReconstitutionInput::new(
+            execution.session,
+            execution.turn,
+            execution.configuration.clone(),
+            execution.start,
+            ActiveTurnPhase::Running {
+                current_attempt: execution.current_attempt.clone(),
+            },
+            execution.targets.clone(),
+            execution.starting_snapshot.clone(),
+            execution.frontier_entries.to_vec(),
+            execution
+                .origin_contents
+                .iter()
+                .map(|(accepted_input, content)| {
+                    ModelCallOriginContent::from_validated_parts(*accepted_input, content.clone())
+                })
+                .collect(),
+            calls,
+        )
+    }
+
+    /// S02 / INV-005 / INV-015: a complete frontier read must preserve exact
+    /// semantic order, not merely the same entry membership.
+    #[test]
+    fn s02_inv005_inv015_reconstitution_rejects_reordered_frontier_entries() {
+        let execution = active_execution();
+        let first = SemanticTranscriptEntry::from_validated_parts(
+            semantic_transcript_entry_id(20),
+            execution.session,
+            SemanticTranscriptEntryPayload::OriginAcceptedInput {
+                accepted_input: accepted_input_id(21),
+            },
+        );
+        let second = SemanticTranscriptEntry::from_validated_parts(
+            semantic_transcript_entry_id(22),
+            execution.session,
+            SemanticTranscriptEntryPayload::OriginAcceptedInput {
+                accepted_input: accepted_input_id(23),
+            },
+        );
+        let snapshot = ResolvedContextFrontierSnapshot::try_from_candidate(
+            execution.session,
+            context_frontier_id(24),
+            vec![first.reference(), second.reference()],
+        )
+        .expect("ordered test frontier is valid");
+        let start = AcceptedInputTurnStart::from_validated_eligibility(
+            crate::AcceptedInputStartingLineage::FirstInSession,
+            snapshot.frontier(),
+        );
+        let input = ModelCallExecutionReconstitutionInput::new(
+            execution.session,
+            execution.turn,
+            execution.configuration.clone(),
+            start,
+            ActiveTurnPhase::Running {
+                current_attempt: execution.current_attempt.clone(),
+            },
+            execution.targets.clone(),
+            snapshot,
+            vec![second, first],
+            vec![
+                ModelCallOriginContent::from_validated_parts(
+                    accepted_input_id(21),
+                    UserContent::try_text(String::from("first")).expect("valid text"),
+                ),
+                ModelCallOriginContent::from_validated_parts(
+                    accepted_input_id(23),
+                    UserContent::try_text(String::from("second")).expect("valid text"),
+                ),
+            ],
+            Vec::new(),
+        );
+
+        let error = input
+            .reconstitute()
+            .expect_err("same membership in another order is not the stored frontier");
+        assert_eq!(
+            error.failure(),
+            ModelCallExecutionReconstitutionFailure::FrontierEntryMismatch
+        );
+    }
+
+    /// S02 / INV-009 / INV-015: an execution snapshot must be the exact
+    /// eligibility-fixed turn start, not another same-content frontier.
+    #[test]
+    fn s02_inv009_inv015_reconstitution_rejects_nonstarting_snapshot() {
+        let execution = active_execution();
+        let other_snapshot = ResolvedContextFrontierSnapshot::try_from_candidate(
+            execution.session,
+            context_frontier_id(25),
+            execution.starting_snapshot.ordered_entries().collect(),
+        )
+        .expect("same-content test snapshot is valid");
+        let input = ModelCallExecutionReconstitutionInput::new(
+            execution.session,
+            execution.turn,
+            execution.configuration.clone(),
+            execution.start,
+            ActiveTurnPhase::Running {
+                current_attempt: execution.current_attempt.clone(),
+            },
+            execution.targets.clone(),
+            other_snapshot,
+            execution.frontier_entries.to_vec(),
+            execution
+                .origin_contents
+                .iter()
+                .map(|(accepted_input, content)| {
+                    ModelCallOriginContent::from_validated_parts(*accepted_input, content.clone())
+                })
+                .collect(),
+            Vec::new(),
+        );
+
+        let error = input
+            .reconstitute()
+            .expect_err("a same-content snapshot is not the fixed starting frontier");
+        assert_eq!(
+            error.failure(),
+            ModelCallExecutionReconstitutionFailure::StartingSnapshotMismatch
+        );
+    }
+
+    /// S02 / INV-014: persisted target facts must still match immutable
+    /// configured target resolution when an execution is reloaded.
+    #[test]
+    fn s02_inv014_reconstitution_rejects_stored_target_mismatch() {
+        let execution = prepared_execution();
+        let call = execution
+            .current_call()
+            .expect("prepared execution has one call");
+        let input = reconstitution_input_with_calls(
+            &execution,
+            vec![ModelCallReconstitutionInput::new(
+                call.id(),
+                call.turn(),
+                call.attempt(),
+                call.selection(),
+                ResolvedProviderTarget::naming(provider_model_identity(99)),
+                call.frontier().snapshot(),
+                ModelCallReconstitutionState::Prepared,
+            )],
+        );
+
+        let error = input
+            .reconstitute()
+            .expect_err("stored target drift cannot reconstruct live authority");
+        assert_eq!(
+            error.failure(),
+            ModelCallExecutionReconstitutionFailure::CallTargetMismatch
+        );
+    }
+
     /// S02 / INV-014 / INV-015: target resolution records the frozen
     /// selection, target, and exact frontier before send authorization.
     #[test]
     fn s02_inv014_inv015_preparation_is_a_distinct_checkpoint() {
         let execution = active_execution();
         let prepared = execution
-            .prepare_initial_call(model_call_id(9), resolution())
+            .prepare_initial_call(model_call_id(9))
             .expect("initial call may be prepared");
 
         assert_eq!(prepared.call().state(), CurrentModelCallState::Prepared);
-        assert_eq!(prepared.call().attempt(), turn_attempt_id(7));
         assert_eq!(
             prepared.call().selection(),
             FrozenModelSelection::Direct(direct(2))
@@ -1615,10 +1856,7 @@ mod tests {
     /// prefix-preserving candidate.
     #[test]
     fn s02_inv005_inv006_inv032_completion_is_atomic_and_ordered() {
-        let authorized = prepared_execution()
-            .authorize_send()
-            .expect("prepared execution may authorize send");
-        let outcome = authorized
+        let outcome = in_flight_execution()
             .apply_terminal_observation(
                 ModelCallTerminalObservation::Completed {
                     assistant_text: vec![
@@ -1680,10 +1918,7 @@ mod tests {
     /// attempt and retains the exact call in a durable recovery wait.
     #[test]
     fn s04_inv025_inv026_ambiguity_preserves_call_and_waits() {
-        let authorized = prepared_execution()
-            .authorize_send()
-            .expect("prepared execution may authorize send");
-        let outcome = authorized
+        let outcome = in_flight_execution()
             .apply_terminal_observation(
                 ModelCallTerminalObservation::Ambiguous,
                 ModelCallTerminalIdentities::Ambiguous,
@@ -1764,13 +1999,53 @@ mod tests {
         );
     }
 
+    /// S04 / INV-025 / INV-026 / INV-034: a committed cancellation request
+    /// remains an issued call whose fate startup cannot infer.
+    #[test]
+    fn s04_inv025_inv026_inv034_restart_preserves_cancellation_requested_call_as_ambiguous() {
+        let in_flight = in_flight_execution();
+        let cancellation_requested = in_flight
+            .current_call()
+            .expect("in-flight execution has one call")
+            .clone()
+            .request_cancellation()
+            .expect("an in-flight call may request cancellation");
+        let execution = reconstitution_input_with_calls(
+            &in_flight,
+            vec![ModelCallReconstitutionInput::new(
+                cancellation_requested.id(),
+                cancellation_requested.turn(),
+                cancellation_requested.attempt(),
+                cancellation_requested.selection(),
+                cancellation_requested.target(),
+                cancellation_requested.frontier().snapshot(),
+                ModelCallReconstitutionState::CancellationRequested,
+            )],
+        )
+        .reconstitute()
+        .expect("cancellation-requested facts retain live issued authority");
+
+        let outcome = execution
+            .recover_after_restart(FailedModelCallTurnIdentities::new(
+                semantic_transcript_entry_id(10),
+                context_frontier_id(11),
+            ))
+            .expect("startup may classify an abandoned cancellation request");
+        let ModelCallTerminalOutcome::AwaitingRecovery(waiting) = outcome else {
+            panic!("a cancellation-requested prior-process call selects recovery wait");
+        };
+
+        assert_eq!(
+            waiting.call().disposition(),
+            ModelCallDisposition::Ambiguous
+        );
+    }
+
     /// S02 / INV-006: definitive known failure closes the physical call and
     /// logical turn as failed in one candidate.
     #[test]
     fn s02_inv006_known_failure_closes_call_attempt_and_turn() {
-        let outcome = prepared_execution()
-            .authorize_send()
-            .expect("prepared execution may authorize send")
+        let outcome = in_flight_execution()
             .apply_terminal_observation(
                 ModelCallTerminalObservation::KnownFailed,
                 ModelCallTerminalIdentities::Failed(FailedModelCallTurnIdentities::new(
@@ -1797,9 +2072,7 @@ mod tests {
     /// cancellation and closes the logical turn as failed.
     #[test]
     fn s02_inv006_cause_free_physical_cancellation_fails_turn() {
-        let outcome = prepared_execution()
-            .authorize_send()
-            .expect("prepared execution may authorize send")
+        let outcome = in_flight_execution()
             .apply_terminal_observation(
                 ModelCallTerminalObservation::Cancelled,
                 ModelCallTerminalIdentities::Failed(FailedModelCallTurnIdentities::new(
@@ -1826,9 +2099,7 @@ mod tests {
     /// logical classifications without manufacturing semantic response text.
     #[test]
     fn s02_inv006_refusal_closes_call_attempt_and_turn_without_content() {
-        let outcome = prepared_execution()
-            .authorize_send()
-            .expect("prepared execution may authorize send")
+        let outcome = in_flight_execution()
             .apply_terminal_observation(
                 ModelCallTerminalObservation::Refused,
                 ModelCallTerminalIdentities::Refused(RefusedModelCallTurnIdentities::new(

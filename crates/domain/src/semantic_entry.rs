@@ -79,14 +79,14 @@ pub(crate) type InitialSemanticTranscriptEntryPayload = SemanticTranscriptEntryP
 ///
 /// ```compile_fail
 /// use signalbox_domain::{
-///     InitialSemanticTranscriptEntryPayload, SemanticTranscriptEntry,
+///     SemanticTranscriptEntry, SemanticTranscriptEntryPayload,
 ///     SemanticTranscriptEntryId, SessionId,
 /// };
 ///
 /// fn raw_parts_are_not_a_semantic_entry(
 ///     identity: SemanticTranscriptEntryId,
 ///     source_session: SessionId,
-///     payload: InitialSemanticTranscriptEntryPayload,
+///     payload: SemanticTranscriptEntryPayload,
 /// ) {
 ///     let _ = SemanticTranscriptEntry {
 ///         identity,

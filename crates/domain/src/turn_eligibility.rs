@@ -63,6 +63,8 @@ pub enum AcceptedInputTurnSchedulingRecordState {
         starting_frontier: ContextFrontierId,
         /// The ended physical attempt that supplied the completed call.
         completing_attempt: TurnAttemptId,
+        /// The stored without-stop end classification for that attempt.
+        completing_attempt_disposition: UnstoppedAttemptDisposition,
         /// The outcome-authoritative call that completed the turn.
         completing_call: crate::ModelCallId,
         /// The complete frontier through the final completion marker.
@@ -76,6 +78,8 @@ pub enum AcceptedInputTurnSchedulingRecordState {
         starting_frontier: ContextFrontierId,
         /// The ended physical attempt that supplied the refusal.
         refusing_attempt: TurnAttemptId,
+        /// The stored without-stop end classification for that attempt.
+        refusing_attempt_disposition: UnstoppedAttemptDisposition,
         /// The outcome-authoritative call that refused the request.
         refusing_call: crate::ModelCallId,
         /// The equal-content terminal frontier identifying the turn boundary.
@@ -597,6 +601,13 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
         /// The affected semantic entry.
         entry: SemanticTranscriptEntryId,
         /// The absent producing call.
+        call: crate::ModelCallId,
+    },
+    /// Assistant content names a call that did not complete successfully.
+    SemanticEntryCallMismatch {
+        /// The affected semantic entry.
+        entry: SemanticTranscriptEntryId,
+        /// The non-completing producing call.
         call: crate::ModelCallId,
     },
     /// The same model-call identity appeared more than once.
@@ -1699,11 +1710,25 @@ fn reconstitute_inner(
         }
     }
     for (call, entries) in &assistant_by_call {
-        if !model_calls.contains_key(call)
-            && let Some(entry) = entries.first().copied()
+        let Some(reconstituted) = model_calls.get(call) else {
+            if let Some(entry) = entries.first().copied() {
+                return Err(
+                    AcceptedInputSchedulingReconstitutionFailure::SemanticEntryCallMissing {
+                        entry: entry.entry(),
+                        call: *call,
+                    },
+                );
+            }
+            continue;
+        };
+        if !matches!(
+            reconstituted,
+            ReconstitutedModelCall::Ended(ended)
+                if ended.disposition() == ModelCallDisposition::Completed
+        ) && let Some(entry) = entries.first().copied()
         {
             return Err(
-                AcceptedInputSchedulingReconstitutionFailure::SemanticEntryCallMissing {
+                AcceptedInputSchedulingReconstitutionFailure::SemanticEntryCallMismatch {
                     entry: entry.entry(),
                     call: *call,
                 },
@@ -1895,6 +1920,7 @@ fn reconstitute_inner(
                 starting_lineage,
                 starting_frontier,
                 completing_attempt,
+                completing_attempt_disposition,
                 completing_call,
                 terminal_frontier,
             } => {
@@ -1926,6 +1952,7 @@ fn reconstitute_inner(
                 };
                 if call.turn() != turn
                     || call.attempt() != *completing_attempt
+                    || completing_attempt_disposition != &UnstoppedAttemptDisposition::TurnCompleted
                     || call.selection() != *record.origin_configuration.effective().model()
                     || call.disposition() != ModelCallDisposition::Completed
                     || call.frontier().snapshot() != *starting_frontier
@@ -1981,6 +2008,7 @@ fn reconstitute_inner(
                 starting_lineage,
                 starting_frontier,
                 refusing_attempt,
+                refusing_attempt_disposition,
                 refusing_call,
                 terminal_frontier,
             } => {
@@ -2012,6 +2040,7 @@ fn reconstitute_inner(
                 };
                 if call.turn() != turn
                     || call.attempt() != *refusing_attempt
+                    || refusing_attempt_disposition != &UnstoppedAttemptDisposition::TurnRefused
                     || call.selection() != *record.origin_configuration.effective().model()
                     || call.disposition() != ModelCallDisposition::Refused
                     || call.frontier().snapshot() != *starting_frontier
@@ -4690,6 +4719,7 @@ mod tests {
                 starting_lineage: AcceptedInputStartingLineage::FirstInSession,
                 starting_frontier: starting_frontier.id(),
                 completing_attempt: turn_attempt_id(60),
+                completing_attempt_disposition: UnstoppedAttemptDisposition::TurnCompleted,
                 completing_call,
                 terminal_frontier: terminal_frontier.id(),
             },
@@ -4756,6 +4786,210 @@ mod tests {
                 completion_entry.reference(&session),
                 activation.origin_entry().reference(&session),
             ]
+        );
+    }
+
+    /// S02 / S09 / INV-005 / INV-009 / INV-015: a refusal has no semantic
+    /// response content, releases the slot, and preserves its equal-content
+    /// terminal frontier as the successor's exact prefix.
+    #[test]
+    fn s02_s09_inv005_inv009_inv015_refused_frontier_becomes_successor_prefix() {
+        let session = current_session();
+        let predecessor = accepted_origin(1);
+        let successor = accepted_origin(2);
+        let origin_entry = semantic_entry(30);
+        let starting_frontier = frontier(40);
+        let terminal_frontier = frontier(41);
+        let refusing_call = model_call_id(50);
+        let refusing_attempt = turn_attempt_id(60);
+        let activation = activation(2);
+        let resolved_starting = ResolvedContextFrontierSnapshot::try_from_candidate(
+            session.id(),
+            starting_frontier.id(),
+            vec![origin_entry.reference(&session)],
+        )
+        .expect("the call frontier has unique membership");
+        let terminal_record = predecessor.record(
+            &session,
+            AcceptedInputTurnSchedulingRecordState::TerminalRefused {
+                starting_lineage: AcceptedInputStartingLineage::FirstInSession,
+                starting_frontier: starting_frontier.id(),
+                refusing_attempt,
+                refusing_attempt_disposition: UnstoppedAttemptDisposition::TurnRefused,
+                refusing_call,
+                terminal_frontier: terminal_frontier.id(),
+            },
+        );
+        let queued_record =
+            successor.record(&session, AcceptedInputTurnSchedulingRecordState::Queued);
+        let call = ModelCallReconstitutionInput::new(
+            refusing_call,
+            predecessor.turn(),
+            refusing_attempt,
+            FrozenModelSelection::Direct(direct(1)),
+            ResolvedProviderTarget::naming(provider_model_identity(51)),
+            resolved_starting.frontier().snapshot(),
+            ModelCallReconstitutionState::Terminal(ModelCallDisposition::Refused),
+        );
+        let projection = AcceptedInputSchedulingReconstitutionInput::new(
+            session.clone(),
+            vec![queued_record, terminal_record],
+            vec![predecessor.entry(&session, origin_entry)],
+            vec![
+                terminal_frontier.snapshot(&session, &[origin_entry]),
+                starting_frontier.snapshot(&session, &[origin_entry]),
+            ],
+            None,
+        )
+        .with_model_calls(vec![call])
+        .reconstitute()
+        .expect("the refused predecessor is fully correlated");
+
+        let candidate = projection
+            .prepare_earliest_queued_activation(activation.identities())
+            .expect("the refused predecessor releases the progressing slot");
+
+        assert_eq!(candidate.turn().turn(), successor.turn());
+        assert_eq!(
+            candidate
+                .starting_snapshot()
+                .ordered_entries()
+                .collect::<Vec<_>>(),
+            vec![
+                origin_entry.reference(&session),
+                activation.origin_entry().reference(&session),
+            ]
+        );
+    }
+
+    /// S02 / INV-005: assistant text cannot name a refused call because only
+    /// completed physical calls can produce semantic assistant content.
+    #[test]
+    fn s02_inv005_refused_call_rejects_assistant_content() {
+        let session = current_session();
+        let origin = accepted_origin(1);
+        let origin_entry = semantic_entry(30);
+        let assistant_entry = semantic_entry(31);
+        let starting_frontier = frontier(40);
+        let terminal_frontier = frontier(41);
+        let refusing_call = model_call_id(50);
+        let refusing_attempt = turn_attempt_id(60);
+        let resolved_starting = ResolvedContextFrontierSnapshot::try_from_candidate(
+            session.id(),
+            starting_frontier.id(),
+            vec![origin_entry.reference(&session)],
+        )
+        .expect("the call frontier has unique membership");
+        let terminal_record = origin.record(
+            &session,
+            AcceptedInputTurnSchedulingRecordState::TerminalRefused {
+                starting_lineage: AcceptedInputStartingLineage::FirstInSession,
+                starting_frontier: starting_frontier.id(),
+                refusing_attempt,
+                refusing_attempt_disposition: UnstoppedAttemptDisposition::TurnRefused,
+                refusing_call,
+                terminal_frontier: terminal_frontier.id(),
+            },
+        );
+        let assistant = SemanticTranscriptEntryReconstitutionInput::new(
+            assistant_entry.id(),
+            session.id(),
+            InitialSemanticTranscriptEntryPayload::AssistantText {
+                producing_call: refusing_call,
+                value: AssistantText::try_new(String::from("not a refusal"))
+                    .expect("test assistant text is nonempty"),
+            },
+        );
+        let call = ModelCallReconstitutionInput::new(
+            refusing_call,
+            origin.turn(),
+            refusing_attempt,
+            FrozenModelSelection::Direct(direct(1)),
+            ResolvedProviderTarget::naming(provider_model_identity(51)),
+            resolved_starting.frontier().snapshot(),
+            ModelCallReconstitutionState::Terminal(ModelCallDisposition::Refused),
+        );
+        let input = AcceptedInputSchedulingReconstitutionInput::new(
+            session.clone(),
+            vec![terminal_record],
+            vec![assistant, origin.entry(&session, origin_entry)],
+            vec![
+                terminal_frontier.snapshot(&session, &[origin_entry]),
+                starting_frontier.snapshot(&session, &[origin_entry]),
+            ],
+            None,
+        )
+        .with_model_calls(vec![call]);
+
+        let error = input
+            .reconstitute()
+            .expect_err("refused calls cannot produce assistant content");
+        assert_eq!(
+            error.failure(),
+            &AcceptedInputSchedulingReconstitutionFailure::SemanticEntryCallMismatch {
+                entry: assistant_entry.id(),
+                call: refusing_call,
+            }
+        );
+    }
+
+    /// S02 / INV-006 / INV-009: a terminal refusal must be backed by the
+    /// stored ended-attempt refusal disposition, not only a matching identity.
+    #[test]
+    fn s02_inv006_inv009_refused_turn_rejects_attempt_disposition_mismatch() {
+        let session = current_session();
+        let origin = accepted_origin(1);
+        let origin_entry = semantic_entry(30);
+        let starting_frontier = frontier(40);
+        let terminal_frontier = frontier(41);
+        let refusing_call = model_call_id(50);
+        let refusing_attempt = turn_attempt_id(60);
+        let resolved_starting = ResolvedContextFrontierSnapshot::try_from_candidate(
+            session.id(),
+            starting_frontier.id(),
+            vec![origin_entry.reference(&session)],
+        )
+        .expect("the call frontier has unique membership");
+        let terminal_record = origin.record(
+            &session,
+            AcceptedInputTurnSchedulingRecordState::TerminalRefused {
+                starting_lineage: AcceptedInputStartingLineage::FirstInSession,
+                starting_frontier: starting_frontier.id(),
+                refusing_attempt,
+                refusing_attempt_disposition: UnstoppedAttemptDisposition::KnownFailure,
+                refusing_call,
+                terminal_frontier: terminal_frontier.id(),
+            },
+        );
+        let call = ModelCallReconstitutionInput::new(
+            refusing_call,
+            origin.turn(),
+            refusing_attempt,
+            FrozenModelSelection::Direct(direct(1)),
+            ResolvedProviderTarget::naming(provider_model_identity(51)),
+            resolved_starting.frontier().snapshot(),
+            ModelCallReconstitutionState::Terminal(ModelCallDisposition::Refused),
+        );
+        let input = AcceptedInputSchedulingReconstitutionInput::new(
+            session.clone(),
+            vec![terminal_record],
+            vec![origin.entry(&session, origin_entry)],
+            vec![
+                terminal_frontier.snapshot(&session, &[origin_entry]),
+                starting_frontier.snapshot(&session, &[origin_entry]),
+            ],
+            None,
+        )
+        .with_model_calls(vec![call]);
+
+        let error = input
+            .reconstitute()
+            .expect_err("a refusal cannot be inferred from attempt identity alone");
+        assert_eq!(
+            error.failure(),
+            &AcceptedInputSchedulingReconstitutionFailure::TerminalModelCallMismatch {
+                turn: origin.turn(),
+            }
         );
     }
 

@@ -928,6 +928,7 @@ pub enum AcceptedInputTurnSchedulingRecordState {
         starting_lineage: AcceptedInputStartingLineage,
         starting_frontier: ContextFrontierId,
         completing_attempt: TurnAttemptId,
+        completing_attempt_disposition: UnstoppedAttemptDisposition,
         completing_call: ModelCallId,
         terminal_frontier: ContextFrontierId,
     },
@@ -935,6 +936,7 @@ pub enum AcceptedInputTurnSchedulingRecordState {
         starting_lineage: AcceptedInputStartingLineage,
         starting_frontier: ContextFrontierId,
         refusing_attempt: TurnAttemptId,
+        refusing_attempt_disposition: UnstoppedAttemptDisposition,
         refusing_call: ModelCallId,
         terminal_frontier: ContextFrontierId,
     },
@@ -1040,6 +1042,10 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
     DuplicateSemanticEntryForSubject { entry: SemanticTranscriptEntryId },
     UnsupportedSemanticEntry { entry: SemanticTranscriptEntryId },
     SemanticEntryCallMissing {
+        entry: SemanticTranscriptEntryId,
+        call: ModelCallId,
+    },
+    SemanticEntryCallMismatch {
         entry: SemanticTranscriptEntryId,
         call: ModelCallId,
     },
@@ -1467,6 +1473,7 @@ pub struct ModelCallExecutionReconstitutionInput { /* private */ }
 pub enum ModelCallExecutionReconstitutionFailure {
     TurnIsNotRunning,
     StartingSnapshotSessionMismatch,
+    StartingSnapshotMismatch,
     FrontierEntryMismatch,
     MultipleCalls,
     DuplicateOriginContent,
@@ -1474,6 +1481,8 @@ pub enum ModelCallExecutionReconstitutionFailure {
     UnreferencedOriginContent,
     CallOwnershipMismatch,
     CallSelectionMismatch,
+    CallTargetMismatch,
+    CallTargetUnavailable,
     InvalidCall,
     LifecycleMismatch,
 }
@@ -1481,7 +1490,7 @@ pub struct ModelCallExecutionReconstitutionError { /* private */ }
 
 pub struct ModelCallExecution { /* private */ }
 pub enum ModelCallPreparationFailure {
-    ResolutionSelectionMismatch,
+    TargetUnavailable,
     CallAlreadyExists,
     AttemptIsNotPrepared,
 }

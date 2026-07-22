@@ -760,7 +760,7 @@ mod tests {
         let later = prepared_from_snapshot(4, &later_snapshot);
 
         assert_eq!(call.id(), model_call_id(3));
-        assert_eq!(call.attempt(), turn_attempt_id(6));
+        assert_eq!(call.attempt(), later.attempt());
         assert_eq!(call.pinned(), &pinned_target());
         assert_eq!(call.turn(), pinned_target().turn());
         assert_eq!(call.target(), pinned_target().target());
@@ -964,14 +964,16 @@ mod tests {
     #[test]
     fn terminal_history_preserves_identity_target_and_exact_frontier() {
         let snapshot = frontier_snapshot(1);
-        let ended: EndedModelCall = prepared_from_snapshot(3, &snapshot)
+        let current = prepared_from_snapshot(3, &snapshot)
             .begin_in_flight()
-            .expect("Prepared may send")
+            .expect("Prepared may send");
+        let attempt = current.attempt();
+        let ended: EndedModelCall = current
             .end_classified(ModelCallDisposition::Completed)
             .expect("InFlight may complete");
 
         assert_eq!(ended.id(), model_call_id(3));
-        assert_eq!(ended.attempt(), turn_attempt_id(6));
+        assert_eq!(ended.attempt(), attempt);
         assert_eq!(ended.pinned(), &pinned_target());
         assert_eq!(ended.turn(), pinned_target().turn());
         assert_eq!(ended.target(), pinned_target().target());
