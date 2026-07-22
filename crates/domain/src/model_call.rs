@@ -4,13 +4,13 @@
 //! hub-resolved provider/model target pinned as a durable turn fact before any
 //! model call exists, the current call record created from that fact and one
 //! resolved context-frontier snapshot, and the call-local predecessor matrix.
-//! Resolving a frozen selection against deployment state, selecting the
-//! lifecycle-correct frontier, provider-target evidence, outcome-authority
-//! transfer, and the turn aggregate's guards are separate later slices. A
-//! standalone value is not proof that resolution or aggregate guards held.
+//! The model-execution aggregate owns resolution and lifecycle correlation;
+//! provider-target evidence and later outcome-authority transfers remain
+//! separate slices. A standalone value is not proof that aggregate guards held.
 
 use crate::{
-    AppliedInterruptProof, ContextFrontier, ModelCallId, ResolvedContextFrontierSnapshot, TurnId,
+    AppliedInterruptProof, ContextFrontier, FrozenModelSelection, ModelCallId,
+    ResolvedContextFrontierSnapshot, TurnId,
 };
 
 crate::define_identity!(
@@ -73,13 +73,6 @@ pub struct PinnedProviderTarget {
 
 impl PinnedProviderTarget {
     /// Pins the exact resolved target for one turn.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the later resolution-owning slice consumes this seam"
-        )
-    )]
     pub(crate) const fn pinned(turn: TurnId, target: ResolvedProviderTarget) -> Self {
         Self { turn, target }
     }
@@ -188,6 +181,7 @@ pub enum CurrentModelCallState {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct CurrentModelCall {
     id: ModelCallId,
+    selection: FrozenModelSelection,
     pinned: PinnedProviderTarget,
     frontier: ContextFrontier,
     state: CurrentModelCallState,
@@ -207,11 +201,13 @@ impl CurrentModelCall {
     /// call and commit both records atomically.
     pub(crate) const fn prepared(
         id: ModelCallId,
+        selection: FrozenModelSelection,
         pinned: PinnedProviderTarget,
         snapshot: &ResolvedContextFrontierSnapshot,
     ) -> Self {
         Self {
             id,
+            selection,
             pinned,
             frontier: snapshot.frontier(),
             state: CurrentModelCallState::Prepared,
@@ -221,6 +217,11 @@ impl CurrentModelCall {
     /// Returns the call identity preserved by every later transition.
     pub const fn id(&self) -> ModelCallId {
         self.id
+    }
+
+    /// Returns the exact frozen selection this authorization records.
+    pub const fn selection(&self) -> FrozenModelSelection {
+        self.selection
     }
 
     /// Borrows the pinned turn fact this call was created from.
@@ -302,6 +303,7 @@ impl CurrentModelCall {
         if allowed {
             Ok(EndedModelCall {
                 id: self.id,
+                selection: self.selection,
                 pinned: self.pinned,
                 frontier: self.frontier,
                 disposition,
@@ -327,6 +329,7 @@ impl CurrentModelCall {
         if self.state == CurrentModelCallState::Prepared && proof.predecessor() == self.turn() {
             Ok(EndedModelCall {
                 id: self.id,
+                selection: self.selection,
                 pinned: self.pinned,
                 frontier: self.frontier,
                 disposition: ModelCallDisposition::Cancelled,
@@ -378,6 +381,7 @@ impl CurrentModelCall {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct EndedModelCall {
     id: ModelCallId,
+    selection: FrozenModelSelection,
     pinned: PinnedProviderTarget,
     frontier: ContextFrontier,
     disposition: ModelCallDisposition,
@@ -387,6 +391,11 @@ impl EndedModelCall {
     /// Returns the identity preserved from the current call.
     pub const fn id(&self) -> ModelCallId {
         self.id
+    }
+
+    /// Returns the exact frozen selection preserved from the authorization.
+    pub const fn selection(&self) -> FrozenModelSelection {
+        self.selection
     }
 
     /// Borrows the pinned turn fact preserved from the current call.
@@ -413,6 +422,139 @@ impl EndedModelCall {
     pub const fn disposition(&self) -> ModelCallDisposition {
         self.disposition
     }
+}
+
+/// Stored lifecycle facts for one model call.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ModelCallReconstitutionState {
+    /// The call is durably prepared but unsent.
+    Prepared,
+    /// Provider interaction is durably authorized.
+    InFlight,
+    /// Best-effort cancellation was durably requested.
+    CancellationRequested,
+    /// The immutable physical disposition was recorded.
+    Terminal(ModelCallDisposition),
+}
+
+/// Complete typed stored facts for one model-call record.
+///
+/// This inert input constructs no call independently. Its owning aggregate
+/// supplies the exact resolved frontier and validates turn, configuration,
+/// target, outcome authority, and lifecycle correlation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelCallReconstitutionInput {
+    id: ModelCallId,
+    turn: TurnId,
+    selection: FrozenModelSelection,
+    target: ResolvedProviderTarget,
+    frontier: ContextFrontier,
+    state: ModelCallReconstitutionState,
+}
+
+impl ModelCallReconstitutionInput {
+    /// Supplies all independently stored typed facts for one call.
+    pub const fn new(
+        id: ModelCallId,
+        turn: TurnId,
+        selection: FrozenModelSelection,
+        target: ResolvedProviderTarget,
+        frontier: ContextFrontier,
+        state: ModelCallReconstitutionState,
+    ) -> Self {
+        Self {
+            id,
+            turn,
+            selection,
+            target,
+            frontier,
+            state,
+        }
+    }
+
+    /// Returns the stored call identity.
+    pub const fn id(&self) -> ModelCallId {
+        self.id
+    }
+
+    /// Returns the stored owning turn.
+    pub const fn turn(&self) -> TurnId {
+        self.turn
+    }
+
+    /// Returns the stored frozen selection.
+    pub const fn selection(&self) -> FrozenModelSelection {
+        self.selection
+    }
+
+    /// Returns the stored exact target.
+    pub const fn target(&self) -> ResolvedProviderTarget {
+        self.target
+    }
+
+    /// Returns the stored context frontier.
+    pub const fn frontier(&self) -> ContextFrontier {
+        self.frontier
+    }
+
+    /// Returns the stored lifecycle fact.
+    pub const fn state(&self) -> ModelCallReconstitutionState {
+        self.state
+    }
+
+    pub(crate) fn reconstitute(
+        &self,
+        snapshot: &ResolvedContextFrontierSnapshot,
+    ) -> Result<ReconstitutedModelCall, ModelCallReconstitutionFailure> {
+        if self.frontier != snapshot.frontier() {
+            return Err(ModelCallReconstitutionFailure::FrontierMismatch);
+        }
+        let pinned = PinnedProviderTarget::pinned(self.turn, self.target);
+        let prepared = CurrentModelCall::prepared(self.id, self.selection, pinned, snapshot);
+        match self.state {
+            ModelCallReconstitutionState::Prepared => Ok(ReconstitutedModelCall::Current(prepared)),
+            ModelCallReconstitutionState::InFlight => prepared
+                .begin_in_flight()
+                .map(ReconstitutedModelCall::Current)
+                .map_err(|_| ModelCallReconstitutionFailure::InvalidTransition),
+            ModelCallReconstitutionState::CancellationRequested => prepared
+                .begin_in_flight()
+                .and_then(CurrentModelCall::request_cancellation)
+                .map(ReconstitutedModelCall::Current)
+                .map_err(|_| ModelCallReconstitutionFailure::InvalidTransition),
+            ModelCallReconstitutionState::Terminal(disposition) => {
+                let predecessor = if disposition == ModelCallDisposition::KnownFailed {
+                    prepared
+                } else {
+                    prepared
+                        .begin_in_flight()
+                        .map_err(|_| ModelCallReconstitutionFailure::InvalidTransition)?
+                };
+                predecessor
+                    .end_classified(disposition)
+                    .map(ReconstitutedModelCall::Ended)
+                    .map_err(|_| ModelCallReconstitutionFailure::InvalidTransition)
+            }
+        }
+    }
+}
+
+/// One canonical current or terminal call reconstructed by its aggregate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReconstitutedModelCall {
+    /// The call remains nonterminal.
+    Current(CurrentModelCall),
+    /// The call has immutable physical history.
+    Ended(EndedModelCall),
+}
+
+/// Why stored model-call facts cannot reconstruct canonical call history.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ModelCallReconstitutionFailure {
+    /// The call's frontier is not the supplied exact resolved snapshot.
+    FrontierMismatch,
+    /// The stored state cannot follow the accepted predecessor matrix.
+    InvalidTransition,
 }
 
 /// The transition input returned when a current call rejects it.
@@ -483,11 +625,12 @@ mod tests {
     };
     use crate::applied_interrupt::test_applied_interrupt_proof;
     use crate::test_support::{
-        command_id, context_frontier_id, model_call_id, provider_model_identity,
+        command_id, context_frontier_id, direct, model_call_id, provider_model_identity,
         semantic_transcript_entry_id, session_id, turn_id,
     };
     use crate::{
-        AppliedInterruptProof, ResolvedContextFrontierSnapshot, SemanticTranscriptEntryRef, TurnId,
+        AppliedInterruptProof, FrozenModelSelection, ResolvedContextFrontierSnapshot,
+        SemanticTranscriptEntryRef, TurnId,
     };
     use uuid::Uuid;
 
@@ -520,7 +663,12 @@ mod tests {
         call: u128,
         snapshot: &ResolvedContextFrontierSnapshot,
     ) -> CurrentModelCall {
-        CurrentModelCall::prepared(model_call_id(call), pinned_target(), snapshot)
+        CurrentModelCall::prepared(
+            model_call_id(call),
+            FrozenModelSelection::Direct(direct(5)),
+            pinned_target(),
+            snapshot,
+        )
     }
 
     fn prepared_call(call: u128, frontier: u128) -> CurrentModelCall {

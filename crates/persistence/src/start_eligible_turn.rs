@@ -10,7 +10,8 @@ use signalbox_application::{
 use signalbox_domain::{
     AcceptedInputEligibilityFailure, AcceptedInputStartingLineage,
     AcceptedInputTurnActivationIdentities, ActiveTurnPhase, CurrentTurnAttemptState,
-    InitialSemanticTranscriptEntryPayload, PreparedAcceptedInputTurnActivation, SessionId,
+    PreparedAcceptedInputTurnActivation,
+    SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload, SessionId,
 };
 use sqlx::{PgConnection, PgPool, types::Uuid};
 
@@ -335,9 +336,12 @@ async fn insert_prepared_activation(
     let (activated, origin_entry, starting_snapshot) = prepared.into_parts();
     let accepted_input = match origin_entry.payload() {
         InitialSemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input } => {
-            accepted_input
+            *accepted_input
         }
-        InitialSemanticTranscriptEntryPayload::TurnFailed { .. } => {
+        InitialSemanticTranscriptEntryPayload::TurnFailed { .. }
+        | InitialSemanticTranscriptEntryPayload::AssistantText { .. }
+        | InitialSemanticTranscriptEntryPayload::AssistantToolUse { .. }
+        | InitialSemanticTranscriptEntryPayload::TurnCompleted { .. } => {
             return Err(StartEligibleTurnRepositoryError::HubInvariant(
                 "prepared origin-entry payload",
             ));

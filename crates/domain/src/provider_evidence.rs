@@ -808,9 +808,14 @@ mod tests {
     }
 
     fn current_call(call: u128) -> CurrentModelCall {
-        CurrentModelCall::prepared(model_call_id(call), pinned_target(), &frontier_snapshot())
-            .begin_in_flight()
-            .expect("Prepared may send")
+        CurrentModelCall::prepared(
+            model_call_id(call),
+            crate::FrozenModelSelection::Direct(crate::test_support::direct(5)),
+            pinned_target(),
+            &frontier_snapshot(),
+        )
+        .begin_in_flight()
+        .expect("Prepared may send")
     }
 
     fn ended_call(call: u128, disposition: ModelCallDisposition) -> EndedModelCall {
@@ -984,6 +989,7 @@ mod tests {
 
         let unsent = CurrentModelCall::prepared(
             model_call_id(SUBJECT_CALL),
+            crate::FrozenModelSelection::Direct(crate::test_support::direct(5)),
             pinned_target(),
             &frontier_snapshot(),
         );
