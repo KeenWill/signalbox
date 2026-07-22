@@ -242,6 +242,13 @@ fn wire_message(message: &ConversationMessage) -> Result<WireMessage, Preparatio
                              cannot be sent"
                         .to_string(),
                 }),
+                Some(signature) if signature.is_empty() => {
+                    Err(PreparationFailure::UnsupportedOperation {
+                        detail: "a replayed thinking block with an empty integrity signature \
+                                 cannot be sent"
+                            .to_string(),
+                    })
+                }
                 Some(signature) => Ok(WireRequestBlock::Thinking {
                     thinking: text.clone(),
                     signature: signature.clone(),
@@ -583,6 +590,15 @@ mod tests {
         assert!(matches!(
             failure,
             PreparationFailure::UnsupportedOperation { .. }
+        ));
+
+        operation.messages[0].parts[0] = MessagePart::Thinking {
+            text: "step one".to_string(),
+            signature: Some(String::new()),
+        };
+        assert!(matches!(
+            build_request(&operation),
+            Err(PreparationFailure::UnsupportedOperation { .. })
         ));
     }
 

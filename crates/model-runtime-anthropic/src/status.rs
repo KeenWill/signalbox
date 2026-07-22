@@ -43,12 +43,28 @@ pub(crate) fn classify_error_status(status: u16) -> ProviderErrorKind {
     }
 }
 
+/// Combines the native token with the authoritative HTTP status.
+///
+/// A credential-rejection status has precedence over a contradictory body so
+/// credential remediation cannot be displaced by provider-controlled text.
+/// Otherwise a recognized native token refines the status classification.
+pub(crate) fn classify_error(status: u16, token: Option<&str>) -> ProviderErrorKind {
+    let status_kind = classify_error_status(status);
+    if status_kind == ProviderErrorKind::CredentialRejected {
+        return status_kind;
+    }
+    match token.map(classify_error_token) {
+        Some(ProviderErrorKind::Unrecognized) | None => status_kind,
+        Some(kind) => kind,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
     use signalbox_expect_table::table;
 
-    use super::{classify_error_status, classify_error_token};
+    use super::{classify_error, classify_error_status, classify_error_token};
 
     #[derive(Debug)]
     #[allow(
@@ -102,6 +118,10 @@ mod tests {
         );
         assert_eq!(
             classify_error_status(401),
+            signalbox_model_runtime::ProviderErrorKind::CredentialRejected
+        );
+        assert_eq!(
+            classify_error(401, Some("rate_limit_error")),
             signalbox_model_runtime::ProviderErrorKind::CredentialRejected
         );
     }

@@ -1,6 +1,5 @@
 //! The adapter runtime: one operation, at most one HTTP interaction.
 
-use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Waker};
@@ -25,7 +24,7 @@ use signalbox_model_runtime::{CredentialAccess, CredentialValue};
 
 use crate::config::AnthropicConfig;
 use crate::response::decode_buffered_response;
-use crate::status::{classify_error_status, classify_error_token};
+use crate::status::{classify_error, classify_error_status};
 use crate::stream::{StreamDecoder, StreamStep};
 use crate::translate::build_request;
 use crate::wire::ErrorEnvelope;
@@ -543,13 +542,7 @@ async fn finish_error(
     }) = serde_json::from_slice(&body)
         && envelope_type == "error"
     {
-        // Token first; when the token is absent or unrecognized, the HTTP
-        // status still carries the documented category, so classification
-        // never depends on incidental body shape.
-        let kind = match error.error_type.as_deref().map(classify_error_token) {
-            Some(ProviderErrorKind::Unrecognized) | None => classify_error_status(status),
-            Some(kind) => kind,
-        };
+        let kind = classify_error(status, error.error_type.as_deref());
         return TerminalEvidence::ProviderError(ProviderErrorEvidence {
             exchange,
             // The Messages error envelope reports no model identity.
@@ -737,7 +730,7 @@ fn sensitive_header(api_key: &CredentialValue) -> Option<HeaderValue> {
 struct RedactingObservationSink<'a, C> {
     inner: &'a mut (dyn ObservationSink<C> + Send),
     credential: &'a str,
-    pending_stream_text: BTreeMap<(StreamField, u32), PendingStreamText<C>>,
+    pending_stream_text: Option<PendingStreamText<C>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -747,6 +740,8 @@ enum StreamField {
 }
 
 struct PendingStreamText<C> {
+    field: StreamField,
+    index: u32,
     correlation: C,
     text: String,
 }
@@ -759,15 +754,15 @@ impl<'a, C: Clone> RedactingObservationSink<'a, C> {
         Self {
             inner,
             credential: std::str::from_utf8(credential.expose_bytes()).unwrap_or_default(),
-            pending_stream_text: BTreeMap::new(),
+            pending_stream_text: None,
         }
     }
 
     fn flush(&mut self) {
-        for ((field, index), pending) in std::mem::take(&mut self.pending_stream_text) {
+        if let Some(pending) = self.pending_stream_text.take() {
             self.emit_stream_text(
-                field,
-                index,
+                pending.field,
+                pending.index,
                 pending.correlation,
                 // The pending bytes are exactly a credential prefix. Once a
                 // non-delta fact must cross the boundary, retaining stream
@@ -796,22 +791,28 @@ impl<'a, C: Clone> RedactingObservationSink<'a, C> {
         correlation: C,
         text: String,
     ) {
+        if self
+            .pending_stream_text
+            .as_ref()
+            .is_some_and(|pending| pending.field != field || pending.index != index)
+        {
+            self.flush();
+        }
         let mut combined = self
             .pending_stream_text
-            .remove(&(field, index))
+            .take()
             .map_or_else(String::new, |pending| pending.text);
         combined.push_str(&text);
         let (emitted, pending) =
             redact_complete_credentials_and_hold_prefix(combined, self.credential);
         self.emit_stream_text(field, index, correlation.clone(), emitted);
         if !pending.is_empty() {
-            self.pending_stream_text.insert(
-                (field, index),
-                PendingStreamText {
-                    correlation,
-                    text: pending,
-                },
-            );
+            self.pending_stream_text = Some(PendingStreamText {
+                field,
+                index,
+                correlation,
+                text: pending,
+            });
         }
     }
 }
@@ -963,52 +964,72 @@ fn redact_json(raw: String, credential: &str) -> String {
     if credential.is_empty() {
         return raw;
     }
-    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+    if serde_json::value::RawValue::from_string(raw.clone()).is_err() {
         return redact_text(raw, credential);
-    };
-    if !redact_json_value(&mut value, credential) {
-        return raw;
     }
-    serde_json::to_string(&value).unwrap_or_else(|_| "\"[redacted]\"".to_string())
-}
 
-fn redact_json_value(value: &mut serde_json::Value, credential: &str) -> bool {
-    match value {
-        serde_json::Value::String(text) => {
-            let redacted = text.replace(credential, "[redacted]");
-            let changed = redacted != *text;
-            *text = redacted;
-            changed
-        }
-        serde_json::Value::Array(values) => {
-            let mut changed = false;
-            for value in values {
-                changed |= redact_json_value(value, credential);
+    let mut redacted = String::with_capacity(raw.len());
+    let mut cursor = 0;
+    while cursor < raw.len() {
+        if raw.as_bytes()[cursor] == b'"' {
+            let mut end = cursor + 1;
+            let mut escaped = false;
+            while end < raw.len() {
+                let byte = raw.as_bytes()[end];
+                end += 1;
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == b'"' {
+                    break;
+                }
             }
-            changed
-        }
-        serde_json::Value::Object(fields) => {
-            let old = std::mem::take(fields);
-            let mut changed = false;
-            for (key, mut value) in old {
-                let redacted_key = key.replace(credential, "[redacted]");
-                changed |= redacted_key != key;
-                changed |= redact_json_value(&mut value, credential);
-                fields.insert(redacted_key, value);
-            }
-            changed
-        }
-        value @ (serde_json::Value::Null
-        | serde_json::Value::Bool(_)
-        | serde_json::Value::Number(_)) => {
-            if value.to_string().contains(credential) {
-                *value = serde_json::Value::String("[redacted]".to_string());
-                true
+            let token = &raw[cursor..end];
+            let Ok(decoded) = serde_json::from_str::<String>(token) else {
+                return redact_text(raw, credential);
+            };
+            if decoded.contains(credential) {
+                let Ok(sanitized) =
+                    serde_json::to_string(&decoded.replace(credential, "[redacted]"))
+                else {
+                    return "\"[redacted]\"".to_string();
+                };
+                redacted.push_str(&sanitized);
             } else {
-                false
+                redacted.push_str(token);
             }
+            cursor = end;
+            continue;
+        }
+
+        if matches!(
+            raw.as_bytes()[cursor],
+            b'{' | b'}' | b'[' | b']' | b',' | b':'
+        ) || raw.as_bytes()[cursor].is_ascii_whitespace()
+        {
+            redacted.push(raw.as_bytes()[cursor] as char);
+            cursor += 1;
+            continue;
+        }
+
+        let start = cursor;
+        while cursor < raw.len()
+            && !matches!(
+                raw.as_bytes()[cursor],
+                b'{' | b'}' | b'[' | b']' | b',' | b':' | b' ' | b'\t' | b'\r' | b'\n'
+            )
+        {
+            cursor += 1;
+        }
+        let token = &raw[start..cursor];
+        if token.contains(credential) {
+            redacted.push_str("\"[redacted]\"");
+        } else {
+            redacted.push_str(token);
         }
     }
+    redacted
 }
 
 fn redact_part(part: AssistantPart, credential: &str) -> AssistantPart {
@@ -1221,6 +1242,16 @@ mod tests {
     }
 
     #[test]
+    fn json_redaction_preserves_untouched_raw_lexemes_and_duplicate_keys() {
+        let raw = r#"{"token":"key_loop","id":184467440737095516160,"dup":1,"dup":2}"#;
+
+        assert_eq!(
+            redact_json(raw.to_string(), "key_loop"),
+            r#"{"token":"[redacted]","id":184467440737095516160,"dup":1,"dup":2}"#
+        );
+    }
+
+    #[test]
     fn truncated_native_body_redacts_a_credential_prefix_at_the_cut() {
         assert_eq!(
             redact_native_message("safe key_ … [truncated]".to_string(), "key_loop"),
@@ -1408,6 +1439,38 @@ mod tests {
         assert!(matches!(
             observed.last().expect("tool delta is forwarded").fact,
             ObservationFact::ToolArgumentsDelta { .. }
+        ));
+    }
+
+    #[test]
+    fn pending_stream_text_is_flushed_before_a_different_field() {
+        let mut observed = Vec::new();
+        let credential = CredentialValue::new(b"key_loop".to_vec());
+        let mut redacting = RedactingObservationSink::new(&mut observed, &credential);
+        redacting.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::ThinkingDelta {
+                index: 0,
+                text: "k".to_string(),
+            },
+        });
+        redacting.observe(Observation {
+            correlation: "call-1".to_string(),
+            fact: ObservationFact::TextDelta {
+                index: 1,
+                text: "later".to_string(),
+            },
+        });
+        redacting.flush();
+        drop(redacting);
+
+        assert!(matches!(
+            &observed[0].fact,
+            ObservationFact::ThinkingDelta { text, .. } if text == "[redacted]"
+        ));
+        assert!(matches!(
+            &observed[1].fact,
+            ObservationFact::TextDelta { text, .. } if text == "later"
         ));
     }
 
