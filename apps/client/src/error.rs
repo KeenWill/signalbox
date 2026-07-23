@@ -17,6 +17,7 @@ pub(crate) enum ClientError {
     },
     AmbiguousMutation,
     Input(&'static str),
+    TurnRecoveryRequired,
     TurnFailed,
     TurnRefused,
 }
@@ -39,6 +40,7 @@ impl ClientError {
             | Self::Protocol(_)
             | Self::AmbiguousMutation
             | Self::Input(_)
+            | Self::TurnRecoveryRequired
             | Self::TurnFailed
             | Self::TurnRefused => Self::AmbiguousMutation,
         }
@@ -72,6 +74,9 @@ impl fmt::Display for ClientError {
                 "the mutation outcome may be ambiguous; retry the exact printed command",
             ),
             Self::Input(message) => formatter.write_str(message),
+            Self::TurnRecoveryRequired => formatter.write_str(
+                "the submitted turn requires model-call recovery that version one cannot perform",
+            ),
             Self::TurnFailed => formatter.write_str("the submitted turn failed"),
             Self::TurnRefused => formatter.write_str("the submitted turn was refused"),
         }
@@ -88,6 +93,7 @@ impl Error for ClientError {
             | Self::Remote { .. }
             | Self::AmbiguousMutation
             | Self::Input(_)
+            | Self::TurnRecoveryRequired
             | Self::TurnFailed
             | Self::TurnRefused => None,
         }

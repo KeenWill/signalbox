@@ -328,11 +328,10 @@ fn terminal_snapshot_state(state: Option<&TurnState>) -> Result<Option<TurnTermi
         Some(TurnState::Completed { .. }) => Ok(Some(TurnTerminal::Completed)),
         Some(TurnState::Failed { .. }) => Ok(Some(TurnTerminal::Failed)),
         Some(TurnState::Refused { .. }) => Ok(Some(TurnTerminal::Refused)),
-        Some(
-            TurnState::Queued { .. }
-            | TurnState::ActiveRunning { .. }
-            | TurnState::ActiveAwaitingModelCallRecovery { .. },
-        ) => Ok(None),
+        Some(TurnState::Queued { .. } | TurnState::ActiveRunning { .. }) => Ok(None),
+        Some(TurnState::ActiveAwaitingModelCallRecovery { .. }) => {
+            Err(ClientError::TurnRecoveryRequired)
+        }
         None => Err(ClientError::Protocol(
             "follow snapshot omitted the submitted turn",
         )),
@@ -401,7 +400,9 @@ async fn follow(
                     if terminal_event_state_for_any_turn(&event) {
                         let refreshed = transcript(client, session_id).await?;
                         output.snapshot_new_entries(&refreshed, &mut displayed_entries)?;
-                        observed_cursor = observed_cursor.max(refreshed.cursor());
+                        // Only consumed follow frames advance this cursor. The
+                        // side snapshot may be newer than buffered transition
+                        // events that still require ordered presentation.
                     }
                 }
                 ServerMessage::Error {
@@ -516,7 +517,11 @@ fn selection_display(selection: ModelSelection) -> String {
 mod tests {
     use std::{ffi::OsString, io::Cursor, process::ExitCode};
 
-    use super::{MAX_INPUT_CONTENT_BYTES, read_input, run};
+    use signalbox_process_protocol::{CanonicalUuid, TurnState};
+    use uuid::Uuid;
+
+    use super::{MAX_INPUT_CONTENT_BYTES, read_input, run, terminal_snapshot_state};
+    use crate::error::ClientError;
 
     #[test]
     fn empty_send_input_is_rejected() {
@@ -542,6 +547,19 @@ mod tests {
                 .map(|value| value.into_bytes()),
             Some(exact)
         );
+    }
+
+    #[test]
+    fn send_fails_explicitly_when_model_call_recovery_is_required() {
+        let state = TurnState::ActiveAwaitingModelCallRecovery {
+            ended_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+            recovery_model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+        };
+
+        assert!(matches!(
+            terminal_snapshot_state(Some(&state)),
+            Err(ClientError::TurnRecoveryRequired)
+        ));
     }
 
     #[tokio::test]
