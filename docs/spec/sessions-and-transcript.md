@@ -246,12 +246,12 @@ atomically.
 Pending steering has a separate safe-point boundary (INV-036). Immediately
 before a later call is prepared, the transaction appends one
 `SteeringAcceptedInput` per pending input in ascending acceptance position,
-derives one frontier extending the previous call frontier (or the starting
-frontier for the first call), changes every input to
-`ConsumedAsSteering { call }`, and inserts that exact `Prepared` call against
-the extended frontier. All four effects commit or roll back together. The entry
-therefore becomes semantic history only with the call that first observes it;
-the immutable accepted-input row remains the content authority.
+derives one frontier extending the starting frontier for the admitted initial
+call, changes every input to `ConsumedAsSteering { call }`, and inserts that
+exact `Prepared` call against the extended frontier. All four effects commit or
+roll back together. The entry therefore becomes semantic history only with the
+call that first observes it; the immutable accepted-input row remains the
+content authority.
 
 Entry/turn-state agreement is a durable schema invariant, not only transactional
 practice. Deferred constraint triggers around

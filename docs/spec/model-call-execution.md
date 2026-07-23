@@ -109,7 +109,10 @@ The two off-transaction provider roles share one call-scoped
 `CancellationSignal`. It resolves when an authoritative reload finds the exact
 call `CancellationRequested` or terminal: direct cancellation of a prepared call
 therefore releases blocked capability preparation, while issued-call
-cancellation reaches provider invocation (INV-037).
+cancellation reaches provider invocation. Capability preparation reports this
+signal as `Cancelled`, and the application returns `NoWork`; it never converts
+authoritative cancellation into the guarded known-failure closure for a call
+that may already be terminal (INV-037).
 
 1. **Prepare transaction.** Locks the session, reconstitutes the aggregate, and
    either: reports no runnable work; creates and commits the exact `Prepared`
@@ -234,7 +237,8 @@ derived) to exactly one disposition:
 | `Completed` (text-only content)                                              | `Completed`   |
 | `Refused`                                                                    | `Refused`     |
 | `ProviderError` (any kind, incl. rate limit, credential rejection, overload) | `KnownFailed` |
-| `ProvenUnsent` (proof of no acceptance)                                      | `KnownFailed` |
+| `ProvenUnsent(CancelledBeforeSend)`                                          | `Cancelled`   |
+| other `ProvenUnsent` (proof of no acceptance)                                | `KnownFailed` |
 | `CancellationConfirmed`                                                      | `Cancelled`   |
 | `BoundaryLoss` (loss after possible acceptance, incl. timeouts)              | `Ambiguous`   |
 
@@ -252,7 +256,7 @@ inferred from timing or injected I/O errors.
 
 ## Terminal outcomes
 
-`apply_terminal_observation` derives one of four outcomes from fresh state, and
+`apply_terminal_observation` derives one of five outcomes from fresh state, and
 persistence commits it atomically with its outbox rows
 ([persistence-protocol](persistence-protocol.md)):
 
@@ -283,15 +287,20 @@ persistence commits it atomically with its outbox rows
 - **Refused.** The call ends `Refused`; the attempt ends `TurnRefused`; the turn
   terminalizes `Refused` atomically with an equal-content terminal frontier. No
   refusal-content entry exists yet (INV-018; open edge).
-- **Ambiguous.** The call ends terminally `Ambiguous`; the attempt ends
-  `Ambiguous` (live) or `Lost` (startup); the turn enters the durable
+- **Ambiguous.** The call ends terminally `Ambiguous`; an unstopped attempt ends
+  `Ambiguous` (live) or `Lost` (startup), and the turn enters the durable
   `awaiting_model_call_recovery` phase carrying the exact wait set (that one
-  call) and retains the session slot. No semantic entry or frontier is created.
+  call) while retaining the session slot. No semantic entry or frontier is
+  created.
+- **ReconciliationRequired.** When that same unacknowledged ambiguity has an
+  applied-interrupt proof, the attempt instead ends
+  `AfterCancellation(Ambiguous)` (live) or `AfterCancellation(Lost)` (startup).
+  The turn terminalizes with the exact model-call wait set and
+  `InterruptRequiresReconciliation` marker, an equal-content terminal frontier,
+  and a typed reconciliation outbox record, releasing the slot.
 
 Completion and refusal races against `StopRequested` end through their typed
-`AfterCancellation` dispositions while retaining their ordinary turn outcomes;
-an ambiguous cancellation race ends the attempt `AfterCancellation(Ambiguous)`
-and parks the turn for recovery with the stop proof still reconstructible.
+`AfterCancellation` dispositions while retaining their ordinary turn outcomes.
 
 Every non-ambiguous outcome atomically reclassifies each pending steering input
 into a fresh queued successor turn at its original acceptance position
@@ -331,9 +340,12 @@ per-session locked transaction as the general scan (INV-034):
 - a durable `Prepared` call proves no send authorization existed; the call ends
   `KnownFailed`, the abandoned attempt ends `Lost`, and the turn fails,
   reclassifying pending steering;
-- a durable `InFlight` call with no surviving evidence ends `Ambiguous`, the
-  abandoned attempt ends `Lost`, and the turn parks in
-  `awaiting_model_call_recovery`.
+- a durable unstopped `InFlight` call with no surviving evidence ends
+  `Ambiguous`, the abandoned attempt ends `Lost`, and the turn parks in
+  `awaiting_model_call_recovery`;
+- a durable `CancellationRequested` call reconstructs its applied interrupt,
+  ends the attempt `AfterCancellation(Lost)`, and terminalizes
+  `ReconciliationRequired` with that call as the exact ambiguity set.
 
 Recovery is configuration-independent: `require_live_execution_for_restart`
 passes no configured catalog and rebuilds target authority from the stored
@@ -360,9 +372,10 @@ prints the semantic transcript; it is deliberately not the client protocol.
   unimplemented; the adapter fails closed with an operator error, so a
   mismatched call is classified `Ambiguous` by restart rather than `KnownFailed`
   live.
-- Ambiguity recovery is a parked state only: no owner decision,
+- Unstopped ambiguity recovery is a parked state only: no owner decision,
   `DuplicateRiskAccepted`, replacement call, or outcome-authority transfer is
-  implemented.
+  implemented. Stop-caused ambiguity terminalizes proof-bearing reconciliation,
+  but no later reconciliation workflow is implemented.
 - Streaming deltas are collected but never delivered as transient drafts, and
   the designed early-observation pause/commit/resume path is unimplemented.
 - The aggregate admits at most one call per turn (with the one-row-per-attempt

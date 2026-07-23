@@ -249,12 +249,17 @@ end (INV-034):
 - a turn holding a `Prepared` model call (`recover_after_restart`) closes the
   call `known_failed` while its abandoned attempt still ends
   `WithoutStop(Lost)`, and the turn fails; and
-- a turn holding an in-flight call ends the call `ambiguous` and the attempt
-  `WithoutStop(Lost)`, but the turn does not terminalize: it stays active,
-  parked in the `awaiting_model_call_recovery` phase naming the ambiguous call
-  (`recovery_model_call_id`), with no `TurnFailed` entry, no terminal frontier,
-  no terminal disposition, and no `turn_failed` outbox record (a
-  `cancellation_requested` call cannot pass the reconstitution seam).
+- a turn holding an unstopped in-flight call ends the call `ambiguous` and the
+  attempt `WithoutStop(Lost)`, but the turn does not terminalize: it stays
+  active, parked in the `awaiting_model_call_recovery` phase naming the
+  ambiguous call (`recovery_model_call_id`), with no `TurnFailed` entry, no
+  terminal frontier, no terminal disposition, and no `turn_failed` outbox
+  record; and
+- a turn holding a proof-correlated `stop_requested` attempt and
+  `cancellation_requested` call ends the call `ambiguous` and the attempt
+  `AfterCancellation(Lost)`, then terminalizes `ReconciliationRequired` with the
+  call as its exact ambiguity set, an equal-content terminal frontier, and the
+  interrupt reason.
 
 In the two failing branches only: one `TurnFailed` semantic entry is appended,
 and the terminal frontier is derived as the starting frontier plus that marker
@@ -271,21 +276,22 @@ confirmed-interrupt evidence, and the version-one no-automatic-retry policy
 ([model-call-execution](model-call-execution.md)) makes the recovered turn fail
 rather than silently retry.
 
-Every failing restart branch atomically reclassifies pending-steering rows as
+Every terminal restart branch atomically reclassifies pending-steering rows as
 fresh queued successor origins (`reclassified_as_turn_origin`) in ascending
 acceptance position, including evidence-free turns; pending steering therefore
 never defers or blocks startup. A persisted `StopRequested` attempt with its
 `CancellationRequested` call reconstructs the exact proof, ends the abandoned
 attempt through `AfterCancellation(Lost)`, and classifies the unobserved issued
-call as ambiguous without discarding stop intent. Identity collisions are
-retried with fresh candidates; infrastructure and fail-closed corruption stop
-startup visibly. The scan is idempotent — a rerun inventories only work still
-active, and a stale observation rolls back as `NoActiveTurn`. There is no
-process-incarnation column and no lease: under the single-hub deployment
-contract, every nonterminal attempt observed at startup is a prior-process
-abandonment (INV-010). That contract is an operational assumption with no code
-enforcement — the advisory singleton guard is an unadopted open edge, and a
-second concurrent hub would violate the premise undetected.
+call as ambiguous, terminalizes proof-bearing reconciliation, and releases the
+slot without discarding stop intent. Identity collisions are retried with fresh
+candidates; infrastructure and fail-closed corruption stop startup visibly. The
+scan is idempotent — a rerun inventories only work still active, and a stale
+observation rolls back as `NoActiveTurn`. There is no process-incarnation column
+and no lease: under the single-hub deployment contract, every nonterminal
+attempt observed at startup is a prior-process abandonment (INV-010). That
+contract is an operational assumption with no code enforcement — the advisory
+singleton guard is an unadopted open edge, and a second concurrent hub would
+violate the premise undetected.
 
 ## Occupied-slot input handling
 

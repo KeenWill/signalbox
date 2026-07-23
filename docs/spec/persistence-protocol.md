@@ -273,12 +273,12 @@ holding a `Prepared` call follows the same logical closure after ending the call
 known-failed; an in-flight call recovers into the `awaiting_model_call_recovery`
 wait. A persisted `stop_requested` attempt and `cancellation_requested` call
 reconstruct through their exact applied interrupt, end the abandoned attempt
-`after_cancellation/lost`, and park the ambiguous call without erasing stop
-intent. The schema guard (`turn_lifecycle_pending_steering_closed`)
-independently requires every pending row to be consumed or reclassified before
-terminalization. Why: a pending steering row is an accepted delivery obligation,
-so every recovery branch must account for it rather than block startup or strand
-it.
+`after_cancellation/lost`, and terminalize proof-bearing reconciliation for the
+ambiguous call without erasing stop intent. The schema guard
+(`turn_lifecycle_pending_steering_closed`) independently requires every pending
+row to be consumed or reclassified before terminalization. Why: a pending
+steering row is an accepted delivery obligation, so every recovery branch must
+account for it rather than block startup or strand it.
 
 ## Corruption taxonomy
 
@@ -350,10 +350,11 @@ protocol scope). Implemented storage:
   `storage_version`, `session_id`) plus one typed record table per kind —
   `session_created_outbox_event`, `turn_failed_outbox_event`,
   `model_call_transition_outbox_event`, `turn_completed_outbox_event`,
-  `turn_refused_outbox_event`, and `turn_cancelled_outbox_event` — with a
-  deferred trigger requiring exactly one typed record per header. The header and
-  typed record tables are append-only (`reject_immutable_record_change`), and
-  every outbox table rejects `TRUNCATE`.
+  `turn_refused_outbox_event`, `turn_cancelled_outbox_event`, and
+  `turn_reconciliation_required_outbox_event` — with a deferred trigger
+  requiring exactly one typed record per header. The header and typed record
+  tables are append-only (`reject_immutable_record_change`), and every outbox
+  table rejects `TRUNCATE`.
 - `outbox_sequence_state`, a mutable singleton row (deletion rejected): a
   `BEFORE INSERT` trigger on the header allocates `last_sequence + 1` by
   updating the singleton, whose row lock is held to transaction end, and a
@@ -385,9 +386,9 @@ unrepresentable.
   `outbox_delivery_state` is advanced only by integration tests.
 - The outbox event-kind set is `session_created`, `turn_failed`,
   `model_call_transition`, `turn_completed`, `turn_refused`, and
-  `turn_cancelled`; input acceptance, activation, and defaults replacement
-  commit no events yet, pending the protocol projections that define client
-  visibility.
+  `turn_cancelled`, plus `turn_reconciliation_required`; input acceptance,
+  activation, and defaults replacement commit no events yet, pending the
+  protocol projections that define client visibility.
 - Outbox retention and pruning of delivered rows are undecided.
 - Attempt continuation is deliberately blocked: a `turn_attempt` with a
   predecessor is rejected (`turn_attempt_continuation_unavailable`) until
