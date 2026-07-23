@@ -2,7 +2,7 @@
 
 This page specifies the implemented behavior of turns, turn attempts,
 eligibility derivation, the scheduler, and startup recovery as verified against
-the working tree at commit `bf39f5f` (main). Code homes:
+the implementing stack through PR #175 (`agent/stop-requests`). Code homes:
 `crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
 `context_frontier,queue_order}.rs`, `crates/application/src/{scheduler,`
 `start_eligible_turn,startup_scan,submit_input}.rs`,
@@ -24,14 +24,15 @@ accepted-input origin under one frozen effective configuration (configuration
 freeze is [identity-and-commands](identity-and-commands.md) scope). The
 implemented slice stores three lifecycle states per turn
 (`turn_lifecycle.state_kind`): `queued`, `active`, and `terminal`, with the
-terminal disposition kind closed to `failed`, `completed`, and `refused`
-(migration `202607220001`). The domain `TurnDisposition` algebra carries all
-five accepted variants — `Completed`, `Refused`, `Failed`,
-`Cancelled { cause }`, `ReconciliationRequired { marker }` — but `Cancelled` is
-constructible only from an `AppliedInterruptProof` and `ReconciliationRequired`
-only from a sealed `ReconciliationMarker`, and committed transitions now produce
-`Completed`, `Refused`, and `Failed` (model-call terminal closure); no committed
-transition produces `Cancelled` or `ReconciliationRequired`.
+terminal disposition kind closed to `failed`, `completed`, `refused`,
+`cancelled`, and `reconciliation_required` (migrations `202607220001` and
+`202607220005`). The domain `TurnDisposition` algebra carries all five accepted
+variants — `Completed`, `Refused`, `Failed`, `Cancelled { cause }`,
+`ReconciliationRequired { marker }` — but `Cancelled` is constructible only from
+an `AppliedInterruptProof` and `ReconciliationRequired` only from a sealed
+`ReconciliationMarker`. Committed transitions produce every variant: interrupted
+physical ambiguity produces proof-bearing `ReconciliationRequired`, while
+confirmed interrupted cancellation produces proof-bearing `Cancelled`.
 
 The domain `ActiveTurnPhase` algebra is `Running { current_attempt }`,
 `AwaitingApproval { request }`, and
@@ -40,9 +41,10 @@ the session's progressing slot (`retains_progressing_slot()` is unconditionally
 true; INV-009). Storage and reconstitution admit the `running` and
 `awaiting_model_call_recovery` phases; `AwaitingRecoveryDecision` is
 reconstituted from an `ambiguous` terminal model call correlated with its ended
-attempt (`ambiguous` from a live loss, `lost` from startup recovery), while
-`StopRequested` and `AwaitingApproval` still have no storage rows or production
-constructors (see
+attempt (`ambiguous` from a live loss, `lost` from startup recovery).
+`StopRequested` is a stored current-attempt state inside the `running` active
+phase and reconstitutes only from its exact applied-interrupt proof;
+`AwaitingApproval` has no storage row or production constructor (see
 [Evidence-bearing reconstitution](#evidence-bearing-reconstitution)).
 
 At most one turn per session is `active`. Enforcement is layered:
@@ -59,9 +61,10 @@ At most one turn per session is `active`. Enforcement is layered:
    `reject_turn_attempt_invalid_change`) that reject invalid writes even from a
    defective writer: insert-as-`queued` / insert-as-`prepared`, only monotonic
    transitions (`queued`→`active`|`terminal`, `active`→`terminal`;
-   `prepared`→`running`|`ended`, `running`→`ended`), terminal-turn and
-   ended-attempt immutability, write-once start fields, no new attempt on a
-   terminal turn, and queued terminalization only without attempt history.
+   `prepared`→`running`|`ended`, `running`→`stop_requested`|`ended`,
+   `stop_requested`→`ended`), terminal-turn immutability, write-once start
+   fields, no new attempt on a terminal turn, and queued terminalization only
+   without attempt history. Ended attempts are immutable.
 
 Why: process memory carries no authority (INV-009, INV-010), so exclusivity must
 hold in durable rows even if every in-process structure is lost. Terminal turns
@@ -103,15 +106,15 @@ completion, refusal, cancellation, or a wait yield, and `WithoutStop` cannot
 claim `Cancelled`. Why: encoding the stop/disposition compatibility matrix in
 types means restart cannot construct a state the accepted lifecycle prohibits.
 
-Committed attempt facts today are exactly: the initial `Prepared` attempt
-created by activation, a stored `running` state kind admitted by reconstitution,
-the startup scan's `Ended(WithoutStop(Lost))`, and the model-call slice's
-`Ended(WithoutStop(_))` closures with dispositions `turn_completed`,
-`turn_refused`, `known_failure`, and `ambiguous`. `turn_attempt` storage
-enforces one initial attempt per turn (`turn_attempt_one_initial_per_turn`), at
-most one live attempt per turn (`turn_attempt_one_live_per_turn`,
-`WHERE state_kind <> 'ended'` — the durable form of exclusive tenure), and a
-unique continuation chain; `StopRequested` has no storage.
+Committed attempt facts include the initial `Prepared` attempt created by
+activation, `running`, and proof-bearing `stop_requested` state kinds, the
+startup scan's lost closures, and the model-call slice's cause-specific terminal
+histories. `stop_requested` stores the exact applied interrupt command and
+predecessor needed to reconstruct `CancellationOnly`; the correlated call is
+durably `cancellation_requested`. `turn_attempt` storage enforces one initial
+attempt per turn (`turn_attempt_one_initial_per_turn`), at most one live attempt
+per turn (`turn_attempt_one_live_per_turn`, `WHERE state_kind <> 'ended'` — the
+durable form of exclusive tenure), and a unique continuation chain.
 
 ## Eligibility derivation
 
@@ -126,12 +129,14 @@ fails closed on any omission or cross-wiring: cross-session records, duplicate
 accepted inputs, missing origin or failure entries, snapshots that do not
 resolve to their exact stored membership, stored starts whose lineage or
 frontier disagree with the derived order, and lifecycle states that do not form
-a failed-terminal prefix, at most one active slot, and a queued suffix in
-durable total order. The total order itself is
-`derive_accepted_input_total_order`: ordinary roots by acceptance position, each
-followed by its unique recursive interrupt-successor chain, with monotonic
-interrupt targets validated. Queued turns store no predecessor pointer; the
-immediate predecessor is fixed once, at eligibility.
+a terminal prefix, at most one active slot, and a queued suffix in durable total
+order. Every terminal variant contributes its checked terminal frontier to that
+prefix, including proof-bearing cancellation and reconciliation-required
+predecessors. The total order itself is `derive_accepted_input_total_order`:
+ordinary roots by acceptance position, each followed by its unique recursive
+interrupt-successor chain, with monotonic interrupt targets validated. Queued
+turns store no predecessor pointer; the immediate predecessor is fixed once, at
+eligibility.
 
 `prepare_earliest_queued_activation` then applies the predicate in pure domain
 code: it rejects when an active turn holds the slot or no queued turn exists
@@ -171,10 +176,10 @@ reconstitution fails with `UnsupportedSessionAncestry` (open edge).
    with complete materialized membership, and the prepared attempt row, then run
    the guarded lifecycle `UPDATE` that binds the exact lineage, frontier, and
    attempt and flips `queued` to `active`. The update re-asserts queued state,
-   no active turn, all earlier ordered turns terminal, and the exact derived
-   predecessor (the SQL re-check orders by raw acceptance position, which
-   coincides with the interrupt-aware derived order only while no
-   interrupt-priority rows can be committed). Commit only when it affects
+   no active turn, every earlier turn under the interrupt-aware total order
+   terminal, and the exact derived predecessor. An `interrupt_immediately_after`
+   origin proves its named predecessor and may precede ordinary queued inputs
+   with lower raw acceptance positions. Commit only when the update affects
    exactly one row; zero rows after in-lock validation is fail-closed
    corruption, and identity-key conflicts map to typed identity-collision errors
    after full rollback.
@@ -247,21 +252,27 @@ end (INV-034):
 - a turn holding a `Prepared` model call (`recover_after_restart`) closes the
   call `known_failed` while its abandoned attempt still ends
   `WithoutStop(Lost)`, and the turn fails; and
-- a turn holding an in-flight call ends the call `ambiguous` and the attempt
-  `WithoutStop(Lost)`, but the turn does not terminalize: it stays active,
-  parked in the `awaiting_model_call_recovery` phase naming the ambiguous call
-  (`recovery_model_call_id`), with no `TurnFailed` entry, no terminal frontier,
-  no terminal disposition, and no `turn_failed` outbox record (a
-  `cancellation_requested` call cannot pass the reconstitution seam).
+- a turn holding an unstopped in-flight call ends the call `ambiguous` and the
+  attempt `WithoutStop(Lost)`, but the turn does not terminalize: it stays
+  active, parked in the `awaiting_model_call_recovery` phase naming the
+  ambiguous call (`recovery_model_call_id`), with no `TurnFailed` entry, no
+  terminal frontier, no terminal disposition, and no `turn_failed` outbox
+  record; and
+- a turn holding a proof-correlated `stop_requested` attempt and
+  `cancellation_requested` call ends the call `ambiguous` and the attempt
+  `AfterCancellation(Lost)`, then terminalizes `ReconciliationRequired` with the
+  call as its exact ambiguity set, an equal-content terminal frontier, and the
+  interrupt reason.
 
-In the two failing branches only: one `TurnFailed` semantic entry is appended,
-and the terminal frontier is derived as the starting frontier plus that marker
-(entry payloads are [sessions-and-transcript](sessions-and-transcript.md)
-scope); the turn terminalizes `Failed`, releasing the slot via one guarded
-attempt-end update and one guarded lifecycle update, each required to match
-exactly one row; and a `turn_failed` outbox record is appended in the same
-transaction (outbox mechanics are
-[persistence-protocol](persistence-protocol.md) scope).
+In the two failing branches only: one `TurnFailed` semantic entry is appended.
+The evidence-free branch extends the starting frontier; the prepared-call branch
+extends that call's exact source frontier, which already contains every steering
+entry consumed when the call was prepared. The turn terminalizes `Failed`,
+releasing the slot via one guarded attempt-end update and one guarded lifecycle
+update, each required to match exactly one row; and a `turn_failed` outbox
+record is appended in the same transaction (entry payloads are
+[sessions-and-transcript](sessions-and-transcript.md) scope; outbox mechanics
+are [persistence-protocol](persistence-protocol.md) scope).
 
 Why `Failed`: the evidence-free slice stores no operations, waits, or stop
 causes, so an abandoned tenure has no sufficient completion, refusal, or
@@ -269,19 +280,22 @@ confirmed-interrupt evidence, and the version-one no-automatic-retry policy
 ([model-call-execution](model-call-execution.md)) makes the recovered turn fail
 rather than silently retry.
 
-Only an evidence-free session (active turn with no model call) whose tail
-contains pending steering defers with the blocking accepted input and fails hub
-startup; when the lost turn holds a `Prepared` model call, recovery fails the
-turn and atomically reclassifies each pending-steering row as a fresh queued
-successor turn origin (`reclassified_as_turn_origin`). Identity collisions are
-retried with fresh candidates; infrastructure and fail-closed corruption stop
-startup visibly. The scan is idempotent — a rerun inventories only work still
-active, and a stale observation rolls back as `NoActiveTurn`. There is no
-process-incarnation column and no lease: under the single-hub deployment
-contract, every nonterminal attempt observed at startup is a prior-process
-abandonment (INV-010). That contract is an operational assumption with no code
-enforcement — the advisory singleton guard is an unadopted open edge, and a
-second concurrent hub would violate the premise undetected.
+Every terminal restart branch atomically reclassifies pending-steering rows as
+fresh queued successor origins (`reclassified_as_turn_origin`) in ascending
+acceptance position, including evidence-free turns; pending steering therefore
+never defers or blocks startup. A persisted `StopRequested` attempt with its
+`CancellationRequested` call reconstructs the exact proof, ends the abandoned
+attempt through `AfterCancellation(Lost)`, and classifies the unobserved issued
+call as ambiguous, terminalizes proof-bearing reconciliation, and releases the
+slot without discarding stop intent. Identity collisions are retried with fresh
+candidates; infrastructure and fail-closed corruption stop startup visibly. The
+scan is idempotent — a rerun inventories only work still active, and a stale
+observation rolls back as `NoActiveTurn`. There is no process-incarnation column
+and no lease: under the single-hub deployment contract, every nonterminal
+attempt observed at startup is a prior-process abandonment (INV-010). That
+contract is an operational assumption with no code enforcement — the advisory
+singleton guard is an unadopted open edge, and a second concurrent hub would
+violate the premise undetected.
 
 ## Occupied-slot input handling
 
@@ -299,21 +313,27 @@ delivery outcomes implemented here are:
   created. A reclassification path now exists: terminalization of the source
   turn reclassifies pending steering into a queued successor origin turn that
   inherits the source turn's configuration
-  (`queued_input_origin.source_configuration_turn_id`); in-turn safe-point
-  consumption still does not exist, and evidence-free startup recovery still
-  defers on pending steering.
+  (`queued_input_origin.source_configuration_turn_id`). At the next model-call
+  preparation, every pending input is consumed under the atomic boundary in
+  [model-call-execution](model-call-execution.md) (INV-036).
 - `AfterCurrentTurn` creates an ordinary queued origin turn with frozen
   configuration and an immutable acceptance position; it fixes no predecessor
   until eligibility.
-- `Interrupt` targeting the active turn is deliberately a nonclaiming
-  preparation failure (`InterruptApplicationUnavailable`): no command identity
-  is claimed, no rejection is recorded, and the caller receives a typed error.
-  Why: the accepted interrupt application must atomically construct the applied
-  proof, immediate-successor priority, and predecessor transition, and none of
-  that authority exists before the `StopRequested` slice — the owner ratified
-  this deferral
-  ([decision ledger, 2026-07-19](../decisions.md#2026-07-19--owner-ratified-matching-interrupt-milestone-deferral))
-  rather than let a weaker interrupt claim a result.
+- `Interrupt` targeting the active turn atomically accepts a configured
+  immediate-successor origin, constructs the exact `AppliedInterruptProof`, and
+  applies the predecessor transition (INV-029, INV-037). Before any terminal
+  transition releases the slot, the same transaction reclassifies every pending
+  steering input against the interrupted turn as an ordered queued successor
+  origin. Call, attempt, and turn terminalization follow
+  [model-call-execution](model-call-execution.md#terminal-outcomes). A matching
+  interrupt against `AwaitingRecoveryDecision` preserves the already terminal
+  ambiguous call and ended attempt, records the new proof on the turn's
+  reconciliation marker, and terminalizes `ReconciliationRequired` with the
+  wait's exact operation set. A next-safe-point request against a stopping turn
+  records `SafePointUnavailableWhileStopping`; equal interrupt replay returns
+  the original applied result. A distinct later interrupt records
+  `InterruptAlreadyApplied { active_turn, existing_command }` without accepting
+  an input or replacing the existing proof.
 
 ## Context frontier snapshots
 
@@ -352,10 +372,12 @@ are conclusions derived from complete owner facts, never trusted discriminators.
 
 - `AwaitingRecoveryDecision` now reconstitutes from complete model-call owner
   facts (an `ambiguous` terminal call correlated with its ended attempt —
-  `ambiguous` from a live loss, `lost` from startup recovery); `StopRequested`
-  and `AwaitingApproval` inputs still have no production constructors
-  (compile-fail-tested); a stored proof-shaped payload or bare wait subject
-  cannot become a phase until a complete correlated owner projection exists.
+  `ambiguous` from a live loss, `lost` from startup recovery). A `StopRequested`
+  current attempt reconstructs only when its stored interrupt command,
+  predecessor, configured immediate successor, applied result, and
+  cancellation-requested call form the exact proof. `AwaitingApproval` still has
+  no production constructor (compile-fail-tested); a bare wait subject cannot
+  become a phase until a complete correlated owner projection exists.
 - A failed terminal turn that ended through a physical attempt durably names its
   exact ended attempt and optional terminal call
   (`turn_lifecycle.terminal_attempt_id`, `terminal_model_call_id`, backfilled
@@ -366,14 +388,29 @@ are conclusions derived from complete owner facts, never trusted discriminators.
   instead of accepting an evidence-free failure record, and the deferred
   `assert_failed_terminal_execution_final_state` assertion re-closes the shape
   at every commit.
+- A cancelled terminal turn reconstructs only from
+  `CancelledTurnExecutionReconstitutionInput`: its exact ended attempt carries
+  `AfterCancellation(Cancelled)` and the same complete applied-interrupt result
+  as the turn disposition. It names either no call, proving direct cancellation
+  before any call was prepared, or its one correlated terminal `cancelled` call.
+  Its terminal frontier must extend the starting or call frontier by exactly the
+  correlated `TurnCancelled` marker.
+- A reconciliation-required terminal turn names its exact ended attempt and
+  required terminal `ambiguous` call. The attempt end is either
+  `WithoutStop(Ambiguous|Lost)` with a later turn-correlated applied interrupt,
+  or `AfterCancellation(Ambiguous|Lost)` carrying that same proof. Its terminal
+  frontier is an equal-content boundary over the ambiguous call's frontier. The
+  checked scheduling input validates those correlations before the turn can
+  serve as a terminal predecessor.
 - Every active turn's projection must carry a session-scoped acceptance tail
   anchored at the turn's exact origin and extending gap-free through the
   observed last acceptance position, with unique identities, same- session
   membership, and per-entry delivery/disposition correlation. A filtered
   pending-steering list or bare maximum cannot substitute (INV-007, INV-016).
-- A tail entry recording an accepted interrupt against the active turn fails
-  reconstitution (`ActivePhaseEvidenceMismatch`): applied-interrupt evidence
-  would require a proof-bearing phase this seam cannot construct.
+- A tail entry recording an accepted interrupt against the active turn is
+  admitted only when the current stop/recovery state carries its exact
+  `AppliedInterruptProof`; an evidence-free active phase rejects it as
+  `ActivePhaseEvidenceMismatch`.
 
 Why fail-closed: an omission inside a claimed complete observation is
 indistinguishable from acknowledged work disappearing, so the seam rejects
@@ -393,8 +430,8 @@ startup with a classified, key-bearing log line and a failure exit code.
 Observability and the operator failure taxonomy are
 [runtime-substrate](runtime-substrate.md) scope.
 
-On SIGINT/SIGTERM the scheduler loop stops admitting new passes and in-flight
-passes get a bounded 30-second grace window to let their authoritative
+On SIGINT/SIGTERM the scheduler loop stops admitting new passes and every
+in-flight pass gets a bounded 30-second grace window to let its authoritative
 transactions commit or abort. Window expiry abandons the work, warns, and skips
 the unbounded pool drain; a clean exit closes the pool. Why shutdown is polish,
 not correctness: abrupt exit at any point is safe because durable rows plus the
@@ -404,12 +441,8 @@ over the shared pool; no shared locked service instance exists.
 
 ## Open edges
 
-- Interrupt application is deferred: `SubmitInput::Interrupt` against the active
-  turn is a nonclaiming failure until the `StopRequested` slice adds application
-  and its designed recorded rejections.
-- `StopRequested` and `AwaitingApproval` have no storage or reconstitution
-  (`AwaitingRecoveryDecision` now has both); evidence-bearing reconstitution
-  requires complete owner projections before any such phase lands.
+- `AwaitingApproval` has no storage or reconstitution; evidence-bearing
+  reconstitution requires a complete owner projection before that phase lands.
 - Direct fatal terminalization has sealed domain derivation values
   (`fatal_mismatch` module) but no aggregate transition or commit path.
 - Dispatch fencing is partially implemented: `model_call` storage, the
@@ -420,13 +453,10 @@ over the shared pool; no shared locked service instance exists.
   unimplemented; activation is the only eligibility outcome.
 - Ancestry-derived sessions cannot be scheduled (`UnsupportedSessionAncestry`);
   ancestry-to-first-frontier resolution is unimplemented.
-- Pending safe-point steering is reclassified into a queued successor origin at
-  source-turn terminalization; in-turn safe-point consumption is still absent,
-  and only evidence-free startup recovery defers on pending steering.
 - Startup recovery now classifies model-call evidence (a `Prepared` call closes
-  as a known failure; an in-flight call parks the turn as ambiguous in
-  `awaiting_model_call_recovery`); stop-cause recovery and wait reconstruction
-  for the remaining phases still await their slices.
+  as a known failure; an unstopped in-flight call parks the turn as ambiguous in
+  `awaiting_model_call_recovery`); wait reconstruction for remaining phases
+  still awaits their slices.
 - The single-hub advisory singleton guard and per-session scan gating (designed
   refinements) are not adopted; sweep interval and fairness tuning remain
   operational open questions.

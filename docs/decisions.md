@@ -10,6 +10,32 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-23 — Atomic steering consumption and proof-bearing stop requests
+
+**Context.** The M3 pending-steering boundary deliberately left safe-point
+consumption and matching interrupt application unimplemented until their
+semantic-history, ordering, atomicity, proof, provider-signal, and restart
+contracts could land together.
+
+**Decision.** Adopt atomic safe-point steering consumption and proof-bearing
+interrupt stop requests as specified by
+[sessions-and-transcript](spec/sessions-and-transcript.md),
+[turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md),
+[model-call-execution](spec/model-call-execution.md), and
+[persistence-protocol](spec/persistence-protocol.md), with the accepted laws
+recorded by INV-036 and INV-037 in [the invariant catalog](invariants.md).
+
+**Rejected alternatives.** Copying steering content into semantic history would
+create a second authority; one-at-a-time or non-atomic consumption could expose
+acknowledged steering without its consuming call. Process-local stop flags,
+unproven command identifiers, and resuming prior-process attempts would lose
+durable causality or violate restart policy.
+
+**Affects.** S07/S08; INV-016/INV-029/INV-034/INV-036/INV-037; the domain and
+application spines; accepted-input, semantic-entry, scheduling, submit,
+model-execution, startup, runtime-bridge, and PostgreSQL implementation and
+tests. No client or `apps/hubd` surface changes.
+
 ## 2026-07-23 — Review-wave amendments: stale-head declines and exhaust-loop escalation
 
 **Context.** The adaptive review-wave rule continues waves while the latest wave

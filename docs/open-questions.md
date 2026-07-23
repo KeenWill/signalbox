@@ -21,11 +21,11 @@ identifiers refer to [scenarios.md](scenarios.md).
   origin-accepted-input and failed-turn payloads plus their eligibility and
   terminal-failure commit boundaries, together with assistant text, logical
   tool-use references, completed-turn markers, and their final response commit
-  boundary. Refusal, cancellation, reconciliation, mismatch, accepted-risk,
-  steering, tool-result, approval, and delegation variants remain open together
-  with rich assistant content and provider/client rendering. The M3 boundary and
-  its reopening obligation are recorded in the
-  [pending-steering fail-closed decision](decisions.md#2026-07-22--m3-pending-steering-fail-closed-boundary).
+  boundary. Refusal, reconciliation, mismatch, accepted-risk, tool-result,
+  approval, and delegation variants remain open together with rich assistant
+  content and provider/client rendering. The steering payload and stop marker
+  are fixed by the
+  [steering and stop decision](decisions.md#2026-07-23--atomic-steering-consumption-and-proof-bearing-stop-requests).
   Blocks only those later semantic-history slices. (S02–S04, S08, S09, S17)
 - **Selectable transcript-frontier boundaries.** Which terminal semantic
   boundaries a client may select as a `TranscriptFrontier` remains open; the
@@ -83,8 +83,8 @@ identifiers refer to [scenarios.md](scenarios.md).
   turn lifecycle defines cancellation authority only through applied interrupts,
   and adding a standalone command requires a future foundation decision with its
   own proof and disposition rules. Later scope. (S07)
-- **Ambiguous provider-call recovery.** A restart-recovered in-flight call parks
-  its turn in the awaiting-recovery wait
+- **Ambiguous provider-call recovery.** A restart-recovered unstopped in-flight
+  call parks its turn in the awaiting-recovery wait
   ([model-call-execution](spec/model-call-execution.md)) with no resolving
   writer yet. The retired design analysis identified adopting a provider
   request-status API — with its polling posture and evidence classes — as the
