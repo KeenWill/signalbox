@@ -1,8 +1,9 @@
 # Persistence protocol
 
-This page describes the implemented persistence protocol of the Signalbox hub as
-verified against the implementing stack through PR #175 (`agent/stop-requests`).
-It covers the Postgres representation in `crates/persistence` (source and
+The baseline persistence protocol was verified through PR #175
+(`agent/stop-requests`); imported-conversation and seed-session storage specify
+the implementing stack rooted at `agent/conversation-import-spec`. This page
+covers the Postgres representation in `crates/persistence` (source and
 migrations), migration discipline, durable command storage and replay equality,
 the fail-closed reconstitution boundary, the lock protocol, pending-steering
 durable state, the corruption taxonomy, commit-ambiguity handling, and the
@@ -74,12 +75,16 @@ is the durable statement of record, and no state is rebuilt by replaying events
 constraints over current-state rows; an event log would move them back into
 projection code.
 
-Implemented table families (across the fourteen migrations):
+Implemented table families (across the forward-only migrations):
 
 - `durable_command` plus typed command records (`create_session_command`,
-  `replace_session_defaults_command`, `submit_input_command`);
+  `seed_session_from_import_command`, `replace_session_defaults_command`,
+  `submit_input_command`);
 - `session`, `session_defaults_version`, `session_current_defaults`,
   `session_scheduler`;
+- `imported_conversation` and `imported_transcript_entry`, whose exact
+  append-only representation and completeness rules are owned by
+  [conversation-import](conversation-import.md);
 - `accepted_input`, `queued_input_origin`, `turn_lifecycle`, `turn_attempt`;
 - `model_call` (execution state owned by
   [model-call-execution](model-call-execution.md), its turn-level
@@ -103,12 +108,14 @@ Representation rules, all enforced in the schema:
   dispositions `completed`/`known_failed`/`refused`/`cancelled`/`ambiguous`.
 - Immutable fact tables carry `BEFORE UPDATE OR DELETE` triggers that raise
   (`reject_immutable_record_change`), making append-only a database property,
-  not a convention. Mutable lifecycle tables carry guard triggers instead:
-  `turn_lifecycle` rows must be inserted `queued`, transition only
-  monotonically, keep identity/origin/order and written starts write-once, and
-  become immutable at `terminal`; `turn_attempt` rows are inserted `prepared`
-  and an `ended` attempt is immutable. Why: restart trusts durable rows as
-  evidence, so the schema itself must forbid rewriting them (INV-006, INV-007).
+  not a convention. This includes imported-conversation headers and members,
+  seed-command records, session seed projections, and every existing historical
+  fact. Mutable lifecycle tables carry guard triggers instead: `turn_lifecycle`
+  rows must be inserted `queued`, transition only monotonically, keep
+  identity/origin/order and written starts write-once, and become immutable at
+  `terminal`; `turn_attempt` rows are inserted `prepared` and an `ended` attempt
+  is immutable. Why: restart trusts durable rows as evidence, so the schema
+  itself must forbid rewriting them (INV-006, INV-007).
 - INV-009 is database-level: partial unique indexes
   `turn_lifecycle_one_active_per_session`, `turn_attempt_one_live_per_turn`, and
   `turn_attempt_one_initial_per_turn` reject a second active turn, second live
@@ -141,10 +148,11 @@ Representation rules, all enforced in the schema:
   inside a transaction while every commit boundary sees the complete shape: each
   claimed registry row has exactly one typed command record, each
   `submit_input_command` terminal result correlates with exactly its committed
-  effects, each `context_frontier` header has complete contiguous ordered
-  membership, and turn/attempt/semantic-entry writes re-assert the complete turn
-  final state (origin entry, frontier prefix relationships, live-attempt
-  cardinality, failure-entry correlation).
+  effects, each imported-conversation and context-frontier header has complete
+  contiguous ordered membership, each import-seeded session names its exact
+  imported aggregate and seed frontier, and turn/attempt/semantic-entry writes
+  re-assert the complete turn final state (origin entry, frontier prefix
+  relationships, live-attempt cardinality, failure-entry correlation).
 - Accepted user text is bounded to 1 MiB of UTF-8 in both the command record and
   `accepted_input` (`octet_length(convert_to(...))` checks), independent of the
   application admission bound.
@@ -166,15 +174,15 @@ states only their storage representation and adapter mechanics.
 One append-only, owner-global `durable_command` registry claims every command
 identifier: `command_id` is the primary key across all kinds and sessions
 (INV-012), with a `CHECK`-closed kind set (`create_session`,
-`replace_session_defaults`, `submit_input`) and `storage_version` (currently
-`1`). Each kind has one typed subordinate record keyed by `command_id` that
-stores every caller-supplied semantic field in typed, `CHECK`-constrained
-columns, plus the terminal `applied`/`rejected` result and its typed result
-fields; result-shape `CHECK` constraints tie each rejection kind to exactly its
-fields, and deferred reverse constraints require exactly one typed record per
-claimed registry row at commit. Why: typed per-kind records keep replay
-semantics reviewable and constraint-checked, where a universal serialized
-payload would make the serializer a second semantic authority.
+`seed_session_from_import`, `replace_session_defaults`, `submit_input`) and a
+kind-scoped `storage_version`. Each kind has one typed subordinate record keyed
+by `command_id` that stores every caller-supplied semantic field in typed,
+`CHECK`-constrained columns, plus the terminal `applied`/`rejected` result and
+its typed result fields; result-shape `CHECK` constraints tie each rejection
+kind to exactly its fields, and deferred reverse constraints require exactly one
+typed record per claimed registry row at commit. Why: typed per-kind records
+keep replay semantics reviewable and constraint-checked, where a universal
+serialized payload would make the serializer a second semantic authority.
 
 Adapter mechanics behind the shared protocol: registry inspection is the first
 durable operation, before any current-state read, and an unseen identifier is

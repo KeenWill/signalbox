@@ -1,17 +1,16 @@
 # Sessions and the transcript
 
-This page specifies the implemented behavior of session creation and ancestry,
-session-level configuration defaults and their replacement, the long-lived
-session aggregate, semantic transcript entries, accepted-input user content, and
-actor attribution. It was verified against the implementing stack through PR
-#175 (`agent/stop-requests`): `crates/domain` (`session.rs`, `configuration.rs`,
-`replace_session_defaults.rs`, `semantic_entry.rs`, `turn_eligibility.rs`,
-`user_content.rs`, `actor.rs`, `submit_input.rs`), `crates/application`
-(`create_session.rs`, `load_session.rs`, `replace_session_defaults.rs`,
-`submit_input.rs`), and `crates/persistence` (sources and migrations). Where a
-law is cited as `INV-NNN`, [invariants.md](../invariants.md) is the catalog of
-record; where mechanics owned by another decision are summarized, the owning
-sibling page is linked inline.
+The baseline session and transcript behavior was verified through PR #175
+(`agent/stop-requests`); the import additions specify the implementing stack
+rooted at `agent/conversation-import-spec`. This page covers session creation
+and ancestry, import-seeded session creation, session-level configuration
+defaults and their replacement, the long-lived session aggregate, semantic
+transcript entries, accepted-input user content, and actor attribution. The
+imported-conversation record and converter are owned by
+[conversation-import](conversation-import.md). Where a law is cited as
+`INV-NNN`, [invariants.md](../invariants.md) is the catalog of record; where
+mechanics owned by another decision are summarized, the owning sibling page is
+linked inline.
 
 ## Session identity and creation provenance
 
@@ -24,9 +23,11 @@ records two required, independent, immutable creation facts, paired as
   `OwnerInitiated`. Reserved causes (application, schedule, delegation) are not
   represented as placeholder variants.
 - **Transcript ancestry** — where initial semantic context came from: `None`
-  (explicitly no prior transcript) or `SingleSource` naming one source
-  `SessionId` and one opaque `TranscriptFrontier`. `TranscriptFrontier` has no
-  public constructor; no implemented slice can produce one.
+  (explicitly no prior transcript), `SingleSource` naming one source `SessionId`
+  and one opaque `TranscriptFrontier`, or `ImportedConversation` naming one
+  `ImportedConversationId` and the exact immutable seed frontier projected from
+  it. `SingleSource` remains unconstructible; seed-from-import is the sole
+  trusted producer of an imported frontier.
 
 Why: deriving one fact from the other would make ordinary forks look delegated
 and force delegated children to inherit transcripts.
@@ -34,7 +35,9 @@ and force delegated children to inherit transcripts.
 Neither fact can be rewritten after creation, and later source-session activity
 cannot change a descendant's recorded ancestry (INV-030). The `session` table
 stores cause and ancestry as independently constrained columns and is
-append-only.
+append-only. Imported conversations are immutable, so later imports or native
+session activity likewise cannot change an imported ancestry boundary (INV-038,
+INV-039).
 
 ## Session creation
 
@@ -56,7 +59,9 @@ Application orchestration (`crates/application/src/create_session.rs`):
 Domain preparation admits only the owner-initiated, no-ancestry pair. A
 `SingleSource` command is a valid canonical value but fails preparation with
 `TranscriptAncestryUnavailable` — a nonterminal error that claims no command
-identifier. Forks are therefore typed but not yet creatable.
+identifier. Forks are therefore typed but not yet creatable. Import-seeded
+creation uses the separate command path below; it does not widen
+`CreateSession`.
 
 The committing transaction atomically inserts the session row, the scheduler
 registration (`session_scheduler`), defaults version one, the current-defaults
@@ -85,6 +90,48 @@ receipts, and scheduler registration are historical facts; in-place mutation
 would rewrite recorded intent and the context that later work consumed. The
 current-defaults pointer alone is mutable because "current" is a present choice,
 not a historical fact.
+
+### Seed from an imported conversation
+
+`SeedSessionFromImport` is a distinct durable command family carrying command
+identity, one `ImportedConversationId`, and complete unversioned initial
+defaults. Its structural replay equality excludes only command identity.
+Separating the family preserves storage version 1 and the no-ancestry contract
+of `CreateSession`; it does not make imported record look like a native fork.
+
+The application supplies fresh candidates for the session, seed semantic
+entries, and seed frontier, then calls one atomic transaction port. The
+transaction loads the complete imported conversation, prepares its exact
+seedable projection, and either:
+
+- returns `ImportedConversationNotFound` or `NoSeedableTranscriptEntries`
+  without claiming the command identity; or
+- handles command claim/replay and creates the complete session seed.
+
+An equal replay returns the recorded created session and ignores unused fresh
+identity candidates. Changed imported conversation or defaults under an already
+claimed command identity is conflicting reuse. Cross-kind reuse follows the
+owner-global durable-command contract in
+[identity-and-commands](identity-and-commands.md).
+
+The committing transaction atomically inserts:
+
+- the owner-initiated session whose immutable ancestry names the imported
+  conversation and seed frontier;
+- defaults version one, its current pointer, scheduler registration, typed
+  command record, registry claim, and the ordinary `session_created` outbox
+  event;
+- one imported-provenance semantic entry for each seed-included text entry, in
+  exact imported position order; and
+- one immutable seed context frontier containing exactly those semantic entries.
+
+No import, tool, call, attempt, or turn lifecycle event is emitted. The imported
+aggregate remains the content authority: the semantic seed entry records its
+exact imported-entry reference, speaker, and checked content projection rather
+than fabricating an accepted input or producing call (INV-038).
+
+Why (one transaction): a visible seeded session must never name a missing
+imported aggregate, partial semantic projection, or incomplete initial frontier.
 
 ## Session defaults and replacement
 
@@ -196,19 +243,18 @@ and closed:
 - `AssistantToolUse { producing_call, request }` — typed, but storage rejects it
   (`semantic_transcript_entry_tool_use_unavailable`) until the reserved tool
   decisions land; and
+- `ImportedText { imported_entry, speaker, value }` — exact text projected from
+  one seed-included imported entry, carrying imported rather than native
+  execution provenance;
 - `TurnCompleted { turn }` — the explicit final marker for a completed turn; and
 - `TurnCancelled { turn }` — the explicit final marker for a turn ended by its
   applied interrupt.
 
 There is no generic text, role, metadata, or "other" payload. Entry identity is
-distinct from accepted-input and turn identity (INV-001); equal content in two
-inputs yields distinct entries. Entry construction is sealed inside the domain
-crate — the checked constructor is `pub(crate)` — and its producers live in two
-modules: `turn_eligibility.rs` (eligibility activation, lost-active-turn failure
-preparation, checked scheduling reconstitution) and `model_execution.rs`
-(steering consumption, terminal completion building the `AssistantText` entries
-plus `TurnCompleted`, cancellation building `TurnCancelled`, and known-failure
-closure building `TurnFailed`).
+distinct from accepted-input, imported-entry, and turn identity (INV-001); equal
+content in two inputs or imports yields distinct entries. Entry construction is
+sealed inside the domain crate. Native producers remain eligibility and model
+execution; seed-session preparation is the only producer of `ImportedText`.
 
 `OriginAcceptedInput` and `SteeringAcceptedInput` reference the accepted input's
 identity; neither copies content. Steering additionally names the exact active
@@ -242,6 +288,14 @@ the accepted-input record alone carries no semantic commitment.
 Why (entry at eligibility, not acceptance): queue acceptance has not fixed
 lineage or the snapshot that consumes the entry; eligibility fixes both
 atomically.
+
+Imported semantic entries have a different commit boundary. Seed-session
+creation appends them before any native turn exists, together with the imported
+ancestry and exact seed frontier. They never require or create accepted-input,
+turn, attempt, or call records. The first native turn's eligibility transaction
+extends that immutable seed frontier with its ordinary `OriginAcceptedInput`;
+every later native frontier follows the existing predecessor-prefix rules
+(INV-039).
 
 Pending steering has a separate safe-point boundary (INV-036). Immediately
 before a later call is prepared, the transaction appends one
@@ -346,11 +400,12 @@ no implemented boundary constructs them.
 
 ## Open edges
 
-- Fork creation is typed but unimplemented: `SingleSource` ancestry fails
-  preparation (`TranscriptAncestryUnavailable`) until a trusted
-  `TranscriptFrontier` producer exists; frontier representation and selectable
-  fork boundaries remain open ([open-questions.md](../open-questions.md),
-  selectable transcript-frontier boundaries).
+- Native fork creation remains typed but unimplemented: `SingleSource` ancestry
+  fails preparation (`TranscriptAncestryUnavailable`) until a trusted native
+  `TranscriptFrontier` producer exists; imported ancestry does not select or
+  authorize a native fork. Selectable fork boundaries remain open
+  ([open-questions.md](../open-questions.md), selectable transcript-frontier
+  boundaries).
 - Multi-source ancestry and transcript merge remain future decision scope, and
   retention when an ancestry source is destructively deleted is undecided; both
   are recorded in [open-questions.md](../open-questions.md).

@@ -868,6 +868,42 @@ those tests.
   cancellation delivery and acknowledgement mechanics, and whether direct
   interrupt-only reconciliation is ever added.
 
+## S28 — Import a Claude Code conversation and continue natively
+
+- **User intent:** Preserve an external Claude Code conversation as durable
+  Signalbox history and continue from its textual context without pretending
+  Signalbox executed the imported work.
+- **Durable commands:** Convert one explicitly selected Claude Code session
+  JSONL file into a separately identified immutable imported conversation, then
+  persist `SeedSessionFromImport` naming that aggregate and complete initial
+  session defaults. Submit ordinary native input to the created session through
+  the existing command path.
+- **State transitions:** Import commits the complete record aggregate without a
+  turn or outbox transition. Seed creation atomically commits the new session,
+  imported ancestry, imported-provenance semantic entries, exact seed frontier,
+  defaults, scheduler registration, command receipt, and ordinary
+  `session_created` event. The first native input queues, activates, extends the
+  seed prefix with its native origin entry, executes one scripted model call,
+  and terminalizes through the unchanged native lifecycle.
+- **Transient updates:** None are required for import. Scripted-model deltas, if
+  any, follow the ordinary transient/final-content boundary.
+- **Owning component:** The Claude Code edge converter owns JSONL quirks; the
+  imported-conversation store owns durable source records; session creation owns
+  the seed projection; the existing scheduler and model path own all native
+  execution after the seed boundary.
+- **Failure behavior:** Malformed or unsupported source content rejects the
+  whole conversion without a partial aggregate. Missing source metadata remains
+  typed absence. Unknown or corrupt imported storage fails closed. Missing or
+  text-empty seed material creates no session and claims no seed command. Replay
+  returns the recorded session only for the same import and defaults. Imported
+  tool/thinking traffic is typed unavailable and never summarized or rendered. A
+  crash reveals either no new aggregate/session or their complete commit shapes.
+- **Required invariants:** INV-001, INV-002, INV-003, INV-005, INV-007, INV-009,
+  INV-012, INV-014, INV-015, INV-026, INV-032, INV-038, INV-039.
+- **Remaining questions:** Additional source converters, import discovery and
+  bulk policy, rich non-text preservation, client presentation, and retention
+  are outside this scenario.
+
 ## Coverage note
 
 The accepted foundation decisions govern retry identity and baseline input

@@ -1,11 +1,12 @@
 # Model-call execution
 
-This page describes the implemented model-call orchestration chain as verified
-against the implementing stack through PR #175 (`agent/stop-requests`):
-rendering a context frontier into provider messages, the staged prepare /
-authorize-send / commit-observation effects, assistant content and turn
-completion, provider failure classification into physical dispositions, and the
-retry prohibition. Turn and attempt lifecycle law lives in
+The baseline model-call chain was verified through PR #175
+(`agent/stop-requests`); imported-message rendering specifies the implementing
+stack rooted at `agent/conversation-import-spec`. This page covers rendering a
+context frontier into provider messages, the staged prepare / authorize-send /
+commit-observation effects, assistant content and turn completion, provider
+failure classification into physical dispositions, and the retry prohibition.
+Turn and attempt lifecycle law lives in
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
 entries and frontiers in [sessions-and-transcript](sessions-and-transcript.md);
 storage protocol and the outbox in
@@ -107,17 +108,21 @@ projects the exact frontier order into provider-neutral messages:
   input's checked content;
 - `AssistantText` renders as an assistant message retaining its producing-call
   provenance;
+- `ImportedText` renders with its imported user or assistant speaker and exact
+  checked text, retaining the imported-entry reference rather than a native
+  accepted-input or producing-call identity;
 - `TurnFailed`, `TurnCompleted`, and `TurnCancelled` markers are skipped — they
   delimit history and carry no model-visible content;
 - `AssistantToolUse` fails closed (operator error) until the reserved tool
   decisions land.
 
-Every message keeps its source-qualified semantic-entry reference. Why:
-inherited entries need not come from a native turn in the current session, so
-role and provenance derive from the entry itself, never from turn grouping. The
-runtime bridge then maps these to provider wire messages; provider types never
-cross the application boundary (INV-002; layering rules in
-[runtime-substrate](runtime-substrate.md)).
+Every message keeps its source-qualified semantic-entry reference and its
+content-authority provenance. Why: inherited entries need not come from a native
+turn in the current session, so role and provenance derive from the entry
+itself, never from turn grouping; imported record is never flattened into native
+execution evidence (INV-038). The runtime bridge then maps these to provider
+wire messages; provider types never cross the application boundary (INV-002;
+layering rules in [runtime-substrate](runtime-substrate.md)).
 
 ## Staged execution
 

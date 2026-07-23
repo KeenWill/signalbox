@@ -26,7 +26,9 @@ identifiers refer to [scenarios.md](scenarios.md).
   content and provider/client rendering. The steering payload and stop marker
   are fixed by the
   [steering and stop decision](decisions.md#2026-07-23--atomic-steering-consumption-and-proof-bearing-stop-requests).
-  Blocks only those later semantic-history slices. (S02–S04, S08, S09, S17)
+  Imported-text provenance and seed rendering are owned separately by
+  [conversation-import](spec/conversation-import.md). Blocks only those later
+  semantic-history slices. (S02–S04, S08, S09, S17)
 - **Selectable transcript-frontier boundaries.** Which terminal semantic
   boundaries a client may select as a `TranscriptFrontier` remains open; the
   accepted frontier semantics decide only how a validated selection resolves
@@ -43,16 +45,17 @@ identifiers refer to [scenarios.md](scenarios.md).
 
 ## Model-input projection
 
-- **Projection and summarization beyond the M3 role mapping.** The
+- **Projection and summarization beyond the implemented role mappings.** The
   [M3 rendering decision](decisions.md#2026-07-22--render-the-initial-model-frontier-by-semantic-entry-role)
-  fixes only the admitted text-entry role mapping and exact frontier order.
-  Semantic compaction, selective omission, summarization, rebasing, and
-  context-window policy remain routed through the accepted frontier extension
-  gate and semantic-entry open-question routing — owned today by
+  and [conversation-import](spec/conversation-import.md) fix the admitted native
+  and imported text-entry role mappings and exact frontier order. Semantic
+  compaction, selective omission, summarization, rebasing, and context-window
+  policy remain routed through the accepted frontier extension gate and
+  semantic-entry open-question routing — owned today by
   [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md) and
   [sessions-and-transcript](spec/sessions-and-transcript.md) — including their
   foundation-decision requirements. Blocks those extensions, not the admitted
-  text-only M3 rendering. (S02, S17)
+  native and imported text rendering. (S02, S17, S28)
 
 ## Delegation
 

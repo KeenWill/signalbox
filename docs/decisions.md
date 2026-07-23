@@ -10,6 +10,42 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-23 — Import external conversations as records and seed native sessions
+
+**Context.** External AI transcripts need to become durable Signalbox history
+without claiming that Signalbox accepted their input or authorized, attempted,
+or observed their model and tool effects. Claude Code session JSONL contains
+non-message records, optional metadata, sidechains, content blocks, and tool
+traffic, and later source formats must not leak their wire quirks into the
+domain or Postgres boundary.
+
+**Decision.** Adopt the immutable imported-conversation aggregate,
+format-versioned edge-converter seam, exact per-entry source attestations, and
+import-seeded session path specified by
+[conversation-import](spec/conversation-import.md) and
+[sessions-and-transcript](spec/sessions-and-transcript.md). Imported semantic
+entries remain provenance-distinct from native evidence. Claude Code converter
+version 1 preserves user/assistant text in physical file/block order; records
+source metadata as attested, explicitly absent, or unattested; retains
+sidechain/meta text but excludes it from model seed context; and records tool,
+tool-result, thinking, and redacted-thinking blocks as typed unavailable
+content, never summaries. A seed command atomically creates a session whose
+ancestry names the import and whose first native frontier extends the exact seed
+projection.
+
+**Rejected alternatives.** Replaying imports as native turns or copying them
+into native accepted-input/model-call variants would fabricate execution
+evidence. Storing only a raw blob would leave no checked seed projection.
+Flattening missing metadata, repairing parent chains, or summarizing tool
+traffic would invent facts. Folding source-specific JSON into the domain or
+store would make every later format a schema-wide concern.
+
+**Affects.** S28; INV-001/INV-002/INV-003/INV-005/INV-038/INV-039; conversation
+import, session ancestry and creation, semantic entries, first native frontier,
+model-input rendering, append-only Postgres storage, the domain/application
+spines, and the offline scripted-model integration path. Native turn lifecycle,
+slot locking, execution evidence, retry, and outbox semantics do not change.
+
 ## 2026-07-23 — Poll durable model-call cancellation every 25 milliseconds
 
 **Context.** Capability preparation and provider invocation need one same-call
