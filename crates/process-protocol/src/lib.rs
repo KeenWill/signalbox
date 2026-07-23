@@ -4,10 +4,13 @@
 //! persistence, and client presentation values remain distinct mappings
 //! (docs/spec/process-protocol.md).
 
-use std::{error::Error, fmt};
+use std::{collections::HashSet, error::Error, fmt};
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_json::Value;
+use serde::{
+    Deserialize, Deserializer, Serialize, Serializer,
+    de::{MapAccess, Visitor},
+};
+use serde_json::value::RawValue;
 use uuid::Uuid;
 
 /// The only protocol version accepted by this crate.
@@ -16,7 +19,7 @@ pub const PROTOCOL_VERSION: u64 = 1;
 /// Maximum encoded frame size, including its final newline.
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
-/// Maximum UTF-8 bytes in one admitted input or transcript content fragment.
+/// Maximum UTF-8 bytes in one transcript content fragment.
 pub const MAX_CONTENT_FRAGMENT_BYTES: usize = 1024 * 1024;
 
 /// A lowercase hyphenated UUID at the process boundary.
@@ -187,38 +190,20 @@ impl From<RequestId> for String {
     }
 }
 
-/// Admitted owner input content.
+/// Exact owner input content carried to the application admission boundary.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
+#[serde(transparent)]
 pub struct InputContent(String);
 
 impl InputContent {
-    /// Applies the version-one UTF-8 admission bound.
-    pub fn try_new(value: String) -> Result<Self, CanonicalValueError> {
-        if value.len() > MAX_CONTENT_FRAGMENT_BYTES {
-            Err(CanonicalValueError::Content)
-        } else {
-            Ok(Self(value))
-        }
+    /// Wraps decoded content without applying application admission policy.
+    pub fn new(value: String) -> Self {
+        Self(value)
     }
 
-    /// Borrows exact admitted text.
+    /// Borrows exact decoded text.
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-}
-
-impl TryFrom<String> for InputContent {
-    type Error = CanonicalValueError;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_new(value)
-    }
-}
-
-impl From<InputContent> for String {
-    fn from(value: InputContent) -> Self {
-        value.0
     }
 }
 
@@ -305,7 +290,7 @@ pub enum CanonicalValueError {
     Decimal,
     /// Client request identity was zero.
     RequestId,
-    /// Input or fragment exceeded its UTF-8 byte bound.
+    /// A transcript fragment exceeded its UTF-8 byte bound.
     Content,
 }
 
@@ -316,7 +301,7 @@ impl fmt::Display for CanonicalValueError {
             Self::CommandId => "command identity is a reserved sentinel",
             Self::Decimal => "unsigned integer is not canonical decimal text",
             Self::RequestId => "client request identity must be nonzero",
-            Self::Content => "content exceeds the version-one UTF-8 byte bound",
+            Self::Content => "content fragment exceeds the version-one UTF-8 byte bound",
         })
     }
 }
@@ -577,16 +562,61 @@ impl<'de> Deserialize<'de> for ErrorDetail {
     }
 }
 
-/// Authoritative turn state carried by a transcript snapshot.
+/// Durable nonterminal model-call state carried by a transcript snapshot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CurrentModelCallState {
+    /// Call is prepared but unsent.
+    Prepared {},
+    /// Call crossed the send boundary.
+    InFlight {},
+}
+
+/// Current model call attached to one running turn.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CurrentModelCall {
+    model_call_id: CanonicalUuid,
+    state: CurrentModelCallState,
+}
+
+impl CurrentModelCall {
+    /// Constructs one exact current-call projection.
+    pub const fn new(model_call_id: CanonicalUuid, state: CurrentModelCallState) -> Self {
+        Self {
+            model_call_id,
+            state,
+        }
+    }
+
+    /// Returns the current model-call identity.
+    pub const fn model_call_id(&self) -> CanonicalUuid {
+        self.model_call_id
+    }
+
+    /// Returns the exact durable nonterminal state.
+    pub const fn state(&self) -> CurrentModelCallState {
+        self.state
+    }
+}
+
+/// Authoritative turn state carried by a transcript snapshot.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TurnState {
     /// Accepted work has not activated.
-    Queued {},
+    Queued {
+        /// Accepted input that created the queued turn.
+        accepted_input_id: CanonicalUuid,
+        /// Exact accepted owner text.
+        content: InputContent,
+    },
     /// The turn is running its current attempt.
     ActiveRunning {
         /// Current live attempt.
         current_attempt_id: CanonicalUuid,
+        /// Current provider call, or null before one is prepared.
+        current_model_call: Option<CurrentModelCall>,
     },
     /// The turn is parked on an ambiguous model call.
     ActiveAwaitingModelCallRecovery {
@@ -688,11 +718,29 @@ pub enum ModelCallState {
 }
 
 /// Closed durable update event family.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SessionEvent {
     /// Session creation committed.
     SessionCreated {},
+    /// Owner input acceptance and its queued turn committed.
+    InputAccepted {
+        /// Accepted input.
+        accepted_input_id: CanonicalUuid,
+        /// Queued origin turn.
+        turn_id: CanonicalUuid,
+        /// Immutable session acceptance position.
+        acceptance_position: CanonicalU64,
+        /// Exact accepted owner text.
+        content: InputContent,
+    },
+    /// A queued turn became active.
+    TurnActivated {
+        /// Activated turn.
+        turn_id: CanonicalUuid,
+        /// Initial current attempt.
+        current_attempt_id: CanonicalUuid,
+    },
     /// Model call advanced.
     ModelCallTransition {
         /// Owning turn.
@@ -1126,44 +1174,113 @@ struct ProbedHeader {
     request_id: RequestId,
 }
 
+struct RawHeaderProbe<'a> {
+    members: HashSet<String>,
+    duplicate_member: bool,
+    duplicate_request_id: bool,
+    version: Option<&'a RawValue>,
+    request_id: Option<&'a RawValue>,
+}
+
+struct RawHeaderProbeVisitor;
+
+impl<'de> Visitor<'de> for RawHeaderProbeVisitor {
+    type Value = RawHeaderProbe<'de>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a process-protocol frame object")
+    }
+
+    fn visit_map<AccessT>(self, mut map: AccessT) -> Result<Self::Value, AccessT::Error>
+    where
+        AccessT: MapAccess<'de>,
+    {
+        let mut members = HashSet::new();
+        let mut duplicate_member = false;
+        let mut duplicate_request_id = false;
+        let mut version = None;
+        let mut request_id = None;
+
+        while let Some(member) = map.next_key::<String>()? {
+            let value = map.next_value::<&'de RawValue>()?;
+            if !members.insert(member.clone()) {
+                duplicate_member = true;
+                duplicate_request_id |= member == "request_id";
+                continue;
+            }
+            match member.as_str() {
+                "version" => version = Some(value),
+                "request_id" => request_id = Some(value),
+                _ => {}
+            }
+        }
+
+        Ok(RawHeaderProbe {
+            members,
+            duplicate_member,
+            duplicate_request_id,
+            version,
+            request_id,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for RawHeaderProbe<'de> {
+    fn deserialize<DeserializerT>(deserializer: DeserializerT) -> Result<Self, DeserializerT::Error>
+    where
+        DeserializerT: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(RawHeaderProbeVisitor)
+    }
+}
+
 fn probe_header(
     content: &[u8],
     payload_member: &str,
     allow_uncorrelated: bool,
 ) -> Result<ProbedHeader, FrameDecodeError> {
-    let value: Value = serde_json::from_slice(content)
+    let mut deserializer = serde_json::Deserializer::from_slice(content);
+    let probe = RawHeaderProbe::deserialize(&mut deserializer)
+        .and_then(|probe| {
+            deserializer.end()?;
+            Ok(probe)
+        })
         .map_err(|_| FrameDecodeError::malformed(RequestId::uncorrelated()))?;
-    let Some(object) = value.as_object() else {
-        return Err(FrameDecodeError::malformed(RequestId::uncorrelated()));
+    let request_id = if probe.duplicate_request_id {
+        RequestId::uncorrelated()
+    } else {
+        probe
+            .request_id
+            .and_then(|value| serde_json::from_str::<String>(value.get()).ok())
+            .and_then(|value| RequestId::try_from(value).ok())
+            .filter(|value| allow_uncorrelated || value.is_correlated())
+            .unwrap_or_else(RequestId::uncorrelated)
     };
-    let request_id = object
-        .get("request_id")
-        .and_then(Value::as_str)
-        .and_then(|value| RequestId::try_from(value.to_owned()).ok())
-        .filter(|value| allow_uncorrelated || value.is_correlated())
-        .unwrap_or_else(RequestId::uncorrelated);
-    if object.len() != 3
-        || !object.contains_key("version")
-        || !object.contains_key("request_id")
-        || !object.contains_key(payload_member)
-    {
+    if probe.duplicate_member {
         return Err(FrameDecodeError::malformed(request_id));
     }
-    let Some(version) = object.get("version").and_then(Value::as_number) else {
+    let Some(version) = probe.version else {
         return Err(FrameDecodeError::malformed(request_id));
     };
-    let version_spelling = version.to_string();
+    let version_spelling = version.get();
     let integer_spelling = version_spelling
         .strip_prefix('-')
-        .unwrap_or(&version_spelling);
+        .unwrap_or(version_spelling);
     if integer_spelling.is_empty() || !integer_spelling.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(FrameDecodeError::malformed(request_id));
     }
-    if version_spelling != PROTOCOL_VERSION.to_string() {
+    if version_spelling != "1" {
         return Err(FrameDecodeError {
             kind: FrameDecodeErrorKind::UnsupportedVersion,
             request_id,
         });
+    }
+    if probe.members.len() != 3
+        || !probe.members.contains("version")
+        || !probe.members.contains("request_id")
+        || !probe.members.contains(payload_member)
+    {
+        return Err(FrameDecodeError::malformed(request_id));
     }
     Ok(ProbedHeader { request_id })
 }
@@ -1172,11 +1289,11 @@ fn probe_header(
 mod tests {
     use super::{
         CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ContentFragment,
-        ErrorCode, ErrorDetail, FrameDecodeErrorKind, FrameEncodeError, InputContent,
-        MAX_CONTENT_FRAGMENT_BYTES, ModelCallDisposition, ModelCallState, ModelSelection,
-        PROTOCOL_VERSION, RejectionDetail, RequestId, ServerFrame, ServerMessage, SessionEvent,
-        TranscriptEntry, TranscriptTextEntry, TurnState, decode_client_line, decode_server_line,
-        encode_client_line, encode_server_line,
+        CurrentModelCall, CurrentModelCallState, ErrorCode, ErrorDetail, FrameDecodeErrorKind,
+        FrameEncodeError, InputContent, MAX_CONTENT_FRAGMENT_BYTES, ModelCallDisposition,
+        ModelCallState, ModelSelection, PROTOCOL_VERSION, RejectionDetail, RequestId, ServerFrame,
+        ServerMessage, SessionEvent, TranscriptEntry, TranscriptTextEntry, TurnState,
+        decode_client_line, decode_server_line, encode_client_line, encode_server_line,
     };
     use uuid::Uuid;
 
@@ -1198,6 +1315,57 @@ mod tests {
         bytes
     }
 
+    #[track_caller]
+    fn assert_client_malformed(json: &str) {
+        let error = decode_client_line(&line(json)).expect_err("client frame must be malformed");
+        assert_eq!(error.kind(), FrameDecodeErrorKind::MalformedFrame);
+    }
+
+    #[track_caller]
+    fn assert_server_malformed(json: &str) {
+        let error = decode_server_line(&line(json)).expect_err("server frame must be malformed");
+        assert_eq!(error.kind(), FrameDecodeErrorKind::MalformedFrame);
+    }
+
+    #[track_caller]
+    fn assert_unsupported_version(version: &str) {
+        let json = format!(
+            "{{\"version\":{version},\"request_id\":\"9\",\"request\":{{\"type\":\"future_request\",\"anything\":true}}}}"
+        );
+        let error = decode_client_line(&line(&json)).expect_err("version must be unsupported");
+        assert_eq!(error.kind(), FrameDecodeErrorKind::UnsupportedVersion);
+        assert_eq!(error.request_id().value(), 9);
+    }
+
+    #[track_caller]
+    fn assert_command_sentinel_rejected(command_id: &str) {
+        let json = format!(
+            "{{\"version\":1,\"request_id\":\"1\",\"request\":{{\"type\":\"create_session\",\"command_id\":\"{command_id}\",\"initial_model_selection\":{{\"kind\":\"direct\",\"selection_id\":\"00000000-0000-0000-0000-000000000001\"}}}}}}"
+        );
+        assert_client_malformed(&json);
+    }
+
+    #[track_caller]
+    fn assert_client_request_version_one(
+        request_id: RequestId,
+        request: ClientRequest,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ClientFrame::try_new(request_id, request)?;
+        let encoded = String::from_utf8(encode_client_line(&frame)?)?;
+        assert!(encoded.starts_with(&format!("{{\"version\":{PROTOCOL_VERSION},")));
+        Ok(())
+    }
+
+    #[track_caller]
+    fn assert_server_message_round_trip(
+        request_id: RequestId,
+        message: ServerMessage,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ServerFrame::try_new(request_id, message)?;
+        assert_eq!(decode_server_line(&encode_server_line(&frame)?)?, frame);
+        Ok(())
+    }
+
     #[test]
     fn inv033_client_round_trip_preserves_closed_request_shape()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1206,7 +1374,7 @@ mod tests {
             ClientRequest::SubmitInput {
                 command_id: command(1)?,
                 session_id: uuid(2),
-                content: InputContent::try_new("hello".to_owned())?,
+                content: InputContent::new("hello".to_owned()),
                 expected_defaults_version: CanonicalU64::new(u64::MAX),
             },
         )?;
@@ -1218,86 +1386,114 @@ mod tests {
 
     #[test]
     fn inv033_unknown_missing_and_wrong_typed_fields_fail_explicitly() {
-        let cases = [
+        assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"list_sessions","extra":true}}"#,
+        );
+        assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"read_transcript"}}"#,
+        );
+        assert_client_malformed(
             r#"{"version":1,"request_id":1,"request":{"type":"list_sessions"}}"#,
+        );
+        assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"future_request"}}"#,
+        );
+        assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"list_sessions"},"extra":true}"#,
-        ];
-        for json in cases {
-            let error = decode_client_line(&line(json));
-            assert_eq!(
-                error.as_ref().err().map(|error| error.kind()),
-                Some(FrameDecodeErrorKind::MalformedFrame),
-                "{json}"
-            );
-        }
+        );
     }
 
     #[test]
     fn inv033_unsupported_version_precedes_payload_decoding() {
-        for version in ["-1", "2", "18446744073709551616"] {
-            let json = format!(
-                "{{\"version\":{version},\"request_id\":\"9\",\"request\":{{\"type\":\"future_request\",\"anything\":true}}}}"
-            );
-            let error = decode_client_line(&line(&json));
-            assert!(matches!(
-                error,
-                Err(error)
-                    if error.kind() == FrameDecodeErrorKind::UnsupportedVersion
-                        && error.request_id().value() == 9
-            ));
-        }
-        let wrong_type = decode_client_line(&line(
+        assert_unsupported_version("-1");
+        assert_unsupported_version("2");
+        assert_unsupported_version("18446744073709551616");
+        assert_client_malformed(
             r#"{"version":1.0,"request_id":"9","request":{"type":"list_sessions"}}"#,
-        ));
-        assert!(matches!(
-            wrong_type,
-            Err(error) if error.kind() == FrameDecodeErrorKind::MalformedFrame
-        ));
+        );
+        let nested_payload = format!("{}0{}", "[".repeat(200), "]".repeat(200));
+        let future = format!(
+            "{{\"version\":2,\"request_id\":\"9\",\"request\":{nested_payload},\"new_v2_field\":true}}"
+        );
+        let error =
+            decode_client_line(&line(&future)).expect_err("future version must be rejected first");
+        assert_eq!(error.kind(), FrameDecodeErrorKind::UnsupportedVersion);
+        assert_eq!(error.request_id().value(), 9);
+    }
+
+    #[test]
+    fn inv033_duplicate_top_level_members_are_malformed_before_classification() {
+        let duplicate_version = decode_client_line(&line(
+            r#"{"version":1,"version":2,"request_id":"9","request":{"type":"list_sessions"}}"#,
+        ))
+        .expect_err("a duplicate version is malformed");
+        assert_eq!(
+            duplicate_version.kind(),
+            FrameDecodeErrorKind::MalformedFrame
+        );
+        assert_eq!(duplicate_version.request_id().value(), 9);
+
+        let reversed_version = decode_client_line(&line(
+            r#"{"version":2,"version":1,"request_id":"9","request":{"type":"list_sessions"}}"#,
+        ))
+        .expect_err("version order cannot alter duplicate classification");
+        assert_eq!(
+            reversed_version.kind(),
+            FrameDecodeErrorKind::MalformedFrame
+        );
+        assert_eq!(reversed_version.request_id().value(), 9);
+
+        let duplicate_request = decode_client_line(&line(
+            r#"{"version":1,"request_id":"1","request_id":"2","request":{"type":"list_sessions"}}"#,
+        ))
+        .expect_err("a duplicate request identity is malformed");
+        assert_eq!(
+            duplicate_request.kind(),
+            FrameDecodeErrorKind::MalformedFrame
+        );
+        assert_eq!(duplicate_request.request_id().value(), 0);
+
+        let duplicate_payload = decode_client_line(&line(
+            r#"{"version":1,"request_id":"9","request":{"type":"list_sessions"},"request":{"type":"list_sessions"}}"#,
+        ))
+        .expect_err("a duplicate payload is malformed");
+        assert_eq!(
+            duplicate_payload.kind(),
+            FrameDecodeErrorKind::MalformedFrame
+        );
+        assert_eq!(duplicate_payload.request_id().value(), 9);
     }
 
     #[test]
     fn inv033_nested_unit_shapes_reject_unknown_members() {
-        let cases = [
+        assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"sessions_start","extra":true}}"#,
-            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"queued","extra":true}}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"queued","accepted_input_id":"00000000-0000-0000-0000-000000000002","content":"queued","extra":true}}}"#,
+        );
+        assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"session_event","cursor":"1","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"session_created","extra":true}}}"#,
-        ];
-        for json in cases {
-            let error = decode_server_line(&line(json));
-            assert_eq!(
-                error.as_ref().err().map(|error| error.kind()),
-                Some(FrameDecodeErrorKind::MalformedFrame),
-                "{json}"
-            );
-        }
+        );
     }
 
     #[test]
     fn inv033_canonical_decimal_and_uuid_spellings_are_required() {
-        let cases = [
+        assert_client_malformed(
             r#"{"version":1,"request_id":"01","request":{"type":"list_sessions"}}"#,
+        );
+        assert_client_malformed(
             r#"{"version":1,"request_id":"+1","request":{"type":"list_sessions"}}"#,
+        );
+        assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"read_transcript","session_id":"00000000-0000-0000-0000-00000000000A"}}"#,
-        ];
-        for json in cases {
-            assert!(decode_client_line(&line(json)).is_err());
-        }
+        );
     }
 
     #[test]
     fn inv012_command_sentinels_and_zero_client_request_id_are_rejected() {
-        for command_id in [
-            "00000000-0000-0000-0000-000000000000",
-            "ffffffff-ffff-ffff-ffff-ffffffffffff",
-        ] {
-            let json = format!(
-                "{{\"version\":1,\"request_id\":\"1\",\"request\":{{\"type\":\"create_session\",\"command_id\":\"{command_id}\",\"initial_model_selection\":{{\"kind\":\"direct\",\"selection_id\":\"00000000-0000-0000-0000-000000000001\"}}}}}}"
-            );
-            assert!(decode_client_line(&line(&json)).is_err());
-        }
+        assert_command_sentinel_rejected("00000000-0000-0000-0000-000000000000");
+        assert_command_sentinel_rejected("ffffffff-ffff-ffff-ffff-ffffffffffff");
         assert!(
             decode_client_line(&line(
                 r#"{"version":1,"request_id":"0","request":{"type":"list_sessions"}}"#
@@ -1402,6 +1598,9 @@ mod tests {
             )
             .is_err()
         );
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"0","message":{"type":"error","code":"not_found","message":"not found"}}"#,
+        );
         Ok(())
     }
 
@@ -1491,59 +1690,99 @@ mod tests {
         let model = ModelSelection::Direct {
             selection_id: uuid(3),
         };
-        let requests = [
+        assert_client_request_version_one(
+            request(1)?,
             ClientRequest::CreateSession {
                 command_id: command(4)?,
                 initial_model_selection: model,
             },
-            ClientRequest::ListSessions {},
+        )?;
+        assert_client_request_version_one(request(2)?, ClientRequest::ListSessions {})?;
+        assert_client_request_version_one(
+            request(3)?,
             ClientRequest::SubmitInput {
                 command_id: command(5)?,
                 session_id: uuid(6),
-                content: InputContent::try_new(String::new())?,
+                content: InputContent::new(String::new()),
                 expected_defaults_version: CanonicalU64::new(1),
             },
+        )?;
+        assert_client_request_version_one(
+            request(4)?,
             ClientRequest::ReadTranscript {
                 session_id: uuid(6),
             },
+        )?;
+        assert_client_request_version_one(
+            request(5)?,
             ClientRequest::FollowSession {
                 session_id: uuid(6),
             },
-        ];
-        for (index, request_value) in requests.into_iter().enumerate() {
-            let frame = ClientFrame::try_new(request((index + 1) as u64)?, request_value)?;
-            let encoded = String::from_utf8(encode_client_line(&frame)?)?;
-            assert!(encoded.starts_with(&format!("{{\"version\":{PROTOCOL_VERSION},")));
-        }
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn submit_content_is_admitted_by_the_application_not_wire_decoding()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let content = "x".repeat(MAX_CONTENT_FRAGMENT_BYTES + 1);
+        let frame = ClientFrame::try_new(
+            request(1)?,
+            ClientRequest::SubmitInput {
+                command_id: command(5)?,
+                session_id: uuid(6),
+                content: InputContent::new(content),
+                expected_defaults_version: CanonicalU64::new(1),
+            },
+        )?;
+        let encoded = encode_client_line(&frame)?;
+        assert!(encoded.len() < super::MAX_FRAME_BYTES);
+        assert_eq!(decode_client_line(&encoded)?, frame);
         Ok(())
     }
 
     #[test]
     fn inv033_server_message_family_round_trips_closed_shapes()
     -> Result<(), Box<dyn std::error::Error>> {
-        let messages = vec![
+        assert_server_message_round_trip(
+            request(1)?,
             ServerMessage::SessionCreated {
                 session_id: uuid(1),
             },
+        )?;
+        assert_server_message_round_trip(
+            request(2)?,
             ServerMessage::InputSubmitted {
                 session_id: uuid(1),
                 accepted_input_id: uuid(2),
                 acceptance_position: CanonicalU64::new(1),
                 turn_id: uuid(3),
             },
-            ServerMessage::SessionsStart {},
+        )?;
+        assert_server_message_round_trip(request(3)?, ServerMessage::SessionsStart {})?;
+        assert_server_message_round_trip(
+            request(4)?,
             ServerMessage::SessionSummary {
                 session_id: uuid(1),
                 defaults_version: CanonicalU64::new(1),
                 model_selection: ModelSelection::Alias { alias_id: uuid(4) },
             },
+        )?;
+        assert_server_message_round_trip(
+            request(5)?,
             ServerMessage::SessionsEnd {
                 session_count: CanonicalU64::new(1),
             },
+        )?;
+        assert_server_message_round_trip(
+            request(6)?,
             ServerMessage::TranscriptSnapshotStart {
                 session_id: uuid(1),
                 cursor: CanonicalU64::new(5),
             },
+        )?;
+        assert_server_message_round_trip(
+            request(7)?,
             ServerMessage::TranscriptTurn {
                 turn_id: uuid(3),
                 acceptance_position: CanonicalU64::new(1),
@@ -1553,12 +1792,68 @@ mod tests {
                     terminal_model_call_id: uuid(8),
                 },
             },
+        )?;
+        assert_server_message_round_trip(
+            request(14)?,
+            ServerMessage::TranscriptTurn {
+                turn_id: uuid(3),
+                acceptance_position: CanonicalU64::new(1),
+                state: TurnState::Queued {
+                    accepted_input_id: uuid(2),
+                    content: InputContent::new("queued request".to_owned()),
+                },
+            },
+        )?;
+        assert_server_message_round_trip(
+            request(15)?,
+            ServerMessage::TranscriptTurn {
+                turn_id: uuid(3),
+                acceptance_position: CanonicalU64::new(1),
+                state: TurnState::ActiveRunning {
+                    current_attempt_id: uuid(7),
+                    current_model_call: None,
+                },
+            },
+        )?;
+        assert_server_message_round_trip(
+            request(16)?,
+            ServerMessage::TranscriptTurn {
+                turn_id: uuid(3),
+                acceptance_position: CanonicalU64::new(1),
+                state: TurnState::ActiveRunning {
+                    current_attempt_id: uuid(7),
+                    current_model_call: Some(CurrentModelCall::new(
+                        uuid(8),
+                        CurrentModelCallState::Prepared {},
+                    )),
+                },
+            },
+        )?;
+        assert_server_message_round_trip(
+            request(17)?,
+            ServerMessage::TranscriptTurn {
+                turn_id: uuid(3),
+                acceptance_position: CanonicalU64::new(1),
+                state: TurnState::ActiveRunning {
+                    current_attempt_id: uuid(7),
+                    current_model_call: Some(CurrentModelCall::new(
+                        uuid(8),
+                        CurrentModelCallState::InFlight {},
+                    )),
+                },
+            },
+        )?;
+        assert_server_message_round_trip(
+            request(8)?,
             ServerMessage::TranscriptEntry {
                 entry_index: CanonicalU64::new(0),
                 source_session_id: uuid(1),
                 entry_id: uuid(9),
                 entry: TranscriptEntry::TurnCompleted { turn_id: uuid(3) },
             },
+        )?;
+        assert_server_message_round_trip(
+            request(9)?,
             ServerMessage::TranscriptTextEntry {
                 entry_index: CanonicalU64::new(1),
                 source_session_id: uuid(1),
@@ -1568,18 +1863,27 @@ mod tests {
                     model_call_id: uuid(8),
                 },
             },
+        )?;
+        assert_server_message_round_trip(
+            request(10)?,
             ServerMessage::TranscriptContent {
                 entry_index: CanonicalU64::new(1),
                 fragment_index: CanonicalU64::new(0),
                 final_fragment: true,
                 content_fragment: ContentFragment::try_new("reply".to_owned())?,
             },
+        )?;
+        assert_server_message_round_trip(
+            request(11)?,
             ServerMessage::TranscriptSnapshotEnd {
                 session_id: uuid(1),
                 cursor: CanonicalU64::new(5),
                 turn_count: CanonicalU64::new(1),
                 entry_count: CanonicalU64::new(2),
             },
+        )?;
+        assert_server_message_round_trip(
+            request(12)?,
             ServerMessage::SessionEvent {
                 cursor: CanonicalU64::new(6),
                 session_id: uuid(1),
@@ -1591,16 +1895,39 @@ mod tests {
                     },
                 },
             },
+        )?;
+        assert_server_message_round_trip(
+            request(18)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(2),
+                session_id: uuid(1),
+                event: SessionEvent::InputAccepted {
+                    accepted_input_id: uuid(2),
+                    turn_id: uuid(3),
+                    acceptance_position: CanonicalU64::new(1),
+                    content: InputContent::new("accepted request".to_owned()),
+                },
+            },
+        )?;
+        assert_server_message_round_trip(
+            request(19)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(3),
+                session_id: uuid(1),
+                event: SessionEvent::TurnActivated {
+                    turn_id: uuid(3),
+                    current_attempt_id: uuid(7),
+                },
+            },
+        )?;
+        assert_server_message_round_trip(
+            request(13)?,
             ServerMessage::Error {
                 code: ErrorCode::NotFound,
                 message: "not found".to_owned(),
                 detail: ErrorDetail::none(),
             },
-        ];
-        for (index, message) in messages.into_iter().enumerate() {
-            let frame = ServerFrame::try_new(request((index + 1) as u64)?, message)?;
-            assert_eq!(decode_server_line(&encode_server_line(&frame)?)?, frame);
-        }
+        )?;
         Ok(())
     }
 }

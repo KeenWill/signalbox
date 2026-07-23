@@ -41,6 +41,7 @@ use crate::{
         durable_command_id_to_uuid, input_position_from_numeric, input_position_to_numeric,
         session_id_from_uuid, session_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
     },
+    outbox::{self, OutboxEvent},
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
 };
 
@@ -1962,6 +1963,17 @@ async fn insert_prepared(
         .bind(accepted_input_id_to_uuid(applied.accepted_input()))
         .bind(input_position_to_numeric(position))
         .execute(&mut *connection)
+        .await?;
+
+        outbox::append(
+            connection,
+            OutboxEvent::InputAccepted {
+                session: applied.session(),
+                accepted_input: applied.accepted_input(),
+                turn: applied.turn(),
+                acceptance_position: position,
+            },
+        )
         .await?;
     }
 

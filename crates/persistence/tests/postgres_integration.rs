@@ -37,9 +37,10 @@ use signalbox_domain::{
     RefusedModelCallTurnIdentities, ReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult,
     ReplaceSessionDefaultsResult, ResolvedProviderTarget, SemanticTranscriptEntryId,
     SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
-    SessionCreationProvenance, SessionId, SubmitInput, SubmitInputAppliedResult,
-    SubmitInputReconstitutionFailure, SubmitInputRejectedResult, SubmitInputResult,
-    TranscriptAncestry, TurnAttemptId, TurnConfigurationProvenance, TurnId, UserContent,
+    SessionCreationProvenance, SessionId, SessionInputPosition, SubmitInput,
+    SubmitInputAppliedResult, SubmitInputReconstitutionFailure, SubmitInputRejectedResult,
+    SubmitInputResult, TranscriptAncestry, TurnAttemptId, TurnConfigurationProvenance, TurnId,
+    UserContent,
 };
 use signalbox_persistence::{
     MIGRATOR,
@@ -52,10 +53,12 @@ use signalbox_persistence::{
         ModelCallRepositoryError, PostgresModelCallRepository, PrepareInitialModelCallOutcome,
     },
     outbox::{
-        OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
+        DispatchedOutboxEventKind, OutboxCorruption, OutboxDeliveryDecision, OutboxDispatchError,
+        OutboxDispatchOutcome, OutboxDispatcher,
     },
     process_read::{
-        ProcessModelSelection, ProcessReadRepository, ProcessTranscriptEntry, ProcessTurnState,
+        ProcessCurrentModelCallState, ProcessModelSelection, ProcessReadRepository,
+        ProcessTranscriptEntry, ProcessTurnState,
     },
     replace_session_defaults::{
         ReplaceSessionDefaultsCorruption, ReplaceSessionDefaultsHandlingOutcome,
@@ -385,17 +388,21 @@ async fn assert_outbox_truncate_rejected(
     Ok(())
 }
 
+/// Derives the direct model selection installed by the outbox session fixture.
+fn outbox_session_fixture_model_selection(session_seed: u128) -> DirectModelSelection {
+    DirectModelSelection::from_uuid(Uuid::from_u128(session_seed ^ 0x2000))
+}
+
 /// Inserts the complete pre-outbox session record family for allocator tests.
 ///
-/// The command and model identities derive from the one session seed so the
-/// fixture states only the session identity those tests observe.
+/// The command and model identities derive from the one session seed.
 async fn insert_outbox_session_fixture(
     pool: &PgPool,
     session_seed: u128,
 ) -> Result<Uuid, sqlx::Error> {
     let session = Uuid::from_u128(session_seed);
     let command = Uuid::from_u128(session_seed ^ 0x1000);
-    let model = Uuid::from_u128(session_seed ^ 0x2000);
+    let model = outbox_session_fixture_model_selection(session_seed);
     let mut transaction = pool.begin().await?;
 
     sqlx::query(
@@ -424,7 +431,7 @@ async fn insert_outbox_session_fixture(
          VALUES ($1, 1, 'direct', $2, NULL)",
     )
     .bind(session)
-    .bind(model)
+    .bind(model.into_uuid())
     .execute(&mut *transaction)
     .await?;
     sqlx::query(
@@ -448,7 +455,7 @@ async fn insert_outbox_session_fixture(
          )",
     )
     .bind(command)
-    .bind(model)
+    .bind(model.into_uuid())
     .bind(session)
     .execute(&mut *transaction)
     .await?;
@@ -8458,7 +8465,7 @@ async fn s03_inv032_inv034_startup_recovery_and_outbox_commit_or_roll_back_toget
     .await?;
     assert_eq!(
         rolled_back,
-        ("active".into(), "prepared".into(), 0, 0, Decimal::ONE)
+        ("active".into(), "prepared".into(), 0, 0, Decimal::from(3))
     );
 
     sqlx::query(
@@ -8496,7 +8503,7 @@ async fn s03_inv032_inv034_startup_recovery_and_outbox_commit_or_roll_back_toget
     .await?;
     assert_eq!(
         committed,
-        ("terminal".into(), "ended".into(), 1, 1, Decimal::from(2))
+        ("terminal".into(), "ended".into(), 1, 1, Decimal::from(4))
     );
 
     pool.close().await;
@@ -10412,6 +10419,12 @@ async fn inv002_inv008_inv012_submit_corruption_and_position_exhaustion_fail_clo
     )
     .execute(&pool)
     .await?;
+    sqlx::query(
+        "ALTER TABLE input_accepted_outbox_event
+            DROP CONSTRAINT input_accepted_outbox_origin_fk",
+    )
+    .execute(&pool)
+    .await?;
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "UPDATE accepted_input
@@ -10636,6 +10649,7 @@ async fn s24_inv032_outbox_delivery_prefix_is_stable() -> Result<(), Box<dyn Err
 async fn s24_process_session_summary_sequence_matches_repeatable_projection()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
+    let earlier_selection = outbox_session_fixture_model_selection(0xe31);
     let earlier_session = insert_outbox_session_fixture(&pool, 0xe31).await?;
     let later_session = Uuid::from_u128(0xe32);
     let alias = ModelAlias::from_uuid(Uuid::from_u128(0xae32));
@@ -10652,9 +10666,7 @@ async fn s24_process_session_summary_sequence_matches_repeatable_projection()
     assert_eq!(summaries[0].defaults_version(), 1);
     assert_eq!(
         summaries[0].model_selection(),
-        ProcessModelSelection::Direct(DirectModelSelection::from_uuid(Uuid::from_u128(
-            0xe31 ^ 0x2000
-        )))
+        ProcessModelSelection::Direct(earlier_selection)
     );
     assert_eq!(summaries[1].session().into_uuid(), later_session);
     assert_eq!(summaries[1].defaults_version(), 1);
@@ -10700,6 +10712,32 @@ async fn s24_inv032_process_transcript_is_one_authoritative_snapshot() -> Result
             Some(turn),
         )
         .await?;
+    let repository = ProcessReadRepository::new(pool.clone());
+    assert!(
+        repository
+            .read_transcript(SessionId::from_uuid(Uuid::from_u128(0xffff)))
+            .await?
+            .is_none()
+    );
+    let queued_snapshot = repository
+        .read_transcript(session)
+        .await?
+        .expect("the committed session has a transcript projection");
+
+    assert_eq!(queued_snapshot.session(), session);
+    assert_eq!(queued_snapshot.cursor(), 2);
+    assert_eq!(queued_snapshot.turns().len(), 1);
+    assert_eq!(queued_snapshot.turns()[0].turn(), turn);
+    assert_eq!(queued_snapshot.turns()[0].acceptance_position(), 1);
+    assert_eq!(
+        queued_snapshot.turns()[0].state(),
+        &ProcessTurnState::Queued {
+            accepted_input,
+            content: "projected user request".to_owned(),
+        }
+    );
+    assert!(queued_snapshot.entries().is_empty());
+
     let origin_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde41));
     let starting_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0xee41));
     let attempt = TurnAttemptId::from_uuid(Uuid::from_u128(0xbe41));
@@ -10714,27 +10752,21 @@ async fn s24_inv032_process_transcript_is_one_authoritative_snapshot() -> Result
     )
     .await?;
 
-    let repository = ProcessReadRepository::new(pool.clone());
-    assert!(
-        repository
-            .read_transcript(SessionId::from_uuid(Uuid::from_u128(0xffff)))
-            .await?
-            .is_none()
-    );
     let snapshot = repository
         .read_transcript(session)
         .await?
         .expect("the committed session has a transcript projection");
 
     assert_eq!(snapshot.session(), session);
-    assert_eq!(snapshot.cursor(), 1);
+    assert_eq!(snapshot.cursor(), 3);
     assert_eq!(snapshot.turns().len(), 1);
     assert_eq!(snapshot.turns()[0].turn(), turn);
     assert_eq!(snapshot.turns()[0].acceptance_position(), 1);
     assert_eq!(
         snapshot.turns()[0].state(),
-        ProcessTurnState::ActiveRunning {
+        &ProcessTurnState::ActiveRunning {
             current_attempt: attempt,
+            current_model_call: None,
         }
     );
     assert_eq!(
@@ -10747,6 +10779,64 @@ async fn s24_inv032_process_transcript_is_one_authoritative_snapshot() -> Result
             turn,
             content: "projected user request".to_owned(),
         }]
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[track_caller]
+fn assert_running_current_model_call(
+    state: &ProcessTurnState,
+    expected_attempt: TurnAttemptId,
+    expected_call: ModelCallId,
+    expected_state: ProcessCurrentModelCallState,
+) {
+    let ProcessTurnState::ActiveRunning {
+        current_attempt,
+        current_model_call: Some(current_model_call),
+    } = state
+    else {
+        panic!("expected one current model call on a running turn");
+    };
+    assert_eq!(*current_attempt, expected_attempt);
+    assert_eq!(current_model_call.call(), expected_call);
+    assert_eq!(current_model_call.state(), expected_state);
+}
+
+/// S24 / INV-032: a process transcript snapshot exposes the exact durable
+/// Prepared or InFlight state of the current model call.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_inv032_process_transcript_projects_current_model_call_state()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let prepared = checkpoint_restart_model_call(&pool, 0x8e50, false).await?;
+    let in_flight = checkpoint_restart_model_call(&pool, 0x8e60, true).await?;
+    let repository = ProcessReadRepository::new(pool.clone());
+    let prepared_snapshot = repository
+        .read_transcript(prepared.session)
+        .await?
+        .expect("the prepared-call session is committed");
+    let in_flight_snapshot = repository
+        .read_transcript(in_flight.session)
+        .await?
+        .expect("the in-flight-call session is committed");
+
+    assert_eq!(prepared_snapshot.turns().len(), 1);
+    assert_running_current_model_call(
+        prepared_snapshot.turns()[0].state(),
+        prepared.attempt,
+        prepared.call,
+        ProcessCurrentModelCallState::Prepared,
+    );
+    assert_eq!(in_flight_snapshot.turns().len(), 1);
+    assert_running_current_model_call(
+        in_flight_snapshot.turns()[0].state(),
+        in_flight.attempt,
+        in_flight.call,
+        ProcessCurrentModelCallState::InFlight,
     );
 
     pool.close().await;
@@ -10900,6 +10990,91 @@ async fn s24_inv032_dispatcher_redelivers_after_cursor_commit_failure_in_order()
     Ok(())
 }
 
+/// S24 / INV-032: an allocator cursor beyond the delivered prefix requires its
+/// exact committed header; dispatcher idle is reserved for equal cursors.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_inv032_dispatcher_reports_a_missing_committed_header() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    sqlx::query(
+        "ALTER TABLE outbox_sequence_state
+         DISABLE TRIGGER outbox_sequence_requires_event",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE outbox_sequence_state
+            SET last_sequence = 1,
+                last_allocation_xid = pg_current_xact_id()
+          WHERE singleton",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE outbox_sequence_state
+         ENABLE TRIGGER outbox_sequence_requires_event",
+    )
+    .execute(&pool)
+    .await?;
+
+    let dispatcher = OutboxDispatcher::new(pool.clone());
+    assert!(matches!(
+        dispatcher
+            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+            .await,
+        Err(OutboxDispatchError::Corruption(
+            OutboxCorruption::MissingCommittedEventHeader
+        ))
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, Decimal>(
+            "SELECT delivered_through
+               FROM outbox_delivery_state
+              WHERE singleton",
+        )
+        .fetch_one(&pool)
+        .await?,
+        Decimal::ZERO
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S24 / INV-032: the dispatcher observes the allocator and candidate header in
+/// one statement snapshot, so an uncommitted allocation is idle rather than
+/// false committed-header corruption.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_inv032_dispatcher_treats_an_uncommitted_allocation_as_idle()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = insert_outbox_session_fixture(&pool, 0xe19).await?;
+    let mut producer = pool.begin().await?;
+    let sequence = append_session_created_test_event(&mut producer, session).await?;
+    let dispatcher = OutboxDispatcher::new(pool.clone());
+
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+            .await?,
+        OutboxDispatchOutcome::Idle
+    );
+    producer.commit().await?;
+    assert_eq!(sequence, Decimal::ONE);
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 1 }
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S24 / INV-032: an event-producing transaction cannot mark its own
 /// uncommitted event delivered and thereby make restart recovery skip it.
 /// Both append-before-delivery and delivery-before-append orderings are covered.
@@ -11012,12 +11187,26 @@ async fn s24_inv032_outbox_delivery_rejects_event_producing_transaction()
 async fn inv032_outbox_storage_rejects_truncate() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
 
+    assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE hub_fence_state CASCADE").await?;
     assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE outbox_sequence_state CASCADE").await?;
     assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE outbox_delivery_state CASCADE").await?;
     assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE outbox_event CASCADE").await?;
     assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE session_created_outbox_event CASCADE")
         .await?;
+    assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE input_accepted_outbox_event CASCADE")
+        .await?;
+    assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE turn_activated_outbox_event CASCADE")
+        .await?;
     assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE turn_failed_outbox_event CASCADE")
+        .await?;
+    assert_outbox_truncate_rejected(
+        &pool,
+        "TRUNCATE TABLE model_call_transition_outbox_event CASCADE",
+    )
+    .await?;
+    assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE turn_completed_outbox_event CASCADE")
+        .await?;
+    assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE turn_refused_outbox_event CASCADE")
         .await?;
 
     pool.close().await;
@@ -11179,6 +11368,142 @@ async fn s01_inv012_inv032_create_session_first_handling_appends_exactly_once()
         .fetch_one(&pool)
         .await?;
     assert_eq!(typed_events, 1);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S01 / INV-012 / INV-032: acceptance and activation append their complete
+/// typed process transitions in the same commits, and command replay emits no
+/// duplicate before the dispatcher advances the exact ordered prefix.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s01_inv012_inv032_scheduling_transitions_dispatch_in_commit_order()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = SessionId::from_uuid(Uuid::from_u128(0xe61));
+    let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(0xe62));
+    let turn = TurnId::from_uuid(Uuid::from_u128(0xe63));
+    let attempt = TurnAttemptId::from_uuid(Uuid::from_u128(0xe64));
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(
+            0xe60,
+            0xe61,
+            ModelSelectionRequest::Direct(signalbox_domain::DirectModelSelection::from_uuid(
+                Uuid::from_u128(0xe65),
+            )),
+        ))
+        .await?;
+    let command = start_input(
+        0xe66,
+        0xe61,
+        "durable process input",
+        1,
+        ModelSelectionOverride::UseSessionDefault,
+    );
+    let repository = SubmitInputRepository::new(pool.clone());
+    let recorded = repository
+        .handle(command.clone(), accepted_input, Some(turn))
+        .await?;
+    assert_eq!(
+        repository
+            .handle(command, accepted_input, Some(turn))
+            .await?,
+        recorded
+    );
+    let activated = activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: session.into_uuid(),
+            origin_entry: Uuid::from_u128(0xe67),
+            starting_frontier: Uuid::from_u128(0xe68),
+            initial_attempt: attempt.into_uuid(),
+        },
+    )
+    .await?;
+    assert_eq!(activated.turn(), turn);
+
+    let dispatcher = OutboxDispatcher::new(pool.clone());
+    let mut created = None;
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|event| {
+                created = Some(event.clone());
+                OutboxDeliveryDecision::Delivered
+            })
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 1 }
+    );
+    let created = created.expect("the session creation event was offered");
+    assert_eq!(created.session(), session);
+    assert!(matches!(
+        created.kind(),
+        DispatchedOutboxEventKind::SessionCreated
+    ));
+
+    let mut accepted = None;
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|event| {
+                accepted = Some(event.clone());
+                OutboxDeliveryDecision::Delivered
+            })
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 2 }
+    );
+    let accepted = accepted.expect("the input acceptance event was offered");
+    assert_eq!(accepted.session(), session);
+    assert_eq!(
+        accepted.kind(),
+        &DispatchedOutboxEventKind::InputAccepted {
+            accepted_input,
+            turn,
+            acceptance_position: SessionInputPosition::first(),
+            content: "durable process input".to_owned(),
+        }
+    );
+
+    let mut activation = None;
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|event| {
+                activation = Some(event.clone());
+                OutboxDeliveryDecision::Delivered
+            })
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 3 }
+    );
+    let activation = activation.expect("the turn activation event was offered");
+    assert_eq!(activation.session(), session);
+    assert_eq!(
+        activation.kind(),
+        &DispatchedOutboxEventKind::TurnActivated {
+            turn,
+            current_attempt: attempt,
+        }
+    );
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+            .await?,
+        OutboxDispatchOutcome::Idle
+    );
+
+    let durable_counts: (i64, i64, Decimal) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM input_accepted_outbox_event
+              WHERE accepted_input_id = $1),
+            (SELECT count(*) FROM turn_activated_outbox_event
+              WHERE current_attempt_id = $2),
+            (SELECT delivered_through FROM outbox_delivery_state
+              WHERE singleton)",
+    )
+    .bind(accepted_input.into_uuid())
+    .bind(attempt.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(durable_counts, (1, 1, Decimal::from(3)));
 
     pool.close().await;
     drop(container);
