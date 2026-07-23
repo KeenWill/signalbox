@@ -334,10 +334,12 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
 
 `crates/application/src/operator_failure.rs` defines the one closed
 operator-facing failure classification shared by application services, the
-persistence adapters, and hubd telemetry: every adapter or runtime error family
-maps into `OperatorFailureClass` through the `ClassifyOperatorFailure` trait,
-exposing a user-content-free classification to shared telemetry while the
-underlying error keeps its diagnostic detail internally. The four classes:
+persistence adapters, and hubd telemetry: the scheduling and model-call error
+families (startup scan, turn activation, eligibility sweep, model-call
+repository) map into `OperatorFailureClass` through the
+`ClassifyOperatorFailure` trait, exposing a user-content-free classification to
+shared telemetry while the underlying error keeps its diagnostic detail
+internally. The four classes:
 
 - **`Infrastructure { commit_ambiguous }`** — the operation could not complete.
   The flag marks failures (a connection lost around commit) whose transaction
@@ -347,9 +349,11 @@ underlying error keeps its diagnostic detail internally. The four classes:
   domain value under [persistence-protocol](persistence-protocol.md)'s
   fail-closed reconstitution: no effect, no repair.
 - **`IdentityCollision`** — a fresh hub-minted candidate identity collided with
-  a durable identity; the operation retries with fresh candidates rather than
-  failing the work ([model-call-execution](model-call-execution.md) owns the
-  identity-collision-only retry).
+  a durable identity. Stages that can mint replacement candidates retry with
+  fresh ones rather than failing the work; a stage bound to already-durable
+  identity (send authorization) surfaces the collision without retrying the same
+  call ([model-call-execution](model-call-execution.md) owns the per-stage retry
+  rule).
 - **`CallerOrHubBug`** — a request or internal guard that can fail only because
   of a defect, kept distinct from corruption.
 

@@ -438,9 +438,11 @@ those tests.
 - **Required invariants:** INV-011, INV-012, INV-021.
 - **Remaining questions:** Fence representation, retention of rejected evidence,
   and result acknowledgement protocol. The compatibility window and subscriber
-  observation semantics are decided by the accepted process- and client-protocol
-  baselines (unimplemented; no spec page yet); the committing-side update
-  mechanism is decided in [persistence-protocol](spec/persistence-protocol.md).
+  observation semantics remain
+  [open](open-questions.md#protocols-and-persistence): the retired protocol
+  designs carry no current authority, and future protocol work is designed fresh
+  as a specification diff; the committing-side update mechanism is decided in
+  [persistence-protocol](spec/persistence-protocol.md).
 
 ## S13 — Use an ambient-user runner
 
@@ -771,10 +773,11 @@ those tests.
 - **Required invariants:** INV-005, INV-012, INV-032, INV-033.
 - **Remaining questions:** Concrete snapshot/event schemas, delta sequencing,
   checkpointing, and browser transport. Protocol semantics and the compatibility
-  window are decided by the accepted client- and process-protocol baselines;
-  update-event derivation and cursor delivery from committed state are decided
-  in [persistence-protocol](spec/persistence-protocol.md), whose retention
-  window remains open.
+  window remain [open](open-questions.md#protocols-and-persistence) — the
+  retired protocol designs carry no current authority; update-event derivation
+  and cursor delivery from committed state are decided in
+  [persistence-protocol](spec/persistence-protocol.md), whose retention window
+  remains open.
 
 ## S25 — Archive and restore a session
 

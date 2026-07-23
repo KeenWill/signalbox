@@ -1,9 +1,11 @@
 //! Signalbox hub composition root.
 //!
-//! docs/spec/runtime-substrate.md and
+//! docs/spec/turn-lifecycle-and-scheduling.md owns startup ordering
+//! (migrate, scan, then schedule), graceful shutdown, and composition-root
+//! wiring; docs/spec/runtime-substrate.md and
 //! docs/spec/configuration-and-credentials.md keep runtime, subscriber,
-//! deployment configuration, migration, startup ordering, and shutdown
-//! policy at this executable boundary.
+//! deployment configuration, and migration policy at this executable
+//! boundary.
 
 use std::{
     env,
