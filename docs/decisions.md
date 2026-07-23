@@ -33,6 +33,52 @@ burn review rounds without converging.
 **Affects.** `AGENTS.md` finished-pull-request rules; every reviewed pull
 request.
 
+## 2026-07-22 — Atomic steering consumption and proof-bearing stop requests
+
+**Context.** The M3 pending-steering boundary deliberately stranded a prepared
+turn rather than invent the semantic payload, ordering, atomicity, or restart
+meaning needed to consume acknowledged `NextSafePoint` input. Matching
+`Interrupt` likewise remained nonclaiming until its immediate-successor result,
+applied proof, durable stop state, provider signal, and stop-caused terminal
+history could land together.
+
+**Decision.** Represent consumed steering as
+`SteeringAcceptedInput { accepted_input, source_turn }`; render its referenced
+accepted content as a user message. At each model-call preparation safe point,
+consume every pending input bound to that turn in ascending acceptance position.
+One locked transaction appends those entries, derives one prefix-preserving
+frontier, changes every disposition to `ConsumedAsSteering { call }`, and
+prepares that exact call against the new frontier. Reconstitution proves the
+same correlations. If restart finds an evidence-free abandoned turn, it
+terminalizes it and reclassifies pending steering in acceptance order instead of
+deferring startup.
+
+A matching `Interrupt` atomically records its configured immediate-successor
+turn and `AppliedInterruptProof`. Prepared work ends directly as cancelled;
+issued work persists the attempt's `StopRequested(CancellationOnly)` state and
+the call's `CancellationRequested` state. The execution service derives its
+runtime cancellation signal from that durable call state. Confirmed cancellation
+ends the attempt `AfterCancellation(Cancelled)`, appends
+`TurnCancelled { turn }`, and terminalizes the turn as `Cancelled { cause }`;
+completion, refusal, known failure, and ambiguity races retain their distinct
+typed after-cancellation outcomes. Restart reconstructs the proof-bearing
+stopped attempt and classifies an issued, unobserved call as ambiguous without
+erasing the stop cause.
+
+**Rejected alternatives.** Copying steering content into the entry creates a
+second authority; UUID order or one-at-a-time consumption contradicts durable
+acceptance order; separate consume and prepare transactions can expose steering
+without a consuming call. Resuming a prior-process attempt violates INV-034,
+while deferring it retains M3's liveness gap. A process-local-only stop flag,
+raw command identifier, or unconditional physical-cancellation-to-turn-failure
+mapping loses the proof or misstates the terminal cause.
+
+**Affects.** The owning session/transcript, turn-lifecycle, model-call, and
+persistence specification pages; S07/S08; INV-016/INV-029/INV-034 plus new
+INV-036/INV-037; the domain and application spines; accepted-input, semantic
+entry, scheduling, submit, model-execution, startup, runtime-bridge, and
+PostgreSQL implementation and tests. No client or `apps/hubd` surface changes.
+
 ## 2026-07-22 — Two-phase living-specification restructure
 
 **Context.** An owner audit of review traffic (roughly 330 classified review

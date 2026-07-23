@@ -103,15 +103,15 @@ completion, refusal, cancellation, or a wait yield, and `WithoutStop` cannot
 claim `Cancelled`. Why: encoding the stop/disposition compatibility matrix in
 types means restart cannot construct a state the accepted lifecycle prohibits.
 
-Committed attempt facts today are exactly: the initial `Prepared` attempt
-created by activation, a stored `running` state kind admitted by reconstitution,
-the startup scan's `Ended(WithoutStop(Lost))`, and the model-call slice's
-`Ended(WithoutStop(_))` closures with dispositions `turn_completed`,
-`turn_refused`, `known_failure`, and `ambiguous`. `turn_attempt` storage
-enforces one initial attempt per turn (`turn_attempt_one_initial_per_turn`), at
-most one live attempt per turn (`turn_attempt_one_live_per_turn`,
-`WHERE state_kind <> 'ended'` — the durable form of exclusive tenure), and a
-unique continuation chain; `StopRequested` has no storage.
+Committed attempt facts include the initial `Prepared` attempt created by
+activation, `running`, and proof-bearing `stop_requested` state kinds, the
+startup scan's lost closures, and the model-call slice's cause-specific terminal
+histories. `stop_requested` stores the exact applied interrupt command and
+predecessor needed to reconstruct `CancellationOnly`; the correlated call is
+durably `cancellation_requested`. `turn_attempt` storage enforces one initial
+attempt per turn (`turn_attempt_one_initial_per_turn`), at most one live attempt
+per turn (`turn_attempt_one_live_per_turn`, `WHERE state_kind <> 'ended'` — the
+durable form of exclusive tenure), and a unique continuation chain.
 
 ## Eligibility derivation
 
@@ -269,11 +269,13 @@ confirmed-interrupt evidence, and the version-one no-automatic-retry policy
 ([model-call-execution](model-call-execution.md)) makes the recovered turn fail
 rather than silently retry.
 
-Only an evidence-free session (active turn with no model call) whose tail
-contains pending steering defers with the blocking accepted input and fails hub
-startup; when the lost turn holds a `Prepared` model call, recovery fails the
-turn and atomically reclassifies each pending-steering row as a fresh queued
-successor turn origin (`reclassified_as_turn_origin`). Identity collisions are
+Every failing restart branch atomically reclassifies pending-steering rows as
+fresh queued successor origins (`reclassified_as_turn_origin`) in ascending
+acceptance position, including evidence-free turns; pending steering therefore
+never defers or blocks startup. A persisted `StopRequested` attempt with its
+`CancellationRequested` call reconstructs the exact proof, ends the abandoned
+attempt through `AfterCancellation(Lost)`, and classifies the unobserved issued
+call as ambiguous without discarding stop intent. Identity collisions are
 retried with fresh candidates; infrastructure and fail-closed corruption stop
 startup visibly. The scan is idempotent — a rerun inventories only work still
 active, and a stale observation rolls back as `NoActiveTurn`. There is no
@@ -299,21 +301,23 @@ delivery outcomes implemented here are:
   created. A reclassification path now exists: terminalization of the source
   turn reclassifies pending steering into a queued successor origin turn that
   inherits the source turn's configuration
-  (`queued_input_origin.source_configuration_turn_id`); in-turn safe-point
-  consumption still does not exist, and evidence-free startup recovery still
-  defers on pending steering.
+  (`queued_input_origin.source_configuration_turn_id`). At the next model-call
+  preparation, every pending input is consumed under the atomic boundary in
+  [model-call-execution](model-call-execution.md) (INV-036).
 - `AfterCurrentTurn` creates an ordinary queued origin turn with frozen
   configuration and an immutable acceptance position; it fixes no predecessor
   until eligibility.
-- `Interrupt` targeting the active turn is deliberately a nonclaiming
-  preparation failure (`InterruptApplicationUnavailable`): no command identity
-  is claimed, no rejection is recorded, and the caller receives a typed error.
-  Why: the accepted interrupt application must atomically construct the applied
-  proof, immediate-successor priority, and predecessor transition, and none of
-  that authority exists before the `StopRequested` slice — the owner ratified
-  this deferral
-  ([decision ledger, 2026-07-19](../decisions.md#2026-07-19--owner-ratified-matching-interrupt-milestone-deferral))
-  rather than let a weaker interrupt claim a result.
+- `Interrupt` targeting the active turn atomically accepts a configured
+  immediate-successor origin, constructs the exact `AppliedInterruptProof`, and
+  applies the predecessor transition (INV-029, INV-037). A prepared attempt ends
+  directly `AfterCancellation(Cancelled)` and the turn terminalizes
+  `Cancelled { cause }`; a prepared call, when present, closes unsent as
+  `Cancelled`. An issued call changes to `CancellationRequested` while the
+  attempt retains the slot as `StopRequested(CancellationOnly)`. A
+  next-safe-point request against that stopping turn records
+  `SafePointUnavailableWhileStopping`; equal interrupt replay returns the
+  original applied result, while a distinct later interrupt cannot replace the
+  existing proof.
 
 ## Context frontier snapshots
 

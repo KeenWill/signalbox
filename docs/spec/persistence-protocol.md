@@ -96,8 +96,9 @@ Representation rules, all enforced in the schema:
   implemented sets are exactly the admitted slices: turn state
   `queued`/`active`/`terminal`, active phase `running` or
   `awaiting_model_call_recovery`, terminal disposition
-  `failed`/`completed`/`refused`, attempt state `prepared`/`running`/`ended`
-  with end variant `without_stop` and six end dispositions, and model-call state
+  `failed`/`completed`/`refused`/`cancelled`, attempt state
+  `prepared`/`running`/`stop_requested`/`ended` with end variants `without_stop`
+  and `after_cancellation`, and model-call state
   `prepared`/`in_flight`/`cancellation_requested`/`terminal` with terminal
   dispositions `completed`/`known_failed`/`refused`/`cancelled`/`ambiguous`.
 - Immutable fact tables carry `BEFORE UPDATE OR DELETE` triggers that raise
@@ -123,9 +124,10 @@ Representation rules, all enforced in the schema:
   while pending steering naming the turn remains
   (`turn_lifecycle_pending_steering_closed`). Migration `202607220001` adds the
   closure: a guard trigger (`reject_invalid_accepted_input_change`) replaces
-  plain append-only on `accepted_input` and admits exactly one update —
-  `pending_steering` → `reclassified_as_turn_origin` setting a fresh
-  `origin_turn_id` with every other column unchanged.
+  plain append-only on `accepted_input` and admits only `pending_steering` →
+  `reclassified_as_turn_origin`, setting a fresh `origin_turn_id`, or
+  `pending_steering` → `consumed_as_steering`, setting the exact
+  `consuming_model_call_id`, with every other column unchanged.
 - Cross-table completeness uses deferrable-initially-deferred foreign keys and
   constraint triggers so rows of one atomic fact can be inserted in any order
   inside a transaction while every commit boundary sees the complete shape: each
@@ -264,18 +266,18 @@ the dangerous corruption cases are rows that look individually valid while their
 cross-record correlations are not, so authority comes only from complete
 validated projections, never from raw identifiers.
 
-Startup recovery terminalizes a lost active turn as failed, with the deferral
-branch now confined to evidence-free turns: when the lost turn holds no model
-call and a pending-steering row names it, the transaction rolls back
-`DeferredPendingSteering` and hubd refuses scheduling (`recovery_blocked`); a
-turn holding a `Prepared` call fails with its pending steering atomically
-reclassified to successor origins, and an in-flight call recovers into the
-`awaiting_model_call_recovery` wait. The schema guard
-(`turn_lifecycle_pending_steering_closed`) enforces the same refusal
-independently at commit. Why: a pending-steering row is an accepted delivery
-obligation; where no reclassification closure applies (an evidence-free lost
-turn), terminalizing its source turn would strand it, so recovery fails closed
-instead.
+Startup recovery terminalizes an evidence-free lost active turn as failed and
+atomically reclassifies its pending steering to successor origins. A turn
+holding a `Prepared` call follows the same logical closure after ending the call
+known-failed; an in-flight call recovers into the `awaiting_model_call_recovery`
+wait. A persisted `stop_requested` attempt and `cancellation_requested` call
+reconstruct through their exact applied interrupt, end the abandoned attempt
+`after_cancellation/lost`, and park the ambiguous call without erasing stop
+intent. The schema guard (`turn_lifecycle_pending_steering_closed`)
+independently requires every pending row to be consumed or reclassified before
+terminalization. Why: a pending steering row is an accepted delivery obligation,
+so every recovery branch must account for it rather than block startup or strand
+it.
 
 ## Corruption taxonomy
 
@@ -346,11 +348,11 @@ protocol scope). Implemented storage:
 - `outbox_event` header (allocator-owned `event_sequence`, closed `event_kind`,
   `storage_version`, `session_id`) plus one typed record table per kind —
   `session_created_outbox_event`, `turn_failed_outbox_event`,
-  `model_call_transition_outbox_event`, `turn_completed_outbox_event`, and
-  `turn_refused_outbox_event` — with a deferred trigger requiring exactly one
-  typed record per header. The header and typed record tables are append-only
-  (`reject_immutable_record_change`), and all eight outbox tables reject
-  `TRUNCATE`.
+  `model_call_transition_outbox_event`, `turn_completed_outbox_event`,
+  `turn_refused_outbox_event`, and `turn_cancelled_outbox_event` — with a
+  deferred trigger requiring exactly one typed record per header. The header and
+  typed record tables are append-only (`reject_immutable_record_change`), and
+  all eight outbox tables reject `TRUNCATE`.
 - `outbox_sequence_state`, a mutable singleton row (deletion rejected): a
   `BEFORE INSERT` trigger on the header allocates `last_sequence + 1` by
   updating the singleton, whose row lock is held to transaction end, and a
@@ -367,13 +369,13 @@ Appends happen only through the crate-private `outbox::append` on the caller's
 existing connection; it never begins or commits a transaction, so the
 state-changing adapter owns the atomic boundary and no post-commit publish step
 exists in application code. Implemented appends: CreateSession handling appends
-`session_created`; startup recovery's terminalization appends `turn_failed` (a
-pending-steering deferral rolls back and appends nothing). Model-call state
-transitions append `model_call_transition`, completion closure appends
-`turn_completed`, refusal closure appends `turn_refused`, and known-failure
-closure appends `turn_failed`. A guarded transition that changes zero rows
-appends zero events. Why: writing the event in the committing transaction makes
-the dual-write failure (state without event, or event without state)
+`session_created`; startup recovery's terminalization appends `turn_failed`.
+Model-call state transitions append `model_call_transition`, completion closure
+appends `turn_completed`, refusal closure appends `turn_refused`, and
+known-failure closure appends `turn_failed`; interrupt-confirmed cancellation
+appends `turn_cancelled`. A guarded transition that changes zero rows appends
+zero events. Why: writing the event in the committing transaction makes the
+dual-write failure (state without event, or event without state)
 unrepresentable.
 
 ## Open edges
@@ -381,26 +383,20 @@ unrepresentable.
 - No outbox publisher, drain task, or subscription layer exists;
   `outbox_delivery_state` is advanced only by integration tests.
 - The outbox event-kind set is `session_created`, `turn_failed`,
-  `model_call_transition`, `turn_completed`, and `turn_refused`; input
-  acceptance, activation, and defaults replacement commit no events yet, pending
-  the protocol projections that define client visibility.
+  `model_call_transition`, `turn_completed`, `turn_refused`, and
+  `turn_cancelled`; input acceptance, activation, and defaults replacement
+  commit no events yet, pending the protocol projections that define client
+  visibility.
 - Outbox retention and pruning of delivered rows are undecided.
 - Attempt continuation is deliberately blocked: a `turn_attempt` with a
   predecessor is rejected (`turn_attempt_continuation_unavailable`) until
   durable wait/closure storage exists.
-- Pending-steering reclassification is implemented at source-turn
-  terminalization (`reclassified_as_turn_origin`); in-turn safe-point
-  consumption remains unimplemented, and evidence-free startup recovery (no
-  model call) still defers (`recovery_blocked`).
 - Frontier lineage checks in migration `202607180004` assume `none` ancestry and
-  `ordinary` priority only; fork ancestry and interrupt priority must replace
-  them by migration.
-- Interrupt application is unavailable: a matched interrupt fails explicitly
-  (`InterruptApplicationUnavailable`) without claiming its identifier.
+  `ordinary` priority only; fork ancestry must replace the ancestry assumption.
 - The designed aggregate-map rows for model calls landed (`model_call`, the
   turn-level target pin, the pinned credential reference); provider evidence,
-  authority transfers, cancellation intent, interrupt-proof storage, and tool
-  tables are not yet in the schema.
+  authority transfers, fatal cancellation intent, and tool tables are not yet in
+  the schema.
 - Command-handling error families implement no `ClassifyOperatorFailure`;
   operator classification covers only startup scan, turn activation, the
   eligibility sweep, and the model-call repository.

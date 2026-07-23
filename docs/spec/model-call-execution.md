@@ -79,10 +79,12 @@ projects the exact frontier order into provider-neutral messages:
 
 - `OriginAcceptedInput` renders as a user message with its checked accepted
   input content;
+- `SteeringAcceptedInput` renders as a user message with the referenced accepted
+  input's checked content;
 - `AssistantText` renders as an assistant message retaining its producing-call
   provenance;
-- `TurnFailed` and `TurnCompleted` markers are skipped — they delimit history
-  and carry no model-visible content;
+- `TurnFailed`, `TurnCompleted`, and `TurnCancelled` markers are skipped — they
+  delimit history and carry no model-visible content;
 - `AssistantToolUse` fails closed (operator error) until the reserved tool
   decisions land.
 
@@ -104,14 +106,17 @@ transaction is ever open across credential I/O or provider work.
    either: reports no runnable work; creates and commits the exact `Prepared`
    call with its pinned non-secret credential reference
    ([configuration-and-credentials](configuration-and-credentials.md)), the
-   turn-target pin, and a `ModelCallTransition` (`Prepared`) outbox event, then
+   turn-target pin, and a `ModelCallTransition` (`Prepared`) outbox event. If
+   pending steering exists, the same transaction first consumes every eligible
+   input in ascending acceptance position, appends its correlated semantic
+   entry, and derives the exact extended frontier supplied to the call. It then
    stops the invocation (`Checkpointed`); reloads an already-committed
    `Prepared` call read-only and returns its request material (`Ready`); closes
-   target-resolution failure as an atomic no-call attempt-and-turn failure; or
-   refuses because acknowledged steering is pending. A new `Prepared` call is
-   never advanced to `InFlight` in its creating transaction. Why: committing
-   durable call identity before any external step means a crash can never
-   produce a provider effect with nothing durable to classify.
+   target-resolution failure as an atomic no-call attempt-and-turn failure. A
+   new `Prepared` call is never advanced to `InFlight` in its creating
+   transaction. Why: committing durable call identity before any external step
+   means a crash can never produce a provider effect with nothing durable to
+   classify.
 2. **Capability preparation (no transaction).** The provider adapter resolves
    its credential internally from the call's durably pinned reference (reloading
    a `Prepared` call without one fails closed) and builds an opaque, one-shot,
@@ -139,7 +144,9 @@ transaction is ever open across credential I/O or provider work.
    most once per invocation, and exactly once only after the `InFlight` commit
    is known. It consumes the capability exactly once and returns one
    provider-neutral terminal observation bound to the sealed issued correlation
-   (session, turn, attempt, call, target, frontier).
+   (session, turn, attempt, call, target, frontier). Its runtime
+   `CancellationSignal` resolves when the repository observes that exact call's
+   durable `CancellationRequested` state (INV-037).
 5. **Commit-observation transaction.** A fresh transaction reloads and
    revalidates complete authority — it never trusts the pre-send projection —
    checks the observation's correlation against fresh state, and atomically
@@ -253,10 +260,16 @@ persistence commits it atomically with its outbox rows
   without exactly one marker. Why: a physically completed call is not a
   completed turn, so completion is an explicit aggregate fact rather than an
   inference from call state.
-- **KnownFailed / Cancelled.** The call keeps its exact physical disposition;
-  the attempt ends `KnownFailure`; the turn fails with a `TurnFailed` entry and
-  terminal frontier. A physical cancellation without an applied-interrupt proof
-  is turn failure, not turn cancellation.
+- **KnownFailed.** The call ends `KnownFailed`; an unstopped attempt ends
+  `KnownFailure`, and the turn fails with a `TurnFailed` entry and terminal
+  frontier. A stop-requested attempt instead ends
+  `AfterCancellation(KnownFailure)` and still fails; the physical result has not
+  proven cancellation.
+- **Cancelled.** Without the exact applied-interrupt proof, a physical
+  cancellation is an unstopped known failure. With the proof-bearing
+  `StopRequested` state, the attempt ends `AfterCancellation(Cancelled)`, one
+  `TurnCancelled` marker extends the call frontier, and the turn ends
+  `Cancelled { cause }` rather than failed or ambiguous.
 - **Refused.** The call ends `Refused`; the attempt ends `TurnRefused`; the turn
   terminalizes `Refused` atomically with an equal-content terminal frontier. No
   refusal-content entry exists yet (INV-018; open edge).
@@ -264,6 +277,11 @@ persistence commits it atomically with its outbox rows
   `Ambiguous` (live) or `Lost` (startup); the turn enters the durable
   `awaiting_model_call_recovery` phase carrying the exact wait set (that one
   call) and retains the session slot. No semantic entry or frontier is created.
+
+Completion and refusal races against `StopRequested` end through their typed
+`AfterCancellation` dispositions while retaining their ordinary turn outcomes;
+an ambiguous cancellation race ends the attempt `AfterCancellation(Ambiguous)`
+and parks the turn for recovery with the stop proof still reconstructible.
 
 Every non-ambiguous outcome atomically reclassifies each pending steering input
 into a fresh queued successor turn at its original acceptance position
@@ -298,6 +316,8 @@ trustworthy result must stop rather than improvise.
 Startup recovery (`crates/persistence/src/startup.rs`), inside the same
 per-session locked transaction as the general scan (INV-034):
 
+- an evidence-free turn ends its abandoned attempt `Lost`, fails the turn, and
+  reclassifies all pending steering instead of deferring startup;
 - a durable `Prepared` call proves no send authorization existed; the call ends
   `KnownFailed`, the abandoned attempt ends `Lost`, and the turn fails,
   reclassifying pending steering;
@@ -333,15 +353,12 @@ prints the semantic transcript; it is deliberately not the client protocol.
 - Ambiguity recovery is a parked state only: no owner decision,
   `DuplicateRiskAccepted`, replacement call, or outcome-authority transfer is
   implemented.
-- No path requests provider cancellation (`CancellationSignal::never()`);
-  `CancellationRequested` and the unsent-cancellation proof transition are
-  sealed, unwired domain seams.
 - Streaming deltas are collected but never delivered as transient drafts, and
   the designed early-observation pause/commit/resume path is unimplemented.
 - The aggregate admits at most one call per turn (with the one-row-per-attempt
-  schema backstop); continuation calls and safe-point steering consumption are
-  unimplemented — pending steering blocks preparation and is reclassified at
-  terminalization.
+  schema backstop); continuation calls remain unimplemented. Safe-point steering
+  is consumed only before that admitted call; steering accepted after its
+  preparation is reclassified at terminalization.
 - A refused turn commits no refusal-content semantic entry; the variant remains
   an open edge in [sessions-and-transcript](sessions-and-transcript.md).
 - `AssistantToolUse` construction is schema-blocked pending the reserved tool
