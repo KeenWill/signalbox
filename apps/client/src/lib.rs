@@ -226,30 +226,14 @@ async fn send(
     };
     output.recovery_value("defaults_version", &defaults_version.value().to_string())?;
 
-    let mut connection = client
-        .request(ClientRequest::SubmitInput {
-            command_id,
-            session_id,
-            content: InputContent::new(content),
-            expected_defaults_version: defaults_version,
-        })
-        .await
-        .map_err(ClientError::mutation)?;
-    let turn_id = match connection.message().await.map_err(ClientError::mutation)? {
-        ServerMessage::InputSubmitted {
-            session_id: submitted_session,
-            turn_id,
-            ..
-        } if submitted_session == session_id => turn_id,
-        ServerMessage::Error {
-            code,
-            message,
-            detail,
-        } => return Err(ClientError::remote(code, message, detail)),
-        _ => {
-            return Err(ClientError::Protocol("submit returned an unexpected response").mutation());
-        }
-    };
+    let turn_id = submit_input(
+        client,
+        command_id,
+        session_id,
+        InputContent::new(content),
+        defaults_version,
+    )
+    .await?;
 
     match await_turn_terminal(client, session_id, turn_id).await? {
         TurnTerminal::Completed => {
@@ -265,6 +249,37 @@ async fn send(
         }
         TurnTerminal::Failed => Err(ClientError::TurnFailed),
         TurnTerminal::Refused => Err(ClientError::TurnRefused),
+    }
+}
+
+async fn submit_input(
+    client: &mut ProcessClient,
+    command_id: CommandId,
+    session_id: CanonicalUuid,
+    content: InputContent,
+    defaults_version: CanonicalU64,
+) -> Result<CanonicalUuid, ClientError> {
+    let mut connection = client
+        .request(ClientRequest::SubmitInput {
+            command_id,
+            session_id,
+            content,
+            expected_defaults_version: defaults_version,
+        })
+        .await
+        .map_err(ClientError::mutation)?;
+    match connection.message().await.map_err(ClientError::mutation)? {
+        ServerMessage::InputSubmitted {
+            session_id: submitted_session,
+            turn_id,
+            ..
+        } if submitted_session == session_id => Ok(turn_id),
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => Err(ClientError::remote(code, message, detail)),
+        _ => Err(ClientError::Protocol("submit returned an unexpected response").mutation()),
     }
 }
 
@@ -596,16 +611,30 @@ fn selection_display(selection: ModelSelection) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsString, io::Cursor, path::PathBuf, process::ExitCode};
+    use std::{
+        error::Error,
+        ffi::OsString,
+        io::{self, Cursor},
+        path::PathBuf,
+        process::ExitCode,
+        time::Duration,
+    };
 
     use signalbox_process_protocol::{
-        CanonicalUuid, ModelCallDisposition, ModelCallState, SessionEvent, TurnState,
+        CanonicalU64, CanonicalUuid, ClientRequest, CommandId, InputContent, ModelCallDisposition,
+        ModelCallState, ServerFrame, ServerMessage, SessionEvent, TurnState, decode_client_line,
+        encode_server_line,
+    };
+    use tokio::{
+        io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+        net::UnixListener,
+        time::timeout,
     };
     use uuid::Uuid;
 
     use super::{
-        MAX_INPUT_CONTENT_BYTES, model_call_recovery_transition, read_input, run, socket_path,
-        terminal_snapshot_state,
+        MAX_INPUT_CONTENT_BYTES, ProcessClient, model_call_recovery_transition, read_input, run,
+        socket_path, submit_input, terminal_snapshot_state,
     };
     use crate::error::ClientError;
 
@@ -702,5 +731,70 @@ mod tests {
         .await;
         assert_eq!(exit, ExitCode::FAILURE);
         assert!(String::from_utf8_lossy(&error).contains("must not be empty"));
+    }
+
+    #[tokio::test]
+    async fn submit_input_releases_its_connection_after_acceptance() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let request = decode_client_line(&line).map_err(io::Error::other)?;
+            if !matches!(
+                request.request(),
+                ClientRequest::SubmitInput {
+                    session_id: requested_session,
+                    ..
+                } if *requested_session == session_id
+            ) {
+                return Err(io::Error::other(
+                    "client did not submit the selected session",
+                ));
+            }
+            let response = ServerFrame::try_new(
+                request.request_id(),
+                ServerMessage::InputSubmitted {
+                    session_id,
+                    accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+                    acceptance_position: CanonicalU64::new(1),
+                    turn_id,
+                },
+            )
+            .map_err(io::Error::other)?;
+            writer
+                .write_all(&encode_server_line(&response).map_err(io::Error::other)?)
+                .await?;
+
+            let mut byte = [0_u8; 1];
+            let read = timeout(Duration::from_secs(1), reader.read(&mut byte))
+                .await
+                .map_err(io::Error::other)??;
+            if read != 0 {
+                return Err(io::Error::other(
+                    "submit connection remained open after its response",
+                ));
+            }
+            Ok::<(), io::Error>(())
+        });
+
+        let mut client = ProcessClient::new(socket);
+        let submitted_turn = submit_input(
+            &mut client,
+            CommandId::try_from_uuid(Uuid::from_u128(4))?,
+            session_id,
+            InputContent::new(String::from("queued content")),
+            CanonicalU64::new(1),
+        )
+        .await?;
+        assert_eq!(submitted_turn, turn_id);
+        server.await??;
+        Ok(())
     }
 }
