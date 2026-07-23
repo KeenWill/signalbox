@@ -30,13 +30,16 @@ it handles the final path as follows:
    without modification.
 
 The bind itself must still create a new socket and never replace a raced entry.
-The hub creates an unlistening Unix stream socket, binds it, and proves by
-`fstat`/`lstat` comparison that the path still names that socket's device and
-inode. It then sets and verifies owner-only `0600` permissions and calls
-`listen`; no connection can be queued before that sequence completes. Any
-identity or permission mismatch fails startup and removes no raced entry.
-Graceful shutdown removes the path only after a final `lstat` proves it is still
-the socket device and inode created by this hub.
+The hub creates an unlistening Unix stream socket, binds it, verifies that the
+socket's local address is the resolved path, and captures the new path entry's
+socket type, effective-user ownership, device, and inode with `lstat`. It then
+sets owner-only `0600` permissions and verifies with a second `lstat` that the
+same socket entry remains, retains that ownership, and has exactly that mode
+before calling `listen`; no connection can be queued before that sequence
+completes. Any address, identity, ownership, or permission mismatch fails
+startup and removes no raced entry. Graceful shutdown removes the path only
+after a final `lstat` proves it is still the socket device and inode captured by
+this hub.
 
 The transport is local-machine and single-user only. Version one's lack of
 protocol authentication is provisional; it has no authorization exchange or
