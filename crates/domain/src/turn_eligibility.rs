@@ -3145,10 +3145,7 @@ fn reconstitute_inner(
                             UnstoppedAttemptDisposition::KnownFailure,
                             UnstoppedAttemptDisposition::Lost,
                         ],
-                        &[
-                            CancellationStopDisposition::KnownFailure,
-                            CancellationStopDisposition::Lost,
-                        ],
+                        &[CancellationStopDisposition::KnownFailure],
                     ) {
                         return Err(
                             AcceptedInputSchedulingReconstitutionFailure::TerminalAttemptEndMismatch {
@@ -6933,6 +6930,52 @@ mod tests {
         ));
         assert_eq!(
             assert_input_rejects_unchanged(wrong_end.input()),
+            AcceptedInputSchedulingReconstitutionFailure::TerminalAttemptEndMismatch {
+                turn: failed.turn(),
+                attempt,
+            }
+        );
+
+        let successor = accepted_origin(2);
+        let successor_order = AcceptedInputQueueOrder::interrupt_immediately_after(
+            successor.position(),
+            failed.turn(),
+        );
+        let interrupt = AppliedInterruptCommandResult::from_correlated_submit(
+            command_id(60),
+            session.id(),
+            failed.turn(),
+            successor.accepted_input(),
+            successor.turn(),
+            successor_order,
+        )
+        .expect("the fixture interrupt is exactly correlated");
+        let mut lost_after_cancellation =
+            FailedTerminalReconstitutionFacts::matching(&session, failed);
+        lost_after_cancellation.replace_terminal_execution(Some(
+            FailedTurnExecutionReconstitutionInput::attempt_only_after_cancellation(
+                failed.turn(),
+                attempt,
+                CancellationStopDisposition::Lost,
+                interrupt,
+            ),
+        ));
+        lost_after_cancellation.turns.push(successor.record_with(
+            &session,
+            OriginRecordFacts {
+                order: successor_order,
+                delivery: DeliveryRequest::Interrupt {
+                    expected_active_turn: failed.turn(),
+                    configuration: PerInputConfigurationChoices::new(
+                        SessionConfigurationDefaultsVersion::first(),
+                        ModelSelectionOverride::UseSessionDefault,
+                    ),
+                },
+                state: AcceptedInputTurnSchedulingRecordState::Queued,
+            },
+        ));
+        assert_eq!(
+            assert_input_rejects_unchanged(lost_after_cancellation.input()),
             AcceptedInputSchedulingReconstitutionFailure::TerminalAttemptEndMismatch {
                 turn: failed.turn(),
                 attempt,

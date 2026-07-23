@@ -268,6 +268,8 @@ pub enum RetainedCapabilityFailureStatus {
     Pending,
     /// The exact known-failure closure is already represented durably.
     AlreadyCommitted,
+    /// A racing interrupt authoritatively cancelled the prepared call.
+    Cancelled,
 }
 
 /// Distinct transaction that durably authorizes one physical send.
@@ -860,6 +862,9 @@ where
                             return Ok(
                                 ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(call),
                             );
+                        }
+                        Ok(RetainedCapabilityFailureStatus::Cancelled) => {
+                            return Ok(ModelCallExecutionOutcome::NoWork);
                         }
                         Err(error) => {
                             self.retained_state = Some(RetainedModelCallExecutionState {
@@ -2444,6 +2449,52 @@ mod tests {
                 },
             }) if retained_session == session && retained_call == call
         ));
+    }
+
+    /// INV-037: if an interrupt wins after capability preparation reported a
+    /// known failure, the retained reread accepts the durable cancellation as
+    /// authoritative no-work rather than retrying failure closure forever.
+    #[tokio::test]
+    async fn inv037_capability_failure_race_rereads_cancellation_as_no_work() {
+        let (request, _) = prepared_fixture();
+        let session = request.session();
+        let mut service = ModelCallExecutionService::new(
+            FixedIds::baseline(),
+            FakePrepare {
+                outcomes: [Ok(ready(request))].into(),
+                calls: 0,
+            },
+            FakeFailure {
+                errors: [FakeError::Infrastructure].into(),
+                rereads: [Ok(RetainedCapabilityFailureStatus::Cancelled)].into(),
+                calls: 0,
+                reread_calls: 0,
+            },
+            UnusedAuthorization,
+            UnusedObservation,
+            ScriptedModelCallProvider::new([ScriptedModelCallStep::CapabilityKnownFailure]),
+            InProcessAttemptDispatchGate::default(),
+        );
+
+        assert!(matches!(
+            service.execute(session).await,
+            Err(ModelCallExecutionError::CapabilityFailureCommit(
+                FakeError::Infrastructure
+            ))
+        ));
+        assert_eq!(
+            service
+                .execute(identity(99, SessionId::from_uuid))
+                .await
+                .expect("the cancellation reread is authoritative"),
+            ModelCallExecutionOutcome::NoWork
+        );
+        let (_, prepare, failure, _, _, provider, _, retained) = service.into_parts();
+        assert_eq!(prepare.calls, 1);
+        assert_eq!(failure.calls, 1);
+        assert_eq!(failure.reread_calls, 1);
+        assert_eq!(provider.capability_preparation_count(), 1);
+        assert!(retained.is_none());
     }
 
     /// docs/spec/model-call-execution.md: a commit-ambiguous

@@ -1344,6 +1344,72 @@ async fn inv006_model_call_capability_failure_reread_distinguishes_pending_and_c
     Ok(())
 }
 
+/// INV-006 / INV-037: a retained capability failure accepts an exact
+/// interrupt-caused cancellation of the still-Prepared call as authoritative
+/// no-work, and rejects an incomplete cancellation closure.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv006_inv037_capability_failure_reread_accepts_prepared_cancellation()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7580;
+    let fixture = checkpoint_restart_model_call(&pool, seed, false).await?;
+    let selection = signalbox_domain::DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5));
+    let provider = ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6));
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        ResolvedProviderTarget::naming(provider),
+    )])
+    .expect("one restart fixture target forms a catalog");
+    let repository =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
+
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            input_with_delivery(
+                seed + 19,
+                seed + 1,
+                "cancel retained capability failure",
+                DeliveryRequest::Interrupt {
+                    expected_active_turn: fixture.turn,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 20)),
+            Some(TurnId::from_uuid(Uuid::from_u128(seed + 21))),
+        )
+        .await?;
+    assert_eq!(
+        repository
+            .reread_capability_failure(fixture.session, fixture.call)
+            .await?,
+        RetainedCapabilityFailureStatus::Cancelled
+    );
+
+    sqlx::query("ALTER TABLE turn_cancelled_outbox_event DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM turn_cancelled_outbox_event WHERE turn_id = $1")
+        .bind(fixture.turn.into_uuid())
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE turn_cancelled_outbox_event ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    assert!(matches!(
+        repository
+            .reread_capability_failure(fixture.session, fixture.call)
+            .await,
+        Err(ModelCallRepositoryError::InvalidTransition(
+            "retained capability failure cancellation closure is incomplete"
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// docs/spec/model-call-execution.md: retained non-completed observations
 /// converge only when their complete disposition-specific durable closure
 /// remains present.
@@ -1918,6 +1984,75 @@ async fn stop_request_schema_keeps_delivery_and_failure_shapes_closed() -> Resul
     assert!(
         !failed_assertion.contains("terminal_disposition_kind IN ('known_failed', 'cancelled')")
     );
+    assert!(!failed_assertion.contains("end_disposition IN ('known_failure', 'lost')"));
+    assert!(failed_assertion.contains("attempt_count <> 1"));
+
+    let seed = 0x75c0;
+    let (failed, failed_repository, failed_authorized) =
+        authorize_checkpointed_model_call(&pool, seed).await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            input_with_delivery(
+                seed + 19,
+                seed + 1,
+                "stop before cardinality check",
+                DeliveryRequest::Interrupt {
+                    expected_active_turn: failed.turn,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 20)),
+            Some(TurnId::from_uuid(Uuid::from_u128(seed + 21))),
+        )
+        .await?;
+    let failed_observation = failed_authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::KnownFailed);
+    failed_repository
+        .apply_terminal_observation(
+            failed.session,
+            failed_observation,
+            ModelCallTerminalIdentities::Failed(FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 22)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 23)),
+            )),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+    sqlx::query("ALTER TABLE turn_attempt DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO turn_attempt
+            (turn_attempt_id, turn_id, session_id, continued_from_attempt_id,
+             state_kind, end_variant, end_disposition)
+         VALUES ($1, $2, $3, $4, 'ended', 'without_stop', 'known_failure')",
+    )
+    .bind(Uuid::from_u128(seed + 24))
+    .bind(failed.turn.into_uuid())
+    .bind(failed.session.into_uuid())
+    .bind(failed.attempt.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_attempt ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    let cardinality_error = sqlx::query("SELECT assert_failed_terminal_execution_final_state($1)")
+        .bind(failed.turn.into_uuid())
+        .execute(&pool)
+        .await
+        .expect_err("a cancellation failure cannot hide an additional ended attempt");
+    assert_eq!(
+        cardinality_error
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into())
+    );
+    assert!(cardinality_error.as_database_error().is_some_and(|error| {
+        error
+            .message()
+            .contains("post-cancellation failure lacks its exact single attempt")
+    }));
 
     pool.close().await;
     drop(container);

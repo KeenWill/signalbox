@@ -1878,12 +1878,16 @@ DECLARE
     checked_session uuid;
     checked_attempt uuid;
     checked_call uuid;
+    checked_attempt_history boolean;
     cancellation_failure boolean;
+    attempt_count bigint;
+    call_count bigint;
 BEGIN
     SELECT
         lifecycle.session_id,
         lifecycle.terminal_attempt_id,
         lifecycle.terminal_model_call_id,
+        lifecycle.attempt_history_present,
         EXISTS (
             SELECT 1
               FROM turn_attempt AS attempt
@@ -1891,12 +1895,13 @@ BEGIN
                AND attempt.turn_id = lifecycle.turn_id
                AND attempt.session_id = lifecycle.session_id
                AND attempt.end_variant = 'after_cancellation'
-               AND attempt.end_disposition IN ('known_failure', 'lost')
+               AND attempt.end_disposition = 'known_failure'
         )
       INTO
         checked_session,
         checked_attempt,
         checked_call,
+        checked_attempt_history,
         cancellation_failure
       FROM turn_lifecycle AS lifecycle
      WHERE lifecycle.turn_id = checked_turn_id
@@ -1908,6 +1913,33 @@ BEGIN
             checked_turn_id
         );
         RETURN;
+    END IF;
+
+    SELECT count(*)
+      INTO attempt_count
+      FROM turn_attempt
+     WHERE turn_id = checked_turn_id
+       AND session_id = checked_session;
+    SELECT count(*)
+      INTO call_count
+      FROM model_call
+     WHERE turn_id = checked_turn_id
+       AND session_id = checked_session;
+    IF checked_attempt_history IS DISTINCT FROM true
+       OR attempt_count <> 1
+       OR checked_attempt IS NULL
+    THEN
+        RAISE EXCEPTION
+            'post-cancellation failure lacks its exact single attempt'
+            USING ERRCODE = '23514';
+    END IF;
+    IF (call_count = 0 AND checked_call IS NOT NULL)
+       OR call_count > 1
+       OR (call_count = 1 AND checked_call IS NULL)
+    THEN
+        RAISE EXCEPTION
+            'post-cancellation failure has inconsistent call provenance'
+            USING ERRCODE = '23514';
     END IF;
 
     PERFORM assert_interrupt_attempt_proof(checked_attempt);

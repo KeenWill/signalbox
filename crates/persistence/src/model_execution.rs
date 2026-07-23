@@ -603,6 +603,24 @@ impl PostgresModelCallRepository {
                         ))
                     }
                 }
+                ("terminal", Some("cancelled")) => {
+                    if prepared_cancellation_closure_matches(
+                        &mut transaction,
+                        session,
+                        turn,
+                        attempt,
+                        call.into_uuid(),
+                        source_frontier,
+                    )
+                    .await?
+                    {
+                        Ok(RetainedCapabilityFailureStatus::Cancelled)
+                    } else {
+                        Err(ModelCallRepositoryError::InvalidTransition(
+                            "retained capability failure cancellation closure is incomplete",
+                        ))
+                    }
+                }
                 _ => Err(ModelCallRepositoryError::InvalidTransition(
                     "retained capability failure durable state changed",
                 )),
@@ -1192,6 +1210,109 @@ async fn cancelled_terminal_closure_matches(
     .bind(session_id_to_uuid(session))
     .bind(turn_id_to_uuid(correlation.turn()))
     .bind(observation.call().into_uuid())
+    .bind(cancellation.entry)
+    .bind(terminal_frontier)
+    .fetch_one(&mut *connection)
+    .await?)
+}
+
+async fn prepared_cancellation_closure_matches(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: Uuid,
+    attempt: Uuid,
+    call: Uuid,
+    source_frontier: Uuid,
+) -> Result<bool, ModelCallRepositoryError> {
+    let terminal_frontier = sqlx::query_scalar::<_, Uuid>(
+        "SELECT terminal_frontier_id
+           FROM turn_lifecycle
+          WHERE session_id = $1
+            AND turn_id = $2
+            AND state_kind = 'terminal'
+            AND terminal_disposition_kind = 'cancelled'
+            AND terminal_attempt_id = $3
+            AND terminal_model_call_id = $4
+            AND EXISTS (
+                SELECT 1
+                  FROM turn_attempt
+                 WHERE session_id = $1
+                   AND turn_id = $2
+                   AND turn_attempt_id = $3
+                   AND state_kind = 'ended'
+                   AND end_variant = 'after_cancellation'
+                   AND end_disposition = 'cancelled'
+                   AND interrupt_command_id IS NOT NULL
+            )
+            AND EXISTS (
+                SELECT 1
+                  FROM model_call_transition_outbox_event
+                 WHERE session_id = $1
+                   AND turn_id = $2
+                   AND model_call_id = $4
+                   AND call_state_kind = 'prepared'
+                   AND terminal_disposition_kind IS NULL
+            )
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM model_call_transition_outbox_event
+                 WHERE session_id = $1
+                   AND turn_id = $2
+                   AND model_call_id = $4
+                   AND call_state_kind IN ('in_flight', 'cancellation_requested')
+            )
+            AND EXISTS (
+                SELECT 1
+                  FROM model_call_transition_outbox_event
+                 WHERE session_id = $1
+                   AND turn_id = $2
+                   AND model_call_id = $4
+                   AND call_state_kind = 'terminal'
+                   AND terminal_disposition_kind = 'cancelled'
+            )",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn)
+    .bind(attempt)
+    .bind(call)
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(terminal_frontier) = terminal_frontier else {
+        return Ok(false);
+    };
+    let source_frontier = load_frontier_members(connection, session, source_frontier).await?;
+    let terminal_members = load_terminal_frontier(connection, session, terminal_frontier).await?;
+    if terminal_members.len() != source_frontier.len() + 1
+        || terminal_members
+            .iter()
+            .zip(&source_frontier)
+            .any(|(stored, expected)| (stored.source_session, stored.entry) != *expected)
+    {
+        return Ok(false);
+    }
+    let cancellation = &terminal_members[source_frontier.len()];
+    if cancellation.source_session != session_id_to_uuid(session)
+        || cancellation.payload_kind != "turn_cancelled"
+        || cancellation.assistant_text.is_some()
+        || cancellation.producing_call.is_some()
+        || cancellation.completed_turn.is_some()
+        || cancellation.failed_turn.is_some()
+        || cancellation.cancelled_turn != Some(turn)
+    {
+        return Ok(false);
+    }
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+            SELECT 1
+              FROM turn_cancelled_outbox_event
+             WHERE session_id = $1
+               AND turn_id = $2
+               AND cancellation_entry_id = $3
+               AND terminal_frontier_id = $4
+        )",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn)
     .bind(cancellation.entry)
     .bind(terminal_frontier)
     .fetch_one(&mut *connection)

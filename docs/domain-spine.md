@@ -2285,6 +2285,7 @@ pub trait FailPreparedModelCallTransaction {
 pub enum RetainedCapabilityFailureStatus {
     Pending,
     AlreadyCommitted,
+    Cancelled,
 }
 
 pub trait AuthorizeModelCallTransaction {
