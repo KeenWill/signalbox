@@ -37,7 +37,9 @@ source.
 as the spine rule above. Pages state implemented behavior only; deferred or
 undecided work is recorded in `docs/open-questions.md` — its one home — and a
 page's Open edges list carries pointers to it, never substantive speculative
-prose.
+prose. Within a stack, the bottom specification diff satisfies this rule for the
+behavior its child pull requests implement; a child adds its own spec edit only
+for behavior the bottom diff does not describe.
 
 **Finished pull requests.** The owner merges every pull request; deliver each
 one finished and awaiting owner merge:
