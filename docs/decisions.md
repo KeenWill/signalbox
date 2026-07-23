@@ -10,44 +10,6 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
-## 2026-07-23 — Reuse Serde and uuid for the closed process wire crate
-
-**Context.** The version-one process boundary needs closed tagged JSON shapes,
-canonical full-range decimal strings, canonical UUID strings, and explicit
-version rejection without leaking domain or storage types. Serde, serde_json,
-and uuid are already pinned elsewhere in the workspace.
-
-**Decision.** The focused `signalbox-process-protocol` crate directly uses those
-three existing dependencies. Serde derives the closed tagged shapes;
-serde_json's `arbitrary_precision` feature preserves an arbitrary integer
-version long enough to reject it as unsupported before decoding its payload; and
-uuid parses values behind custom lowercase-hyphenated and command-sentinel
-checks. The crate owns framing and wire validation only.
-
-**Rejected alternatives.** A handwritten JSON parser would duplicate escaping,
-UTF-8, and number handling. Raw string identifiers would defer canonical checks
-to every adapter. A schema generator or protocol framework would add a larger
-toolchain and compatibility policy than exact version one needs.
-
-**Affects.** `crates/process-protocol`, the workspace member inventory, and its
-lockfile package entry; no domain or application public type changes.
-
-## 2026-07-23 — Trust only root or the hub user in socket ancestry
-
-**Context.** A non-writable ancestor owned by a different unprivileged user is
-not stable: its owner can later broaden its mode, rename the next component, and
-substitute an impostor socket hierarchy after startup validation.
-
-**Decision.** Require every resolved socket-parent ancestor to be owned by
-either root or the hub's effective user, in addition to the sticky-directory and
-child-ownership rules. Root remains the operating-system trust boundary.
-
-**Rejected alternatives.** Trusting the mode observed at one instant ignores the
-owner's authority to change it. Requiring the hub user to own system ancestors
-would reject ordinary paths beneath root-owned `/`, `/var`, or `/tmp`.
-
-**Affects.** Local process-socket ancestry validation and its startup tests.
-
 ## 2026-07-23 — Bound the local process-socket backlog at 128
 
 **Context.** The guarded Unix listener must select a finite kernel accept queue.
@@ -87,6 +49,44 @@ and executable-path failure modes without solving separate bind/listen.
 
 **Affects.** The hub-owned local process transport and its direct dependency
 surface; no domain, persistence, or wire representation changes.
+
+## 2026-07-23 — Reuse Serde and uuid for the closed process wire crate
+
+**Context.** The version-one process boundary needs closed tagged JSON shapes,
+canonical full-range decimal strings, canonical UUID strings, and explicit
+version rejection without leaking domain or storage types. Serde, serde_json,
+and uuid are already pinned elsewhere in the workspace.
+
+**Decision.** The focused `signalbox-process-protocol` crate directly uses those
+three existing dependencies. Serde derives the closed tagged shapes;
+serde_json's `arbitrary_precision` feature preserves an arbitrary integer
+version long enough to reject it as unsupported before decoding its payload; and
+uuid parses values behind custom lowercase-hyphenated and command-sentinel
+checks. The crate owns framing and wire validation only.
+
+**Rejected alternatives.** A handwritten JSON parser would duplicate escaping,
+UTF-8, and number handling. Raw string identifiers would defer canonical checks
+to every adapter. A schema generator or protocol framework would add a larger
+toolchain and compatibility policy than exact version one needs.
+
+**Affects.** `crates/process-protocol`, the workspace member inventory, and its
+lockfile package entry; no domain or application public type changes.
+
+## 2026-07-23 — Trust only root or the hub user in socket ancestry
+
+**Context.** A non-writable ancestor owned by a different unprivileged user is
+not stable: its owner can later broaden its mode, rename the next component, and
+substitute an impostor socket hierarchy after startup validation.
+
+**Decision.** Require every resolved socket-parent ancestor to be owned by
+either root or the hub's effective user, in addition to the sticky-directory and
+child-ownership rules. Root remains the operating-system trust boundary.
+
+**Rejected alternatives.** Trusting the mode observed at one instant ignores the
+owner's authority to change it. Requiring the hub user to own system ancestors
+would reject ordinary paths beneath root-owned `/`, `/var`, or `/tmp`.
+
+**Affects.** Local process-socket ancestry validation and its startup tests.
 
 ## 2026-07-23 — Bound process fan-out retention at 64 events
 
