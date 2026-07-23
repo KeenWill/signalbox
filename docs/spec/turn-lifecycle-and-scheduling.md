@@ -129,12 +129,14 @@ fails closed on any omission or cross-wiring: cross-session records, duplicate
 accepted inputs, missing origin or failure entries, snapshots that do not
 resolve to their exact stored membership, stored starts whose lineage or
 frontier disagree with the derived order, and lifecycle states that do not form
-a failed-terminal prefix, at most one active slot, and a queued suffix in
-durable total order. The total order itself is
-`derive_accepted_input_total_order`: ordinary roots by acceptance position, each
-followed by its unique recursive interrupt-successor chain, with monotonic
-interrupt targets validated. Queued turns store no predecessor pointer; the
-immediate predecessor is fixed once, at eligibility.
+a terminal prefix, at most one active slot, and a queued suffix in durable total
+order. Every terminal variant contributes its checked terminal frontier to that
+prefix, including proof-bearing cancellation and reconciliation-required
+predecessors. The total order itself is `derive_accepted_input_total_order`:
+ordinary roots by acceptance position, each followed by its unique recursive
+interrupt-successor chain, with monotonic interrupt targets validated. Queued
+turns store no predecessor pointer; the immediate predecessor is fixed once, at
+eligibility.
 
 `prepare_earliest_queued_activation` then applies the predicate in pure domain
 code: it rejects when an active turn holds the slot or no queued turn exists
@@ -386,6 +388,20 @@ are conclusions derived from complete owner facts, never trusted discriminators.
   instead of accepting an evidence-free failure record, and the deferred
   `assert_failed_terminal_execution_final_state` assertion re-closes the shape
   at every commit.
+- A cancelled terminal turn reconstructs only from
+  `CancelledTurnExecutionReconstitutionInput`: its exact ended attempt carries
+  `AfterCancellation(Cancelled)` and the same complete applied-interrupt result
+  as the turn disposition. It names either no call, proving direct cancellation
+  before any call was prepared, or its one correlated terminal `cancelled` call.
+  Its terminal frontier must extend the starting or call frontier by exactly the
+  correlated `TurnCancelled` marker.
+- A reconciliation-required terminal turn names its exact ended attempt and
+  required terminal `ambiguous` call. The attempt end is either
+  `WithoutStop(Ambiguous|Lost)` with a later turn-correlated applied interrupt,
+  or `AfterCancellation(Ambiguous|Lost)` carrying that same proof. Its terminal
+  frontier is an equal-content boundary over the ambiguous call's frontier. The
+  checked scheduling input validates those correlations before the turn can
+  serve as a terminal predecessor.
 - Every active turn's projection must carry a session-scoped acceptance tail
   anchored at the turn's exact origin and extending gap-free through the
   observed last acceptance position, with unique identities, same- session

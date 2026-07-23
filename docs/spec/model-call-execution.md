@@ -75,6 +75,17 @@ stale authority, so every invalid shape refuses rather than repairs. Sealed
 constructors (compile-fail-tested) prevent forging call records or terminal
 history outside the aggregate (INV-002).
 
+Reconstituting a checkpointed `Prepared` call also reloads the call's exact
+stored snapshot, not only the turn's starting snapshot. When steering extended
+that frontier, the complete acceptance tail must reconstruct every consumed
+input in acceptance order; the corresponding suffix must contain exactly one
+`SteeringAcceptedInput` entry per receipt, correlated to the input, source turn,
+and current call, and every referenced input's checked content must be present.
+The call becomes resumable only when that extended snapshot is a strict
+prefix-preserving extension of the starting snapshot and its complete ordered
+membership equals those checked semantic entries. Why: checkpointing cannot
+erase steering that the durable call was prepared to observe.
+
 ## Frontier rendering
 
 `PreparedModelOperation::render` (`crates/application/src/model_execution.rs`)
@@ -204,7 +215,10 @@ Ambiguous commits are never resolved by replay:
   still `Prepared`, the capability and permit are discarded and the error
   returned; if `InFlight` committed, the unconsumed capability is proof of
   non-send, and the service commits a `KnownFailed` observation for the issued
-  call without ever sending.
+  call without ever sending; if an interrupt concurrently committed
+  `CancellationRequested`, the same unconsumed capability proves no send, the
+  stop remains authoritative, and the service commits the correlated `Cancelled`
+  observation instead.
 - A failed terminal-observation commit retains the unchanged observation in
   memory. A later pass rereads durable state first: `Pending` recommits the
   identical observation; `AlreadyCommitted` (same disposition and content)
@@ -281,10 +295,12 @@ persistence commits it atomically with its outbox rows
   `AfterCancellation(KnownFailure)` and still fails; the physical result has not
   proven cancellation.
 - **Cancelled.** Without the exact applied-interrupt proof, a physical
-  cancellation is an unstopped known failure. With the proof-bearing
-  `StopRequested` state, the attempt ends `AfterCancellation(Cancelled)`, one
-  `TurnCancelled` marker extends the call frontier, and the turn ends
-  `Cancelled { cause }` rather than failed or ambiguous.
+  cancellation is an unstopped known failure. With the exact proof — carried
+  directly by the atomic interrupt transition before any call exists or for an
+  unsent `Prepared` call, or retained by `StopRequested` for an issued call —
+  the attempt ends `AfterCancellation(Cancelled)`, one `TurnCancelled` marker
+  extends the starting or call frontier, and the turn ends `Cancelled { cause }`
+  rather than failed or ambiguous.
 - **Refused.** The call ends `Refused`; the attempt ends `TurnRefused`; the turn
   terminalizes `Refused` atomically with an equal-content terminal frontier. No
   refusal-content entry exists yet (INV-018; open edge).
@@ -349,7 +365,10 @@ per-session locked transaction as the general scan (INV-034):
   reclassifies all pending steering instead of deferring startup;
 - a durable `Prepared` call proves no send authorization existed; the call ends
   `KnownFailed`, the abandoned attempt ends `Lost`, and the turn fails,
-  reclassifying pending steering;
+  reclassifying pending steering. Before closure, reconstitution validates the
+  call's exact stored frontier; when preparation consumed steering, that is the
+  complete extended snapshot and checked steering suffix described above, not
+  the turn's unextended starting snapshot;
 - a durable unstopped `InFlight` call with no surviving evidence ends
   `Ambiguous`, the abandoned attempt ends `Lost`, and the turn parks in
   `awaiting_model_call_recovery`;

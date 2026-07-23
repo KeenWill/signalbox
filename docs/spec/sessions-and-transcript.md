@@ -264,11 +264,13 @@ completed turn's terminal frontier extends its producing call's frontier by the
 call's assistant entries plus exactly its completion marker last; a cancelled
 turn's terminal frontier extends the latest call frontier (or starting frontier)
 with exactly its cancellation marker; and a refused turn's terminal frontier is
-a distinct equal-content copy of its latest call frontier. Migration
-`202607220001` first defined the model-call assertion; migrations `202607220004`
-and `202607220005` widen it for steering and stop requests. A writer that
-diverges from the transactional practice above is rejected at the commit
-boundary.
+a distinct equal-content copy of its latest call frontier. A
+reconciliation-required turn likewise carries a distinct equal-content terminal
+frontier over its exact ambiguous call, correlated ended attempt, and applied
+interrupt proof. Migration `202607220001` first defined the model-call
+assertion; migrations `202607220004` and `202607220005` widen it for steering
+and stop requests. A writer that diverges from the transactional practice above
+is rejected at the commit boundary.
 
 `TurnFailed` now has two producers — the model-call known-failure closure and
 startup recovery — each appending the marker after every earlier committed entry

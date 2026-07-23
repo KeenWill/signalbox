@@ -96,9 +96,9 @@ Representation rules, all enforced in the schema:
   implemented sets are exactly the admitted slices: turn state
   `queued`/`active`/`terminal`, active phase `running` or
   `awaiting_model_call_recovery`, terminal disposition
-  `failed`/`completed`/`refused`/`cancelled`, attempt state
-  `prepared`/`running`/`stop_requested`/`ended` with end variants `without_stop`
-  and `after_cancellation`, and model-call state
+  `failed`/`completed`/`refused`/`cancelled`/`reconciliation_required`, attempt
+  state `prepared`/`running`/`stop_requested`/`ended` with end variants
+  `without_stop` and `after_cancellation`, and model-call state
   `prepared`/`in_flight`/`cancellation_requested`/`terminal` with terminal
   dispositions `completed`/`known_failed`/`refused`/`cancelled`/`ambiguous`.
 - Immutable fact tables carry `BEFORE UPDATE OR DELETE` triggers that raise
@@ -247,25 +247,30 @@ complete queue and lifecycle state, `ModelCallExecutionReconstitutionInput` for
 the active turn's pinned provider target and complete call history, and
 `FailedTurnExecutionReconstitutionInput` for a failed terminal turn's exact
 ended attempt and optional `known_failed`/`cancelled` call provenance
-(backfilled and closed by migration `202607220003`). The scheduling load proves
-its own completeness — it counts `queued_input_origin` against `turn_lifecycle`
-and fails on mismatch — rather than trusting whichever rows a filter returned.
-Active-phase and acceptance-tail validation semantics are owned by
+(backfilled and closed by migration `202607220003`). Cancelled and
+reconciliation-required terminal turns additionally supply their exact
+proof-bearing attempt end, applied-interrupt result, and optional cancelled or
+required ambiguous call through the scheduling input described in
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md). The
+scheduling load proves its own completeness — it counts `queued_input_origin`
+against `turn_lifecycle` and fails on mismatch — rather than trusting whichever
+rows a filter returned. Active-phase, terminal-evidence, and acceptance-tail
+validation semantics are owned by
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md).
 
 Persisted data is never normalized into a nearby valid state; malformed durable
 rows produce typed corruption errors, authorize no effect, and are not repaired
-or dropped on load. Load paths do not panic on durable data; one acknowledged
-`expect` remains on the interrupt-unavailable path in `submit_input.rs`, a
-marked temporary site reachable only if the checked active-projection contract
-is broken. Startup recovery operates only on successfully reconstituted
-projections (INV-034), and a successful reconstitution does not waive the
-guarded compare-and-set when a later transaction commits: every guarded write
-that matches zero rows is either benign staleness (reload and rederive) or,
-where the transaction's own premises made a match mandatory, corruption. Why:
-the dangerous corruption cases are rows that look individually valid while their
-cross-record correlations are not, so authority comes only from complete
-validated projections, never from raw identifiers.
+or dropped on load. Load paths do not panic on durable data; checked interrupt
+application produces the exact cancellation-requested or reconciliation-required
+transition, while a projection that cannot support that transition fails closed
+as typed corruption. Startup recovery operates only on successfully
+reconstituted projections (INV-034), and a successful reconstitution does not
+waive the guarded compare-and-set when a later transaction commits: every
+guarded write that matches zero rows is either benign staleness (reload and
+rederive) or, where the transaction's own premises made a match mandatory,
+corruption. Why: the dangerous corruption cases are rows that look individually
+valid while their cross-record correlations are not, so authority comes only
+from complete validated projections, never from raw identifiers.
 
 Startup recovery terminalizes an evidence-free lost active turn as failed and
 atomically reclassifies its pending steering to successor origins. A turn
