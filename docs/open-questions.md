@@ -196,6 +196,11 @@ questions below remain open.
   request-scoped value read by `FileCredentialAccess` remains undecided, with no
   implementation. This question is separate from the accepted storage and
   delivery semantics but applies to the current file-backed credential path.
+- **Controlled provider proxy and private trust roots.** Whether and how a
+  deployment may select an explicit outbound provider proxy or private
+  certificate authority remains undecided. The implemented adapters expose
+  neither capability and disable ambient proxy discovery. Blocks only
+  deployments requiring that transport extension.
 - **First-release resource limits.** Leaning: explicit bounded concurrency and
   configurable usage limits at effect boundaries. Blocks public release.
   (S02–S06, S13–S18)
