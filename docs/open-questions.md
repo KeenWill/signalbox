@@ -269,8 +269,8 @@ questions below remain open.
 ## Destination features (target model)
 
 These unresolved foundation requirements are authoritative here. The
-[target-model concept status map](target-model.md#concept-status-map) is
-non-normative direction for their destination and ordering.
+[target model](target-model.md) is non-normative direction for their destination
+and ordering.
 
 - **Goal identity and lifecycle.** Durable persistent-objective identity and
   lifecycle require a future foundation decision. Blocks platform goal mode.
