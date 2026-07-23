@@ -1,11 +1,12 @@
 # Model-call execution
 
 This page describes the implemented model-call orchestration chain as verified
-against the implementing stack through PR #175 (`agent/stop-requests`):
-rendering a context frontier into provider messages, the staged prepare /
-authorize-send / commit-observation effects, assistant content and turn
-completion, provider failure classification into physical dispositions, and the
-retry prohibition. Turn and attempt lifecycle law lives in
+against the implementing stack through PR #183
+(`agent/provider-call-security-parser`): rendering a context frontier into
+provider messages, the staged prepare / authorize-send / commit-observation
+effects, assistant content and turn completion, provider failure classification
+into physical dispositions, and the retry prohibition. Turn and attempt
+lifecycle law lives in
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
 entries and frontiers in [sessions-and-transcript](sessions-and-transcript.md);
 storage protocol and the outbox in

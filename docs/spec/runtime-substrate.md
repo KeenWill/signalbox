@@ -2,13 +2,13 @@
 
 This page specifies the Layer-1 typed model-runtime boundary as implemented in
 `crates/model-runtime`, `crates/model-runtime-anthropic`, and
-`crates/model-runtime-openai`, verified against the implementing
-provider-call-security stack rooted at `agent/provider-call-security-spec`. It
-covers the provider-neutral operation, observation, and evidence vocabulary; SSE
-framing; structured-output and tool decode; `ScriptedModel`; the two provider
-adapters; and the in-process credential-access boundary. Layer-2 authorization
-and evidence classification ([model-call-execution](model-call-execution.md)),
-credential channels, delivery, and rotation discipline
+`crates/model-runtime-openai`, verified against the implementing stack through
+PR #183 (`agent/provider-call-security-parser`). It covers the provider-neutral
+operation, observation, and evidence vocabulary; SSE framing; structured-output
+and tool decode; `ScriptedModel`; the two provider adapters; and the in-process
+credential-access boundary. Layer-2 authorization and evidence classification
+([model-call-execution](model-call-execution.md)), credential channels,
+delivery, and rotation discipline
 ([configuration-and-credentials](configuration-and-credentials.md)), and the
 authoritative transcript commit
 ([sessions-and-transcript](sessions-and-transcript.md)) are owned by those
@@ -243,7 +243,7 @@ the SSE record limit and whole-exchange timeout must both be positive.
 Construction failure is a configuration defect, not operation evidence.
 
 Provider traffic uses reqwest 0.13 with default features disabled and only its
-Rustls and byte-stream features enabled. Both clients force the Rustls backend,
+rustls and byte-stream features enabled. Both clients force the rustls backend,
 verify the server certificate and hostname against `rustls-platform-verifier`'s
 platform trust roots, require TLS 1.2 or newer, and carry no custom-root or
 verification-bypass surface. Ambient system and environment proxies are disabled
@@ -298,13 +298,15 @@ allocation-free scanner rejects JSON nested beyond 128 containers, including
 unknown fields and `RawValue` material. Unknown fields remain tolerated for
 additive provider evolution, but they receive the same byte and nesting limits
 as known fields. Malformed or over-depth HTTP-200 JSON is
-`ResponseUnintelligible` boundary loss; malformed or over-depth streamed JSON is
-a terminal stream protocol violation. A malformed or over-depth body attached to
-a definitive 4xx/5xx status cannot erase that definitive exchange: the adapter
-falls back to status classification and retains only bounded,
-credential-sanitized native material. Why: hostile provider output may consume
-only fixed memory/depth budgets and can never be upgraded into completion by
-truncation or permissive parsing.
+`ResponseUnintelligible` boundary loss. Over-depth streamed material and
+malformed known-event JSON are terminal stream protocol violations; unknown
+event names remain additively tolerated and their bounded payloads are discarded
+without typed parsing. A malformed or over-depth body attached to a definitive
+4xx/5xx status cannot erase that definitive exchange: the adapter falls back to
+status classification and retains only bounded, credential-sanitized native
+material. Why: hostile provider output may consume only fixed memory/depth
+budgets and can never be upgraded into completion by truncation or permissive
+parsing.
 
 Stream integrity, Anthropic: the decoder enforces the Messages stream protocol —
 `message_start` first with a complete envelope (discriminators, id, model, input
