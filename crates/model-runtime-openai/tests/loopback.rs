@@ -19,8 +19,9 @@ use std::time::Duration;
 use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, CompletionFinish, ConversationMessage, DeliveryMode,
     LossCause, ModelOperation, ModelRuntime, ModelSettings, Observation, ObservationFact,
-    PreparationFailure, PreparationOutcome, ProviderErrorKind, ProviderRequestId, RequestedTarget,
-    ResolvedTarget, StreamInterruption, TerminalEvidence, TerminalReport, UnsentCause,
+    PROVIDER_JSON_NESTING_LIMIT, PreparationFailure, PreparationOutcome, ProviderErrorKind,
+    ProviderRequestId, RequestedTarget, ResolvedTarget, StreamInterruption, TerminalEvidence,
+    TerminalReport, UnsentCause,
 };
 use signalbox_model_runtime::{
     CredentialAccess, CredentialAccessError, CredentialAccessFailure, CredentialReference,
@@ -427,6 +428,49 @@ async fn buffered_error_type_classifies_when_code_is_absent() {
         Some("insufficient_quota")
     );
     assert_eq!(error.native.error_code, None);
+}
+
+#[tokio::test]
+async fn malformed_and_overdeep_error_bodies_fall_back_to_http_status() {
+    let nested = format!(
+        "{}null{}",
+        "[".repeat(PROVIDER_JSON_NESTING_LIMIT + 1),
+        "]".repeat(PROVIDER_JSON_NESTING_LIMIT + 1)
+    );
+    let overdeep = format!(
+        r#"{{"error":{{"message":"contradictory code","type":"invalid_request_error",
+            "code":"invalid_api_key","future":{nested}}}}}"#
+    );
+    let server = CannedServer::serving(vec![
+        http_response(
+            "503 Service Unavailable",
+            &[("content-type", "application/json")],
+            b"{not json",
+        ),
+        http_response(
+            "503 Service Unavailable",
+            &[("content-type", "application/json")],
+            overdeep.as_bytes(),
+        ),
+    ])
+    .await;
+    let runtime = runtime_for(&server.base_url);
+
+    for correlation in ["call-malformed-error", "call-overdeep-error"] {
+        let (report, _) = execute(
+            &runtime,
+            operation(correlation),
+            CancellationSignal::never(),
+        )
+        .await;
+
+        let TerminalEvidence::ProviderError(error) = report.evidence else {
+            panic!("a complete terminal error status remains definitive");
+        };
+        assert_eq!(error.kind, ProviderErrorKind::Overloaded);
+        assert_eq!(error.native.error_code, None);
+        assert_eq!(error.exchange.http_status, Some(503));
+    }
 }
 
 #[tokio::test]

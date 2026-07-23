@@ -6,6 +6,7 @@ use signalbox_model_runtime::{
     AssistantPart, BoundaryLossEvidence, CompletionEvidence, ExchangeFacts, FinishReason,
     LossCause, Observation, ObservationFact, ObservationSink, ProviderReportedModel,
     RefusalEvidence, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
+    validate_provider_json_nesting,
 };
 
 use crate::{
@@ -102,6 +103,14 @@ pub(crate) fn decode_buffered_response<C: Clone>(
     sink: &mut (dyn ObservationSink<C> + Send),
     stop_sequences_declared: bool,
 ) -> TerminalEvidence {
+    if let Err(error) = validate_provider_json_nesting(body) {
+        return unintelligible(
+            format!("success response body exceeds the provider JSON bound: {error}"),
+            exchange,
+            None,
+            TokenUsage::unreported(),
+        );
+    }
     let completion: ChatCompletion = match serde_json::from_slice(body) {
         Ok(completion) => completion,
         Err(error) => {
@@ -348,8 +357,8 @@ mod tests {
     use signalbox_expect_table::table;
     use signalbox_model_runtime::{
         AssistantPart, CompletionFinish, ExchangeFacts, FinishReason, LossCause, Observation,
-        ObservationFact, ProviderReportedModel, ProviderRequestId, TerminalEvidence, TokenUsage,
-        ToolCallId, ToolCallProposal, ToolName,
+        ObservationFact, PROVIDER_JSON_NESTING_LIMIT, ProviderReportedModel, ProviderRequestId,
+        TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
     };
 
     use super::{decode_buffered_response, map_finish};
@@ -787,6 +796,44 @@ mod tests {
         ));
         assert_eq!(loss.exchange, exchange());
         assert_eq!(observations, vec![]);
+    }
+
+    #[test]
+    fn overdeep_unknown_success_material_is_response_unintelligible() {
+        let nested = format!(
+            "{}null{}",
+            "[".repeat(PROVIDER_JSON_NESTING_LIMIT + 1),
+            "]".repeat(PROVIDER_JSON_NESTING_LIMIT + 1)
+        );
+        let body = format!(
+            r#"{{
+                "id":"chatcmpl_1","object":"chat.completion","model":"model-exact-1",
+                "choices":[{{"index":0,"message":{{"role":"assistant","content":"ok",
+                    "future":{nested}}},"finish_reason":"stop"}}]
+            }}"#
+        );
+
+        let TerminalEvidence::BoundaryLoss(loss) = decode(&body).0 else {
+            panic!("overdeep unknown content must be rejected before typed parsing");
+        };
+        let LossCause::ResponseUnintelligible { detail } = loss.cause else {
+            panic!("deep success JSON must be response-unintelligible evidence");
+        };
+        assert!(detail.contains("128-container nesting limit"));
+    }
+
+    #[test]
+    fn shallow_additive_fields_remain_tolerated() {
+        let (evidence, _) = decode(
+            r#"{
+                "id":"chatcmpl_1","object":"chat.completion","model":"model-exact-1",
+                "future_envelope":{"enabled":true},
+                "choices":[{"index":0,"message":{"role":"assistant","content":"ok",
+                    "future_message":[1,2]},"finish_reason":"stop"}]
+            }"#,
+        );
+
+        assert!(matches!(evidence, TerminalEvidence::Completed(_)));
     }
 
     #[test]

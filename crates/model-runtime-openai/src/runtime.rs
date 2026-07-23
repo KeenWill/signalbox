@@ -23,7 +23,7 @@ use signalbox_model_runtime::{
     PreparationOutcome, ProvenUnsentEvidence, ProviderErrorEvidence, ProviderErrorKind,
     ProviderMessageId, ProviderReportedModel, ProviderRequestId, SseFraming, StreamInterruption,
     TerminalEvidence, TerminalReport, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
-    TransportFacts, UnsentCause,
+    TransportFacts, UnsentCause, validate_provider_json_nesting,
 };
 
 use signalbox_model_runtime::{CredentialAccess, CredentialValue};
@@ -621,7 +621,9 @@ async fn finish_error(
         Some(Err(cause)) => return exchange_loss(cause, exchange),
         Some(Ok(bytes)) => bytes,
     };
-    if let Ok(ErrorEnvelope { error: Some(error) }) = serde_json::from_slice(&body) {
+    if validate_provider_json_nesting(&body).is_ok()
+        && let Ok(ErrorEnvelope { error: Some(error) }) = serde_json::from_slice(&body)
+    {
         let code = error.code_text();
         let kind = classify_error_envelope(status, code.as_deref(), error.error_type.as_deref());
         return TerminalEvidence::ProviderError(ProviderErrorEvidence {

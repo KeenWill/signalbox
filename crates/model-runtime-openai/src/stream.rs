@@ -19,7 +19,7 @@ use signalbox_model_runtime::{
     AssistantPart, BoundaryLossEvidence, CompletionEvidence, ExchangeFacts, FinishReason,
     LossCause, Observation, ObservationFact, ObservationSink, ProviderErrorEvidence,
     ProviderReportedModel, RefusalEvidence, SseRecord, StreamInterruption, TerminalEvidence,
-    TokenUsage, ToolCallId, ToolCallProposal, ToolName,
+    TokenUsage, ToolCallId, ToolCallProposal, ToolName, validate_provider_json_nesting,
 };
 
 use crate::response::{convert_usage, map_finish};
@@ -87,6 +87,9 @@ impl StreamDecoder {
     ) -> StreamStep {
         if record.data == "[DONE]" {
             return self.apply_done();
+        }
+        if let Err(error) = validate_provider_json_nesting(record.data.as_bytes()) {
+            return self.violation(format!("stream chunk exceeds the JSON bound: {error}"));
         }
         let chunk: ChatChunk = match serde_json::from_str(&record.data) {
             Ok(chunk) => chunk,
@@ -544,9 +547,9 @@ impl StreamDecoder {
 mod tests {
     use signalbox_model_runtime::{
         AssistantPart, CompletionFinish, ExchangeFacts, FinishReason, LossCause, Observation,
-        ObservationFact, ProviderErrorKind, ProviderReportedModel, ProviderRequestId, SseFraming,
-        SseRecord, StreamInterruption, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal,
-        ToolName,
+        ObservationFact, PROVIDER_JSON_NESTING_LIMIT, ProviderErrorKind, ProviderReportedModel,
+        ProviderRequestId, SseFraming, SseRecord, StreamInterruption, TerminalEvidence, TokenUsage,
+        ToolCallId, ToolCallProposal, ToolName,
     };
 
     use super::{StreamDecoder, StreamStep};
@@ -960,6 +963,28 @@ mod tests {
             loss.cause,
             LossCause::StreamProtocolViolation { .. }
         ));
+    }
+
+    #[test]
+    fn overdeep_stream_json_is_a_protocol_violation() {
+        let nested = format!(
+            "{}null{}",
+            "[".repeat(PROVIDER_JSON_NESTING_LIMIT + 1),
+            "]".repeat(PROVIDER_JSON_NESTING_LIMIT + 1)
+        );
+        let chunk = format!(
+            "data: {{\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
+             \"model\":\"model-exact-1\",\"choices\":[],\"future\":{nested}}}\n\n"
+        );
+        let (terminal, _) = drive(&[chunk.as_bytes()]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("overdeep stream material must not reach typed parsing");
+        };
+        let LossCause::StreamProtocolViolation { detail } = loss.cause else {
+            panic!("deep SSE JSON must surface as a stream protocol violation");
+        };
+        assert!(detail.contains("128-container nesting limit"));
     }
 
     #[test]

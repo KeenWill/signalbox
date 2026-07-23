@@ -19,8 +19,9 @@ use std::time::Duration;
 use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, CompletionFinish, ConversationMessage, DeliveryMode,
     LossCause, ModelOperation, ModelRuntime, ModelSettings, Observation, ObservationFact,
-    PreparationFailure, PreparationOutcome, ProviderErrorKind, ProviderRequestId, RequestedTarget,
-    ResolvedTarget, StreamInterruption, TerminalEvidence, TerminalReport, UnsentCause,
+    PROVIDER_JSON_NESTING_LIMIT, PreparationFailure, PreparationOutcome, ProviderErrorKind,
+    ProviderRequestId, RequestedTarget, ResolvedTarget, StreamInterruption, TerminalEvidence,
+    TerminalReport, UnsentCause,
 };
 use signalbox_model_runtime::{
     CredentialAccess, CredentialAccessError, CredentialAccessFailure, CredentialReference,
@@ -369,6 +370,49 @@ async fn credential_rejection_is_typed_provider_error_evidence() {
         Some("authentication_error".to_string())
     );
     assert_eq!(error.exchange.http_status, Some(401));
+}
+
+#[tokio::test]
+async fn malformed_and_overdeep_error_bodies_fall_back_to_http_status() {
+    let nested = format!(
+        "{}null{}",
+        "[".repeat(PROVIDER_JSON_NESTING_LIMIT + 1),
+        "]".repeat(PROVIDER_JSON_NESTING_LIMIT + 1)
+    );
+    let overdeep = format!(
+        r#"{{"type":"error","error":{{"type":"authentication_error",
+            "message":"contradictory token","future":{nested}}}}}"#
+    );
+    let server = CannedServer::serving(vec![
+        http_response(
+            "429 Too Many Requests",
+            &[("content-type", "application/json")],
+            b"{not json",
+        ),
+        http_response(
+            "429 Too Many Requests",
+            &[("content-type", "application/json")],
+            overdeep.as_bytes(),
+        ),
+    ])
+    .await;
+    let runtime = runtime_for(&server.base_url);
+
+    for correlation in ["call-malformed-error", "call-overdeep-error"] {
+        let (report, _) = execute(
+            &runtime,
+            operation(correlation),
+            CancellationSignal::never(),
+        )
+        .await;
+
+        let TerminalEvidence::ProviderError(error) = report.evidence else {
+            panic!("a complete terminal error status remains definitive");
+        };
+        assert_eq!(error.kind, ProviderErrorKind::RateLimited);
+        assert_eq!(error.native.error_token, None);
+        assert_eq!(error.exchange.http_status, Some(429));
+    }
 }
 
 #[tokio::test]
