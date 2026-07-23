@@ -32,6 +32,7 @@ use signalbox_process_protocol::{
     ModelCallDisposition, ModelCallState, ModelSelection as WireModelSelection, RejectionDetail,
     RequestId, ServerFrame, ServerMessage, SessionEvent, TranscriptEntry, TranscriptTextEntry,
     TurnState, content_fragments, decode_client_line, encode_server_line,
+    recover_bounded_client_request_id,
 };
 use sqlx::PgPool;
 use tokio::{
@@ -247,10 +248,10 @@ async fn serve_connection(
                     return Ok(());
                 }
             },
-            IncomingLine::Oversized => {
+            IncomingLine::Oversized(request_id) => {
                 write_error(
                     &mut writer,
-                    RequestId::uncorrelated(),
+                    request_id,
                     ProtocolError::without_detail(ErrorCode::MalformedFrame),
                 )
                 .await?;
@@ -1095,7 +1096,7 @@ where
 
 enum IncomingLine {
     Complete(Vec<u8>),
-    Oversized,
+    Oversized(RequestId),
 }
 
 async fn read_frame_line<Reader>(
@@ -1116,18 +1117,25 @@ where
         }
         if let Some(newline) = available.iter().position(|byte| *byte == b'\n') {
             let consumed = newline + 1;
-            if line.len().saturating_add(consumed) > MAX_FRAME_BYTES {
+            let frame_len = line.len().saturating_add(consumed);
+            if frame_len > MAX_FRAME_BYTES {
+                let request_id = if frame_len == MAX_FRAME_BYTES + 1 {
+                    line.extend_from_slice(&available[..newline]);
+                    recover_bounded_client_request_id(&line)
+                } else {
+                    RequestId::uncorrelated()
+                };
                 reader.consume(consumed);
-                return Ok(Some(IncomingLine::Oversized));
+                return Ok(Some(IncomingLine::Oversized(request_id)));
             }
             line.extend_from_slice(&available[..consumed]);
             reader.consume(consumed);
             return Ok(Some(IncomingLine::Complete(line)));
         }
-        if line.len().saturating_add(available.len()) >= MAX_FRAME_BYTES {
+        if line.len().saturating_add(available.len()) > MAX_FRAME_BYTES {
             let consumed = available.len();
             reader.consume(consumed);
-            return Ok(Some(IncomingLine::Oversized));
+            return Ok(Some(IncomingLine::Oversized(RequestId::uncorrelated())));
         }
         line.extend_from_slice(available);
         let consumed = available.len();
@@ -1552,7 +1560,22 @@ mod tests {
         let mut oversized_reader = BufReader::new(oversized.as_slice());
         assert!(matches!(
             read_frame_line(&mut oversized_reader).await?,
-            Some(IncomingLine::Oversized)
+            Some(IncomingLine::Oversized(request_id)) if request_id.value() == 0
+        ));
+
+        let request_members = r#""request_id":"9""#;
+        let mut correlated = format!(
+            r#"{{"version":1,{request_members},"request":{{"type":"list_sessions","padding":""#
+        )
+        .into_bytes();
+        let suffix = b"\"}}";
+        correlated.resize(MAX_FRAME_BYTES - suffix.len(), b'x');
+        correlated.extend_from_slice(suffix);
+        correlated.push(b'\n');
+        let mut correlated_reader = BufReader::new(correlated.as_slice());
+        assert!(matches!(
+            read_frame_line(&mut correlated_reader).await?,
+            Some(IncomingLine::Oversized(request_id)) if request_id.value() == 9
         ));
         Ok(())
     }
