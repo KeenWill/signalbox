@@ -10637,11 +10637,12 @@ async fn s24_inv032_dispatcher_redelivers_after_cursor_commit_failure_in_order()
     let (container, pool, _database_url) = migrated_postgres().await?;
     let first_session = insert_outbox_session_fixture(&pool, 0xe17).await?;
     let second_session = insert_outbox_session_fixture(&pool, 0xe18).await?;
-    for session in [first_session, second_session] {
-        let mut transaction = pool.begin().await?;
-        append_session_created_test_event(&mut transaction, session).await?;
-        transaction.commit().await?;
-    }
+    let mut first_transaction = pool.begin().await?;
+    append_session_created_test_event(&mut first_transaction, first_session).await?;
+    first_transaction.commit().await?;
+    let mut second_transaction = pool.begin().await?;
+    append_session_created_test_event(&mut second_transaction, second_session).await?;
+    second_transaction.commit().await?;
     sqlx::query(
         "CREATE FUNCTION fail_test_outbox_delivery_commit()
          RETURNS trigger
@@ -10714,21 +10715,32 @@ async fn s24_inv032_dispatcher_redelivers_after_cursor_commit_failure_in_order()
         .execute(&pool)
         .await?;
 
-    for expected in [1, 2] {
-        let next_offer = Arc::clone(&offered);
-        assert_eq!(
-            dispatcher
-                .dispatch_next(move |event| {
-                    next_offer
-                        .lock()
-                        .expect("offer log lock")
-                        .push((event.sequence(), event.session().into_uuid()));
-                    OutboxDeliveryDecision::Delivered
-                })
-                .await?,
-            OutboxDispatchOutcome::Delivered { sequence: expected }
-        );
-    }
+    let first_redelivery = Arc::clone(&offered);
+    assert_eq!(
+        dispatcher
+            .dispatch_next(move |event| {
+                first_redelivery
+                    .lock()
+                    .expect("offer log lock")
+                    .push((event.sequence(), event.session().into_uuid()));
+                OutboxDeliveryDecision::Delivered
+            })
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 1 }
+    );
+    let second_delivery = Arc::clone(&offered);
+    assert_eq!(
+        dispatcher
+            .dispatch_next(move |event| {
+                second_delivery
+                    .lock()
+                    .expect("offer log lock")
+                    .push((event.sequence(), event.session().into_uuid()));
+                OutboxDeliveryDecision::Delivered
+            })
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 2 }
+    );
     assert_eq!(
         dispatcher
             .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
