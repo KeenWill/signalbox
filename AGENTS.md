@@ -1,17 +1,20 @@
 # Agent guidance
 
-Signalbox is in its design and foundation phase. Implementation is limited to
-mechanical workspace and tooling scaffolding plus narrowly scoped domain slices
-authorized by accepted decisions or explicit owner-approved plans; speculative
-product behavior is not permitted.
+Signalbox is built in narrowly scoped slices authorized by recorded decisions or
+explicit owner-approved plans; speculative product behavior is not permitted.
 
-Authoritative starting points are `docs/architecture.md`, `docs/invariants.md`,
-`docs/decisions.md`, `docs/open-questions.md`, and accepted records under
-`docs/decisions/`. Accepted ADRs are the normative specification for decided
-semantics; executable tests become the enforcement of record as slices implement
-them. When selecting milestones, also consult `docs/target-model.md`, the
-owner's directional product target — it guides destination and ordering but is
-not authoritative and never overrides the sources above.
+The normative surface is the living specification: the subsystem pages under
+`docs/spec/` (implemented behavior), the invariant catalog `docs/invariants.md`
+(laws, with INV-tagged tests as the enforcement of record), and
+`docs/domain-spine.md` (public API shapes). `docs/decisions.md` is the
+append-only record of recorded choices; `docs/open-questions.md` is the one home
+of deferred design; `docs/scenarios.md` and `docs/testing-style.md` govern
+scenarios and tests; `docs/architecture.md` orients but owns nothing. The
+historical ADR corpus formerly under `docs/decisions/` is retired: its content
+was distilled into `docs/spec/` (mapping in `docs/spec/README.md`), git history
+is its archive, and it is not citable as current authority. When selecting
+milestones, consult the priority order in `docs/target-model.md` — directional,
+never overriding the sources above.
 
 **Working autonomously.** Within an assigned task, proceed without asking:
 branch, implement, run the validation sequence (it defines done for any code
@@ -28,6 +31,12 @@ and application crates as bare declarations and is the owner's primary review
 surface. Any change to a public item in those crates updates the spine in the
 same pull request; CI checks its exported names and inventory counts against
 source.
+
+**Living specification.** A pull request that changes behavior described by a
+`docs/spec/` page updates the owning section in the same pull request, exactly
+as the spine rule above. Pages state implemented behavior only; deferred or
+undecided work appears in a page's Open edges list and in
+`docs/open-questions.md`, never as speculative prose.
 
 **Finished pull requests.** The owner merges every pull request; deliver each
 one finished and awaiting owner merge:
@@ -59,7 +68,11 @@ one finished and awaiting owner merge:
   no actionable findings or whose findings are all declined, produces no
   accepted finding and concludes the loop: the pull request is finished and
   awaits owner merge. After five waves on one pull request, stop and escalate to
-  the owner regardless of hit rate, reporting the wave history in one line.
+  the owner regardless of hit rate, reporting the wave history in one line. A
+  re-report of an already-fixed finding made against a stale head is declined by
+  standing policy, naming the fixing commit. When a wave's accepted findings are
+  predominantly defects in code the previous wave's fixes introduced, stop and
+  escalate to the owner instead of continuing the loop.
 
 **Stacked pull requests.** Stacks may grow as deep as the work requires; the
 owner merges in batches, so never wait on a merge to continue. Keep every stack
@@ -74,24 +87,30 @@ linear and healthy:
 - Never force-push or rewrite a shared branch without first proving it necessary
   and safe; preserve owner-authored and externally added changes.
 
-Every normative statement lives in exactly one place — an accepted ADR, a
-decision-log entry, a catalog row or scenario that is its own statement of
-record, or an implemented test — and other documents link to it rather than
-restating it. Do not restate content owned elsewhere in the overview documents
-(architecture, the invariant catalog's ADR-backed summaries, scenarios); a row
-or fixture that is itself the statement of record changes only together with the
-decision that authorizes the change.
+Every normative statement lives in exactly one place — the owning `docs/spec/`
+page, a decision-log entry, an invariant row, a scenario that is its own
+statement of record, or an implemented test — and other documents link to it
+rather than restating it. Do not restate content owned elsewhere in overview
+documents; a row or fixture that is itself the statement of record changes only
+together with the decision that authorizes the change.
 
-Decisions have two weights. Ordinary decisions are made in the pull request and
-recorded as a dated entry in `docs/decisions.md` stating context, decision,
-rejected alternatives, and what it affects. Foundation-weight changes — altering
-accepted ADR semantics, moving a boundary between domain, storage, wire, or
+Decisions have two weights. Ordinary decisions — a new dependency, a provisional
+parameter or limit, a policy or process change, a migration choice the
+specification does not already fix — are made in the pull request and recorded
+as a dated entry in `docs/decisions.md` stating context, decision, rejected
+alternatives, and what it affects. Implementing behavior the specification and
+recorded decisions already fix is not itself a decision; the pull-request
+description and the spec update are its record. Foundation-weight changes —
+changing normative semantics in a `docs/spec/` page beyond recording behavior
+the same stack implements, moving a boundary between domain, storage, wire, or
 framework representations, weakening an invariant, introducing a technology that
 constrains several components, or closing an open question whose resolution has
-any of these effects — require an ADR under `docs/decisions/`, exercised against
-scenarios. Do not silently change a foundational decision or close a recorded
-open question. Keep domain types distinct from storage records, protocol
-messages, and framework types. Keep pull requests narrow and reviewable.
+any of these effects — are proposed as a specification diff reviewed at the
+bottom of the implementing stack, with a `docs/decisions.md` entry recording the
+choice; owner merge is acceptance. Do not silently change a foundational
+decision or close a recorded open question. Keep domain types distinct from
+storage records, protocol messages, and framework types. Keep pull requests
+narrow and reviewable.
 
 Tests reference the scenario and invariant identifiers they enforce when the
 connection is meaningful (for example `S12_INV011_rejects_stale_generation`, or

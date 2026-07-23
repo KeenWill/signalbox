@@ -1,8 +1,8 @@
 # yaml-language-server: $schema=https://storage.googleapis.com/coderabbit_public_assets/schema.v2.json
 #
 # CodeRabbit configuration: pre-merge checks as verdict-logic mirrors of rules
-# owned by AGENTS.md, docs/testing-style.md, docs/goal-mode.md, and
-# docs/decisions/README.md. Ownership stays with those documents; each check
+# owned by AGENTS.md, docs/testing-style.md, docs/goal-mode.md, and the living
+# specification under docs/spec/. Ownership stays with those documents; each check
 # restates only the operational pass/fail logic, and the comment above each
 # check names its owning rule document. See the docs/decisions.md entry
 # "CodeRabbit pre-merge checks mirror repository rules" for modes and rollout.
@@ -21,12 +21,10 @@ reviews:
         mode: warning
         instructions: |-
           Scope: only PRs that add or modify text in the Enforcement column of docs/invariants.md. Pass immediately if that column is untouched.
-          For every Enforcement cell added or changed in this PR:
+          Enforcement cells are bare citations: the INV tag with one or more file paths, no coverage narration. For every cell added or changed in this PR:
           1. Every cited file path must exist in the repository at the PR head. Fail on any dead path.
-          2. A claim of the form "INV-NNN-tagged tests in <file>" must be verifiable: search the cited file case-insensitively for "invNNN" in test function names or "INV-NNN" in comments. Zero matches is a Fail.
-          3. A test function name cited verbatim must exist in the cited file. Fail if absent.
-          4. Totality language — "complete", "every variant", "all transitions", "exhaustive", "each <case>" — is allowed only when the cited file's tests visibly enumerate the claimed cases: every variant, transition, or case named in the claim must appear in the cited file's test code. Fail if any claimed case has no match.
-          5. Enforcement that exists only as a plan must not be stated in the present tense. Fail on a present-tense claim ("is enforced by", "tests in") whose cited artifact is absent from the PR head.
+          2. Each cited file must carry the row's tag: search case-insensitively for "invNNN" in test function names or "INV-NNN" in comments. Zero matches is a Fail.
+          3. Prose beyond the citations — totality claims, coverage narration, test-by-test description — is a Fail; the INV-tagged tests themselves are the statement of coverage.
           Evidence must come from the PR head tree — the cited tests may be added by this same PR. Report each failing cell with its INV ID and the missing evidence. If docs/invariants.md is changed but no Enforcement cell is, Pass.
 
       # verdict logic for the decision-weight rules owned by AGENTS.md and
@@ -35,19 +33,20 @@ reviews:
         mode: warning
         instructions: |-
           Determine whether this PR makes a decision, then verify it is recorded.
-          Ordinary-decision triggers (any): a new public trait or port in crates/domain or crates/application; a new file under crates/persistence/migrations/; a new public domain type or changed public domain semantics; a dependency added to any Cargo.toml [dependencies] or [dev-dependencies] (not a pure version bump); a change to process or tooling rules (.github/workflows/, scripts/, .coderabbit.yaml, AGENTS.md, CONTRIBUTING.md, docs/goal-mode.md, docs/testing-style.md).
+          Ordinary-decision triggers (any): a dependency added to any Cargo.toml [dependencies] or [dev-dependencies] (not a pure version bump); a change to process or tooling rules (.github/workflows/, scripts/, .coderabbit.yaml, AGENTS.md, CONTRIBUTING.md, docs/goal-mode.md, docs/testing-style.md); a migration under crates/persistence/migrations/ that backfills data, alters constraints on an existing table, or otherwise makes a choice the specification does not already fix; a provisional limit or parameter the PR description itself presents as provisional or owner-decided.
           If any trigger fires, docs/decisions.md must gain a new entry in this PR headed "## YYYY-MM-DD — <title>" (newest first) containing all four bolded sections: **Context.**, **Decision.**, **Rejected alternatives.**, **Affects.**. Fail if the entry or any section is missing.
-          Foundation-weight triggers (any): the meaning of an accepted file under docs/decisions/ changes; a boundary between domain, storage, wire, or framework representations moves; an invariant row in docs/invariants.md is weakened or deleted; an entry in docs/open-questions.md is closed or removed. If any fires, the PR must add an ADR file under docs/decisions/ (or an explicit supersession linking both directions). A decisions.md entry alone is a Fail for foundation weight.
-          Pass when no trigger fires (mechanical fixes, refactors adding no public surface, formatting), or the required record is present. Report which trigger fired and which record is missing.
+          NOT a trigger: implementing behavior the docs/spec/ pages and recorded decisions already fix — new public types, ports, or traits, and purely additive migrations realizing specified behavior need no entry; the spec update and PR description are their record.
+          Foundation-weight triggers (any): a docs/spec/ page's normative semantics change beyond recording behavior this PR or its stack implements; a boundary between domain, storage, wire, or framework representations moves; an invariant row in docs/invariants.md is weakened or deleted; an entry in docs/open-questions.md is closed or removed. If any fires, the specification diff must ride in this PR or at the bottom of its stack AND a docs/decisions.md entry must record the choice; Fail if either is missing.
+          Pass when no trigger fires (mechanical fixes, refactors, formatting, specified-behavior slices), or the required records are present. Report which trigger fired and which record is missing.
 
       # verdict logic for the single-statement-of-record rule owned by AGENTS.md
       - name: "Normative statements live in one place"
         mode: warning
         instructions: |-
           Scope: Markdown prose added or modified under docs/ or in README.md. Pass immediately if none changed.
-          Fail when the PR adds a normative statement — a sentence using must, never, always, only, cannot, or "is rejected" about system behavior or process — that duplicates a statement owned elsewhere: an accepted ADR under docs/decisions/, a docs/decisions.md entry, an invariant row in docs/invariants.md, a scenario in docs/scenarios.md, or a rule in AGENTS.md or docs/testing-style.md. Duplication means a reader could learn the rule from the new text alone; a restatement is acceptable only when the same sentence or paragraph links to the owning document.
-          Also fail when the PR copies a single-owner list into a second file: the validation command sequence (owned by AGENTS.md), the foundation-weight criteria (owned by docs/decisions/README.md, mirrored only by the decision-log preamble), or ADR-owned semantics restated into docs/architecture.md or docs/glossary.md.
-          Pass when: the new text is itself the statement of record (a new ADR, invariant row, or decision entry); or the added prose links to its owner in the same paragraph; or the change is a cross-reference, link, or wording fix adding no normative content.
+          Fail when the PR adds a normative statement — a sentence using must, never, always, only, cannot, or "is rejected" about system behavior or process — that duplicates a statement owned elsewhere: the owning docs/spec/ page, a docs/decisions.md entry, an invariant row in docs/invariants.md, a scenario in docs/scenarios.md, or a rule in AGENTS.md or docs/testing-style.md. Duplication means a reader could learn the rule from the new text alone; a restatement is acceptable only when the same sentence or paragraph links to the owning document.
+          Also fail when the PR copies a single-owner list into a second file: the validation command sequence (owned by AGENTS.md), the decision-weight criteria (owned by AGENTS.md), or spec-owned semantics restated into docs/architecture.md or docs/glossary.md.
+          Pass when: the new text is itself the statement of record (a new or updated owning spec-page section, invariant row, or decision entry); or the added prose links to its owner in the same paragraph; or the change is a cross-reference, link, or wording fix adding no normative content.
           Report each failure as: the added sentence, the owning document, and the link that should replace the restatement.
 
       # verdict logic for the finished-pull-request description rule owned by
@@ -75,9 +74,8 @@ reviews:
           4. Rule 17: if the PR renames, splits, or deletes a test in a file cited by docs/invariants.md, the file must still contain tests tagged with each INV the catalog binds to it, and the catalog cell must be updated in this PR when coverage moves. Fail otherwise.
           5. If the count of #[test] functions in a modified test file decreases, the PR description or a decision-log entry must state which tests were removed and why (rule 19 deletions qualify). A silent decrease is a Fail.
 
-      # verdict logic for the embedded-migrations discipline owned by ADR-0022
-      # and ADR-0032 (docs/decisions/0022-persistence-representation.md,
-      # docs/decisions/0032-postgres-implementation-dependencies.md)
+      # verdict logic for the embedded-migrations discipline owned by the
+      # persistence-protocol specification (docs/spec/persistence-protocol.md)
       - name: "Migration files are immutable once merged"
         mode: error
         instructions: |-
@@ -88,16 +86,6 @@ reviews:
           2. The numeric prefix must be strictly greater than the highest prefix on the base branch, and no two files added by this PR may share a prefix.
           Exception: a migration file this same PR introduced (present in the PR's commits but absent from the base branch) may still be edited within the PR — that is not a violation.
           Pass when no base-branch migration file is touched and all added filenames order correctly. Report each violation with the filename and whether it is an edit of a merged migration or an ordering conflict.
-
-      # verdict logic for the frozen-surface rule owned by docs/goal-mode.md
-      - name: "Frozen surfaces cite the freeze-lift condition"
-        mode: error
-        instructions: |-
-          Scope: crates/domain/src/fatal_mismatch.rs, all files under crates/domain/src/fatal_mismatch/, and crates/domain/src/provider_evidence.rs. Pass immediately if the diff touches none of them.
-          These surfaces are frozen by docs/goal-mode.md: no new public items and no semantic changes until model-call preparation exists. Mechanical changes are allowed: formatting, comment and doc-comment fixes, and adjustments required by CI (fmt, clippy, spine sync) or by an accepted review finding on this PR.
-          Fail if the diff adds any new public item (pub struct, enum, trait, fn, method, variant, or field) in these files, or changes runtime behavior, type semantics, or state transitions in them — unless the PR description explicitly states the freeze is lifted because the model-call preparation milestone has been selected, citing docs/goal-mode.md.
-          Judging "semantic": a change that alters what any caller can construct, observe, or trigger is semantic; a change invisible to all callers is mechanical.
-          Report the changed item, whether it is a new public item or a semantic change, and whether the description carries the required freeze-lift citation.
 
       # verdict logic for the sealed-annotation contract owned by
       # docs/domain-spine.md (spine-maintenance rule owned by AGENTS.md)
@@ -113,15 +101,14 @@ reviews:
           Verification: for each sealed annotation on a type whose producing code this PR touches, list the type's public producers in source (search for public fns and methods returning the type) and compare against the producers the annotation names. The sets must match exactly.
           Report each stale annotation with the type, the producers the prose names, and the producers found in source.
 
-      # verdict logic for the append-only record rules owned by the
-      # docs/decisions.md preamble and docs/decisions/README.md
-      - name: "Decision log and ADRs are append-only"
+      # verdict logic for the append-only record rule owned by the
+      # docs/decisions.md preamble
+      - name: "Decision log is append-only"
         mode: error
         instructions: |-
-          Scope: docs/decisions.md and files under docs/decisions/ that exist on the base branch. Pass immediately if neither is touched.
-          docs/decisions.md: Fail if the diff changes or deletes any line inside an entry (a "## YYYY-MM-DD — ..." section) that exists on the base branch, except pure mdformat rewrapping with identical words, or fixing a hyperlink whose target this same PR moved. A new entry must be inserted above all existing entries with a date not older than the newest existing entry; Fail on out-of-order insertion. An entry this same PR introduced may still be edited within the PR.
-          docs/decisions/*.md existing on the base branch: Fail if the diff changes the Decision section or any normative statement, unless (a) the PR description declares a meaning-preserving correction and the change does not alter what is permitted or forbidden, or (b) it is a supersession: a new ADR file is added in this PR and the two records link both directions (Superseded-by on the old, Supersedes on the new). Header history notes (Amended, Accepted-with) accompanying such a declared change are allowed.
-          Report each violated entry or ADR and which rule it breaks.
+          Scope: docs/decisions.md. Pass immediately if it is untouched.
+          Fail if the diff changes or deletes any line inside an entry (a "## YYYY-MM-DD — ..." section) that exists on the base branch, except pure mdformat rewrapping with identical words, or fixing a hyperlink whose target this same PR moved. A new entry must be inserted above all existing entries with a date not older than the newest existing entry; Fail on out-of-order insertion. An entry this same PR introduced may still be edited within the PR.
+          Report each violated entry and which rule it breaks.
 
 knowledge_base:
   code_guidelines:

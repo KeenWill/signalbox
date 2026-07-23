@@ -17,11 +17,9 @@ finishing a milestone.
 - Any new public domain or application type ships with a consumer in the same
   pull request or stack.
 - Domain machinery for steps that cannot yet execute is frozen: no new public
-  items and no semantic changes — in particular the fatal-mismatch and
-  provider-evidence surface until model-call preparation exists. A step's freeze
-  lifts when that step becomes the selected milestone (the fatal-mismatch and
-  provider-evidence surface unfreezes with the model-call milestone). Mechanical
-  fixes required by CI or accepted review feedback are allowed.
+  items and no semantic changes. A step's freeze lifts when that step becomes
+  the selected milestone. Mechanical fixes required by CI or accepted review
+  feedback are allowed.
 
 ## Executing
 
@@ -29,11 +27,11 @@ finishing a milestone.
   branch; no two agents edit the same checkout. The root agent owns
   architecture, reconciliation, stack ordering, final review, and pull-request
   management.
-- When one track hits an owner gate — a needed ADR, a dependency approval, an
-  unclear priority — stop that track and report the precise decision needed
-  rather than inventing semantics; continue all other unblocked work. Delegating
-  services, re-export batches, and polish of unconsumed machinery are not
-  substitutes for blocked work.
+- When one track hits an owner gate — a needed foundation-weight decision, a
+  dependency approval, an unclear priority — stop that track and report the
+  precise decision needed rather than inventing semantics; continue all other
+  unblocked work. Delegating services, re-export batches, and polish of
+  unconsumed machinery are not substitutes for blocked work.
 - Maintain compact progress checkpoints naming the current track, what has been
   verified, what remains, and any semantic or external blocker.
 
