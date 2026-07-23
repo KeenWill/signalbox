@@ -405,16 +405,29 @@ supplied together. The client never silently substitutes a new command identity
 for an ambiguous attempt. It uses a fresh nonzero request identity per
 connection, renders only known version-one messages, and exits nonzero on
 protocol or application errors other than the follow-specific `resync_required`
-control case, which reconnects for a fresh snapshot. After completion, `send`
-rereads and prints only authoritative committed assistant text produced for its
-exact turn. A failed or refused turn produces a typed diagnostic and a nonzero
-exit without reply text. `follow` prints the initial transcript and subsequent
-typed durable updates until interrupted. By default every process-derived text
-field written to a terminal preserves line feed but renders every other C0 code
-point, DEL, and C1 code points as visible `\u{...}` escapes, preventing ESC/OSC
-execution. `--raw-output` is the explicit opt-in that writes those fields
-unchanged; the same safe-rendering choice covers assistant text, typed
-diagnostics, and durable updates.
+control case, which reconnects for a fresh snapshot.
+
+The client validates each complete snapshot and its terminal counts into an
+owner-private anonymous temporary-file spool before replay or presentation.
+Turn and source-qualified entry identity indexes are disk-backed too, so the
+wire's intentionally unbounded aggregate snapshot size does not become
+unbounded client memory. Before adopting an initial or resynchronized snapshot
+cursor, `follow` presents its acceptance-ordered turn projections, including
+queued owner content, active attempt and current-call state, recovery waits, and
+terminal state. A transition committed at or below that cursor therefore
+remains visible even when it has not added a semantic transcript entry.
+
+After completion, `send` rereads and prints only authoritative committed
+assistant text produced for its exact turn. A failed or refused turn produces a
+typed diagnostic and a nonzero exit without reply text. `follow` prints the
+initial transcript and subsequent typed durable updates until interrupted. By
+default every process-derived text field written to a terminal preserves line
+feed but renders every other C0 code point, DEL, and C1 code points as visible
+`\u{...}` escapes, preventing ESC/OSC execution. `--raw-output` is the explicit
+opt-in that writes those fields unchanged; the same safe-rendering choice covers
+assistant text, typed diagnostics, and durable updates. Each complete raw text
+value is flushed before the client awaits another frame, without adding a
+delimiter.
 
 The existing `signalbox-debug` binary is unchanged and remains a development
 harness, not a protocol client.
