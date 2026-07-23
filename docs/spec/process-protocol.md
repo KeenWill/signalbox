@@ -418,6 +418,12 @@ content, active attempt and current-call state, recovery waits, and terminal
 state. A transition committed at or below that cursor therefore remains visible
 even when it has not added a semantic transcript entry.
 
+The unbounded aggregate session-summary sequence is bounded the same way. `list`
+validates ordering and the terminal count while spooling summary frames to an
+anonymous temporary file, then presents them only after the complete sequence
+validates. `send` validates the whole sequence with constant memory and retains
+only the selected session's defaults version.
+
 After completion, `send` rereads and prints only authoritative committed
 assistant text produced for its exact turn. A failed or refused turn produces a
 typed diagnostic and a nonzero exit without reply text. `follow` prints the

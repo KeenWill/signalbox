@@ -2,7 +2,7 @@
 
 use std::{
     ffi::OsString,
-    io::{Read, Write},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::PathBuf,
     process::ExitCode,
 };
@@ -13,7 +13,8 @@ use error::ClientError;
 use presentation::{Output, SnapshotSelection};
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ErrorCode, InputContent,
-    ModelCallDisposition, ModelCallState, ModelSelection, ServerMessage, SessionEvent, TurnState,
+    ModelCallDisposition, ModelCallState, ModelSelection, ServerFrame, ServerMessage, SessionEvent,
+    TurnState, decode_server_line, encode_server_line,
 };
 use transcript::{SnapshotIdentitySet, SnapshotRecord, TranscriptSnapshot, read_snapshot};
 use uuid::Uuid;
@@ -190,12 +191,33 @@ async fn create(
 }
 
 async fn list(client: &mut ProcessClient, output: &mut Output<'_>) -> Result<(), ClientError> {
-    for summary in read_session_summaries(client).await? {
-        output.session_summary(
-            summary.session_id,
-            summary.defaults_version,
-            &selection_display(summary.model_selection),
-        )?;
+    let mut spool = tempfile::tempfile()?;
+    read_session_summaries(client, |_, frame| {
+        spool.write_all(&encode_server_line(frame)?)?;
+        Ok(())
+    })
+    .await?;
+    spool.seek(SeekFrom::Start(0))?;
+    let mut reader = BufReader::new(spool);
+    let mut line = Vec::new();
+    while reader.read_until(b'\n', &mut line)? != 0 {
+        match decode_server_line(&line)?.message() {
+            ServerMessage::SessionSummary {
+                session_id,
+                defaults_version,
+                model_selection,
+            } => output.session_summary(
+                *session_id,
+                defaults_version.value(),
+                &selection_display(*model_selection),
+            )?,
+            _ => {
+                return Err(ClientError::Protocol(
+                    "session-summary spool contained a non-summary frame",
+                ));
+            }
+        }
+        line.clear();
     }
     Ok(())
 }
@@ -217,12 +239,17 @@ async fn send(
     }
     let defaults_version = match defaults_version {
         Some(version) => version,
-        None => read_session_summaries(client)
-            .await?
-            .into_iter()
-            .find(|summary| summary.session_id == session_id)
-            .map(|summary| CanonicalU64::new(summary.defaults_version))
-            .ok_or(ClientError::Input("the selected session was not listed"))?,
+        None => {
+            let mut selected = None;
+            read_session_summaries(client, |summary, _| {
+                if summary.session_id == session_id {
+                    selected = Some(CanonicalU64::new(summary.defaults_version));
+                }
+                Ok(())
+            })
+            .await?;
+            selected.ok_or(ClientError::Input("the selected session was not listed"))?
+        }
     };
     output.recovery_value("defaults_version", &defaults_version.value().to_string())?;
 
@@ -478,14 +505,7 @@ fn terminal_snapshot_selection(event: &SessionEvent) -> Option<SnapshotSelection
         SessionEvent::TurnFailed { turn_id, .. } => {
             Some(SnapshotSelection::Failed { turn_id: *turn_id })
         }
-        SessionEvent::TurnRefused {
-            turn_id,
-            model_call_id,
-            ..
-        } => Some(SnapshotSelection::Refused {
-            turn_id: *turn_id,
-            model_call_id: *model_call_id,
-        }),
+        SessionEvent::TurnRefused { .. } => None,
         SessionEvent::SessionCreated {}
         | SessionEvent::InputAccepted { .. }
         | SessionEvent::TurnActivated { .. }
@@ -533,12 +553,12 @@ fn write_assistant_texts(
 struct SessionSummary {
     session_id: CanonicalUuid,
     defaults_version: u64,
-    model_selection: ModelSelection,
 }
 
 async fn read_session_summaries(
     client: &mut ProcessClient,
-) -> Result<Vec<SessionSummary>, ClientError> {
+    mut consume: impl FnMut(SessionSummary, &ServerFrame) -> Result<(), ClientError>,
+) -> Result<(), ClientError> {
     let mut connection = client.request(ClientRequest::ListSessions {}).await?;
     match connection.message().await? {
         ServerMessage::SessionsStart {} => {}
@@ -553,37 +573,43 @@ async fn read_session_summaries(
             ));
         }
     }
-    let mut summaries = Vec::new();
+    let mut prior_session = None;
+    let mut summary_count = 0_u64;
     loop {
-        match connection.message().await? {
+        let frame = connection.frame().await?;
+        match frame.message() {
             ServerMessage::SessionSummary {
                 session_id,
                 defaults_version,
-                model_selection,
+                ..
             } => {
-                if summaries.last().is_some_and(|prior: &SessionSummary| {
-                    prior.session_id.into_uuid() >= session_id.into_uuid()
-                }) {
+                if prior_session
+                    .is_some_and(|prior: CanonicalUuid| prior.into_uuid() >= session_id.into_uuid())
+                {
                     return Err(ClientError::Protocol(
                         "session summaries were not strictly ordered",
                     ));
                 }
-                summaries.push(SessionSummary {
-                    session_id,
+                let summary = SessionSummary {
+                    session_id: *session_id,
                     defaults_version: defaults_version.value(),
-                    model_selection,
-                });
+                };
+                consume(summary, &frame)?;
+                prior_session = Some(*session_id);
+                summary_count = summary_count
+                    .checked_add(1)
+                    .ok_or(ClientError::Protocol("session summary count overflowed"))?;
             }
             ServerMessage::SessionsEnd { session_count }
-                if usize::try_from(session_count.value()) == Ok(summaries.len()) =>
+                if session_count.value() == summary_count =>
             {
-                return Ok(summaries);
+                return Ok(());
             }
             ServerMessage::Error {
                 code,
                 message,
                 detail,
-            } => return Err(ClientError::remote(code, message, detail)),
+            } => return Err(ClientError::remote(*code, message.clone(), *detail)),
             _ => {
                 return Err(ClientError::Protocol(
                     "session list sequence or count was invalid",
@@ -634,7 +660,7 @@ mod tests {
 
     use super::{
         MAX_INPUT_CONTENT_BYTES, ProcessClient, model_call_recovery_transition, read_input, run,
-        socket_path, submit_input, terminal_snapshot_state,
+        socket_path, submit_input, terminal_snapshot_selection, terminal_snapshot_state,
     };
     use crate::error::ClientError;
 
@@ -709,6 +735,18 @@ mod tests {
             &event,
             CanonicalUuid::from_uuid(Uuid::from_u128(3))
         ));
+    }
+
+    #[test]
+    fn refused_terminal_event_requests_no_side_reread() {
+        assert!(
+            terminal_snapshot_selection(&SessionEvent::TurnRefused {
+                turn_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+                model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+                terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+            })
+            .is_none()
+        );
     }
 
     #[tokio::test]

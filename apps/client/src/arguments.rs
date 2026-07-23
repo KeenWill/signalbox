@@ -57,10 +57,10 @@ impl std::error::Error for UsageError {}
 )]
 struct Cli {
     /// Override SIGNALBOX_SOCKET_PATH.
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", global = true)]
     socket: Option<PathBuf>,
     /// Write process-derived text without terminal-safe escaping.
-    #[arg(long)]
+    #[arg(long, global = true)]
     raw_output: bool,
     #[command(subcommand)]
     command: CliCommand,
@@ -202,9 +202,9 @@ fn canonical_u64(value: &str) -> Result<CanonicalU64, String> {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
+    use std::{ffi::OsString, path::Path};
 
-    use super::{Command, ParseOutcome, parse};
+    use super::{Arguments, Command, ParseOutcome, parse};
 
     #[test]
     fn send_recovery_flags_are_an_exact_pair() {
@@ -233,6 +233,33 @@ mod tests {
     #[test]
     fn duplicate_global_options_are_rejected() {
         assert!(parse(["--raw-output", "--raw-output", "list"].map(Into::into)).is_err());
+    }
+
+    #[test]
+    fn global_options_are_accepted_before_or_after_the_subcommand() {
+        assert!(matches!(
+            parse(["list", "--socket", "/tmp/hub.sock"].map(Into::into)),
+            Ok(ParseOutcome::Run(Arguments {
+                socket: Some(path),
+                raw_output: false,
+                command: Command::List,
+            })) if path == Path::new("/tmp/hub.sock")
+        ));
+        assert!(matches!(
+            parse(
+                [
+                    "follow",
+                    "00000000-0000-0000-0000-000000000001",
+                    "--raw-output"
+                ]
+                .map(Into::into)
+            ),
+            Ok(ParseOutcome::Run(Arguments {
+                raw_output: true,
+                command: Command::Follow { .. },
+                ..
+            }))
+        ));
     }
 
     #[test]

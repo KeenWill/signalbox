@@ -23,10 +23,6 @@ pub(crate) enum SnapshotSelection {
     Failed {
         turn_id: CanonicalUuid,
     },
-    Refused {
-        turn_id: CanonicalUuid,
-        model_call_id: CanonicalUuid,
-    },
 }
 
 pub(crate) struct Output<'a> {
@@ -378,16 +374,6 @@ impl SnapshotSelection {
                     turn_id: entry_turn,
                     model_call_id: entry_call,
                 }),
-            )
-            | (
-                Self::Refused {
-                    turn_id,
-                    model_call_id,
-                },
-                SnapshotEntryKind::Text(TranscriptTextEntry::Assistant {
-                    turn_id: entry_turn,
-                    model_call_id: entry_call,
-                }),
             ) => turn_id == *entry_turn && model_call_id == *entry_call,
             (
                 Self::Completed { turn_id, .. },
@@ -402,7 +388,7 @@ impl SnapshotSelection {
                 }),
             ) => turn_id == *entry_turn,
             (
-                Self::Completed { .. } | Self::Failed { .. } | Self::Refused { .. },
+                Self::Completed { .. } | Self::Failed { .. },
                 SnapshotEntryKind::Text(_)
                 | SnapshotEntryKind::Marker(
                     TranscriptEntry::TurnCompleted { .. } | TranscriptEntry::TurnFailed { .. },
