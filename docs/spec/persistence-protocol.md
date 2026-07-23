@@ -353,11 +353,12 @@ protocol scope). Implemented storage:
 
 - `outbox_event` header (allocator-owned `event_sequence`, closed `event_kind`,
   `storage_version`, `session_id`) plus one typed record table per kind —
-  `session_created_outbox_event`, `turn_failed_outbox_event`,
+  `session_created_outbox_event`, `input_accepted_outbox_event`,
+  `turn_activated_outbox_event`, `turn_failed_outbox_event`,
   `model_call_transition_outbox_event`, `turn_completed_outbox_event`, and
   `turn_refused_outbox_event` — with a deferred trigger requiring exactly one
   typed record per header. The header and typed record tables are append-only
-  (`reject_immutable_record_change`), and all eight outbox tables reject
+  (`reject_immutable_record_change`), and all ten outbox tables reject
   `TRUNCATE`.
 - `outbox_sequence_state`, a mutable singleton row (deletion rejected): a
   `BEFORE INSERT` trigger on the header allocates `last_sequence + 1` by
@@ -375,14 +376,15 @@ Appends happen only through the crate-private `outbox::append` on the caller's
 existing connection; it never begins or commits a transaction, so the
 state-changing adapter owns the atomic boundary and no post-commit publish step
 exists in application code. Implemented appends: CreateSession handling appends
-`session_created`; startup recovery's terminalization appends `turn_failed` (a
-pending-steering deferral rolls back and appends nothing). Model-call state
-transitions append `model_call_transition`, completion closure appends
-`turn_completed`, refusal closure appends `turn_refused`, and known-failure
-closure appends `turn_failed`. A guarded transition that changes zero rows
-appends zero events. Why: writing the event in the committing transaction makes
-the dual-write failure (state without event, or event without state)
-unrepresentable.
+`session_created`; an applied turn-origin SubmitInput appends `input_accepted`;
+and eligibility activation appends `turn_activated`. Startup recovery's
+terminalization appends `turn_failed` (a pending-steering deferral rolls back
+and appends nothing). Model-call state transitions append
+`model_call_transition`, completion closure appends `turn_completed`, refusal
+closure appends `turn_refused`, and known-failure closure appends `turn_failed`.
+A guarded transition that changes zero rows appends zero events. Why: writing
+the event in the committing transaction makes the dual-write failure (state
+without event, or event without state) unrepresentable.
 
 The public `OutboxDispatcher` is the storage-side single-consumer seam. It locks
 the delivery singleton, decodes exactly the next typed event, invokes a

@@ -17,6 +17,7 @@ use sqlx::{PgConnection, PgPool, types::Uuid};
 
 use crate::{
     mapping::{input_position_to_numeric, session_id_to_uuid, turn_id_to_uuid},
+    outbox::{self, OutboxEvent},
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
     submit_input::{SubmitInputCorruption, SubmitInputRepositoryError, load_scheduling_projection},
 };
@@ -498,7 +499,18 @@ async fn insert_prepared_activation(
     .rows_affected();
 
     match updated {
-        1 => Ok(activated),
+        1 => {
+            outbox::append(
+                connection,
+                OutboxEvent::TurnActivated {
+                    session,
+                    turn: activated.turn(),
+                    current_attempt: initial_attempt,
+                },
+            )
+            .await?;
+            Ok(activated)
+        }
         0 => Err(
             StartEligibleTurnCorruption::Inconsistent("guarded activation matched no row").into(),
         ),
