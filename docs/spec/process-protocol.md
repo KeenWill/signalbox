@@ -1,7 +1,8 @@
 # Process protocol
 
 This page specifies Signalbox process protocol version one and the terminal
-client that consumes it. It is the normative boundary between a local client
+client that consumes it, verified against the implementing stack through PR #177
+(`agent/terminal-client`). It is the normative boundary between a local client
 process and `signalbox-hubd`; domain values, PostgreSQL records, and wire
 messages remain distinct representations.
 
@@ -212,9 +213,14 @@ Each `transcript_turn` has `turn_id` and one closed `state` object:
 - `queued { accepted_input_id, content }`;
 - `active_running { current_attempt_id, current_model_call }`, where
   `current_model_call` is null before preparation or `{ model_call_id, state }`
-  with state exactly `prepared` or `in_flight`;
+  with state exactly `prepared`, `in_flight`, or `cancellation_requested`;
 - `active_awaiting_model_call_recovery { ended_attempt_id, recovery_model_call_id }`;
-- `failed { terminal_frontier_id }`;
+- `failed { terminal_frontier_id, terminal_attempt_id, terminal_model_call }`,
+  where `terminal_attempt_id` is null only for an evidence-free recovery
+  failure, and `terminal_model_call` is null when that failure or physical
+  attempt owns no call; otherwise it is `{ model_call_id, disposition }` with
+  disposition exactly `known_failed` or `cancelled`. A nonnull
+  `terminal_model_call` requires a nonnull `terminal_attempt_id`;
 - `completed { terminal_frontier_id, terminal_attempt_id, terminal_model_call_id }`;
 - `refused { terminal_frontier_id, terminal_attempt_id, terminal_model_call_id }`;
 - `cancelled { terminal_frontier_id, terminal_attempt_id, terminal_model_call_id }`,
@@ -260,18 +266,21 @@ startup. The two integer keys are the ASCII namespaces `SBX1` and `HUB1`.
 
 The singleton `hub_fence_state` stores a positive generation. Every application
 pool connection acquires and retains a shared session advisory lock keyed by the
-ASCII namespace `SBF1` (`1396852273`) and this hub's generation before the
-connection becomes usable. A successor holding the singleton guard takes and
-retains the exclusive prior-generation fence, then transactionally advances the
-row before constructing its fenced pool. That exclusive request waits for all
-prior pooled sessions and prevents the old process from opening another usable
-connection. The first migration creates and initializes the row for a database
-that cannot have a prior fenced hub; later startups fence before running any
-newer migration. This fence migration belongs to Signalbox's initial deployment:
-the owner confirms that no deployed database or hub predates it, so there is no
-legacy unfenced writer to drain during the first installation. Importing or
-upgrading a pre-fence database is unsupported. Exhaustion or corruption fails
-startup rather than wrapping.
+ASCII namespace `SBF1` (`1396852273`) and this hub's generation, then requires
+the durable singleton still to equal that generation before the connection
+becomes usable. A mismatch rejects the connection. A successor holding the
+singleton guard takes and retains the exclusive prior-generation fence, then
+transactionally advances the row before constructing its fenced pool. That
+exclusive request waits for all prior pooled sessions and prevents the old
+process from opening another usable connection: an older generation that tries
+again after a failed intermediate successor can acquire only its old shared
+lock, then fails the current-generation check. The first migration creates and
+initializes the row for a database that cannot have a prior fenced hub; later
+startups fence before running any newer migration. This fence migration belongs
+to Signalbox's initial deployment: the owner confirms that no deployed database
+or hub predates it, so there is no legacy unfenced writer to drain during the
+first installation. Importing or upgrading a pre-fence database is unsupported.
+Exhaustion or corruption fails startup rather than wrapping.
 
 Together these guards enforce one active hub process—and therefore one
 dispatcher and one process-local fan-out—for a database, while preventing a
