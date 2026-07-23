@@ -2277,6 +2277,75 @@ impl ReconstitutedReplaceSessionDefaults {
 }
 ```
 
+## application: conversation_import
+
+```rust
+pub trait ImportedConversationIdGenerator {
+    fn next_conversation_id(&mut self) -> ImportedConversationId;
+    fn next_entry_id(&mut self) -> ImportedTranscriptEntryId;
+}
+
+pub struct UuidV7ImportedConversationIdGenerator;
+// Default; impl ImportedConversationIdGenerator
+
+pub trait ImportedConversationConverter {
+    type Error;
+    fn format(&self) -> ImportedConversationFormat;
+    fn convert<NextEntryId>(
+        &mut self,
+        conversation: ImportedConversationId,
+        source: &[u8],
+        next_entry_id: NextEntryId,
+    ) -> Result<ImportedConversation, Self::Error>
+    where
+        NextEntryId: FnMut() -> ImportedTranscriptEntryId;
+}
+
+pub trait ImportedConversationStore {
+    type Error;
+    fn insert(
+        &mut self,
+        conversation: ImportedConversation,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+}
+
+pub enum ImportConversationError<ConverterError, StoreError> {
+    Conversion(ConverterError),
+    ConverterIdentityMismatch {
+        supplied: ImportedConversationId,
+        converted: ImportedConversationId,
+    },
+    ConverterFormatMismatch {
+        declared: ImportedConversationFormat,
+        converted: ImportedConversationFormat,
+    },
+    Store(StoreError),
+}
+// impl Display + std::error::Error (bounded on both adapter errors)
+
+pub struct ImportConversationService<Generator, Converter, Store> { /* private */ }
+impl<Generator, Converter, Store>
+    ImportConversationService<Generator, Converter, Store>
+{
+    pub const fn new(ids: Generator, converter: Converter, store: Store) -> Self;
+    pub fn into_parts(self) -> (Generator, Converter, Store);
+}
+impl<
+    Generator: ImportedConversationIdGenerator,
+    Converter: ImportedConversationConverter,
+    Store: ImportedConversationStore,
+> ImportConversationService<Generator, Converter, Store>
+{
+    pub async fn execute(
+        &mut self,
+        source: &[u8],
+    ) -> Result<
+        ImportedConversationId,
+        ImportConversationError<Converter::Error, Store::Error>,
+    >;
+}
+```
+
 ## application: create_session
 
 ```rust
@@ -3038,6 +3107,7 @@ impl<
 | domain: fatal_mismatch                | 0                    |
 | domain: replace_session_defaults      | 13                   |
 | **signalbox-domain total**            | **227 (+1 free fn)** |
+| application: conversation_import      | 6 (incl. 3 traits)   |
 | application: create_session           | 8 (incl. 2 traits)   |
 | application: load_session             | 2 (incl. 1 trait)    |
 | application: model_execution          | 28 (incl. 7 traits)  |
@@ -3047,4 +3117,4 @@ impl<
 | application: start_eligible_turn      | 5 (incl. 2 traits)   |
 | application: startup_scan             | 7 (incl. 2 traits)   |
 | application: submit_input             | 7 (incl. 2 traits)   |
-| **signalbox-application total**       | **75**               |
+| **signalbox-application total**       | **81**               |
