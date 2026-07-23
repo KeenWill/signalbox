@@ -7,18 +7,20 @@ use rust_decimal::Decimal;
 use signalbox_application::{SubmitInputOutcome, SubmitInputTransaction};
 use signalbox_domain::{
     AcceptedInputDisposition, AcceptedInputId, AcceptedInputLifecycle, AcceptedInputQueueOrder,
-    AcceptedInputSchedulingProjection, AcceptedInputSchedulingReconstitutionFailure,
-    AcceptedInputSchedulingReconstitutionInput, AcceptedInputStartingLineage,
-    AcceptedInputTurnSchedulingRecord, AcceptedInputTurnSchedulingRecordState,
-    ActiveTurnSchedulingReconstitutionInput, Actor, AssistantText, ContextFrontierId,
-    DeliveryRequest, DirectModelSelection, DurableCommandId,
-    FailedTurnExecutionReconstitutionInput, FrozenAliasDefinition, FrozenModelSelection,
-    ModelAlias, ModelCallDisposition, ModelCallId, ModelCallReconstitutionInput,
-    ModelCallReconstitutionState, ModelSelectionOverride, ModelSelectionRequest,
-    NonEmptyUnicodeTextFailure, OriginConfiguration, PerInputConfigurationChoices,
-    PinnedProviderTargetReconstitutionInput, PreparedSubmitInput, ProviderModelIdentity,
-    ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget,
-    SemanticTranscriptEntryId,
+    AcceptedInputQueuePriority, AcceptedInputSchedulingProjection,
+    AcceptedInputSchedulingReconstitutionFailure, AcceptedInputSchedulingReconstitutionInput,
+    AcceptedInputStartingLineage, AcceptedInputTurnSchedulingRecord,
+    AcceptedInputTurnSchedulingRecordState, ActiveTurnSchedulingReconstitutionInput, Actor,
+    AppliedInterruptCommandResult, AssistantText, CancellationStopDisposition,
+    CancelledModelCallTurnIdentities, CancelledTurnExecutionReconstitutionInput,
+    ConsumedSteeringReconstitutionInput, ContextFrontierId, DeliveryRequest, DirectModelSelection,
+    DurableCommandId, FailedTurnExecutionReconstitutionInput, FrozenAliasDefinition,
+    FrozenModelSelection, ModelAlias, ModelCallDisposition, ModelCallId, ModelCallInterruptOutcome,
+    ModelCallReconstitutionInput, ModelCallReconstitutionState, ModelCallTerminalOutcome,
+    ModelSelectionOverride, ModelSelectionRequest, NonEmptyUnicodeTextFailure, OriginConfiguration,
+    PerInputConfigurationChoices, PinnedProviderTargetReconstitutionInput, PreparedSubmitInput,
+    ProviderModelIdentity, ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput,
+    ResolvedProviderTarget, SemanticTranscriptEntryId,
     SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session,
     SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
@@ -27,7 +29,8 @@ use signalbox_domain::{
     SubmitInputAppliedResult, SubmitInputPreparationFailure, SubmitInputReconstitutionFailure,
     SubmitInputReconstitutionInput, SubmitInputRejectedResult, SubmitInputResult,
     SubmitInputTerminalSourceReconstitutionInput, SubmitInputTurnOriginReconstitutionInput,
-    ToolRequestId, TurnAttemptId, TurnId, UnstoppedAttemptDisposition, UserContent,
+    TerminalAttemptEndReconstitutionInput, ToolRequestId, TurnAttemptId, TurnId,
+    UnstoppedAttemptDisposition, UserContent,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -40,6 +43,11 @@ use crate::{
         defaults_version_from_numeric, defaults_version_to_numeric, durable_command_id_from_uuid,
         durable_command_id_to_uuid, input_position_from_numeric, input_position_to_numeric,
         session_id_from_uuid, session_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
+    },
+    model_execution::{
+        ModelCallRepositoryError, attach_interrupt_reclassification_candidates,
+        attach_recovery_interrupt_reclassification_candidates, persist_stop_requested,
+        persist_terminal_outcome, require_live_execution_for_restart,
     },
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
 };
@@ -83,14 +91,22 @@ enum StoredTerminalTurnDisposition {
     Completed,
     Refused,
     Failed,
+    Cancelled {
+        interrupt_command: DurableCommandId,
+    },
+    ReconciliationRequired {
+        interrupt_command: DurableCommandId,
+        ambiguous_call: ModelCallId,
+    },
 }
 
 impl StoredTerminalTurnDisposition {
-    const fn domain(self) -> signalbox_domain::TurnDisposition {
+    const fn unstopped_domain(self) -> Option<signalbox_domain::TurnDisposition> {
         match self {
-            Self::Completed => signalbox_domain::TurnDisposition::Completed,
-            Self::Refused => signalbox_domain::TurnDisposition::Refused,
-            Self::Failed => signalbox_domain::TurnDisposition::Failed,
+            Self::Completed => Some(signalbox_domain::TurnDisposition::Completed),
+            Self::Refused => Some(signalbox_domain::TurnDisposition::Refused),
+            Self::Failed => Some(signalbox_domain::TurnDisposition::Failed),
+            Self::Cancelled { .. } | Self::ReconciliationRequired { .. } => None,
         }
     }
 }
@@ -266,13 +282,9 @@ pub enum SubmitInputRepositoryError {
     },
     /// Durable records cannot reconstruct the requested domain value.
     Corruption(SubmitInputCorruption),
-    /// A matching interrupt reached the intentionally unavailable transition.
-    InterruptApplicationUnavailable {
-        /// The unclaimed durable-command identity.
-        command_id: DurableCommandId,
-        /// The exact authoritative active turn that matched the command.
-        active_turn: TurnId,
-    },
+    /// The active turn's model-execution aggregate could not apply or persist
+    /// the correlated stop transition.
+    ModelExecution(Box<ModelCallRepositoryError>),
 }
 
 impl fmt::Display for SubmitInputRepositoryError {
@@ -294,13 +306,9 @@ impl fmt::Display for SubmitInputRepositoryError {
                 "SubmitInput command {command_id:?} proposed accepted input {accepted_input:?}, which is already the origin of active turn {active_turn:?}"
             ),
             Self::Corruption(error) => error.fmt(formatter),
-            Self::InterruptApplicationUnavailable {
-                command_id,
-                active_turn,
-            } => write!(
-                formatter,
-                "SubmitInput command {command_id:?} matched active turn {active_turn:?}, but interrupt application is unavailable"
-            ),
+            Self::ModelExecution(error) => {
+                write!(formatter, "SubmitInput model execution failed: {error}")
+            }
         }
     }
 }
@@ -309,10 +317,9 @@ impl Error for SubmitInputRepositoryError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Database(error) => Some(error),
-            Self::DifferentCommandKind { .. }
-            | Self::AcceptedInputIdentityCollision { .. }
-            | Self::InterruptApplicationUnavailable { .. } => None,
+            Self::DifferentCommandKind { .. } | Self::AcceptedInputIdentityCollision { .. } => None,
             Self::Corruption(error) => Some(error),
+            Self::ModelExecution(error) => Some(error),
         }
     }
 }
@@ -329,9 +336,20 @@ impl From<SubmitInputCorruption> for SubmitInputRepositoryError {
     }
 }
 
+impl From<ModelCallRepositoryError> for SubmitInputRepositoryError {
+    fn from(error: ModelCallRepositoryError) -> Self {
+        Self::ModelExecution(Box::new(error))
+    }
+}
+
 enum TransactionDecision {
     Commit(SubmitInputHandlingOutcome),
     Rollback(SubmitInputHandlingOutcome),
+}
+
+struct PreparedAgainstLockedState {
+    prepared: PreparedSubmitInput,
+    scheduling: Option<AcceptedInputSchedulingProjection>,
 }
 
 /// PostgreSQL implementation of atomic durable input acceptance.
@@ -352,14 +370,27 @@ impl SubmitInputRepository {
     /// locks the session and its current-defaults pointer before reading
     /// state, serializes position assignment on the session row, and commits
     /// the typed terminal result with all applied effects.
-    pub async fn handle(
+    pub async fn handle_with_candidates<NextTurn>(
         &self,
         command: SubmitInput,
         accepted_input: AcceptedInputId,
         turn: Option<TurnId>,
-    ) -> Result<SubmitInputHandlingOutcome, SubmitInputRepositoryError> {
+        cancellation_identities: CancelledModelCallTurnIdentities,
+        next_reclassified_turn: NextTurn,
+    ) -> Result<SubmitInputHandlingOutcome, SubmitInputRepositoryError>
+    where
+        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+    {
         let mut transaction = self.pool.begin().await?;
-        let decision = handle_in_transaction(&mut transaction, command, accepted_input, turn).await;
+        let decision = handle_in_transaction(
+            &mut transaction,
+            command,
+            accepted_input,
+            turn,
+            cancellation_identities,
+            next_reclassified_turn,
+        )
+        .await;
 
         match decision {
             Ok(TransactionDecision::Commit(outcome)) => {
@@ -404,13 +435,26 @@ impl SubmitInputRepository {
 impl SubmitInputTransaction for SubmitInputRepository {
     type Error = SubmitInputRepositoryError;
 
-    async fn handle(
+    async fn handle<NextTurn>(
         &mut self,
         command: SubmitInput,
         accepted_input: AcceptedInputId,
         turn: Option<TurnId>,
-    ) -> Result<SubmitInputOutcome, Self::Error> {
-        let outcome = SubmitInputRepository::handle(self, command, accepted_input, turn).await?;
+        cancellation_identities: CancelledModelCallTurnIdentities,
+        next_reclassified_turn: NextTurn,
+    ) -> Result<SubmitInputOutcome, Self::Error>
+    where
+        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+    {
+        let outcome = SubmitInputRepository::handle_with_candidates(
+            self,
+            command,
+            accepted_input,
+            turn,
+            cancellation_identities,
+            next_reclassified_turn,
+        )
+        .await?;
 
         Ok(match outcome {
             SubmitInputHandlingOutcome::Recorded(result) => SubmitInputOutcome::Recorded(result),
@@ -421,12 +465,17 @@ impl SubmitInputTransaction for SubmitInputRepository {
     }
 }
 
-async fn handle_in_transaction(
+async fn handle_in_transaction<NextTurn>(
     connection: &mut PgConnection,
     command: SubmitInput,
     accepted_input: AcceptedInputId,
     turn: Option<TurnId>,
-) -> Result<TransactionDecision, SubmitInputRepositoryError> {
+    cancellation_identities: CancelledModelCallTurnIdentities,
+    mut next_reclassified_turn: NextTurn,
+) -> Result<TransactionDecision, SubmitInputRepositoryError>
+where
+    NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+{
     let command_id = command.command_id();
     match inspect_registry(connection, command_id).await? {
         Some(CommandKind::SubmitInput) => {
@@ -472,9 +521,94 @@ async fn handle_in_transaction(
         };
     }
 
-    let prepared = prepare_against_locked_state(connection, command, accepted_input, turn).await?;
+    let PreparedAgainstLockedState {
+        prepared,
+        scheduling,
+    } = prepare_against_locked_state(connection, command, accepted_input, turn).await?;
     let recorded = prepared.result().clone();
+    let interrupt = match prepared.result() {
+        SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(origin)) => {
+            origin.applied_interrupt().copied()
+        }
+        SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(_))
+        | SubmitInputResult::Rejected(_) => None,
+    };
+    let interrupt_outcome = if let Some(interrupt) = interrupt {
+        let recovery_wait = scheduling
+            .as_ref()
+            .and_then(AcceptedInputSchedulingProjection::active_turn_execution)
+            .is_some_and(|active| {
+                matches!(
+                    active.phase(),
+                    signalbox_domain::ActiveTurnPhase::AwaitingRecoveryDecision {
+                        applied_interrupt: None,
+                        ..
+                    }
+                )
+            });
+        if recovery_wait {
+            let scheduling = scheduling.ok_or(SubmitInputCorruption::Inconsistent(
+                "applied interrupt lacks active scheduling state",
+            ))?;
+            let active_turn =
+                scheduling
+                    .active_turn_execution()
+                    .ok_or(SubmitInputCorruption::Inconsistent(
+                        "applied interrupt lacks active turn execution",
+                    ))?;
+            let identities = attach_recovery_interrupt_reclassification_candidates(
+                cancellation_identities,
+                &active_turn,
+                &mut next_reclassified_turn,
+            )?;
+            Some(ModelCallInterruptOutcome::ReconciliationRequired(
+                scheduling
+                    .apply_interrupt_to_model_call_recovery(interrupt, identities.into_ambiguous())
+                    .map_err(|_| {
+                        SubmitInputCorruption::Inconsistent(
+                            "applied interrupt does not match model-call recovery wait",
+                        )
+                    })?,
+            ))
+        } else {
+            let execution =
+                require_live_execution_for_restart(connection, interrupt.session()).await?;
+            let identities = attach_interrupt_reclassification_candidates(
+                cancellation_identities,
+                &execution,
+                &mut next_reclassified_turn,
+            )?;
+            Some(
+                execution
+                    .apply_interrupt(interrupt, identities)
+                    .map_err(|_| {
+                        SubmitInputCorruption::Inconsistent(
+                            "applied interrupt does not match active model execution",
+                        )
+                    })?,
+            )
+        }
+    } else {
+        None
+    };
     insert_prepared(connection, prepared).await?;
+    match interrupt_outcome {
+        Some(ModelCallInterruptOutcome::Cancelled(cancelled)) => {
+            persist_terminal_outcome(connection, &ModelCallTerminalOutcome::Cancelled(cancelled))
+                .await?;
+        }
+        Some(ModelCallInterruptOutcome::CancellationRequested(stopped)) => {
+            persist_stop_requested(connection, &stopped).await?;
+        }
+        Some(ModelCallInterruptOutcome::ReconciliationRequired(reconciliation)) => {
+            persist_terminal_outcome(
+                connection,
+                &ModelCallTerminalOutcome::ReconciliationRequired(reconciliation),
+            )
+            .await?;
+        }
+        None => {}
+    }
     Ok(TransactionDecision::Commit(
         SubmitInputHandlingOutcome::Recorded(recorded),
     ))
@@ -536,7 +670,9 @@ pub(crate) async fn require_recorded_batch(
                     .ok_or(SubmitInputCorruption::Missing("related turn origin"))
             })
             .transpose()?;
-        let reconstructed = decode_complete(row, command_id, related_turn_origin)?;
+        let existing_interrupt = load_existing_interrupt(connection, &row).await?;
+        let reconstructed =
+            decode_complete(row, command_id, related_turn_origin, existing_interrupt)?;
         if recorded.insert(command_id, reconstructed).is_some() {
             return Err(
                 SubmitInputCorruption::Inconsistent("duplicate batched command row").into(),
@@ -564,7 +700,7 @@ async fn prepare_against_locked_state(
     command: SubmitInput,
     accepted_input: AcceptedInputId,
     turn: Option<TurnId>,
-) -> Result<PreparedSubmitInput, SubmitInputRepositoryError> {
+) -> Result<PreparedAgainstLockedState, SubmitInputRepositoryError> {
     // Lock-mode constraint: this session-row lock must use the no-key-update
     // mode, not PostgreSQL's strongest row-lock mode. Submit orders the session row before the
     // scheduler row and current-defaults pointer row, while a concurrent
@@ -581,7 +717,10 @@ async fn prepare_against_locked_state(
         .await?
         .is_some();
     if !session_exists {
-        return Ok(command.prepare_session_not_found());
+        return Ok(PreparedAgainstLockedState {
+            prepared: command.prepare_session_not_found(),
+            scheduling: None,
+        });
     }
 
     let scheduler_exists =
@@ -656,37 +795,33 @@ async fn prepare_against_locked_state(
         )
     };
 
-    prepared.map_err(|error| match error.failure() {
-        SubmitInputPreparationFailure::SessionMismatch { .. } => {
-            SubmitInputCorruption::Inconsistent("current session ownership").into()
-        }
-        SubmitInputPreparationFailure::TurnCandidateMismatch => {
-            SubmitInputCorruption::Inconsistent("delivery turn candidate").into()
-        }
-        SubmitInputPreparationFailure::AcceptedInputCandidateReusesActiveOrigin {
-            active_turn,
-            accepted_input,
-        } => SubmitInputRepositoryError::AcceptedInputIdentityCollision {
-            command_id: error.command().command_id(),
-            active_turn,
-            accepted_input,
-        },
-        SubmitInputPreparationFailure::ActiveTurnProjectionMissing => {
-            SubmitInputCorruption::Inconsistent("selected active scheduling state").into()
-        }
-        SubmitInputPreparationFailure::InterruptApplicationUnavailable => {
-            #[expect(
-                clippy::expect_used,
-                reason = "temporary ledger site: this failure is produced only from a checked active projection; typed conversion is commissioned by the 2026-07-20 audit"
-            )]
-            let active_turn = active_turn_id
-                .expect("interrupt unavailability requires a checked active projection");
-            SubmitInputRepositoryError::InterruptApplicationUnavailable {
+    prepared
+        .map(|prepared| PreparedAgainstLockedState {
+            prepared,
+            scheduling: Some(scheduling),
+        })
+        .map_err(|error| match error.failure() {
+            SubmitInputPreparationFailure::SessionMismatch { .. } => {
+                SubmitInputCorruption::Inconsistent("current session ownership").into()
+            }
+            SubmitInputPreparationFailure::TurnCandidateMismatch => {
+                SubmitInputCorruption::Inconsistent("delivery turn candidate").into()
+            }
+            SubmitInputPreparationFailure::AcceptedInputCandidateReusesActiveOrigin {
+                active_turn,
+                accepted_input,
+            } => SubmitInputRepositoryError::AcceptedInputIdentityCollision {
                 command_id: error.command().command_id(),
                 active_turn,
+                accepted_input,
+            },
+            SubmitInputPreparationFailure::ActiveTurnProjectionMissing => {
+                SubmitInputCorruption::Inconsistent("selected active scheduling state").into()
             }
-        }
-    })
+            SubmitInputPreparationFailure::InterruptQueueOrderInvalid => {
+                SubmitInputCorruption::Inconsistent("interrupt queue order").into()
+            }
+        })
 }
 
 pub(crate) async fn load_scheduling_projection(
@@ -719,6 +854,7 @@ pub(crate) async fn load_scheduling_projection(
             queued.session_id AS queued_session_id,
             queued.acceptance_position AS queued_position,
             queued.priority_kind,
+            queued.interrupt_predecessor_turn_id,
             accepted.accepting_command_id,
             accepted.accepted_input_id,
             accepted.session_id AS accepted_session_id,
@@ -764,11 +900,20 @@ pub(crate) async fn load_scheduling_projection(
             turn.terminal_attempt_id,
             turn.terminal_model_call_id,
             turn.terminal_disposition_kind,
+            (
+                SELECT call.model_call_id
+                  FROM model_call AS call
+                 WHERE call.turn_id = turn.turn_id
+                   AND call.session_id = turn.session_id
+                   AND call.state_kind = 'cancellation_requested'
+            ) AS stop_requested_model_call_id,
             attempt.turn_attempt_id,
             attempt.turn_id AS attempt_turn_id,
             attempt.session_id AS attempt_session_id,
             attempt.continued_from_attempt_id,
             attempt.state_kind AS attempt_state_kind,
+            attempt.interrupt_command_id,
+            attempt.interrupt_predecessor_turn_id AS attempt_interrupt_predecessor_turn_id,
             attempt.end_variant,
             attempt.end_disposition
          FROM queued_input_origin AS queued
@@ -808,7 +953,31 @@ pub(crate) async fn load_scheduling_projection(
             accepted_input_id_from_uuid(required(&row, "queued_accepted_input_id")?);
         let queued_session = session_id_from_uuid(required(&row, "queued_session_id")?);
         let queued_position = decode_position(&row, "queued_position")?;
-        require_spelling(&row, "priority_kind", "ordinary")?;
+        let queued_order = match required::<String>(&row, "priority_kind")?.as_str() {
+            "ordinary" => {
+                if row
+                    .try_get::<Option<Uuid>, _>("interrupt_predecessor_turn_id")?
+                    .is_some()
+                {
+                    return Err(
+                        SubmitInputCorruption::Inconsistent("ordinary queue priority").into(),
+                    );
+                }
+                AcceptedInputQueueOrder::ordinary(queued_position)
+            }
+            "interrupt_immediately_after" => {
+                let predecessor =
+                    turn_id_from_uuid(required(&row, "interrupt_predecessor_turn_id")?);
+                AcceptedInputQueueOrder::interrupt_immediately_after(queued_position, predecessor)
+            }
+            value => {
+                return Err(SubmitInputCorruption::Unsupported {
+                    field: "queue priority kind",
+                    value: value.to_owned(),
+                }
+                .into());
+            }
+        };
 
         let accepted_input = accepted_input_id_from_uuid(required(&row, "accepted_input_id")?);
         let accepted_session = session_id_from_uuid(required(&row, "accepted_session_id")?);
@@ -986,6 +1155,21 @@ pub(crate) async fn load_scheduling_projection(
                                 lifecycle_turn,
                                 attempt_id,
                             ),
+                            "stop_requested" => {
+                                let call = required::<Uuid>(&row, "stop_requested_model_call_id")?;
+                                let interrupt = require_applied_interrupt_from_attempt(
+                                    &row,
+                                    lifecycle_turn,
+                                    &recorded_commands,
+                                )?;
+                                required_model_calls.insert(call);
+                                ActiveTurnSchedulingReconstitutionInput::stop_requested(
+                                    lifecycle_turn,
+                                    attempt_id,
+                                    ModelCallId::from_uuid(call),
+                                    interrupt,
+                                )
+                            }
                             value => {
                                 return Err(SubmitInputCorruption::Unsupported {
                                     field: "active attempt state_kind",
@@ -998,37 +1182,61 @@ pub(crate) async fn load_scheduling_projection(
                     Some("awaiting_model_call_recovery") => {
                         let recovery_call = recovery_model_call
                             .ok_or(SubmitInputCorruption::Missing("recovery_model_call_id"))?;
-                        if attempt_state != "ended"
-                            || end_variant.as_deref() != Some("without_stop")
-                        {
+                        if attempt_state != "ended" {
                             return Err(SubmitInputCorruption::Inconsistent(
                                 "model-call recovery attempt end",
                             )
                             .into());
                         }
                         required_model_calls.insert(recovery_call);
-                        match end_disposition.as_deref() {
-                            Some("ambiguous") => ActiveTurnSchedulingReconstitutionInput::awaiting_model_call_recovery(
+                        match (end_variant.as_deref(), end_disposition.as_deref()) {
+                            (Some("without_stop"), Some("ambiguous")) => ActiveTurnSchedulingReconstitutionInput::awaiting_model_call_recovery(
                                 lifecycle_turn,
                                 attempt_id,
                                 ModelCallId::from_uuid(recovery_call),
                             ),
-                            Some("lost") => ActiveTurnSchedulingReconstitutionInput::awaiting_model_call_recovery_after_restart(
+                            (Some("without_stop"), Some("lost")) => ActiveTurnSchedulingReconstitutionInput::awaiting_model_call_recovery_after_restart(
                                 lifecycle_turn,
                                 attempt_id,
                                 ModelCallId::from_uuid(recovery_call),
                             ),
-                            Some(value) => {
-                                return Err(SubmitInputCorruption::Unsupported {
-                                    field: "model-call recovery attempt end_disposition",
-                                    value: value.to_owned(),
-                                }
+                            (Some("after_cancellation"), Some("ambiguous")) => {
+                                let interrupt = require_applied_interrupt_from_attempt(
+                                    &row,
+                                    lifecycle_turn,
+                                    &recorded_commands,
+                                )?;
+                                ActiveTurnSchedulingReconstitutionInput::awaiting_model_call_recovery_after_cancellation(
+                                    lifecycle_turn,
+                                    attempt_id,
+                                    ModelCallId::from_uuid(recovery_call),
+                                    interrupt,
+                                )
+                            }
+                            (Some("after_cancellation"), Some("lost")) => {
+                                let interrupt = require_applied_interrupt_from_attempt(
+                                    &row,
+                                    lifecycle_turn,
+                                    &recorded_commands,
+                                )?;
+                                ActiveTurnSchedulingReconstitutionInput::awaiting_model_call_recovery_after_cancellation_restart(
+                                    lifecycle_turn,
+                                    attempt_id,
+                                    ModelCallId::from_uuid(recovery_call),
+                                    interrupt,
+                                )
+                            }
+                            (None, _) | (_, None) => {
+                                return Err(SubmitInputCorruption::Missing(
+                                    "model-call recovery attempt end",
+                                )
                                 .into());
                             }
-                            None => {
-                                return Err(SubmitInputCorruption::Missing(
-                                    "model-call recovery attempt end_disposition",
-                                )
+                            (Some(value), Some(_)) => {
+                                return Err(SubmitInputCorruption::Unsupported {
+                                    field: "model-call recovery attempt end_variant",
+                                    value: value.to_owned(),
+                                }
                                 .into());
                             }
                         }
@@ -1092,41 +1300,110 @@ pub(crate) async fn load_scheduling_projection(
                                     || attempt_session != lifecycle_session
                                     || continued_from.is_some()
                                     || attempt_state != "ended"
-                                    || end_variant.as_deref() != Some("without_stop")
                                 {
                                     return Err(SubmitInputCorruption::Inconsistent(
                                         "failed terminal attempt",
                                     )
                                     .into());
                                 }
-                                let attempt_disposition = match end_disposition.as_deref() {
-                                    Some("known_failure") => {
-                                        UnstoppedAttemptDisposition::KnownFailure
-                                    }
-                                    Some("lost") => UnstoppedAttemptDisposition::Lost,
-                                    _ => {
-                                        return Err(SubmitInputCorruption::Inconsistent(
-                                            "failed terminal attempt disposition",
-                                        )
-                                        .into());
-                                    }
-                                };
-                                Some(match terminal_call {
-                                    Some(call) => {
-                                        required_model_calls.insert(call);
-                                        FailedTurnExecutionReconstitutionInput::with_call(
+                                let ended_call = terminal_call.map(|call| {
+                                    required_model_calls.insert(call);
+                                    ModelCallId::from_uuid(call)
+                                });
+                                Some(
+                                    match (
+                                        end_variant.as_deref(),
+                                        end_disposition.as_deref(),
+                                        ended_call,
+                                    ) {
+                                        (
+                                            Some("without_stop"),
+                                            Some("known_failure"),
+                                            Some(call),
+                                        ) => FailedTurnExecutionReconstitutionInput::with_call(
                                             lifecycle_turn,
                                             stored_attempt_id,
-                                            attempt_disposition,
-                                            ModelCallId::from_uuid(call),
-                                        )
-                                    }
-                                    None => FailedTurnExecutionReconstitutionInput::attempt_only(
-                                        lifecycle_turn,
-                                        stored_attempt_id,
-                                        attempt_disposition,
-                                    ),
-                                })
+                                            UnstoppedAttemptDisposition::KnownFailure,
+                                            call,
+                                        ),
+                                        (Some("without_stop"), Some("known_failure"), None) => {
+                                            FailedTurnExecutionReconstitutionInput::attempt_only(
+                                                lifecycle_turn,
+                                                stored_attempt_id,
+                                                UnstoppedAttemptDisposition::KnownFailure,
+                                            )
+                                        }
+                                        (Some("without_stop"), Some("lost"), Some(call)) => {
+                                            FailedTurnExecutionReconstitutionInput::with_call(
+                                                lifecycle_turn,
+                                                stored_attempt_id,
+                                                UnstoppedAttemptDisposition::Lost,
+                                                call,
+                                            )
+                                        }
+                                        (Some("without_stop"), Some("lost"), None) => {
+                                            FailedTurnExecutionReconstitutionInput::attempt_only(
+                                                lifecycle_turn,
+                                                stored_attempt_id,
+                                                UnstoppedAttemptDisposition::Lost,
+                                            )
+                                        }
+                                        (
+                                            Some("after_cancellation"),
+                                            Some("known_failure"),
+                                            ended_call,
+                                        ) => {
+                                            let interrupt = require_applied_interrupt_from_attempt(
+                                                &row,
+                                                lifecycle_turn,
+                                                &recorded_commands,
+                                            )?;
+                                            match ended_call {
+                                            Some(call) => FailedTurnExecutionReconstitutionInput::with_call_after_cancellation(
+                                                lifecycle_turn,
+                                                stored_attempt_id,
+                                                CancellationStopDisposition::KnownFailure,
+                                                interrupt,
+                                                call,
+                                            ),
+                                            None => FailedTurnExecutionReconstitutionInput::attempt_only_after_cancellation(
+                                                lifecycle_turn,
+                                                stored_attempt_id,
+                                                CancellationStopDisposition::KnownFailure,
+                                                interrupt,
+                                            ),
+                                        }
+                                        }
+                                        (Some("after_cancellation"), Some("lost"), ended_call) => {
+                                            let interrupt = require_applied_interrupt_from_attempt(
+                                                &row,
+                                                lifecycle_turn,
+                                                &recorded_commands,
+                                            )?;
+                                            match ended_call {
+                                            Some(call) => FailedTurnExecutionReconstitutionInput::with_call_after_cancellation(
+                                                lifecycle_turn,
+                                                stored_attempt_id,
+                                                CancellationStopDisposition::Lost,
+                                                interrupt,
+                                                call,
+                                            ),
+                                            None => FailedTurnExecutionReconstitutionInput::attempt_only_after_cancellation(
+                                                lifecycle_turn,
+                                                stored_attempt_id,
+                                                CancellationStopDisposition::Lost,
+                                                interrupt,
+                                            ),
+                                        }
+                                        }
+                                        _ => {
+                                            return Err(SubmitInputCorruption::Inconsistent(
+                                                "failed terminal attempt disposition",
+                                            )
+                                            .into());
+                                        }
+                                    },
+                                )
                             }
                             (None, Some(_)) => {
                                 return Err(SubmitInputCorruption::Inconsistent(
@@ -1139,6 +1416,149 @@ pub(crate) async fn load_scheduling_projection(
                             starting_lineage,
                             starting_frontier: ContextFrontierId::from_uuid(starting_frontier),
                             terminal_execution,
+                            terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
+                        }
+                    }
+                    Some("cancelled") => {
+                        let terminal_attempt = terminal_attempt
+                            .ok_or(SubmitInputCorruption::Missing("terminal_attempt_id"))?;
+                        let stored_attempt_id =
+                            TurnAttemptId::from_uuid(required(&row, "turn_attempt_id")?);
+                        let attempt_turn = turn_id_from_uuid(required(&row, "attempt_turn_id")?);
+                        let attempt_session =
+                            session_id_from_uuid(required(&row, "attempt_session_id")?);
+                        let continued_from: Option<Uuid> =
+                            row.try_get("continued_from_attempt_id")?;
+                        let attempt_state: String = required(&row, "attempt_state_kind")?;
+                        let end_variant: Option<String> = row.try_get("end_variant")?;
+                        let end_disposition: Option<String> = row.try_get("end_disposition")?;
+                        if stored_attempt_id.into_uuid() != terminal_attempt
+                            || attempt_turn != lifecycle_turn
+                            || attempt_session != lifecycle_session
+                            || continued_from.is_some()
+                            || attempt_state != "ended"
+                            || end_variant.as_deref() != Some("after_cancellation")
+                            || end_disposition.as_deref() != Some("cancelled")
+                        {
+                            return Err(SubmitInputCorruption::Inconsistent(
+                                "cancelled terminal attempt",
+                            )
+                            .into());
+                        }
+                        let interrupt = require_applied_interrupt_from_attempt(
+                            &row,
+                            lifecycle_turn,
+                            &recorded_commands,
+                        )?;
+                        let ended_call = terminal_model_call.map(ModelCallId::from_uuid);
+                        if let Some(call) = terminal_model_call {
+                            required_model_calls.insert(call);
+                        }
+                        AcceptedInputTurnSchedulingRecordState::TerminalCancelled {
+                            starting_lineage,
+                            starting_frontier: ContextFrontierId::from_uuid(starting_frontier),
+                            terminal_execution: CancelledTurnExecutionReconstitutionInput::new(
+                                lifecycle_turn,
+                                stored_attempt_id,
+                                TerminalAttemptEndReconstitutionInput::after_cancellation(
+                                    CancellationStopDisposition::Cancelled,
+                                    interrupt,
+                                ),
+                                ended_call,
+                                interrupt,
+                            ),
+                            terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
+                        }
+                    }
+                    Some("reconciliation_required") => {
+                        let terminal_attempt = terminal_attempt
+                            .ok_or(SubmitInputCorruption::Missing("terminal_attempt_id"))?;
+                        let terminal_call = terminal_model_call
+                            .ok_or(SubmitInputCorruption::Missing("terminal_model_call_id"))?;
+                        let stored_attempt_id =
+                            TurnAttemptId::from_uuid(required(&row, "turn_attempt_id")?);
+                        let attempt_turn = turn_id_from_uuid(required(&row, "attempt_turn_id")?);
+                        let attempt_session =
+                            session_id_from_uuid(required(&row, "attempt_session_id")?);
+                        let continued_from: Option<Uuid> =
+                            row.try_get("continued_from_attempt_id")?;
+                        let attempt_state: String = required(&row, "attempt_state_kind")?;
+                        let end_variant: Option<String> = row.try_get("end_variant")?;
+                        let end_disposition: Option<String> = row.try_get("end_disposition")?;
+                        if stored_attempt_id.into_uuid() != terminal_attempt
+                            || attempt_turn != lifecycle_turn
+                            || attempt_session != lifecycle_session
+                            || continued_from.is_some()
+                            || attempt_state != "ended"
+                        {
+                            return Err(SubmitInputCorruption::Inconsistent(
+                                "reconciliation terminal attempt",
+                            )
+                            .into());
+                        }
+                        let interrupt = match end_variant.as_deref() {
+                            Some("after_cancellation") => require_applied_interrupt_from_attempt(
+                                &row,
+                                lifecycle_turn,
+                                &recorded_commands,
+                            )?,
+                            Some("without_stop") => require_applied_interrupt_for_turn(
+                                lifecycle_turn,
+                                &recorded_commands,
+                            )?,
+                            Some(value) => {
+                                return Err(SubmitInputCorruption::Unsupported {
+                                    field: "reconciliation attempt end_variant",
+                                    value: value.to_owned(),
+                                }
+                                .into());
+                            }
+                            None => {
+                                return Err(SubmitInputCorruption::Missing(
+                                    "reconciliation attempt end_variant",
+                                )
+                                .into());
+                            }
+                        };
+                        let reconciling_attempt_end =
+                            match (end_variant.as_deref(), end_disposition.as_deref()) {
+                                (Some("without_stop"), Some("ambiguous")) => {
+                                    TerminalAttemptEndReconstitutionInput::without_stop(
+                                        UnstoppedAttemptDisposition::Ambiguous,
+                                    )
+                                }
+                                (Some("without_stop"), Some("lost")) => {
+                                    TerminalAttemptEndReconstitutionInput::without_stop(
+                                        UnstoppedAttemptDisposition::Lost,
+                                    )
+                                }
+                                (Some("after_cancellation"), Some("ambiguous")) => {
+                                    TerminalAttemptEndReconstitutionInput::after_cancellation(
+                                        CancellationStopDisposition::Ambiguous,
+                                        interrupt,
+                                    )
+                                }
+                                (Some("after_cancellation"), Some("lost")) => {
+                                    TerminalAttemptEndReconstitutionInput::after_cancellation(
+                                        CancellationStopDisposition::Lost,
+                                        interrupt,
+                                    )
+                                }
+                                _ => {
+                                    return Err(SubmitInputCorruption::Inconsistent(
+                                        "reconciliation terminal attempt disposition",
+                                    )
+                                    .into());
+                                }
+                            };
+                        required_model_calls.insert(terminal_call);
+                        AcceptedInputTurnSchedulingRecordState::TerminalReconciliationRequired {
+                            starting_lineage,
+                            starting_frontier: ContextFrontierId::from_uuid(starting_frontier),
+                            reconciling_attempt: stored_attempt_id,
+                            reconciling_attempt_end,
+                            ambiguous_call: ModelCallId::from_uuid(terminal_call),
+                            interrupt,
                             terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
                         }
                     }
@@ -1162,7 +1582,6 @@ pub(crate) async fn load_scheduling_projection(
                             || attempt_session != lifecycle_session
                             || continued_from.is_some()
                             || attempt_state != "ended"
-                            || end_variant.as_deref() != Some("without_stop")
                         {
                             return Err(SubmitInputCorruption::Inconsistent(
                                 "terminal model-call attempt",
@@ -1172,26 +1591,54 @@ pub(crate) async fn load_scheduling_projection(
                         required_model_calls.insert(terminal_call);
                         match terminal_disposition.as_deref() {
                             Some("completed") => {
-                                let completing_attempt_disposition =
-                                    match end_disposition.as_deref() {
-                                        Some("turn_completed") => {
-                                            UnstoppedAttemptDisposition::TurnCompleted
-                                        }
-                                        Some("lost") => UnstoppedAttemptDisposition::Lost,
-                                        _ => {
-                                            return Err(SubmitInputCorruption::Inconsistent(
-                                                "terminal model-call disposition",
-                                            )
-                                            .into());
-                                        }
-                                    };
+                                let completing_attempt_end = match (
+                                    end_variant.as_deref(),
+                                    end_disposition.as_deref(),
+                                ) {
+                                    (Some("without_stop"), Some("turn_completed")) => {
+                                        TerminalAttemptEndReconstitutionInput::without_stop(
+                                            UnstoppedAttemptDisposition::TurnCompleted,
+                                        )
+                                    }
+                                    (Some("without_stop"), Some("lost")) => {
+                                        TerminalAttemptEndReconstitutionInput::without_stop(
+                                            UnstoppedAttemptDisposition::Lost,
+                                        )
+                                    }
+                                    (Some("after_cancellation"), Some("turn_completed")) => {
+                                        TerminalAttemptEndReconstitutionInput::after_cancellation(
+                                            CancellationStopDisposition::TurnCompleted,
+                                            require_applied_interrupt_from_attempt(
+                                                &row,
+                                                lifecycle_turn,
+                                                &recorded_commands,
+                                            )?,
+                                        )
+                                    }
+                                    (Some("after_cancellation"), Some("lost")) => {
+                                        TerminalAttemptEndReconstitutionInput::after_cancellation(
+                                            CancellationStopDisposition::Lost,
+                                            require_applied_interrupt_from_attempt(
+                                                &row,
+                                                lifecycle_turn,
+                                                &recorded_commands,
+                                            )?,
+                                        )
+                                    }
+                                    _ => {
+                                        return Err(SubmitInputCorruption::Inconsistent(
+                                            "terminal model-call disposition",
+                                        )
+                                        .into());
+                                    }
+                                };
                                 AcceptedInputTurnSchedulingRecordState::TerminalCompleted {
                                     starting_lineage,
                                     starting_frontier: ContextFrontierId::from_uuid(
                                         starting_frontier,
                                     ),
                                     completing_attempt: stored_attempt_id,
-                                    completing_attempt_disposition,
+                                    completing_attempt_end,
                                     completing_call: ModelCallId::from_uuid(terminal_call),
                                     terminal_frontier: ContextFrontierId::from_uuid(
                                         terminal_frontier,
@@ -1199,12 +1646,40 @@ pub(crate) async fn load_scheduling_projection(
                                 }
                             }
                             Some("refused") => {
-                                let refusing_attempt_disposition = match end_disposition.as_deref()
-                                {
-                                    Some("turn_refused") => {
-                                        UnstoppedAttemptDisposition::TurnRefused
+                                let refusing_attempt_end = match (
+                                    end_variant.as_deref(),
+                                    end_disposition.as_deref(),
+                                ) {
+                                    (Some("without_stop"), Some("turn_refused")) => {
+                                        TerminalAttemptEndReconstitutionInput::without_stop(
+                                            UnstoppedAttemptDisposition::TurnRefused,
+                                        )
                                     }
-                                    Some("lost") => UnstoppedAttemptDisposition::Lost,
+                                    (Some("without_stop"), Some("lost")) => {
+                                        TerminalAttemptEndReconstitutionInput::without_stop(
+                                            UnstoppedAttemptDisposition::Lost,
+                                        )
+                                    }
+                                    (Some("after_cancellation"), Some("turn_refused")) => {
+                                        TerminalAttemptEndReconstitutionInput::after_cancellation(
+                                            CancellationStopDisposition::TurnRefused,
+                                            require_applied_interrupt_from_attempt(
+                                                &row,
+                                                lifecycle_turn,
+                                                &recorded_commands,
+                                            )?,
+                                        )
+                                    }
+                                    (Some("after_cancellation"), Some("lost")) => {
+                                        TerminalAttemptEndReconstitutionInput::after_cancellation(
+                                            CancellationStopDisposition::Lost,
+                                            require_applied_interrupt_from_attempt(
+                                                &row,
+                                                lifecycle_turn,
+                                                &recorded_commands,
+                                            )?,
+                                        )
+                                    }
                                     _ => {
                                         return Err(SubmitInputCorruption::Inconsistent(
                                             "terminal model-call disposition",
@@ -1218,7 +1693,7 @@ pub(crate) async fn load_scheduling_projection(
                                         starting_frontier,
                                     ),
                                     refusing_attempt: stored_attempt_id,
-                                    refusing_attempt_disposition,
+                                    refusing_attempt_end,
                                     refusing_call: ModelCallId::from_uuid(terminal_call),
                                     terminal_frontier: ContextFrontierId::from_uuid(
                                         terminal_frontier,
@@ -1285,7 +1760,7 @@ pub(crate) async fn load_scheduling_projection(
                 accepted_lifecycle,
                 queued_session,
                 queued_turn,
-                AcceptedInputQueueOrder::ordinary(queued_position),
+                queued_order,
                 origin_delivery,
                 origin_configuration,
                 state,
@@ -1296,6 +1771,32 @@ pub(crate) async fn load_scheduling_projection(
 
     let active_acceptance_tail =
         load_active_acceptance_tail(connection, session_id, &turns).await?;
+
+    let consumed_steering_rows = sqlx::query(
+        "SELECT session_id, accepted_input_id, acceptance_position, expected_active_turn_id,
+                consuming_model_call_id
+           FROM accepted_input
+          WHERE session_id = $1
+            AND disposition_kind = 'consumed_as_steering'
+          ORDER BY acceptance_position",
+    )
+    .bind(session_id_to_uuid(session_id))
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut consumed_steering = Vec::with_capacity(consumed_steering_rows.len());
+    for row in consumed_steering_rows {
+        let call = ModelCallId::from_uuid(required(&row, "consuming_model_call_id")?);
+        required_model_calls.insert(call.into_uuid());
+        consumed_steering.push(ConsumedSteeringReconstitutionInput::new(
+            session_id_from_uuid(required(&row, "session_id")?),
+            AcceptedInputLifecycle::new(
+                accepted_input_id_from_uuid(required(&row, "accepted_input_id")?),
+                AcceptedInputDisposition::ConsumedAsSteering { call },
+            ),
+            decode_position(&row, "acceptance_position")?,
+            turn_id_from_uuid(required(&row, "expected_active_turn_id")?),
+        ));
+    }
 
     let required_model_call_ids = required_model_calls.iter().copied().collect::<Vec<_>>();
     let model_call_rows = sqlx::query(
@@ -1444,7 +1945,9 @@ pub(crate) async fn load_scheduling_projection(
             semantic_entry_id,
             payload_kind,
             origin_accepted_input_id,
+            steering_source_turn_id,
             failed_turn_id,
+            cancelled_turn_id,
             assistant_text_value,
             producing_model_call_id,
             assistant_tool_request_id,
@@ -1475,7 +1978,9 @@ pub(crate) async fn load_scheduling_projection(
         let entry = SemanticTranscriptEntryId::from_uuid(entry_uuid);
         let payload_kind: String = required(&row, "payload_kind")?;
         let origin: Option<Uuid> = row.try_get("origin_accepted_input_id")?;
+        let steering_source_turn: Option<Uuid> = row.try_get("steering_source_turn_id")?;
         let failed_turn: Option<Uuid> = row.try_get("failed_turn_id")?;
+        let cancelled_turn: Option<Uuid> = row.try_get("cancelled_turn_id")?;
         let assistant_text: Option<String> = row.try_get("assistant_text_value")?;
         let producing_call: Option<Uuid> = row.try_get("producing_model_call_id")?;
         let tool_request: Option<Uuid> = row.try_get("assistant_tool_request_id")?;
@@ -1483,23 +1988,44 @@ pub(crate) async fn load_scheduling_projection(
         let payload = match (
             payload_kind.as_str(),
             origin,
+            steering_source_turn,
             failed_turn,
+            cancelled_turn,
             assistant_text,
             producing_call,
             tool_request,
             completed_turn,
         ) {
-            ("origin_accepted_input", Some(origin), None, None, None, None, None) => {
+            ("origin_accepted_input", Some(origin), None, None, None, None, None, None, None) => {
                 InitialSemanticTranscriptEntryPayload::OriginAcceptedInput {
                     accepted_input: accepted_input_id_from_uuid(origin),
                 }
             }
-            ("turn_failed", None, Some(turn), None, None, None, None) => {
+            (
+                "steering_accepted_input",
+                Some(accepted_input),
+                Some(source_turn),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ) => InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput {
+                accepted_input: accepted_input_id_from_uuid(accepted_input),
+                source_turn: turn_id_from_uuid(source_turn),
+            },
+            ("turn_failed", None, None, Some(turn), None, None, None, None, None) => {
                 InitialSemanticTranscriptEntryPayload::TurnFailed {
                     turn: turn_id_from_uuid(turn),
                 }
             }
-            ("assistant_text", None, None, Some(text), Some(call), None, None) => {
+            ("turn_cancelled", None, None, None, Some(turn), None, None, None, None) => {
+                InitialSemanticTranscriptEntryPayload::TurnCancelled {
+                    turn: turn_id_from_uuid(turn),
+                }
+            }
+            ("assistant_text", None, None, None, None, Some(text), Some(call), None, None) => {
                 InitialSemanticTranscriptEntryPayload::AssistantText {
                     producing_call: ModelCallId::from_uuid(call),
                     value: AssistantText::try_new(text).map_err(|error| {
@@ -1510,20 +2036,30 @@ pub(crate) async fn load_scheduling_projection(
                     })?,
                 }
             }
-            ("assistant_tool_use", None, None, None, Some(call), Some(request), None) => {
-                InitialSemanticTranscriptEntryPayload::AssistantToolUse {
-                    producing_call: ModelCallId::from_uuid(call),
-                    request: ToolRequestId::from_uuid(request),
-                }
-            }
-            ("turn_completed", None, None, None, None, None, Some(turn)) => {
+            (
+                "assistant_tool_use",
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(call),
+                Some(request),
+                None,
+            ) => InitialSemanticTranscriptEntryPayload::AssistantToolUse {
+                producing_call: ModelCallId::from_uuid(call),
+                request: ToolRequestId::from_uuid(request),
+            },
+            ("turn_completed", None, None, None, None, None, None, None, Some(turn)) => {
                 InitialSemanticTranscriptEntryPayload::TurnCompleted {
                     turn: turn_id_from_uuid(turn),
                 }
             }
             (
                 "origin_accepted_input"
+                | "steering_accepted_input"
                 | "turn_failed"
+                | "turn_cancelled"
                 | "assistant_text"
                 | "assistant_tool_use"
                 | "turn_completed",
@@ -1533,10 +2069,12 @@ pub(crate) async fn load_scheduling_projection(
                 _,
                 _,
                 _,
+                _,
+                _,
             ) => {
                 return Err(SubmitInputCorruption::Inconsistent("semantic entry payload").into());
             }
-            (value, _, _, _, _, _, _) => {
+            (value, _, _, _, _, _, _, _, _) => {
                 return Err(SubmitInputCorruption::Unsupported {
                     field: "semantic entry payload_kind",
                     value: value.to_owned(),
@@ -1617,6 +2155,7 @@ pub(crate) async fn load_scheduling_projection(
         active_acceptance_tail,
     )
     .with_model_call_facts(pinned_targets, model_calls)
+    .with_consumed_steering_facts(consumed_steering)
     .reconstitute()
     .map_err(|error| {
         let (_, failure) = error.into_parts();
@@ -1624,15 +2163,74 @@ pub(crate) async fn load_scheduling_projection(
     })
 }
 
+fn require_applied_interrupt_from_attempt(
+    row: &PgRow,
+    owning_turn: TurnId,
+    recorded_commands: &BTreeMap<DurableCommandId, ReconstitutedSubmitInput>,
+) -> Result<AppliedInterruptCommandResult, SubmitInputRepositoryError> {
+    let command = durable_command_id_from_uuid(required(row, "interrupt_command_id")?)
+        .map_err(|_| SubmitInputCorruption::Inconsistent("interrupt command identity"))?;
+    let predecessor = turn_id_from_uuid(required(row, "attempt_interrupt_predecessor_turn_id")?);
+    if predecessor != owning_turn {
+        return Err(SubmitInputCorruption::Inconsistent("attempt interrupt predecessor").into());
+    }
+    let receipt = recorded_commands
+        .get(&command)
+        .ok_or(SubmitInputCorruption::Missing("applied interrupt command"))?;
+    let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(origin)) = receipt.result()
+    else {
+        return Err(
+            SubmitInputCorruption::Inconsistent("interrupt command was not applied").into(),
+        );
+    };
+    origin
+        .applied_interrupt()
+        .copied()
+        .filter(|interrupt| {
+            interrupt.proof().command() == command && interrupt.proof().predecessor() == owning_turn
+        })
+        .ok_or_else(|| SubmitInputCorruption::Inconsistent("attempt interrupt authority").into())
+}
+
+fn require_applied_interrupt_for_turn(
+    owning_turn: TurnId,
+    recorded_commands: &BTreeMap<DurableCommandId, ReconstitutedSubmitInput>,
+) -> Result<AppliedInterruptCommandResult, SubmitInputRepositoryError> {
+    let mut matches = recorded_commands.values().filter_map(|receipt| {
+        let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(origin)) =
+            receipt.result()
+        else {
+            return None;
+        };
+        origin
+            .applied_interrupt()
+            .copied()
+            .filter(|interrupt| interrupt.proof().predecessor() == owning_turn)
+    });
+    let interrupt = matches
+        .next()
+        .ok_or(SubmitInputCorruption::Missing("applied interrupt command"))?;
+    if matches.next().is_some() {
+        return Err(
+            SubmitInputCorruption::Inconsistent("multiple applied interrupt commands").into(),
+        );
+    }
+    Ok(interrupt)
+}
+
 fn accepted_origin_source_turn(delivery: DeliveryRequest) -> Option<TurnId> {
     match delivery {
         DeliveryRequest::AfterCurrentTurn {
             expected_active_turn,
             ..
+        }
+        | DeliveryRequest::Interrupt {
+            expected_active_turn,
+            ..
         } => Some(expected_active_turn),
-        DeliveryRequest::StartWhenNoActiveTurn { .. }
-        | DeliveryRequest::Interrupt { .. }
-        | DeliveryRequest::NextSafePoint { .. } => None,
+        DeliveryRequest::StartWhenNoActiveTurn { .. } | DeliveryRequest::NextSafePoint { .. } => {
+            None
+        }
     }
 }
 
@@ -1706,6 +2304,7 @@ async fn load_active_acceptance_tail(
             acceptance_position,
             disposition_kind,
             origin_turn_id,
+            consuming_model_call_id,
             delivery_kind,
             expected_active_turn_id,
             expected_defaults_version,
@@ -1743,12 +2342,19 @@ async fn load_active_acceptance_tail(
         )?;
         let disposition_kind: String = required(&row, "disposition_kind")?;
         let origin_turn: Option<Uuid> = row.try_get("origin_turn_id")?;
-        let disposition = match (disposition_kind.as_str(), origin_turn, delivery) {
-            ("origin_of", Some(origin), _) => {
+        let consuming_call: Option<Uuid> = row.try_get("consuming_model_call_id")?;
+        let disposition = match (
+            disposition_kind.as_str(),
+            origin_turn,
+            consuming_call,
+            delivery,
+        ) {
+            ("origin_of", Some(origin), None, _) => {
                 AcceptedInputDisposition::OriginOf(turn_id_from_uuid(origin))
             }
             (
                 "pending_steering",
+                None,
                 None,
                 DeliveryRequest::NextSafePoint {
                     expected_active_turn,
@@ -1759,18 +2365,32 @@ async fn load_active_acceptance_tail(
             (
                 "reclassified_as_turn_origin",
                 Some(origin),
+                None,
                 DeliveryRequest::NextSafePoint { .. },
             ) => AcceptedInputDisposition::ReclassifiedAsTurnOrigin {
                 turn: turn_id_from_uuid(origin),
                 reason: SteeringReclassificationReason::NoSafePointBeforeTerminal,
             },
-            ("origin_of" | "pending_steering" | "reclassified_as_turn_origin", _, _) => {
+            ("consumed_as_steering", None, Some(call), DeliveryRequest::NextSafePoint { .. }) => {
+                AcceptedInputDisposition::ConsumedAsSteering {
+                    call: ModelCallId::from_uuid(call),
+                }
+            }
+            (
+                "origin_of"
+                | "pending_steering"
+                | "reclassified_as_turn_origin"
+                | "consumed_as_steering",
+                _,
+                _,
+                _,
+            ) => {
                 return Err(SubmitInputCorruption::Inconsistent(
                     "active acceptance-tail disposition",
                 )
                 .into());
             }
-            (value, _, _) => {
+            (value, _, _, _) => {
                 return Err(SubmitInputCorruption::Unsupported {
                     field: "active acceptance-tail disposition_kind",
                     value: value.to_owned(),
@@ -1842,11 +2462,12 @@ async fn insert_prepared(
              result_actual_active_turn_id,
              result_expected_active_turn_id, result_expected_defaults_version,
              result_current_defaults_version, result_unknown_alias_id,
-             result_selected_defaults_version, result_last_position)
+             result_selected_defaults_version, result_last_position,
+             result_existing_interrupt_command_id)
          VALUES
             ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
              $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25,
-             $26, $27, $28)",
+             $26, $27, $28, $29)",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(SUBMIT_INPUT_KIND)
@@ -1876,6 +2497,7 @@ async fn insert_prepared(
     .bind(result.unknown_alias)
     .bind(result.selected_defaults_version)
     .bind(result.last_position)
+    .bind(result.existing_interrupt_command)
     .execute(&mut *connection)
     .await?;
 
@@ -1886,6 +2508,13 @@ async fn insert_prepared(
         let requested = encode_selection(origin.requested().model());
         let frozen = encode_frozen_model(origin.effective().model());
         let position = applied.acceptance_position();
+        let (priority_kind, interrupt_predecessor) = match applied.queue_order().priority() {
+            AcceptedInputQueuePriority::Ordinary => ("ordinary", None),
+            AcceptedInputQueuePriority::InterruptImmediatelyAfter { predecessor } => (
+                "interrupt_immediately_after",
+                Some(turn_id_to_uuid(predecessor)),
+            ),
+        };
 
         sqlx::query(
             "INSERT INTO accepted_input
@@ -1921,6 +2550,7 @@ async fn insert_prepared(
             "INSERT INTO queued_input_origin
                 (turn_id, accepted_input_id, session_id, acceptance_position,
                  priority_kind, defaults_version,
+                 interrupt_predecessor_turn_id,
                  requested_model_kind, requested_direct_model_selection_id,
                  requested_model_alias_id, frozen_model_kind,
                  frozen_direct_model_selection_id, frozen_model_alias_id,
@@ -1928,16 +2558,17 @@ async fn insert_prepared(
                  known_provider_failure_retry, model_fallback)
              VALUES
                 ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                 $14, $15, $16)",
+                 $14, $15, $16, $17)",
         )
         .bind(turn_id_to_uuid(applied.turn()))
         .bind(accepted_input_id_to_uuid(applied.accepted_input()))
         .bind(session_id_to_uuid(applied.session()))
         .bind(input_position_to_numeric(position))
-        .bind("ordinary")
+        .bind(priority_kind)
         .bind(defaults_version_to_numeric(
             origin.session_defaults_version(),
         ))
+        .bind(interrupt_predecessor)
         .bind(requested.kind)
         .bind(requested.direct)
         .bind(requested.alias)
@@ -2159,6 +2790,7 @@ struct EncodedResult {
     unknown_alias: Option<Uuid>,
     selected_defaults_version: Option<Decimal>,
     last_position: Option<Decimal>,
+    existing_interrupt_command: Option<Uuid>,
 }
 
 fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> EncodedResult {
@@ -2176,6 +2808,7 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
             unknown_alias: None,
             selected_defaults_version: None,
             last_position: None,
+            existing_interrupt_command: None,
         },
         SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(result)) => {
             EncodedResult {
@@ -2191,6 +2824,7 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
                 unknown_alias: None,
                 selected_defaults_version: None,
                 last_position: None,
+                existing_interrupt_command: None,
             }
         }
         SubmitInputResult::Rejected(SubmitInputRejectedResult::ActiveTurnPresent {
@@ -2209,6 +2843,7 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
             unknown_alias: None,
             selected_defaults_version: None,
             last_position: None,
+            existing_interrupt_command: None,
         },
         SubmitInputResult::Rejected(SubmitInputRejectedResult::ActiveTurnMismatch {
             session,
@@ -2227,6 +2862,7 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
             unknown_alias: None,
             selected_defaults_version: None,
             last_position: None,
+            existing_interrupt_command: None,
         },
         SubmitInputResult::Rejected(SubmitInputRejectedResult::SessionNotFound { session }) => {
             EncodedResult {
@@ -2242,6 +2878,7 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
                 unknown_alias: None,
                 selected_defaults_version: None,
                 last_position: None,
+                existing_interrupt_command: None,
             }
         }
         SubmitInputResult::Rejected(SubmitInputRejectedResult::NoActiveTurn {
@@ -2260,6 +2897,7 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
             unknown_alias: None,
             selected_defaults_version: None,
             last_position: None,
+            existing_interrupt_command: None,
         },
         SubmitInputResult::Rejected(
             SubmitInputRejectedResult::SessionDefaultsVersionMismatch {
@@ -2280,6 +2918,7 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
             unknown_alias: None,
             selected_defaults_version: None,
             last_position: None,
+            existing_interrupt_command: None,
         },
         SubmitInputResult::Rejected(SubmitInputRejectedResult::UnknownModelAlias {
             session,
@@ -2298,6 +2937,7 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
             selected_defaults_version: configured_defaults_version(delivery)
                 .map(defaults_version_to_numeric),
             last_position: None,
+            existing_interrupt_command: None,
         },
         SubmitInputResult::Rejected(SubmitInputRejectedResult::AcceptancePositionExhausted {
             session,
@@ -2315,6 +2955,47 @@ fn encode_result(result: &SubmitInputResult, delivery: DeliveryRequest) -> Encod
             unknown_alias: None,
             selected_defaults_version: None,
             last_position: Some(input_position_to_numeric(*last)),
+            existing_interrupt_command: None,
+        },
+        SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::SafePointUnavailableWhileStopping {
+                session,
+                active_turn,
+                existing_command,
+            },
+        ) => EncodedResult {
+            kind: REJECTED,
+            rejection_kind: Some("safe_point_unavailable_while_stopping"),
+            session: *session,
+            accepted_input: None,
+            turn: None,
+            actual_active_turn: Some(turn_id_to_uuid(*active_turn)),
+            expected_active_turn: None,
+            expected_defaults_version: None,
+            current_defaults_version: None,
+            unknown_alias: None,
+            selected_defaults_version: None,
+            last_position: None,
+            existing_interrupt_command: Some(durable_command_id_to_uuid(*existing_command)),
+        },
+        SubmitInputResult::Rejected(SubmitInputRejectedResult::InterruptAlreadyApplied {
+            session,
+            active_turn,
+            existing_command,
+        }) => EncodedResult {
+            kind: REJECTED,
+            rejection_kind: Some("interrupt_already_applied"),
+            session: *session,
+            accepted_input: None,
+            turn: None,
+            actual_active_turn: Some(turn_id_to_uuid(*active_turn)),
+            expected_active_turn: None,
+            expected_defaults_version: None,
+            current_defaults_version: None,
+            unknown_alias: None,
+            selected_defaults_version: None,
+            last_position: None,
+            existing_interrupt_command: Some(durable_command_id_to_uuid(*existing_command)),
         },
     }
 }
@@ -2369,6 +3050,7 @@ async fn load_complete_rows(
             typed.result_unknown_alias_id,
             typed.result_selected_defaults_version,
             typed.result_last_position,
+            typed.result_existing_interrupt_command_id,
             accepted.accepting_command_id,
             accepted.accepted_input_id,
             accepted.session_id AS accepted_session_id,
@@ -2389,6 +3071,7 @@ async fn load_complete_rows(
             queued.session_id AS queued_session_id,
             queued.acceptance_position AS queued_position,
             queued.priority_kind,
+            queued.interrupt_predecessor_turn_id,
             queued.defaults_version AS queued_defaults_version,
             queued.requested_model_kind,
             queued.requested_direct_model_selection_id,
@@ -2452,7 +3135,43 @@ async fn load_from_connection(
         return Err(SubmitInputCorruption::Inconsistent("duplicate complete command rows").into());
     }
     let related_turn_origin = load_related_turn_origin(connection, &row).await?;
-    decode_complete(row, command_id, related_turn_origin).map(Some)
+    let existing_interrupt = load_existing_interrupt(connection, &row).await?;
+    decode_complete(row, command_id, related_turn_origin, existing_interrupt).map(Some)
+}
+
+async fn load_existing_interrupt(
+    connection: &mut PgConnection,
+    row: &PgRow,
+) -> Result<Option<AppliedInterruptCommandResult>, SubmitInputRepositoryError> {
+    let Some(command_uuid) =
+        row.try_get::<Option<Uuid>, _>("result_existing_interrupt_command_id")?
+    else {
+        return Ok(None);
+    };
+    let command = durable_command_id_from_uuid(command_uuid)
+        .map_err(|_| SubmitInputCorruption::Inconsistent("existing interrupt command identity"))?;
+    let mut rows = load_complete_rows(connection, &[command_uuid]).await?;
+    let interrupt_row = rows
+        .pop()
+        .ok_or(SubmitInputCorruption::Missing("existing interrupt command"))?;
+    if !rows.is_empty() {
+        return Err(
+            SubmitInputCorruption::Inconsistent("duplicate existing interrupt command").into(),
+        );
+    }
+    let predecessor_origin = load_related_turn_origin(connection, &interrupt_row).await?;
+    let receipt = decode_complete(interrupt_row, command, predecessor_origin, None)?;
+    let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(origin)) = receipt.result()
+    else {
+        return Err(
+            SubmitInputCorruption::Inconsistent("existing interrupt was not applied").into(),
+        );
+    };
+    origin
+        .applied_interrupt()
+        .copied()
+        .map(Some)
+        .ok_or_else(|| SubmitInputCorruption::Inconsistent("existing interrupt authority").into())
 }
 
 async fn load_related_turn_origin(
@@ -2480,12 +3199,19 @@ fn related_turn_origin_key(
         rejection_kind.as_deref(),
         delivery_kind.as_deref(),
     ) {
-        (Some(APPLIED), None, Some("after_current_turn" | "next_safe_point")) => {
+        (Some(APPLIED), None, Some("interrupt" | "after_current_turn" | "next_safe_point")) => {
             required(row, "command_expected_active_turn_id")?
         }
-        (Some(REJECTED), Some("active_turn_present" | "active_turn_mismatch"), _) => {
-            required(row, "result_actual_active_turn_id")?
-        }
+        (
+            Some(REJECTED),
+            Some(
+                "active_turn_present"
+                | "active_turn_mismatch"
+                | "safe_point_unavailable_while_stopping"
+                | "interrupt_already_applied",
+            ),
+            _,
+        ) => required(row, "result_actual_active_turn_id")?,
         (
             Some(REJECTED),
             Some(
@@ -2493,7 +3219,7 @@ fn related_turn_origin_key(
                 | "unknown_model_alias"
                 | "acceptance_position_exhausted",
             ),
-            Some("after_current_turn" | "next_safe_point"),
+            Some("interrupt" | "after_current_turn" | "next_safe_point"),
         ) => required(row, "command_expected_active_turn_id")?,
         _ => return Ok(None),
     };
@@ -2551,7 +3277,10 @@ pub(crate) async fn load_turn_origin_graph(
                     AND accepted.expected_active_turn_id IS NOT NULL
                ) OR (
                     accepted.disposition_kind = 'origin_of'
-                    AND command.delivery_kind = 'after_current_turn'
+                    AND command.delivery_kind IN (
+                        'interrupt',
+                        'after_current_turn'
+                    )
                     AND command.expected_active_turn_id IS NOT NULL
                )
         )
@@ -2564,10 +3293,16 @@ pub(crate) async fn load_turn_origin_graph(
             accepted.expected_active_turn_id AS reclassified_source_turn_id,
             queued.acceptance_position AS origin_acceptance_position,
             queued.priority_kind AS origin_priority_kind,
+            queued.interrupt_predecessor_turn_id AS origin_interrupt_predecessor_turn_id,
             command.delivery_kind AS origin_delivery_kind,
             command.expected_active_turn_id AS origin_predecessor_turn_id,
             source.state_kind AS source_state_kind,
-            source.terminal_disposition_kind AS source_terminal_disposition_kind
+            source.terminal_disposition_kind AS source_terminal_disposition_kind,
+            source.terminal_model_call_id AS source_terminal_model_call_id,
+            COALESCE(
+                source_attempt.interrupt_command_id,
+                source_interrupt.command_id
+            ) AS source_interrupt_command_id
           FROM origin_turn AS current
           JOIN turn_lifecycle AS turn
             ON turn.turn_id = current.turn_id
@@ -2589,6 +3324,40 @@ pub(crate) async fn load_turn_origin_graph(
           LEFT JOIN turn_lifecycle AS source
             ON source.turn_id = accepted.expected_active_turn_id
            AND source.session_id = accepted.session_id
+          LEFT JOIN turn_attempt AS source_attempt
+            ON source_attempt.turn_attempt_id = source.terminal_attempt_id
+           AND source_attempt.turn_id = source.turn_id
+           AND source_attempt.session_id = source.session_id
+          LEFT JOIN LATERAL (
+                SELECT interrupt.command_id
+                  FROM submit_input_command AS interrupt
+                  JOIN accepted_input AS interrupt_accepted
+                    ON interrupt_accepted.accepting_command_id =
+                        interrupt.command_id
+                   AND interrupt_accepted.accepted_input_id =
+                        interrupt.result_accepted_input_id
+                   AND interrupt_accepted.session_id =
+                        interrupt.result_session_id
+                   AND interrupt_accepted.origin_turn_id =
+                        interrupt.result_turn_id
+                  JOIN queued_input_origin AS interrupt_successor
+                    ON interrupt_successor.accepted_input_id =
+                        interrupt_accepted.accepted_input_id
+                   AND interrupt_successor.turn_id =
+                        interrupt_accepted.origin_turn_id
+                   AND interrupt_successor.session_id =
+                        interrupt_accepted.session_id
+                   AND interrupt_successor.priority_kind =
+                        'interrupt_immediately_after'
+                   AND interrupt_successor.interrupt_predecessor_turn_id =
+                        source.turn_id
+                 WHERE interrupt.session_id = source.session_id
+                   AND interrupt.delivery_kind = 'interrupt'
+                   AND interrupt.expected_active_turn_id = source.turn_id
+                   AND interrupt.result_kind = 'applied'
+                   AND interrupt.rejection_kind IS NULL
+                   AND interrupt_accepted.disposition_kind = 'origin_of'
+          ) AS source_interrupt ON TRUE
          ORDER BY current.session_id, current.turn_id",
     )
     .bind(&source_sessions)
@@ -2609,7 +3378,29 @@ pub(crate) async fn load_turn_origin_graph(
         let accepted_input =
             accepted_input_id_from_uuid(required(&row, "origin_accepted_input_id")?);
         let queue_position = decode_position(&row, "origin_acceptance_position")?;
-        require_spelling(&row, "origin_priority_kind", "ordinary")?;
+        let interrupt_predecessor: Option<Uuid> =
+            row.try_get("origin_interrupt_predecessor_turn_id")?;
+        let queue_order = match required::<String>(&row, "origin_priority_kind")?.as_str() {
+            "ordinary" if interrupt_predecessor.is_none() => {
+                AcceptedInputQueueOrder::ordinary(queue_position)
+            }
+            "interrupt_immediately_after" => AcceptedInputQueueOrder::interrupt_immediately_after(
+                queue_position,
+                turn_id_from_uuid(interrupt_predecessor.ok_or(SubmitInputCorruption::Missing(
+                    "origin_interrupt_predecessor_turn_id",
+                ))?),
+            ),
+            "ordinary" => {
+                return Err(SubmitInputCorruption::Inconsistent("ordinary origin priority").into());
+            }
+            value => {
+                return Err(SubmitInputCorruption::Unsupported {
+                    field: "origin_priority_kind",
+                    value: value.to_owned(),
+                }
+                .into());
+            }
+        };
         let disposition_kind: String = required(&row, "origin_disposition_kind")?;
         let delivery_kind: String = required(&row, "origin_delivery_kind")?;
         let predecessor_turn: Option<Uuid> = row.try_get("origin_predecessor_turn_id")?;
@@ -2630,6 +3421,13 @@ pub(crate) async fn load_turn_origin_graph(
                     predecessor: Some((key.0, turn)),
                 }
             }
+            ("origin_of", "interrupt", Some(turn), Some(source))
+                if turn == source && interrupt_predecessor == Some(turn) =>
+            {
+                StoredTurnOriginKind::Direct {
+                    predecessor: Some((key.0, turn)),
+                }
+            }
             ("reclassified_as_turn_origin", "next_safe_point", Some(source), Some(binding))
                 if source == binding && source_state.as_deref() == Some("terminal") =>
             {
@@ -2637,6 +3435,38 @@ pub(crate) async fn load_turn_origin_graph(
                     Some("completed") => StoredTerminalTurnDisposition::Completed,
                     Some("refused") => StoredTerminalTurnDisposition::Refused,
                     Some("failed") => StoredTerminalTurnDisposition::Failed,
+                    Some("cancelled") => {
+                        let command = durable_command_id_from_uuid(required(
+                            &row,
+                            "source_interrupt_command_id",
+                        )?)
+                        .map_err(|_| {
+                            SubmitInputCorruption::Inconsistent(
+                                "cancelled source interrupt command",
+                            )
+                        })?;
+                        StoredTerminalTurnDisposition::Cancelled {
+                            interrupt_command: command,
+                        }
+                    }
+                    Some("reconciliation_required") => {
+                        let command = durable_command_id_from_uuid(required(
+                            &row,
+                            "source_interrupt_command_id",
+                        )?)
+                        .map_err(|_| {
+                            SubmitInputCorruption::Inconsistent(
+                                "reconciliation source interrupt command",
+                            )
+                        })?;
+                        StoredTerminalTurnDisposition::ReconciliationRequired {
+                            interrupt_command: command,
+                            ambiguous_call: ModelCallId::from_uuid(required(
+                                &row,
+                                "source_terminal_model_call_id",
+                            )?),
+                        }
+                    }
                     Some(value) => {
                         return Err(SubmitInputCorruption::Unsupported {
                             field: "reclassified source terminal disposition",
@@ -2676,7 +3506,7 @@ pub(crate) async fn load_turn_origin_graph(
                     command_id,
                     kind,
                     accepted_input,
-                    queue_order: AcceptedInputQueueOrder::ordinary(queue_position),
+                    queue_order,
                 },
             )
             .is_some()
@@ -2754,7 +3584,7 @@ pub(crate) async fn load_turn_origin_graph(
                     .ok_or(SubmitInputCorruption::Missing("turn origin predecessor"))
             })
             .transpose()?;
-        let receipt = decode_complete(row, link.command_id, dependency.clone())?;
+        let receipt = decode_complete(row, link.command_id, dependency.clone(), None)?;
         let reconstructed = match link.kind {
             StoredTurnOriginKind::Direct { .. } => {
                 let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(applied)) =
@@ -2806,6 +3636,106 @@ pub(crate) async fn load_turn_origin_graph(
                 }
                 let source_origin = dependency
                     .ok_or(SubmitInputCorruption::Missing("reclassified source origin"))?;
+                let source_turn = turn_id_from_uuid(source.1);
+                let source_terminal = match source_disposition {
+                    StoredTerminalTurnDisposition::Completed
+                    | StoredTerminalTurnDisposition::Refused
+                    | StoredTerminalTurnDisposition::Failed => {
+                        SubmitInputTerminalSourceReconstitutionInput::new(
+                            source_origin.clone(),
+                            source_turn,
+                            source_disposition.unstopped_domain().ok_or(
+                                SubmitInputCorruption::Inconsistent("terminal source disposition"),
+                            )?,
+                        )
+                    }
+                    StoredTerminalTurnDisposition::Cancelled { interrupt_command } => {
+                        let interrupt_uuid = durable_command_id_to_uuid(interrupt_command);
+                        let mut interrupt_rows =
+                            load_complete_rows(connection, &[interrupt_uuid]).await?;
+                        let interrupt_row = interrupt_rows.pop().ok_or(
+                            SubmitInputCorruption::Missing("cancelled source interrupt command"),
+                        )?;
+                        if !interrupt_rows.is_empty() {
+                            return Err(SubmitInputCorruption::Inconsistent(
+                                "duplicate cancelled source interrupt command",
+                            )
+                            .into());
+                        }
+                        let interrupt_receipt = decode_complete(
+                            interrupt_row,
+                            interrupt_command,
+                            Some(source_origin.clone()),
+                            None,
+                        )?;
+                        let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(
+                            interrupt_origin,
+                        )) = interrupt_receipt.result()
+                        else {
+                            return Err(SubmitInputCorruption::Inconsistent(
+                                "cancelled source interrupt result",
+                            )
+                            .into());
+                        };
+                        SubmitInputTerminalSourceReconstitutionInput::new(
+                            source_origin.clone(),
+                            source_turn,
+                            signalbox_domain::TurnDisposition::Cancelled {
+                                cause: interrupt_origin
+                                    .applied_interrupt()
+                                    .ok_or(SubmitInputCorruption::Inconsistent(
+                                        "cancelled source interrupt authority",
+                                    ))?
+                                    .proof(),
+                            },
+                        )
+                    }
+                    StoredTerminalTurnDisposition::ReconciliationRequired {
+                        interrupt_command,
+                        ambiguous_call,
+                    } => {
+                        let interrupt_uuid = durable_command_id_to_uuid(interrupt_command);
+                        let mut interrupt_rows =
+                            load_complete_rows(connection, &[interrupt_uuid]).await?;
+                        let interrupt_row =
+                            interrupt_rows.pop().ok_or(SubmitInputCorruption::Missing(
+                                "reconciliation source interrupt command",
+                            ))?;
+                        if !interrupt_rows.is_empty() {
+                            return Err(SubmitInputCorruption::Inconsistent(
+                                "duplicate reconciliation source interrupt command",
+                            )
+                            .into());
+                        }
+                        let interrupt_receipt = decode_complete(
+                            interrupt_row,
+                            interrupt_command,
+                            Some(source_origin.clone()),
+                            None,
+                        )?;
+                        let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(
+                            interrupt_origin,
+                        )) = interrupt_receipt.result()
+                        else {
+                            return Err(SubmitInputCorruption::Inconsistent(
+                                "reconciliation source interrupt result",
+                            )
+                            .into());
+                        };
+                        SubmitInputTerminalSourceReconstitutionInput::
+                            interrupted_model_call_reconciliation(
+                                source_origin.clone(),
+                                source_turn,
+                                ambiguous_call,
+                                interrupt_origin
+                                    .applied_interrupt()
+                                    .ok_or(SubmitInputCorruption::Inconsistent(
+                                        "reconciliation source interrupt authority",
+                                    ))?
+                                    .proof(),
+                            )
+                    }
+                };
                 SubmitInputTurnOriginReconstitutionInput::reclassified(
                     receipt,
                     AcceptedInputLifecycle::new(
@@ -2819,11 +3749,7 @@ pub(crate) async fn load_turn_origin_graph(
                     session_id_from_uuid(ready.0),
                     turn_id_from_uuid(ready.1),
                     link.queue_order,
-                    SubmitInputTerminalSourceReconstitutionInput::new(
-                        source_origin,
-                        turn_id_from_uuid(source.1),
-                        source_disposition.domain(),
-                    ),
+                    source_terminal,
                 )
             }
         };
@@ -2838,6 +3764,7 @@ fn decode_complete(
     row: PgRow,
     command_id: DurableCommandId,
     related_turn_origin: Option<SubmitInputTurnOriginReconstitutionInput>,
+    existing_interrupt: Option<AppliedInterruptCommandResult>,
 ) -> Result<ReconstitutedSubmitInput, SubmitInputRepositoryError> {
     require_spelling(&row, "registry_kind", SUBMIT_INPUT_KIND)?;
     require_version(&row, "registry_version", STORAGE_VERSION)?;
@@ -2891,6 +3818,8 @@ fn decode_complete(
     let result_selected_defaults: Option<Decimal> =
         row.try_get("result_selected_defaults_version")?;
     let result_last_position: Option<Decimal> = row.try_get("result_last_position")?;
+    let result_existing_interrupt: Option<Uuid> =
+        row.try_get("result_existing_interrupt_command_id")?;
     let accepted_effect_count: i64 = required(&row, "accepted_effect_count")?;
     let queued_effect_count: i64 = required(&row, "queued_effect_count")?;
 
@@ -2902,6 +3831,7 @@ fn decode_complete(
                 || result_unknown_alias.is_some()
                 || result_selected_defaults.is_some()
                 || result_last_position.is_some()
+                || result_existing_interrupt.is_some()
             {
                 return Err(SubmitInputCorruption::Inconsistent("applied result fields").into());
             }
@@ -2972,6 +3902,8 @@ fn decode_complete(
                 result_unknown_alias,
                 result_selected_defaults,
                 result_last_position,
+                result_existing_interrupt,
+                existing_interrupt,
             )?
         }
         (APPLIED, Some(_)) | (REJECTED, None) => {
@@ -3031,7 +3963,28 @@ fn decode_applied_turn_origin(
     }
     let queued_session = session_id_from_uuid(required(row, "queued_session_id")?);
     let queued_position = decode_position(row, "queued_position")?;
-    require_spelling(row, "priority_kind", "ordinary")?;
+    let queue_order = match required::<String>(row, "priority_kind")?.as_str() {
+        "ordinary" => {
+            if row
+                .try_get::<Option<Uuid>, _>("interrupt_predecessor_turn_id")?
+                .is_some()
+            {
+                return Err(SubmitInputCorruption::Inconsistent("ordinary queue priority").into());
+            }
+            AcceptedInputQueueOrder::ordinary(queued_position)
+        }
+        "interrupt_immediately_after" => AcceptedInputQueueOrder::interrupt_immediately_after(
+            queued_position,
+            turn_id_from_uuid(required(row, "interrupt_predecessor_turn_id")?),
+        ),
+        value => {
+            return Err(SubmitInputCorruption::Unsupported {
+                field: "priority_kind",
+                value: value.to_owned(),
+            }
+            .into());
+        }
+    };
     require_spelling(row, "model_parameters", "provider_defaults")?;
     require_spelling(row, "known_provider_failure_retry", "disabled")?;
     require_spelling(row, "model_fallback", "disabled")?;
@@ -3077,7 +4030,7 @@ fn decode_applied_turn_origin(
         AcceptedInputDisposition::OriginOf(accepted_origin_turn),
         queued_session,
         queued_turn,
-        AcceptedInputQueueOrder::ordinary(queued_position),
+        queue_order,
         defaults_session,
         defaults_version,
         defaults,
@@ -3148,7 +4101,18 @@ fn decode_rejected(
     unknown_alias: Option<Uuid>,
     selected_defaults: Option<Decimal>,
     last_position: Option<Decimal>,
+    existing_interrupt_command: Option<Uuid>,
+    existing_interrupt: Option<AppliedInterruptCommandResult>,
 ) -> Result<SubmitInputReconstitutionInput, SubmitInputRepositoryError> {
+    if !matches!(
+        rejection_kind,
+        "safe_point_unavailable_while_stopping" | "interrupt_already_applied"
+    ) && (existing_interrupt_command.is_some() || existing_interrupt.is_some())
+    {
+        return Err(
+            SubmitInputCorruption::Inconsistent("unexpected existing interrupt result").into(),
+        );
+    }
     match rejection_kind {
         "session_not_found" => {
             require_all_absent(
@@ -3344,6 +4308,86 @@ fn decode_rejected(
                     decode_optional_position(last_position, "result_last_position")?
                         .ok_or(SubmitInputCorruption::Missing("result_last_position"))?,
                     active_turn_origin,
+                ),
+            )
+        }
+        "safe_point_unavailable_while_stopping" => {
+            if expected_turn.is_some()
+                || expected_defaults.is_some()
+                || current_defaults.is_some()
+                || unknown_alias.is_some()
+                || selected_defaults.is_some()
+                || last_position.is_some()
+            {
+                return Err(SubmitInputCorruption::Inconsistent(
+                    "stopping safe-point result fields",
+                )
+                .into());
+            }
+            let active_turn = turn_id_from_uuid(actual_turn.ok_or(
+                SubmitInputCorruption::Missing("result_actual_active_turn_id"),
+            )?);
+            let stored_command = durable_command_id_from_uuid(existing_interrupt_command.ok_or(
+                SubmitInputCorruption::Missing("result_existing_interrupt_command_id"),
+            )?)
+            .map_err(|_| {
+                SubmitInputCorruption::Inconsistent("existing interrupt command identity")
+            })?;
+            let interrupt = existing_interrupt.ok_or(SubmitInputCorruption::Missing(
+                "existing interrupt authority",
+            ))?;
+            if stored_command != interrupt.proof().command() {
+                return Err(
+                    SubmitInputCorruption::Inconsistent("existing interrupt command").into(),
+                );
+            }
+            Ok(
+                SubmitInputReconstitutionInput::rejected_safe_point_unavailable_while_stopping(
+                    command,
+                    stored_actor,
+                    result_session,
+                    active_turn,
+                    active_turn_origin
+                        .ok_or(SubmitInputCorruption::Missing("active turn origin"))?,
+                    interrupt,
+                ),
+            )
+        }
+        "interrupt_already_applied" => {
+            if expected_turn.is_some()
+                || expected_defaults.is_some()
+                || current_defaults.is_some()
+                || unknown_alias.is_some()
+                || selected_defaults.is_some()
+                || last_position.is_some()
+            {
+                return Err(SubmitInputCorruption::Inconsistent(
+                    "already-applied interrupt result fields",
+                )
+                .into());
+            }
+            let active_turn = turn_id_from_uuid(actual_turn.ok_or(
+                SubmitInputCorruption::Missing("result_actual_active_turn_id"),
+            )?);
+            let stored_command = durable_command_id_from_uuid(existing_interrupt_command.ok_or(
+                SubmitInputCorruption::Missing("result_existing_interrupt_command_id"),
+            )?)
+            .map_err(|_| {
+                SubmitInputCorruption::Inconsistent("existing interrupt command identity")
+            })?;
+            let interrupt = existing_interrupt.ok_or(SubmitInputCorruption::Missing(
+                "existing interrupt authority",
+            ))?;
+            Ok(
+                SubmitInputReconstitutionInput::rejected_interrupt_already_applied(
+                    command,
+                    stored_actor,
+                    result_session,
+                    active_turn,
+                    stored_command,
+                    active_turn_origin
+                        .ok_or(SubmitInputCorruption::Missing("active turn origin"))?,
+                    interrupt,
                 ),
             )
         }

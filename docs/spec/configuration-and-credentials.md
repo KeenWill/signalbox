@@ -1,10 +1,11 @@
 # Configuration and credentials
 
 This page describes the implemented configuration and credential behavior of
-Signalbox, verified against merged `main` at `bf39f5f` (hubd configuration
-loading in `apps/hubd/src/configuration.rs` and `apps/hubd/src/main.rs`, the
-static TOML catalog, and the provider bridge in `crates/model-provider-runtime`)
-together with the model-runtime crates it composes
+Signalbox, verified against the implementing stack through PR #175
+(`agent/stop-requests`; hubd configuration loading in
+`apps/hubd/src/configuration.rs` and `apps/hubd/src/main.rs`, the static TOML
+catalog, and the provider bridge in `crates/model-provider-runtime`) together
+with the model-runtime crates it composes
 (`crates/model-runtime/src/credential.rs` and the redaction pipeline in
 `crates/model-runtime-anthropic/src/runtime.rs`). Invariant law lives in
 [docs/invariants.md](../invariants.md), cited here by tag.
@@ -158,11 +159,9 @@ deployment-side rules that code cannot enforce are stated in
 - **Resolution timing.** The adapter resolves the pinned reference during send
   preparation of exactly one physical request — after the durable `Prepared`
   record, before send authorization — and the resulting value is scoped to that
-  request (INV-002 boundary type). The adapter races resolution against its
-  cancellation signal so a blocked read cannot hold a cancelled operation; in
-  the composed hubd this race is inert, because the provider bridge passes
-  `CancellationSignal::never()` to both preparation and execution and nothing
-  constructs a firing signal (see Open edges).
+  request (INV-002 boundary type). The shared cancellation contract for
+  preparation and execution is owned by
+  [model-call-execution](model-call-execution.md#staged-execution).
 - **Failure behavior.** A failed resolution, or a value that cannot form an HTTP
   header (empty, non-UTF-8, non-header-safe bytes), is a typed known preparation
   failure: the call ends `KnownFailed`, the attempt ends with a known failure,
@@ -294,9 +293,5 @@ here because the surviving hub-side mechanics depend on them):
   contract assigns the budget to the caller); a hung provider exchange is
   bounded only by process shutdown — the 30-second grace window, then
   abandonment to startup recovery.
-- No cancellation channel exists in the hubd composition: the provider bridge
-  passes `CancellationSignal::never()` to both runtime preparation and
-  execution, so the adapter's cancellation-dependent guarantees (credential-read
-  race, cancelled-before-send) are inert capability in the live system.
 - In-memory credential hygiene (zeroization or equivalent) remains an open
   question with no implementation.
