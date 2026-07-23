@@ -387,7 +387,9 @@ mod tests {
                     ImportedRawRecordPosition::first(),
                     ImportedRecordEntryPosition::first(),
                     ImportedSourceAttestation::Attested(ImportedSpeaker::User),
-                    ImportedTranscriptContent::Text(text("first")),
+                    ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(text(
+                        "first",
+                    ))),
                     metadata(ImportedSpeaker::User),
                 ),
                 ImportedTranscriptEntryInput::new(
@@ -399,7 +401,9 @@ mod tests {
                         .expect("fixture raw position is positive"),
                     ImportedRecordEntryPosition::first(),
                     ImportedSourceAttestation::Attested(ImportedSpeaker::Assistant),
-                    ImportedTranscriptContent::Text(text("second")),
+                    ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(text(
+                        "second",
+                    ))),
                     metadata(ImportedSpeaker::Assistant),
                 ),
             ],
