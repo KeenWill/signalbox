@@ -7957,6 +7957,20 @@ async fn occupied_slot_mixed_acceptances_serialize_positions_and_effects()
 async fn occupied_slot_schema_constraints_and_checked_decode_fail_closed()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
+    let steering_frontier_assertion: String = sqlx::query_scalar(
+        "SELECT pg_get_functiondef(oid)
+           FROM pg_proc
+          WHERE proname = 'assert_model_call_steering_final_state'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(steering_frontier_assertion.contains(
+        "earlier.disposition_kind IN (
+                    'pending_steering',
+                    'reclassified_as_turn_origin'
+               )"
+    ));
+
     CreateSessionRepository::new(pool.clone())
         .handle(prepared(0x461, 0x861, direct(0xc61)))
         .await?;

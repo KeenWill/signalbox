@@ -2308,6 +2308,19 @@ fn reconstitute_inner(
                 AcceptedInputTurnSchedulingRecordState::Active { .. }
             )
         });
+        let earlier_reclassified = records_by_turn.values().any(|record| {
+            record.order.acceptance_position() < consumed.acceptance_position
+                && matches!(
+                    record.accepted_input.disposition(),
+                    AcceptedInputDisposition::ReclassifiedAsTurnOrigin { .. }
+                )
+                && matches!(
+                    record.origin_delivery,
+                    DeliveryRequest::NextSafePoint {
+                        expected_active_turn,
+                    } if expected_active_turn == consumed.source_turn
+                )
+        });
         let model_call_matches = model_call_inputs.get(call).zip(source_record).is_some_and(
             |(model_call, record)| {
                 let lifecycle_matches = match &record.state {
@@ -2387,6 +2400,7 @@ fn reconstitute_inner(
         if accepted_input_turns.contains_key(&accepted_input)
             || !source_record_matches
             || !model_call_matches
+            || earlier_reclassified
             || (source_is_active && !active_tail_matches)
         {
             return Err(
@@ -4950,6 +4964,46 @@ mod tests {
         nonfollowing_position.acceptance_tail.observed_last_position = active.position();
         assert_eq!(
             assert_input_rejects_unchanged(nonfollowing_position.input()),
+            AcceptedInputSchedulingReconstitutionFailure::ConsumedSteeringMismatch {
+                accepted_input: consumed.accepted_input(),
+            }
+        );
+
+        let mut skipped_reclassified =
+            ConsumedSteeringReconstitutionFacts::matching(&session, active, consumed);
+        skipped_reclassified.turns[0].state =
+            AcceptedInputTurnSchedulingRecordState::TerminalFailed {
+                starting_lineage: AcceptedInputStartingLineage::FirstInSession,
+                starting_frontier: ActiveReconstitutionFacts::matching_starting_frontier().id(),
+                terminal_execution: None,
+                terminal_frontier: frontier(42).id(),
+            };
+        let reclassified = accepted_origin(2);
+        skipped_reclassified
+            .turns
+            .push(AcceptedInputTurnSchedulingRecord::reclassified(
+                session.id(),
+                reclassified.turn(),
+                session.id(),
+                AcceptedInputLifecycle::new(
+                    reclassified.accepted_input(),
+                    AcceptedInputDisposition::ReclassifiedAsTurnOrigin {
+                        turn: reclassified.turn(),
+                        reason: crate::SteeringReclassificationReason::NoSafePointBeforeTerminal,
+                    },
+                ),
+                session.id(),
+                reclassified.turn(),
+                reclassified.ordinary_order(),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: active.turn(),
+                },
+                crate::SteeringBinding::new(active.turn()),
+                configuration(&session),
+                AcceptedInputTurnSchedulingRecordState::Queued,
+            ));
+        assert_eq!(
+            assert_input_rejects_unchanged(skipped_reclassified.input()),
             AcceptedInputSchedulingReconstitutionFailure::ConsumedSteeringMismatch {
                 accepted_input: consumed.accepted_input(),
             }
