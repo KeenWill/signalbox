@@ -316,6 +316,8 @@ pub enum ActiveTurnPhase {
     AwaitingRecoveryDecision {
         /// The operations still blocking turn-level disposition.
         ambiguous_operations: NonEmptyIssuedOperationRefs,
+        /// The exact interrupt still stopping the turn, when one was applied.
+        applied_interrupt: Option<crate::AppliedInterruptProof>,
     },
 }
 
@@ -542,6 +544,7 @@ mod tests {
         };
         let awaiting_recovery = ActiveTurnPhase::AwaitingRecoveryDecision {
             ambiguous_operations: ambiguous.clone(),
+            applied_interrupt: None,
         };
 
         assert!(running.retains_progressing_slot());
@@ -558,7 +561,10 @@ mod tests {
         ));
         assert!(matches!(
             &awaiting_recovery,
-            ActiveTurnPhase::AwaitingRecoveryDecision { ambiguous_operations }
+            ActiveTurnPhase::AwaitingRecoveryDecision {
+                ambiguous_operations,
+                ..
+            }
                 if ambiguous_operations == &ambiguous
         ));
     }

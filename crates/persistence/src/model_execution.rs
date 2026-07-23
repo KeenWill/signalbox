@@ -21,10 +21,10 @@ use signalbox_application::{
 };
 use signalbox_domain::{
     AcceptedInputDisposition, AcceptedInputId, AmbiguousModelCallTurn, AssistantText,
-    AuthorizedModelCall, CompletedModelCallTurn, CorrelatedModelCallTerminalObservation,
-    DirectModelSelection, FailedModelCallTurn, FailedModelCallTurnIdentities,
-    FrozenAliasDefinition, FrozenModelSelection, ModelAlias, ModelCallDisposition,
-    ModelCallExecution, ModelCallExecutionReconstitutionFailure,
+    AuthorizedModelCall, CancelledModelCallTurn, CompletedModelCallTurn,
+    CorrelatedModelCallTerminalObservation, DirectModelSelection, FailedModelCallTurn,
+    FailedModelCallTurnIdentities, FrozenAliasDefinition, FrozenModelSelection, ModelAlias,
+    ModelCallDisposition, ModelCallExecution, ModelCallExecutionReconstitutionFailure,
     ModelCallExecutionReconstitutionInput, ModelCallId, ModelCallOriginContent,
     ModelCallPreparationFailure, ModelCallReconstitutionInput, ModelCallReconstitutionState,
     ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
@@ -32,13 +32,15 @@ use signalbox_domain::{
     PinnedProviderTargetReconstitutionInput, PreparedModelCallRequest, ProviderModelIdentity,
     ReclassifiedPendingSteeringTurn, RefusedModelCallTurn,
     ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget, SemanticTranscriptEntry,
-    SemanticTranscriptEntryPayload, SemanticTranscriptEntryRef, SessionId, TurnId,
+    SemanticTranscriptEntryPayload, SemanticTranscriptEntryRef, SessionId,
+    StopRequestedModelCallTurn, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
 use crate::{
     mapping::{
-        durable_command_id_from_uuid, session_id_from_uuid, session_id_to_uuid, turn_id_to_uuid,
+        durable_command_id_from_uuid, durable_command_id_to_uuid, session_id_from_uuid,
+        session_id_to_uuid, turn_id_to_uuid,
     },
     outbox::{self, ModelCallOutboxState, OutboxEvent},
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
@@ -724,6 +726,42 @@ impl PostgresModelCallRepository {
                     }
                     Ok(RetainedModelCallObservationStatus::Pending)
                 }
+                ("cancellation_requested", None) => {
+                    let retained_stop = sqlx::query_scalar::<_, bool>(
+                        "SELECT EXISTS (
+                            SELECT 1
+                              FROM turn_lifecycle AS lifecycle
+                              JOIN turn_attempt AS attempt
+                                ON attempt.turn_attempt_id =
+                                    lifecycle.current_attempt_id
+                               AND attempt.turn_id = lifecycle.turn_id
+                               AND attempt.session_id = lifecycle.session_id
+                               AND attempt.state_kind = 'stop_requested'
+                               AND attempt.interrupt_command_id IS NOT NULL
+                              JOIN model_call_transition_outbox_event AS event
+                                ON event.session_id = lifecycle.session_id
+                               AND event.turn_id = lifecycle.turn_id
+                               AND event.model_call_id = $3
+                               AND event.call_state_kind =
+                                   'cancellation_requested'
+                             WHERE lifecycle.session_id = $1
+                               AND lifecycle.turn_id = $2
+                               AND lifecycle.state_kind = 'active'
+                               AND lifecycle.active_phase_kind = 'running'
+                        )",
+                    )
+                    .bind(session_id_to_uuid(session))
+                    .bind(turn)
+                    .bind(observation.call().into_uuid())
+                    .fetch_one(&mut *transaction)
+                    .await?;
+                    if !retained_stop {
+                        return Err(ModelCallRepositoryError::InvalidTransition(
+                            "retained observation stop authority changed",
+                        ));
+                    }
+                    Ok(RetainedModelCallObservationStatus::Pending)
+                }
                 ("terminal", Some(stored_disposition))
                     if stored_disposition
                         == encode_disposition(observation.observation().disposition()) =>
@@ -855,6 +893,37 @@ impl AuthorizeModelCallTransaction for PostgresModelCallRepository {
     ) -> Result<ModelCallAuthorizationReread, Self::Error> {
         self.reread_ambiguous_authorization(session, prepared).await
     }
+
+    fn cancellation_signal(
+        &self,
+        session: SessionId,
+        call: ModelCallId,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let pool = self.pool.clone();
+        async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(25));
+            loop {
+                interval.tick().await;
+                let state = sqlx::query_scalar::<_, String>(
+                    "SELECT state_kind
+                       FROM model_call
+                      WHERE session_id = $1
+                        AND model_call_id = $2",
+                )
+                .bind(session_id_to_uuid(session))
+                .bind(call.into_uuid())
+                .fetch_optional(&pool)
+                .await;
+                if matches!(
+                    state,
+                    Ok(Some(ref state))
+                        if state == "cancellation_requested" || state == "terminal"
+                ) {
+                    return;
+                }
+            }
+        }
+    }
 }
 
 impl CommitModelCallObservationTransaction for PostgresModelCallRepository {
@@ -896,8 +965,15 @@ async fn terminal_observation_closure_matches(
             completed_terminal_closure_matches(connection, session, observation, assistant_text)
                 .await
         }
-        ModelCallTerminalObservation::KnownFailed | ModelCallTerminalObservation::Cancelled => {
+        ModelCallTerminalObservation::KnownFailed => {
             failed_terminal_closure_matches(connection, session, observation).await
+        }
+        ModelCallTerminalObservation::Cancelled => {
+            if cancelled_terminal_closure_matches(connection, session, observation).await? {
+                Ok(true)
+            } else {
+                failed_terminal_closure_matches(connection, session, observation).await
+            }
         }
         ModelCallTerminalObservation::Refused => {
             refused_terminal_closure_matches(connection, session, observation).await
@@ -1020,6 +1096,93 @@ async fn failed_terminal_closure_matches(
         correlation.frontier().into_uuid(),
     )
     .await
+}
+
+async fn cancelled_terminal_closure_matches(
+    connection: &mut PgConnection,
+    session: SessionId,
+    observation: &CorrelatedModelCallTerminalObservation,
+) -> Result<bool, ModelCallRepositoryError> {
+    let correlation = observation.correlation();
+    let terminal_frontier = sqlx::query_scalar::<_, Uuid>(
+        "SELECT terminal_frontier_id
+           FROM turn_lifecycle
+          WHERE session_id = $1
+            AND turn_id = $2
+            AND state_kind = 'terminal'
+            AND terminal_disposition_kind = 'cancelled'
+            AND terminal_attempt_id = $3
+            AND terminal_model_call_id = $4
+            AND EXISTS (
+                SELECT 1
+                  FROM turn_attempt
+                 WHERE session_id = $1
+                   AND turn_id = $2
+                   AND turn_attempt_id = $3
+                   AND state_kind = 'ended'
+                   AND end_variant = 'after_cancellation'
+                   AND end_disposition = 'cancelled'
+                   AND interrupt_command_id IS NOT NULL
+            )",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(correlation.turn()))
+    .bind(correlation.attempt().into_uuid())
+    .bind(observation.call().into_uuid())
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(terminal_frontier) = terminal_frontier else {
+        return Ok(false);
+    };
+    let source_frontier =
+        load_frontier_members(connection, session, correlation.frontier().into_uuid()).await?;
+    let terminal_members = load_terminal_frontier(connection, session, terminal_frontier).await?;
+    if terminal_members.len() != source_frontier.len() + 1
+        || terminal_members
+            .iter()
+            .zip(&source_frontier)
+            .any(|(stored, expected)| (stored.source_session, stored.entry) != *expected)
+    {
+        return Ok(false);
+    }
+    let cancellation = &terminal_members[source_frontier.len()];
+    if cancellation.source_session != session_id_to_uuid(session)
+        || cancellation.payload_kind != "turn_cancelled"
+        || cancellation.assistant_text.is_some()
+        || cancellation.producing_call.is_some()
+        || cancellation.completed_turn.is_some()
+        || cancellation.failed_turn.is_some()
+        || cancellation.cancelled_turn != Some(turn_id_to_uuid(correlation.turn()))
+    {
+        return Ok(false);
+    }
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT
+            EXISTS (
+                SELECT 1
+                  FROM model_call_transition_outbox_event
+                 WHERE session_id = $1
+                   AND turn_id = $2
+                   AND model_call_id = $3
+                   AND call_state_kind = 'cancellation_requested'
+                   AND terminal_disposition_kind IS NULL
+            )
+            AND EXISTS (
+                SELECT 1
+                  FROM turn_cancelled_outbox_event
+                 WHERE session_id = $1
+                   AND turn_id = $2
+                   AND cancellation_entry_id = $4
+                   AND terminal_frontier_id = $5
+            )",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(correlation.turn()))
+    .bind(observation.call().into_uuid())
+    .bind(cancellation.entry)
+    .bind(terminal_frontier)
+    .fetch_one(&mut *connection)
+    .await?)
 }
 
 async fn failed_turn_closure_matches(
@@ -1227,7 +1390,7 @@ async fn load_terminal_frontier(
         "SELECT member.source_session_id, member.semantic_entry_id,
                 entry.payload_kind, entry.assistant_text_value,
                 entry.producing_model_call_id, entry.completed_turn_id,
-                entry.failed_turn_id
+                entry.failed_turn_id, entry.cancelled_turn_id
            FROM context_frontier_member AS member
            JOIN semantic_transcript_entry AS entry
              ON entry.source_session_id = member.source_session_id
@@ -1250,6 +1413,7 @@ async fn load_terminal_frontier(
             producing_call: row.try_get("producing_model_call_id")?,
             completed_turn: row.try_get("completed_turn_id")?,
             failed_turn: row.try_get("failed_turn_id")?,
+            cancelled_turn: row.try_get("cancelled_turn_id")?,
         })
     })
     .collect()
@@ -1264,6 +1428,7 @@ struct StoredTerminalFrontierMember {
     producing_call: Option<Uuid>,
     completed_turn: Option<Uuid>,
     failed_turn: Option<Uuid>,
+    cancelled_turn: Option<Uuid>,
 }
 
 fn completed_terminal_frontier_matches(
@@ -1295,6 +1460,7 @@ fn completed_terminal_frontier_matches(
                 || stored.producing_call != Some(call)
                 || stored.completed_turn.is_some()
                 || stored.failed_turn.is_some()
+                || stored.cancelled_turn.is_some()
         })
     {
         return false;
@@ -1306,6 +1472,7 @@ fn completed_terminal_frontier_matches(
         && completion.producing_call.is_none()
         && completion.completed_turn == Some(turn)
         && completion.failed_turn.is_none()
+        && completion.cancelled_turn.is_none()
 }
 
 fn failed_terminal_frontier_matches(
@@ -1329,6 +1496,7 @@ fn failed_terminal_frontier_matches(
         && failure.producing_call.is_none()
         && failure.completed_turn.is_none()
         && failure.failed_turn == Some(turn)
+        && failure.cancelled_turn.is_none()
 }
 
 fn pending_reclassification_candidates(
@@ -1347,6 +1515,18 @@ fn pending_reclassification_candidates(
         ));
     }
     Ok(reclassifications)
+}
+
+pub(crate) fn attach_interrupt_reclassification_candidates(
+    identities: signalbox_domain::CancelledModelCallTurnIdentities,
+    execution: &ModelCallExecution,
+    next_turn: &mut impl FnMut(AcceptedInputId) -> TurnId,
+) -> Result<signalbox_domain::CancelledModelCallTurnIdentities, ModelCallRepositoryError> {
+    Ok(
+        identities.with_pending_steering_reclassifications(pending_reclassification_candidates(
+            execution, next_turn,
+        )?),
+    )
 }
 
 fn record_reclassified_turn_candidate(
@@ -1380,6 +1560,11 @@ fn attach_pending_reclassification_candidates(
         ModelCallTerminalIdentities::Failed(identities) => ModelCallTerminalIdentities::Failed(
             identities.with_pending_steering_reclassifications(reclassifications),
         ),
+        ModelCallTerminalIdentities::PhysicalCancellation(identities) => {
+            ModelCallTerminalIdentities::PhysicalCancellation(
+                identities.with_pending_steering_reclassifications(reclassifications),
+            )
+        }
         ModelCallTerminalIdentities::Refused(identities) => ModelCallTerminalIdentities::Refused(
             identities.with_pending_steering_reclassifications(reclassifications),
         ),
@@ -1611,6 +1796,7 @@ async fn load_origin_contents(
                 Some(*accepted_input)
             }
             SemanticTranscriptEntryPayload::TurnFailed { .. }
+            | SemanticTranscriptEntryPayload::TurnCancelled { .. }
             | SemanticTranscriptEntryPayload::AssistantText { .. }
             | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
             | SemanticTranscriptEntryPayload::TurnCompleted { .. } => None,
@@ -2019,6 +2205,66 @@ async fn persist_authorization(
     Ok(())
 }
 
+pub(crate) async fn persist_stop_requested(
+    connection: &mut PgConnection,
+    stopped: &StopRequestedModelCallTurn,
+) -> Result<(), ModelCallRepositoryError> {
+    let proof = stopped.interrupt();
+    let attempt_rows = sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'stop_requested',
+                interrupt_command_id = $1,
+                interrupt_predecessor_turn_id = $2
+          WHERE turn_attempt_id = $3
+            AND turn_id = $4
+            AND session_id = $5
+            AND state_kind = 'running'
+            AND end_variant IS NULL
+            AND end_disposition IS NULL
+            AND interrupt_command_id IS NULL
+            AND interrupt_predecessor_turn_id IS NULL",
+    )
+    .bind(durable_command_id_to_uuid(proof.command()))
+    .bind(turn_id_to_uuid(proof.predecessor()))
+    .bind(stopped.attempt().id().into_uuid())
+    .bind(turn_id_to_uuid(stopped.turn()))
+    .bind(session_id_to_uuid(stopped.session()))
+    .execute(&mut *connection)
+    .await?
+    .rows_affected();
+    require_single(attempt_rows, "stop-requested turn attempt")?;
+
+    let call_rows = sqlx::query(
+        "UPDATE model_call
+            SET state_kind = 'cancellation_requested'
+          WHERE model_call_id = $1
+            AND turn_id = $2
+            AND session_id = $3
+            AND turn_attempt_id = $4
+            AND state_kind = 'in_flight'
+            AND terminal_disposition_kind IS NULL",
+    )
+    .bind(stopped.call().id().into_uuid())
+    .bind(turn_id_to_uuid(stopped.turn()))
+    .bind(session_id_to_uuid(stopped.session()))
+    .bind(stopped.attempt().id().into_uuid())
+    .execute(&mut *connection)
+    .await?
+    .rows_affected();
+    require_single(call_rows, "cancellation-requested model call")?;
+    outbox::append(
+        connection,
+        OutboxEvent::ModelCallTransition {
+            session: stopped.session(),
+            turn: stopped.turn(),
+            call: stopped.call().id(),
+            state: ModelCallOutboxState::CancellationRequested,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
 pub(crate) async fn persist_terminal_outcome(
     connection: &mut PgConnection,
     outcome: &ModelCallTerminalOutcome,
@@ -2028,11 +2274,79 @@ pub(crate) async fn persist_terminal_outcome(
             persist_completed(connection, completed).await
         }
         ModelCallTerminalOutcome::Failed(failed) => persist_failed(connection, failed).await,
+        ModelCallTerminalOutcome::Cancelled(cancelled) => {
+            persist_cancelled(connection, cancelled).await
+        }
         ModelCallTerminalOutcome::Refused(refused) => persist_refused(connection, refused).await,
         ModelCallTerminalOutcome::AwaitingRecovery(ambiguous) => {
             persist_ambiguous(connection, ambiguous).await
         }
     }
+}
+
+async fn persist_cancelled(
+    connection: &mut PgConnection,
+    cancelled: &CancelledModelCallTurn,
+) -> Result<(), ModelCallRepositoryError> {
+    if let Some(call) = cancelled.call() {
+        persist_ended_call(connection, cancelled.session(), cancelled.turn(), call).await?;
+    }
+    persist_ended_attempt(
+        connection,
+        cancelled.session(),
+        cancelled.turn(),
+        cancelled.attempt(),
+    )
+    .await?;
+    let entry = cancelled.cancellation_entry();
+    if !matches!(
+        entry.payload(),
+        SemanticTranscriptEntryPayload::TurnCancelled { turn } if *turn == cancelled.turn()
+    ) {
+        return Err(ModelCallCorruption::Inconsistent("cancellation entry payload").into());
+    }
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind, cancelled_turn_id)
+         VALUES ($1, $2, 'turn_cancelled', $3)",
+    )
+    .bind(session_id_to_uuid(entry.source_session()))
+    .bind(entry.identity().into_uuid())
+    .bind(turn_id_to_uuid(cancelled.turn()))
+    .execute(&mut *connection)
+    .await?;
+    insert_snapshot(connection, cancelled.terminal_snapshot()).await?;
+    persist_reclassified_pending_steering(
+        connection,
+        cancelled.session(),
+        cancelled.turn(),
+        cancelled.reclassified_pending_steering(),
+    )
+    .await?;
+    terminalize_lifecycle(
+        connection,
+        cancelled.session(),
+        cancelled.turn(),
+        "cancelled",
+        cancelled.terminal_snapshot().frontier().snapshot(),
+        Some(cancelled.attempt().id()),
+        cancelled.call().map(signalbox_domain::EndedModelCall::id),
+    )
+    .await?;
+    if let Some(call) = cancelled.call() {
+        append_terminal_call_event(connection, cancelled.session(), cancelled.turn(), call).await?;
+    }
+    outbox::append(
+        connection,
+        OutboxEvent::TurnCancelled {
+            session: cancelled.session(),
+            turn: cancelled.turn(),
+            cancellation_entry: entry.identity(),
+            terminal_frontier: cancelled.terminal_snapshot().frontier().snapshot(),
+        },
+    )
+    .await?;
+    Ok(())
 }
 
 async fn persist_completed(
@@ -2465,21 +2779,45 @@ async fn persist_ended_attempt(
     turn: TurnId,
     attempt: &signalbox_domain::EndedTurnAttempt,
 ) -> Result<(), ModelCallRepositoryError> {
-    let (variant, disposition) = encode_attempt_end(attempt.end())?;
+    let (variant, disposition, interrupt_command, interrupt_predecessor) =
+        encode_attempt_end(attempt.end())?;
     let rows = sqlx::query(
         "UPDATE turn_attempt
             SET state_kind = 'ended',
                 end_variant = $1,
-                end_disposition = $2
-          WHERE turn_attempt_id = $3
-            AND turn_id = $4
-            AND session_id = $5
-            AND state_kind IN ('prepared', 'running')
+                end_disposition = $2,
+                interrupt_command_id = COALESCE(interrupt_command_id, $3),
+                interrupt_predecessor_turn_id =
+                    COALESCE(interrupt_predecessor_turn_id, $4)
+          WHERE turn_attempt_id = $5
+            AND turn_id = $6
+            AND session_id = $7
+            AND state_kind IN ('prepared', 'running', 'stop_requested')
             AND end_variant IS NULL
-            AND end_disposition IS NULL",
+            AND end_disposition IS NULL
+            AND (
+                (
+                    $3::uuid IS NULL
+                    AND interrupt_command_id IS NULL
+                    AND interrupt_predecessor_turn_id IS NULL
+                )
+                OR (
+                    $3::uuid IS NOT NULL
+                    AND (
+                        interrupt_command_id IS NULL
+                        OR interrupt_command_id = $3
+                    )
+                    AND (
+                        interrupt_predecessor_turn_id IS NULL
+                        OR interrupt_predecessor_turn_id = $4
+                    )
+                )
+            )",
     )
     .bind(variant)
     .bind(disposition)
+    .bind(interrupt_command)
+    .bind(interrupt_predecessor)
     .bind(attempt.id().into_uuid())
     .bind(turn_id_to_uuid(turn))
     .bind(session_id_to_uuid(session))
@@ -2489,25 +2827,47 @@ async fn persist_ended_attempt(
     require_single(rows, "terminal model-call attempt")
 }
 
+type EncodedAttemptEnd = (&'static str, &'static str, Option<Uuid>, Option<Uuid>);
+
 fn encode_attempt_end(
     end: &signalbox_domain::AttemptEnd,
-) -> Result<(&'static str, &'static str), ModelCallRepositoryError> {
-    let signalbox_domain::AttemptEnd::WithoutStop { disposition } = end else {
-        return Err(ModelCallRepositoryError::InvalidTransition(
-            "initial model execution produced a stop-caused attempt end",
-        ));
-    };
-    let disposition = match disposition {
-        signalbox_domain::UnstoppedAttemptDisposition::TurnCompleted => "turn_completed",
-        signalbox_domain::UnstoppedAttemptDisposition::TurnRefused => "turn_refused",
-        signalbox_domain::UnstoppedAttemptDisposition::YieldedToDurableWait => {
-            "yielded_to_durable_wait"
+) -> Result<EncodedAttemptEnd, ModelCallRepositoryError> {
+    match end {
+        signalbox_domain::AttemptEnd::WithoutStop { disposition } => {
+            let disposition = match disposition {
+                signalbox_domain::UnstoppedAttemptDisposition::TurnCompleted => "turn_completed",
+                signalbox_domain::UnstoppedAttemptDisposition::TurnRefused => "turn_refused",
+                signalbox_domain::UnstoppedAttemptDisposition::YieldedToDurableWait => {
+                    "yielded_to_durable_wait"
+                }
+                signalbox_domain::UnstoppedAttemptDisposition::KnownFailure => "known_failure",
+                signalbox_domain::UnstoppedAttemptDisposition::Lost => "lost",
+                signalbox_domain::UnstoppedAttemptDisposition::Ambiguous => "ambiguous",
+            };
+            Ok(("without_stop", disposition, None, None))
         }
-        signalbox_domain::UnstoppedAttemptDisposition::KnownFailure => "known_failure",
-        signalbox_domain::UnstoppedAttemptDisposition::Lost => "lost",
-        signalbox_domain::UnstoppedAttemptDisposition::Ambiguous => "ambiguous",
-    };
-    Ok(("without_stop", disposition))
+        signalbox_domain::AttemptEnd::AfterCancellation { cause, disposition } => {
+            let disposition = match disposition {
+                signalbox_domain::CancellationStopDisposition::TurnCompleted => "turn_completed",
+                signalbox_domain::CancellationStopDisposition::TurnRefused => "turn_refused",
+                signalbox_domain::CancellationStopDisposition::KnownFailure => "known_failure",
+                signalbox_domain::CancellationStopDisposition::Lost => "lost",
+                signalbox_domain::CancellationStopDisposition::Cancelled => "cancelled",
+                signalbox_domain::CancellationStopDisposition::Ambiguous => "ambiguous",
+            };
+            Ok((
+                "after_cancellation",
+                disposition,
+                Some(durable_command_id_to_uuid(cause.command())),
+                Some(turn_id_to_uuid(cause.predecessor())),
+            ))
+        }
+        signalbox_domain::AttemptEnd::AfterFatalMismatch { .. } => {
+            Err(ModelCallRepositoryError::InvalidTransition(
+                "initial model execution cannot persist fatal-mismatch attempt history",
+            ))
+        }
+    }
 }
 
 async fn insert_snapshot(
@@ -2687,7 +3047,7 @@ fn map_scheduling_error(error: SubmitInputRepositoryError) -> ModelCallRepositor
         SubmitInputRepositoryError::AcceptedInputIdentityCollision { .. } => {
             ModelCallCorruption::Inconsistent("origin accepted-input identity").into()
         }
-        SubmitInputRepositoryError::InterruptApplicationUnavailable { .. } => {
+        SubmitInputRepositoryError::ModelExecution(_) => {
             ModelCallCorruption::Inconsistent("origin command application").into()
         }
     }
@@ -2883,6 +3243,7 @@ mod tests {
             producing_call: None,
             completed_turn: None,
             failed_turn: None,
+            cancelled_turn: None,
         };
         let assistant_member = StoredTerminalFrontierMember {
             source_session: session,
@@ -2892,6 +3253,7 @@ mod tests {
             producing_call: Some(call),
             completed_turn: None,
             failed_turn: None,
+            cancelled_turn: None,
         };
         let completion = StoredTerminalFrontierMember {
             source_session: session,
@@ -2901,6 +3263,7 @@ mod tests {
             producing_call: None,
             completed_turn: Some(turn),
             failed_turn: None,
+            cancelled_turn: None,
         };
         let exact = vec![prefix.clone(), assistant_member.clone(), completion.clone()];
         assert!(completed_terminal_frontier_matches(
@@ -2948,6 +3311,7 @@ mod tests {
             producing_call: None,
             completed_turn: None,
             failed_turn: None,
+            cancelled_turn: None,
         };
         let failure = StoredTerminalFrontierMember {
             source_session: session,
@@ -2957,6 +3321,7 @@ mod tests {
             producing_call: None,
             completed_turn: None,
             failed_turn: Some(turn),
+            cancelled_turn: None,
         };
         assert!(failed_terminal_frontier_matches(
             &source,

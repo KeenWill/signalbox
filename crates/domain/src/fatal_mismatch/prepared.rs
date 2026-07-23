@@ -411,6 +411,7 @@ mod tests {
                     IssuedOperationRef::ToolAttempt(tool_attempt_id(1)),
                 ])
                 .expect("one operation is nonempty"),
+                applied_interrupt: None,
             },
             PreparedFatalMismatchBindingRejection::SourcePhaseIsNotRunning,
         );

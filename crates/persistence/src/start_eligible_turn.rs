@@ -340,6 +340,7 @@ async fn insert_prepared_activation(
         }
         InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
         | InitialSemanticTranscriptEntryPayload::TurnFailed { .. }
+        | InitialSemanticTranscriptEntryPayload::TurnCancelled { .. }
         | InitialSemanticTranscriptEntryPayload::AssistantText { .. }
         | InitialSemanticTranscriptEntryPayload::AssistantToolUse { .. }
         | InitialSemanticTranscriptEntryPayload::TurnCompleted { .. } => {
@@ -452,34 +453,66 @@ async fn insert_prepared_activation(
                  WHERE active.session_id = candidate.session_id
                    AND active.state_kind = 'active'
             )
-            AND NOT EXISTS (
-                SELECT 1
-                  FROM turn_lifecycle AS earlier
-                 WHERE earlier.session_id = candidate.session_id
-                   AND earlier.acceptance_position < candidate.acceptance_position
-                   AND earlier.state_kind <> 'terminal'
-            )
             AND (
                 (
-                    $1 = 'first_in_session'
-                    AND $2::uuid IS NULL
+                    EXISTS (
+                        SELECT 1
+                          FROM queued_input_origin AS queued
+                         WHERE queued.turn_id = candidate.turn_id
+                           AND queued.session_id = candidate.session_id
+                           AND queued.priority_kind = 'ordinary'
+                    )
                     AND NOT EXISTS (
                         SELECT 1
                           FROM turn_lifecycle AS earlier
                          WHERE earlier.session_id = candidate.session_id
-                           AND earlier.acceptance_position < candidate.acceptance_position
+                           AND earlier.acceptance_position
+                               < candidate.acceptance_position
+                           AND earlier.state_kind <> 'terminal'
+                    )
+                    AND (
+                        (
+                            $1 = 'first_in_session'
+                            AND $2::uuid IS NULL
+                            AND NOT EXISTS (
+                                SELECT 1
+                                  FROM turn_lifecycle AS earlier
+                                 WHERE earlier.session_id = candidate.session_id
+                                   AND earlier.acceptance_position
+                                       < candidate.acceptance_position
+                            )
+                        )
+                        OR
+                        (
+                            $1 = 'after'
+                            AND $2::uuid = (
+                                SELECT earlier.turn_id
+                                  FROM turn_lifecycle AS earlier
+                                 WHERE earlier.session_id = candidate.session_id
+                                   AND earlier.acceptance_position
+                                       < candidate.acceptance_position
+                                 ORDER BY earlier.acceptance_position DESC
+                                 LIMIT 1
+                            )
+                        )
                     )
                 )
                 OR
                 (
                     $1 = 'after'
-                    AND $2::uuid = (
-                        SELECT earlier.turn_id
-                          FROM turn_lifecycle AS earlier
-                         WHERE earlier.session_id = candidate.session_id
-                           AND earlier.acceptance_position < candidate.acceptance_position
-                         ORDER BY earlier.acceptance_position DESC
-                         LIMIT 1
+                    AND EXISTS (
+                        SELECT 1
+                          FROM queued_input_origin AS queued
+                          JOIN turn_lifecycle AS predecessor
+                            ON predecessor.turn_id
+                                = queued.interrupt_predecessor_turn_id
+                           AND predecessor.session_id = queued.session_id
+                           AND predecessor.state_kind = 'terminal'
+                         WHERE queued.turn_id = candidate.turn_id
+                           AND queued.session_id = candidate.session_id
+                           AND queued.priority_kind
+                               = 'interrupt_immediately_after'
+                           AND queued.interrupt_predecessor_turn_id = $2::uuid
                     )
                 )
             )",
@@ -521,7 +554,7 @@ fn map_scheduling_error(error: SubmitInputRepositoryError) -> StartEligibleTurnR
         SubmitInputRepositoryError::AcceptedInputIdentityCollision { .. } => {
             StartEligibleTurnCorruption::Inconsistent("origin accepted-input identity").into()
         }
-        SubmitInputRepositoryError::InterruptApplicationUnavailable { .. } => {
+        SubmitInputRepositoryError::ModelExecution(_) => {
             StartEligibleTurnCorruption::Inconsistent("origin command application").into()
         }
     }

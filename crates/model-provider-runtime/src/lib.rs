@@ -8,7 +8,7 @@
 //! docs/spec/model-call-execution.md. It owns no retry, fallback, lifecycle,
 //! or durable state.
 
-use std::{collections::HashMap, error::Error, fmt, sync::Arc};
+use std::{collections::HashMap, error::Error, fmt, future::Future, sync::Arc};
 
 use signalbox_application::{
     ClassifyOperatorFailure, ModelCallCapabilityPreparation, ModelCallProvider,
@@ -293,10 +293,14 @@ where
     type Capability = RuntimeModelCallCapability<R::Prepared>;
     type Error = RuntimeModelCallProviderError;
 
-    async fn prepare_capability(
+    async fn prepare_capability<Cancellation>(
         &mut self,
         operation: PreparedModelOperation,
-    ) -> Result<ModelCallCapabilityPreparation<Self::Capability>, Self::Error> {
+        cancellation: Cancellation,
+    ) -> Result<ModelCallCapabilityPreparation<Self::Capability>, Self::Error>
+    where
+        Cancellation: Future<Output = ()> + Send + 'static,
+    {
         let request = operation.request();
         let call = request.call();
         let credential =
@@ -338,7 +342,7 @@ where
         let provider_model = definition.provider_model().to_owned();
         match self
             .runtime
-            .prepare(runtime_operation, CancellationSignal::never())
+            .prepare(runtime_operation, CancellationSignal::when(cancellation))
             .await
         {
             PreparationOutcome::Prepared(prepared) => Ok(ModelCallCapabilityPreparation::Ready(
@@ -368,14 +372,16 @@ where
         }
     }
 
-    async fn invoke<AcceptancePossible>(
+    async fn invoke<AcceptancePossible, Cancellation>(
         &mut self,
         authorized: AuthorizedModelCall,
         capability: Self::Capability,
         acceptance_possible: AcceptancePossible,
+        cancellation: Cancellation,
     ) -> Result<signalbox_domain::CorrelatedModelCallTerminalObservation, Self::Error>
     where
         AcceptancePossible: FnOnce() + Send,
+        Cancellation: Future<Output = ()> + Send + 'static,
     {
         if !capability.binding.matches(&authorized) {
             return Err(RuntimeModelCallProviderError::AuthorizationMismatch);
@@ -392,7 +398,7 @@ where
             .execute(
                 capability.prepared,
                 &mut observations,
-                CancellationSignal::never(),
+                CancellationSignal::when(cancellation),
             )
             .await;
         require_correlation(correlation, report.correlation)?;

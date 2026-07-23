@@ -24,12 +24,13 @@ use std::{
 
 use crate::{
     AcceptedInputDisposition, AcceptedInputId, AcceptedInputLifecycle, AcceptedInputQueueOrder,
-    AcceptedInputQueuePriority, AcceptedInputSchedulingProjection, Actor, AppliedInterruptState,
-    DeliveryRequest, DurableCommandId, FrozenAliasDefinition, FrozenModelSelection, ModelAlias,
+    AcceptedInputQueuePriority, AcceptedInputQueueWork, AcceptedInputSchedulingProjection, Actor,
+    AppliedInterruptCommandResult, AppliedInterruptState, CurrentTurnAttemptState, DeliveryRequest,
+    DurableCommandId, FrozenAliasDefinition, FrozenModelSelection, ModelAlias,
     ModelSelectionRequest, OriginConfiguration, PerInputConfigurationChoices, ReconciliationReason,
     Session, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
     SessionInputPosition, SteeringBinding, TurnDisposition, TurnId, UserContent,
-    VersionedSessionConfigurationDefaults,
+    VersionedSessionConfigurationDefaults, derive_accepted_input_total_order,
 };
 
 /// One canonical owner-global durable input command.
@@ -221,6 +222,7 @@ impl SubmitInput {
                     turn,
                     queue_order: AcceptedInputQueueOrder::ordinary(acceptance_position),
                     origin_configuration,
+                    applied_interrupt: None,
                 },
             )),
         })
@@ -312,12 +314,174 @@ impl SubmitInput {
                 ),
             });
         }
+        let existing_interrupt = active_turn.active_phase().and_then(|phase| match phase {
+            crate::ActiveTurnPhase::Running { current_attempt } => match current_attempt.state() {
+                CurrentTurnAttemptState::StopRequested { causes } => match causes {
+                    crate::TurnAttemptStopCauses::CancellationOnly { interrupt } => {
+                        Some(*interrupt)
+                    }
+                    crate::TurnAttemptStopCauses::FatalMismatch(causes) => {
+                        match causes.interrupt() {
+                            AppliedInterruptState::NoAppliedInterrupt => None,
+                            AppliedInterruptState::Applied { proof } => Some(proof),
+                        }
+                    }
+                },
+                CurrentTurnAttemptState::Prepared | CurrentTurnAttemptState::Running => None,
+            },
+            crate::ActiveTurnPhase::AwaitingApproval { .. } => None,
+            crate::ActiveTurnPhase::AwaitingRecoveryDecision {
+                applied_interrupt, ..
+            } => *applied_interrupt,
+        });
         match delivery {
-            DeliveryRequest::Interrupt { .. } => Err(SubmitInputPreparationError {
-                command: Box::new(self),
-                failure: SubmitInputPreparationFailure::InterruptApplicationUnavailable,
-            }),
+            DeliveryRequest::Interrupt { configuration, .. } => {
+                if let Some(existing) = existing_interrupt {
+                    return Ok(PreparedSubmitInput {
+                        command: self,
+                        result: SubmitInputResult::Rejected(
+                            SubmitInputRejectedResult::InterruptAlreadyApplied {
+                                session: target_session,
+                                active_turn: actual_active_turn,
+                                existing_command: existing.command(),
+                            },
+                        ),
+                    });
+                }
+                let Some(turn) = turn else {
+                    return Err(SubmitInputPreparationError {
+                        command: Box::new(self),
+                        failure: SubmitInputPreparationFailure::TurnCandidateMismatch,
+                    });
+                };
+                if turn == actual_active_turn {
+                    return Err(SubmitInputPreparationError {
+                        command: Box::new(self),
+                        failure: SubmitInputPreparationFailure::TurnCandidateMismatch,
+                    });
+                }
+                let checked = match session.current_configuration_defaults().derive_request(
+                    configuration.expected_session_defaults_version(),
+                    configuration.model(),
+                ) {
+                    Ok(checked) => checked,
+                    Err(mismatch) => {
+                        return Ok(PreparedSubmitInput {
+                            command: self,
+                            result: SubmitInputResult::Rejected(
+                                SubmitInputRejectedResult::SessionDefaultsVersionMismatch {
+                                    session: target_session,
+                                    expected: mismatch.expected(),
+                                    current: mismatch.current(),
+                                },
+                            ),
+                        });
+                    }
+                };
+                let origin_configuration =
+                    match OriginConfiguration::freeze(checked, select_definition) {
+                        Ok(configuration) => configuration,
+                        Err(unknown) => {
+                            return Ok(PreparedSubmitInput {
+                                command: self,
+                                result: SubmitInputResult::Rejected(
+                                    SubmitInputRejectedResult::UnknownModelAlias {
+                                        session: target_session,
+                                        alias: unknown.alias(),
+                                    },
+                                ),
+                            });
+                        }
+                    };
+                let acceptance_position = match next_acceptance_position(previous_position) {
+                    Ok(position) => position,
+                    Err(last) => {
+                        return Ok(PreparedSubmitInput {
+                            command: self,
+                            result: SubmitInputResult::Rejected(
+                                SubmitInputRejectedResult::AcceptancePositionExhausted {
+                                    session: target_session,
+                                    last,
+                                },
+                            ),
+                        });
+                    }
+                };
+                if accepted_input == active_turn.accepted_input().id() {
+                    return Err(SubmitInputPreparationError {
+                        command: Box::new(self),
+                        failure:
+                            SubmitInputPreparationFailure::AcceptedInputCandidateReusesActiveOrigin {
+                                active_turn: actual_active_turn,
+                                accepted_input,
+                            },
+                    });
+                }
+                let queue_order = AcceptedInputQueueOrder::interrupt_immediately_after(
+                    acceptance_position,
+                    actual_active_turn,
+                );
+                let successor = AcceptedInputQueueWork::new(target_session, turn, queue_order);
+                if derive_accepted_input_total_order(
+                    scheduling
+                        .turns()
+                        .map(|known| {
+                            AcceptedInputQueueWork::new(
+                                known.session(),
+                                known.turn(),
+                                known.order(),
+                            )
+                        })
+                        .chain([successor]),
+                )
+                .is_err()
+                {
+                    return Err(SubmitInputPreparationError {
+                        command: Box::new(self),
+                        failure: SubmitInputPreparationFailure::InterruptQueueOrderInvalid,
+                    });
+                }
+                let Some(applied_interrupt) = AppliedInterruptCommandResult::from_correlated_submit(
+                    self.command_id,
+                    target_session,
+                    actual_active_turn,
+                    accepted_input,
+                    turn,
+                    queue_order,
+                ) else {
+                    return Err(SubmitInputPreparationError {
+                        command: Box::new(self),
+                        failure: SubmitInputPreparationFailure::InterruptQueueOrderInvalid,
+                    });
+                };
+                Ok(PreparedSubmitInput {
+                    command: self,
+                    result: SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(
+                        SubmitInputTurnOriginAppliedResult {
+                            accepted_input,
+                            session: target_session,
+                            acceptance_position,
+                            turn,
+                            queue_order,
+                            origin_configuration,
+                            applied_interrupt: Some(Box::new(applied_interrupt)),
+                        },
+                    )),
+                })
+            }
             DeliveryRequest::NextSafePoint { .. } => {
+                if let Some(existing) = existing_interrupt {
+                    return Ok(PreparedSubmitInput {
+                        command: self,
+                        result: SubmitInputResult::Rejected(
+                            SubmitInputRejectedResult::SafePointUnavailableWhileStopping {
+                                session: target_session,
+                                active_turn: actual_active_turn,
+                                existing_command: existing.command(),
+                            },
+                        ),
+                    });
+                }
                 let acceptance_position = match next_acceptance_position(previous_position) {
                     Ok(position) => position,
                     Err(last) => {
@@ -436,6 +600,7 @@ impl SubmitInput {
                             turn,
                             queue_order: AcceptedInputQueueOrder::ordinary(acceptance_position),
                             origin_configuration,
+                            applied_interrupt: None,
                         },
                     )),
                 })
@@ -582,6 +747,7 @@ pub struct SubmitInputTurnOriginAppliedResult {
     turn: TurnId,
     queue_order: AcceptedInputQueueOrder,
     origin_configuration: OriginConfiguration,
+    applied_interrupt: Option<Box<AppliedInterruptCommandResult>>,
 }
 
 impl SubmitInputTurnOriginAppliedResult {
@@ -618,6 +784,15 @@ impl SubmitInputTurnOriginAppliedResult {
     /// Borrows the complete frozen origin configuration.
     pub const fn origin_configuration(&self) -> &OriginConfiguration {
         &self.origin_configuration
+    }
+
+    /// Borrows the exact applied-interrupt authority when this origin
+    /// immediately succeeds the interrupted active turn.
+    pub const fn applied_interrupt(&self) -> Option<&AppliedInterruptCommandResult> {
+        match &self.applied_interrupt {
+            Some(result) => Some(result),
+            None => None,
+        }
     }
 }
 
@@ -715,6 +890,26 @@ pub enum SubmitInputRejectedResult {
         /// The maximum recorded position.
         last: SessionInputPosition,
     },
+    /// A safe-point request arrived after interruption had already stopped the
+    /// active attempt from authorizing more semantic work.
+    SafePointUnavailableWhileStopping {
+        /// The target session.
+        session: SessionId,
+        /// The exact active turn retaining the slot.
+        active_turn: TurnId,
+        /// The command whose applied result is already stopping the turn.
+        existing_command: DurableCommandId,
+    },
+    /// A distinct later interrupt cannot replace the exact proof already
+    /// applied to the active turn.
+    InterruptAlreadyApplied {
+        /// The target session.
+        session: SessionId,
+        /// The exact active turn retaining the slot.
+        active_turn: TurnId,
+        /// The command whose applied result remains cancellation authority.
+        existing_command: DurableCommandId,
+    },
 }
 
 /// One sealed pre-commit command/result candidate.
@@ -764,11 +959,9 @@ pub enum SubmitInputPreparationFailure {
     },
     /// The supplied complete scheduling aggregate has no active slot owner.
     ActiveTurnProjectionMissing,
-    /// This slice cannot yet apply interruption or claim its command result.
-    // The first `StopRequested` slice's rejection scope is recorded in
-    // `docs/decisions.md`, "Authoritative occupied-slot SubmitInput
-    // preparation" (2026-07-19).
-    InterruptApplicationUnavailable,
+    /// The proposed interrupt successor would violate the checked complete
+    /// queue order.
+    InterruptQueueOrderInvalid,
 }
 
 /// A nonterminal correlation failure during preparation.
@@ -998,6 +1191,19 @@ enum SubmitInputReconstitutionFacts {
         result_session: SessionId,
         result_last_position: SessionInputPosition,
         active_turn_origin: Option<SubmitInputTurnOriginReconstitutionInput>,
+    },
+    RejectedSafePointUnavailableWhileStopping {
+        result_session: SessionId,
+        result_active_turn: TurnId,
+        active_turn_origin: SubmitInputTurnOriginReconstitutionInput,
+        existing_interrupt: AppliedInterruptCommandResult,
+    },
+    RejectedInterruptAlreadyApplied {
+        result_session: SessionId,
+        result_active_turn: TurnId,
+        result_existing_command: DurableCommandId,
+        active_turn_origin: SubmitInputTurnOriginReconstitutionInput,
+        existing_interrupt: AppliedInterruptCommandResult,
     },
 }
 
@@ -1249,6 +1455,52 @@ impl SubmitInputReconstitutionInput {
         }
     }
 
+    /// Supplies a safe-point rejection and the exact applied interrupt that
+    /// has already stopped its authoritative active turn.
+    pub const fn rejected_safe_point_unavailable_while_stopping(
+        command: SubmitInput,
+        stored_actor: Actor,
+        result_session: SessionId,
+        result_active_turn: TurnId,
+        active_turn_origin: SubmitInputTurnOriginReconstitutionInput,
+        existing_interrupt: AppliedInterruptCommandResult,
+    ) -> Self {
+        Self {
+            command,
+            stored_actor,
+            facts: SubmitInputReconstitutionFacts::RejectedSafePointUnavailableWhileStopping {
+                result_session,
+                result_active_turn,
+                active_turn_origin,
+                existing_interrupt,
+            },
+        }
+    }
+
+    /// Supplies a later-interrupt rejection and the exact earlier applied
+    /// interrupt whose cancellation authority remains binding.
+    pub const fn rejected_interrupt_already_applied(
+        command: SubmitInput,
+        stored_actor: Actor,
+        result_session: SessionId,
+        result_active_turn: TurnId,
+        result_existing_command: DurableCommandId,
+        active_turn_origin: SubmitInputTurnOriginReconstitutionInput,
+        existing_interrupt: AppliedInterruptCommandResult,
+    ) -> Self {
+        Self {
+            command,
+            stored_actor,
+            facts: SubmitInputReconstitutionFacts::RejectedInterruptAlreadyApplied {
+                result_session,
+                result_active_turn,
+                result_existing_command,
+                active_turn_origin,
+                existing_interrupt,
+            },
+        }
+    }
+
     /// Borrows the reconstructed canonical command.
     pub const fn command(&self) -> &SubmitInput {
         &self.command
@@ -1289,8 +1541,10 @@ impl SubmitInputReconstitutionInput {
                     stored_requested_model,
                     stored_frozen_model,
                 } = *facts;
-                let expected_predecessor = match self.command.delivery {
-                    DeliveryRequest::StartWhenNoActiveTurn { .. } => None,
+                let (expected_predecessor, expected_priority) = match self.command.delivery {
+                    DeliveryRequest::StartWhenNoActiveTurn { .. } => {
+                        (None, AcceptedInputQueuePriority::Ordinary)
+                    }
                     DeliveryRequest::AfterCurrentTurn {
                         expected_active_turn,
                         ..
@@ -1298,9 +1552,26 @@ impl SubmitInputReconstitutionInput {
                         if expected_active_turn == result_turn {
                             return Err(fail(SubmitInputReconstitutionFailure::QueueTurnMismatch));
                         }
-                        Some(expected_active_turn)
+                        (
+                            Some(expected_active_turn),
+                            AcceptedInputQueuePriority::Ordinary,
+                        )
                     }
-                    DeliveryRequest::Interrupt { .. } | DeliveryRequest::NextSafePoint { .. } => {
+                    DeliveryRequest::Interrupt {
+                        expected_active_turn,
+                        ..
+                    } => {
+                        if expected_active_turn == result_turn {
+                            return Err(fail(SubmitInputReconstitutionFailure::QueueTurnMismatch));
+                        }
+                        (
+                            Some(expected_active_turn),
+                            AcceptedInputQueuePriority::InterruptImmediatelyAfter {
+                                predecessor: expected_active_turn,
+                            },
+                        )
+                    }
+                    DeliveryRequest::NextSafePoint { .. } => {
                         return Err(fail(
                             SubmitInputReconstitutionFailure::AppliedDeliveryIsNotTurnOrigin,
                         ));
@@ -1352,7 +1623,7 @@ impl SubmitInputReconstitutionInput {
                         SubmitInputReconstitutionFailure::QueuePositionMismatch,
                     ));
                 }
-                if queue_order.priority() != AcceptedInputQueuePriority::Ordinary {
+                if queue_order.priority() != expected_priority {
                     return Err(fail(
                         SubmitInputReconstitutionFailure::QueuePriorityMismatch,
                     ));
@@ -1409,6 +1680,25 @@ impl SubmitInputReconstitutionInput {
                     stored_frozen_model,
                 )
                 .map_err(&fail)?;
+                let applied_interrupt = match self.command.delivery {
+                    DeliveryRequest::Interrupt {
+                        expected_active_turn,
+                        ..
+                    } => AppliedInterruptCommandResult::from_correlated_submit(
+                        self.command.command_id,
+                        result_session,
+                        expected_active_turn,
+                        result_accepted_input,
+                        result_turn,
+                        queue_order,
+                    )
+                    .map(Box::new)
+                    .ok_or_else(|| fail(SubmitInputReconstitutionFailure::QueuePriorityMismatch))?
+                    .into(),
+                    DeliveryRequest::StartWhenNoActiveTurn { .. }
+                    | DeliveryRequest::AfterCurrentTurn { .. } => None,
+                    DeliveryRequest::NextSafePoint { .. } => unreachable!(),
+                };
 
                 SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(
                     SubmitInputTurnOriginAppliedResult {
@@ -1418,6 +1708,7 @@ impl SubmitInputReconstitutionInput {
                         turn: result_turn,
                         queue_order,
                         origin_configuration,
+                        applied_interrupt,
                     },
                 ))
             }
@@ -1732,6 +2023,90 @@ impl SubmitInputReconstitutionInput {
                     },
                 )
             }
+            SubmitInputReconstitutionFacts::RejectedSafePointUnavailableWhileStopping {
+                result_session,
+                result_active_turn,
+                active_turn_origin,
+                existing_interrupt,
+            } => {
+                if result_session != self.command.session {
+                    return Err(fail(
+                        SubmitInputReconstitutionFailure::ResultSessionMismatch,
+                    ));
+                }
+                if !matches!(
+                    self.command.delivery,
+                    DeliveryRequest::NextSafePoint {
+                        expected_active_turn
+                    } if expected_active_turn == result_active_turn
+                ) {
+                    return Err(fail(
+                        SubmitInputReconstitutionFailure::StoppingRejectionMismatch,
+                    ));
+                }
+                validate_rejection_active_turn_origin(
+                    &self.command,
+                    Some(result_active_turn),
+                    Some(&active_turn_origin),
+                )
+                .map_err(&fail)?;
+                validate_existing_interrupt(
+                    &self.command,
+                    result_active_turn,
+                    existing_interrupt,
+                    None,
+                )
+                .map_err(&fail)?;
+                SubmitInputResult::Rejected(
+                    SubmitInputRejectedResult::SafePointUnavailableWhileStopping {
+                        session: result_session,
+                        active_turn: result_active_turn,
+                        existing_command: existing_interrupt.proof().command(),
+                    },
+                )
+            }
+            SubmitInputReconstitutionFacts::RejectedInterruptAlreadyApplied {
+                result_session,
+                result_active_turn,
+                result_existing_command,
+                active_turn_origin,
+                existing_interrupt,
+            } => {
+                if result_session != self.command.session {
+                    return Err(fail(
+                        SubmitInputReconstitutionFailure::ResultSessionMismatch,
+                    ));
+                }
+                if !matches!(
+                    self.command.delivery,
+                    DeliveryRequest::Interrupt {
+                        expected_active_turn,
+                        ..
+                    } if expected_active_turn == result_active_turn
+                ) {
+                    return Err(fail(
+                        SubmitInputReconstitutionFailure::StoppingRejectionMismatch,
+                    ));
+                }
+                validate_rejection_active_turn_origin(
+                    &self.command,
+                    Some(result_active_turn),
+                    Some(&active_turn_origin),
+                )
+                .map_err(&fail)?;
+                validate_existing_interrupt(
+                    &self.command,
+                    result_active_turn,
+                    existing_interrupt,
+                    Some(result_existing_command),
+                )
+                .map_err(&fail)?;
+                SubmitInputResult::Rejected(SubmitInputRejectedResult::InterruptAlreadyApplied {
+                    session: result_session,
+                    active_turn: result_active_turn,
+                    existing_command: result_existing_command,
+                })
+            }
         };
 
         Ok(ReconstitutedSubmitInput {
@@ -1739,6 +2114,22 @@ impl SubmitInputReconstitutionInput {
             result,
         })
     }
+}
+
+fn validate_existing_interrupt(
+    command: &SubmitInput,
+    active_turn: TurnId,
+    interrupt: AppliedInterruptCommandResult,
+    recorded_command: Option<DurableCommandId>,
+) -> Result<(), SubmitInputReconstitutionFailure> {
+    if interrupt.session() != command.session
+        || interrupt.proof().predecessor() != active_turn
+        || interrupt.proof().command() == command.command_id
+        || recorded_command.is_some_and(|recorded| recorded != interrupt.proof().command())
+    {
+        return Err(SubmitInputReconstitutionFailure::ExistingInterruptMismatch);
+    }
+    Ok(())
 }
 
 fn reconstruct_origin_configuration(
@@ -1786,8 +2177,9 @@ fn explicit_origin_configuration(
 ) -> Option<PerInputConfigurationChoices> {
     match delivery {
         DeliveryRequest::StartWhenNoActiveTurn { configuration }
+        | DeliveryRequest::Interrupt { configuration, .. }
         | DeliveryRequest::AfterCurrentTurn { configuration, .. } => Some(configuration),
-        DeliveryRequest::Interrupt { .. } | DeliveryRequest::NextSafePoint { .. } => None,
+        DeliveryRequest::NextSafePoint { .. } => None,
     }
 }
 
@@ -1799,10 +2191,11 @@ fn rejection_configuration(
         DeliveryRequest::AfterCurrentTurn {
             expected_active_turn,
             configuration,
-        } => Ok((configuration, Some(expected_active_turn))),
-        DeliveryRequest::Interrupt { .. } => {
-            Err(SubmitInputReconstitutionFailure::InterruptConfigurationRejectionUnavailable)
         }
+        | DeliveryRequest::Interrupt {
+            expected_active_turn,
+            configuration,
+        } => Ok((configuration, Some(expected_active_turn))),
         DeliveryRequest::NextSafePoint { .. } => {
             Err(SubmitInputReconstitutionFailure::RejectionHasNoExplicitOriginConfiguration)
         }
@@ -1817,13 +2210,14 @@ fn position_exhaustion_origin(
         DeliveryRequest::NextSafePoint {
             expected_active_turn,
         }
+        | DeliveryRequest::Interrupt {
+            expected_active_turn,
+            ..
+        }
         | DeliveryRequest::AfterCurrentTurn {
             expected_active_turn,
             ..
         } => Ok(Some(expected_active_turn)),
-        DeliveryRequest::Interrupt { .. } => {
-            Err(SubmitInputReconstitutionFailure::PositionExhaustionDeliveryUnavailable)
-        }
     }
 }
 
@@ -2084,9 +2478,6 @@ pub enum SubmitInputReconstitutionFailure {
     RejectionActiveTurnOriginCommandReused,
     /// A configuration rejection carries no explicit origin configuration.
     RejectionHasNoExplicitOriginConfiguration,
-    /// Matching interrupt cannot record a configuration rejection in this
-    /// milestone.
-    InterruptConfigurationRejectionUnavailable,
     /// A mismatch result repeats a different expected defaults version.
     ExpectedDefaultsVersionMismatch,
     /// A mismatch result claims equal expected and current versions.
@@ -2105,9 +2496,11 @@ pub enum SubmitInputReconstitutionFailure {
     RejectionDidNotSelectAlias,
     /// The recorded last position still has a successor.
     PositionIsNotExhausted,
-    /// Interrupt application cannot record position exhaustion in this
-    /// milestone.
-    PositionExhaustionDeliveryUnavailable,
+    /// A stopping-only rejection carries another delivery or active target.
+    StoppingRejectionMismatch,
+    /// The stored applied interrupt does not supply the exact earlier
+    /// cancellation authority named by the rejection.
+    ExistingInterruptMismatch,
 }
 
 /// Failed reconstitution retaining every typed input unchanged.
@@ -2188,13 +2581,13 @@ mod tests {
     };
     use crate::{
         AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputQueueOrder,
-        AcceptedInputSchedulingProjection, AcceptedInputSchedulingReconstitutionInput,
-        AcceptedInputStartingLineage, AcceptedInputTurnSchedulingRecord,
-        AcceptedInputTurnSchedulingRecordState, ActiveTurnSchedulingReconstitutionInput, Actor,
-        DeliveryRequest, FrozenAliasDefinition, FrozenModelSelection,
-        InitialSemanticTranscriptEntryPayload, IssuedOperationRef, ModelSelectionOverride,
-        ModelSelectionRequest, NonEmptyIssuedOperationRefs, OriginConfiguration,
-        PerInputConfigurationChoices, ReconciliationReason,
+        AcceptedInputQueuePriority, AcceptedInputSchedulingProjection,
+        AcceptedInputSchedulingReconstitutionInput, AcceptedInputStartingLineage,
+        AcceptedInputTurnSchedulingRecord, AcceptedInputTurnSchedulingRecordState,
+        ActiveTurnSchedulingReconstitutionInput, Actor, DeliveryRequest, FrozenAliasDefinition,
+        FrozenModelSelection, InitialSemanticTranscriptEntryPayload, IssuedOperationRef,
+        ModelSelectionOverride, ModelSelectionRequest, NonEmptyIssuedOperationRefs,
+        OriginConfiguration, PerInputConfigurationChoices, ReconciliationReason,
         ResolvedContextFrontierReconstitutionInput, SemanticTranscriptEntryReconstitutionInput,
         SemanticTranscriptEntryRef, Session, SessionAcceptanceTailEntryReconstitutionInput,
         SessionAcceptanceTailReconstitutionInput, SessionConfigurationDefaults,
@@ -3165,10 +3558,10 @@ mod tests {
         ));
     }
 
-    /// S07 / INV-012 / INV-028: a matching interrupt remains nonclaiming until
-    /// its correlated application boundary exists.
+    /// S07 / INV-012 / INV-029 / INV-037: matching interrupt preparation
+    /// creates the exact immediate successor and sole cancellation proof.
     #[test]
-    fn s07_inv012_inv028_occupied_slot_matching_interrupt_remains_nonclaiming() {
+    fn s07_inv012_inv029_inv037_occupied_slot_matching_interrupt_applies() {
         let current = session(1, 1, ModelSelectionRequest::Direct(direct(2)));
         let active = active_turn(&current);
         let active_turn = active
@@ -3178,15 +3571,27 @@ mod tests {
         let accepted_input = accepted_input_id(3);
         let turn_candidate = turn_id(8);
         let interrupt = interrupt_command(6, active_turn);
-        let unavailable = interrupt
+        let prepared = interrupt
             .clone()
             .prepare_with_active_turn(&active, accepted_input, Some(turn_candidate), |_| None)
-            .expect_err("interrupt application cannot claim a command in this slice");
+            .expect("matching interrupt creates one correlated result");
+        let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(applied)) =
+            prepared.result()
+        else {
+            panic!("matching interrupt applies as successor origin");
+        };
+        let authority = applied
+            .applied_interrupt()
+            .expect("interrupt origin carries cancellation authority");
+        assert_eq!(authority.proof().command(), interrupt.command_id());
+        assert_eq!(authority.proof().predecessor(), active_turn);
+        assert_eq!(authority.successor(), turn_candidate);
         assert_eq!(
-            unavailable.failure(),
-            SubmitInputPreparationFailure::InterruptApplicationUnavailable
+            applied.queue_order().priority(),
+            AcceptedInputQueuePriority::InterruptImmediatelyAfter {
+                predecessor: active_turn
+            }
         );
-        assert_eq!(unavailable.command(), &interrupt);
     }
 
     /// S09 / INV-008 / INV-012 / INV-028: after-current preparation records
@@ -5008,22 +5413,21 @@ mod tests {
         );
     }
 
-    /// S07 / S08 / INV-012 / INV-028: replay exposes no terminal result that
-    /// matching interrupt preparation cannot record in this milestone, and
-    /// safe-point stopping remains closed until exact stop evidence exists.
+    /// S07 / S08 / INV-012 / INV-028: interrupt replay admits the same
+    /// configuration and position rejections as preparation, while a
+    /// safe-point request still carries no configurable model choice.
     #[test]
-    fn inv012_inv028_unimplemented_rejection_paths_fail_closed() {
-        assert_rejection_reconstitution_fails(
-            SubmitInputReconstitutionInput::rejected_defaults_version_mismatch(
-                interrupt_command(1, turn_id(7)),
-                Actor::Owner,
-                session_id(1),
-                version(1),
-                version(2),
-                Some(source_turn_origin()),
-            ),
-            SubmitInputReconstitutionFailure::InterruptConfigurationRejectionUnavailable,
-        );
+    fn inv012_inv028_interrupt_rejections_reconstitute_exactly() {
+        SubmitInputReconstitutionInput::rejected_defaults_version_mismatch(
+            interrupt_command(1, turn_id(7)),
+            Actor::Owner,
+            session_id(1),
+            version(1),
+            version(2),
+            Some(source_turn_origin()),
+        )
+        .reconstitute()
+        .expect("an interrupt defaults-version rejection reconstructs");
         assert_rejection_reconstitution_fails(
             SubmitInputReconstitutionInput::rejected_defaults_version_mismatch(
                 safe_point_command(1, turn_id(7)),
@@ -5048,19 +5452,18 @@ mod tests {
                 ),
             },
         );
-        assert_rejection_reconstitution_fails(
-            SubmitInputReconstitutionInput::rejected_unknown_model_alias(
-                interrupt_alias,
-                Actor::Owner,
-                session_id(1),
-                alias(2),
-                session_id(1),
-                version(1),
-                defaults(ModelSelectionRequest::Direct(direct(3))),
-                Some(source_turn_origin()),
-            ),
-            SubmitInputReconstitutionFailure::InterruptConfigurationRejectionUnavailable,
-        );
+        SubmitInputReconstitutionInput::rejected_unknown_model_alias(
+            interrupt_alias,
+            Actor::Owner,
+            session_id(1),
+            alias(2),
+            session_id(1),
+            version(1),
+            defaults(ModelSelectionRequest::Direct(direct(3))),
+            Some(source_turn_origin()),
+        )
+        .reconstitute()
+        .expect("an interrupt unknown-alias rejection reconstructs");
 
         let safe_point = safe_point_command(1, turn_id(7));
         assert_rejection_reconstitution_fails(
@@ -5078,16 +5481,15 @@ mod tests {
         );
 
         let maximum = SessionInputPosition::try_from_u64(u64::MAX).expect("positive maximum");
-        assert_rejection_reconstitution_fails(
-            SubmitInputReconstitutionInput::rejected_acceptance_position_exhausted(
-                interrupt_command(1, turn_id(7)),
-                Actor::Owner,
-                session_id(1),
-                maximum,
-                Some(source_turn_origin()),
-            ),
-            SubmitInputReconstitutionFailure::PositionExhaustionDeliveryUnavailable,
-        );
+        SubmitInputReconstitutionInput::rejected_acceptance_position_exhausted(
+            interrupt_command(1, turn_id(7)),
+            Actor::Owner,
+            session_id(1),
+            maximum,
+            Some(source_turn_origin()),
+        )
+        .reconstitute()
+        .expect("an interrupt position-exhaustion rejection reconstructs");
     }
 
     /// S01 / INV-012: preparation against another command's session is a

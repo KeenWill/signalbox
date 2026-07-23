@@ -644,7 +644,7 @@ fn map_scheduling_error(error: SubmitInputRepositoryError) -> StartupScanReposit
         SubmitInputRepositoryError::AcceptedInputIdentityCollision { .. } => {
             StartupScanCorruption::Inconsistent("origin accepted-input identity").into()
         }
-        SubmitInputRepositoryError::InterruptApplicationUnavailable { .. } => {
+        SubmitInputRepositoryError::ModelExecution(_) => {
             StartupScanCorruption::Inconsistent("origin command application").into()
         }
     }
