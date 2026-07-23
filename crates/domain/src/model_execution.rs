@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::{
     AcceptedInputDisposition, AcceptedInputId, AcceptedInputLifecycle, AcceptedInputQueueOrder,
     AcceptedInputTurnStart, ActivatedAcceptedInputTurn, ActiveTurnPhase,
-    AppliedInterruptCommandResult, AppliedInterruptProof, AssistantText,
+    AppliedInterruptCommandResult, AppliedInterruptProof, AssistantText, AttemptEnd,
     CancellationStopDisposition, ContextFrontierId, CurrentModelCall, CurrentModelCallState,
     CurrentTurnAttempt, CurrentTurnAttemptState, DirectModelSelection, EffectiveConfiguration,
     EndedModelCall, EndedTurnAttempt, FrozenModelSelection, ModelCallDisposition, ModelCallId,
@@ -617,6 +617,28 @@ impl ModelCallExecution {
             call,
             frontier_entries: self.frontier_entries.clone(),
             origin_contents: self.origin_contents.clone(),
+        })
+    }
+
+    /// Reconstructs an issued call whose exact interrupt was durably accepted
+    /// before this process entered the provider.
+    pub fn resume_cancellation_requested_call(&self) -> Option<StopRequestedModelCallTurn> {
+        let call = self.current_call.clone()?;
+        let CurrentTurnAttemptState::StopRequested {
+            causes: TurnAttemptStopCauses::CancellationOnly { interrupt },
+        } = self.current_attempt.state()
+        else {
+            return None;
+        };
+        if call.state() != CurrentModelCallState::CancellationRequested {
+            return None;
+        }
+        Some(StopRequestedModelCallTurn {
+            session: self.session,
+            turn: self.turn,
+            call,
+            attempt: self.current_attempt.clone(),
+            interrupt: *interrupt,
         })
     }
 
@@ -2089,6 +2111,19 @@ impl StopRequestedModelCallTurn {
     pub const fn interrupt(&self) -> AppliedInterruptProof {
         self.interrupt
     }
+
+    /// Returns the issued facts binding a provider-neutral cancellation
+    /// observation to this exact stopped authorization.
+    pub const fn observation_correlation(&self) -> IssuedModelCallCorrelation {
+        IssuedModelCallCorrelation {
+            session: self.session,
+            turn: self.turn,
+            attempt: self.attempt.id(),
+            call: self.call.id(),
+            target: self.call.target(),
+            frontier: self.call.frontier().snapshot(),
+        }
+    }
 }
 
 /// One refused-turn commit candidate.
@@ -2616,9 +2651,14 @@ pub(crate) fn apply_interrupt_to_recovery_wait(
     let terminal_snapshot = source_snapshot
         .derive_appending_candidate(identities.terminal_frontier, Vec::new())
         .map_err(|_| ModelCallClosureError::FrontierDerivationFailed)?;
-    let attempt = attempt
-        .apply_interrupt_to_ambiguity(proof)
-        .map_err(|_| ModelCallClosureError::AttemptStateMismatch)?;
+    if !matches!(
+        attempt.end(),
+        AttemptEnd::WithoutStop {
+            disposition: UnstoppedAttemptDisposition::Ambiguous | UnstoppedAttemptDisposition::Lost,
+        }
+    ) {
+        return Err(ModelCallClosureError::AttemptStateMismatch);
+    }
     let marker =
         ReconciliationMarker::from_interrupt_ambiguity(ambiguous_operations.clone(), proof);
     Ok(ReconciliationRequiredModelCallTurn {

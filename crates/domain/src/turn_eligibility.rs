@@ -100,6 +100,24 @@ pub enum AcceptedInputTurnSchedulingRecordState {
         /// The complete frontier through the cancellation marker.
         terminal_frontier: ContextFrontierId,
     },
+    /// The turn released its slot while one interrupted call remains
+    /// durably ambiguous.
+    TerminalReconciliationRequired {
+        /// The stored lineage selected at eligibility.
+        starting_lineage: AcceptedInputStartingLineage,
+        /// The stored starting snapshot identity.
+        starting_frontier: ContextFrontierId,
+        /// The ended attempt that owns the ambiguous call.
+        reconciling_attempt: TurnAttemptId,
+        /// The preserved stored end classification for that attempt.
+        reconciling_attempt_end: TerminalAttemptEndReconstitutionInput,
+        /// The exact ambiguous physical call.
+        ambiguous_call: crate::ModelCallId,
+        /// The later or already-applied interrupt that requires reconciliation.
+        interrupt: AppliedInterruptCommandResult,
+        /// The equal-content terminal frontier identifying the turn boundary.
+        terminal_frontier: ContextFrontierId,
+    },
 }
 
 /// Correlated stored execution provenance for one failed terminal turn.
@@ -1346,6 +1364,8 @@ pub enum AcceptedInputTurnSchedulingStatus {
     TerminalRefused,
     /// The turn committed a proof-bearing cancellation marker.
     TerminalCancelled,
+    /// The turn released its slot with proof-bearing ambiguous work.
+    TerminalReconciliationRequired,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1368,6 +1388,10 @@ enum ReconstitutedSchedulingState {
         terminal_frontier: ResolvedContextFrontierSnapshot,
     },
     TerminalCancelled {
+        start: AcceptedInputTurnStart,
+        terminal_frontier: ResolvedContextFrontierSnapshot,
+    },
+    TerminalReconciliationRequired {
         start: AcceptedInputTurnStart,
         terminal_frontier: ResolvedContextFrontierSnapshot,
     },
@@ -1435,6 +1459,9 @@ impl AcceptedInputTurnSchedulingProjection {
             ReconstitutedSchedulingState::TerminalCancelled { .. } => {
                 AcceptedInputTurnSchedulingStatus::TerminalCancelled
             }
+            ReconstitutedSchedulingState::TerminalReconciliationRequired { .. } => {
+                AcceptedInputTurnSchedulingStatus::TerminalReconciliationRequired
+            }
         }
     }
 
@@ -1446,7 +1473,10 @@ impl AcceptedInputTurnSchedulingProjection {
             | ReconstitutedSchedulingState::TerminalFailed { start, .. }
             | ReconstitutedSchedulingState::TerminalCompleted { start, .. }
             | ReconstitutedSchedulingState::TerminalRefused { start, .. }
-            | ReconstitutedSchedulingState::TerminalCancelled { start, .. } => Some(*start),
+            | ReconstitutedSchedulingState::TerminalCancelled { start, .. }
+            | ReconstitutedSchedulingState::TerminalReconciliationRequired { start, .. } => {
+                Some(*start)
+            }
         }
     }
 
@@ -1458,7 +1488,8 @@ impl AcceptedInputTurnSchedulingProjection {
             | ReconstitutedSchedulingState::TerminalFailed { .. }
             | ReconstitutedSchedulingState::TerminalCompleted { .. }
             | ReconstitutedSchedulingState::TerminalRefused { .. }
-            | ReconstitutedSchedulingState::TerminalCancelled { .. } => None,
+            | ReconstitutedSchedulingState::TerminalCancelled { .. }
+            | ReconstitutedSchedulingState::TerminalReconciliationRequired { .. } => None,
         }
     }
 
@@ -1495,7 +1526,8 @@ impl AcceptedInputTurnSchedulingProjection {
             }
             ReconstitutedSchedulingState::TerminalCompleted { .. }
             | ReconstitutedSchedulingState::TerminalRefused { .. }
-            | ReconstitutedSchedulingState::TerminalCancelled { .. } => None,
+            | ReconstitutedSchedulingState::TerminalCancelled { .. }
+            | ReconstitutedSchedulingState::TerminalReconciliationRequired { .. } => None,
         }
     }
 
@@ -1513,6 +1545,10 @@ impl AcceptedInputTurnSchedulingProjection {
             }
             | ReconstitutedSchedulingState::TerminalCancelled {
                 terminal_frontier, ..
+            }
+            | ReconstitutedSchedulingState::TerminalReconciliationRequired {
+                terminal_frontier,
+                ..
             } => Some(terminal_frontier),
             ReconstitutedSchedulingState::Queued | ReconstitutedSchedulingState::Active { .. } => {
                 None
@@ -3527,6 +3563,126 @@ fn reconstitute_inner(
                     terminal_frontier: terminal,
                 }
             }
+            AcceptedInputTurnSchedulingRecordState::TerminalReconciliationRequired {
+                starting_lineage,
+                starting_frontier,
+                reconciling_attempt,
+                reconciling_attempt_end,
+                ambiguous_call,
+                interrupt,
+                terminal_frontier,
+            } => {
+                if active.is_some() || queued_seen {
+                    return Err(
+                        AcceptedInputSchedulingReconstitutionFailure::InvalidLifecycleOrder {
+                            turn,
+                        },
+                    );
+                }
+                let attempt_end_matches = match reconciling_attempt_end.end() {
+                    AttemptEnd::WithoutStop {
+                        disposition:
+                            UnstoppedAttemptDisposition::Ambiguous | UnstoppedAttemptDisposition::Lost,
+                    } => reconciling_attempt_end.interrupt().is_none(),
+                    AttemptEnd::AfterCancellation {
+                        cause,
+                        disposition:
+                            CancellationStopDisposition::Ambiguous | CancellationStopDisposition::Lost,
+                    } => {
+                        *cause == interrupt.proof()
+                            && reconciling_attempt_end.interrupt() == Some(*interrupt)
+                    }
+                    _ => false,
+                };
+                let successor = records_by_turn.get(&interrupt.successor());
+                if interrupt.session() != session
+                    || interrupt.proof().predecessor() != turn
+                    || !attempt_end_matches
+                    || successor.is_none_or(|successor| {
+                        successor.stored_session != session
+                            || successor.accepted_input.id() != interrupt.accepted_input()
+                            || successor.order != interrupt.successor_order()
+                    })
+                    || attempt_owners.insert(*reconciling_attempt, turn).is_some()
+                {
+                    return Err(
+                        AcceptedInputSchedulingReconstitutionFailure::TerminalAttemptEndMismatch {
+                            turn,
+                            attempt: *reconciling_attempt,
+                        },
+                    );
+                }
+                let start = validate_start(
+                    index,
+                    turn,
+                    *starting_lineage,
+                    *starting_frontier,
+                    previous_terminal.as_ref(),
+                    &origin_by_turn,
+                    &snapshots,
+                    &mut referenced_snapshots,
+                )?;
+                let Some(ReconstitutedModelCall::Ended(call)) = model_calls.get(ambiguous_call)
+                else {
+                    return Err(
+                        AcceptedInputSchedulingReconstitutionFailure::TerminalModelCallMissing {
+                            turn,
+                            call: *ambiguous_call,
+                        },
+                    );
+                };
+                let Some(pinned) = pinned_targets.get(&turn) else {
+                    return Err(
+                        AcceptedInputSchedulingReconstitutionFailure::PinnedTargetMissing {
+                            call: *ambiguous_call,
+                        },
+                    );
+                };
+                if call.turn() != turn
+                    || call.attempt() != *reconciling_attempt
+                    || call.selection() != *record.origin_configuration.effective().model()
+                    || call.target() != pinned.target()
+                    || call.disposition() != ModelCallDisposition::Ambiguous
+                {
+                    return Err(
+                        AcceptedInputSchedulingReconstitutionFailure::TerminalModelCallMismatch {
+                            turn,
+                        },
+                    );
+                }
+                referenced_model_calls.insert(*ambiguous_call);
+                let source_frontier = call.frontier().snapshot();
+                if source_frontier != *starting_frontier {
+                    referenced_snapshots.insert(source_frontier);
+                }
+                let source = snapshots.get(&source_frontier).ok_or(
+                    AcceptedInputSchedulingReconstitutionFailure::StartingSnapshotMissing { turn },
+                )?;
+                if !snapshots[starting_frontier].is_semantic_prefix_of(source) {
+                    return Err(
+                        AcceptedInputSchedulingReconstitutionFailure::TerminalModelCallMismatch {
+                            turn,
+                        },
+                    );
+                }
+                let terminal = snapshots.get(terminal_frontier).cloned().ok_or(
+                    AcceptedInputSchedulingReconstitutionFailure::TerminalSnapshotMissing { turn },
+                )?;
+                if !referenced_snapshots.insert(*terminal_frontier)
+                    || terminal.ordered_entries().ne(source.ordered_entries())
+                {
+                    return Err(
+                        AcceptedInputSchedulingReconstitutionFailure::TerminalFrontierMismatch {
+                            turn,
+                        },
+                    );
+                }
+                previous_terminal = Some((turn, terminal.clone()));
+                ReconstitutedSchedulingState::TerminalReconciliationRequired {
+                    start,
+                    terminal_frontier: terminal,
+                }
+            }
         };
 
         if !matches!(state, ReconstitutedSchedulingState::Queued)
@@ -3631,7 +3787,8 @@ fn reconstitute_active_acceptance_tail(
         | AcceptedInputTurnSchedulingRecordState::TerminalFailed { .. }
         | AcceptedInputTurnSchedulingRecordState::TerminalCompleted { .. }
         | AcceptedInputTurnSchedulingRecordState::TerminalRefused { .. }
-        | AcceptedInputTurnSchedulingRecordState::TerminalCancelled { .. } => None,
+        | AcceptedInputTurnSchedulingRecordState::TerminalCancelled { .. }
+        | AcceptedInputTurnSchedulingRecordState::TerminalReconciliationRequired { .. } => None,
     };
     let expected_anchor = active_record.accepted_input.id();
     if candidate.anchor != expected_anchor {

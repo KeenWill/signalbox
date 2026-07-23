@@ -381,7 +381,10 @@ where
             identities.failure_entry(),
             identities.terminal_frontier(),
         );
-        if call_state == CurrentModelCallState::Prepared {
+        if matches!(
+            call_state,
+            CurrentModelCallState::Prepared | CurrentModelCallState::CancellationRequested
+        ) {
             let mut proposed_turns = BTreeSet::new();
             let mut reclassifications = Vec::new();
             for pending in model_execution.active_turn().pending_steering() {
@@ -407,7 +410,9 @@ where
             })?;
         if !matches!(
             outcome,
-            ModelCallTerminalOutcome::Failed(_) | ModelCallTerminalOutcome::AwaitingRecovery(_)
+            ModelCallTerminalOutcome::Failed(_)
+                | ModelCallTerminalOutcome::AwaitingRecovery(_)
+                | ModelCallTerminalOutcome::ReconciliationRequired(_)
         ) {
             return Err(StartupScanCorruption::Inconsistent("model-call restart outcome").into());
         }

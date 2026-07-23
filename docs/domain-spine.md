@@ -981,6 +981,15 @@ pub enum AcceptedInputTurnSchedulingRecordState {
         terminal_execution: CancelledTurnExecutionReconstitutionInput,
         terminal_frontier: ContextFrontierId,
     },
+    TerminalReconciliationRequired {
+        starting_lineage: AcceptedInputStartingLineage,
+        starting_frontier: ContextFrontierId,
+        reconciling_attempt: TurnAttemptId,
+        reconciling_attempt_end: TerminalAttemptEndReconstitutionInput,
+        ambiguous_call: ModelCallId,
+        interrupt: AppliedInterruptCommandResult,
+        terminal_frontier: ContextFrontierId,
+    },
 }
 
 pub struct FailedTurnExecutionReconstitutionInput { /* private */ }
@@ -1292,6 +1301,7 @@ pub enum AcceptedInputTurnSchedulingStatus {
     TerminalCompleted,
     TerminalRefused,
     TerminalCancelled,
+    TerminalReconciliationRequired,
 }
 
 pub struct AcceptedInputTurnSchedulingProjection { /* private */ }
@@ -1717,6 +1727,7 @@ impl ModelCallExecution {
         failure_identities: FailedModelCallTurnIdentities,
     ) -> Result<ModelCallTerminalOutcome, ModelCallClosureError>;
     pub fn resume_in_flight_call(&self) -> Option<AuthorizedModelCall>;
+    pub fn resume_cancellation_requested_call(&self) -> Option<StopRequestedModelCallTurn>;
 }
 pub enum ModelCallPreparationFailure {
     TargetUnavailable,
@@ -1794,7 +1805,7 @@ pub struct CancelledModelCallTurn { /* private */ }
 // accessors: session(), turn(), call(), attempt(), disposition(),
 // cancellation_entry(), terminal_snapshot(), reclassified_pending_steering()
 pub struct StopRequestedModelCallTurn { /* private */ }
-// accessors: session(), turn(), call(), attempt(), interrupt()
+// accessors: session(), turn(), call(), attempt(), interrupt(), observation_correlation()
 pub struct RefusedModelCallTurn { /* private */ }
 // each terminal turn exposes reclassified_pending_steering()
 pub struct ReconciliationRequiredModelCallTurn { /* private */ }
@@ -2303,6 +2314,7 @@ pub enum AuthorizeModelCallOutcome {
 pub enum ModelCallAuthorizationReread {
     Prepared,
     InFlight(Box<AuthorizedModelCall>),
+    CancellationRequested(Box<StopRequestedModelCallTurn>),
 }
 
 pub trait CommitModelCallObservationTransaction {

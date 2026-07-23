@@ -1464,6 +1464,98 @@ pub(crate) async fn load_scheduling_projection(
                             terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
                         }
                     }
+                    Some("reconciliation_required") => {
+                        let terminal_attempt = terminal_attempt
+                            .ok_or(SubmitInputCorruption::Missing("terminal_attempt_id"))?;
+                        let terminal_call = terminal_model_call
+                            .ok_or(SubmitInputCorruption::Missing("terminal_model_call_id"))?;
+                        let stored_attempt_id =
+                            TurnAttemptId::from_uuid(required(&row, "turn_attempt_id")?);
+                        let attempt_turn = turn_id_from_uuid(required(&row, "attempt_turn_id")?);
+                        let attempt_session =
+                            session_id_from_uuid(required(&row, "attempt_session_id")?);
+                        let continued_from: Option<Uuid> =
+                            row.try_get("continued_from_attempt_id")?;
+                        let attempt_state: String = required(&row, "attempt_state_kind")?;
+                        let end_variant: Option<String> = row.try_get("end_variant")?;
+                        let end_disposition: Option<String> = row.try_get("end_disposition")?;
+                        if stored_attempt_id.into_uuid() != terminal_attempt
+                            || attempt_turn != lifecycle_turn
+                            || attempt_session != lifecycle_session
+                            || continued_from.is_some()
+                            || attempt_state != "ended"
+                        {
+                            return Err(SubmitInputCorruption::Inconsistent(
+                                "reconciliation terminal attempt",
+                            )
+                            .into());
+                        }
+                        let interrupt = match end_variant.as_deref() {
+                            Some("after_cancellation") => require_applied_interrupt_from_attempt(
+                                &row,
+                                lifecycle_turn,
+                                &recorded_commands,
+                            )?,
+                            Some("without_stop") => require_applied_interrupt_for_turn(
+                                lifecycle_turn,
+                                &recorded_commands,
+                            )?,
+                            Some(value) => {
+                                return Err(SubmitInputCorruption::Unsupported {
+                                    field: "reconciliation attempt end_variant",
+                                    value: value.to_owned(),
+                                }
+                                .into());
+                            }
+                            None => {
+                                return Err(SubmitInputCorruption::Missing(
+                                    "reconciliation attempt end_variant",
+                                )
+                                .into());
+                            }
+                        };
+                        let reconciling_attempt_end =
+                            match (end_variant.as_deref(), end_disposition.as_deref()) {
+                                (Some("without_stop"), Some("ambiguous")) => {
+                                    TerminalAttemptEndReconstitutionInput::without_stop(
+                                        UnstoppedAttemptDisposition::Ambiguous,
+                                    )
+                                }
+                                (Some("without_stop"), Some("lost")) => {
+                                    TerminalAttemptEndReconstitutionInput::without_stop(
+                                        UnstoppedAttemptDisposition::Lost,
+                                    )
+                                }
+                                (Some("after_cancellation"), Some("ambiguous")) => {
+                                    TerminalAttemptEndReconstitutionInput::after_cancellation(
+                                        CancellationStopDisposition::Ambiguous,
+                                        interrupt,
+                                    )
+                                }
+                                (Some("after_cancellation"), Some("lost")) => {
+                                    TerminalAttemptEndReconstitutionInput::after_cancellation(
+                                        CancellationStopDisposition::Lost,
+                                        interrupt,
+                                    )
+                                }
+                                _ => {
+                                    return Err(SubmitInputCorruption::Inconsistent(
+                                        "reconciliation terminal attempt disposition",
+                                    )
+                                    .into());
+                                }
+                            };
+                        required_model_calls.insert(terminal_call);
+                        AcceptedInputTurnSchedulingRecordState::TerminalReconciliationRequired {
+                            starting_lineage,
+                            starting_frontier: ContextFrontierId::from_uuid(starting_frontier),
+                            reconciling_attempt: stored_attempt_id,
+                            reconciling_attempt_end,
+                            ambiguous_call: ModelCallId::from_uuid(terminal_call),
+                            interrupt,
+                            terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
+                        }
+                    }
                     Some("completed" | "refused") => {
                         let terminal_attempt = terminal_attempt
                             .ok_or(SubmitInputCorruption::Missing("terminal_attempt_id"))?;
@@ -2092,6 +2184,32 @@ fn require_applied_interrupt_from_attempt(
             interrupt.proof().command() == command && interrupt.proof().predecessor() == owning_turn
         })
         .ok_or_else(|| SubmitInputCorruption::Inconsistent("attempt interrupt authority").into())
+}
+
+fn require_applied_interrupt_for_turn(
+    owning_turn: TurnId,
+    recorded_commands: &BTreeMap<DurableCommandId, ReconstitutedSubmitInput>,
+) -> Result<AppliedInterruptCommandResult, SubmitInputRepositoryError> {
+    let mut matches = recorded_commands.values().filter_map(|receipt| {
+        let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(origin)) =
+            receipt.result()
+        else {
+            return None;
+        };
+        origin
+            .applied_interrupt()
+            .copied()
+            .filter(|interrupt| interrupt.proof().predecessor() == owning_turn)
+    });
+    let interrupt = matches
+        .next()
+        .ok_or(SubmitInputCorruption::Missing("applied interrupt command"))?;
+    if matches.next().is_some() {
+        return Err(
+            SubmitInputCorruption::Inconsistent("multiple applied interrupt commands").into(),
+        );
+    }
+    Ok(interrupt)
 }
 
 fn accepted_origin_source_turn(delivery: DeliveryRequest) -> Option<TurnId> {

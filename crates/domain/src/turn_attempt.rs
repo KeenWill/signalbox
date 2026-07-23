@@ -657,25 +657,6 @@ impl EndedTurnAttempt {
     pub const fn end(&self) -> &AttemptEnd {
         &self.end
     }
-
-    pub(crate) fn apply_interrupt_to_ambiguity(
-        self,
-        cause: AppliedInterruptProof,
-    ) -> Result<Self, Self> {
-        let disposition = match self.end {
-            AttemptEnd::WithoutStop {
-                disposition: UnstoppedAttemptDisposition::Ambiguous,
-            } => CancellationStopDisposition::Ambiguous,
-            AttemptEnd::WithoutStop {
-                disposition: UnstoppedAttemptDisposition::Lost,
-            } => CancellationStopDisposition::Lost,
-            _ => return Err(self),
-        };
-        Ok(Self {
-            id: self.id,
-            end: AttemptEnd::AfterCancellation { cause, disposition },
-        })
-    }
 }
 
 /// The transition input returned when a current attempt rejects it.

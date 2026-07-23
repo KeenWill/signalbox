@@ -20,7 +20,8 @@ use signalbox_domain::{
     ModelCallTerminalObservation, ModelCallTerminalOutcome,
     PhysicalCancellationModelCallTurnIdentities, PreparedModelCallRequest,
     RefusedModelCallTurnIdentities, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
-    SemanticTranscriptEntryRef, SessionId, TurnAttemptId, TurnId, UserContent,
+    SemanticTranscriptEntryRef, SessionId, StopRequestedModelCallTurn, TurnAttemptId, TurnId,
+    UserContent,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
@@ -316,6 +317,9 @@ pub enum ModelCallAuthorizationReread {
     Prepared,
     /// The authorization committed; this exact issued call was not consumed.
     InFlight(Box<AuthorizedModelCall>),
+    /// The authorization committed, but an interrupt stopped it before this
+    /// process entered the provider.
+    CancellationRequested(Box<StopRequestedModelCallTurn>),
 }
 
 /// Fresh transaction committing a provider-neutral terminal observation.
@@ -888,6 +892,14 @@ where
                             .commit_terminal_observation(retained_session, non_consumption)
                             .await;
                     }
+                    Ok(ModelCallAuthorizationReread::CancellationRequested(stopped)) => {
+                        let cancellation = stopped
+                            .observation_correlation()
+                            .bind_terminal_observation(ModelCallTerminalObservation::Cancelled);
+                        return self
+                            .commit_terminal_observation(retained_session, cancellation)
+                            .await;
+                    }
                     Err(error) => {
                         self.retained_state = Some(RetainedModelCallExecutionState {
                             state:
@@ -1026,6 +1038,16 @@ where
                             .bind_terminal_observation(ModelCallTerminalObservation::KnownFailed);
                         return self
                             .commit_terminal_observation(session, non_consumption)
+                            .await;
+                    }
+                    Ok(ModelCallAuthorizationReread::CancellationRequested(stopped)) => {
+                        drop(capability);
+                        drop(permit);
+                        let cancellation = stopped
+                            .observation_correlation()
+                            .bind_terminal_observation(ModelCallTerminalObservation::Cancelled);
+                        return self
+                            .commit_terminal_observation(session, cancellation)
                             .await;
                     }
                     Err(reread_error) => {

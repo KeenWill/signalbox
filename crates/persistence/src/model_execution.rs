@@ -656,11 +656,24 @@ impl PostgresModelCallRepository {
                     }
                     Ok(ModelCallAuthorizationReread::InFlight(Box::new(authorized)))
                 }
-                Some(signalbox_domain::CurrentModelCallState::CancellationRequested) | None => {
-                    Err(ModelCallRepositoryError::InvalidTransition(
-                        "ambiguous authorization reread found no resumable call",
+                Some(signalbox_domain::CurrentModelCallState::CancellationRequested) => {
+                    let stopped = execution.resume_cancellation_requested_call().ok_or(
+                        ModelCallRepositoryError::InvalidTransition(
+                            "ambiguous authorization reread could not resume CancellationRequested",
+                        ),
+                    )?;
+                    if !prepared_matches_stopped(prepared, &execution, &stopped) {
+                        return Err(ModelCallRepositoryError::InvalidTransition(
+                            "ambiguous authorization reread changed stopped request",
+                        ));
+                    }
+                    Ok(ModelCallAuthorizationReread::CancellationRequested(
+                        Box::new(stopped),
                     ))
                 }
+                None => Err(ModelCallRepositoryError::InvalidTransition(
+                    "ambiguous authorization reread found no resumable call",
+                )),
             }
         }
         .await;
@@ -1668,6 +1681,33 @@ fn prepared_matches_authorized(
             })
 }
 
+fn prepared_matches_stopped(
+    prepared: &PreparedModelCallRequest,
+    execution: &ModelCallExecution,
+    stopped: &StopRequestedModelCallTurn,
+) -> bool {
+    prepared.session() == stopped.session()
+        && prepared.turn() == stopped.turn()
+        && prepared.attempt() == stopped.attempt().id()
+        && prepared.call().id() == stopped.call().id()
+        && prepared.call().selection() == stopped.call().selection()
+        && prepared.call().target() == stopped.call().target()
+        && prepared.call().frontier() == stopped.call().frontier()
+        && prepared.frontier_entries().eq(execution.frontier_entries())
+        && prepared
+            .frontier_entries()
+            .all(|entry| match entry.payload() {
+                SemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input }
+                | SemanticTranscriptEntryPayload::SteeringAcceptedInput {
+                    accepted_input, ..
+                } => {
+                    prepared.origin_content(*accepted_input)
+                        == execution.origin_content(*accepted_input)
+                }
+                _ => true,
+             })
+}
+
 async fn lock_session(
     connection: &mut PgConnection,
     session: SessionId,
@@ -2386,13 +2426,15 @@ async fn persist_reconciliation_required(
         )
         .await?;
     }
-    persist_ended_attempt(
-        connection,
-        reconciliation.session(),
-        reconciliation.turn(),
-        reconciliation.attempt(),
-    )
-    .await?;
+    if !call_already_ambiguous {
+        persist_ended_attempt(
+            connection,
+            reconciliation.session(),
+            reconciliation.turn(),
+            reconciliation.attempt(),
+        )
+        .await?;
+    }
     insert_snapshot(connection, reconciliation.terminal_snapshot()).await?;
     persist_reclassified_pending_steering(
         connection,
@@ -2946,13 +2988,6 @@ async fn persist_ended_attempt(
                     state_kind IN ('prepared', 'running', 'stop_requested')
                     AND end_variant IS NULL
                     AND end_disposition IS NULL
-                )
-                OR (
-                    state_kind = 'ended'
-                    AND end_variant = 'without_stop'
-                    AND end_disposition = $2
-                    AND $1 = 'after_cancellation'
-                    AND $2 IN ('ambiguous', 'lost')
                 )
             )
             AND (

@@ -588,19 +588,7 @@ BEGIN
     END IF;
 
     IF OLD.state_kind = 'ended' THEN
-        IF OLD.end_variant = 'without_stop'
-           AND OLD.end_disposition IN ('ambiguous', 'lost')
-           AND OLD.interrupt_command_id IS NULL
-           AND OLD.interrupt_predecessor_turn_id IS NULL
-           AND NEW.state_kind = 'ended'
-           AND NEW.end_variant = 'after_cancellation'
-           AND NEW.end_disposition = OLD.end_disposition
-           AND NEW.interrupt_command_id IS NOT NULL
-           AND NEW.interrupt_predecessor_turn_id = NEW.turn_id
-        THEN
-            RETURN NEW;
-        END IF;
-        RAISE EXCEPTION 'ended turn attempt is immutable except for ambiguity stop proof'
+        RAISE EXCEPTION 'ended turn attempt is immutable'
             USING ERRCODE = '23514';
     END IF;
 
@@ -1170,14 +1158,36 @@ BEGIN
           JOIN turn_attempt AS stopped_attempt
             ON stopped_attempt.turn_id = NEW.expected_active_turn_id
            AND stopped_attempt.session_id = NEW.session_id
-           AND stopped_attempt.interrupt_command_id = NEW.command_id
-           AND stopped_attempt.interrupt_predecessor_turn_id
-               = NEW.expected_active_turn_id
            AND (
-                stopped_attempt.state_kind = 'stop_requested'
+                (
+                    stopped_attempt.interrupt_command_id = NEW.command_id
+                    AND stopped_attempt.interrupt_predecessor_turn_id
+                        = NEW.expected_active_turn_id
+                    AND (
+                        stopped_attempt.state_kind = 'stop_requested'
+                        OR (
+                            stopped_attempt.state_kind = 'ended'
+                            AND stopped_attempt.end_variant = 'after_cancellation'
+                        )
+                    )
+                )
                 OR (
                     stopped_attempt.state_kind = 'ended'
-                    AND stopped_attempt.end_variant = 'after_cancellation'
+                    AND stopped_attempt.end_variant = 'without_stop'
+                    AND stopped_attempt.end_disposition IN ('ambiguous', 'lost')
+                    AND stopped_attempt.interrupt_command_id IS NULL
+                    AND stopped_attempt.interrupt_predecessor_turn_id IS NULL
+                    AND EXISTS (
+                        SELECT 1
+                          FROM turn_lifecycle AS reconciled
+                         WHERE reconciled.turn_id = stopped_attempt.turn_id
+                           AND reconciled.session_id = stopped_attempt.session_id
+                           AND reconciled.state_kind = 'terminal'
+                           AND reconciled.terminal_disposition_kind
+                               = 'reconciliation_required'
+                           AND reconciled.terminal_attempt_id
+                               = stopped_attempt.turn_attempt_id
+                    )
                 )
            )
          WHERE accepted.accepting_command_id = NEW.command_id
@@ -1425,6 +1435,7 @@ DECLARE
     attempt_state text;
     attempt_variant text;
     attempt_disposition text;
+    attempt_interrupt_command uuid;
     turn_state text;
     active_phase text;
     current_attempt uuid;
@@ -1441,6 +1452,7 @@ BEGIN
         attempt.state_kind,
         attempt.end_variant,
         attempt.end_disposition,
+        attempt.interrupt_command_id,
         lifecycle.state_kind,
         lifecycle.active_phase_kind,
         lifecycle.current_attempt_id,
@@ -1456,6 +1468,7 @@ BEGIN
         attempt_state,
         attempt_variant,
         attempt_disposition,
+        attempt_interrupt_command,
         turn_state,
         active_phase,
         current_attempt,
@@ -1467,7 +1480,6 @@ BEGIN
         ON attempt.turn_attempt_id = call.turn_attempt_id
        AND attempt.turn_id = call.turn_id
        AND attempt.session_id = call.session_id
-       AND attempt.interrupt_command_id IS NOT NULL
       JOIN turn_lifecycle AS lifecycle
         ON lifecycle.turn_id = call.turn_id
        AND lifecycle.session_id = call.session_id
@@ -1478,7 +1490,9 @@ BEGIN
             USING ERRCODE = '23503';
     END IF;
 
-    PERFORM assert_interrupt_attempt_proof(checked_attempt);
+    IF attempt_interrupt_command IS NOT NULL THEN
+        PERFORM assert_interrupt_attempt_proof(checked_attempt);
+    END IF;
     PERFORM assert_model_call_steering_final_state(checked_model_call_id);
 
     IF checked_state = 'cancellation_requested' THEN
@@ -1517,7 +1531,15 @@ BEGIN
            OR terminal_attempt IS DISTINCT FROM checked_attempt
            OR terminal_call IS DISTINCT FROM checked_model_call_id
            OR attempt_state IS DISTINCT FROM 'ended'
-           OR attempt_variant IS DISTINCT FROM 'after_cancellation'
+           OR attempt_variant NOT IN ('without_stop', 'after_cancellation')
+           OR (
+                attempt_variant = 'without_stop'
+                AND attempt_interrupt_command IS NOT NULL
+           )
+           OR (
+                attempt_variant = 'after_cancellation'
+                AND attempt_interrupt_command IS NULL
+           )
         THEN
             RAISE EXCEPTION
                 'ambiguous stopped call lacks exact reconciliation outcome'
@@ -1546,20 +1568,31 @@ BEGIN
             ON attempt.turn_attempt_id = call.turn_attempt_id
            AND attempt.turn_id = call.turn_id
            AND attempt.session_id = call.session_id
+          JOIN turn_lifecycle AS lifecycle
+            ON lifecycle.turn_id = call.turn_id
+           AND lifecycle.session_id = call.session_id
          WHERE call.model_call_id = checked_model_call_id
-           AND attempt.interrupt_command_id IS NOT NULL
            AND (
-                call.state_kind = 'cancellation_requested'
+                (
+                    attempt.interrupt_command_id IS NOT NULL
+                    AND call.state_kind = 'cancellation_requested'
+                )
                 OR (
                     call.state_kind = 'terminal'
                     AND (
                         (
                             call.terminal_disposition_kind = 'cancelled'
+                            AND attempt.interrupt_command_id IS NOT NULL
                             AND attempt.end_disposition = 'cancelled'
                         )
                         OR (
                             call.terminal_disposition_kind = 'ambiguous'
                             AND attempt.end_disposition IN ('ambiguous', 'lost')
+                            AND lifecycle.state_kind = 'terminal'
+                            AND lifecycle.terminal_disposition_kind
+                                = 'reconciliation_required'
+                            AND lifecycle.terminal_model_call_id
+                                = checked_model_call_id
                         )
                     )
                 )
@@ -1901,6 +1934,189 @@ $$;
 ALTER FUNCTION assert_turn_lifecycle_final_state(uuid)
     RENAME TO assert_turn_lifecycle_final_state_without_reconciliation;
 
+CREATE FUNCTION assert_terminal_started_turn_common_final_state(
+    checked_turn_id uuid
+)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    checked_session uuid;
+    checked_origin_input uuid;
+    checked_position numeric(20, 0);
+    checked_attempt_history boolean;
+    checked_lineage text;
+    checked_predecessor uuid;
+    checked_starting_frontier uuid;
+    checked_terminal_attempt uuid;
+    attempt_count bigint;
+    ended_attempt_count bigint;
+    origin_entry_count bigint;
+    origin_entry uuid;
+    starting_member_count numeric(20, 0);
+    origin_member_count bigint;
+    origin_member_position numeric(20, 0);
+    predecessor_turn uuid;
+    predecessor_frontier uuid;
+    predecessor_member_count numeric(20, 0);
+    prefix_mismatch_count bigint;
+BEGIN
+    SELECT
+        session_id,
+        origin_accepted_input_id,
+        acceptance_position,
+        attempt_history_present,
+        start_lineage_kind,
+        immediate_predecessor_turn_id,
+        starting_frontier_id,
+        terminal_attempt_id
+      INTO
+        checked_session,
+        checked_origin_input,
+        checked_position,
+        checked_attempt_history,
+        checked_lineage,
+        checked_predecessor,
+        checked_starting_frontier,
+        checked_terminal_attempt
+      FROM turn_lifecycle
+     WHERE turn_id = checked_turn_id
+       AND state_kind = 'terminal';
+
+    IF NOT FOUND THEN
+        RETURN;
+    END IF;
+
+    SELECT
+        count(*),
+        count(*) FILTER (
+            WHERE state_kind = 'ended'
+              AND turn_attempt_id = checked_terminal_attempt
+        )
+      INTO attempt_count, ended_attempt_count
+      FROM turn_attempt
+     WHERE turn_id = checked_turn_id
+       AND session_id = checked_session;
+
+    IF checked_attempt_history IS DISTINCT FROM (attempt_count > 0)
+       OR attempt_count <> 1
+       OR ended_attempt_count <> 1
+    THEN
+        RAISE EXCEPTION
+            'terminal turn % lacks its exact single ended attempt history',
+            checked_turn_id
+            USING ERRCODE = '23514';
+    END IF;
+
+    SELECT count(*)
+      INTO origin_entry_count
+      FROM semantic_transcript_entry
+     WHERE source_session_id = checked_session
+       AND payload_kind = 'origin_accepted_input'
+       AND origin_accepted_input_id = checked_origin_input;
+    IF origin_entry_count <> 1 THEN
+        RAISE EXCEPTION
+            'terminal turn % lacks its exact origin entry',
+            checked_turn_id
+            USING ERRCODE = '23514';
+    END IF;
+    SELECT semantic_entry_id
+      INTO origin_entry
+      FROM semantic_transcript_entry
+     WHERE source_session_id = checked_session
+       AND payload_kind = 'origin_accepted_input'
+       AND origin_accepted_input_id = checked_origin_input;
+
+    SELECT member_count
+      INTO starting_member_count
+      FROM context_frontier
+     WHERE owning_session_id = checked_session
+       AND context_frontier_id = checked_starting_frontier;
+    SELECT count(*), max(member_position)
+      INTO origin_member_count, origin_member_position
+      FROM context_frontier_member
+     WHERE owning_session_id = checked_session
+       AND context_frontier_id = checked_starting_frontier
+       AND source_session_id = checked_session
+       AND semantic_entry_id = origin_entry;
+    IF starting_member_count IS NULL
+       OR origin_member_count <> 1
+       OR origin_member_position IS DISTINCT FROM starting_member_count
+    THEN
+        RAISE EXCEPTION
+            'terminal turn % starting frontier lacks its final origin',
+            checked_turn_id
+            USING ERRCODE = '23514';
+    END IF;
+
+    predecessor_turn := accepted_input_turn_queue_predecessor(
+        checked_session,
+        checked_turn_id
+    );
+    IF checked_lineage = 'first_in_session' THEN
+        IF checked_predecessor IS NOT NULL
+           OR predecessor_turn IS NOT NULL
+           OR starting_member_count <> 1
+        THEN
+            RAISE EXCEPTION
+                'terminal turn % has inconsistent first lineage',
+                checked_turn_id
+                USING ERRCODE = '23514';
+        END IF;
+    ELSIF checked_lineage = 'after' THEN
+        IF checked_predecessor IS DISTINCT FROM predecessor_turn THEN
+            RAISE EXCEPTION
+                'terminal turn % does not name its queue predecessor',
+                checked_turn_id
+                USING ERRCODE = '23514';
+        END IF;
+        SELECT terminal_frontier_id
+          INTO predecessor_frontier
+          FROM turn_lifecycle
+         WHERE turn_id = checked_predecessor
+           AND session_id = checked_session
+           AND state_kind = 'terminal';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION
+                'terminal turn % predecessor is not terminal',
+                checked_turn_id
+                USING ERRCODE = '23514';
+        END IF;
+        SELECT member_count
+          INTO predecessor_member_count
+          FROM context_frontier
+         WHERE owning_session_id = checked_session
+           AND context_frontier_id = predecessor_frontier;
+        SELECT count(*)
+          INTO prefix_mismatch_count
+          FROM context_frontier_member AS predecessor_member
+          LEFT JOIN context_frontier_member AS starting_member
+            ON starting_member.owning_session_id = checked_session
+           AND starting_member.context_frontier_id = checked_starting_frontier
+           AND starting_member.member_position = predecessor_member.member_position
+           AND starting_member.source_session_id = predecessor_member.source_session_id
+           AND starting_member.semantic_entry_id = predecessor_member.semantic_entry_id
+         WHERE predecessor_member.owning_session_id = checked_session
+           AND predecessor_member.context_frontier_id = predecessor_frontier
+           AND starting_member.member_position IS NULL;
+        IF starting_member_count
+               IS DISTINCT FROM predecessor_member_count + 1
+           OR prefix_mismatch_count <> 0
+        THEN
+            RAISE EXCEPTION
+                'terminal turn % starting frontier does not extend its predecessor',
+                checked_turn_id
+                USING ERRCODE = '23514';
+        END IF;
+    ELSE
+        RAISE EXCEPTION
+            'terminal turn % has unsupported lineage',
+            checked_turn_id
+            USING ERRCODE = '23514';
+    END IF;
+END;
+$$;
+
 CREATE FUNCTION assert_reconciliation_required_turn_final_state(
     checked_turn_id uuid
 )
@@ -1916,6 +2132,8 @@ DECLARE
     member_mismatch_count bigint;
     contradictory_entry_count bigint;
     outbox_count bigint;
+    interrupt_command uuid;
+    interrupt_record_count bigint;
 BEGIN
     SELECT
         session_id,
@@ -1936,6 +2154,8 @@ BEGIN
         RETURN;
     END IF;
 
+    PERFORM assert_terminal_started_turn_common_final_state(checked_turn_id);
+
     IF NOT EXISTS (
         SELECT 1
           FROM turn_attempt
@@ -1943,14 +2163,62 @@ BEGIN
            AND turn_id = checked_turn_id
            AND session_id = checked_session
            AND state_kind = 'ended'
-           AND end_variant = 'after_cancellation'
            AND end_disposition IN ('ambiguous', 'lost')
+           AND (
+                (
+                    end_variant = 'after_cancellation'
+                    AND interrupt_command_id IS NOT NULL
+                    AND interrupt_predecessor_turn_id = checked_turn_id
+                )
+                OR (
+                    end_variant = 'without_stop'
+                    AND interrupt_command_id IS NULL
+                    AND interrupt_predecessor_turn_id IS NULL
+                )
+           )
     ) THEN
         RAISE EXCEPTION
-            'reconciliation-required turn lacks exact stopped attempt'
+            'reconciliation-required turn lacks exact ambiguous attempt'
             USING ERRCODE = '23514';
     END IF;
-    PERFORM assert_interrupt_attempt_proof(checked_attempt);
+
+    SELECT interrupt_command_id
+      INTO interrupt_command
+      FROM turn_attempt
+     WHERE turn_attempt_id = checked_attempt;
+    IF interrupt_command IS NOT NULL THEN
+        PERFORM assert_interrupt_attempt_proof(checked_attempt);
+    END IF;
+
+    SELECT count(*)
+      INTO interrupt_record_count
+      FROM submit_input_command AS command
+      JOIN accepted_input AS accepted
+        ON accepted.accepting_command_id = command.command_id
+       AND accepted.accepted_input_id = command.result_accepted_input_id
+       AND accepted.session_id = command.result_session_id
+       AND accepted.origin_turn_id = command.result_turn_id
+      JOIN queued_input_origin AS successor
+        ON successor.accepted_input_id = accepted.accepted_input_id
+       AND successor.turn_id = accepted.origin_turn_id
+       AND successor.session_id = accepted.session_id
+       AND successor.priority_kind = 'interrupt_immediately_after'
+       AND successor.interrupt_predecessor_turn_id = checked_turn_id
+     WHERE command.session_id = checked_session
+       AND command.delivery_kind = 'interrupt'
+       AND command.expected_active_turn_id = checked_turn_id
+       AND command.result_kind = 'applied'
+       AND command.rejection_kind IS NULL
+       AND accepted.disposition_kind = 'origin_of'
+       AND (
+            interrupt_command IS NULL
+            OR command.command_id = interrupt_command
+       );
+    IF interrupt_record_count <> 1 THEN
+        RAISE EXCEPTION
+            'reconciliation-required turn lacks its exact applied interrupt'
+            USING ERRCODE = '23514';
+    END IF;
 
     SELECT context_frontier_id
       INTO source_frontier
