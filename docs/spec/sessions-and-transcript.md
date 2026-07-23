@@ -3,8 +3,8 @@
 This page specifies the implemented behavior of session creation and ancestry,
 session-level configuration defaults and their replacement, the long-lived
 session aggregate, semantic transcript entries, accepted-input user content, and
-actor attribution. It was verified against the working tree at commit `bf39f5f`
-(current `main`): `crates/domain` (`session.rs`, `configuration.rs`,
+actor attribution. It was verified against the implementing stack through PR
+#175 (`agent/stop-requests`): `crates/domain` (`session.rs`, `configuration.rs`,
 `replace_session_defaults.rs`, `semantic_entry.rs`, `turn_eligibility.rs`,
 `user_content.rs`, `actor.rs`, `submit_input.rs`), `crates/application`
 (`create_session.rs`, `load_session.rs`, `replace_session_defaults.rs`,

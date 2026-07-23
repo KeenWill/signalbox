@@ -2,7 +2,7 @@
 
 This page specifies the implemented behavior of turns, turn attempts,
 eligibility derivation, the scheduler, and startup recovery as verified against
-the working tree at commit `bf39f5f` (main). Code homes:
+the implementing stack through PR #175 (`agent/stop-requests`). Code homes:
 `crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
 `context_frontier,queue_order}.rs`, `crates/application/src/{scheduler,`
 `start_eligible_turn,startup_scan,submit_input}.rs`,

@@ -1,11 +1,11 @@
 # Model-call execution
 
-This page describes the implemented model-call orchestration chain as it exists
-on `main` after the M3 stack merged (verified at `bf39f5f`): rendering a context
-frontier into provider messages, the staged prepare / authorize-send /
-commit-observation effects, assistant content and turn completion, provider
-failure classification into physical dispositions, and the retry prohibition.
-Turn and attempt lifecycle law lives in
+This page describes the implemented model-call orchestration chain as verified
+against the implementing stack through PR #175 (`agent/stop-requests`):
+rendering a context frontier into provider messages, the staged prepare /
+authorize-send / commit-observation effects, assistant content and turn
+completion, provider failure classification into physical dispositions, and the
+retry prohibition. Turn and attempt lifecycle law lives in
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
 entries and frontiers in [sessions-and-transcript](sessions-and-transcript.md);
 storage protocol and the outbox in
@@ -218,7 +218,9 @@ Ambiguous commits are never resolved by replay:
   call without ever sending; if an interrupt concurrently committed
   `CancellationRequested`, the same unconsumed capability proves no send, the
   stop remains authoritative, and the service commits the correlated `Cancelled`
-  observation instead.
+  observation instead; if the interrupt already terminalized the unsent call as
+  `Cancelled`, the complete proof-bearing closure is authoritative and the
+  service returns `NoWork`.
 - A failed terminal-observation commit retains the unchanged observation in
   memory. A later pass rereads durable state first: `Pending` recommits the
   identical observation; `AlreadyCommitted` (same disposition and content)
