@@ -22,8 +22,8 @@ use tokio::net::{UnixListener, UnixStream, unix::SocketAddr as UnixSocketAddr};
 
 const LISTEN_BACKLOG: i32 = 128;
 const OWNER_ONLY_MODE: u32 = 0o600;
+const OWNER_PRIVATE_DIRECTORY_MODE: u32 = 0o700;
 const PERMISSION_MASK: u32 = 0o7777;
-const GROUP_OR_OTHER_ACCESS: u32 = 0o077;
 const GROUP_OR_OTHER_WRITE: u32 = 0o022;
 const STICKY_BIT: u32 = 0o1000;
 
@@ -191,8 +191,8 @@ fn resolve_socket_path(configured_path: &Path) -> Result<PathBuf, LocalSocketErr
     if metadata.uid() != effective_user {
         return Err(LocalSocketError::ParentOwnerMismatch);
     }
-    if metadata.mode() & GROUP_OR_OTHER_ACCESS != 0 {
-        return Err(LocalSocketError::ParentPermissionsTooBroad);
+    if metadata.mode() & PERMISSION_MASK != OWNER_PRIVATE_DIRECTORY_MODE {
+        return Err(LocalSocketError::ParentPermissionsMismatch);
     }
     validate_ancestor_chain(&resolved_parent, metadata.uid(), effective_user)?;
     Ok(resolved_parent.join(file_name))
@@ -347,8 +347,8 @@ pub enum LocalSocketError {
     ParentNotDirectory,
     /// The resolved parent was not owned by the effective user.
     ParentOwnerMismatch,
-    /// The resolved parent allowed group or other access.
-    ParentPermissionsTooBroad,
+    /// The resolved parent did not have exact owner-private directory mode.
+    ParentPermissionsMismatch,
     /// An ancestor of the resolved parent could not be inspected.
     ReadAncestorMetadata(io::Error),
     /// An ancestor was owned by neither root nor the effective user.
@@ -425,8 +425,8 @@ impl fmt::Display for LocalSocketError {
             }
             Self::ParentNotDirectory => "the local process socket parent is not a directory",
             Self::ParentOwnerMismatch => "the local process socket parent has the wrong owner",
-            Self::ParentPermissionsTooBroad => {
-                "the local process socket parent permissions are too broad"
+            Self::ParentPermissionsMismatch => {
+                "the local process socket parent permissions are not exact owner-private mode"
             }
             Self::ReadAncestorMetadata(_) => {
                 "the local process socket parent ancestry could not be inspected"
@@ -513,7 +513,7 @@ impl Error for LocalSocketError {
             Self::InvalidPath
             | Self::ParentNotDirectory
             | Self::ParentOwnerMismatch
-            | Self::ParentPermissionsTooBroad
+            | Self::ParentPermissionsMismatch
             | Self::AncestorOwnerMismatch
             | Self::AncestorPermissionsTooBroad
             | Self::InvalidPathLock
@@ -716,18 +716,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn broad_parent_permissions_fail_before_path_creation() -> Result<(), Box<dyn Error>> {
+    async fn nonexact_parent_permissions_fail_before_path_creation() -> Result<(), Box<dyn Error>> {
         let directory = TestDirectory::create()?;
-        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o755))?;
-        let path = directory.socket_path();
+        for mode in [0o755, 0o300, 0o1700] {
+            fs::set_permissions(directory.path(), fs::Permissions::from_mode(mode))?;
+            let path = directory.socket_path();
 
-        let result = LocalProcessListener::bind(&path);
+            let result = LocalProcessListener::bind(&path);
 
-        assert!(matches!(
-            result,
-            Err(LocalSocketError::ParentPermissionsTooBroad)
-        ));
-        assert!(!path.exists());
+            assert!(matches!(
+                result,
+                Err(LocalSocketError::ParentPermissionsMismatch)
+            ));
+            assert!(!path.exists());
+        }
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
         Ok(())
     }
 
