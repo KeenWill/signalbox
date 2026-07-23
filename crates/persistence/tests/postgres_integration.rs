@@ -1713,10 +1713,11 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
     Ok(())
 }
 
-/// S02 / S08 / INV-005 / INV-014 / INV-015 / INV-036: the scripted application
-/// path consumes multiple steering inputs at preparation, renders them to the
-/// provider in acceptance order, rejects noncontiguous stored snapshot
-/// ordinals before resume, and preserves the staged terminal commits.
+/// S02 / S08 / INV-005 / INV-012 / INV-014 / INV-015 / INV-036: the scripted
+/// application path consumes multiple steering inputs at preparation, renders
+/// them to the provider in acceptance order, rejects noncontiguous stored
+/// snapshot ordinals before resume, preserves the staged terminal commits, and
+/// replays each immutable pending-steering receipt after consumption.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s02_inv014_inv015_application_service_completes_scripted_reply()
@@ -1766,44 +1767,39 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
         AcceptedInputId::from_uuid(Uuid::from_u128(0x19e2)),
         AcceptedInputId::from_uuid(Uuid::from_u128(0x19e3)),
     ];
-    let first_steering = SubmitInputRepository::new(pool.clone())
-        .handle(
-            SubmitInput::new(
-                DurableCommandId::from_uuid(Uuid::from_u128(0x14e3)),
-                session,
-                UserContent::try_text(String::from("first steering"))
-                    .expect("fixture steering content is admitted"),
-                DeliveryRequest::NextSafePoint {
-                    expected_active_turn: turn,
-                },
-            ),
-            steering_inputs[0],
-            None,
-        )
+    let submit_repository = SubmitInputRepository::new(pool.clone());
+    let first_steering_command = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0x14e3)),
+        session,
+        UserContent::try_text(String::from("first steering"))
+            .expect("fixture steering content is admitted"),
+        DeliveryRequest::NextSafePoint {
+            expected_active_turn: turn,
+        },
+    );
+    let first_steering = submit_repository
+        .handle(first_steering_command.clone(), steering_inputs[0], None)
         .await?;
     assert!(matches!(
-        first_steering,
+        &first_steering,
         SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
             SubmitInputAppliedResult::PendingSteering(_)
         ))
     ));
-    let second_steering = SubmitInputRepository::new(pool.clone())
-        .handle(
-            SubmitInput::new(
-                DurableCommandId::from_uuid(Uuid::from_u128(0x14e4)),
-                session,
-                UserContent::try_text(String::from("second steering"))
-                    .expect("fixture steering content is admitted"),
-                DeliveryRequest::NextSafePoint {
-                    expected_active_turn: turn,
-                },
-            ),
-            steering_inputs[1],
-            None,
-        )
+    let second_steering_command = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0x14e4)),
+        session,
+        UserContent::try_text(String::from("second steering"))
+            .expect("fixture steering content is admitted"),
+        DeliveryRequest::NextSafePoint {
+            expected_active_turn: turn,
+        },
+    );
+    let second_steering = submit_repository
+        .handle(second_steering_command.clone(), steering_inputs[1], None)
         .await?;
     assert!(matches!(
-        second_steering,
+        &second_steering,
         SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
             SubmitInputAppliedResult::PendingSteering(_)
         ))
@@ -2084,6 +2080,26 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
     .fetch_one(&pool)
     .await?;
     assert_eq!(durable_terminal, (1, 1, 2, 2));
+    assert_eq!(
+        submit_repository
+            .handle(
+                first_steering_command,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x19f2)),
+                None,
+            )
+            .await?,
+        first_steering
+    );
+    assert_eq!(
+        submit_repository
+            .handle(
+                second_steering_command,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x19f3)),
+                None,
+            )
+            .await?,
+        second_steering
+    );
 
     pool.close().await;
     drop(container);
