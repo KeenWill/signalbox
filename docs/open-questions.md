@@ -16,9 +16,11 @@ accepted records; those numbers remain reserved for their topics.
 - **Wire identity representation.** ADR-0033
   ([identity-and-commands](spec/identity-and-commands.md)) closes generation,
   supply, minting authority, and baseline Postgres encoding. Protocol field
-  types, public URL forms, and wire serialization remain open within the
-  ADR-0019 and ADR-0021 baselines. Blocks cross-process protocols, not
-  persistence. (S01, S02, S04, S08, S10, S12)
+  types, public URL forms, and wire serialization remain open; the retired
+  ADR-0019 and ADR-0021 protocol designs are unimplemented and carry no current
+  authority, so future client-protocol work is designed fresh as a specification
+  diff. Blocks cross-process protocols, not persistence. (S01, S02, S04, S08,
+  S10, S12)
 - **Semantic transcript-entry extensions and rendering.** ADR-0036 fixes
   origin-accepted-input and failed-turn payloads plus their eligibility and
   terminal-failure commit boundaries, and ADR-0042 fixes assistant text, logical
