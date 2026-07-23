@@ -1,7 +1,8 @@
 # Process protocol
 
 This page specifies Signalbox process protocol version one and the terminal
-client that consumes it. It is the normative boundary between a local client
+client that consumes it, verified against the implementing stack through PR #177
+(`agent/terminal-client`). It is the normative boundary between a local client
 process and `signalbox-hubd`; domain values, PostgreSQL records, and wire
 messages remain distinct representations.
 
@@ -214,7 +215,12 @@ Each `transcript_turn` has `turn_id` and one closed `state` object:
   `current_model_call` is null before preparation or `{ model_call_id, state }`
   with state exactly `prepared` or `in_flight`;
 - `active_awaiting_model_call_recovery { ended_attempt_id, recovery_model_call_id }`;
-- `failed { terminal_frontier_id }`;
+- `failed { terminal_frontier_id, terminal_attempt_id, terminal_model_call }`,
+  where `terminal_attempt_id` is null only for an evidence-free recovery
+  failure, and `terminal_model_call` is null when that failure or physical
+  attempt owns no call; otherwise it is `{ model_call_id, disposition }` with
+  disposition exactly `known_failed` or `cancelled`. A nonnull
+  `terminal_model_call` requires a nonnull `terminal_attempt_id`;
 - `completed { terminal_frontier_id, terminal_attempt_id, terminal_model_call_id }`;
 - `refused { terminal_frontier_id, terminal_attempt_id, terminal_model_call_id }`;
 - `cancelled { terminal_frontier_id, terminal_attempt_id, terminal_model_call_id }`,
