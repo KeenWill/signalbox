@@ -321,9 +321,11 @@ state from the initial snapshot or waits for its durable terminal event, rereads
 the authoritative transcript, and prints the committed assistant text. A client
 disconnect never cancels model work. After each terminal turn event, `follow`
 uses a separate connection to read and validate a fresh authoritative transcript
-before it resumes printing later followed events. Final durable content
-therefore replaces the earlier presentation without interrupting the follow
-subscription.
+before it resumes printing later followed events. It then discards buffered
+events at or below the fresh snapshot cursor and resumes only with events above
+that cursor. Final durable content therefore replaces the earlier presentation
+without interrupting the follow subscription or replaying updates already
+represented by the reread.
 
 ## Terminal client
 

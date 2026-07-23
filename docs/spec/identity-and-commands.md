@@ -305,11 +305,9 @@ edges.
   attribution implicit.
 - No recorded-transition record family has adopted actor attribution;
   startup-scan terminalizations do not yet record a `Recovery` actor.
-- Wire field types and public identity encodings remain reserved for the future
-  client and process protocols
-  ([identity representation](../open-questions.md#identity-representation)); no
-  protocol surface exists and commands enter only through in-process application
-  services.
+- Public URL identity encodings remain undecided
+  ([identity representation](../open-questions.md#identity-representation));
+  local wire forms are owned by [process-protocol](process-protocol.md).
 - `ProviderTargetEvidenceId`, `ToolRequestId`, and `ToolAttemptId` have assigned
   supply classes but no production minting seam; generators land with their
   owning slices. `ProviderModelIdentity` is now persisted and

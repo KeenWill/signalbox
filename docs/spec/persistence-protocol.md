@@ -349,11 +349,12 @@ protocol scope). Implemented storage:
 
 - `outbox_event` header (allocator-owned `event_sequence`, closed `event_kind`,
   `storage_version`, `session_id`) plus one typed record table per kind —
-  `session_created_outbox_event`, `turn_failed_outbox_event`,
+  `session_created_outbox_event`, `input_accepted_outbox_event`,
+  `turn_activated_outbox_event`, `turn_failed_outbox_event`,
   `model_call_transition_outbox_event`, `turn_completed_outbox_event`, and
   `turn_refused_outbox_event` — with a deferred trigger requiring exactly one
   typed record per header. The header and typed record tables are append-only
-  (`reject_immutable_record_change`), and all eight outbox tables reject
+  (`reject_immutable_record_change`), and all ten outbox tables reject
   `TRUNCATE`.
 - `outbox_sequence_state`, a mutable singleton row (deletion rejected): a
   `BEFORE INSERT` trigger on the header allocates `last_sequence + 1` by
