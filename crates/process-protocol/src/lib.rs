@@ -562,16 +562,61 @@ impl<'de> Deserialize<'de> for ErrorDetail {
     }
 }
 
-/// Authoritative turn state carried by a transcript snapshot.
+/// Durable nonterminal model-call state carried by a transcript snapshot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CurrentModelCallState {
+    /// Call is prepared but unsent.
+    Prepared {},
+    /// Call crossed the send boundary.
+    InFlight {},
+}
+
+/// Current model call attached to one running turn.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CurrentModelCall {
+    model_call_id: CanonicalUuid,
+    state: CurrentModelCallState,
+}
+
+impl CurrentModelCall {
+    /// Constructs one exact current-call projection.
+    pub const fn new(model_call_id: CanonicalUuid, state: CurrentModelCallState) -> Self {
+        Self {
+            model_call_id,
+            state,
+        }
+    }
+
+    /// Returns the current model-call identity.
+    pub const fn model_call_id(&self) -> CanonicalUuid {
+        self.model_call_id
+    }
+
+    /// Returns the exact durable nonterminal state.
+    pub const fn state(&self) -> CurrentModelCallState {
+        self.state
+    }
+}
+
+/// Authoritative turn state carried by a transcript snapshot.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TurnState {
     /// Accepted work has not activated.
-    Queued {},
+    Queued {
+        /// Accepted input that created the queued turn.
+        accepted_input_id: CanonicalUuid,
+        /// Exact accepted owner text.
+        content: InputContent,
+    },
     /// The turn is running its current attempt.
     ActiveRunning {
         /// Current live attempt.
         current_attempt_id: CanonicalUuid,
+        /// Current provider call, or null before one is prepared.
+        current_model_call: Option<CurrentModelCall>,
     },
     /// The turn is parked on an ambiguous model call.
     ActiveAwaitingModelCallRecovery {
@@ -673,11 +718,29 @@ pub enum ModelCallState {
 }
 
 /// Closed durable update event family.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SessionEvent {
     /// Session creation committed.
     SessionCreated {},
+    /// Owner input acceptance and its queued turn committed.
+    InputAccepted {
+        /// Accepted input.
+        accepted_input_id: CanonicalUuid,
+        /// Queued origin turn.
+        turn_id: CanonicalUuid,
+        /// Immutable session acceptance position.
+        acceptance_position: CanonicalU64,
+        /// Exact accepted owner text.
+        content: InputContent,
+    },
+    /// A queued turn became active.
+    TurnActivated {
+        /// Activated turn.
+        turn_id: CanonicalUuid,
+        /// Initial current attempt.
+        current_attempt_id: CanonicalUuid,
+    },
     /// Model call advanced.
     ModelCallTransition {
         /// Owning turn.
@@ -1226,11 +1289,11 @@ fn probe_header(
 mod tests {
     use super::{
         CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ContentFragment,
-        ErrorCode, ErrorDetail, FrameDecodeErrorKind, FrameEncodeError, InputContent,
-        MAX_CONTENT_FRAGMENT_BYTES, ModelCallDisposition, ModelCallState, ModelSelection,
-        PROTOCOL_VERSION, RejectionDetail, RequestId, ServerFrame, ServerMessage, SessionEvent,
-        TranscriptEntry, TranscriptTextEntry, TurnState, decode_client_line, decode_server_line,
-        encode_client_line, encode_server_line,
+        CurrentModelCall, CurrentModelCallState, ErrorCode, ErrorDetail, FrameDecodeErrorKind,
+        FrameEncodeError, InputContent, MAX_CONTENT_FRAGMENT_BYTES, ModelCallDisposition,
+        ModelCallState, ModelSelection, PROTOCOL_VERSION, RejectionDetail, RequestId, ServerFrame,
+        ServerMessage, SessionEvent, TranscriptEntry, TranscriptTextEntry, TurnState,
+        decode_client_line, decode_server_line, encode_client_line, encode_server_line,
     };
     use uuid::Uuid;
 
@@ -1407,7 +1470,7 @@ mod tests {
             r#"{"version":1,"request_id":"1","message":{"type":"sessions_start","extra":true}}"#,
         );
         assert_server_malformed(
-            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"queued","extra":true}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"queued","accepted_input_id":"00000000-0000-0000-0000-000000000002","content":"queued","extra":true}}}"#,
         );
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"session_event","cursor":"1","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"session_created","extra":true}}}"#,
@@ -1731,6 +1794,56 @@ mod tests {
             },
         )?;
         assert_server_message_round_trip(
+            request(14)?,
+            ServerMessage::TranscriptTurn {
+                turn_id: uuid(3),
+                acceptance_position: CanonicalU64::new(1),
+                state: TurnState::Queued {
+                    accepted_input_id: uuid(2),
+                    content: InputContent::new("queued request".to_owned()),
+                },
+            },
+        )?;
+        assert_server_message_round_trip(
+            request(15)?,
+            ServerMessage::TranscriptTurn {
+                turn_id: uuid(3),
+                acceptance_position: CanonicalU64::new(1),
+                state: TurnState::ActiveRunning {
+                    current_attempt_id: uuid(7),
+                    current_model_call: None,
+                },
+            },
+        )?;
+        assert_server_message_round_trip(
+            request(16)?,
+            ServerMessage::TranscriptTurn {
+                turn_id: uuid(3),
+                acceptance_position: CanonicalU64::new(1),
+                state: TurnState::ActiveRunning {
+                    current_attempt_id: uuid(7),
+                    current_model_call: Some(CurrentModelCall::new(
+                        uuid(8),
+                        CurrentModelCallState::Prepared {},
+                    )),
+                },
+            },
+        )?;
+        assert_server_message_round_trip(
+            request(17)?,
+            ServerMessage::TranscriptTurn {
+                turn_id: uuid(3),
+                acceptance_position: CanonicalU64::new(1),
+                state: TurnState::ActiveRunning {
+                    current_attempt_id: uuid(7),
+                    current_model_call: Some(CurrentModelCall::new(
+                        uuid(8),
+                        CurrentModelCallState::InFlight {},
+                    )),
+                },
+            },
+        )?;
+        assert_server_message_round_trip(
             request(8)?,
             ServerMessage::TranscriptEntry {
                 entry_index: CanonicalU64::new(0),
@@ -1780,6 +1893,30 @@ mod tests {
                     state: ModelCallState::Terminal {
                         disposition: ModelCallDisposition::Refused,
                     },
+                },
+            },
+        )?;
+        assert_server_message_round_trip(
+            request(18)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(2),
+                session_id: uuid(1),
+                event: SessionEvent::InputAccepted {
+                    accepted_input_id: uuid(2),
+                    turn_id: uuid(3),
+                    acceptance_position: CanonicalU64::new(1),
+                    content: InputContent::new("accepted request".to_owned()),
+                },
+            },
+        )?;
+        assert_server_message_round_trip(
+            request(19)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(3),
+                session_id: uuid(1),
+                event: SessionEvent::TurnActivated {
+                    turn_id: uuid(3),
+                    current_attempt_id: uuid(7),
                 },
             },
         )?;
