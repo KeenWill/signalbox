@@ -10,6 +10,25 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-23 — Bound the local process-socket backlog at 128
+
+**Context.** The guarded Unix listener must select a finite kernel accept queue.
+The value affects only how many already-authenticated local connection attempts
+can wait before hubd accepts them; request concurrency and application admission
+remain separately bounded by runtime task ownership.
+
+**Decision.** Request a backlog of 128 when the verified owner-only process
+socket begins listening. Treat it as a provisional local-transport capacity, not
+a protocol or application limit.
+
+**Rejected alternatives.** Leaving the value implicit would make behavior depend
+on a library default that the raw listen boundary does not provide. One would
+make ordinary local bursts fragile. The platform maximum would add no useful
+bound and is still kernel-clamped.
+
+**Affects.** Only the hub-owned local Unix listener's pending connection queue;
+it does not change framing, request ordering, or durable admission.
+
 ## 2026-07-23 — Use Rustix for guarded Unix-socket construction
 
 **Context.** The process socket must remain unlistening until its path identity,

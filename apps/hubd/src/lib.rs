@@ -21,6 +21,7 @@ use signalbox_persistence::model_execution::{
 use tokio::sync::watch;
 
 mod configuration;
+mod fenced_database;
 mod local_socket;
 mod single_hub;
 
@@ -28,6 +29,7 @@ pub use configuration::{
     ANTHROPIC_CREDENTIAL_REFERENCE, FileCredentialAccess, HubModelConfiguration,
     HubModelConfigurationError,
 };
+pub use fenced_database::{FencedHubDatabase, FencedHubDatabaseError};
 pub use local_socket::{LocalProcessListener, LocalSocketError};
 pub use single_hub::{SingleHubGuard, SingleHubGuardError};
 

@@ -2,18 +2,20 @@
 
 use std::{
     error::Error,
-    fmt, fs, io,
+    fmt, fs,
+    fs::File,
+    io,
     os::unix::{
         ffi::OsStrExt,
         fs::{FileTypeExt, MetadataExt, PermissionsExt},
-        net::UnixStream as StdUnixStream,
     },
     path::{Path, PathBuf},
 };
 
 use rustix::{
+    fs::{FlockOperation, Mode, OFlags, fchmod, fcntl_getfl, fcntl_setfl, flock, open},
     io::{FdFlags, fcntl_setfd},
-    net::{AddressFamily, SocketAddrUnix, SocketType, bind, getsockname, listen, socket},
+    net::{AddressFamily, SocketAddrUnix, SocketType, bind, connect, getsockname, listen, socket},
     process::geteuid,
 };
 use tokio::net::{UnixListener, UnixStream, unix::SocketAddr as UnixSocketAddr};
@@ -29,12 +31,14 @@ pub struct LocalProcessListener {
     listener: UnixListener,
     path: PathBuf,
     identity: SocketIdentity,
+    path_lock: File,
 }
 
 impl LocalProcessListener {
     /// Binds one guarded owner-only listener at an absolute configured path.
     pub fn bind(configured_path: &Path) -> Result<Self, LocalSocketError> {
         let path = resolve_socket_path(configured_path)?;
+        let path_lock = acquire_path_lock(&path)?;
         prepare_final_entry(&path)?;
 
         let socket = socket(AddressFamily::UNIX, SocketType::STREAM, None)
@@ -45,6 +49,13 @@ impl LocalProcessListener {
             .map_err(|error| LocalSocketError::CreateAddress(rustix_error(error)))?;
         bind(&socket, &address).map_err(|error| LocalSocketError::Bind(rustix_error(error)))?;
 
+        let effective_user = geteuid().as_raw();
+        let first_metadata =
+            fs::symlink_metadata(&path).map_err(LocalSocketError::ReadBoundIdentity)?;
+        let identity = SocketIdentity::capture(&first_metadata, effective_user)
+            .ok_or(LocalSocketError::BoundIdentityMismatch)?;
+        let cleanup = FailedBindCleanup::new(&path, identity);
+
         let local_address = getsockname(&socket)
             .map_err(|error| LocalSocketError::ReadLocalAddress(rustix_error(error)))?;
         let local_address = SocketAddrUnix::try_from(local_address)
@@ -52,12 +63,6 @@ impl LocalProcessListener {
         if local_address.path_bytes() != Some(path.as_os_str().as_bytes()) {
             return Err(LocalSocketError::BoundAddressMismatch);
         }
-
-        let effective_user = geteuid().as_raw();
-        let first_metadata =
-            fs::symlink_metadata(&path).map_err(LocalSocketError::ReadBoundIdentity)?;
-        let identity = SocketIdentity::capture(&first_metadata, effective_user)
-            .ok_or(LocalSocketError::BoundIdentityMismatch)?;
 
         fs::set_permissions(&path, fs::Permissions::from_mode(OWNER_ONLY_MODE))
             .map_err(LocalSocketError::SetPermissions)?;
@@ -77,11 +82,13 @@ impl LocalProcessListener {
             .map_err(LocalSocketError::ConfigureSocket)?;
         let listener =
             UnixListener::from_std(std_listener).map_err(LocalSocketError::RegisterListener)?;
+        cleanup.disarm();
 
         Ok(Self {
             listener,
             path,
             identity,
+            path_lock,
         })
     }
 
@@ -103,7 +110,9 @@ impl LocalProcessListener {
         if !self.identity.matches(&metadata, geteuid().as_raw()) {
             return Err(LocalSocketError::CleanupIdentityMismatch);
         }
-        fs::remove_file(&self.path).map_err(LocalSocketError::RemoveSocket)
+        fs::remove_file(&self.path).map_err(LocalSocketError::RemoveSocket)?;
+        drop(self.path_lock);
+        Ok(())
     }
 }
 
@@ -123,6 +132,40 @@ impl SocketIdentity {
 
     fn matches(self, metadata: &fs::Metadata, effective_user: u32) -> bool {
         Self::capture(metadata, effective_user) == Some(self)
+    }
+}
+
+struct FailedBindCleanup {
+    path: PathBuf,
+    identity: SocketIdentity,
+    armed: bool,
+}
+
+impl FailedBindCleanup {
+    fn new(path: &Path, identity: SocketIdentity) -> Self {
+        Self {
+            path: path.to_owned(),
+            identity,
+            armed: true,
+        }
+    }
+
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for FailedBindCleanup {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let effective_user = geteuid().as_raw();
+        if fs::symlink_metadata(&self.path)
+            .is_ok_and(|metadata| self.identity.matches(&metadata, effective_user))
+        {
+            let _ = fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -151,6 +194,66 @@ fn resolve_socket_path(configured_path: &Path) -> Result<PathBuf, LocalSocketErr
     Ok(resolved_parent.join(file_name))
 }
 
+fn acquire_path_lock(socket_path: &Path) -> Result<File, LocalSocketError> {
+    let mut lock_path = socket_path.as_os_str().to_owned();
+    lock_path.push(".lock");
+    let lock_path = PathBuf::from(lock_path);
+    let flags = OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let (descriptor, created) = match open(
+        &lock_path,
+        flags | OFlags::CREATE | OFlags::EXCL,
+        Mode::RUSR | Mode::WUSR,
+    ) {
+        Ok(descriptor) => (descriptor, true),
+        Err(rustix::io::Errno::EXIST) => (
+            open(&lock_path, flags, Mode::empty())
+                .map_err(|error| LocalSocketError::OpenPathLock(rustix_error(error)))?,
+            false,
+        ),
+        Err(error) => return Err(LocalSocketError::OpenPathLock(rustix_error(error))),
+    };
+    if created {
+        fchmod(&descriptor, Mode::RUSR | Mode::WUSR)
+            .map_err(|error| LocalSocketError::ConfigurePathLock(rustix_error(error)))?;
+    }
+    let path_lock = File::from(descriptor);
+    let descriptor_metadata = path_lock
+        .metadata()
+        .map_err(LocalSocketError::InspectPathLock)?;
+    let path_metadata =
+        fs::symlink_metadata(&lock_path).map_err(LocalSocketError::InspectPathLock)?;
+    let effective_user = geteuid().as_raw();
+    let valid_lock = descriptor_metadata.is_file()
+        && descriptor_metadata.uid() == effective_user
+        && descriptor_metadata.mode() & PERMISSION_MASK == OWNER_ONLY_MODE
+        && path_metadata.is_file()
+        && path_metadata.uid() == effective_user
+        && path_metadata.mode() & PERMISSION_MASK == OWNER_ONLY_MODE
+        && descriptor_metadata.dev() == path_metadata.dev()
+        && descriptor_metadata.ino() == path_metadata.ino();
+    if !valid_lock {
+        return Err(LocalSocketError::InvalidPathLock);
+    }
+    flock(&path_lock, FlockOperation::NonBlockingLockExclusive).map_err(|error| {
+        if error == rustix::io::Errno::WOULDBLOCK {
+            LocalSocketError::PathLockBusy
+        } else {
+            LocalSocketError::LockPath(rustix_error(error))
+        }
+    })?;
+    let locked_path_metadata =
+        fs::symlink_metadata(&lock_path).map_err(LocalSocketError::InspectPathLock)?;
+    if !locked_path_metadata.is_file()
+        || locked_path_metadata.uid() != effective_user
+        || locked_path_metadata.mode() & PERMISSION_MASK != OWNER_ONLY_MODE
+        || descriptor_metadata.dev() != locked_path_metadata.dev()
+        || descriptor_metadata.ino() != locked_path_metadata.ino()
+    {
+        return Err(LocalSocketError::InvalidPathLock);
+    }
+    Ok(path_lock)
+}
+
 fn prepare_final_entry(path: &Path) -> Result<(), LocalSocketError> {
     let first_metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -161,10 +264,25 @@ fn prepare_final_entry(path: &Path) -> Result<(), LocalSocketError> {
         return Err(LocalSocketError::ExistingEntryNotSocket);
     }
 
-    match StdUnixStream::connect(path) {
+    let probe = socket(AddressFamily::UNIX, SocketType::STREAM, None)
+        .map_err(|error| LocalSocketError::ProbeExistingSocket(rustix_error(error)))?;
+    fcntl_setfd(&probe, FdFlags::CLOEXEC)
+        .map_err(|error| LocalSocketError::ProbeExistingSocket(rustix_error(error)))?;
+    let flags = fcntl_getfl(&probe)
+        .map_err(|error| LocalSocketError::ProbeExistingSocket(rustix_error(error)))?;
+    fcntl_setfl(&probe, flags | OFlags::NONBLOCK)
+        .map_err(|error| LocalSocketError::ProbeExistingSocket(rustix_error(error)))?;
+    let address = SocketAddrUnix::new(path)
+        .map_err(|error| LocalSocketError::ProbeExistingSocket(rustix_error(error)))?;
+    match connect(&probe, &address) {
         Ok(_) => return Err(LocalSocketError::ExistingSocketLive),
-        Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {}
-        Err(error) => return Err(LocalSocketError::ProbeExistingSocket(error)),
+        Err(rustix::io::Errno::CONNREFUSED) => {}
+        Err(
+            rustix::io::Errno::AGAIN | rustix::io::Errno::INPROGRESS | rustix::io::Errno::ALREADY,
+        ) => return Err(LocalSocketError::ExistingSocketLive),
+        Err(error) => {
+            return Err(LocalSocketError::ProbeExistingSocket(rustix_error(error)));
+        }
     }
 
     let effective_user = geteuid().as_raw();
@@ -197,6 +315,18 @@ pub enum LocalSocketError {
     ParentOwnerMismatch,
     /// The resolved parent allowed group or other writes.
     ParentPermissionsTooBroad,
+    /// The adjacent sidecar could not be opened without following links.
+    OpenPathLock(io::Error),
+    /// A newly created sidecar could not be made owner-only.
+    ConfigurePathLock(io::Error),
+    /// The adjacent sidecar's descriptor or path identity could not be read.
+    InspectPathLock(io::Error),
+    /// The adjacent sidecar was not the required owner-only regular file.
+    InvalidPathLock,
+    /// Another process currently owns the adjacent sidecar lock.
+    PathLockBusy,
+    /// The adjacent sidecar's exclusive advisory lock could not be attempted.
+    LockPath(io::Error),
     /// An existing final entry could not be inspected.
     ReadExistingEntry(io::Error),
     /// An existing final entry was not a socket.
@@ -258,6 +388,15 @@ impl fmt::Display for LocalSocketError {
             Self::ParentPermissionsTooBroad => {
                 "the local process socket parent permissions are too broad"
             }
+            Self::OpenPathLock(_) => "the local process socket path lock could not be opened",
+            Self::ConfigurePathLock(_) => {
+                "the local process socket path lock could not be configured"
+            }
+            Self::InspectPathLock(_) | Self::InvalidPathLock => {
+                "the local process socket path lock is invalid"
+            }
+            Self::PathLockBusy => "another hub owns the local process socket path lock",
+            Self::LockPath(_) => "the local process socket path could not be locked",
             Self::ReadExistingEntry(_) => {
                 "the existing local process socket entry could not be inspected"
             }
@@ -301,6 +440,10 @@ impl Error for LocalSocketError {
         match self {
             Self::ResolveParent(error)
             | Self::ReadParentMetadata(error)
+            | Self::OpenPathLock(error)
+            | Self::ConfigurePathLock(error)
+            | Self::InspectPathLock(error)
+            | Self::LockPath(error)
             | Self::ReadExistingEntry(error)
             | Self::ProbeExistingSocket(error)
             | Self::RevalidateExistingSocket(error)
@@ -321,6 +464,8 @@ impl Error for LocalSocketError {
             | Self::ParentNotDirectory
             | Self::ParentOwnerMismatch
             | Self::ParentPermissionsTooBroad
+            | Self::InvalidPathLock
+            | Self::PathLockBusy
             | Self::ExistingEntryNotSocket
             | Self::ExistingSocketLive
             | Self::ExistingSocketOwnerMismatch
@@ -337,7 +482,7 @@ mod tests {
     use std::{
         error::Error,
         fs::{self, File},
-        os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
+        os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt, symlink},
         path::{Path, PathBuf},
         sync::atomic::{AtomicU64, Ordering},
     };
@@ -366,6 +511,10 @@ mod tests {
             self.0.join("hub.sock")
         }
 
+        fn lock_path(&self) -> PathBuf {
+            self.0.join("hub.sock.lock")
+        }
+
         fn path(&self) -> &Path {
             &self.0
         }
@@ -387,12 +536,59 @@ mod tests {
         assert!(metadata.file_type().is_socket());
         assert_eq!(metadata.mode() & 0o7777, 0o600);
         assert_eq!(listener.path(), path);
+        let lock_metadata = fs::symlink_metadata(directory.lock_path())?;
+        assert!(lock_metadata.is_file());
+        assert_eq!(lock_metadata.mode() & 0o7777, 0o600);
 
         let client = UnixStream::connect(&path).await?;
         let (server, _) = listener.accept().await?;
         drop(client);
         drop(server);
         listener.cleanup()?;
+        assert!(!path.exists());
+        assert!(directory.lock_path().exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lifetime_path_lock_precedes_final_socket_inspection() -> Result<(), Box<dyn Error>> {
+        let directory = TestDirectory::create()?;
+        let path = directory.socket_path();
+        let listener = LocalProcessListener::bind(&path)?;
+
+        let result = LocalProcessListener::bind(&path);
+
+        assert!(matches!(result, Err(LocalSocketError::PathLockBusy)));
+        listener.cleanup()?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalid_path_lock_never_touches_the_socket_path() -> Result<(), Box<dyn Error>> {
+        let directory = TestDirectory::create()?;
+        let path = directory.socket_path();
+        let lock = File::create(directory.lock_path())?;
+        fs::set_permissions(directory.lock_path(), fs::Permissions::from_mode(0o644))?;
+
+        let result = LocalProcessListener::bind(&path);
+
+        assert!(matches!(result, Err(LocalSocketError::InvalidPathLock)));
+        assert!(!path.exists());
+        drop(lock);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn path_lock_symlink_is_rejected_without_following() -> Result<(), Box<dyn Error>> {
+        let directory = TestDirectory::create()?;
+        let path = directory.socket_path();
+        let target = directory.path().join("lock-target");
+        File::create(&target)?;
+        symlink(&target, directory.lock_path())?;
+
+        let result = LocalProcessListener::bind(&path);
+
+        assert!(matches!(result, Err(LocalSocketError::OpenPathLock(_))));
         assert!(!path.exists());
         Ok(())
     }
@@ -402,11 +598,16 @@ mod tests {
         let directory = TestDirectory::create()?;
         let path = directory.socket_path();
         let stale = std::os::unix::net::UnixListener::bind(&path)?;
-        let stale_inode = fs::symlink_metadata(&path)?.ino();
         drop(stale);
 
         let listener = LocalProcessListener::bind(&path)?;
-        assert_ne!(fs::symlink_metadata(&path)?.ino(), stale_inode);
+        let metadata = fs::symlink_metadata(&path)?;
+        assert!(metadata.file_type().is_socket());
+        assert_eq!(metadata.mode() & 0o7777, 0o600);
+        let client = UnixStream::connect(&path).await?;
+        let (server, _) = listener.accept().await?;
+        drop(client);
+        drop(server);
         listener.cleanup()?;
         Ok(())
     }
