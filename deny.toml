@@ -36,6 +36,8 @@ allow = [
   "Apache-2.0",
   "ISC",
   "BSD-3-Clause",
+  # webpki-root-certs, pulled by reqwest's rustls platform verifier.
+  "CDLA-Permissive-2.0",
   "Unicode-3.0",
   "Zlib",
 ]
