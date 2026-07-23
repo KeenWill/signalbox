@@ -6,24 +6,22 @@ selection aims at a destination instead of drifting.
 
 ## Purpose and authority
 
-This document is **directional, not normative**. Accepted records under
-[docs/decisions/](decisions/README.md), the [invariant catalog](invariants.md),
-and the [decision log](decisions.md) always override it; where this document and
-an accepted record disagree, the record wins and this document is out of date.
-Concepts described here that lack an accepted ADR are **targets awaiting
-decisions, not decisions**: naming a concept here authorizes neither its
-implementation nor a silent closure of an open question. The
-[one-place rule](../AGENTS.md) applies throughout — decided semantics are
-linked, never restated, and only target-only concepts are owned by this
-document.
+This document is **directional destination only, never authority**. Implemented
+behavior is owned by the [living specification](spec/README.md) under
+`docs/spec/`, together with the [invariant catalog](invariants.md) and the
+[domain spine](domain-spine.md); where this document and those pages disagree
+about what the system does, they win and this document describes only where the
+system is headed. The [glossary](glossary.md) is a terminology index, not part
+of that normative surface. Concepts described here that the spec does not yet
+describe are **targets awaiting decisions, not decisions**: naming a concept
+here authorizes neither its implementation nor a silent closure of an open
+question. The [one-place rule](../AGENTS.md) applies throughout — implemented
+semantics are linked, never restated, and only target-only concepts are owned by
+this document.
 
 Milestone selection rules for autonomous runs live in
 [goal-mode.md](goal-mode.md); this document owns only the
-[priority order](#priority-order) and [concept status map](#concept-status-map)
-those rules reference. A row marked *Target* identifies work that needs a
-decision before code; a row marked *Reserved* names the ADR number that decision
-must use. Cross-check the [open questions inventory](open-questions.md) before
-treating anything here as settled.
+[priority order](#priority-order) those rules reference.
 
 ## Product vision
 
@@ -47,39 +45,38 @@ provenance for who or what caused each change is reconstructible after the fact.
 ## Concept catalog
 
 The complete target noun set, each with a one-line responsibility. Names follow
-the accepted [glossary](glossary.md); concepts without an accepted decision are
-marked as targets and detailed only here.
+the [glossary](glossary.md). Concepts the [living spec](spec/README.md) already
+describes appear here only as destination responsibilities; concepts marked
+*(target)* have no implemented behavior and are detailed only here.
 
-| Concept                                       | Responsibility                                                                                                                                                                                                                                                                                                                       |
-| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Session**                                   | One durable, independently browsable conversation ([glossary](glossary.md#session)); minimal long-lived aggregate boundary per [ADR-0038](decisions/0038-session-aggregate-boundary.md).                                                                                                                                             |
-| **SessionCreationCause / TranscriptAncestry** | Two independent immutable creation facts — why the session exists and where its initial semantic context came from ([ADR-0003](decisions/0003-session-creation-and-transcript-ancestry.md)).                                                                                                                                         |
-| **AcceptedInput**                             | One admitted submission made durable with its explicit delivery treatment and recoverable disposition; the accepted baseline admits only owner-submitted user content ([glossary](glossary.md#accepted-input); [ADR-0027](decisions/0027-input-delivery-lifecycle.md), content [ADR-0037](decisions/0037-baseline-user-content.md)). |
-| **DurableCommandId**                          | The owner-global idempotency identity for durably handled caller commands ([glossary](glossary.md#durable-command-identity); [ADR-0001](decisions/0001-domain-terminology-and-identity.md), storage [ADR-0034](decisions/0034-durable-command-storage-and-equality.md)).                                                             |
-| **SemanticTranscriptEntry**                   | One immutable identified semantic-history fact, distinct from operational, streaming, and presentation state ([ADR-0036](decisions/0036-initial-semantic-transcript-entries.md), [ADR-0042](decisions/0042-assistant-content-and-completion.md)); target entry types below.                                                          |
-| **Turn**                                      | One durable logical request for a conversational outcome under one frozen effective configuration ([glossary](glossary.md#turn); [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md)).                                                                                                                                          |
-| **TurnAttempt**                               | One exclusive physical orchestration tenure advancing an active turn ([glossary](glossary.md#turn-attempt); [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md)).                                                                                                                                                               |
-| **ModelCall**                                 | One durable authorization to attempt one provider interaction, carrying its exact pinned target and context frontier ([glossary](glossary.md#model-call); [ADR-0005](decisions/0005-model-call-retry-semantics.md)).                                                                                                                 |
-| **ContextFrontier / TranscriptFrontier**      | The immutable identified snapshot of the exact ordered semantic context consumed by one call or fixed at a turn start, and the distinct purpose-specific source boundary used by ancestry ([ADR-0030](decisions/0030-context-frontier-snapshots.md)).                                                                                |
-| **ToolRequest**                               | One logical request for a named tool operation with normalized arguments, policy state, and eventual logical outcome ([glossary](glossary.md#tool-request); identity and ownership [ADR-0001](decisions/0001-domain-terminology-and-identity.md); target lifecycle below).                                                           |
-| **ToolAttempt**                               | One physical effort to execute one tool request at one placement, fenced by its dispatch generation ([glossary](glossary.md#tool-attempt); fencing [ADR-0009](decisions/0009-dispatch-fencing.md)).                                                                                                                                  |
-| **ApprovalDecision** *(target record)*        | An immutable recorded human decision permitting or denying one exact tool request; the binding rule is accepted ([glossary](glossary.md#approval), INV-019), while the durable record shape, consumption, and expiry await the reserved tool decisions.                                                                              |
-| **Tool-risk metadata** *(target)*             | Trusted, registry-owned classification of a tool operation — side-effect scope, reversibility, idempotency, data egress — supplied by the tool registry and never by model-provided arguments; awaiting the reserved [tool-safety decisions](open-questions.md#tool-safety-reserved-adr-0011-adr-0012-adr-0013-adr-0014).            |
-| **Effective configuration**                   | The complete immutable configuration governing one turn ([glossary](glossary.md#effective-configuration); baseline [ADR-0027](decisions/0027-input-delivery-lifecycle.md)); target contents below.                                                                                                                                   |
-| **Resolved model plan** *(target)*            | A nonempty ordered set of exact provider/model candidates plus an explicit frozen fallback policy, generalizing today's single pinned target only if fallback is accepted (reserved [ADR-0006/ADR-0007](open-questions.md#model-fallback-and-provenance-reserved-adr-0006-adr-0007)).                                                |
-| **Streaming response snapshot** *(target)*    | An optional, noncanonical, replaceable checkpoint of partial provider output used only for reconnect continuity; never transcript truth (the open streaming-checkpoint question under [ADR-0022](decisions/0022-persistence-representation.md)).                                                                                     |
-| **Artifact** *(target)*                       | An independently retrievable output with its own identity, content digest, and producer provenance, linked into sessions by reference.                                                                                                                                                                                               |
-| **Goal** *(target)*                           | One durable persistent objective with explicit pursue, pause, resume, and revise transitions; identity and lifecycle require a future foundation decision recorded under [decisions/](decisions/README.md).                                                                                                                          |
-| **UpdateSubscription** *(target)*             | One durable standing registration that converts later updates into explicitly delivered session input; identity, lifetime, delivery, and cancellation require a future foundation decision recorded under [decisions/](decisions/README.md).                                                                                         |
-| **Actor**                                     | Typed provenance attribution recorded with commands and transitions — provenance, not a multi-user authorization model; the closed variant set is normative in [ADR-0039](decisions/0039-actor-attribution.md).                                                                                                                      |
+| Concept                                       | Responsibility                                                                                                                                                                                                                                     |
+| --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Session**                                   | One durable, independently browsable conversation ([glossary](glossary.md#session)); the minimal long-lived aggregate boundary.                                                                                                                    |
+| **SessionCreationCause / TranscriptAncestry** | Two independent immutable creation facts — why the session exists and where its initial semantic context came from.                                                                                                                                |
+| **AcceptedInput**                             | One admitted submission made durable with its explicit delivery treatment and recoverable disposition; the implemented baseline admits only owner-submitted user content ([glossary](glossary.md#accepted-input)).                                 |
+| **DurableCommandId**                          | The owner-global idempotency identity for durably handled caller commands ([glossary](glossary.md#durable-command-identity)).                                                                                                                      |
+| **SemanticTranscriptEntry**                   | One immutable identified semantic-history fact, distinct from operational, streaming, and presentation state; target entry types below.                                                                                                            |
+| **Turn**                                      | One durable logical request for a conversational outcome under one frozen effective configuration ([glossary](glossary.md#turn)).                                                                                                                  |
+| **TurnAttempt**                               | One exclusive physical orchestration tenure advancing an active turn ([glossary](glossary.md#turn-attempt)).                                                                                                                                       |
+| **ModelCall**                                 | One durable authorization to attempt one provider interaction, carrying its exact pinned target and context frontier ([glossary](glossary.md#model-call)).                                                                                         |
+| **ContextFrontier / TranscriptFrontier**      | The immutable identified snapshot of the exact ordered semantic context consumed by one call or fixed at a turn start, and the distinct purpose-specific source boundary used by ancestry.                                                         |
+| **ToolRequest**                               | One logical request for a named tool operation with normalized arguments, policy state, and eventual logical outcome ([glossary](glossary.md#tool-request); target lifecycle below).                                                               |
+| **ToolAttempt**                               | One physical effort to execute one tool request at one placement, fenced by its dispatch generation ([glossary](glossary.md#tool-attempt)).                                                                                                        |
+| **ApprovalDecision** *(target record)*        | An immutable recorded human decision permitting or denying one exact tool request; the binding rule is fixed ([glossary](glossary.md#approval), INV-019), while the durable record shape, consumption, and expiry await the future tool decisions. |
+| **Tool-risk metadata** *(target)*             | Trusted, registry-owned classification of a tool operation — side-effect scope, reversibility, idempotency, data egress — supplied by the tool registry and never by model-provided arguments; awaiting the future tool-safety decisions.          |
+| **Effective configuration**                   | The complete immutable configuration governing one turn ([glossary](glossary.md#effective-configuration)); target contents below.                                                                                                                  |
+| **Resolved model plan** *(target)*            | A nonempty ordered set of exact provider/model candidates plus an explicit frozen fallback policy, generalizing today's single pinned target only if fallback is ever accepted.                                                                    |
+| **Streaming response snapshot** *(target)*    | An optional, noncanonical, replaceable checkpoint of partial provider output used only for reconnect continuity; never transcript truth.                                                                                                           |
+| **Artifact** *(target)*                       | An independently retrievable output with its own identity, content digest, and producer provenance, linked into sessions by reference.                                                                                                             |
+| **Goal** *(target)*                           | One durable persistent objective with explicit pursue, pause, resume, and revise transitions; identity and lifecycle require a future foundation decision.                                                                                         |
+| **UpdateSubscription** *(target)*             | One durable standing registration that converts later updates into explicitly delivered session input; identity, lifetime, delivery, and cancellation require a future foundation decision.                                                        |
+| **Actor**                                     | Typed provenance attribution recorded with commands and transitions — provenance, not a multi-user authorization model; the variant set is closed, never open-ended.                                                                               |
 
 ### Target semantic-entry types
 
-[ADR-0036](decisions/0036-initial-semantic-transcript-entries.md) and
-[ADR-0042](decisions/0042-assistant-content-and-completion.md) fix the accepted
-entry payloads; the
-[remaining variants are open](open-questions.md#identity-representation). The
-target entry set additionally includes, each awaiting its owning decision:
+The implemented entry payloads are owned by
+[sessions-and-transcript](spec/sessions-and-transcript.md). The target entry set
+additionally includes, each awaiting its owning decision:
 
 - **Remaining content and outcome markers** — refusal, cancellation,
   reconciliation, accepted-risk, mismatch, steering, tool-result, approval, and
@@ -87,47 +84,43 @@ target entry set additionally includes, each awaiting its owning decision:
 - **Supersession** — editing is append-only: a replacement entry plus a typed
   supersession relation, never in-place mutation of committed history.
 - **Compaction summaries** — an explicit semantic marker standing for summarized
-  history; any non-prefix-preserving context policy needs the foundation
-  decision [ADR-0030](decisions/0030-context-frontier-snapshots.md) reserves for
-  it.
+  history; any non-prefix-preserving context policy needs its own foundation
+  decision.
 - **Visibility annotations** — hiding content from default projections without
-  erasing durable history; destructive purge stays a separate
-  [retention policy](open-questions.md#archival-and-retention-reserved-adr-0028-adr-0029).
+  erasing durable history; destructive purge stays a separate retention-policy
+  decision.
 - **Delegated-session references** — a typed reference to a child session and
-  its delivered result, arriving with delegation (reserved
-  [ADR-0002](open-questions.md#delegation-reserved-adr-0002)).
+  its delivered result, arriving with delegation.
 
 ### Effective configuration: target contents
 
-The accepted baseline is deliberately model-selection-only;
-[ADR-0027](decisions/0027-input-delivery-lifecycle.md) requires any new semantic
-category to extend the request, default, override, and effective-value algebras
-together. The target grows the frozen value to cover:
+The implemented baseline is deliberately model-selection-only
+([configuration-and-credentials](spec/configuration-and-credentials.md)), and
+any new semantic category must extend the request, default, override, and
+effective-value algebras together. The target grows the frozen value to cover:
 
 - the model plan (single pinned target today; a resolved model plan if fallback
-  is accepted);
+  is ever accepted);
 - tool policy together with the pinned tool revisions the turn may use;
 - the prompt-renderer version, so the entry-to-provider-prompt projection that a
   retry uses is the one the turn froze; and
 - execution limits (token, tool, output, recursion, and wall-time budgets —
-  [resource governance is open](open-questions.md#identity-credentials-and-resource-governance-reserved-adr-0015-through-adr-0018)).
+  resource governance remains an open question).
 
 Informally, this complete frozen value is the turn's *execution fingerprint*:
 recovery may continue the same turn only while it is unchanged, and any semantic
 difference is new logical work. The authority is structural typed equality of
-the frozen value — a digest or request hash never defines identity
-([ADR-0005](decisions/0005-model-call-retry-semantics.md)).
+the frozen value — a digest or request hash never defines identity.
 
 ## Target lifecycles
 
-Lifecycles already decided are linked at the end of this section and not
-restated. The sketches below are targets: they show the destination the reserved
-tool decisions (ADR-0011 through ADR-0014) should reach, and they are
-constrained by the accepted invariants cited inline. Conflating session identity
-with retry identity, or a logical request with its physical attempts, weakens
-recovery — the accepted identity boundaries
-([ADR-0001](decisions/0001-domain-terminology-and-identity.md)) exist to prevent
-exactly that, and every sketch below preserves them.
+Implemented lifecycles are owned by the living spec and linked at the end of
+this section, not restated. The sketches below are targets: they show the
+destination the future tool decisions should reach, and they are constrained by
+the accepted invariants cited inline. Conflating session identity with retry
+identity, or a logical request with its physical attempts, weakens recovery —
+the identity boundaries exist to prevent exactly that, and every sketch below
+preserves them.
 
 ### Logical tool requests (target)
 
@@ -145,15 +138,13 @@ Accepted rules that already shape this design: a denied request can never create
 an authorized physical attempt (INV-027); terminal outcomes never reopen
 (INV-006); turn terminalization must close every authorized-but-undispatched
 request so nothing can dispatch it after the slot is released, and an interrupt
-that closes an approval wait terminally cancels the owned request
-([ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md)). The request belongs
-to its turn, not to one attempt, so it survives approval pauses, client
-reconnects, hub restarts, and replacement turn attempts
-([ADR-0001](decisions/0001-domain-terminology-and-identity.md)). Changed
-arguments or a changed tool revision are a new request, never a mutation.
-Request-level `Ambiguous` derives from attempt evidence: physical ambiguity is
-recorded on the attempt (INV-025) and effect policy decides whether another
-attempt is ever permitted (INV-026).
+that closes an approval wait terminally cancels the owned request. The request
+belongs to its turn, not to one attempt, so it survives approval pauses, client
+reconnects, hub restarts, and replacement turn attempts. Changed arguments or a
+changed tool revision are a new request, never a mutation. Request-level
+`Ambiguous` derives from attempt evidence: physical ambiguity is recorded on the
+attempt (INV-025) and effect policy decides whether another attempt is ever
+permitted (INV-026).
 
 ### Physical tool attempts (target)
 
@@ -165,11 +156,10 @@ Prepared -> CancelledBeforeExecution
 Each attempt records its executor placement, dispatch identity, timing, output,
 and outcome classification. Dispatch and result acceptance are fenced by the
 attempt-plus-generation pair, so a stale attempt or superseded dispatch cannot
-advance current state — normative in
-[ADR-0009](decisions/0009-dispatch-fencing.md) (INV-011, INV-021). An external
-write whose acknowledgement is lost ends `Ambiguous` and is never blindly
-repeated (INV-025, INV-026); a second attempt for the same request exists only
-where effect policy proves repetition safe.
+advance current state (INV-011, INV-021). An external write whose
+acknowledgement is lost ends `Ambiguous` and is never blindly repeated (INV-025,
+INV-026); a second attempt for the same request exists only where effect policy
+proves repetition safe.
 
 ### Approval algebra (target)
 
@@ -180,20 +170,16 @@ the authority), the pinned tool revision, and the material execution constraints
 — the accepted binding rule (INV-019; [glossary](glossary.md#approval)).
 Consumption is transactional: `AwaitingApproval` plus a matching unexpired
 approval becomes `Ready` in the same transaction that closes the turn's approval
-wait and creates its continuing attempt (the turn-side transition is normative
-in [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md)). A stale, expired,
-or mismatched decision has no effect on current state and is retained as
-history. A model or automated-judge recommendation is a distinct actor and never
-masquerades as human approval (INV-020). Expiry, revocation, and scoped standing
-grants remain
-[open](open-questions.md#tool-safety-reserved-adr-0011-adr-0012-adr-0013-adr-0014).
+wait and creates its continuing attempt. A stale, expired, or mismatched
+decision has no effect on current state and is retained as history. A model or
+automated-judge recommendation is a distinct actor and never masquerades as
+human approval (INV-020). Expiry, revocation, and scoped standing grants remain
+open.
 
 ### Cancellation of tool work (target)
 
 Baseline cancellation authority is the applied interrupt; there is no standalone
-cancel command ([ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md),
-[ADR-0027](decisions/0027-input-delivery-lifecycle.md)). For an individual
-effect the target keeps three honest timings:
+cancel command. For an individual effect the target keeps three honest timings:
 
 1. **Before an attempt is prepared** — the request is closed non-dispatchable;
    no external effect exists.
@@ -204,40 +190,34 @@ effect the target keeps three honest timings:
    completion, known failure, or ambiguity, and completion may win the race.
    Cancellation never claims rollback.
 
-A stale attempt cannot commit results after supersession or terminalization
-([ADR-0009](decisions/0009-dispatch-fencing.md)), and local process cancellation
-must terminate the entire process group (see
+A stale attempt cannot commit results after supersession or terminalization, and
+local process cancellation must terminate the entire process group (see
 [execution isolation](#execution-isolation-target)).
 
-### Delegation (target; reserved ADR-0002)
+### Delegation (target)
 
 A delegated child is a real session: distinct identity, independently browsable,
 with an explicit typed relationship to the exact parent work (INV-031). The
 delegated creation cause carries the exact durable parent-work identity, and
-cause remains independent of transcript ancestry
-([ADR-0003](decisions/0003-session-creation-and-transcript-ancestry.md)). Result
-delivery targets the exact parent `ToolRequest`, so a late or duplicate child
-result cannot attach to the wrong work. Parent cancellation may request child
-cancellation under explicit policy but never deletes the child session or its
-history. Child waits, result representation, detached work, and cancellation
-propagation are all
-[reserved for ADR-0002](open-questions.md#delegation-reserved-adr-0002).
+cause remains independent of transcript ancestry. Result delivery targets the
+exact parent `ToolRequest`, so a late or duplicate child result cannot attach to
+the wrong work. Parent cancellation may request child cancellation under
+explicit policy but never deletes the child session or its history. Child waits,
+result representation, detached work, and cancellation propagation all await
+delegation's owning foundation decision.
 
-### Decided lifecycles
+### Implemented lifecycles
 
-The turn and attempt lifecycle, including waits, stop causes, terminal guards,
-and the startup recovery scan, is normative in
-[ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md) with the
-closed-boundary refinement in
-[ADR-0031](decisions/0031-direct-fatal-terminalization.md). Model-call
-semantics, retry and continuation identity, and provider-target mismatch
-handling are normative in
-[ADR-0005](decisions/0005-model-call-retry-semantics.md). Two consequences worth
-repeating only as orientation: retry intent is always expressed as a new
-`TurnAttempt` — a terminal state never reopens (INV-006) — and unresolved
-ambiguity holds the turn in its recovery-decision wait until evidence or an
-explicit owner decision resolves it, rather than being coerced into failure or
-silently retried.
+The turn and attempt lifecycle — waits, stop causes, terminal guards, the
+session slot, and the startup recovery scan — is owned by
+[turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md);
+model-call semantics, retry and continuation identity, and provider failure
+classification by [model-call-execution](spec/model-call-execution.md). Two
+consequences worth repeating only as orientation: retry intent is always
+expressed as a new `TurnAttempt` — a terminal state never reopens (INV-006) —
+and unresolved ambiguity holds the turn in its recovery-decision wait until
+evidence or an explicit owner decision resolves it, rather than being coerced
+into failure or silently retried.
 
 ## Execution isolation target
 
@@ -248,8 +228,8 @@ runners:
 - a dedicated restricted execution identity, never the owner's account;
 - no ambient owner credentials — no SSH agent, browser profile, credential-store
   socket, cloud metadata, or provider key is inherited; any credential a tool
-  needs is injected per attempt under the hub-controlled boundary (INV-035,
-  [ADR-0017](decisions/0017-credential-lifecycle.md));
+  needs is injected per attempt under the hub-controlled boundary (INV-035;
+  [configuration-and-credentials](spec/configuration-and-credentials.md));
 - explicit mounts — read-only workspace by default, allowlisted writable paths,
   symlink and mount escapes rejected;
 - network disabled or allowlisted per tool policy;
@@ -263,36 +243,29 @@ runner properties stay distinct, an ambient-user runner is an explicit visible
 choice never labeled sandboxed, and the
 [execution boundary](glossary.md#execution-boundary) shown for a dispatch
 reflects only what the evidence supports (INV-022, INV-023). The isolation
-strength required for hostile or arbitrary generated code is deliberately an
-[open question](open-questions.md#tool-safety-reserved-adr-0011-adr-0012-adr-0013-adr-0014);
-the target treats stronger sandboxes as an extension point, not a baseline
+strength required for hostile or arbitrary generated code is deliberately still
+open; the target treats stronger sandboxes as an extension point, not a baseline
 assumption.
 
 ## Live updates target
 
-Reconnect semantics are decided: a client reconstructs authoritative durable
+The target reconnect semantics: a client reconstructs authoritative durable
 state from a snapshot with an observation cursor, resumes strictly ordered
 durable-transition events after that cursor, and treats streamed drafts as
-replaceable transient content (INV-032; normative in
-[ADR-0019](decisions/0019-process-protocol.md) and
-[ADR-0021](decisions/0021-compatibility-and-negotiation.md)).
-
-The publication mechanism inside the hub is decided: the transactional outbox is
-normative in [ADR-0040](decisions/0040-transactional-outbox.md). Its
-commit-order and durable-delivery storage foundation plus the CreateSession and
-startup failed-turn appends are implemented; other transition appends and the
-publisher remain pending.
+replaceable transient content (INV-032). The publication mechanism inside the
+hub is the transactional outbox; its implemented storage foundation and
+same-transaction appends are owned by
+[persistence-protocol](spec/persistence-protocol.md), while the publisher and
+the client-facing protocol remain future work.
 
 ## Destination features
 
-The owner's post-model-call feature arc. Everything here is directional under
-[Purpose and authority](#purpose-and-authority): each feature names the
-reserved, accepted, or required future decision record that owns its semantics,
-none authorizes implementation, and the [priority order](#priority-order) still
-governs sequencing — these features queue behind the model-call milestone and an
-initial smoke against a real provider, and each reaches code only through its
-owning decisions. The inspirations are the same contemporary agent products the
-[product vision](#product-vision) absorbs; the features below are where a
+The owner's feature arc beyond the landed model-call substrate. Everything here
+is directional under [Purpose and authority](#purpose-and-authority): each
+feature reaches code only through its own future owning decisions, none is
+authorized by appearing here, and the [priority order](#priority-order) still
+governs sequencing. The inspirations are the same contemporary agent products
+the [product vision](#product-vision) absorbs; the features below are where a
 durable-session substrate should let Signalbox go further than they do.
 
 ### Context management and compaction (target)
@@ -301,32 +274,28 @@ Compaction as a first-class product surface, not a hidden token-budget
 mitigation: owner-supplied compaction prompts, multiple named compaction
 strategies — long-running work warrants a different treatment than a short
 exchange — and whole compaction workflows that select, apply, and review a
-strategy. The owning seats are already identified: the
-[compaction-summary entry](#target-semantic-entry-types) deferred by
-[ADR-0036](decisions/0036-initial-semantic-transcript-entries.md) is the
-explicit semantic marker, and any non-prefix-preserving context policy needs the
-additional foundation decision reserved by
-[ADR-0030](decisions/0030-context-frontier-snapshots.md). The future foundation
-decision should preserve cheap strategy experimentation: competing compactions
-should be able to coexist as distinct snapshots over retained history. That
-decision must define when trying one may discard anything and how compaction
-interacts with the still-open retention policy.
+strategy. The owning seats are identified: the deferred
+[compaction-summary entry](#target-semantic-entry-types) is the explicit
+semantic marker, and any non-prefix-preserving context policy needs an
+additional foundation decision. That future decision should preserve cheap
+strategy experimentation: competing compactions should be able to coexist as
+distinct snapshots over retained history. It must also define when trying one
+may discard anything and how compaction interacts with the still-open retention
+policy.
 
 ### Inter-session messaging (target)
 
 Sessions send messages to sessions: an accepted input whose actor is another
 session's agency rather than the owner. This requires a foundation extension to
-the closed actor algebra in [ADR-0039](decisions/0039-actor-attribution.md), an
-explicit decision admitting that actor for `SubmitInput`, and the authentication
-and authorization work reserved under
-[ADR-0015 through ADR-0018](open-questions.md#identity-credentials-and-resource-governance-reserved-adr-0015-through-adr-0018).
-Delivery and queueing reuse the accepted
-[ADR-0027](decisions/0027-input-delivery-lifecycle.md) treatments: a
+the closed actor algebra, an explicit decision admitting that actor for
+`SubmitInput`, and the still-open authentication and authorization decisions.
+Delivery and queueing reuse the implemented treatments
+([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)): a
 session-sent message arrives under the same explicit delivery requests and
 durable queue order as owner input, never through a parallel channel. The
-baseline `Interrupt` treatment remains owner-only under ADR-0004 and INV-029;
-session-issued interruption requires a foundation decision extending that
-cancellation authority. The client-facing surface is a planned
+baseline `Interrupt` treatment remains owner-only (INV-029); session-issued
+interruption requires a foundation decision extending that cancellation
+authority. The client-facing surface is a planned
 [session-management tool family](#the-tool-system-as-the-load-bearing-layer):
 list sessions and send a message. Receive-update callbacks additionally require
 a decision defining their standing subscription and delivery lifecycle.
@@ -338,17 +307,13 @@ created separately and linked on request — with results and messages flowing
 between orchestrator and sub-sessions. Sessions and their durable messages
 remain hub-owned when work spans worktrees, pull requests, or machines; runners
 only execute dispatched tools, and the hub applies every resulting message
-through the same durable messaging surface. The grounding is reserved delegation
-([ADR-0002](open-questions.md#delegation-reserved-adr-0002)) and the accepted
-rule it builds on — a child is a real session, independently browsable, with an
-explicit typed relationship to the exact parent work (INV-031), per the
-[delegation sketch](#delegation-target-reserved-adr-0002) above. Linking a
-session that delegation did not create requires its own foundation decision for
-the typed relationship, as
-[ADR-0038](decisions/0038-session-aggregate-boundary.md) requires for
-related-session navigation. Cross-machine tool placement remains owned by the
-reserved runner protocol
-([ADR-0008](open-questions.md#scheduling-and-runners-reserved-adr-0008)).
+through the same durable messaging surface. The grounding is future delegation
+and the rule it builds on — a child is a real session, independently browsable,
+with an explicit typed relationship to the exact parent work (INV-031), per the
+[delegation sketch](#delegation-target) above. Linking a session that delegation
+did not create requires its own foundation decision for the typed
+related-session relationship. Cross-machine tool placement remains owned by the
+future runner-protocol decision.
 
 ### Session linking and visibility authority (target)
 
@@ -360,94 +325,41 @@ and background work can set stricter authority for later turns; an accepted
 turn's frozen effective configuration does not change. Affecting an in-flight
 tool request would instead require an explicit policy-reevaluation and
 approval-invalidation decision. No configuration grants unlimited permission.
-Visibility and approval authority is owned by the reserved tool-policy and
-approval decisions
-([ADR-0011 through ADR-0014](open-questions.md#tool-safety-reserved-adr-0011-adr-0012-adr-0013-adr-0014)),
-constrained by the accepted binding and honesty rules (INV-019, INV-020,
-INV-023); per-session configurability lands through the
-[configuration categories](open-questions.md#configuration-categories) that
-ADR-0027 requires to extend the request, default, override, and effective-value
-algebras together. Independent-session linking remains blocked on the separate
-foundation decision identified above.
+Visibility and approval authority is owned by the future tool-policy and
+approval decisions, constrained by the accepted binding and honesty rules
+(INV-019, INV-020, INV-023); per-session configurability lands through new
+configuration categories, extending the request, default, override, and
+effective-value algebras together. Independent-session linking remains blocked
+on the separate foundation decision identified above.
 
 ### Goal mode as a platform feature (target)
 
 A persistent objective a session works toward across turns — pursued, paused,
 resumed, revised — as a product capability, not only this repository's own
 [operating rules](goal-mode.md). A foundation decision must define durable goal
-identity and the pursue, pause, resume, and revise transitions; that required
-future record belongs under [decisions/](decisions/README.md). That lifecycle
+identity and the pursue, pause, resume, and revise transitions. That lifecycle
 then composes with long-running turns, scheduled creation causes at the explicit
-feature-ADR extension point
-[ADR-0003](decisions/0003-session-creation-and-transcript-ancestry.md) leaves
-open, and delegation under reserved
-[ADR-0002](open-questions.md#delegation-reserved-adr-0002).
+extension point session creation leaves open, and delegation.
 
 ### The tool system as the load-bearing layer
 
-Most of the features above surface as tools, so the reserved tool decisions
-([ADR-0011 through ADR-0014](open-questions.md#tool-safety-reserved-adr-0011-adr-0012-adr-0013-adr-0014))
-and the reserved runner protocol
-([ADR-0008](open-questions.md#scheduling-and-runners-reserved-adr-0008)) are the
-enabling decisions for this whole section, not merely for step five of the
-priority order. Session-management tools to list sessions and send a message are
-a planned tool family under those seats, entering turns like any other tool:
-normalized logical requests, policy, approvals, and fenced attempts per the
+Most of the features above surface as tools, so the future tool-policy,
+approval, and runner-protocol decisions are the enabling decisions for this
+whole section, not merely for step five of the priority order.
+Session-management tools to list sessions and send a message are a planned tool
+family under those decisions, entering turns like any other tool: normalized
+logical requests, policy, approvals, and fenced attempts per the
 [target lifecycles](#target-lifecycles) above. A link-session tool additionally
 requires the independent-link foundation decision identified above. A standing
 update subscription is not an ordinary tool attempt: it needs its own decision
 for registration identity, lifetime, callback delivery, and conversion of later
-events into session input, recorded under [decisions/](decisions/README.md).
+events into session input.
 
 ### An app-facing SDK (target)
 
-The app-facing SDK remains a directional target only. Its deferral gate and
-non-decisions are owned by
-[ADR-0047](decisions/0047-typed-model-runtime-substrate.md#anti-goals).
-
-## Concept status map
-
-Statuses: **Implemented** (accepted decision plus code in tree), **Accepted**
-(decision on `main`; code partial or absent), **Reserved** (awaiting the named
-reserved ADR number), **Proposed** (an ADR proposal exists but is not accepted),
-**Target** (no decision yet; owned by this document).
-
-| Target concept                                                             | Status                                                                                                                                                                                                                                                                |
-| -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Session identity, creation, and long-lived aggregate                       | Implemented — [ADR-0001](decisions/0001-domain-terminology-and-identity.md), [ADR-0003](decisions/0003-session-creation-and-transcript-ancestry.md), [ADR-0038](decisions/0038-session-aggregate-boundary.md); domain and Postgres `CreateSession`/load slices exist  |
-| Durable command identity, storage, and replay                              | Implemented — [ADR-0001](decisions/0001-domain-terminology-and-identity.md), [ADR-0033](decisions/0033-identity-generation-supply-and-encoding.md), [ADR-0034](decisions/0034-durable-command-storage-and-equality.md); registry and first typed command family exist |
-| Accepted-input delivery lifecycle                                          | Accepted — [ADR-0027](decisions/0027-input-delivery-lifecycle.md), [ADR-0037](decisions/0037-baseline-user-content.md); acceptance transaction and occupied-slot storage implemented; steering consumption and matching interrupt pending (owner-ratified deferral)   |
-| Turn / TurnAttempt lifecycle                                               | Accepted — [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md), [ADR-0031](decisions/0031-direct-fatal-terminalization.md); eligible-turn activation orchestration and Postgres slot storage implemented; attempt progression, stop, and recovery pending        |
-| ModelCall lifecycle and provider evidence                                  | Accepted — [ADR-0005](decisions/0005-model-call-retry-semantics.md) and failure classification [ADR-0043](decisions/0043-provider-failure-classification.md); domain values and transitions implemented, no provider adapter                                          |
-| ContextFrontier snapshots                                                  | Implemented — [ADR-0030](decisions/0030-context-frontier-snapshots.md); domain values and Postgres materialized membership                                                                                                                                            |
-| SemanticTranscriptEntry (origin and failed-turn variants)                  | Implemented for origin entries (committed at activation) — [ADR-0036](decisions/0036-initial-semantic-transcript-entries.md); the TurnFailed producer is pending                                                                                                      |
-| Assistant-text, tool-use-reference, and completed-turn entries             | Accepted — [ADR-0042](decisions/0042-assistant-content-and-completion.md); implementation pending                                                                                                                                                                     |
-| Remaining steering, tool-result, approval, and outcome entry variants      | Target — [open](open-questions.md#identity-representation)                                                                                                                                                                                                            |
-| Supersession (edit-as-append)                                              | Target                                                                                                                                                                                                                                                                |
-| Compaction summaries                                                       | Target — requires the foundation decision reserved by [ADR-0030](decisions/0030-context-frontier-snapshots.md)                                                                                                                                                        |
-| Visibility annotations                                                     | Target — destructive purge separately reserved ([ADR-0029](open-questions.md#archival-and-retention-reserved-adr-0028-adr-0029))                                                                                                                                      |
-| Effective configuration (model-selection baseline)                         | Implemented — [ADR-0027](decisions/0027-input-delivery-lifecycle.md); `OriginConfiguration::freeze` and persisted frozen provenance; an alias-definition source is pending                                                                                            |
-| Effective-configuration target categories (tools, prompt renderer, limits) | Target — [open](open-questions.md#configuration-categories)                                                                                                                                                                                                           |
-| Resolved model plan and fallback policy                                    | Reserved — ADR-0006/ADR-0007 ([open](open-questions.md#model-fallback-and-provenance-reserved-adr-0006-adr-0007))                                                                                                                                                     |
-| ToolRequest / ToolAttempt identities and ownership                         | Accepted — [ADR-0001](decisions/0001-domain-terminology-and-identity.md); identities only, implemented in domain code                                                                                                                                                 |
-| ToolRequest / ToolAttempt lifecycles, risk taxonomy, retry policy          | Reserved — ADR-0011 through ADR-0014 ([open](open-questions.md#tool-safety-reserved-adr-0011-adr-0012-adr-0013-adr-0014))                                                                                                                                             |
-| ApprovalDecision record, consumption, expiry                               | Reserved — ADR-0011 through ADR-0014; binding rule accepted (INV-019, INV-020, INV-027)                                                                                                                                                                               |
-| Tool-risk metadata registry                                                | Reserved — ADR-0011                                                                                                                                                                                                                                                   |
-| Dispatch fencing and initial scheduler                                     | Accepted — [ADR-0009](decisions/0009-dispatch-fencing.md), [ADR-0010](decisions/0010-initial-scheduler-mechanics.md)                                                                                                                                                  |
-| Runner protocol, capabilities, placement                                   | Reserved — ADR-0008 ([open](open-questions.md#scheduling-and-runners-reserved-adr-0008))                                                                                                                                                                              |
-| Execution isolation profiles                                               | Reserved — sandbox minimums with ADR-0011 through ADR-0014; execution identity, enrollment, and credentials with ADR-0015 through ADR-0018 ([ADR-0017](decisions/0017-credential-lifecycle.md) accepted)                                                              |
-| Delegation and child sessions                                              | Reserved — ADR-0002 ([open](open-questions.md#delegation-reserved-adr-0002))                                                                                                                                                                                          |
-| Inter-session messaging (session-actor accepted input)                     | Target — requires an ADR-0039 actor-algebra extension, explicit `SubmitInput` admissibility, and ADR-0015 through ADR-0018 authentication and authorization decisions                                                                                                 |
-| Session linking and visibility authority                                   | Target — independent links require their own foundation decision; authority composes reserved ADR-0011 through ADR-0014 with the open [configuration categories](open-questions.md#configuration-categories)                                                          |
-| Persistent goal identity and lifecycle                                     | Target — requires a future foundation decision recorded under [decisions/](decisions/README.md)                                                                                                                                                                       |
-| Standing update-subscription lifecycle                                     | Target — requires a future foundation decision recorded under [decisions/](decisions/README.md)                                                                                                                                                                       |
-| Forking from a transcript frontier                                         | Accepted — [ADR-0003](decisions/0003-session-creation-and-transcript-ancestry.md), [ADR-0030](decisions/0030-context-frontier-snapshots.md); selectable frontier boundaries [open](open-questions.md#identity-representation)                                         |
-| Archive / restore                                                          | Reserved — ADR-0028; destructive retention ADR-0029                                                                                                                                                                                                                   |
-| Live-update protocol semantics                                             | Accepted — [ADR-0019](decisions/0019-process-protocol.md), [ADR-0021](decisions/0021-compatibility-and-negotiation.md)                                                                                                                                                |
-| Transactional outbox publication                                           | Partially implemented — [ADR-0040](decisions/0040-transactional-outbox.md); storage foundation plus CreateSession and startup failed-turn appends                                                                                                                     |
-| Actor attribution                                                          | Implemented — [ADR-0039](decisions/0039-actor-attribution.md); SubmitInput attribution storage and stored-actor validation                                                                                                                                            |
-| Streaming response snapshots                                               | Target — streaming-checkpoint question open under [ADR-0022](decisions/0022-persistence-representation.md)                                                                                                                                                            |
-| Artifacts                                                                  | Target                                                                                                                                                                                                                                                                |
+The app-facing SDK remains a directional target only: it queues behind the
+destination features above, and the model-runtime substrate it would build on is
+owned by [runtime-substrate](spec/runtime-substrate.md).
 
 ## Deferred and explicit non-goals
 
@@ -457,18 +369,17 @@ select milestones toward them, and a future change of direction would revise
 this document first:
 
 - **Multi-user ACLs, teams, and shared quotas.** Single-owner scope is fixed; a
-  future multi-owner model is a foundation decision (the owner namespace note in
-  [ADR-0034](decisions/0034-durable-command-storage-and-equality.md)).
+  future multi-owner model is a foundation decision.
 - **Distributed schedulers and cross-host workers.** The single-hub,
-  Postgres-coordinated baseline is accepted
-  ([ADR-0010](decisions/0010-initial-scheduler-mechanics.md)) with explicit
-  adapter seams; no broker or worker fleet is in the target.
-- **Full event sourcing.** Rejected as the primary representation by
-  [ADR-0022](decisions/0022-persistence-representation.md); append-only tables
+  Postgres-coordinated baseline
+  ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md))
+  stands with explicit adapter seams; no broker or worker fleet is in the
+  target.
+- **Full event sourcing.** Rejected as the primary representation
+  ([persistence-protocol](spec/persistence-protocol.md)); append-only tables
   exist only where facts are immutable.
 - **Session merging and multi-source ancestry.** An explicit extension boundary,
-  not a destination
-  ([ADR-0003](decisions/0003-session-creation-and-transcript-ancestry.md)).
+  not a destination.
 - **Deterministic model replay.** Rerunning pinned inputs is comparative new
   work, never a claim of reproducing provider behavior.
 - **Persisting every streaming token.** Drafts remain transient; the only target
@@ -476,50 +387,47 @@ this document first:
 
 ## Priority order
 
-The near-term arc, in order. Each step should land through the decision-first
-process in [AGENTS.md](../AGENTS.md); a step whose blocking decision is reserved
-or open is reached by proposing that decision, not by implementing around it.
+The near-term arc, in order. Landed steps stay listed so the arc keeps its
+shape; their implemented behavior is owned by the [living spec](spec/README.md).
+Each remaining step should land through the decision-first process in
+[AGENTS.md](../AGENTS.md); a step whose blocking decision does not yet exist is
+reached by proposing that decision, not by implementing around it.
 
-1. **Durable input acceptance.** The complete `SubmitInput` slice: canonical
-   construction, owner-global deduplication, and one atomic acceptance
+1. **Durable input acceptance** — landed. The complete `SubmitInput` slice:
+   canonical construction, owner-global deduplication, and one atomic acceptance
    transaction persisting content, delivery treatment, order facts, disposition,
-   and configuration provenance before acknowledgement. Decisions accepted
-   ([ADR-0027](decisions/0027-input-delivery-lifecycle.md),
-   [ADR-0034](decisions/0034-durable-command-storage-and-equality.md),
-   [ADR-0037](decisions/0037-baseline-user-content.md)); domain values largely
-   exist, so the milestone is the transaction and application boundary.
-2. **Turn creation and the session slot.** Eligibility derivation, origin
-   semantic entry, starting frontier, activation with the initial prepared
-   attempt, and database slot enforcement
-   ([ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md),
-   [ADR-0010](decisions/0010-initial-scheduler-mechanics.md),
-   [ADR-0022](decisions/0022-persistence-representation.md),
-   [ADR-0030](decisions/0030-context-frontier-snapshots.md),
-   [ADR-0036](decisions/0036-initial-semantic-transcript-entries.md)).
-3. **A model call against a scripted provider.** Target resolution and pinning,
-   prepared-call creation, an in-repo scripted provider adapter, transient draft
-   streaming, assistant-content commit, and the idempotent startup scan
-   (INV-034). Its assistant-content boundary is fixed by
-   [ADR-0042](decisions/0042-assistant-content-and-completion.md).
-4. **A smoke against a real provider.** Exercise the same accepted model-call
-   lifecycle through one provider adapter, including resolved and reported
-   target evidence. Failure classification is decided by
-   [ADR-0043](decisions/0043-provider-failure-classification.md); the remaining
-   blockers are ADR-0007's provider-identity normalization and provenance
-   decision and the outbound-provider security questions in
-   [open-questions.md](open-questions.md#provider-call-security). This is the
-   gate before destination-feature milestones.
+   and configuration provenance before acknowledgement
+   ([identity-and-commands](spec/identity-and-commands.md),
+   [sessions-and-transcript](spec/sessions-and-transcript.md)).
+2. **Turn creation and the session slot** — landed. Eligibility derivation,
+   origin semantic entry, starting frontier, activation with the initial
+   prepared attempt, and database slot enforcement
+   ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)).
+3. **A model call against a scripted provider** — landed. Target resolution and
+   pinning, prepared-call creation, an in-repo scripted provider adapter,
+   assistant-content commit, and the idempotent startup scan (INV-034), end to
+   end ([model-call-execution](spec/model-call-execution.md); remaining
+   refinements are that page's open edges).
+4. **A smoke against a real provider** — landed for the owner-run smoke. The
+   same model-call lifecycle exercised through a real provider adapter, resolved
+   and reported target evidence included
+   ([model-call-execution](spec/model-call-execution.md),
+   [runtime-substrate](spec/runtime-substrate.md)); the production security
+   posture for outbound provider calls remains open per
+   [provider-call-security](open-questions.md#provider-call-security). This was
+   the gate before destination-feature milestones.
 5. **The tool loop with approvals.** ToolRequest and ToolAttempt lifecycles, the
    trusted risk registry, approval consumption, and a first harmless hub-local
-   tool. Blocked by reserved ADR-0011 through ADR-0014.
+   tool. Blocked on the tool-policy and approval decisions, which do not yet
+   exist.
 6. **The restricted executor.** The
    [execution isolation target](#execution-isolation-target) applied to a first
-   restricted placement. Blocked by the sandbox-minimum and execution-identity
-   decisions above.
-7. **Delegation and forking.** Fork frontier selection (the open
-   selectable-boundary question), then delegation under reserved ADR-0002:
-   delegated cause, child waits, targeted result delivery, cancellation
-   propagation.
+   restricted placement. Blocked on the sandbox-minimum and execution-identity
+   decisions.
+7. **Delegation and forking.** Fork frontier selection (the still-open
+   selectable-boundary question), then delegation under its own foundation
+   decision: delegated cause, child waits, targeted result delivery,
+   cancellation propagation.
 8. **Artifacts.** Identity, digest, producer provenance, controlled byte
    storage, and transcript links.
 9. **Destination features.** Reach the
@@ -527,4 +435,4 @@ or open is reached by proposing that decision, not by implementing around it.
    decisions: context management and compaction; inter-session messaging;
    orchestrator sessions, linking, and visibility authority; and persistent goal
    mode. Their order within this step remains owner-directed milestone
-   selection, but none precedes the real-provider smoke.
+   selection.

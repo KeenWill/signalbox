@@ -16,11 +16,11 @@ companion pages.
 ## Boundary and crate layout
 
 The runtime layer is three library crates, hand-rolled per the 2026-07-20
-decision-ledger entry ([docs/decisions.md](../decisions.md)) that closed
-ADR-0047's vendor-versus-hand-roll question: one provider-neutral core crate
-plus separately named provider adapters, with SerdesAI as a design reference
-only. `signalbox-model-runtime` is the shared vocabulary; the Anthropic and
-OpenAI adapter crates' only workspace `[dependencies]` entry is
+[decision-ledger entry](../decisions.md) that closed ADR-0047's
+vendor-versus-hand-roll question: one provider-neutral core crate plus
+separately named provider adapters, with SerdesAI as a design reference only.
+`signalbox-model-runtime` is the shared vocabulary; the Anthropic and OpenAI
+adapter crates' only workspace `[dependencies]` entry is
 `signalbox-model-runtime` (their dev-dependencies add the workspace test helper
 `signalbox-expect-table`, which is test-only and ships in no built artifact).
 `crates/domain`, `crates/application`, and `crates/persistence` declare no

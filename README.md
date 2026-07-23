@@ -63,7 +63,7 @@ boundaries and important qualifications behind this sketch.
 - [Testing style](docs/testing-style.md)
 - [Decision log](docs/decisions.md)
 - [Open questions](docs/open-questions.md)
-- [Architecture decision records](docs/decisions/README.md)
+- [Living specification](docs/spec/README.md)
 
 Project participation is described in [CONTRIBUTING.md](CONTRIBUTING.md),
 security reporting in [SECURITY.md](SECURITY.md), and repository guidance for

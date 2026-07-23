@@ -2,9 +2,10 @@
 
 This document records current high-level boundaries, not an implemented system
 or final API. Accepted names are defined in the [glossary](glossary.md);
-unresolved choices remain in [open questions](open-questions.md). Authoritative
-foundation records and later accepted refinements are indexed in the
-[accepted ADRs](decisions/README.md).
+unresolved choices remain in [open questions](open-questions.md). Implemented
+behavior and the accepted decisions behind it are specified in the
+[living specification](spec/README.md), whose ADR mapping resolves historical
+ADR names.
 
 ## Component view
 
@@ -39,8 +40,8 @@ Clients never need a direct provider or runner connection. Provider calls
 originate in the hub; runner-local tool execution is dispatched over a runner's
 outbound connection. Both placements participate in one hub-coordinated logical
 tool lifecycle. On the snapshots/events edge, client-visible durable update
-events follow the mechanism defined by
-[ADR-0040](decisions/0040-transactional-outbox.md).
+events follow the transactional-outbox mechanism specified in
+[persistence-protocol](spec/persistence-protocol.md).
 
 ## Responsibilities
 
@@ -77,15 +78,15 @@ ownership modules, not a requirement for network services.
 | Effective runner properties for a dispatch                                                                               | Hub policy applied to available declarations, trusted configuration, and verified evidence; durable snapshot with the attempt                                     | Scheduler memory and client display                                                                  |
 | Final tool result and outcome classification                                                                             | Hub-accepted durable record                                                                                                                                       | Runner delivery buffer and client presentation                                                       |
 | Streaming drafts and progress                                                                                            | Live hub process unless selectively checkpointed                                                                                                                  | Client transient view; never authoritative final content                                             |
-| Provider credentials                                                                                                     | Hub-controlled secret storage; mechanism decided by [ADR-0017](decisions/0017-credential-lifecycle.md)                                                            | Never client or runner session state                                                                 |
+| Provider credentials                                                                                                     | Hub-controlled secret storage; mechanism specified in [configuration-and-credentials](spec/configuration-and-credentials.md)                                      | Never client or runner session state                                                                 |
 
 Postgres is the canonical durable store in development, testing, and production.
-[ADR-0022](decisions/0022-persistence-representation.md) fixes the normalized
+[persistence-protocol](spec/persistence-protocol.md) fixes the normalized
 record/domain mapping boundary, while
-[ADR-0030](decisions/0030-context-frontier-snapshots.md) fixes the semantic and
-atomic constraints for context-frontier snapshots independently of their
-physical layout. This does not mean every transient token delta is stored or
-that database records themselves are domain types.
+[turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md) fixes the
+semantic and atomic constraints for context-frontier snapshots independently of
+their physical layout. This does not mean every transient token delta is stored
+or that database records themselves are domain types.
 
 A declaration is an operationally required claim, not proof of the claimed
 capability or isolation. Configured properties describe trusted deployment
@@ -99,11 +100,10 @@ enrollment, authentication, verification, and attestation remain unresolved.
 
 ### Accepted input and model execution
 
-[ADR-0027](decisions/0027-input-delivery-lifecycle.md) is the normative
-definition of input selection and eligibility,
-[ADR-0030](decisions/0030-context-frontier-snapshots.md) defines frontier
-identity, resolution, and construction authority, and
-[ADR-0005](decisions/0005-model-call-retry-semantics.md) defines model-call
+[turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md) is the
+normative definition of input selection and eligibility and of frontier
+identity, resolution, and construction authority;
+[model-call-execution](spec/model-call-execution.md) defines model-call
 semantics. In outline:
 
 1. Session creation establishes version one of the session's model-selection
@@ -165,17 +165,16 @@ regardless of placement.
 ### Delegation and ancestry
 
 Session creation cause and transcript ancestry are independent immutable facts.
-Accepted [ADR-0003](decisions/0003-session-creation-and-transcript-ancestry.md)
-limits the first implementable cause to owner initiation and represents ancestry
-as none or one exact source frontier. Session configuration defaults are a
-separate versioned value: creation establishes the first version, while later
-updates affect only future input acceptance. ADR-0002 must add a delegated-cause
-variant with an exact parent-work identity before delegation creates related
-sessions; its parent-side wait, result, and cancellation transitions likewise
-remain reserved and are not variants in the first implementable turn state
-machine. Forking initializes an owner-created session from a selected transcript
-frontier without claiming that the new session was delegated. Future merging
-remains open.
+[sessions-and-transcript](spec/sessions-and-transcript.md) limits the first
+implementable cause to owner initiation and represents ancestry as none or one
+exact source frontier. Session configuration defaults are a separate versioned
+value: creation establishes the first version, while later updates affect only
+future input acceptance. ADR-0002 must add a delegated-cause variant with an
+exact parent-work identity before delegation creates related sessions; its
+parent-side wait, result, and cancellation transitions likewise remain reserved
+and are not variants in the first implementable turn state machine. Forking
+initializes an owner-created session from a selected transcript frontier without
+claiming that the new session was delegated. Future merging remains open.
 
 ## Dependency direction
 
@@ -210,37 +209,38 @@ reconstructs durable state from Postgres, ends each nonterminal turn attempt
 owned by the prior process with disposition `Lost`, and classifies every
 interrupted physical operation; the scan is not itself an attempt and issues no
 semantic effects. Live and startup classification share the single outcome
-precedence that [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md) and
-[ADR-0005](decisions/0005-model-call-retry-semantics.md) define normatively;
-provider model-call evidence uses
-[ADR-0043](decisions/0043-provider-failure-classification.md). Ambiguous
-external effects are preserved as ambiguous rather than coerced to failure.
-Separate resolving evidence may clear a blocking ambiguity without rewriting the
-physical record, after which unfinished work continues without repeating it;
-continuing past a still-unresolved ambiguity requires an explicit owner decision
-that records accepted duplicate risk.
+precedence that
+[turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md) and
+[model-call-execution](spec/model-call-execution.md) define normatively;
+provider model-call evidence is specified in
+[runtime-substrate](spec/runtime-substrate.md) and classified in
+model-call-execution. Ambiguous external effects are preserved as ambiguous
+rather than coerced to failure. Separate resolving evidence may clear a blocking
+ambiguity without rewriting the physical record, after which unfinished work
+continues without repeating it; continuing past a still-unresolved ambiguity
+requires an explicit owner decision that records accepted duplicate risk.
 
 At most one logical turn actively progresses per session initially; every
 implemented active phase, including approval and recovery waits, retains the
 session slot. A running turn owns exactly one current attempt, while a waiting
 turn carries its exact wait subject and no attempt. The complete state,
-stop-cause, and terminal-guard algebra is normative in ADR-0004, with live
-closed-boundary fatal handling refined by
-[ADR-0031](decisions/0031-direct-fatal-terminalization.md). Future child waits
-require the delegation decision (reserved ADR-0002) and will retain the slot
-unless it defines explicit branching semantics. Initial scheduler mechanics are
-fixed by [ADR-0010](decisions/0010-initial-scheduler-mechanics.md); its listed
-operational refinements remain open.
+stop-cause, and terminal-guard algebra, including live closed-boundary fatal
+handling, is normative in
+[turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md). Future
+child waits require the delegation decision (reserved ADR-0002) and will retain
+the slot unless it defines explicit branching semantics. Initial scheduler
+mechanics are fixed in the same page; their listed operational refinements
+remain open.
 
 ## Explicitly open boundaries
 
-- Process-protocol implementation within
-  [ADR-0019](decisions/0019-process-protocol.md) and
-  [ADR-0021](decisions/0021-compatibility-and-negotiation.md): exact browser
-  transport and Swift generation remain open.
-- Scheduler implementation within [ADR-0009](decisions/0009-dispatch-fencing.md)
-  and [ADR-0010](decisions/0010-initial-scheduler-mechanics.md): runner
-  capabilities, affinity, pinning, multi-runner participation, and listed
+- Process-protocol implementation within the accepted ADR-0019 and ADR-0021
+  baselines (unimplemented design; no spec page yet): exact browser transport
+  and Swift generation remain open.
+- Scheduler implementation within the accepted dispatch-fencing and
+  scheduler-mechanics baseline
+  ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)):
+  runner capabilities, affinity, pinning, multi-runner participation, and listed
   operational tuning remain open.
 - Workflow infrastructure: an extension boundary is preserved, but no broker or
   workflow engine is selected.
@@ -252,21 +252,18 @@ operational refinements remain open.
   minimums, and retry rules.
 - Identity and access: owner/client authentication, runner enrollment and
   authentication, and session revocation (provider/integration credential
-  lifecycle is decided by [ADR-0017](decisions/0017-credential-lifecycle.md)).
+  lifecycle is specified in
+  [configuration-and-credentials](spec/configuration-and-credentials.md)).
 - Resource governance: initial limits for turns, provider use, tool execution,
   runner concurrency, and retained artifacts.
-- Persistence implementation within
-  [ADR-0022's](decisions/0022-persistence-representation.md) normalized
-  relational baseline, using the driver, pool, migration, runtime, and
-  ephemeral-test stack selected by
-  [ADR-0032](decisions/0032-postgres-implementation-dependencies.md), the typed
-  durable-command representation selected by
-  [ADR-0034](decisions/0034-durable-command-storage-and-equality.md), the
-  domain-owned reconstitution boundary fixed by
-  [ADR-0035](decisions/0035-domain-owned-persistence-reconstitution.md) as
-  refined by [ADR-0041](decisions/0041-evidence-bearing-reconstitution.md), and
-  the long-lived session aggregate and load boundary fixed by
-  [ADR-0038](decisions/0038-session-aggregate-boundary.md): cancellation
+- Persistence implementation within the accepted normalized relational baseline,
+  implementation stack, typed durable-command representation, and domain-owned
+  reconstitution boundary ([persistence-protocol](spec/persistence-protocol.md)
+  and [identity-and-commands](spec/identity-and-commands.md)), the
+  evidence-bearing reconstitution refinement
+  ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)), and
+  the long-lived session aggregate and load boundary
+  ([sessions-and-transcript](spec/sessions-and-transcript.md)): cancellation
   delivery, streaming checkpoint policy, and archival form remain open; the
   first physical frontier layout is recorded in the
   [decision log](decisions.md#2026-07-17--materialize-complete-membership-for-first-context-frontier-storage).

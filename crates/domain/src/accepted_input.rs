@@ -1,7 +1,8 @@
 //! Accepted-input disposition lifecycle.
 //!
-//! ADR-0027 (`docs/decisions/0027-input-delivery-lifecycle.md`) is the
-//! normative specification. An accepted input either originates a turn,
+//! The normative specification is
+//! `docs/spec/turn-lifecycle-and-scheduling.md` (originally ADR-0027).
+//! An accepted input either originates a turn,
 //! waits as pending steering bound to its source turn, is consumed by an
 //! exact model call, or is reclassified as new turn-origin work when its
 //! source turn terminates before a safe point.
