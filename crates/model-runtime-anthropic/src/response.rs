@@ -700,7 +700,7 @@ mod tests {
         let LossCause::ResponseUnintelligible { detail } = loss.cause else {
             panic!("deep success JSON must be response-unintelligible evidence");
         };
-        assert!(detail.contains("128-container nesting limit"));
+        assert!(detail.contains("127-container nesting limit"));
     }
 
     #[test]

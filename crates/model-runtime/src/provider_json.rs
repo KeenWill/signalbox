@@ -2,7 +2,7 @@
 
 /// Maximum permitted nesting of JSON object and array containers in one
 /// provider-controlled value.
-pub const PROVIDER_JSON_NESTING_LIMIT: usize = 128;
+pub const PROVIDER_JSON_NESTING_LIMIT: usize = 127;
 
 /// Provider-controlled JSON exceeds [`PROVIDER_JSON_NESTING_LIMIT`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +72,7 @@ mod tests {
         );
 
         assert_eq!(validate_provider_json_nesting(json.as_bytes()), Ok(()));
+        assert!(serde_json::from_str::<serde_json::Value>(&json).is_ok());
     }
 
     #[test]
