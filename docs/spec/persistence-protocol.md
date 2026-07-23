@@ -397,10 +397,14 @@ resolved by the next locked cursor read: a committed advance proceeds, while a
 rolled-back advance redelivers. The injected rolled-back-commit PostgreSQL test
 enforces ordered at-least-once behavior. Before offering a record, the
 dispatcher proves that its header does not exceed the allocator cursor and that
-failed, completed, and refused records agree with the durable turn, terminal
-frontier, semantic marker where present, and terminal model call where present.
-Exhausted delivery still validates the allocator singleton and cursor. Hub task
-ownership, polling, fan-out, and client observation semantics are owned by
+an activation agrees with the durable turn's active current attempt or retained
+terminal attempt; a terminal model-call transition agrees with the authoritative
+call's exact terminal disposition; and failed, completed, and refused records
+agree with the durable turn, terminal frontier, semantic marker where present,
+and terminal model call where present. Historical Prepared and InFlight
+transition records remain dispatchable after their call advances. Exhausted
+delivery still validates the allocator singleton and cursor. Hub task ownership,
+polling, fan-out, and client observation semantics are owned by
 [process-protocol](process-protocol.md).
 
 ## Open edges

@@ -53,8 +53,8 @@ use signalbox_persistence::{
         ModelCallRepositoryError, PostgresModelCallRepository, PrepareInitialModelCallOutcome,
     },
     outbox::{
-        DispatchedOutboxEventKind, OutboxCorruption, OutboxDeliveryDecision, OutboxDispatchError,
-        OutboxDispatchOutcome, OutboxDispatcher,
+        DispatchedModelCallState, DispatchedOutboxEventKind, OutboxCorruption,
+        OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
     },
     process_read::{
         ProcessCurrentModelCallState, ProcessModelSelection, ProcessReadRepository,
@@ -11932,6 +11932,249 @@ async fn s01_inv012_inv032_scheduling_transitions_dispatch_in_commit_order()
     .fetch_one(&pool)
     .await?;
     assert_eq!(durable_counts, (1, 1, Decimal::from(3)));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S01 / INV-032: an activation remains dispatchable after its turn
+/// terminalizes only while the retained terminal attempt is the activated
+/// attempt; cross-wired lifecycle provenance fails closed.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s01_inv032_turn_activation_dispatch_requires_authoritative_attempt()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = SessionId::from_uuid(Uuid::from_u128(0xe81));
+    let turn = TurnId::from_uuid(Uuid::from_u128(0xe82));
+    let attempt = TurnAttemptId::from_uuid(Uuid::from_u128(0xe83));
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0xe80, 0xe81, direct(0xe84)))
+        .await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                0xe85,
+                0xe81,
+                "activation correlation",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xe86)),
+            Some(turn),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: session.into_uuid(),
+            origin_entry: Uuid::from_u128(0xe87),
+            starting_frontier: Uuid::from_u128(0xe88),
+            initial_attempt: attempt.into_uuid(),
+        },
+    )
+    .await?;
+    let mut startup = StartupScanService::new(
+        FixedStartupScanIds::new(
+            [SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xe89))],
+            [ContextFrontierId::from_uuid(Uuid::from_u128(0xe8a))],
+        ),
+        PostgresStartupScanRepository::new(pool.clone()),
+    );
+    assert_eq!(startup.execute().await?.recovered_turn_count(), 1);
+
+    let dispatcher = OutboxDispatcher::new(pool.clone());
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 1 }
+    );
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 2 }
+    );
+    let mut activation = None;
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|event| {
+                activation = Some(event.clone());
+                OutboxDeliveryDecision::Delivered
+            })
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 3 }
+    );
+    assert_eq!(
+        activation
+            .expect("the retained terminal attempt authorizes dispatch")
+            .kind(),
+        &DispatchedOutboxEventKind::TurnActivated {
+            turn,
+            current_attempt: attempt,
+        }
+    );
+
+    sqlx::query(
+        "ALTER TABLE turn_lifecycle
+            DROP CONSTRAINT turn_lifecycle_terminal_attempt_fk",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET terminal_attempt_id = $1
+          WHERE turn_id = $2",
+    )
+    .bind(Uuid::from_u128(0xe8b))
+    .bind(turn.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "ALTER TABLE outbox_delivery_state
+         DISABLE TRIGGER outbox_delivery_advances_prefix",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE outbox_delivery_state
+            SET delivered_through = 2,
+                last_delivery_xid = pg_current_xact_id()
+          WHERE singleton",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE outbox_delivery_state
+         ENABLE TRIGGER outbox_delivery_advances_prefix",
+    )
+    .execute(&pool)
+    .await?;
+
+    assert!(matches!(
+        dispatcher
+            .dispatch_next(|_| panic!("cross-wired activation must not be offered"))
+            .await,
+        Err(OutboxDispatchError::Corruption(
+            OutboxCorruption::InvalidLifecycleEventCorrelation
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S01 / INV-032: historical Prepared and InFlight transition records remain
+/// dispatchable after advancement, but a terminal record must carry the
+/// authoritative call's exact terminal disposition.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s01_inv032_terminal_model_call_dispatch_requires_exact_disposition()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0xe90;
+    let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::Ambiguous);
+    repository
+        .apply_terminal_observation(
+            fixture.session,
+            observation,
+            ModelCallTerminalIdentities::Ambiguous,
+            |_| panic!("Ambiguous creates no pending-steering successors"),
+        )
+        .await?;
+
+    let dispatcher = OutboxDispatcher::new(pool.clone());
+    for sequence in 1..=3 {
+        assert_eq!(
+            dispatcher
+                .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+                .await?,
+            OutboxDispatchOutcome::Delivered { sequence }
+        );
+    }
+    let mut prepared_transition = None;
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|event| {
+                prepared_transition = Some(event.clone());
+                OutboxDeliveryDecision::Delivered
+            })
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 4 }
+    );
+    assert_eq!(
+        prepared_transition
+            .expect("historical Prepared transition is offered")
+            .kind(),
+        &DispatchedOutboxEventKind::ModelCallTransition {
+            turn: fixture.turn,
+            call: fixture.call,
+            state: DispatchedModelCallState::Prepared,
+        }
+    );
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|event| {
+                assert_eq!(
+                    event.kind(),
+                    &DispatchedOutboxEventKind::ModelCallTransition {
+                        turn: fixture.turn,
+                        call: fixture.call,
+                        state: DispatchedModelCallState::InFlight,
+                    }
+                );
+                OutboxDeliveryDecision::Delivered
+            })
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 5 }
+    );
+
+    sqlx::query("ALTER TABLE model_call_transition_outbox_event DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE model_call_transition_outbox_event
+            SET terminal_disposition_kind = 'cancelled'
+          WHERE model_call_id = $1
+            AND call_state_kind = 'terminal'",
+    )
+    .bind(fixture.call.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE model_call_transition_outbox_event ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+
+    assert!(matches!(
+        dispatcher
+            .dispatch_next(|_| panic!("cross-wired terminal transition must not be offered"))
+            .await,
+        Err(OutboxDispatchError::Corruption(
+            OutboxCorruption::InvalidTerminalEventCorrelation
+        ))
+    ));
+
+    let authoritative: (String, Option<String>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind
+           FROM model_call
+          WHERE model_call_id = $1",
+    )
+    .bind(fixture.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(authoritative, ("terminal".into(), Some("ambiguous".into())));
 
     pool.close().await;
     drop(container);
