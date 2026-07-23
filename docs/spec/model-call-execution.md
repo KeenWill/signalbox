@@ -86,6 +86,16 @@ prefix-preserving extension of the starting snapshot and its complete ordered
 membership equals those checked semantic entries. Why: checkpointing cannot
 erase steering that the durable call was prepared to observe.
 
+Scheduling projection reconstitution independently reloads every consumed
+input's stored session, lifecycle, acceptance position, source turn, and
+consuming call. Each fact must have exactly one matching
+`SteeringAcceptedInput`; the call must belong to that source turn and lifecycle,
+and its snapshot must equal the turn's starting snapshot plus the complete
+acceptance-ordered steering suffix. Terminal response-frontier validation uses
+that checked call snapshot as its prefix. Why: every adapter reaching the domain
+seam must reject cross-wired steering history, even when its storage schema has
+already performed the same correlation.
+
 ## Frontier rendering
 
 `PreparedModelOperation::render` (`crates/application/src/model_execution.rs`)
