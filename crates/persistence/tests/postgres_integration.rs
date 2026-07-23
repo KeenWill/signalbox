@@ -10831,6 +10831,270 @@ async fn s24_inv032_dispatcher_reports_a_missing_committed_header() -> Result<()
     Ok(())
 }
 
+/// S24 / INV-032: a header restored ahead of the allocator cursor is durable
+/// corruption and is never offered to the consumer.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_inv032_dispatcher_rejects_a_header_beyond_the_allocator() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = insert_outbox_session_fixture(&pool, 0xe1a).await?;
+    let mut producer = pool.begin().await?;
+    append_session_created_test_event(&mut producer, session).await?;
+    producer.commit().await?;
+
+    sqlx::query(
+        "ALTER TABLE outbox_sequence_state
+         DISABLE TRIGGER outbox_sequence_requires_event",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE outbox_sequence_state
+            SET last_sequence = 0,
+                last_allocation_xid = NULL
+          WHERE singleton",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE outbox_sequence_state
+         ENABLE TRIGGER outbox_sequence_requires_event",
+    )
+    .execute(&pool)
+    .await?;
+
+    let dispatcher = OutboxDispatcher::new(pool.clone());
+    assert!(matches!(
+        dispatcher
+            .dispatch_next(|_| panic!("an unallocated header must not be offered"))
+            .await,
+        Err(OutboxDispatchError::Corruption(
+            OutboxCorruption::EventBeyondAllocatedSequence
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S24 / INV-032: exhausted delivery still validates the allocator singleton
+/// rather than silently polling forever on missing durable state.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_inv032_dispatcher_validates_the_allocator_at_exhaustion() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    sqlx::query(
+        "ALTER TABLE outbox_delivery_state
+         DISABLE TRIGGER outbox_delivery_advances_prefix",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE outbox_delivery_state
+            SET delivered_through = 18446744073709551615,
+                last_delivery_xid = pg_current_xact_id()
+          WHERE singleton",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE outbox_delivery_state
+         ENABLE TRIGGER outbox_delivery_advances_prefix",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE outbox_sequence_state
+         DISABLE TRIGGER outbox_sequence_state_cannot_be_deleted",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query("DELETE FROM outbox_sequence_state WHERE singleton")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "ALTER TABLE outbox_sequence_state
+         ENABLE TRIGGER outbox_sequence_state_cannot_be_deleted",
+    )
+    .execute(&pool)
+    .await?;
+
+    let dispatcher = OutboxDispatcher::new(pool.clone());
+    assert!(matches!(
+        dispatcher
+            .dispatch_next(|_| panic!("exhausted delivery cannot offer an event"))
+            .await,
+        Err(OutboxDispatchError::Corruption(
+            OutboxCorruption::MissingSequenceState
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S24 / INV-032: independently valid same-session terminal identifiers do not
+/// form a dispatchable event unless they all describe the event's exact turn.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_inv032_dispatcher_rejects_crosswired_terminal_correlations()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = Uuid::from_u128(0x7e1);
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0x3e0, 0x7e1, direct(0x8e1)))
+        .await?;
+    let inputs = SubmitInputRepository::new(pool.clone());
+
+    let first_turn = Uuid::from_u128(0xae1);
+    inputs
+        .handle(
+            start_input(
+                0x3e1,
+                0x7e1,
+                "first failed turn",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x9e1)),
+            Some(TurnId::from_uuid(first_turn)),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session,
+            origin_entry: Uuid::from_u128(0xce1),
+            starting_frontier: Uuid::from_u128(0xde1),
+            initial_attempt: Uuid::from_u128(0xbe1),
+        },
+    )
+    .await?;
+    let mut first_scan = StartupScanService::new(
+        FixedStartupScanIds::new(
+            [SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xee1))],
+            [ContextFrontierId::from_uuid(Uuid::from_u128(0xfe1))],
+        ),
+        PostgresStartupScanRepository::new(pool.clone()),
+    );
+    assert_eq!(first_scan.execute().await?.recovered_turn_count(), 1);
+
+    let second_turn = Uuid::from_u128(0xae2);
+    inputs
+        .handle(
+            start_input(
+                0x3e2,
+                0x7e1,
+                "second failed turn",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x9e2)),
+            Some(TurnId::from_uuid(second_turn)),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session,
+            origin_entry: Uuid::from_u128(0xce2),
+            starting_frontier: Uuid::from_u128(0xde2),
+            initial_attempt: Uuid::from_u128(0xbe2),
+        },
+    )
+    .await?;
+    let mut second_scan = StartupScanService::new(
+        FixedStartupScanIds::new(
+            [SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xee2))],
+            [ContextFrontierId::from_uuid(Uuid::from_u128(0xfe2))],
+        ),
+        PostgresStartupScanRepository::new(pool.clone()),
+    );
+    assert_eq!(second_scan.execute().await?.recovered_turn_count(), 1);
+
+    let failures: Vec<(Decimal, Uuid, Uuid, Uuid)> = sqlx::query_as(
+        "SELECT event_sequence, turn_id, failure_entry_id, terminal_frontier_id
+           FROM turn_failed_outbox_event
+          WHERE session_id = $1
+          ORDER BY event_sequence",
+    )
+    .bind(session)
+    .fetch_all(&pool)
+    .await?;
+    let [first, second] = failures.as_slice() else {
+        return Err(std::io::Error::other("fixture did not produce two failures").into());
+    };
+    assert_eq!(first.1, first_turn);
+    assert_eq!(second.1, second_turn);
+
+    sqlx::query(
+        "ALTER TABLE turn_failed_outbox_event
+         DISABLE TRIGGER turn_failed_outbox_event_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query("DELETE FROM turn_failed_outbox_event WHERE event_sequence = $1")
+        .bind(second.0)
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE turn_failed_outbox_event
+            SET failure_entry_id = $1,
+                terminal_frontier_id = $2
+          WHERE event_sequence = $3",
+    )
+    .bind(second.2)
+    .bind(second.3)
+    .bind(first.0)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE turn_failed_outbox_event
+         ENABLE TRIGGER turn_failed_outbox_event_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE outbox_delivery_state
+         DISABLE TRIGGER outbox_delivery_advances_prefix",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE outbox_delivery_state
+            SET delivered_through = $1 - 1,
+                last_delivery_xid = pg_current_xact_id()
+          WHERE singleton",
+    )
+    .bind(first.0)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE outbox_delivery_state
+         ENABLE TRIGGER outbox_delivery_advances_prefix",
+    )
+    .execute(&pool)
+    .await?;
+
+    let dispatcher = OutboxDispatcher::new(pool.clone());
+    assert!(matches!(
+        dispatcher
+            .dispatch_next(|_| panic!("a cross-wired terminal event must not be offered"))
+            .await,
+        Err(OutboxDispatchError::Corruption(
+            OutboxCorruption::InvalidTerminalEventCorrelation
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S24 / INV-032: the dispatcher observes the allocator and candidate header in
 /// one statement snapshot, so an uncommitted allocation is idle rather than
 /// false committed-header corruption.
