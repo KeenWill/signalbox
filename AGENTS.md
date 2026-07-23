@@ -16,6 +16,12 @@ is its archive, and it is not citable as current authority. When selecting
 milestones, consult the priority order in `docs/target-model.md` — directional,
 never overriding the sources above.
 
+**Public-source hygiene.** Repository content — code, documentation, commit
+messages, pull-request text, branch names — cites only public sources. Never
+include or allude to non-public material — internal systems, documents, or
+vocabulary of any organization — regardless of origin. Citing public open-source
+work is fine regardless of publisher.
+
 **Working autonomously.** Within an assigned task, proceed without asking:
 branch, implement, run the validation sequence (it defines done for any code
 change), and open and revise pull requests. Stop only at owner gates — merges,
