@@ -4013,11 +4013,14 @@ fn reconstitute_active_acceptance_tail(
                 .get(&accepted_input)
                 .and_then(|successor| records_by_turn.get(successor))
                 .is_some_and(|successor| {
-                    expected_active_turn != active
-                        && scheduling_record_is_terminal(successor)
-                        && records_by_turn
-                            .get(&expected_active_turn)
-                            .is_some_and(|predecessor| scheduling_record_is_terminal(predecessor))
+                    historical_interrupt_matches_terminal_proof(
+                        session,
+                        active,
+                        expected_active_turn,
+                        accepted_input,
+                        successor,
+                        records_by_turn,
+                    )
                 })
         {
             return Err(
@@ -4070,6 +4073,61 @@ fn scheduling_record_is_terminal(record: &AcceptedInputTurnSchedulingRecord) -> 
             | AcceptedInputTurnSchedulingRecordState::TerminalCancelled { .. }
             | AcceptedInputTurnSchedulingRecordState::TerminalReconciliationRequired { .. }
     )
+}
+
+fn historical_interrupt_matches_terminal_proof(
+    session: SessionId,
+    active: TurnId,
+    expected_active_turn: TurnId,
+    accepted_input: AcceptedInputId,
+    successor: &AcceptedInputTurnSchedulingRecord,
+    records_by_turn: &BTreeMap<TurnId, &AcceptedInputTurnSchedulingRecord>,
+) -> bool {
+    expected_active_turn != active
+        && scheduling_record_is_terminal(successor)
+        && records_by_turn
+            .get(&expected_active_turn)
+            .filter(|predecessor| scheduling_record_is_terminal(predecessor))
+            .and_then(|predecessor| terminal_record_interrupt(predecessor))
+            .is_some_and(|interrupt| {
+                interrupt.session() == session
+                    && interrupt.proof().predecessor() == expected_active_turn
+                    && interrupt.accepted_input() == accepted_input
+                    && interrupt.successor() == successor.turn
+                    && interrupt.successor_order() == successor.order
+            })
+}
+
+fn terminal_record_interrupt(
+    record: &AcceptedInputTurnSchedulingRecord,
+) -> Option<AppliedInterruptCommandResult> {
+    match &record.state {
+        AcceptedInputTurnSchedulingRecordState::TerminalFailed {
+            terminal_execution: Some(execution),
+            ..
+        } => execution.attempt_end.interrupt(),
+        AcceptedInputTurnSchedulingRecordState::TerminalCompleted {
+            completing_attempt_end,
+            ..
+        } => completing_attempt_end.interrupt(),
+        AcceptedInputTurnSchedulingRecordState::TerminalRefused {
+            refusing_attempt_end,
+            ..
+        } => refusing_attempt_end.interrupt(),
+        AcceptedInputTurnSchedulingRecordState::TerminalCancelled {
+            terminal_execution, ..
+        } => Some(terminal_execution.interrupt),
+        AcceptedInputTurnSchedulingRecordState::TerminalReconciliationRequired {
+            interrupt,
+            ..
+        } => Some(*interrupt),
+        AcceptedInputTurnSchedulingRecordState::Queued
+        | AcceptedInputTurnSchedulingRecordState::Active { .. }
+        | AcceptedInputTurnSchedulingRecordState::TerminalFailed {
+            terminal_execution: None,
+            ..
+        } => None,
+    }
 }
 
 fn origin_delivery_matches_record(
@@ -5337,6 +5395,171 @@ mod tests {
         )
     }
 
+    fn active_input_after_historical_interrupt(
+        session: &Session,
+        predecessor: OriginFixture,
+        active: OriginFixture,
+        interrupt_successor: OriginFixture,
+    ) -> AcceptedInputSchedulingReconstitutionInput {
+        let predecessor_origin_entry = semantic_entry(20);
+        let predecessor_failure_entry = semantic_entry(21);
+        let interrupt_origin_entry = semantic_entry(22);
+        let interrupt_failure_entry = semantic_entry(23);
+        let active_origin_entry = semantic_entry(24);
+        let predecessor_starting_frontier = frontier(30);
+        let predecessor_terminal_frontier = frontier(31);
+        let interrupt_starting_frontier = frontier(32);
+        let interrupt_terminal_frontier = frontier(33);
+        let active_starting_frontier = frontier(34);
+        let interrupt_order = AcceptedInputQueueOrder::interrupt_immediately_after(
+            interrupt_successor.position(),
+            predecessor.turn(),
+        );
+        let interrupt = AppliedInterruptCommandResult::from_correlated_submit(
+            command_id(40),
+            session.id(),
+            predecessor.turn(),
+            interrupt_successor.accepted_input(),
+            interrupt_successor.turn(),
+            interrupt_order,
+        )
+        .expect("the historical interrupt is exactly correlated");
+        let active_delivery = DeliveryRequest::AfterCurrentTurn {
+            expected_active_turn: predecessor.turn(),
+            configuration: PerInputConfigurationChoices::new(
+                SessionConfigurationDefaultsVersion::first(),
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+        };
+        let interrupt_delivery = DeliveryRequest::Interrupt {
+            expected_active_turn: predecessor.turn(),
+            configuration: PerInputConfigurationChoices::new(
+                SessionConfigurationDefaultsVersion::first(),
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+        };
+
+        AcceptedInputSchedulingReconstitutionInput::new(
+            session.clone(),
+            vec![
+                predecessor.record(
+                    session,
+                    AcceptedInputTurnSchedulingRecordState::TerminalFailed {
+                        starting_lineage: AcceptedInputStartingLineage::FirstInSession,
+                        starting_frontier: predecessor_starting_frontier.id(),
+                        terminal_execution: Some(
+                            FailedTurnExecutionReconstitutionInput::attempt_only_after_cancellation(
+                                predecessor.turn(),
+                                turn_attempt_id(40),
+                                CancellationStopDisposition::KnownFailure,
+                                interrupt,
+                            ),
+                        ),
+                        terminal_frontier: predecessor_terminal_frontier.id(),
+                    },
+                ),
+                active.record_with(
+                    session,
+                    OriginRecordFacts {
+                        order: active.ordinary_order(),
+                        delivery: active_delivery,
+                        state: AcceptedInputTurnSchedulingRecordState::Active {
+                            starting_lineage: AcceptedInputStartingLineage::After {
+                                immediate_predecessor: interrupt_successor.turn(),
+                            },
+                            starting_frontier: active_starting_frontier.id(),
+                            phase: ActiveTurnSchedulingReconstitutionInput::prepared(
+                                active.turn(),
+                                turn_attempt_id(41),
+                            ),
+                        },
+                    },
+                ),
+                interrupt_successor.record_with(
+                    session,
+                    OriginRecordFacts {
+                        order: interrupt_order,
+                        delivery: interrupt_delivery,
+                        state: AcceptedInputTurnSchedulingRecordState::TerminalFailed {
+                            starting_lineage: AcceptedInputStartingLineage::After {
+                                immediate_predecessor: predecessor.turn(),
+                            },
+                            starting_frontier: interrupt_starting_frontier.id(),
+                            terminal_execution: None,
+                            terminal_frontier: interrupt_terminal_frontier.id(),
+                        },
+                    },
+                ),
+            ],
+            vec![
+                predecessor.entry(session, predecessor_origin_entry),
+                predecessor_failure_entry.failed_turn(session, predecessor),
+                interrupt_successor.entry(session, interrupt_origin_entry),
+                interrupt_failure_entry.failed_turn(session, interrupt_successor),
+                active.entry(session, active_origin_entry),
+            ],
+            vec![
+                predecessor_starting_frontier.snapshot(session, &[predecessor_origin_entry]),
+                predecessor_terminal_frontier.snapshot(
+                    session,
+                    &[predecessor_origin_entry, predecessor_failure_entry],
+                ),
+                interrupt_starting_frontier.snapshot(
+                    session,
+                    &[
+                        predecessor_origin_entry,
+                        predecessor_failure_entry,
+                        interrupt_origin_entry,
+                    ],
+                ),
+                interrupt_terminal_frontier.snapshot(
+                    session,
+                    &[
+                        predecessor_origin_entry,
+                        predecessor_failure_entry,
+                        interrupt_origin_entry,
+                        interrupt_failure_entry,
+                    ],
+                ),
+                active_starting_frontier.snapshot(
+                    session,
+                    &[
+                        predecessor_origin_entry,
+                        predecessor_failure_entry,
+                        interrupt_origin_entry,
+                        interrupt_failure_entry,
+                        active_origin_entry,
+                    ],
+                ),
+            ],
+            Some(SessionAcceptanceTailReconstitutionInput::new(
+                session.id(),
+                active.accepted_input(),
+                interrupt_successor.position(),
+                vec![
+                    SessionAcceptanceTailEntryReconstitutionInput::new(
+                        session.id(),
+                        AcceptedInputLifecycle::new(
+                            active.accepted_input(),
+                            AcceptedInputDisposition::OriginOf(active.turn()),
+                        ),
+                        active.position(),
+                        active_delivery,
+                    ),
+                    SessionAcceptanceTailEntryReconstitutionInput::new(
+                        session.id(),
+                        AcceptedInputLifecycle::new(
+                            interrupt_successor.accepted_input(),
+                            AcceptedInputDisposition::OriginOf(interrupt_successor.turn()),
+                        ),
+                        interrupt_successor.position(),
+                        interrupt_delivery,
+                    ),
+                ],
+            )),
+        )
+    }
+
     #[derive(Debug)]
     #[allow(
         dead_code,
@@ -6462,6 +6685,42 @@ mod tests {
             &AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
                 turn: origins.active.turn(),
                 accepted_input: origins.queued.accepted_input(),
+            }
+        );
+    }
+
+    /// S03 / S07 / INV-029 / INV-037: a historical interrupt in the active
+    /// acceptance tail retains the target terminal's exact stop proof.
+    #[test]
+    fn s03_s07_inv029_inv037_historical_interrupt_requires_target_stop_proof() {
+        let session = current_session();
+        let predecessor = accepted_origin(1);
+        let active = accepted_origin(2);
+        let interrupt_successor = accepted_origin(3);
+        let matching = active_input_after_historical_interrupt(
+            &session,
+            predecessor,
+            active,
+            interrupt_successor,
+        );
+        matching
+            .clone()
+            .reconstitute()
+            .expect("the exact historical interrupt proof remains admissible");
+
+        let mut missing_proof = matching;
+        let AcceptedInputTurnSchedulingRecordState::TerminalFailed {
+            terminal_execution, ..
+        } = &mut missing_proof.turns[0].state
+        else {
+            panic!("the historical target fixture is terminal failed");
+        };
+        *terminal_execution = None;
+        assert_eq!(
+            assert_input_rejects_unchanged(missing_proof),
+            AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
+                turn: active.turn(),
+                accepted_input: interrupt_successor.accepted_input(),
             }
         );
     }
