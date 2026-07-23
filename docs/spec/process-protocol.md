@@ -40,8 +40,8 @@ later request is read from that connection.
 Every client and server frame has these required top-level members:
 
 - `version`: JSON integer `1`;
-- `request_id`: a JSON integer in the unsigned 64-bit range, copied unchanged
-  into every response produced for that request;
+- `request_id`: the canonical decimal string of a nonzero unsigned 64-bit
+  integer, copied unchanged into every response produced for that request;
 - `request` on a client frame or `message` on a server frame: one closed tagged
   object described below.
 
@@ -50,8 +50,9 @@ and members with the wrong JSON type fail explicitly (INV-033). An unsupported
 `version` produces a version-one `unsupported_version` error naming the
 supported version, then the server closes the connection. A malformed frame
 whose request identity cannot be recovered produces an error with
-`request_id = 0`, which is reserved for that purpose. Each request identity must
-otherwise be nonzero.
+`request_id = "0"`, which is reserved for that purpose. Leading zeroes, a plus
+sign, whitespace, and any spelling other than the shortest ASCII decimal form
+are invalid.
 
 The server may close a connection after any error. Clients never reinterpret an
 unknown message as a known one.
@@ -101,9 +102,9 @@ that variant. Every accepted non-follow request produces exactly one of:
 - `error` with a stable `code` and a non-sensitive `message`.
 
 A session summary contains `session_id`, `defaults_version`, and
-`model_selection`. Identifiers are canonical UUID strings. Ordinal versions and
-outbox cursors are decimal strings, preserving their full unsigned 64-bit range
-without JSON-number precision loss.
+`model_selection`. Identifiers are canonical UUID strings. Request identities,
+ordinal versions, and outbox cursors are canonical decimal strings, preserving
+their full unsigned 64-bit range without JSON-number precision loss.
 
 The error-code set in version one is:
 
