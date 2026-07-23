@@ -43,7 +43,8 @@ const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_NAME: &str = "signalbox_process_runtime";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
-const OVERSIZED_SUBMITTED_INPUT_BYTES: usize = 1024 * 1024 + 1;
+const MAX_SUBMITTED_INPUT_BYTES: usize = 1024 * 1024;
+const OVERSIZED_SUBMITTED_INPUT_BYTES: usize = MAX_SUBMITTED_INPUT_BYTES + 1;
 const MODEL_CONFIGURATION: &str = r#"
 version = 1
 
@@ -239,7 +240,7 @@ async fn s24_process_runtime_serves_snapshot_first_follow_without_a_race()
             ClientRequest::SubmitInput {
                 command_id: command()?,
                 session_id,
-                content: InputContent::new("first input".to_owned()),
+                content: InputContent::new("x".repeat(MAX_SUBMITTED_INPUT_BYTES)),
                 expected_defaults_version: CanonicalU64::new(1),
             },
         )
@@ -285,7 +286,8 @@ async fn s24_process_runtime_serves_snapshot_first_follow_without_a_race()
                         },
                 } if *turn_id == first_turn
                     && acceptance_position.value() == 1
-                    && content.as_str() == "first input" =>
+                    && content.as_str().len() == MAX_SUBMITTED_INPUT_BYTES
+                    && content.as_str().bytes().all(|byte| byte == b'x') =>
                 {
                     saw_first_turn = true;
                 }
@@ -319,22 +321,10 @@ async fn s24_process_runtime_serves_snapshot_first_follow_without_a_race()
             return Err(io::Error::other(format!("unexpected follow start: {message:?}")).into());
         }
     };
-    timeout(Duration::from_secs(5), async {
-        loop {
-            if matches!(
-                follow.response().await?.message(),
-                ServerMessage::TranscriptSnapshotEnd {
-                    session_id: snapshot_session,
-                    cursor,
-                    ..
-                } if *snapshot_session == session_id && cursor.value() == follow_cursor
-            ) {
-                return Ok::<(), Box<dyn Error>>(());
-            }
-        }
-    })
-    .await??;
 
+    // The exact-limit queued content keeps the snapshot writer blocked after
+    // its start frame. Commit the next update before draining the snapshot so
+    // only a subscription formed before snapshot transmission can retain it.
     commands
         .request(
             6,
@@ -354,6 +344,22 @@ async fn s24_process_runtime_serves_snapshot_first_follow_without_a_race()
             ..
         } if *submitted_session == session_id && acceptance_position.value() == 2
     ));
+
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                follow.response().await?.message(),
+                ServerMessage::TranscriptSnapshotEnd {
+                    session_id: snapshot_session,
+                    cursor,
+                    ..
+                } if *snapshot_session == session_id && cursor.value() == follow_cursor
+            ) {
+                return Ok::<(), Box<dyn Error>>(());
+            }
+        }
+    })
+    .await??;
 
     let followed = timeout(Duration::from_secs(5), follow.response()).await??;
     assert!(matches!(
