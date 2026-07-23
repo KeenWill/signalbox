@@ -51,15 +51,50 @@ impl ProcessSessionSummary {
     }
 }
 
-/// Authoritative lifecycle state for one projected turn.
+/// Durable state of the current model call attached to an active turn.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessCurrentModelCallState {
+    /// Provider work has not been authorized.
+    Prepared,
+    /// Provider work was authorized and may have happened.
+    InFlight,
+}
+
+/// Current model call attached to the active turn attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProcessCurrentModelCall {
+    call: ModelCallId,
+    state: ProcessCurrentModelCallState,
+}
+
+impl ProcessCurrentModelCall {
+    /// Returns the current model-call identity.
+    pub const fn call(&self) -> ModelCallId {
+        self.call
+    }
+
+    /// Returns the exact durable call state.
+    pub const fn state(&self) -> ProcessCurrentModelCallState {
+        self.state
+    }
+}
+
+/// Authoritative lifecycle state for one projected turn.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProcessTurnState {
     /// Accepted work has not activated.
-    Queued,
+    Queued {
+        /// Accepted input that created the queued turn.
+        accepted_input: AcceptedInputId,
+        /// Exact accepted owner text.
+        content: String,
+    },
     /// The current attempt is running.
     ActiveRunning {
         /// Current live attempt.
         current_attempt: TurnAttemptId,
+        /// Current provider call, when one has been prepared or authorized.
+        current_model_call: Option<ProcessCurrentModelCall>,
     },
     /// The ended attempt is parked on an ambiguous model call.
     ActiveAwaitingModelCallRecovery {
@@ -94,7 +129,7 @@ pub enum ProcessTurnState {
 }
 
 /// One turn in acceptance order.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessTranscriptTurn {
     turn: TurnId,
     acceptance_position: u64,
@@ -113,8 +148,8 @@ impl ProcessTranscriptTurn {
     }
 
     /// Returns the authoritative lifecycle state.
-    pub const fn state(&self) -> ProcessTurnState {
-        self.state
+    pub const fn state(&self) -> &ProcessTurnState {
+        &self.state
     }
 }
 
@@ -360,20 +395,35 @@ impl ProcessReadRepository {
 
         let turn_rows = sqlx::query(
             "SELECT
-                turn_id,
-                acceptance_position,
-                state_kind,
-                starting_frontier_id,
-                terminal_frontier_id,
-                active_phase_kind,
-                current_attempt_id,
-                terminal_disposition_kind,
-                recovery_model_call_id,
-                terminal_attempt_id,
-                terminal_model_call_id
-               FROM turn_lifecycle
-              WHERE session_id = $1
-              ORDER BY acceptance_position",
+                turn.turn_id,
+                turn.acceptance_position,
+                turn.origin_accepted_input_id,
+                turn.state_kind,
+                turn.starting_frontier_id,
+                turn.terminal_frontier_id,
+                turn.active_phase_kind,
+                turn.current_attempt_id,
+                turn.terminal_disposition_kind,
+                turn.recovery_model_call_id,
+                turn.terminal_attempt_id,
+                turn.terminal_model_call_id,
+                accepted.accepted_input_id,
+                accepted.acceptance_position AS accepted_position,
+                accepted.origin_turn_id,
+                accepted.content_text AS accepted_content,
+                current_call.model_call_id AS current_model_call_id,
+                current_call.state_kind AS current_model_call_state_kind
+               FROM turn_lifecycle AS turn
+               LEFT JOIN accepted_input AS accepted
+                 ON accepted.accepted_input_id = turn.origin_accepted_input_id
+                AND accepted.session_id = turn.session_id
+               LEFT JOIN model_call AS current_call
+                 ON current_call.turn_attempt_id = turn.current_attempt_id
+                AND current_call.turn_id = turn.turn_id
+                AND current_call.session_id = turn.session_id
+                AND current_call.state_kind <> 'terminal'
+              WHERE turn.session_id = $1
+              ORDER BY turn.acceptance_position",
         )
         .bind(session_id_to_uuid(requested_session))
         .fetch_all(&mut *transaction)
@@ -444,6 +494,22 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         required(row, "acceptance_position")?,
         "turn acceptance position",
     )?;
+    let origin_accepted_input =
+        AcceptedInputId::from_uuid(required(row, "origin_accepted_input_id")?);
+    let accepted_input = AcceptedInputId::from_uuid(required(row, "accepted_input_id")?);
+    let accepted_position = decode_positive(
+        required(row, "accepted_position")?,
+        "accepted input position",
+    )?;
+    let accepted_origin = TurnId::from_uuid(required(row, "origin_turn_id")?);
+    let accepted_content: String = required(row, "accepted_content")?;
+    if origin_accepted_input != accepted_input
+        || accepted_position != acceptance_position
+        || accepted_origin != turn
+        || accepted_content.is_empty()
+    {
+        return Err(ProcessReadCorruption::Inconsistent("turn accepted-input correlation").into());
+    }
     let state_kind: String = required(row, "state_kind")?;
     let starting_frontier: Option<Uuid> = row.try_get("starting_frontier_id")?;
     let terminal_frontier: Option<Uuid> = row.try_get("terminal_frontier_id")?;
@@ -453,6 +519,8 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
     let recovery_call: Option<Uuid> = row.try_get("recovery_model_call_id")?;
     let terminal_attempt: Option<Uuid> = row.try_get("terminal_attempt_id")?;
     let terminal_call: Option<Uuid> = row.try_get("terminal_model_call_id")?;
+    let current_model_call: Option<Uuid> = row.try_get("current_model_call_id")?;
+    let current_model_call_state: Option<String> = row.try_get("current_model_call_state_kind")?;
 
     if !matches!(state_kind.as_str(), "queued" | "active" | "terminal") {
         return Err(ProcessReadCorruption::Unsupported {
@@ -479,6 +547,27 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         }
         .into());
     }
+    let current_model_call = match (current_model_call, current_model_call_state.as_deref()) {
+        (None, None) => None,
+        (Some(call), Some("prepared")) => Some(ProcessCurrentModelCall {
+            call: ModelCallId::from_uuid(call),
+            state: ProcessCurrentModelCallState::Prepared,
+        }),
+        (Some(call), Some("in_flight")) => Some(ProcessCurrentModelCall {
+            call: ModelCallId::from_uuid(call),
+            state: ProcessCurrentModelCallState::InFlight,
+        }),
+        (Some(_), Some(value)) => {
+            return Err(ProcessReadCorruption::Unsupported {
+                field: "current model call state",
+                value: value.to_owned(),
+            }
+            .into());
+        }
+        _ => {
+            return Err(ProcessReadCorruption::Inconsistent("current model call shape").into());
+        }
+    };
 
     let (state, latest_frontier) = match (
         state_kind.as_str(),
@@ -490,10 +579,15 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         recovery_call,
         terminal_attempt,
         terminal_call,
+        current_model_call,
     ) {
-        ("queued", None, None, None, None, None, None, None, None) => {
-            (ProcessTurnState::Queued, None)
-        }
+        ("queued", None, None, None, None, None, None, None, None, None) => (
+            ProcessTurnState::Queued {
+                accepted_input,
+                content: accepted_content,
+            },
+            None,
+        ),
         (
             "active",
             Some(frontier),
@@ -504,9 +598,11 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
             None,
             None,
             None,
+            current_model_call,
         ) => (
             ProcessTurnState::ActiveRunning {
                 current_attempt: TurnAttemptId::from_uuid(attempt),
+                current_model_call,
             },
             Some(ContextFrontierId::from_uuid(frontier)),
         ),
@@ -520,6 +616,7 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
             Some(call),
             None,
             None,
+            None,
         ) => (
             ProcessTurnState::ActiveAwaitingModelCallRecovery {
                 ended_attempt: TurnAttemptId::from_uuid(attempt),
@@ -527,13 +624,35 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
             },
             Some(ContextFrontierId::from_uuid(frontier)),
         ),
-        ("terminal", Some(_), Some(frontier), None, None, Some("failed"), None, None, None) => (
+        (
+            "terminal",
+            Some(_),
+            Some(frontier),
+            None,
+            None,
+            Some("failed"),
+            None,
+            None,
+            None,
+            None,
+        ) => (
             ProcessTurnState::Failed {
                 terminal_frontier: ContextFrontierId::from_uuid(frontier),
             },
             Some(ContextFrontierId::from_uuid(frontier)),
         ),
-        ("terminal", Some(_), Some(frontier), None, None, Some("failed"), None, Some(_), _) => (
+        (
+            "terminal",
+            Some(_),
+            Some(frontier),
+            None,
+            None,
+            Some("failed"),
+            None,
+            Some(_),
+            _,
+            None,
+        ) => (
             ProcessTurnState::Failed {
                 terminal_frontier: ContextFrontierId::from_uuid(frontier),
             },
@@ -549,6 +668,7 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
             None,
             Some(attempt),
             Some(call),
+            None,
         ) => (
             ProcessTurnState::Completed {
                 terminal_frontier: ContextFrontierId::from_uuid(frontier),
@@ -567,6 +687,7 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
             None,
             Some(attempt),
             Some(call),
+            None,
         ) => (
             ProcessTurnState::Refused {
                 terminal_frontier: ContextFrontierId::from_uuid(frontier),
