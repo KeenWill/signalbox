@@ -108,9 +108,12 @@ projects the exact frontier order into provider-neutral messages:
   input's checked content;
 - `AssistantText` renders as an assistant message retaining its producing-call
   provenance;
-- `ImportedText` renders with its imported user or assistant speaker and exact
-  checked text, retaining the imported-entry reference rather than a native
+- imported `Text` renders with its imported user or assistant speaker and exact
+  decoded text, retaining the imported-entry reference rather than a native
   accepted-input or producing-call identity;
+- imported `SourceEvent`, `MessageContentAbsent`, `ToolCall`, `ToolResult`,
+  `Thinking`, `RedactedThinking`, and `Document` entries are skipped by the
+  first conservative renderer while remaining in the exact context frontier;
 - `TurnFailed`, `TurnCompleted`, and `TurnCancelled` markers are skipped — they
   delimit history and carry no model-visible content;
 - `AssistantToolUse` fails closed (operator error) until the reserved tool
@@ -123,6 +126,16 @@ itself, never from turn grouping; imported record is never flattened into native
 execution evidence (INV-038). The runtime bridge then maps these to provider
 wire messages; provider types never cross the application boundary (INV-002;
 layering rules in [runtime-substrate](runtime-substrate.md)).
+
+Why imported non-text is initially skipped: source administrative events and
+content absence are not conversational messages; emitting an imported tool call
+or result through the native tool-message vocabulary would imply Signalbox-owned
+tool identities and execution evidence that do not exist; exposing imported
+thinking would reveal source-private reasoning; and the provider-neutral request
+has no admitted media projection. Skipping affects only model visibility. It
+does not remove, rewrite, summarize, or reorder the semantic entries or their
+addressable imported frontier. A richer projection requires a later foundation
+decision.
 
 ## Staged execution
 
@@ -432,6 +445,9 @@ prints the semantic transcript; it is deliberately not the client protocol.
   an open edge in [sessions-and-transcript](sessions-and-transcript.md).
 - `AssistantToolUse` construction is schema-blocked pending the reserved tool
   decisions.
+- Imported source-event, absence, and non-text entries remain model-invisible
+  under the conservative projection; richer rendering is routed through
+  [conversation-import](conversation-import.md).
 - Same-incarnation retained-evidence reconciliation gets exactly one production
   pass (`reconcile_retained_once`) before fatal escalation; repeated
   same-incarnation drains are exercised only by tests.
