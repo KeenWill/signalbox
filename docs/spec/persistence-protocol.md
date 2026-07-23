@@ -1,16 +1,17 @@
 # Persistence protocol
 
 The baseline persistence protocol was verified through PR #175
-(`agent/stop-requests`); imported-conversation and seed-session storage specify
-the implementing stack rooted at `agent/conversation-import-spec`. This page
-covers the Postgres representation in `crates/persistence` (source and
-migrations), migration discipline, durable command storage and replay equality,
-the fail-closed reconstitution boundary, the lock protocol, pending-steering
-durable state, the corruption taxonomy, commit-ambiguity handling, and the
-transactional outbox. Session aggregate semantics live in
-[sessions-and-transcript](sessions-and-transcript.md), turn and attempt
-lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
-identity kinds and command construction in
+(`agent/stop-requests`); imported-conversation and imported-frontier session
+storage specify the implementing stack rooted at
+`agent/conversation-import-spec`. This page covers the Postgres representation
+in `crates/persistence` (source and migrations), migration discipline, durable
+command storage and replay equality, the fail-closed reconstitution boundary,
+the lock protocol, pending-steering durable state, the corruption taxonomy,
+commit-ambiguity handling, and the transactional outbox. Session aggregate
+semantics live in [sessions-and-transcript](sessions-and-transcript.md), turn
+and attempt lifecycle in
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), identity
+kinds and command construction in
 [identity-and-commands](identity-and-commands.md), and runtime wiring in
 [runtime-substrate](runtime-substrate.md). Invariant text is normative in
 [docs/invariants.md](../invariants.md); this page cites rows by tag.
@@ -78,13 +79,14 @@ projection code.
 Implemented table families (across the forward-only migrations):
 
 - `durable_command` plus typed command records (`create_session_command`,
-  `seed_session_from_import_command`, `replace_session_defaults_command`,
-  `submit_input_command`);
+  `create_session_from_imported_frontier_command`,
+  `replace_session_defaults_command`, `submit_input_command`);
 - `session`, `session_defaults_version`, `session_current_defaults`,
   `session_scheduler`;
-- `imported_conversation` and `imported_transcript_entry`, whose exact
-  append-only representation and completeness rules are owned by
-  [conversation-import](conversation-import.md);
+- `imported_raw_source_record`, `imported_conversation`,
+  `imported_conversation_raw_record`, and `imported_transcript_entry`, whose
+  exact append-only representation, idempotency, and completeness rules are
+  owned by [conversation-import](conversation-import.md);
 - `accepted_input`, `queued_input_origin`, `turn_lifecycle`, `turn_attempt`;
 - `model_call` (execution state owned by
   [model-call-execution](model-call-execution.md), its turn-level
@@ -108,14 +110,15 @@ Representation rules, all enforced in the schema:
   dispositions `completed`/`known_failed`/`refused`/`cancelled`/`ambiguous`.
 - Immutable fact tables carry `BEFORE UPDATE OR DELETE` triggers that raise
   (`reject_immutable_record_change`), making append-only a database property,
-  not a convention. This includes imported-conversation headers and members,
-  seed-command records, session seed projections, and every existing historical
-  fact. Mutable lifecycle tables carry guard triggers instead: `turn_lifecycle`
-  rows must be inserted `queued`, transition only monotonically, keep
-  identity/origin/order and written starts write-once, and become immutable at
-  `terminal`; `turn_attempt` rows are inserted `prepared` and an `ended` attempt
-  is immutable. Why: restart trusts durable rows as evidence, so the schema
-  itself must forbid rewriting them (INV-006, INV-007).
+  not a convention. This includes raw-record blobs and occurrences,
+  imported-conversation headers and members, imported-frontier command records,
+  session seed projections, and every existing historical fact. Mutable
+  lifecycle tables carry guard triggers instead: `turn_lifecycle` rows must be
+  inserted `queued`, transition only monotonically, keep identity/origin/order
+  and written starts write-once, and become immutable at `terminal`;
+  `turn_attempt` rows are inserted `prepared` and an `ended` attempt is
+  immutable. Why: restart trusts durable rows as evidence, so the schema itself
+  must forbid rewriting them (INV-006, INV-007).
 - INV-009 is database-level: partial unique indexes
   `turn_lifecycle_one_active_per_session`, `turn_attempt_one_live_per_turn`, and
   `turn_attempt_one_initial_per_turn` reject a second active turn, second live
@@ -149,10 +152,11 @@ Representation rules, all enforced in the schema:
   claimed registry row has exactly one typed command record, each
   `submit_input_command` terminal result correlates with exactly its committed
   effects, each imported-conversation and context-frontier header has complete
-  contiguous ordered membership, each import-seeded session names its exact
-  imported aggregate and seed frontier, and turn/attempt/semantic-entry writes
-  re-assert the complete turn final state (origin entry, frontier prefix
-  relationships, live-attempt cardinality, failure-entry correlation).
+  contiguous ordered membership, each imported-frontier session names its exact
+  aggregate, boundary, relationship, and seed frontier, and
+  turn/attempt/semantic-entry writes re-assert the complete turn final state
+  (origin entry, frontier prefix relationships, live-attempt cardinality,
+  failure-entry correlation).
 - Accepted user text is bounded to 1 MiB of UTF-8 in both the command record and
   `accepted_input` (`octet_length(convert_to(...))` checks), independent of the
   application admission bound.
@@ -174,15 +178,16 @@ states only their storage representation and adapter mechanics.
 One append-only, owner-global `durable_command` registry claims every command
 identifier: `command_id` is the primary key across all kinds and sessions
 (INV-012), with a `CHECK`-closed kind set (`create_session`,
-`seed_session_from_import`, `replace_session_defaults`, `submit_input`) and a
-kind-scoped `storage_version`. Each kind has one typed subordinate record keyed
-by `command_id` that stores every caller-supplied semantic field in typed,
-`CHECK`-constrained columns, plus the terminal `applied`/`rejected` result and
-its typed result fields; result-shape `CHECK` constraints tie each rejection
-kind to exactly its fields, and deferred reverse constraints require exactly one
-typed record per claimed registry row at commit. Why: typed per-kind records
-keep replay semantics reviewable and constraint-checked, where a universal
-serialized payload would make the serializer a second semantic authority.
+`create_session_from_imported_frontier`, `replace_session_defaults`,
+`submit_input`) and a kind-scoped `storage_version`. Each kind has one typed
+subordinate record keyed by `command_id` that stores every caller-supplied
+semantic field in typed, `CHECK`-constrained columns, plus the terminal
+`applied`/`rejected` result and its typed result fields; result-shape `CHECK`
+constraints tie each rejection kind to exactly its fields, and deferred reverse
+constraints require exactly one typed record per claimed registry row at commit.
+Why: typed per-kind records keep replay semantics reviewable and
+constraint-checked, where a universal serialized payload would make the
+serializer a second semantic authority.
 
 Adapter mechanics behind the shared protocol: registry inspection is the first
 durable operation, before any current-state read, and an unseen identifier is
@@ -423,8 +428,8 @@ unrepresentable.
 - Attempt continuation is deliberately blocked: a `turn_attempt` with a
   predecessor is rejected (`turn_attempt_continuation_unavailable`) until
   durable wait/closure storage exists.
-- Frontier lineage checks assume `none` ancestry; fork ancestry must replace
-  that assumption.
+- Frontier lineage checks admit `none` and checked imported-frontier ancestry;
+  native `SingleSource` fork ancestry remains unimplemented.
 - The designed aggregate-map rows for model calls landed (`model_call`, the
   turn-level target pin, the pinned credential reference); provider evidence,
   authority transfers, fatal cancellation intent, and tool tables are not yet in

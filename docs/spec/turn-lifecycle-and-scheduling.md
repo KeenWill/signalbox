@@ -149,9 +149,9 @@ queued turn, and constructs atomically-committable state:
   immediately before it;
 - the starting context frontier: the predecessor's terminal frontier with the
   fresh origin semantic entry appended (prefix-preserving); for a
-  first-in-session turn, the session's exact imported seed frontier followed by
-  the origin entry when ancestry is `ImportedConversation`, or only the origin
-  entry when ancestry is `None`;
+  first-in-session turn, the session's exact selected imported-prefix frontier
+  followed by the origin entry when ancestry is `ImportedConversation`, or only
+  the origin entry when ancestry is `None`;
 - the opaque `AcceptedInputTurnStart` binding lineage and frontier, whose
   constructor is private to validated eligibility (INV-009 — a raw identifier or
   list supplied by a caller is not start authority); and
@@ -160,14 +160,15 @@ queued turn, and constructs atomically-committable state:
 `SingleSource` native-fork ancestry remains unschedulable and fails
 reconstitution with `UnsupportedSessionAncestry`. Imported ancestry is admitted
 only with its complete seed projection: reconstitution requires that the seed
-frontier belongs to the current session and contains exactly the seed-included
-`ImportedText` entries from the named imported conversation in strict imported
-position order. No seed entry may carry native accepted-input, turn, attempt, or
-call evidence (INV-038, INV-039).
+frontier belongs to the current session and contains exactly one `Imported`
+semantic entry for every normalized imported position from one through the
+selected addressable boundary. No seed entry may carry native accepted-input,
+turn, attempt, call, or tool evidence (INV-038, INV-039).
 
 Imported ancestry does not alter lifecycle order, eligibility, slot ownership,
-or lineage. The first native turn is still `FirstInSession`; imported entries
-are a context prefix, not a synthetic predecessor turn.
+or lineage. Its resume/fork relationship is immutable creation provenance, not a
+scheduler mode. The first native turn is still `FirstInSession`; imported
+entries are a context prefix, not a synthetic predecessor turn.
 
 ## The activation transaction
 
@@ -466,7 +467,7 @@ over the shared pool; no shared locked service instance exists.
 - Native `SingleSource` ancestry remains unschedulable
   (`UnsupportedSessionAncestry`); selecting and resolving native fork boundaries
   is unimplemented. Imported-conversation ancestry has its own exact
-  seed-frontier path and does not close that fork question.
+  selected-prefix frontier path and does not close that fork question.
 - Continuation safe points after a call or tool result are not implemented; the
   current execution slice consumes steering only while preparing its one initial
   call. Source terminalization and evidence-free startup recovery reclassify any

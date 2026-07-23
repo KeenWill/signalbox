@@ -15,35 +15,42 @@ recorded here (see `AGENTS.md`). Unresolved questions live in
 **Context.** External AI transcripts need to become durable Signalbox history
 without claiming that Signalbox accepted their input or authorized, attempted,
 or observed their model and tool effects. Claude Code session JSONL contains
-non-message records, optional metadata, sidechains, content blocks, and tool
-traffic, and later source formats must not leak their wire quirks into the
-domain or Postgres boundary.
+non-message records, optional metadata, sidechains, text-only vintages,
+structured tool traffic, thinking, and media. Import must be safe to rerun
+without deciding whether, where, or how a future session uses the record.
 
 **Decision.** Adopt the immutable imported-conversation aggregate,
-format-versioned edge-converter seam, exact per-entry source attestations, and
-import-seeded session path specified by
+format-versioned edge-converter seam, exact per-field source attestations,
+content-addressed verbatim raw records, source-neutral maximum-fidelity
+normalization of message content and non-message source events, and later
+session creation from any imported entry boundary as specified by
 [conversation-import](spec/conversation-import.md) and
-[sessions-and-transcript](spec/sessions-and-transcript.md). Imported semantic
-entries remain provenance-distinct from native evidence. Claude Code converter
-version 1 preserves user/assistant text in physical file/block order; records
-source metadata as attested, explicitly absent, or unattested; retains
-sidechain/meta text but excludes it from model seed context; and records tool,
-tool-result, thinking, and redacted-thinking blocks as typed unavailable
-content, never summaries. A seed command atomically creates a session whose
-ancestry names the import and whose first native frontier extends the exact seed
-projection.
+[sessions-and-transcript](spec/sessions-and-transcript.md). SHA-256, supplied by
+the narrow `sha2` dependency, keys raw-record deduplication and a
+domain-separated, length-framed source digest makes exact reingestion
+idempotent. Import is pure ingestion: resume-style or fork-style selection is a
+later client-invoked session-creation fact. Both select any addressable imported
+frontier and leave the imported snapshot unchanged. Imported semantic entries
+remain provenance-distinct from native evidence. Initial rendering emits exact
+imported user/assistant text and conservatively omits imported tool, result,
+thinking, and media entries without removing them from the frontier.
 
 **Rejected alternatives.** Replaying imports as native turns or copying them
 into native accepted-input/model-call variants would fabricate execution
-evidence. Storing only a raw blob would leave no checked seed projection.
-Flattening missing metadata, repairing parent chains, or summarizing tool
-traffic would invent facts. Folding source-specific JSON into the domain or
-store would make every later format a schema-wide concern.
+evidence. Import-time `import_only`/`adopt_resume`/`adopt_fork` coupling would
+make ingestion choose one future use and one session too early. Normalized-only
+storage would make converter omissions unrecoverable; raw-only storage would
+leave no checked frontier. Flattening absence, repairing parent chains,
+discarding tool/thinking/media payloads, or rendering them as native tool
+traffic would invent or lose facts. Provider JSON in the domain would make every
+later format a schema-wide concern. Non-cryptographic or unframed hashes would
+provide weaker collision and concatenation boundaries.
 
 **Affects.** S28; INV-001/INV-002/INV-003/INV-005/INV-038/INV-039; conversation
-import, session ancestry and creation, semantic entries, first native frontier,
+ingestion and idempotency, raw-record storage, imported frontier selection,
+session ancestry and creation, semantic entries, first native frontier,
 model-input rendering, append-only Postgres storage, the domain/application
-spines, and the offline scripted-model integration path. Native turn lifecycle,
+spines, and opt-in content-silent real-transcript validation. Native lifecycle,
 slot locking, execution evidence, retry, and outbox semantics do not change.
 
 ## 2026-07-23 — Poll durable model-call cancellation every 25 milliseconds
