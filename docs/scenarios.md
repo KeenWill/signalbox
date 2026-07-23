@@ -74,9 +74,11 @@ those tests.
   with exactly one current attempt → terminal/completed only after the call is
   classified and the attempt ends; model call prepared → in flight →
   terminal/completed.
-- **Transient updates:** Version one relays durable progress events and replaces
-  them with final content from an authoritative snapshot. Provider token deltas
-  remain a future replaceable-draft extension.
+- **Transient updates:** Client presentation follows the durable-update and
+  authoritative-replacement contract in
+  [process-protocol](spec/process-protocol.md#follow-synchronization).
+  Provider-token relay remains
+  [open](open-questions.md#protocols-and-persistence).
 - **Owning component:** The hub resolves and calls the provider; Postgres owns
   durable provenance and final content; clients render drafts.
 - **Failure behavior:** A client disconnect does not cancel the call.
@@ -764,7 +766,8 @@ those tests.
 - **Durable commands:** The server subscribes to process-local fan-out before
   reading an authoritative repeatable-read snapshot of transcript entries, turn
   states, and the outbox cursor, then sends matching events above that cursor;
-  no new logical work is created merely by reconnecting.
+  no new logical work is created merely by reconnecting
+  ([follow synchronization](spec/process-protocol.md#follow-synchronization)).
 - **State transitions:** Client disconnected → synchronized snapshot → live
   observer; server-side turn remains unchanged.
 - **Transient updates:** Previously seen draft may be replaced. Version one
@@ -777,13 +780,12 @@ those tests.
   finished or refused while disconnected, terminal turn state in the snapshot
   prevents a waiter from depending on an already-covered event. Large
   transcripts arrive as validated bounded frames; a partial sequence is never
-  authoritative. Final durable content replaces any draft.
+  authoritative. Final durable content replaces any draft
+  ([process protocol](spec/process-protocol.md#transcript-snapshots)).
 - **Required invariants:** INV-005, INV-012, INV-032, INV-033.
-- **Remaining questions:** Transient-delta sequencing, checkpointing, browser
-  transport, and compatibility beyond exact version one remain
-  [open](open-questions.md#protocols-and-persistence). The retired protocol
-  designs carry no current authority; event retention remains open in
-  [persistence-protocol](spec/persistence-protocol.md).
+- **Remaining questions:** Transient updates, retention, later compatibility,
+  and browser transport remain
+  [open](open-questions.md#protocols-and-persistence).
 
 ## S25 — Archive and restore a session
 
