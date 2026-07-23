@@ -5,7 +5,12 @@
     reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
 )]
 
-use std::{collections::VecDeque, error::Error, future::Future, sync::Arc};
+use std::{
+    collections::VecDeque,
+    error::Error,
+    future::Future,
+    sync::{Arc, Mutex},
+};
 
 use rust_decimal::Decimal;
 use signalbox_application::{
@@ -45,6 +50,9 @@ use signalbox_persistence::{
     local_test_connection_options, migrate,
     model_execution::{
         ModelCallRepositoryError, PostgresModelCallRepository, PrepareInitialModelCallOutcome,
+    },
+    outbox::{
+        OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
     },
     replace_session_defaults::{
         ReplaceSessionDefaultsCorruption, ReplaceSessionDefaultsHandlingOutcome,
@@ -10612,6 +10620,140 @@ async fn s24_inv032_outbox_delivery_prefix_is_stable() -> Result<(), Box<dyn Err
     assert_eq!(first_sequence, Decimal::ONE);
     assert_eq!(second_sequence, Decimal::from(2));
     assert_eq!(undelivered_suffix, vec![second_sequence]);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S24 / INV-032: the production dispatcher offers one exact next event before
+/// advancing the locked durable prefix. Consumer retry and an injected deferred
+/// commit failure after the offer both roll the prefix back, so restart offers
+/// the same cursor again before the later committed event.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_inv032_dispatcher_redelivers_after_cursor_commit_failure_in_order()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let first_session = insert_outbox_session_fixture(&pool, 0xe17).await?;
+    let second_session = insert_outbox_session_fixture(&pool, 0xe18).await?;
+    for session in [first_session, second_session] {
+        let mut transaction = pool.begin().await?;
+        append_session_created_test_event(&mut transaction, session).await?;
+        transaction.commit().await?;
+    }
+    sqlx::query(
+        "CREATE FUNCTION fail_test_outbox_delivery_commit()
+         RETURNS trigger
+         LANGUAGE plpgsql
+         AS $$
+         BEGIN
+             RAISE EXCEPTION 'injected delivery cursor commit failure'
+                 USING ERRCODE = '40001';
+         END;
+         $$",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "CREATE CONSTRAINT TRIGGER zz_test_fail_outbox_delivery_commit
+         AFTER UPDATE ON outbox_delivery_state
+         DEFERRABLE INITIALLY DEFERRED
+         FOR EACH ROW
+         EXECUTE FUNCTION fail_test_outbox_delivery_commit()",
+    )
+    .execute(&pool)
+    .await?;
+
+    let dispatcher = OutboxDispatcher::new(pool.clone());
+    let offered = Arc::new(Mutex::new(Vec::new()));
+    let retry_offer = Arc::clone(&offered);
+    assert_eq!(
+        dispatcher
+            .dispatch_next(move |event| {
+                retry_offer
+                    .lock()
+                    .expect("offer log lock")
+                    .push((event.sequence(), event.session().into_uuid()));
+                OutboxDeliveryDecision::Retry
+            })
+            .await?,
+        OutboxDispatchOutcome::Retry { sequence: 1 }
+    );
+    let first_offer = Arc::clone(&offered);
+    assert!(matches!(
+        dispatcher
+            .dispatch_next(move |event| {
+                first_offer
+                    .lock()
+                    .expect("offer log lock")
+                    .push((event.sequence(), event.session().into_uuid()));
+                OutboxDeliveryDecision::Delivered
+            })
+            .await,
+        Err(OutboxDispatchError::Database(_))
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, Decimal>(
+            "SELECT delivered_through
+               FROM outbox_delivery_state
+              WHERE singleton",
+        )
+        .fetch_one(&pool)
+        .await?,
+        Decimal::ZERO
+    );
+
+    sqlx::query(
+        "DROP TRIGGER zz_test_fail_outbox_delivery_commit
+            ON outbox_delivery_state",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query("DROP FUNCTION fail_test_outbox_delivery_commit()")
+        .execute(&pool)
+        .await?;
+
+    for expected in [1, 2] {
+        let next_offer = Arc::clone(&offered);
+        assert_eq!(
+            dispatcher
+                .dispatch_next(move |event| {
+                    next_offer
+                        .lock()
+                        .expect("offer log lock")
+                        .push((event.sequence(), event.session().into_uuid()));
+                    OutboxDeliveryDecision::Delivered
+                })
+                .await?,
+            OutboxDispatchOutcome::Delivered { sequence: expected }
+        );
+    }
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+            .await?,
+        OutboxDispatchOutcome::Idle
+    );
+    assert_eq!(
+        offered.lock().expect("offer log lock").as_slice(),
+        [
+            (1, first_session),
+            (1, first_session),
+            (1, first_session),
+            (2, second_session)
+        ]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Decimal>(
+            "SELECT delivered_through
+               FROM outbox_delivery_state
+              WHERE singleton",
+        )
+        .fetch_one(&pool)
+        .await?,
+        Decimal::from(2)
+    );
 
     pool.close().await;
     drop(container);
