@@ -2677,9 +2677,12 @@ fn reconstitute_inner(
                                 )
                                 | (
                                     StoredActiveTurnPhase::Running,
-                                    crate::ModelCallReconstitutionState::InFlight
-                                    | crate::ModelCallReconstitutionState::CancellationRequested,
+                                    crate::ModelCallReconstitutionState::InFlight,
                                 ) => true,
+                                (
+                                    StoredActiveTurnPhase::StopRequested { call, .. },
+                                    crate::ModelCallReconstitutionState::CancellationRequested,
+                                ) => call == model_call.id(),
                                 (
                                     StoredActiveTurnPhase::AwaitingModelCallRecovery {
                                         call, ..
@@ -2731,6 +2734,29 @@ fn reconstitute_inner(
                             && model_call.state()
                                 == crate::ModelCallReconstitutionState::Terminal(
                                     ModelCallDisposition::Refused,
+                                )
+                    }
+                    AcceptedInputTurnSchedulingRecordState::TerminalCancelled {
+                        terminal_execution,
+                        ..
+                    } => {
+                        model_call.attempt() == terminal_execution.ended_attempt
+                            && terminal_execution.ended_call == Some(model_call.id())
+                            && model_call.state()
+                                == crate::ModelCallReconstitutionState::Terminal(
+                                    ModelCallDisposition::Cancelled,
+                                )
+                    }
+                    AcceptedInputTurnSchedulingRecordState::TerminalReconciliationRequired {
+                        reconciling_attempt,
+                        ambiguous_call,
+                        ..
+                    } => {
+                        model_call.attempt() == *reconciling_attempt
+                            && model_call.id() == *ambiguous_call
+                            && model_call.state()
+                                == crate::ModelCallReconstitutionState::Terminal(
+                                    ModelCallDisposition::Ambiguous,
                                 )
                     }
                 };
@@ -2796,6 +2822,12 @@ fn reconstitute_inner(
                 starting_frontier, ..
             }
             | AcceptedInputTurnSchedulingRecordState::TerminalRefused {
+                starting_frontier, ..
+            }
+            | AcceptedInputTurnSchedulingRecordState::TerminalCancelled {
+                starting_frontier, ..
+            }
+            | AcceptedInputTurnSchedulingRecordState::TerminalReconciliationRequired {
                 starting_frontier, ..
             } => Some(starting_frontier),
         };
@@ -3115,7 +3147,6 @@ fn reconstitute_inner(
                         },
                     );
                 }
-                let mut terminal_call_frontier = None;
                 let start = validate_start(
                     index,
                     turn,
@@ -3126,6 +3157,7 @@ fn reconstitute_inner(
                     &snapshots,
                     &mut referenced_snapshots,
                 )?;
+                let mut source_frontier = *starting_frontier;
                 if let Some(execution) = terminal_execution {
                     let attempt = execution.ended_attempt;
                     if execution.owning_turn != turn {
@@ -3178,16 +3210,31 @@ fn reconstitute_inner(
                                 },
                             );
                         };
+                        let call_disposition_matches = match execution.attempt_end.end() {
+                            AttemptEnd::WithoutStop {
+                                disposition: UnstoppedAttemptDisposition::KnownFailure,
+                            } => matches!(
+                                call.disposition(),
+                                ModelCallDisposition::KnownFailed | ModelCallDisposition::Cancelled
+                            ),
+                            AttemptEnd::WithoutStop {
+                                disposition: UnstoppedAttemptDisposition::Lost,
+                            }
+                            | AttemptEnd::AfterCancellation {
+                                disposition: CancellationStopDisposition::KnownFailure,
+                                ..
+                            } => call.disposition() == ModelCallDisposition::KnownFailed,
+                            AttemptEnd::WithoutStop { .. }
+                            | AttemptEnd::AfterCancellation { .. }
+                            | AttemptEnd::AfterFatalMismatch { .. } => false,
+                        };
                         if call.turn() != turn
                             || call.attempt() != attempt
                             || call.selection() != *record.origin_configuration.effective().model()
                             || call.target() != pinned.target()
                             || (call.frontier().snapshot() != *starting_frontier
                                 && !referenced_model_calls.contains(&call_id))
-                            || !matches!(
-                                call.disposition(),
-                                ModelCallDisposition::KnownFailed | ModelCallDisposition::Cancelled
-                            )
+                            || !call_disposition_matches
                         {
                             return Err(
                                 AcceptedInputSchedulingReconstitutionFailure::TerminalModelCallMismatch {
@@ -3195,9 +3242,22 @@ fn reconstitute_inner(
                                 },
                             );
                         }
-                        terminal_call_frontier = Some(call.frontier().snapshot());
+                        source_frontier = call.frontier().snapshot();
+                        if source_frontier != *starting_frontier {
+                            referenced_snapshots.insert(source_frontier);
+                        }
                         referenced_model_calls.insert(call_id);
                     }
+                }
+                let source = snapshots.get(&source_frontier).ok_or(
+                    AcceptedInputSchedulingReconstitutionFailure::StartingSnapshotMissing { turn },
+                )?;
+                if !snapshots[starting_frontier].is_semantic_prefix_of(source) {
+                    return Err(
+                        AcceptedInputSchedulingReconstitutionFailure::TerminalModelCallMismatch {
+                            turn,
+                        },
+                    );
                 }
                 let terminal = snapshots.get(terminal_frontier).cloned().ok_or(
                     AcceptedInputSchedulingReconstitutionFailure::TerminalSnapshotMissing { turn },
@@ -3212,14 +3272,7 @@ fn reconstitute_inner(
                 let failed_entry = failure_by_turn.get(&turn).copied().ok_or(
                     AcceptedInputSchedulingReconstitutionFailure::MissingFailureEntry { turn },
                 )?;
-                let mut expected = terminal_call_frontier.map_or_else(
-                    || start_snapshot_entries(&snapshots, start),
-                    |call_frontier| {
-                        snapshots[&call_frontier]
-                            .ordered_entries()
-                            .collect::<Vec<_>>()
-                    },
-                );
+                let mut expected = source.ordered_entries().collect::<Vec<_>>();
                 expected.push(failed_entry);
                 if terminal.ordered_entries().ne(expected.iter().copied()) {
                     return Err(
@@ -3302,6 +3355,20 @@ fn reconstitute_inner(
                         },
                     );
                 }
+                let source_frontier = call.frontier().snapshot();
+                if source_frontier != *starting_frontier {
+                    referenced_snapshots.insert(source_frontier);
+                }
+                let source = snapshots.get(&source_frontier).ok_or(
+                    AcceptedInputSchedulingReconstitutionFailure::StartingSnapshotMissing { turn },
+                )?;
+                if !snapshots[starting_frontier].is_semantic_prefix_of(source) {
+                    return Err(
+                        AcceptedInputSchedulingReconstitutionFailure::TerminalModelCallMismatch {
+                            turn,
+                        },
+                    );
+                }
                 referenced_model_calls.insert(*completing_call);
                 let terminal = snapshots.get(terminal_frontier).cloned().ok_or(
                     AcceptedInputSchedulingReconstitutionFailure::TerminalSnapshotMissing { turn },
@@ -3320,11 +3387,8 @@ fn reconstitute_inner(
                     .get(completing_call)
                     .cloned()
                     .unwrap_or_default();
-                let call_frontier = snapshots.get(&call.frontier().snapshot()).ok_or(
-                    AcceptedInputSchedulingReconstitutionFailure::StartingSnapshotMissing { turn },
-                )?;
                 if !completed_terminal_matches(
-                    call_frontier,
+                    source,
                     &terminal,
                     *completing_call,
                     &assistant_entries,
@@ -3411,14 +3475,26 @@ fn reconstitute_inner(
                         },
                     );
                 }
+                let source_frontier = call.frontier().snapshot();
+                if source_frontier != *starting_frontier {
+                    referenced_snapshots.insert(source_frontier);
+                }
+                let source = snapshots.get(&source_frontier).ok_or(
+                    AcceptedInputSchedulingReconstitutionFailure::StartingSnapshotMissing { turn },
+                )?;
+                if !snapshots[starting_frontier].is_semantic_prefix_of(source) {
+                    return Err(
+                        AcceptedInputSchedulingReconstitutionFailure::TerminalModelCallMismatch {
+                            turn,
+                        },
+                    );
+                }
                 referenced_model_calls.insert(*refusing_call);
                 let terminal = snapshots.get(terminal_frontier).cloned().ok_or(
                     AcceptedInputSchedulingReconstitutionFailure::TerminalSnapshotMissing { turn },
                 )?;
                 if !referenced_snapshots.insert(*terminal_frontier)
-                    || terminal
-                        .ordered_entries()
-                        .ne(snapshots[&call.frontier().snapshot()].ordered_entries())
+                    || terminal.ordered_entries().ne(source.ordered_entries())
                 {
                     return Err(
                         AcceptedInputSchedulingReconstitutionFailure::TerminalFrontierMismatch {
@@ -3507,6 +3583,8 @@ fn reconstitute_inner(
                             || call.selection() != *record.origin_configuration.effective().model()
                             || call.target() != pinned.target()
                             || call.disposition() != ModelCallDisposition::Cancelled
+                            || (call.frontier().snapshot() != *starting_frontier
+                                && !referenced_model_calls.contains(&call_id))
                         {
                             return Err(
                                 AcceptedInputSchedulingReconstitutionFailure::TerminalModelCallMismatch {
@@ -3640,6 +3718,8 @@ fn reconstitute_inner(
                     || call.selection() != *record.origin_configuration.effective().model()
                     || call.target() != pinned.target()
                     || call.disposition() != ModelCallDisposition::Ambiguous
+                    || (call.frontier().snapshot() != *starting_frontier
+                        && !referenced_model_calls.contains(ambiguous_call))
                 {
                     return Err(
                         AcceptedInputSchedulingReconstitutionFailure::TerminalModelCallMismatch {
@@ -4176,15 +4256,6 @@ fn validate_start(
         actual_lineage,
         snapshot.frontier(),
     ))
-}
-
-fn start_snapshot_entries(
-    snapshots: &BTreeMap<ContextFrontierId, ResolvedContextFrontierSnapshot>,
-    start: AcceptedInputTurnStart,
-) -> Vec<SemanticTranscriptEntryRef> {
-    snapshots[&start.frontier().snapshot()]
-        .ordered_entries()
-        .collect()
 }
 
 fn completed_terminal_matches(
@@ -6810,9 +6881,29 @@ mod tests {
         call_disposition: ModelCallDisposition,
     ) {
         let origin_entry = FailedTerminalReconstitutionFacts::matching_origin_entry();
-        let starting_frontier = FailedTerminalReconstitutionFacts::matching_starting_frontier();
+        let failure_entry = FailedTerminalReconstitutionFacts::matching_failure_entry();
+        let steering_entry = semantic_entry(32);
+        let call_frontier = frontier(42);
+        let terminal_frontier = FailedTerminalReconstitutionFacts::matching_terminal_frontier();
         let call_id = model_call_id(50);
         let mut facts = FailedTerminalReconstitutionFacts::matching(session, failed);
+        facts
+            .semantic_entries
+            .push(SemanticTranscriptEntryReconstitutionInput::new(
+                steering_entry.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput {
+                    accepted_input: accepted_input_id(70),
+                    source_turn: failed.turn(),
+                },
+            ));
+        facts
+            .snapshots
+            .retain(|snapshot| snapshot.snapshot() != terminal_frontier.id());
+        facts.snapshots.extend([
+            call_frontier.snapshot(session, &[origin_entry, steering_entry]),
+            terminal_frontier.snapshot(session, &[origin_entry, steering_entry, failure_entry]),
+        ]);
         facts.replace_terminal_execution(Some(FailedTurnExecutionReconstitutionInput::with_call(
             failed.turn(),
             attempt,
@@ -6825,7 +6916,7 @@ mod tests {
             attempt,
             FrozenModelSelection::Direct(direct(1)),
             ResolvedProviderTarget::naming(provider_model_identity(51)),
-            starting_frontier.id(),
+            call_frontier.id(),
             ModelCallReconstitutionState::Terminal(call_disposition),
         );
         let projection = facts
@@ -6850,9 +6941,9 @@ mod tests {
         );
     }
 
-    /// S02 / S03 / INV-006: failed-terminal reconstitution preserves all
-    /// three accepted execution shapes: direct failure, attempt-only startup
-    /// loss, and an attempt with an exact KnownFailed or Cancelled call.
+    /// S02 / S03 / INV-006 / INV-016: failed-terminal reconstitution
+    /// preserves all three accepted execution shapes and any steering already
+    /// committed in an ended call's source frontier.
     #[test]
     fn s02_s03_inv006_failed_terminal_execution_provenance_is_complete() {
         let session = current_session();
@@ -6893,6 +6984,84 @@ mod tests {
             failed,
             attempt,
             ModelCallDisposition::Cancelled,
+        );
+    }
+
+    /// S02 / S07 / INV-006 / INV-037: a proof-bearing known-failure attempt
+    /// can only correlate a physically known-failed call. Confirmed physical
+    /// cancellation remains the cancelled terminal outcome.
+    #[test]
+    fn s02_s07_inv006_inv037_stopped_failure_rejects_cancelled_call() {
+        let session = current_session();
+        let failed = accepted_origin(1);
+        let successor = accepted_origin(2);
+        let attempt = turn_attempt_id(60);
+        let call_id = model_call_id(50);
+        let starting_frontier = FailedTerminalReconstitutionFacts::matching_starting_frontier();
+        let successor_order = AcceptedInputQueueOrder::interrupt_immediately_after(
+            successor.position(),
+            failed.turn(),
+        );
+        let interrupt = AppliedInterruptCommandResult::from_correlated_submit(
+            command_id(60),
+            session.id(),
+            failed.turn(),
+            successor.accepted_input(),
+            successor.turn(),
+            successor_order,
+        )
+        .expect("the fixture interrupt is exactly correlated");
+        let mut facts = FailedTerminalReconstitutionFacts::matching(&session, failed);
+        facts.replace_terminal_execution(Some(
+            FailedTurnExecutionReconstitutionInput::with_call_after_cancellation(
+                failed.turn(),
+                attempt,
+                CancellationStopDisposition::KnownFailure,
+                interrupt,
+                call_id,
+            ),
+        ));
+        facts.turns.push(successor.record_with(
+            &session,
+            OriginRecordFacts {
+                order: successor_order,
+                delivery: DeliveryRequest::Interrupt {
+                    expected_active_turn: failed.turn(),
+                    configuration: PerInputConfigurationChoices::new(
+                        SessionConfigurationDefaultsVersion::first(),
+                        ModelSelectionOverride::UseSessionDefault,
+                    ),
+                },
+                state: AcceptedInputTurnSchedulingRecordState::Queued,
+            },
+        ));
+        let input_for = |disposition| {
+            let call = ModelCallReconstitutionInput::new(
+                call_id,
+                failed.turn(),
+                attempt,
+                FrozenModelSelection::Direct(direct(1)),
+                ResolvedProviderTarget::naming(provider_model_identity(51)),
+                starting_frontier.id(),
+                ModelCallReconstitutionState::Terminal(disposition),
+            );
+            facts.clone().input().with_model_call_facts(
+                vec![crate::PinnedProviderTargetReconstitutionInput::new(
+                    failed.turn(),
+                    call.target(),
+                )],
+                vec![call],
+            )
+        };
+
+        input_for(ModelCallDisposition::KnownFailed)
+            .reconstitute()
+            .expect("stopped known failure retains its known-failed call");
+        assert_eq!(
+            assert_input_rejects_unchanged(input_for(ModelCallDisposition::Cancelled)),
+            AcceptedInputSchedulingReconstitutionFailure::TerminalModelCallMismatch {
+                turn: failed.turn(),
+            }
         );
     }
 
@@ -7024,47 +7193,107 @@ mod tests {
         );
     }
 
-    /// S02 / S04 / S09 / INV-005 / INV-009 / INV-015: a live or
-    /// startup-recovered completed response validates producing-call provenance
-    /// and its final marker before the exact terminal frontier becomes the
-    /// successor's starting prefix.
+    /// S02 / S04 / S07 / S09 / INV-005 / INV-009 / INV-015 / INV-016 /
+    /// INV-037: a live or startup-recovered completed response validates the
+    /// producing call's steering-extended source, stop provenance, and final
+    /// marker before the exact terminal frontier becomes the successor's
+    /// starting prefix.
     #[test]
     fn s02_s04_s09_inv005_inv009_inv015_completed_frontier_becomes_successor_prefix() {
         let session = current_session();
         let predecessor = accepted_origin(1);
         let successor = accepted_origin(2);
         let origin_entry = semantic_entry(30);
-        let assistant_entry = semantic_entry(31);
-        let completion_entry = semantic_entry(32);
+        let steering_entry = semantic_entry(31);
+        let assistant_entry = semantic_entry(32);
+        let completion_entry = semantic_entry(33);
         let starting_frontier = frontier(40);
-        let terminal_frontier = frontier(41);
+        let call_frontier = frontier(41);
+        let terminal_frontier = frontier(42);
         let completing_call = model_call_id(50);
         let activation = activation(2);
-        let resolved_starting = ResolvedContextFrontierSnapshot::try_from_candidate(
+        let successor_order = AcceptedInputQueueOrder::interrupt_immediately_after(
+            successor.position(),
+            predecessor.turn(),
+        );
+        let interrupt = AppliedInterruptCommandResult::from_correlated_submit(
+            command_id(60),
             session.id(),
-            starting_frontier.id(),
-            vec![origin_entry.reference(&session)],
+            predecessor.turn(),
+            successor.accepted_input(),
+            successor.turn(),
+            successor_order,
         )
-        .expect("the call frontier has unique membership");
-        for attempt_disposition in [
-            UnstoppedAttemptDisposition::TurnCompleted,
-            UnstoppedAttemptDisposition::Lost,
-        ] {
+        .expect("the fixture interrupt is exactly correlated");
+        let interrupt_delivery = DeliveryRequest::Interrupt {
+            expected_active_turn: predecessor.turn(),
+            configuration: PerInputConfigurationChoices::new(
+                SessionConfigurationDefaultsVersion::first(),
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+        };
+        let cases = vec![
+            (
+                TerminalAttemptEndReconstitutionInput::without_stop(
+                    UnstoppedAttemptDisposition::TurnCompleted,
+                ),
+                successor.record(&session, AcceptedInputTurnSchedulingRecordState::Queued),
+            ),
+            (
+                TerminalAttemptEndReconstitutionInput::without_stop(
+                    UnstoppedAttemptDisposition::Lost,
+                ),
+                successor.record(&session, AcceptedInputTurnSchedulingRecordState::Queued),
+            ),
+            (
+                TerminalAttemptEndReconstitutionInput::after_cancellation(
+                    CancellationStopDisposition::TurnCompleted,
+                    interrupt,
+                ),
+                successor.record_with(
+                    &session,
+                    OriginRecordFacts {
+                        order: successor_order,
+                        delivery: interrupt_delivery,
+                        state: AcceptedInputTurnSchedulingRecordState::Queued,
+                    },
+                ),
+            ),
+            (
+                TerminalAttemptEndReconstitutionInput::after_cancellation(
+                    CancellationStopDisposition::Lost,
+                    interrupt,
+                ),
+                successor.record_with(
+                    &session,
+                    OriginRecordFacts {
+                        order: successor_order,
+                        delivery: interrupt_delivery,
+                        state: AcceptedInputTurnSchedulingRecordState::Queued,
+                    },
+                ),
+            ),
+        ];
+        for (completing_attempt_end, queued_record) in cases {
             let terminal_record = predecessor.record(
                 &session,
                 AcceptedInputTurnSchedulingRecordState::TerminalCompleted {
                     starting_lineage: AcceptedInputStartingLineage::FirstInSession,
                     starting_frontier: starting_frontier.id(),
                     completing_attempt: turn_attempt_id(60),
-                    completing_attempt_end: TerminalAttemptEndReconstitutionInput::without_stop(
-                        attempt_disposition,
-                    ),
+                    completing_attempt_end,
                     completing_call,
                     terminal_frontier: terminal_frontier.id(),
                 },
             );
-            let queued_record =
-                successor.record(&session, AcceptedInputTurnSchedulingRecordState::Queued);
+            let steering = SemanticTranscriptEntryReconstitutionInput::new(
+                steering_entry.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput {
+                    accepted_input: accepted_input_id(70),
+                    source_turn: predecessor.turn(),
+                },
+            );
             let assistant = SemanticTranscriptEntryReconstitutionInput::new(
                 assistant_entry.id(),
                 session.id(),
@@ -7087,7 +7316,7 @@ mod tests {
                 turn_attempt_id(60),
                 FrozenModelSelection::Direct(direct(1)),
                 ResolvedProviderTarget::naming(provider_model_identity(51)),
-                resolved_starting.frontier().snapshot(),
+                call_frontier.id(),
                 ModelCallReconstitutionState::Terminal(ModelCallDisposition::Completed),
             );
             let projection = AcceptedInputSchedulingReconstitutionInput::new(
@@ -7096,11 +7325,20 @@ mod tests {
                 vec![
                     assistant,
                     completion,
+                    steering,
                     predecessor.entry(&session, origin_entry),
                 ],
                 vec![
-                    terminal_frontier
-                        .snapshot(&session, &[origin_entry, assistant_entry, completion_entry]),
+                    terminal_frontier.snapshot(
+                        &session,
+                        &[
+                            origin_entry,
+                            steering_entry,
+                            assistant_entry,
+                            completion_entry,
+                        ],
+                    ),
+                    call_frontier.snapshot(&session, &[origin_entry, steering_entry]),
                     starting_frontier.snapshot(&session, &[origin_entry]),
                 ],
                 None,
@@ -7138,6 +7376,7 @@ mod tests {
                     .collect::<Vec<_>>(),
                 vec![
                     origin_entry.reference(&session),
+                    steering_entry.reference(&session),
                     assistant_entry.reference(&session),
                     completion_entry.reference(&session),
                     activation.origin_entry().reference(&session),
@@ -7292,61 +7531,122 @@ mod tests {
         );
     }
 
-    /// S02 / S04 / S09 / INV-005 / INV-009 / INV-015: a live or
-    /// startup-recovered refusal has no semantic response content, releases the
-    /// slot, and preserves its equal-content terminal frontier as the
-    /// successor's exact prefix.
+    /// S02 / S04 / S07 / S09 / INV-005 / INV-009 / INV-015 / INV-016 /
+    /// INV-037: a live or startup-recovered refusal validates the producing
+    /// call's steering-extended source and stop provenance, releases the slot,
+    /// and preserves its equal-content terminal frontier as the successor's
+    /// exact prefix.
     #[test]
     fn s02_s04_s09_inv005_inv009_inv015_refused_frontier_becomes_successor_prefix() {
         let session = current_session();
         let predecessor = accepted_origin(1);
         let successor = accepted_origin(2);
         let origin_entry = semantic_entry(30);
+        let steering_entry = semantic_entry(31);
         let starting_frontier = frontier(40);
-        let terminal_frontier = frontier(41);
+        let call_frontier = frontier(41);
+        let terminal_frontier = frontier(42);
         let refusing_call = model_call_id(50);
         let refusing_attempt = turn_attempt_id(60);
         let activation = activation(2);
-        let resolved_starting = ResolvedContextFrontierSnapshot::try_from_candidate(
+        let successor_order = AcceptedInputQueueOrder::interrupt_immediately_after(
+            successor.position(),
+            predecessor.turn(),
+        );
+        let interrupt = AppliedInterruptCommandResult::from_correlated_submit(
+            command_id(60),
             session.id(),
-            starting_frontier.id(),
-            vec![origin_entry.reference(&session)],
+            predecessor.turn(),
+            successor.accepted_input(),
+            successor.turn(),
+            successor_order,
         )
-        .expect("the call frontier has unique membership");
-        for attempt_disposition in [
-            UnstoppedAttemptDisposition::TurnRefused,
-            UnstoppedAttemptDisposition::Lost,
-        ] {
+        .expect("the fixture interrupt is exactly correlated");
+        let interrupt_delivery = DeliveryRequest::Interrupt {
+            expected_active_turn: predecessor.turn(),
+            configuration: PerInputConfigurationChoices::new(
+                SessionConfigurationDefaultsVersion::first(),
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+        };
+        let cases = vec![
+            (
+                TerminalAttemptEndReconstitutionInput::without_stop(
+                    UnstoppedAttemptDisposition::TurnRefused,
+                ),
+                successor.record(&session, AcceptedInputTurnSchedulingRecordState::Queued),
+            ),
+            (
+                TerminalAttemptEndReconstitutionInput::without_stop(
+                    UnstoppedAttemptDisposition::Lost,
+                ),
+                successor.record(&session, AcceptedInputTurnSchedulingRecordState::Queued),
+            ),
+            (
+                TerminalAttemptEndReconstitutionInput::after_cancellation(
+                    CancellationStopDisposition::TurnRefused,
+                    interrupt,
+                ),
+                successor.record_with(
+                    &session,
+                    OriginRecordFacts {
+                        order: successor_order,
+                        delivery: interrupt_delivery,
+                        state: AcceptedInputTurnSchedulingRecordState::Queued,
+                    },
+                ),
+            ),
+            (
+                TerminalAttemptEndReconstitutionInput::after_cancellation(
+                    CancellationStopDisposition::Lost,
+                    interrupt,
+                ),
+                successor.record_with(
+                    &session,
+                    OriginRecordFacts {
+                        order: successor_order,
+                        delivery: interrupt_delivery,
+                        state: AcceptedInputTurnSchedulingRecordState::Queued,
+                    },
+                ),
+            ),
+        ];
+        for (refusing_attempt_end, queued_record) in cases {
             let terminal_record = predecessor.record(
                 &session,
                 AcceptedInputTurnSchedulingRecordState::TerminalRefused {
                     starting_lineage: AcceptedInputStartingLineage::FirstInSession,
                     starting_frontier: starting_frontier.id(),
                     refusing_attempt,
-                    refusing_attempt_end: TerminalAttemptEndReconstitutionInput::without_stop(
-                        attempt_disposition,
-                    ),
+                    refusing_attempt_end,
                     refusing_call,
                     terminal_frontier: terminal_frontier.id(),
                 },
             );
-            let queued_record =
-                successor.record(&session, AcceptedInputTurnSchedulingRecordState::Queued);
+            let steering = SemanticTranscriptEntryReconstitutionInput::new(
+                steering_entry.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput {
+                    accepted_input: accepted_input_id(70),
+                    source_turn: predecessor.turn(),
+                },
+            );
             let call = ModelCallReconstitutionInput::new(
                 refusing_call,
                 predecessor.turn(),
                 refusing_attempt,
                 FrozenModelSelection::Direct(direct(1)),
                 ResolvedProviderTarget::naming(provider_model_identity(51)),
-                resolved_starting.frontier().snapshot(),
+                call_frontier.id(),
                 ModelCallReconstitutionState::Terminal(ModelCallDisposition::Refused),
             );
             let projection = AcceptedInputSchedulingReconstitutionInput::new(
                 session.clone(),
                 vec![queued_record, terminal_record],
-                vec![predecessor.entry(&session, origin_entry)],
+                vec![predecessor.entry(&session, origin_entry), steering],
                 vec![
-                    terminal_frontier.snapshot(&session, &[origin_entry]),
+                    terminal_frontier.snapshot(&session, &[origin_entry, steering_entry]),
+                    call_frontier.snapshot(&session, &[origin_entry, steering_entry]),
                     starting_frontier.snapshot(&session, &[origin_entry]),
                 ],
                 None,
@@ -7373,6 +7673,7 @@ mod tests {
                     .collect::<Vec<_>>(),
                 vec![
                     origin_entry.reference(&session),
+                    steering_entry.reference(&session),
                     activation.origin_entry().reference(&session),
                 ]
             );
