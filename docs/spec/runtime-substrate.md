@@ -26,13 +26,14 @@ OpenAI adapter crates' only workspace `[dependencies]` entry is
 `crates/domain`, `crates/application`, and `crates/persistence` declare no
 dependency on any runtime crate, and no runtime type appears in a domain or
 application signature (INV-002, INV-005); the approved runtime consumers are the
-adapter crates, the `crates/model-provider-runtime` bridge — which depends on
-both the application crate and the runtime and maps between them, so the
-dependency arrow points from the bridge into application, never from application
-into the runtime — and the hub composition root (see Open edges). The Cargo
-manifest is the enforcement mechanism: an undeclared dependency fails the
-workspace build. Why: manifest-visible boundaries make a boundary violation a
-reviewable diff instead of a silent import.
+adapter crates, the `crates/model-provider-runtime` bridge — whose
+`RuntimeModelCallProvider` implements the application's `ModelCallProvider` port
+over any `ModelRuntime<ModelCallId>`, depending on both crates so the dependency
+arrow points from the bridge into application, never from application into the
+runtime — and the hub composition root (see Open edges). The Cargo manifest is
+the enforcement mechanism: an undeclared dependency fails the workspace build.
+Why: manifest-visible boundaries make a boundary violation a reviewable diff
+instead of a silent import.
 
 Caller identity crosses the boundary as an opaque correlation parameter `C`
 threaded through `ModelOperation<C>`, every `Observation<C>`, and the final
@@ -313,6 +314,9 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
   signal so a blocked read cannot hold a cancelled operation. Failures are
   reference-only (`Unmapped`, `Unavailable`, `Unreadable`) and never contain
   secret bytes.
+- The production implementation is hubd's `FileCredentialAccess`: each resolve
+  rereads the key file named by `ANTHROPIC_API_KEY_FILE` and feeds the
+  production `AnthropicRuntime`.
 - The resolved value is scoped to the one prepared request as a
   sensitivity-marked HTTP header; execute performs no second lookup.
 - Provider-controlled text is credential-sanitized before leaving the adapter:
@@ -332,13 +336,6 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
   awaits an upload-proving transport or evidence source.
 - `CancellationConfirmed` and `SendIncompleteProvenUnacceptable` are
   vocabulary-total variants no in-repository adapter constructs today.
-- A production `CredentialAccess` implementation exists: hubd's
-  `FileCredentialAccess` reads the key file named by `ANTHROPIC_API_KEY_FILE`
-  per resolve and feeds the production `AnthropicRuntime`.
-- The Layer-1 consumer set is now three kinds — provider adapters, the
-  `model-provider-runtime` bridge crate, and the hub composition root; the
-  restriction remains a review-time contract with no manifest allowlist check.
-- A Layer-2 consumer now wires `ModelRuntime`: `crates/model-provider-runtime`'s
-  `RuntimeModelCallProvider` implements the application's `ModelCallProvider`
-  port over any `ModelRuntime<ModelCallId>`, and hubd runs the Anthropic adapter
-  through it behind `ModelCallExecutionService`.
+- The three-kind consumer allowlist (provider adapters, the
+  `model-provider-runtime` bridge, the hub composition root) is a review-time
+  contract only; no manifest allowlist check enforces it.

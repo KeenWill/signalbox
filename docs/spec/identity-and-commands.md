@@ -147,7 +147,8 @@ caller-supplied semantic field, the terminal `applied`/`rejected` result
 discriminator, and the typed result fields, all under `CHECK` constraints and
 foreign keys. Kind and version agreement between the registry row and its typed
 record is enforced by a composite foreign key, and a deferred constraint trigger
-(`require_durable_command_typed_record`) requires exactly one typed record per
+(`durable_command_requires_typed_record`, executing function
+`require_durable_command_typed_record`) requires exactly one typed record per
 claim at every transaction boundary. Why: typed relational records keep each
 command's comparison payload and result reviewable and constraint-checked
 instead of delegating meaning to a serializer; there is no universal JSONB or
