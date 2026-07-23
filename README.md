@@ -123,9 +123,11 @@ SIGNALBOX_E2E_SELECTION_ID=10000000-0000-4000-8000-000000000001 \
 ### Scripted debug harness
 
 The `signalbox-debug` binary is a local development harness, not the supported
-process client. Against a disposable local PostgreSQL database it runs
-migrations, creates one session, submits one input, lets the real scheduler
-execute a deterministic reply, and prints the terminal semantic transcript:
+terminal client defined by the
+[process protocol](docs/spec/process-protocol.md). Against a disposable local
+PostgreSQL database it runs migrations, creates one session, submits one input,
+lets the real scheduler execute a deterministic reply, and prints the terminal
+semantic transcript:
 
 ```console
 SIGNALBOX_DEBUG_DATABASE_URL=postgres://signalbox:signalbox@localhost/signalbox \

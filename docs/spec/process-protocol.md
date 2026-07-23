@@ -17,15 +17,17 @@ when present and otherwise requires that environment value. `signalbox-hubd`
 binds the socket with owner-only `0600` permissions. The configured path must be
 absolute. The hub canonicalizes its existing parent once and uses that resolved
 parent for the socket lifetime; the parent must be a directory owned by the
-hub's effective user and must not be group- or other-writable. Every resolved
-ancestor up to the filesystem root must also resist same-machine replacement: a
-group- or other-writable ancestor is accepted only when it has the sticky bit
-and the next path component toward the socket is owned by the hub's effective
-user. Every ancestor must itself be owned by either root or the hub's effective
-user, so an unprivileged different owner cannot make a currently protected
-directory writable after validation. An untrusted owner, a non-sticky writable
-ancestor, or a sticky writable ancestor containing a component owned by another
-user fails startup.
+hub's effective user with traditional permission mode exactly `0700`. This
+owner-private immediate parent is required even when the socket node itself has
+mode `0600`; version one does not rely on every supported Unix implementation
+enforcing socket-node permissions. Every resolved ancestor up to the filesystem
+root must also resist same-machine replacement: a group- or other-writable
+ancestor is accepted only when it has the sticky bit and the next path component
+toward the socket is owned by the hub's effective user. Every ancestor must
+itself be owned by either root or the hub's effective user, so an unprivileged
+different owner cannot make a currently protected directory writable after
+validation. An untrusted owner, a non-sticky writable ancestor, or a sticky
+writable ancestor containing a component owned by another user fails startup.
 
 Before inspecting the final path, the hub opens or creates the adjacent
 `<socket-path>.lock` as a no-follow regular file owned by the effective user
@@ -95,13 +97,16 @@ Every client and server frame has these required top-level members:
   object described below.
 
 Unknown top-level members, unknown tagged variants, missing required members,
-and members with the wrong JSON type fail explicitly (INV-033). An unsupported
-`version` produces a version-one `unsupported_version` error naming the
-supported version, then the server closes the connection. A server error uses
-`request_id = "0"` only when the incoming frame prevents recovery of a valid
-nonzero identity; zero is never a valid client identity or success-response
-identity. Leading zeroes, a plus sign, whitespace, and any spelling other than
-the shortest ASCII decimal form are invalid.
+and members with the wrong JSON type fail explicitly (INV-033). Repeating a
+decoded member name within any JSON object at any nesting depth is a
+`malformed_frame`, including when two different JSON string spellings decode to
+the same name. An unsupported `version` produces a version-one
+`unsupported_version` error naming the supported version, then the server closes
+the connection. A server error uses `request_id = "0"` only when the incoming
+frame prevents recovery of a valid nonzero identity; zero is never a valid
+client identity or success-response identity. Leading zeroes, a plus sign,
+whitespace, and any spelling other than the shortest ASCII decimal form are
+invalid.
 
 The server may close a connection after any error. Clients never reinterpret an
 unknown message as a known one.
@@ -362,9 +367,17 @@ event, `follow` uses a separate connection to read and validate a fresh
 authoritative transcript before it resumes printing later followed events. That
 side reread does not advance the follow connection's observed cursor: only
 events consumed from the subscribed connection do so, and every buffered event
-remains eligible for ordered presentation. Final durable content is deduplicated
-by source-qualified semantic-entry identity while transition-only events remain
-visible instead of being suppressed by a newer side snapshot.
+remains eligible for ordered presentation. Although the reread may have a cursor
+later than the triggering event, it makes presentation eligible only the
+previously undisplayed semantic material attributable to that exact terminal
+event: assistant text from its named turn and model call plus the exact
+completion marker for `turn_completed`, the exact failure marker for
+`turn_failed`, or refusal text from its named turn and model call for
+`turn_refused`. It does not present material introduced by any later cursor.
+Such material remains ordered behind its buffered followed event, or behind a
+new authoritative snapshot after `resync_required`. Final durable content is
+deduplicated by source-qualified semantic-entry identity while transition-only
+events remain visible instead of being suppressed by a newer side snapshot.
 
 ## Terminal client
 

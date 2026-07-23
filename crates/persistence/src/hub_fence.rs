@@ -201,3 +201,15 @@ impl From<HubFenceCorruption> for HubFenceError {
         Self::Corruption(error)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::advisory_key;
+
+    #[test]
+    fn fence_advisory_key_encoding_is_stable_across_generations() {
+        assert_eq!(advisory_key(1), 5_999_434_831_275_116_080);
+        assert_eq!(advisory_key(2), 5_999_434_831_275_116_083);
+        assert_eq!(advisory_key(u64::MAX), -5_999_434_831_275_116_082);
+    }
+}
