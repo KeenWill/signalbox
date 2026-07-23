@@ -122,13 +122,17 @@ protection.
 **Context.** Losing only the dedicated singleton-guard session releases its
 advisory lock while the old process can still have usable pooled sessions. A
 successor that ran recovery immediately could overlap those old writers; a
-monitoring interval or graceful drain cannot close that authority gap.
+monitoring interval or graceful drain cannot close that authority gap. Fencing
+only the immediately prior generation would still let an older process reconnect
+after an intermediate successor advanced the generation and then failed.
 
 **Decision.** Add a durable positive hub-fence generation and session advisory
 pool fencing as specified by
 [process-protocol](spec/process-protocol.md#durable-update-dispatch). A
 successor retains the prior generation exclusively before advancing to its own
-shared pool generation. Guard loss cancels rather than gracefully drains the old
+shared pool generation. After acquiring its shared generation lock, every pool
+connection verifies that the durable singleton still names that exact generation
+before becoming usable. Guard loss cancels rather than gracefully drains the old
 runtime.
 
 **Rejected alternatives.** Polling faster still leaves a gap. Treating row-lock
@@ -194,17 +198,17 @@ separate. The protocol supplies create/list, submit, transcript snapshot, and
 snapshot-first follow operations. Exactly one hubd dispatcher offers each next
 committed outbox event before transactionally advancing the durable prefix,
 yielding ordered at-least-once delivery. It polls idle storage every 50 ms, the
-process fan-out retains 1,024 events, and frames are capped at 8 MiB. One hub
-per database is enforced by holding the dedicated
-`pg_try_advisory_lock(1396856881, 1213547057)` connection from before migration
-through shutdown. Socket cleanup uses refused-connect plus same-device/inode
-revalidation inside an effective-user-owned, non-group/other-writable resolved
-parent, never unconditional replacement. Transcript snapshots include
-authoritative turn state and use start/turn/entry/content/end frames with text
-fragments capped at 1 MiB, so valid transcripts are not capped at one frame.
-Mutation command identities are caller-visible and reusable after ambiguity;
-submit requests also carry the exact expected defaults version that participates
-in durable command equality.
+process fan-out initially retained 1,024 events (superseded by the 64-event
+decision above), and frames are capped at 8 MiB. One hub per database is
+enforced by holding the dedicated `pg_try_advisory_lock(1396856881, 1213547057)`
+connection from before migration through shutdown. Socket cleanup uses
+refused-connect plus same-device/inode revalidation inside an
+effective-user-owned, non-group/other-writable resolved parent, never
+unconditional replacement. Transcript snapshots include authoritative turn state
+and use start/turn/entry/content/end frames with text fragments capped at 1 MiB,
+so valid transcripts are not capped at one frame. Mutation command identities
+are caller-visible and reusable after ambiguity; submit requests also carry the
+exact expected defaults version that participates in durable command equality.
 
 **Rejected alternatives.** Resurrecting the retired protocol wholesale: it has
 no accepted semantics. HTTP or a remote socket: either expands version one or
