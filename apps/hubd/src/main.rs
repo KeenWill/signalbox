@@ -458,7 +458,12 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
     let scheduler_pool = pool.clone();
     let sweep = PostgresEligibilitySweep::new(scheduler_pool.clone());
     let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
-    let process_runtime = ProcessRuntime::new(listener, scheduler_pool.clone(), eligibility_nudge);
+    let process_runtime = ProcessRuntime::new(
+        listener,
+        scheduler_pool.clone(),
+        eligibility_nudge,
+        model_configuration,
+    );
     let (execution, fatal_execution) =
         FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
             PostgresModelCallRepository::new(

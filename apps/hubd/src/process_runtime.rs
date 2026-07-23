@@ -5,13 +5,13 @@ use std::{error::Error, fmt, future::Future, io, time::Duration};
 use signalbox_application::{
     CreateSessionError, CreateSessionOutcome, CreateSessionRequest, CreateSessionService,
     InProcessEligibilityNudge, SubmitInputOutcome, SubmitInputRequest, SubmitInputService,
-    UuidV7SessionIdGenerator, UuidV7SubmitInputIdGenerator,
+    SubmitInputTransaction, UuidV7SessionIdGenerator, UuidV7SubmitInputIdGenerator,
 };
 use signalbox_domain::{
-    DeliveryRequest, DirectModelSelection, DurableCommandId, ModelAlias, ModelSelectionOverride,
-    ModelSelectionRequest, PerInputConfigurationChoices, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionId, SubmitInputAppliedResult,
-    SubmitInputRejectedResult, SubmitInputResult, UserContent,
+    AcceptedInputId, DeliveryRequest, DirectModelSelection, DurableCommandId, ModelAlias,
+    ModelSelectionOverride, ModelSelectionRequest, PerInputConfigurationChoices,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId, SubmitInput,
+    SubmitInputAppliedResult, SubmitInputRejectedResult, SubmitInputResult, TurnId, UserContent,
 };
 use signalbox_persistence::{
     create_session::{CreateSessionRepository, CreateSessionRepositoryError},
@@ -24,7 +24,7 @@ use signalbox_persistence::{
         ProcessCurrentModelCallState, ProcessModelSelection, ProcessReadError,
         ProcessReadRepository, ProcessTranscriptEntry, ProcessTranscriptSnapshot, ProcessTurnState,
     },
-    submit_input::{SubmitInputRepository, SubmitInputRepositoryError},
+    submit_input::{SubmitInputHandlingOutcome, SubmitInputRepository, SubmitInputRepositoryError},
 };
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientRequest, CurrentModelCall, CurrentModelCallState, ErrorCode,
@@ -42,12 +42,20 @@ use tokio::{
     time::sleep,
 };
 
-use crate::{LocalProcessListener, LocalSocketError};
+use crate::{HubModelConfiguration, LocalProcessListener, LocalSocketError};
 
 const OUTBOX_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const PROCESS_UPDATE_CAPACITY: usize = 64;
 const MAX_ACTIVE_CONNECTIONS: usize = 128;
 const MAX_SUBMITTED_INPUT_BYTES: usize = 1024 * 1024;
+
+#[derive(Clone, Debug)]
+struct ConnectionServices {
+    pool: PgPool,
+    eligibility_nudge: InProcessEligibilityNudge,
+    model_configuration: HubModelConfiguration,
+    updates: broadcast::Sender<ProcessUpdate>,
+}
 
 /// The hub-owned local protocol runtime: one outbox dispatcher, one bounded
 /// fan-out, and one guarded Unix listener.
@@ -56,19 +64,22 @@ pub struct ProcessRuntime {
     listener: LocalProcessListener,
     pool: PgPool,
     eligibility_nudge: InProcessEligibilityNudge,
+    model_configuration: HubModelConfiguration,
 }
 
 impl ProcessRuntime {
-    /// Composes the already-guarded listener and fenced database pool.
+    /// Composes the guarded listener, fenced database, nudge, and static models.
     pub const fn new(
         listener: LocalProcessListener,
         pool: PgPool,
         eligibility_nudge: InProcessEligibilityNudge,
+        model_configuration: HubModelConfiguration,
     ) -> Self {
         Self {
             listener,
             pool,
             eligibility_nudge,
+            model_configuration,
         }
     }
 
@@ -80,6 +91,7 @@ impl ProcessRuntime {
             &self.listener,
             self.pool.clone(),
             self.eligibility_nudge,
+            self.model_configuration,
             updates.clone(),
             shutdown.clone(),
         );
@@ -129,9 +141,16 @@ async fn serve_connections(
     listener: &LocalProcessListener,
     pool: PgPool,
     eligibility_nudge: InProcessEligibilityNudge,
+    model_configuration: HubModelConfiguration,
     updates: broadcast::Sender<ProcessUpdate>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProcessRuntimeError> {
+    let services = ConnectionServices {
+        pool,
+        eligibility_nudge,
+        model_configuration,
+        updates,
+    };
     let mut connections = JoinSet::new();
     loop {
         if shutdown_requested(&shutdown) {
@@ -143,9 +162,7 @@ async fn serve_connections(
                 let (stream, _) = accepted.map_err(ProcessRuntimeError::Accept)?;
                 connections.spawn(serve_connection(
                     stream,
-                    pool.clone(),
-                    eligibility_nudge.clone(),
-                    updates.clone(),
+                    services.clone(),
                     shutdown.clone(),
                 ));
             }
@@ -183,9 +200,7 @@ fn inspect_connection_completion(
 
 async fn serve_connection(
     stream: UnixStream,
-    pool: PgPool,
-    eligibility_nudge: InProcessEligibilityNudge,
-    updates: broadcast::Sender<ProcessUpdate>,
+    services: ConnectionServices,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProcessConnectionError> {
     let (reader, mut writer) = stream.into_split();
@@ -237,9 +252,7 @@ async fn serve_connection(
             &mut writer,
             request_id,
             request,
-            &pool,
-            &eligibility_nudge,
-            &updates,
+            &services,
             shutdown.clone(),
         )
         .await?;
@@ -253,9 +266,7 @@ async fn handle_request<Writer>(
     writer: &mut Writer,
     request_id: RequestId,
     request: ClientRequest,
-    pool: &PgPool,
-    eligibility_nudge: &InProcessEligibilityNudge,
-    updates: &broadcast::Sender<ProcessUpdate>,
+    services: &ConnectionServices,
     shutdown: watch::Receiver<bool>,
 ) -> Result<(), ProcessConnectionError>
 where
@@ -271,11 +282,13 @@ where
                 request_id,
                 command_id.into_uuid(),
                 initial_model_selection,
-                pool,
+                &services.pool,
             )
             .await
         }
-        ClientRequest::ListSessions {} => handle_list_sessions(writer, request_id, pool).await,
+        ClientRequest::ListSessions {} => {
+            handle_list_sessions(writer, request_id, &services.pool).await
+        }
         ClientRequest::SubmitInput {
             command_id,
             session_id,
@@ -289,16 +302,25 @@ where
                 session_id,
                 content,
                 expected_defaults_version,
-                pool,
-                eligibility_nudge,
+                &services.pool,
+                &services.eligibility_nudge,
+                &services.model_configuration,
             )
             .await
         }
         ClientRequest::ReadTranscript { session_id } => {
-            handle_read_transcript(writer, request_id, session_id, pool).await
+            handle_read_transcript(writer, request_id, session_id, &services.pool).await
         }
         ClientRequest::FollowSession { session_id } => {
-            handle_follow_session(writer, request_id, session_id, pool, updates, shutdown).await
+            handle_follow_session(
+                writer,
+                request_id,
+                session_id,
+                &services.pool,
+                &services.updates,
+                shutdown,
+            )
+            .await
         }
     }
 }
@@ -408,6 +430,37 @@ where
     .await
 }
 
+#[derive(Debug)]
+struct ConfiguredSubmitInputTransaction<'configuration> {
+    repository: SubmitInputRepository,
+    model_configuration: &'configuration HubModelConfiguration,
+}
+
+impl SubmitInputTransaction for ConfiguredSubmitInputTransaction<'_> {
+    type Error = SubmitInputRepositoryError;
+
+    async fn handle(
+        &mut self,
+        command: SubmitInput,
+        accepted_input: AcceptedInputId,
+        turn: Option<TurnId>,
+    ) -> Result<SubmitInputOutcome, Self::Error> {
+        let outcome = self
+            .repository
+            .handle_with_alias_resolver(command, accepted_input, turn, |alias| {
+                self.model_configuration.resolve_alias(alias)
+            })
+            .await?;
+
+        Ok(match outcome {
+            SubmitInputHandlingOutcome::Recorded(result) => SubmitInputOutcome::Recorded(result),
+            SubmitInputHandlingOutcome::ConflictingReuse { command_id } => {
+                SubmitInputOutcome::ConflictingReuse { command_id }
+            }
+        })
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "the closed submit request is kept explicit at this wire-to-application adapter"
@@ -421,6 +474,7 @@ async fn handle_submit_input<Writer>(
     expected_defaults_version: CanonicalU64,
     pool: &PgPool,
     eligibility_nudge: &InProcessEligibilityNudge,
+    model_configuration: &HubModelConfiguration,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
@@ -465,7 +519,10 @@ where
     };
     let mut service = SubmitInputService::new(
         UuidV7SubmitInputIdGenerator,
-        SubmitInputRepository::new(pool.clone()),
+        ConfiguredSubmitInputTransaction {
+            repository: SubmitInputRepository::new(pool.clone()),
+            model_configuration,
+        },
         eligibility_nudge.clone(),
     );
     match service.execute(request).await {
