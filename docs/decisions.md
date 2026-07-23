@@ -5,9 +5,8 @@ Each entry states context, the decision, rejected alternatives, and what it
 affects, in roughly ten to twenty lines. Foundation-weight changes — altering
 accepted ADR semantics, moving a boundary between domain, storage, wire, or
 framework representations, weakening an invariant, or introducing a technology
-that constrains several components — require a full record under
-[decisions/](decisions/README.md) instead. Unresolved questions live in
-[open-questions.md](open-questions.md).
+that constrains several components — require a full record under decisions/
+instead. Unresolved questions live in [open-questions.md](open-questions.md).
 
 ## 2026-07-23 — Review-wave amendments: stale-head declines and exhaust-loop escalation
 
@@ -136,12 +135,12 @@ reopening obligation.
 
 ## 2026-07-22 — Pin model-call credential references on the call record
 
-**Context.** [ADR-0017](decisions/0017-credential-lifecycle.md) requires the
-non-secret credential reference selected with an exact provider target to
-survive restart, while deferring its concrete persistence shape. The initial
-provider composition instead supplied a process-wide reference during request
-preparation, which could re-derive a different scope for already-prepared work
-after deployment configuration changed.
+**Context.** ADR-0017 requires the non-secret credential reference selected with
+an exact provider target to survive restart, while deferring its concrete
+persistence shape. The initial provider composition instead supplied a
+process-wide reference during request preparation, which could re-derive a
+different scope for already-prepared work after deployment configuration
+changed.
 
 **Decision.** Add a forward-only nullable `credential_reference` column to the
 model-call record. Every newly prepared call writes its current non-secret
@@ -421,12 +420,12 @@ record. It does not move CI to Nix or change Rust and database-test ownership.
 
 ## 2026-07-20 — Hand-roll the typed model-runtime substrate
 
-**Context.** [ADR-0047](decisions/0047-typed-model-runtime-substrate.md) fixes
-the isolation and dependency rules for a provider-neutral runtime but leaves the
-Phase-0 audit outcome, replacement strategy, and exact crate decomposition to a
-later recorded decision. The audit found that the trustworthy send, error, and
-stream-terminal paths require semantic reversal, while the useful wire and
-framing ideas are small enough to reproduce directly.
+**Context.** ADR-0047 fixes the isolation and dependency rules for a
+provider-neutral runtime but leaves the Phase-0 audit outcome, replacement
+strategy, and exact crate decomposition to a later recorded decision. The audit
+found that the trustworthy send, error, and stream-terminal paths require
+semantic reversal, while the useful wire and framing ideas are small enough to
+reproduce directly.
 
 **Decision.** Hand-roll `signalbox-model-runtime` as the provider-neutral core
 crate, with one separately named workspace crate per provider adapter. Use
@@ -489,15 +488,13 @@ not change.
 
 ## 2026-07-20 — ADR-0044 post-merge review corrections
 
-**Context.** Post-merge review of the pull request that introduced
-[ADR-0044](decisions/0044-hub-runtime-foundations.md) found defects in its
-configuration, telemetry, corruption-key, and failure-classification wording.
+**Context.** Post-merge review of the pull request that introduced ADR-0044
+found defects in its configuration, telemetry, corruption-key, and
+failure-classification wording.
 
-**Decision.** Record that [ADR-0044](decisions/0044-hub-runtime-foundations.md)
-was corrected on 2026-07-20 and that
-[ADR-0046](decisions/0046-durable-command-telemetry-correlation.md) supersedes
-its incomplete caller-command telemetry clause. The linked ADRs are the sole
-statements of the resulting semantics.
+**Decision.** Record that ADR-0044 was corrected on 2026-07-20 and that ADR-0046
+supersedes its incomplete caller-command telemetry clause. The linked ADRs are
+the sole statements of the resulting semantics.
 
 **Rejected alternatives.** Restating the corrections here: that would create a
 second normative owner. Leaving the correlation clause as an in-place
@@ -595,9 +592,8 @@ session/scheduler lock-ordering protocol lives only in comments in
 - *Scaling timing.* Record now; fix after the model-call milestone. The remedy
   requires a still-undesigned representation that keeps complete scheduling
   reads bounded, together with a frontier storage change (prefix sharing or
-  deltas) the 2026-07-17 layout entry already permits under
-  [ADR-0030](decisions/0030-context-frontier-snapshots.md). Accepted cost: that
-  fix reopens model-call storage after the milestone lands.
+  deltas) the 2026-07-17 layout entry already permits under ADR-0030. Accepted
+  cost: that fix reopens model-call storage after the milestone lands.
 - *Panic ledger.* The typed-error obligation extends from the three
   `prepare_earliest_queued_activation` sites to all thirteen non-test sites.
   Stable enclosing identifiers are `SubmitInput::prepare_when_no_active_turn`
@@ -622,8 +618,7 @@ session/scheduler lock-ordering protocol lives only in comments in
   application test modules into shared test support (testing-style rule 3:
   plumbing irrelevant to the behavior under test); normalize the
   `CreateSessionError` asymmetry and delete its unreachable `Preparation`
-  variant as remaining implementation work under accepted
-  [ADR-0044](decisions/0044-hub-runtime-foundations.md).
+  variant as remaining implementation work under accepted ADR-0044.
 - *Rigor tier.* Uniform rigor stays; the model-call milestone's time-to-land is
   the canary that reopens this decision.
 - *Supply chain.* `cargo-deny` (advisories, an exact license allow-list,
@@ -750,12 +745,11 @@ catalog requires a later decision.
 
 ## 2026-07-20 — Provisional one-mebibyte accepted-input content bound
 
-**Context.** [ADR-0037](decisions/0037-baseline-user-content.md) defines
-baseline user content with no maximum length, leaves concrete resource-size
-limits to resource governance, and permits a limit that rejects before typed
-construction without rewriting content. Unbounded accepted text let one
-submission consume arbitrary memory and storage before any governance policy
-exists. The owner decided a provisional bound.
+**Context.** ADR-0037 defines baseline user content with no maximum length,
+leaves concrete resource-size limits to resource governance, and permits a limit
+that rejects before typed construction without rewriting content. Unbounded
+accepted text let one submission consume arbitrary memory and storage before any
+governance policy exists. The owner decided a provisional bound.
 
 **Decision.** `SubmitInputRequest::try_new`, the application admission boundary
 before typed `SubmitInput` construction, rejects text whose UTF-8 encoding
@@ -848,15 +842,15 @@ per pull request from a version-controlled `.coderabbit.yaml`.
 **Decision.** Adopt nine custom pre-merge checks in `.coderabbit.yaml` as
 verdict-logic mirrors of rules owned by [AGENTS.md](../AGENTS.md),
 [testing-style.md](testing-style.md), [goal-mode.md](goal-mode.md), and
-[decisions/README.md](decisions/README.md). Ownership stays with those
-documents; the YAML restates only operational pass/fail logic, and a comment
-above each check names its owning document. The three mechanical checks —
-migration immutability, frozen-surface citation, append-only decision records —
-run in `error` mode now; the six judgment checks run in `warning` mode pending
-calibration against real reviews, with the catalog-honesty and
-description-accuracy checks first in line for promotion to `error`.
-`request_changes_workflow` and `override_requested_reviewers_only` are enabled
-so failing checks gate approval and only requested reviewers can override them.
+decisions/README.md. Ownership stays with those documents; the YAML restates
+only operational pass/fail logic, and a comment above each check names its
+owning document. The three mechanical checks — migration immutability,
+frozen-surface citation, append-only decision records — run in `error` mode now;
+the six judgment checks run in `warning` mode pending calibration against real
+reviews, with the catalog-honesty and description-accuracy checks first in line
+for promotion to `error`. `request_changes_workflow` and
+`override_requested_reviewers_only` are enabled so failing checks gate approval
+and only requested reviewers can override them.
 
 **Rejected alternatives.** Configuring the checks only in CodeRabbit's web UI:
 unreviewable, unversioned, and subject to a documented 1,000-character limit on
@@ -2252,12 +2246,12 @@ enforcement.
 
 ## 2026-07-17 — PostgreSQL 18 production and integration-test baseline
 
-**Context.** [ADR-0032](decisions/0032-postgres-implementation-dependencies.md)
-requires an explicitly tagged supported PostgreSQL image and requires production
-and integration tests to use the same major, while leaving the exact tag as an
-implementation decision. Signalbox is greenfield: it has no deployed database,
-compatibility obligation, or accepted schema feature requiring an older major.
-PostgreSQL 18 has a longer remaining upstream support window than PostgreSQL 17.
+**Context.** ADR-0032 requires an explicitly tagged supported PostgreSQL image
+and requires production and integration tests to use the same major, while
+leaving the exact tag as an implementation decision. Signalbox is greenfield: it
+has no deployed database, compatibility obligation, or accepted schema feature
+requiring an older major. PostgreSQL 18 has a longer remaining upstream support
+window than PostgreSQL 17.
 
 **Decision.** Establish PostgreSQL 18 as the production and integration-test
 major baseline and pin the initial Testcontainers image to
@@ -2279,13 +2273,12 @@ selection. It changes no domain, transaction, migration, or schema semantics.
 
 ## 2026-07-17 — Materialize complete membership for first context-frontier storage
 
-**Context.** [ADR-0022](decisions/0022-persistence-representation.md) and
-[ADR-0030](decisions/0030-context-frontier-snapshots.md) deliberately permit
-complete membership, parent-plus-append, or shared immutable prefixes when each
-representation resolves to the same complete ordered-distinct source-qualified
-sequence. The first S01/S03 persistence slice benefits more from direct
-constraints and inspectability than from prefix compression, and choosing among
-those already-permitted physical forms does not change domain semantics.
+**Context.** ADR-0022 and ADR-0030 deliberately permit complete membership,
+parent-plus-append, or shared immutable prefixes when each representation
+resolves to the same complete ordered-distinct source-qualified sequence. The
+first S01/S03 persistence slice benefits more from direct constraints and
+inspectability than from prefix compression, and choosing among those
+already-permitted physical forms does not change domain semantics.
 
 **Decision.** Store one immutable snapshot header for the composite
 `(owning session, context-frontier identity)` and materialize one membership row
@@ -2314,12 +2307,11 @@ by ADR-0030.
 
 ## 2026-07-17 — Prepared model calls borrow resolved frontier projections
 
-**Context.** [ADR-0005](decisions/0005-model-call-retry-semantics.md) and
-[ADR-0030](decisions/0030-context-frontier-snapshots.md) require the exact call
-frontier to exist on the prepared record before send authorization. The
-preceding value slice makes a resolved projection available through a sealed
-construction seam, while the existing `CurrentModelCall::prepared` accepts only
-the call identity and turn-wide pinned target.
+**Context.** ADR-0005 and ADR-0030 require the exact call frontier to exist on
+the prepared record before send authorization. The preceding value slice makes a
+resolved projection available through a sealed construction seam, while the
+existing `CurrentModelCall::prepared` accepts only the call identity and
+turn-wide pinned target.
 
 **Decision.** Add a nonoptional private `ContextFrontier` field to both
 `CurrentModelCall` and `EndedModelCall`. Make the crate-private prepared entry
@@ -2349,13 +2341,12 @@ remain later aggregate work.
 
 ## 2026-07-17 — UUID-backed context-frontier values and sealed prefix derivation
 
-**Context.** [ADR-0030](decisions/0030-context-frontier-snapshots.md) fixes
-context-frontier identity, resolution, equality, immutability, and construction
-authority while deliberately leaving its semantic pseudocode, initial Rust
-identity backing, and trusted transition spelling open. The first domain slice
-needs to compare and derive resolved frontier candidates without making a raw
-identifier, structurally plausible entry list, or generally callable service
-into lifecycle authority.
+**Context.** ADR-0030 fixes context-frontier identity, resolution, equality,
+immutability, and construction authority while deliberately leaving its semantic
+pseudocode, initial Rust identity backing, and trusted transition spelling open.
+The first domain slice needs to compare and derive resolved frontier candidates
+without making a raw identifier, structurally plausible entry list, or generally
+callable service into lifecycle authority.
 
 **Decision.** Follow the existing `define_identity!` private-field UUID-newtype
 convention for the distinct `ContextFrontierId` and `SemanticTranscriptEntryId`
@@ -2389,11 +2380,11 @@ persistence, and ancestry-boundary resolution remain later slices.
 
 ## 2026-07-17 — Atomic-only prepared fatal-mismatch candidate
 
-**Context.** [ADR-0004](decisions/0004-turn-and-attempt-lifecycle.md) permits
-live completed-call invalidation during `Prepared` to end directly as fatal
-known failure, while that attempt state has no `StopRequested` or
-fatal-reconciliation edge. The preceding lifecycle binding deliberately requires
-a fatal-stop fallback and therefore covers only `Running` and `StopRequested`.
+**Context.** ADR-0004 permits live completed-call invalidation during `Prepared`
+to end directly as fatal known failure, while that attempt state has no
+`StopRequested` or fatal-reconciliation edge. The preceding lifecycle binding
+deliberately requires a fatal-stop fallback and therefore covers only `Running`
+and `StopRequested`.
 
 **Decision.** Represent the prepared path with a separate crate-private
 consuming binding and `PreparedFatalMismatchAtomicCandidate`. It couples exact
@@ -2416,11 +2407,11 @@ remain later work.
 
 ## 2026-07-17 — Sealed live fatal-mismatch lifecycle candidate binding
 
-**Context.** [ADR-0031](decisions/0031-direct-fatal-terminalization.md) owns the
-stop-versus-direct-closure rule, while the preceding slice derives its sealed
-post-evidence inputs but commits no lifecycle transition. The Rust
-implementation needs a candidate representation that couples those inputs to
-existing attempt and turn values without implying aggregate or commit authority.
+**Context.** ADR-0031 owns the stop-versus-direct-closure rule, while the
+preceding slice derives its sealed post-evidence inputs but commits no lifecycle
+transition. The Rust implementation needs a candidate representation that
+couples those inputs to existing attempt and turn values without implying
+aggregate or commit authority.
 
 **Decision.** For `Running` and `StopRequested` attempt projections, represent
 local binding as a crate-private consuming `FatalMismatchLifecycleBinding` that
@@ -2447,10 +2438,9 @@ later work.
 ## 2026-07-17 — Sealed post-evidence fatal-closure derivation
 
 **Context.** The sealed provider-target mismatch fact prevents cross-wired
-evidence, while [ADR-0031](decisions/0031-direct-fatal-terminalization.md) also
-forbids callers from supplying completion, guard, cause-set, ambiguity-set, or
-disposition authority. The domain needs one representation from which those
-facts are derived together.
+evidence, while ADR-0031 also forbids callers from supplying completion, guard,
+cause-set, ambiguity-set, or disposition authority. The domain needs one
+representation from which those facts are derived together.
 
 **Decision.** A crate-private `CompleteFatalMismatchProjection` owns the current
 attempt plus `BTreeMap`-canonicalized entries for every owned logical dependency
@@ -2477,11 +2467,11 @@ atomic persistence remain later work.
 
 ## 2026-07-17 — Sealed provider-target mismatch correlation facts
 
-**Context.** [ADR-0031](decisions/0031-direct-fatal-terminalization.md) requires
-the aggregate to apply one trusted fatal-mismatch fact through one of three
-timing-specific call effects. The existing ADR-0005 evidence slice validated
-each correlation but returned only a failure reference, so later closure code
-could pair a valid failure for call A with call B or a different timing effect.
+**Context.** ADR-0031 requires the aggregate to apply one trusted fatal-mismatch
+fact through one of three timing-specific call effects. The existing ADR-0005
+evidence slice validated each correlation but returned only a failure reference,
+so later closure code could pair a valid failure for call A with call B or a
+different timing effect.
 
 **Decision.** Replace those crate-private producer results with a private-field
 `AppliedProviderTargetMismatch` coupling the exact
