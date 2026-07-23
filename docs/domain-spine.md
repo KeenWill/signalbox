@@ -589,6 +589,12 @@ impl SubmitInputTerminalSourceReconstitutionInput {
         turn: TurnId,
         disposition: TurnDisposition,
     ) -> Self;
+    pub fn interrupted_model_call_reconciliation(
+        origin: SubmitInputTurnOriginReconstitutionInput,
+        turn: TurnId,
+        ambiguous_call: ModelCallId,
+        interrupt: AppliedInterruptProof,
+    ) -> Self;
 }
 
 pub struct SubmitInputTurnOriginReconstitutionInput { /* private */ }

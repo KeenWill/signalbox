@@ -1050,6 +1050,29 @@ impl SubmitInputTerminalSourceReconstitutionInput {
             disposition,
         }
     }
+
+    /// Supplies a terminal source whose exact ambiguous model call remained
+    /// unresolved after an applied interrupt.
+    pub fn interrupted_model_call_reconciliation(
+        origin: SubmitInputTurnOriginReconstitutionInput,
+        turn: TurnId,
+        ambiguous_call: crate::ModelCallId,
+        interrupt: crate::AppliedInterruptProof,
+    ) -> Self {
+        let ambiguous_operations = crate::NonEmptyIssuedOperationRefs::singleton(
+            crate::IssuedOperationRef::ModelCall(ambiguous_call),
+        );
+        Self::new(
+            origin,
+            turn,
+            TurnDisposition::ReconciliationRequired {
+                marker: crate::ReconciliationMarker::from_interrupt_ambiguity(
+                    ambiguous_operations,
+                    interrupt,
+                ),
+            },
+        )
+    }
 }
 
 impl SubmitInputTurnOriginReconstitutionInput {

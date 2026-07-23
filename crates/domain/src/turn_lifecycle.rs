@@ -104,6 +104,12 @@ pub struct NonEmptyIssuedOperationRefs {
 }
 
 impl NonEmptyIssuedOperationRefs {
+    pub(crate) fn singleton(operation: IssuedOperationRef) -> Self {
+        Self {
+            operations: BTreeSet::from([operation]),
+        }
+    }
+
     /// Canonicalizes distinct references and rejects empty or duplicate input.
     pub fn try_from_operations(
         operations: impl IntoIterator<Item = IssuedOperationRef>,

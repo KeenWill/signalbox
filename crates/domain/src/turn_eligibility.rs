@@ -4004,11 +4004,21 @@ fn reconstitute_active_acceptance_tail(
                 expected_active_turn,
                 ..
             } = entry.delivery
-            && (expected_active_turn != active
-                || applied_interrupt.is_none_or(|interrupt| {
-                    interrupt.accepted_input() != accepted_input
-                        || accepted_input_turns.get(&accepted_input) != Some(&interrupt.successor())
-                }))
+            && !applied_interrupt.is_some_and(|interrupt| {
+                expected_active_turn == active
+                    && interrupt.accepted_input() == accepted_input
+                    && accepted_input_turns.get(&accepted_input) == Some(&interrupt.successor())
+            })
+            && !accepted_input_turns
+                .get(&accepted_input)
+                .and_then(|successor| records_by_turn.get(successor))
+                .is_some_and(|successor| {
+                    expected_active_turn != active
+                        && scheduling_record_is_terminal(successor)
+                        && records_by_turn
+                            .get(&expected_active_turn)
+                            .is_some_and(|predecessor| scheduling_record_is_terminal(predecessor))
+                })
         {
             return Err(
                 AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
@@ -4049,6 +4059,17 @@ fn reconstitute_active_acceptance_tail(
         observed_last_position: candidate.observed_last_position,
         entries: entries.into_boxed_slice(),
     }))
+}
+
+fn scheduling_record_is_terminal(record: &AcceptedInputTurnSchedulingRecord) -> bool {
+    matches!(
+        &record.state,
+        AcceptedInputTurnSchedulingRecordState::TerminalFailed { .. }
+            | AcceptedInputTurnSchedulingRecordState::TerminalCompleted { .. }
+            | AcceptedInputTurnSchedulingRecordState::TerminalRefused { .. }
+            | AcceptedInputTurnSchedulingRecordState::TerminalCancelled { .. }
+            | AcceptedInputTurnSchedulingRecordState::TerminalReconciliationRequired { .. }
+    )
 }
 
 fn origin_delivery_matches_record(

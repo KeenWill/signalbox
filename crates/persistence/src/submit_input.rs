@@ -91,7 +91,13 @@ enum StoredTerminalTurnDisposition {
     Completed,
     Refused,
     Failed,
-    Cancelled { interrupt_command: DurableCommandId },
+    Cancelled {
+        interrupt_command: DurableCommandId,
+    },
+    ReconciliationRequired {
+        interrupt_command: DurableCommandId,
+        ambiguous_call: ModelCallId,
+    },
 }
 
 impl StoredTerminalTurnDisposition {
@@ -100,7 +106,7 @@ impl StoredTerminalTurnDisposition {
             Self::Completed => Some(signalbox_domain::TurnDisposition::Completed),
             Self::Refused => Some(signalbox_domain::TurnDisposition::Refused),
             Self::Failed => Some(signalbox_domain::TurnDisposition::Failed),
-            Self::Cancelled { .. } => None,
+            Self::Cancelled { .. } | Self::ReconciliationRequired { .. } => None,
         }
     }
 }
@@ -3291,8 +3297,8 @@ pub(crate) async fn load_turn_origin_graph(
             command.delivery_kind AS origin_delivery_kind,
             command.expected_active_turn_id AS origin_predecessor_turn_id,
             source.state_kind AS source_state_kind,
-            source.terminal_disposition_kind AS source_terminal_disposition_kind
-            ,
+            source.terminal_disposition_kind AS source_terminal_disposition_kind,
+            source.terminal_model_call_id AS source_terminal_model_call_id,
             source_attempt.interrupt_command_id AS source_interrupt_command_id
           FROM origin_turn AS current
           JOIN turn_lifecycle AS turn
@@ -3408,6 +3414,24 @@ pub(crate) async fn load_turn_origin_graph(
                         })?;
                         StoredTerminalTurnDisposition::Cancelled {
                             interrupt_command: command,
+                        }
+                    }
+                    Some("reconciliation_required") => {
+                        let command = durable_command_id_from_uuid(required(
+                            &row,
+                            "source_interrupt_command_id",
+                        )?)
+                        .map_err(|_| {
+                            SubmitInputCorruption::Inconsistent(
+                                "reconciliation source interrupt command",
+                            )
+                        })?;
+                        StoredTerminalTurnDisposition::ReconciliationRequired {
+                            interrupt_command: command,
+                            ambiguous_call: ModelCallId::from_uuid(required(
+                                &row,
+                                "source_terminal_model_call_id",
+                            )?),
                         }
                     }
                     Some(value) => {
@@ -3579,6 +3603,106 @@ pub(crate) async fn load_turn_origin_graph(
                 }
                 let source_origin = dependency
                     .ok_or(SubmitInputCorruption::Missing("reclassified source origin"))?;
+                let source_turn = turn_id_from_uuid(source.1);
+                let source_terminal = match source_disposition {
+                    StoredTerminalTurnDisposition::Completed
+                    | StoredTerminalTurnDisposition::Refused
+                    | StoredTerminalTurnDisposition::Failed => {
+                        SubmitInputTerminalSourceReconstitutionInput::new(
+                            source_origin.clone(),
+                            source_turn,
+                            source_disposition.unstopped_domain().ok_or(
+                                SubmitInputCorruption::Inconsistent("terminal source disposition"),
+                            )?,
+                        )
+                    }
+                    StoredTerminalTurnDisposition::Cancelled { interrupt_command } => {
+                        let interrupt_uuid = durable_command_id_to_uuid(interrupt_command);
+                        let mut interrupt_rows =
+                            load_complete_rows(connection, &[interrupt_uuid]).await?;
+                        let interrupt_row = interrupt_rows.pop().ok_or(
+                            SubmitInputCorruption::Missing("cancelled source interrupt command"),
+                        )?;
+                        if !interrupt_rows.is_empty() {
+                            return Err(SubmitInputCorruption::Inconsistent(
+                                "duplicate cancelled source interrupt command",
+                            )
+                            .into());
+                        }
+                        let interrupt_receipt = decode_complete(
+                            interrupt_row,
+                            interrupt_command,
+                            Some(source_origin.clone()),
+                            None,
+                        )?;
+                        let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(
+                            interrupt_origin,
+                        )) = interrupt_receipt.result()
+                        else {
+                            return Err(SubmitInputCorruption::Inconsistent(
+                                "cancelled source interrupt result",
+                            )
+                            .into());
+                        };
+                        SubmitInputTerminalSourceReconstitutionInput::new(
+                            source_origin.clone(),
+                            source_turn,
+                            signalbox_domain::TurnDisposition::Cancelled {
+                                cause: interrupt_origin
+                                    .applied_interrupt()
+                                    .ok_or(SubmitInputCorruption::Inconsistent(
+                                        "cancelled source interrupt authority",
+                                    ))?
+                                    .proof(),
+                            },
+                        )
+                    }
+                    StoredTerminalTurnDisposition::ReconciliationRequired {
+                        interrupt_command,
+                        ambiguous_call,
+                    } => {
+                        let interrupt_uuid = durable_command_id_to_uuid(interrupt_command);
+                        let mut interrupt_rows =
+                            load_complete_rows(connection, &[interrupt_uuid]).await?;
+                        let interrupt_row =
+                            interrupt_rows.pop().ok_or(SubmitInputCorruption::Missing(
+                                "reconciliation source interrupt command",
+                            ))?;
+                        if !interrupt_rows.is_empty() {
+                            return Err(SubmitInputCorruption::Inconsistent(
+                                "duplicate reconciliation source interrupt command",
+                            )
+                            .into());
+                        }
+                        let interrupt_receipt = decode_complete(
+                            interrupt_row,
+                            interrupt_command,
+                            Some(source_origin.clone()),
+                            None,
+                        )?;
+                        let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(
+                            interrupt_origin,
+                        )) = interrupt_receipt.result()
+                        else {
+                            return Err(SubmitInputCorruption::Inconsistent(
+                                "reconciliation source interrupt result",
+                            )
+                            .into());
+                        };
+                        SubmitInputTerminalSourceReconstitutionInput::
+                            interrupted_model_call_reconciliation(
+                                source_origin.clone(),
+                                source_turn,
+                                ambiguous_call,
+                                interrupt_origin
+                                    .applied_interrupt()
+                                    .ok_or(SubmitInputCorruption::Inconsistent(
+                                        "reconciliation source interrupt authority",
+                                    ))?
+                                    .proof(),
+                            )
+                    }
+                };
                 SubmitInputTurnOriginReconstitutionInput::reclassified(
                     receipt,
                     AcceptedInputLifecycle::new(
@@ -3592,57 +3716,7 @@ pub(crate) async fn load_turn_origin_graph(
                     session_id_from_uuid(ready.0),
                     turn_id_from_uuid(ready.1),
                     link.queue_order,
-                    SubmitInputTerminalSourceReconstitutionInput::new(
-                        source_origin.clone(),
-                        turn_id_from_uuid(source.1),
-                        match source_disposition {
-                            StoredTerminalTurnDisposition::Completed
-                            | StoredTerminalTurnDisposition::Refused
-                            | StoredTerminalTurnDisposition::Failed => source_disposition
-                                .unstopped_domain()
-                                .ok_or(SubmitInputCorruption::Inconsistent(
-                                    "terminal source disposition",
-                                ))?,
-                            StoredTerminalTurnDisposition::Cancelled { interrupt_command } => {
-                                let interrupt_uuid = durable_command_id_to_uuid(interrupt_command);
-                                let mut interrupt_rows =
-                                    load_complete_rows(connection, &[interrupt_uuid]).await?;
-                                let interrupt_row =
-                                    interrupt_rows.pop().ok_or(SubmitInputCorruption::Missing(
-                                        "cancelled source interrupt command",
-                                    ))?;
-                                if !interrupt_rows.is_empty() {
-                                    return Err(SubmitInputCorruption::Inconsistent(
-                                        "duplicate cancelled source interrupt command",
-                                    )
-                                    .into());
-                                }
-                                let interrupt_receipt = decode_complete(
-                                    interrupt_row,
-                                    interrupt_command,
-                                    Some(source_origin.clone()),
-                                    None,
-                                )?;
-                                let SubmitInputResult::Applied(
-                                    SubmitInputAppliedResult::TurnOrigin(interrupt_origin),
-                                ) = interrupt_receipt.result()
-                                else {
-                                    return Err(SubmitInputCorruption::Inconsistent(
-                                        "cancelled source interrupt result",
-                                    )
-                                    .into());
-                                };
-                                signalbox_domain::TurnDisposition::Cancelled {
-                                    cause: interrupt_origin
-                                        .applied_interrupt()
-                                        .ok_or(SubmitInputCorruption::Inconsistent(
-                                            "cancelled source interrupt authority",
-                                        ))?
-                                        .proof(),
-                                }
-                            }
-                        },
-                    ),
+                    source_terminal,
                 )
             }
         };

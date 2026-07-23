@@ -3017,7 +3017,8 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
 /// Prepared is known-failed with exact terminal execution provenance while
 /// reclassifying newly observed steering, an issued call becomes an exact
 /// ambiguity wait, a stopped call terminalizes as reconciliation while
-/// reclassifying its steering, and replay changes neither.
+/// reclassifying its steering, that successor remains a valid replay origin,
+/// and replay changes neither.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s03_s04_inv006_inv014_inv034_startup_scan_classifies_prepared_and_issued_model_calls()
@@ -3285,6 +3286,7 @@ async fn s03_s04_inv006_inv014_inv034_startup_scan_classifies_prepared_and_issue
             SubmitInputAppliedResult::TurnOrigin(_)
         ))
     ));
+
     assert_eq!(
         PostgresStartupScanRepository::new(restarted_pool.clone())
             .recover(
@@ -3323,6 +3325,92 @@ async fn s03_s04_inv006_inv014_inv034_startup_scan_classifies_prepared_and_issue
     .await?;
     assert_eq!(unchanged, (2, 2, 1, 0));
     assert_ne!(prepared.session, issued.session);
+
+    let activated_interrupt = activate_earliest_queued_turn(
+        &restarted_pool,
+        EarliestQueuedTurnActivation {
+            session: stopped.session.into_uuid(),
+            origin_entry: Uuid::from_u128(0x6400),
+            starting_frontier: Uuid::from_u128(0x6401),
+            initial_attempt: Uuid::from_u128(0x6402),
+        },
+    )
+    .await?;
+    assert_eq!(
+        activated_interrupt.turn(),
+        TurnId::from_uuid(Uuid::from_u128(0x6203))
+    );
+    let empty_targets =
+        ModelTargetCatalog::try_from_definitions([]).expect("an empty target catalog is valid");
+    let target_miss = PostgresModelCallRepository::new(
+        restarted_pool.clone(),
+        empty_targets,
+        model_credential_reference(),
+    );
+    let PrepareInitialModelCallOutcome::TargetUnavailable(failed_interrupt) = target_miss
+        .prepare_initial_call(
+            stopped.session,
+            ModelCallId::from_uuid(Uuid::from_u128(0x6403)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x6404)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x6405)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0x6406)),
+            |_| panic!("the interrupt successor has no pending steering"),
+        )
+        .await?
+    else {
+        panic!("the unavailable target must release the interrupt successor");
+    };
+    assert_eq!(
+        failed_interrupt.turn(),
+        TurnId::from_uuid(Uuid::from_u128(0x6203))
+    );
+
+    let activated_reclassified = activate_earliest_queued_turn(
+        &restarted_pool,
+        EarliestQueuedTurnActivation {
+            session: stopped.session.into_uuid(),
+            origin_entry: Uuid::from_u128(0x6410),
+            starting_frontier: Uuid::from_u128(0x6411),
+            initial_attempt: Uuid::from_u128(0x6412),
+        },
+    )
+    .await?;
+    let reclassified_turn = TurnId::from_uuid(Uuid::from_u128(0x6202));
+    assert_eq!(activated_reclassified.turn(), reclassified_turn);
+
+    let descendant_command = DurableCommandId::from_uuid(Uuid::from_u128(0x4303));
+    let descendant = SubmitInputRepository::new(restarted_pool.clone())
+        .handle(
+            input_with_delivery(
+                0x4303,
+                0x3501,
+                "work after reconciliation-origin steering",
+                DeliveryRequest::AfterCurrentTurn {
+                    expected_active_turn: reclassified_turn,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0x6105)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0x6205))),
+        )
+        .await?;
+    let SubmitInputHandlingOutcome::Recorded(descendant_result) = &descendant else {
+        panic!("the descendant command was newly recorded");
+    };
+    assert!(matches!(
+        descendant_result,
+        SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(_))
+    ));
+    assert_eq!(
+        SubmitInputRepository::new(restarted_pool.clone())
+            .load(descendant_command)
+            .await?
+            .expect("the descendant command must replay")
+            .result(),
+        descendant_result
+    );
 
     restarted_pool.close().await;
     drop(container);
