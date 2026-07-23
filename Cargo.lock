@@ -2385,6 +2385,7 @@ dependencies = [
  "signalbox-model-runtime",
  "signalbox-model-runtime-anthropic",
  "signalbox-persistence",
+ "signalbox-process-protocol",
  "sqlx",
  "testcontainers-modules",
  "tokio",
