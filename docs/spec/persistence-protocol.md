@@ -282,11 +282,11 @@ account for it rather than block startup or strand it.
 
 An interrupt accepted against an unstopped `awaiting_model_call_recovery` row
 does not rewrite its terminal ambiguous call. In the accepting transaction, the
-ended attempt changes only from `without_stop/ambiguous|lost` to the same
-disposition under `after_cancellation` with the exact interrupt proof, and the
-active lifecycle terminalizes `reconciliation_required` with an equal-content
-frontier and typed outbox record. The attempt trigger admits only this
-cause-enrichment edge; all other ended-attempt updates remain rejected.
+ended attempt remains its original `without_stop/ambiguous|lost` evidence, and
+the active lifecycle terminalizes `reconciliation_required` with an
+equal-content frontier and typed outbox record. The reconciliation marker and
+accepted successor carry the exact interrupt proof. The attempt trigger rejects
+every update to an ended attempt.
 
 ## Corruption taxonomy
 

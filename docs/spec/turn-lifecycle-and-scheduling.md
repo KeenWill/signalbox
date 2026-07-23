@@ -64,11 +64,7 @@ At most one turn per session is `active`. Enforcement is layered:
    `prepared`→`running`|`ended`, `running`→`stop_requested`|`ended`,
    `stop_requested`→`ended`), terminal-turn immutability, write-once start
    fields, no new attempt on a terminal turn, and queued terminalization only
-   without attempt history. Ended attempts have one monotonic proof-enrichment
-   edge: an unstopped `Ambiguous` or `Lost` end can become the corresponding
-   `AfterCancellation` end when a later interrupt closes its exact recovery
-   wait; identity and disposition remain unchanged and no ended attempt can
-   return to a current state.
+   without attempt history. Ended attempts are immutable.
 
 Why: process memory carries no authority (INV-009, INV-010), so exclusivity must
 hold in durable rows even if every in-process structure is lost. Terminal turns
@@ -329,11 +325,11 @@ delivery outcomes implemented here are:
   origin. Call, attempt, and turn terminalization follow
   [model-call-execution](model-call-execution.md#terminal-outcomes). A matching
   interrupt against `AwaitingRecoveryDecision` preserves the already terminal
-  ambiguous call, enriches its ended attempt with the new proof, and
-  terminalizes `ReconciliationRequired` with the wait's exact operation set. A
-  next-safe-point request against a stopping turn records
-  `SafePointUnavailableWhileStopping`; equal interrupt replay returns the
-  original applied result. A distinct later interrupt records
+  ambiguous call and ended attempt, records the new proof on the turn's
+  reconciliation marker, and terminalizes `ReconciliationRequired` with the
+  wait's exact operation set. A next-safe-point request against a stopping turn
+  records `SafePointUnavailableWhileStopping`; equal interrupt replay returns
+  the original applied result. A distinct later interrupt records
   `InterruptAlreadyApplied { active_turn, existing_command }` without accepting
   an input or replacing the existing proof.
 
@@ -418,8 +414,8 @@ startup with a classified, key-bearing log line and a failure exit code.
 Observability and the operator failure taxonomy are
 [runtime-substrate](runtime-substrate.md) scope.
 
-On SIGINT/SIGTERM the scheduler loop stops admitting new passes and in-flight
-passes get a bounded 30-second grace window to let their authoritative
+On SIGINT/SIGTERM the scheduler loop stops admitting new passes and unstopped
+in-flight passes get a bounded 30-second grace window to let their authoritative
 transactions commit or abort. Window expiry abandons the work, warns, and skips
 the unbounded pool drain; a clean exit closes the pool. Why shutdown is polish,
 not correctness: abrupt exit at any point is safe because durable rows plus the
@@ -442,7 +438,7 @@ over the shared pool; no shared locked service instance exists.
 - Ancestry-derived sessions cannot be scheduled (`UnsupportedSessionAncestry`);
   ancestry-to-first-frontier resolution is unimplemented.
 - Startup recovery now classifies model-call evidence (a `Prepared` call closes
-  as a known failure; an in-flight call parks the turn as ambiguous in
+  as a known failure; an unstopped in-flight call parks the turn as ambiguous in
   `awaiting_model_call_recovery`); wait reconstruction for remaining phases
   still awaits their slices.
 - The single-hub advisory singleton guard and per-session scan gating (designed
