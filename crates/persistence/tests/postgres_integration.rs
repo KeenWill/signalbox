@@ -1667,6 +1667,75 @@ async fn stopped_ambiguity_commits_reconciliation_and_rereads_exactly() -> Resul
     .await?;
     assert_eq!(stored, (1, 1, 1));
 
+    let waiting_seed = seed + 0x20;
+    let (waiting, waiting_repository, waiting_authorized) =
+        authorize_checkpointed_model_call(&pool, waiting_seed).await?;
+    let waiting_observation = waiting_authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::Ambiguous);
+    let waiting_outcome = waiting_repository
+        .apply_terminal_observation(
+            waiting.session,
+            waiting_observation,
+            ModelCallTerminalIdentities::Ambiguous(
+                signalbox_domain::AmbiguousModelCallTurnIdentities::new(
+                    ContextFrontierId::from_uuid(Uuid::from_u128(waiting_seed + 22)),
+                ),
+            ),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+    assert!(matches!(
+        waiting_outcome,
+        ModelCallTerminalOutcome::AwaitingRecovery(ref ambiguous)
+            if ambiguous.turn() == waiting.turn
+                && ambiguous.call().id() == waiting.call
+    ));
+    let waiting_interrupt = SubmitInputRepository::new(pool.clone())
+        .handle(
+            input_with_delivery(
+                waiting_seed + 23,
+                waiting_seed + 1,
+                "interrupt existing ambiguity wait",
+                DeliveryRequest::Interrupt {
+                    expected_active_turn: waiting.turn,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(waiting_seed + 24)),
+            Some(TurnId::from_uuid(Uuid::from_u128(waiting_seed + 25))),
+        )
+        .await?;
+    assert!(matches!(
+        waiting_interrupt,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::TurnOrigin(_)
+        ))
+    ));
+    let waiting_stored: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*)
+               FROM turn_attempt
+              WHERE turn_attempt_id = $1
+                AND end_variant = 'after_cancellation'
+                AND end_disposition = 'ambiguous'),
+            (SELECT count(*)
+               FROM turn_lifecycle
+              WHERE turn_id = $2
+                AND state_kind = 'terminal'
+                AND terminal_disposition_kind = 'reconciliation_required'),
+            (SELECT count(*)
+               FROM turn_reconciliation_required_outbox_event
+              WHERE turn_id = $2
+                AND model_call_id = $3)",
+    )
+    .bind(waiting.attempt.into_uuid())
+    .bind(waiting.turn.into_uuid())
+    .bind(waiting.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(waiting_stored, (1, 1, 1));
+
     let failed_seed = seed + 0x40;
     let (failed, failed_repository, failed_authorized) =
         authorize_checkpointed_model_call(&pool, failed_seed).await?;
@@ -1744,6 +1813,48 @@ async fn stopped_ambiguity_commits_reconciliation_and_rereads_exactly() -> Resul
             .reread_terminal_observation(refused.session, &refused_observation)
             .await?,
         RetainedModelCallObservationStatus::AlreadyCommitted
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S07 / S08 / INV-006 / INV-012 / INV-037: the stop-request migration keeps
+/// each stopping rejection paired with its immutable delivery and admits only
+/// a known-failed call as failed post-cancellation provenance.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn stop_request_schema_keeps_delivery_and_failure_shapes_closed() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+
+    let result_shape: String = sqlx::query_scalar(
+        "SELECT pg_get_constraintdef(oid)
+           FROM pg_constraint
+          WHERE conname = 'submit_input_command_result_shape'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(result_shape.contains(
+        "((rejection_kind = 'safe_point_unavailable_while_stopping'::text) AND \
+         (delivery_kind = 'next_safe_point'::text))"
+    ));
+    assert!(result_shape.contains(
+        "((rejection_kind = 'interrupt_already_applied'::text) AND \
+         (delivery_kind = 'interrupt'::text))"
+    ));
+
+    let failed_assertion: String = sqlx::query_scalar(
+        "SELECT pg_get_functiondef(oid)
+           FROM pg_proc
+          WHERE proname = 'assert_failed_terminal_execution_final_state'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(failed_assertion.contains("terminal_disposition_kind = 'known_failed'"));
+    assert!(
+        !failed_assertion.contains("terminal_disposition_kind IN ('known_failed', 'cancelled')")
     );
 
     pool.close().await;

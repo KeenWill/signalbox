@@ -1553,12 +1553,19 @@ fn pending_reclassification_candidates(
     execution: &ModelCallExecution,
     next_turn: &mut impl FnMut(AcceptedInputId) -> TurnId,
 ) -> Result<Vec<PendingSteeringReclassificationIdentity>, ModelCallRepositoryError> {
+    pending_reclassification_candidates_for_active(execution.active_turn(), next_turn)
+}
+
+fn pending_reclassification_candidates_for_active(
+    active_turn: &signalbox_domain::ActivatedAcceptedInputTurn,
+    next_turn: &mut impl FnMut(AcceptedInputId) -> TurnId,
+) -> Result<Vec<PendingSteeringReclassificationIdentity>, ModelCallRepositoryError> {
     let mut proposed_turns = BTreeSet::new();
     let mut reclassifications = Vec::new();
-    for pending in execution.active_turn().pending_steering() {
+    for pending in active_turn.pending_steering() {
         let accepted_input = pending.accepted_input();
         let proposed_turn = next_turn(accepted_input);
-        record_reclassified_turn_candidate(execution.turn(), proposed_turn, &mut proposed_turns)?;
+        record_reclassified_turn_candidate(active_turn.turn(), proposed_turn, &mut proposed_turns)?;
         reclassifications.push(PendingSteeringReclassificationIdentity::new(
             accepted_input,
             proposed_turn,
@@ -1577,6 +1584,16 @@ pub(crate) fn attach_interrupt_reclassification_candidates(
             execution, next_turn,
         )?),
     )
+}
+
+pub(crate) fn attach_recovery_interrupt_reclassification_candidates(
+    identities: signalbox_domain::CancelledModelCallTurnIdentities,
+    active_turn: &signalbox_domain::ActivatedAcceptedInputTurn,
+    next_turn: &mut impl FnMut(AcceptedInputId) -> TurnId,
+) -> Result<signalbox_domain::CancelledModelCallTurnIdentities, ModelCallRepositoryError> {
+    Ok(identities.with_pending_steering_reclassifications(
+        pending_reclassification_candidates_for_active(active_turn, next_turn)?,
+    ))
 }
 
 fn record_reclassified_turn_candidate(
@@ -2342,13 +2359,33 @@ async fn persist_reconciliation_required(
     connection: &mut PgConnection,
     reconciliation: &ReconciliationRequiredModelCallTurn,
 ) -> Result<(), ModelCallRepositoryError> {
-    persist_ended_call(
-        connection,
-        reconciliation.session(),
-        reconciliation.turn(),
-        reconciliation.call(),
+    let call_already_ambiguous = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+            SELECT 1
+              FROM model_call
+             WHERE model_call_id = $1
+               AND turn_id = $2
+               AND session_id = $3
+               AND turn_attempt_id = $4
+               AND state_kind = 'terminal'
+               AND terminal_disposition_kind = 'ambiguous'
+        )",
     )
+    .bind(reconciliation.call().id().into_uuid())
+    .bind(turn_id_to_uuid(reconciliation.turn()))
+    .bind(session_id_to_uuid(reconciliation.session()))
+    .bind(reconciliation.attempt().id().into_uuid())
+    .fetch_one(&mut *connection)
     .await?;
+    if !call_already_ambiguous {
+        persist_ended_call(
+            connection,
+            reconciliation.session(),
+            reconciliation.turn(),
+            reconciliation.call(),
+        )
+        .await?;
+    }
     persist_ended_attempt(
         connection,
         reconciliation.session(),
@@ -2374,13 +2411,15 @@ async fn persist_reconciliation_required(
         Some(reconciliation.call().id()),
     )
     .await?;
-    append_terminal_call_event(
-        connection,
-        reconciliation.session(),
-        reconciliation.turn(),
-        reconciliation.call(),
-    )
-    .await?;
+    if !call_already_ambiguous {
+        append_terminal_call_event(
+            connection,
+            reconciliation.session(),
+            reconciliation.turn(),
+            reconciliation.call(),
+        )
+        .await?;
+    }
     outbox::append(
         connection,
         OutboxEvent::TurnReconciliationRequired {
@@ -2902,9 +2941,20 @@ async fn persist_ended_attempt(
           WHERE turn_attempt_id = $5
             AND turn_id = $6
             AND session_id = $7
-            AND state_kind IN ('prepared', 'running', 'stop_requested')
-            AND end_variant IS NULL
-            AND end_disposition IS NULL
+            AND (
+                (
+                    state_kind IN ('prepared', 'running', 'stop_requested')
+                    AND end_variant IS NULL
+                    AND end_disposition IS NULL
+                )
+                OR (
+                    state_kind = 'ended'
+                    AND end_variant = 'without_stop'
+                    AND end_disposition = $2
+                    AND $1 = 'after_cancellation'
+                    AND $2 IN ('ambiguous', 'lost')
+                )
+            )
             AND (
                 (
                     $3::uuid IS NULL
@@ -3038,7 +3088,17 @@ async fn terminalize_lifecycle(
           WHERE turn_id = $5
             AND session_id = $6
             AND state_kind = 'active'
-            AND active_phase_kind = 'running'",
+            AND (
+                (
+                    active_phase_kind = 'running'
+                    AND recovery_model_call_id IS NULL
+                )
+                OR (
+                    $4 = 'reconciliation_required'
+                    AND active_phase_kind = 'awaiting_model_call_recovery'
+                    AND recovery_model_call_id = $3
+                )
+            )",
     )
     .bind(terminal_frontier.into_uuid())
     .bind(terminal_attempt.map(signalbox_domain::TurnAttemptId::into_uuid))

@@ -206,11 +206,16 @@ ALTER TABLE submit_input_command
         OR
         (
             result_kind = 'rejected'
-            AND rejection_kind IN (
-                'safe_point_unavailable_while_stopping',
-                'interrupt_already_applied'
+            AND (
+                (
+                    rejection_kind = 'safe_point_unavailable_while_stopping'
+                    AND delivery_kind = 'next_safe_point'
+                )
+                OR (
+                    rejection_kind = 'interrupt_already_applied'
+                    AND delivery_kind = 'interrupt'
+                )
             )
-            AND delivery_kind IN ('next_safe_point', 'interrupt')
             AND result_accepted_input_id IS NULL
             AND result_turn_id IS NULL
             AND result_actual_active_turn_id = expected_active_turn_id
@@ -583,7 +588,19 @@ BEGIN
     END IF;
 
     IF OLD.state_kind = 'ended' THEN
-        RAISE EXCEPTION 'ended turn attempt is immutable'
+        IF OLD.end_variant = 'without_stop'
+           AND OLD.end_disposition IN ('ambiguous', 'lost')
+           AND OLD.interrupt_command_id IS NULL
+           AND OLD.interrupt_predecessor_turn_id IS NULL
+           AND NEW.state_kind = 'ended'
+           AND NEW.end_variant = 'after_cancellation'
+           AND NEW.end_disposition = OLD.end_disposition
+           AND NEW.interrupt_command_id IS NOT NULL
+           AND NEW.interrupt_predecessor_turn_id = NEW.turn_id
+        THEN
+            RETURN NEW;
+        END IF;
+        RAISE EXCEPTION 'ended turn attempt is immutable except for ambiguity stop proof'
             USING ERRCODE = '23514';
     END IF;
 
@@ -1870,7 +1887,7 @@ BEGIN
                AND turn_id = checked_turn_id
                AND session_id = checked_session
                AND state_kind = 'terminal'
-               AND terminal_disposition_kind IN ('known_failed', 'cancelled')
+               AND terminal_disposition_kind = 'known_failed'
         ) THEN
             RAISE EXCEPTION
                 'post-cancellation failure lacks its exact terminal call'

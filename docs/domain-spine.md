@@ -1027,6 +1027,7 @@ impl CancelledTurnExecutionReconstitutionInput {
     pub const fn new(
         owning_turn: TurnId,
         ended_attempt: TurnAttemptId,
+        attempt_end: TerminalAttemptEndReconstitutionInput,
         ended_call: Option<ModelCallId>,
         interrupt: AppliedInterruptCommandResult,
     ) -> Self;
@@ -1313,6 +1314,11 @@ impl AcceptedInputSchedulingProjection {
     ) -> Option<&AcceptedInputTurnSchedulingProjection>;
     pub fn active_turn(&self) -> Option<&AcceptedInputTurnSchedulingProjection>;
     pub fn active_turn_execution(&self) -> Option<ActivatedAcceptedInputTurn>;
+    pub fn apply_interrupt_to_model_call_recovery(
+        self,
+        interrupt: AppliedInterruptCommandResult,
+        identities: AmbiguousModelCallTurnIdentities,
+    ) -> Result<ReconciliationRequiredModelCallTurn, ModelCallClosureError>;
     pub fn earliest_queued_turn(&self)
         -> Option<&AcceptedInputTurnSchedulingProjection>;
     pub fn prepare_earliest_queued_activation(
@@ -1755,7 +1761,7 @@ pub struct CompletedModelCallIdentities { /* private */ }
 pub struct FailedModelCallTurnIdentities { /* private */ }
 // constructor plus with_pending_steering_reclassifications(...)
 pub struct CancelledModelCallTurnIdentities { /* private */ }
-// constructor plus with_pending_steering_reclassifications(...)
+// constructor plus with_pending_steering_reclassifications(...) and into_ambiguous()
 pub struct PhysicalCancellationModelCallTurnIdentities { /* private */ }
 // constructor plus with_pending_steering_reclassifications(...)
 pub struct RefusedModelCallTurnIdentities { /* private */ }
@@ -1780,6 +1786,7 @@ pub enum ModelCallTerminalOutcome {
 pub enum ModelCallInterruptOutcome {
     Cancelled(CancelledModelCallTurn),
     CancellationRequested(StopRequestedModelCallTurn),
+    ReconciliationRequired(ReconciliationRequiredModelCallTurn),
 }
 pub struct CompletedModelCallTurn { /* private */ }
 pub struct FailedModelCallTurn { /* private */ }

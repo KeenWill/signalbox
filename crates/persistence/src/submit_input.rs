@@ -46,7 +46,8 @@ use crate::{
     },
     model_execution::{
         ModelCallRepositoryError, attach_interrupt_reclassification_candidates,
-        persist_stop_requested, persist_terminal_outcome, require_live_execution_for_restart,
+        attach_recovery_interrupt_reclassification_candidates, persist_stop_requested,
+        persist_terminal_outcome, require_live_execution_for_restart,
     },
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
 };
@@ -340,6 +341,11 @@ enum TransactionDecision {
     Rollback(SubmitInputHandlingOutcome),
 }
 
+struct PreparedAgainstLockedState {
+    prepared: PreparedSubmitInput,
+    scheduling: Option<AcceptedInputSchedulingProjection>,
+}
+
 /// PostgreSQL implementation of atomic durable input acceptance.
 #[derive(Clone, Debug)]
 pub struct SubmitInputRepository {
@@ -509,7 +515,10 @@ where
         };
     }
 
-    let prepared = prepare_against_locked_state(connection, command, accepted_input, turn).await?;
+    let PreparedAgainstLockedState {
+        prepared,
+        scheduling,
+    } = prepare_against_locked_state(connection, command, accepted_input, turn).await?;
     let recorded = prepared.result().clone();
     let interrupt = match prepared.result() {
         SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(origin)) => {
@@ -519,21 +528,60 @@ where
         | SubmitInputResult::Rejected(_) => None,
     };
     let interrupt_outcome = if let Some(interrupt) = interrupt {
-        let execution = require_live_execution_for_restart(connection, interrupt.session()).await?;
-        let identities = attach_interrupt_reclassification_candidates(
-            cancellation_identities,
-            &execution,
-            &mut next_reclassified_turn,
-        )?;
-        Some(
-            execution
-                .apply_interrupt(interrupt, identities)
-                .map_err(|_| {
-                    SubmitInputCorruption::Inconsistent(
-                        "applied interrupt does not match active model execution",
-                    )
-                })?,
-        )
+        let recovery_wait = scheduling
+            .as_ref()
+            .and_then(AcceptedInputSchedulingProjection::active_turn_execution)
+            .is_some_and(|active| {
+                matches!(
+                    active.phase(),
+                    signalbox_domain::ActiveTurnPhase::AwaitingRecoveryDecision {
+                        applied_interrupt: None,
+                        ..
+                    }
+                )
+            });
+        if recovery_wait {
+            let scheduling = scheduling.ok_or(SubmitInputCorruption::Inconsistent(
+                "applied interrupt lacks active scheduling state",
+            ))?;
+            let active_turn =
+                scheduling
+                    .active_turn_execution()
+                    .ok_or(SubmitInputCorruption::Inconsistent(
+                        "applied interrupt lacks active turn execution",
+                    ))?;
+            let identities = attach_recovery_interrupt_reclassification_candidates(
+                cancellation_identities,
+                &active_turn,
+                &mut next_reclassified_turn,
+            )?;
+            Some(ModelCallInterruptOutcome::ReconciliationRequired(
+                scheduling
+                    .apply_interrupt_to_model_call_recovery(interrupt, identities.into_ambiguous())
+                    .map_err(|_| {
+                        SubmitInputCorruption::Inconsistent(
+                            "applied interrupt does not match model-call recovery wait",
+                        )
+                    })?,
+            ))
+        } else {
+            let execution =
+                require_live_execution_for_restart(connection, interrupt.session()).await?;
+            let identities = attach_interrupt_reclassification_candidates(
+                cancellation_identities,
+                &execution,
+                &mut next_reclassified_turn,
+            )?;
+            Some(
+                execution
+                    .apply_interrupt(interrupt, identities)
+                    .map_err(|_| {
+                        SubmitInputCorruption::Inconsistent(
+                            "applied interrupt does not match active model execution",
+                        )
+                    })?,
+            )
+        }
     } else {
         None
     };
@@ -545,6 +593,13 @@ where
         }
         Some(ModelCallInterruptOutcome::CancellationRequested(stopped)) => {
             persist_stop_requested(connection, &stopped).await?;
+        }
+        Some(ModelCallInterruptOutcome::ReconciliationRequired(reconciliation)) => {
+            persist_terminal_outcome(
+                connection,
+                &ModelCallTerminalOutcome::ReconciliationRequired(reconciliation),
+            )
+            .await?;
         }
         None => {}
     }
@@ -639,7 +694,7 @@ async fn prepare_against_locked_state(
     command: SubmitInput,
     accepted_input: AcceptedInputId,
     turn: Option<TurnId>,
-) -> Result<PreparedSubmitInput, SubmitInputRepositoryError> {
+) -> Result<PreparedAgainstLockedState, SubmitInputRepositoryError> {
     // Lock-mode constraint: this session-row lock must use the no-key-update
     // mode, not PostgreSQL's strongest row-lock mode. Submit orders the session row before the
     // scheduler row and current-defaults pointer row, while a concurrent
@@ -656,7 +711,10 @@ async fn prepare_against_locked_state(
         .await?
         .is_some();
     if !session_exists {
-        return Ok(command.prepare_session_not_found());
+        return Ok(PreparedAgainstLockedState {
+            prepared: command.prepare_session_not_found(),
+            scheduling: None,
+        });
     }
 
     let scheduler_exists =
@@ -731,28 +789,33 @@ async fn prepare_against_locked_state(
         )
     };
 
-    prepared.map_err(|error| match error.failure() {
-        SubmitInputPreparationFailure::SessionMismatch { .. } => {
-            SubmitInputCorruption::Inconsistent("current session ownership").into()
-        }
-        SubmitInputPreparationFailure::TurnCandidateMismatch => {
-            SubmitInputCorruption::Inconsistent("delivery turn candidate").into()
-        }
-        SubmitInputPreparationFailure::AcceptedInputCandidateReusesActiveOrigin {
-            active_turn,
-            accepted_input,
-        } => SubmitInputRepositoryError::AcceptedInputIdentityCollision {
-            command_id: error.command().command_id(),
-            active_turn,
-            accepted_input,
-        },
-        SubmitInputPreparationFailure::ActiveTurnProjectionMissing => {
-            SubmitInputCorruption::Inconsistent("selected active scheduling state").into()
-        }
-        SubmitInputPreparationFailure::InterruptQueueOrderInvalid => {
-            SubmitInputCorruption::Inconsistent("interrupt queue order").into()
-        }
-    })
+    prepared
+        .map(|prepared| PreparedAgainstLockedState {
+            prepared,
+            scheduling: Some(scheduling),
+        })
+        .map_err(|error| match error.failure() {
+            SubmitInputPreparationFailure::SessionMismatch { .. } => {
+                SubmitInputCorruption::Inconsistent("current session ownership").into()
+            }
+            SubmitInputPreparationFailure::TurnCandidateMismatch => {
+                SubmitInputCorruption::Inconsistent("delivery turn candidate").into()
+            }
+            SubmitInputPreparationFailure::AcceptedInputCandidateReusesActiveOrigin {
+                active_turn,
+                accepted_input,
+            } => SubmitInputRepositoryError::AcceptedInputIdentityCollision {
+                command_id: error.command().command_id(),
+                active_turn,
+                accepted_input,
+            },
+            SubmitInputPreparationFailure::ActiveTurnProjectionMissing => {
+                SubmitInputCorruption::Inconsistent("selected active scheduling state").into()
+            }
+            SubmitInputPreparationFailure::InterruptQueueOrderInvalid => {
+                SubmitInputCorruption::Inconsistent("interrupt queue order").into()
+            }
+        })
 }
 
 pub(crate) async fn load_scheduling_projection(
@@ -1391,6 +1454,10 @@ pub(crate) async fn load_scheduling_projection(
                             terminal_execution: CancelledTurnExecutionReconstitutionInput::new(
                                 lifecycle_turn,
                                 stored_attempt_id,
+                                TerminalAttemptEndReconstitutionInput::after_cancellation(
+                                    CancellationStopDisposition::Cancelled,
+                                    interrupt,
+                                ),
                                 ended_call,
                                 interrupt,
                             ),

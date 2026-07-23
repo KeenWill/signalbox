@@ -1733,6 +1733,16 @@ impl CancelledModelCallTurnIdentities {
         self.pending_steering_reclassifications = identities;
         self
     }
+
+    /// Reuses the terminal frontier and pending-steering successors when an
+    /// interrupt closes an existing ambiguity wait instead of emitting a
+    /// cancellation marker.
+    pub fn into_ambiguous(self) -> AmbiguousModelCallTurnIdentities {
+        AmbiguousModelCallTurnIdentities {
+            terminal_frontier: self.terminal_frontier,
+            pending_steering_reclassifications: self.pending_steering_reclassifications,
+        }
+    }
 }
 
 /// Fresh identity for a refusal terminal frontier.
@@ -1804,6 +1814,8 @@ pub enum ModelCallInterruptOutcome {
     Cancelled(CancelledModelCallTurn),
     /// Issued work retained the slot while durable cancellation was requested.
     CancellationRequested(StopRequestedModelCallTurn),
+    /// An existing physical-ambiguity wait closed under the applied interrupt.
+    ReconciliationRequired(ReconciliationRequiredModelCallTurn),
 }
 
 impl ModelCallTerminalIdentities {
@@ -2565,6 +2577,59 @@ fn reclassify_pending_steering(
         });
     }
     Ok(reclassified.into_boxed_slice())
+}
+
+pub(crate) fn apply_interrupt_to_recovery_wait(
+    active_turn: ActivatedAcceptedInputTurn,
+    call: EndedModelCall,
+    attempt: EndedTurnAttempt,
+    source_snapshot: ResolvedContextFrontierSnapshot,
+    interrupt: AppliedInterruptCommandResult,
+    identities: AmbiguousModelCallTurnIdentities,
+) -> Result<ReconciliationRequiredModelCallTurn, ModelCallClosureError> {
+    let proof = interrupt.proof();
+    let ActiveTurnPhase::AwaitingRecoveryDecision {
+        ambiguous_operations,
+        applied_interrupt: None,
+    } = active_turn.phase()
+    else {
+        return Err(ModelCallClosureError::AttemptStateMismatch);
+    };
+    if interrupt.session() != active_turn.session()
+        || proof.predecessor() != active_turn.turn()
+        || interrupt.successor() == active_turn.turn()
+        || interrupt.successor_order().priority()
+            != (crate::AcceptedInputQueuePriority::InterruptImmediatelyAfter {
+                predecessor: active_turn.turn(),
+            })
+        || ambiguous_operations.operation_count() != 1
+        || !ambiguous_operations.contains(crate::IssuedOperationRef::ModelCall(call.id()))
+        || call.turn() != active_turn.turn()
+        || call.attempt() != attempt.id()
+        || call.disposition() != ModelCallDisposition::Ambiguous
+        || call.frontier() != source_snapshot.frontier()
+    {
+        return Err(ModelCallClosureError::InterruptCorrelationMismatch);
+    }
+    let reclassified_pending_steering =
+        reclassify_pending_steering(&active_turn, &identities.pending_steering_reclassifications)?;
+    let terminal_snapshot = source_snapshot
+        .derive_appending_candidate(identities.terminal_frontier, Vec::new())
+        .map_err(|_| ModelCallClosureError::FrontierDerivationFailed)?;
+    let attempt = attempt
+        .apply_interrupt_to_ambiguity(proof)
+        .map_err(|_| ModelCallClosureError::AttemptStateMismatch)?;
+    let marker =
+        ReconciliationMarker::from_interrupt_ambiguity(ambiguous_operations.clone(), proof);
+    Ok(ReconciliationRequiredModelCallTurn {
+        session: active_turn.session(),
+        turn: active_turn.turn(),
+        call,
+        attempt,
+        disposition: TurnDisposition::ReconciliationRequired { marker },
+        terminal_snapshot,
+        reclassified_pending_steering,
+    })
 }
 
 fn complete_turn(
