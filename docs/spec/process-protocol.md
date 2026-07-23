@@ -408,14 +408,14 @@ protocol or application errors other than the follow-specific `resync_required`
 control case, which reconnects for a fresh snapshot.
 
 The client validates each complete snapshot and its terminal counts into an
-owner-private anonymous temporary-file spool before replay or presentation.
-Turn and source-qualified entry identity indexes are disk-backed too, so the
-wire's intentionally unbounded aggregate snapshot size does not become
-unbounded client memory. Before adopting an initial or resynchronized snapshot
-cursor, `follow` presents its acceptance-ordered turn projections, including
-queued owner content, active attempt and current-call state, recovery waits, and
-terminal state. A transition committed at or below that cursor therefore
-remains visible even when it has not added a semantic transcript entry.
+owner-private anonymous temporary-file spool before replay or presentation. Turn
+and source-qualified entry identity indexes are disk-backed too, so the wire's
+intentionally unbounded aggregate snapshot size does not become unbounded client
+memory. Before adopting an initial or resynchronized snapshot cursor, `follow`
+presents its acceptance-ordered turn projections, including queued owner
+content, active attempt and current-call state, recovery waits, and terminal
+state. A transition committed at or below that cursor therefore remains visible
+even when it has not added a semantic transcript entry.
 
 After completion, `send` rereads and prints only authoritative committed
 assistant text produced for its exact turn. A failed or refused turn produces a
