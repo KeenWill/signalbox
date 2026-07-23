@@ -10,6 +10,61 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-23 — Bound process fan-out retention at 64 events
+
+**Context.** The initial version-one design retained 1,024 update events while
+allowing each event to carry nearly 1 MiB of text. That event-count-only bound
+could retain roughly 1 GiB of payload in one hub process before overhead, while
+followers can already recover from lag through an authoritative snapshot.
+
+**Decision.** Retain 64 process-local update events. A follower that overruns
+that bounded ring receives `resync_required` and reconnects for a fresh
+snapshot; durable delivery remains independent of follower presence.
+
+**Rejected alternatives.** Keeping 1,024 events reserves an excessive payload
+ceiling for a convenience buffer. Adding a second byte-accounting queue would
+duplicate lag and resynchronization policy before measurements require it.
+
+**Affects.** Process-local update retention, follower lag behavior, and the
+version-one process-protocol specification.
+
+## 2026-07-23 — Treat hub fencing as an initial-deployment migration
+
+**Context.** A first fence installation cannot stop an already-running hub that
+does not participate in generation fencing. The owner confirms that no Signalbox
+deployment or database predates the fence migration in this stack.
+
+**Decision.** Treat this stack as the initial deployment boundary. The fence row
+may be installed without a legacy-writer rollout gate because no pre-fence
+writer or database exists; importing or upgrading a pre-fence database is not a
+supported operation.
+
+**Rejected alternatives.** A legacy bootstrap acknowledgement or operator drain
+protocol would claim a migration population that does not exist. Silently
+assuming compatibility with a hypothetical pre-fence deployment would leave the
+authority gap unresolved.
+
+**Affects.** The first installation of the hub-fence migration and its
+documented deployment premise.
+
+## 2026-07-23 — Require rename-resistant process-socket ancestry
+
+**Context.** Protecting only the socket's immediate resolved parent does not
+prevent another local user from renaming that directory through a writable
+ancestor and substituting an impostor hierarchy at the configured path.
+
+**Decision.** Validate the complete canonical parent ancestry. A group- or
+other-writable ancestor is accepted only when it has the sticky bit and the
+child path component toward the socket is owned by the hub's effective user;
+every other writable-ancestor shape fails startup.
+
+**Rejected alternatives.** Checking only the immediate parent misses ancestor
+replacement. Rejecting every writable ancestor makes ordinary owner-created
+runtime directories beneath `/tmp` unusable despite sticky-directory ownership
+protection.
+
+**Affects.** Local process-socket path validation and its startup tests.
+
 ## 2026-07-23 — Fence database pools across hub incarnations
 
 **Context.** Losing only the dedicated singleton-guard session releases its
