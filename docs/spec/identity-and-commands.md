@@ -285,16 +285,17 @@ Typed error `Debug`/`Display` representations may contain a raw command
 identifier (for example `DifferentCommandKind` in the persistence repositories)
 and are treated as internal values; the telemetry paths log classification
 fields, not formatted errors. The keyed correlation-token scheme that would
-restore per-command telemetry correlation is designed but not implemented;
+restore per-command telemetry correlation is a retired unimplemented design;
 command-scoped events currently carry no command correlation at all. See Open
 edges.
 
 ## Open edges
 
-- The designed durable-command telemetry token (`dc1` HMAC epoch scheme, mounted
-  epoch document, fail-closed startup validation, sanitized panic hook) is
-  entirely unimplemented; telemetry currently omits durable-command correlation
-  rather than tokenizing it.
+- The `dc1` durable-command telemetry token (HMAC epoch scheme, mounted epoch
+  document, fail-closed startup validation, sanitized panic hook) is a retired
+  unimplemented design; telemetry currently omits durable-command correlation
+  rather than tokenizing it
+  ([telemetry correlation](../open-questions.md#telemetry-correlation)).
 - `ReplaceSessionDefaults` v1 payload and storage carry no `actor` field despite
   the accepted adoption path expecting one from the kind's first accepted
   version; the truthful `Owner` backfill via a kind-scoped storage version

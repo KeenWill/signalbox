@@ -15,7 +15,10 @@ See [sessions and transcript](spec/sessions-and-transcript.md).
 ## Accepted input
 
 One user submission made durable with its explicit delivery request and
-recoverable disposition before acknowledgement. See
+recoverable disposition before acknowledgement. Delivery, disposition, and
+reclassification semantics are owned by
+[occupied-slot input handling](spec/turn-lifecycle-and-scheduling.md#occupied-slot-input-handling);
+content and transcript representation by
 [sessions and transcript](spec/sessions-and-transcript.md).
 
 ## UserContent

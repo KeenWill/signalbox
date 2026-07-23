@@ -11,7 +11,9 @@ credential channels, delivery, and rotation discipline
 ([configuration-and-credentials](configuration-and-credentials.md)), and the
 authoritative transcript commit
 ([sessions-and-transcript](sessions-and-transcript.md)) are owned by those
-companion pages.
+companion pages. This page also owns the shared
+[operator failure taxonomy](#operator-failure-taxonomy) — defined in
+`crates/application` and consumed by hubd telemetry.
 
 ## Boundary and crate layout
 
@@ -327,6 +329,35 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
   so a secret split across provider chunks can never be emitted piecewise; when
   ordering forces a held prefix out, it is replaced with `[redacted]`. Why: fail
   closed — a possible secret prefix is destroyed rather than delivered.
+
+## Operator failure taxonomy
+
+`crates/application/src/operator_failure.rs` defines the one closed
+operator-facing failure classification shared by application services, the
+persistence adapters, and hubd telemetry: every adapter or runtime error family
+maps into `OperatorFailureClass` through the `ClassifyOperatorFailure` trait,
+exposing a user-content-free classification to shared telemetry while the
+underlying error keeps its diagnostic detail internally. The four classes:
+
+- **`Infrastructure { commit_ambiguous }`** — the operation could not complete.
+  The flag marks failures (a connection lost around commit) whose transaction
+  fate is unknown: recovery must re-read durable state rather than assume either
+  outcome.
+- **`FailClosedCorruption`** — committed rows cannot construct the accepted
+  domain value under [persistence-protocol](persistence-protocol.md)'s
+  fail-closed reconstitution: no effect, no repair.
+- **`IdentityCollision`** — a fresh hub-minted candidate identity collided with
+  a durable identity; the operation retries with fresh candidates rather than
+  failing the work ([model-call-execution](model-call-execution.md) owns the
+  identity-collision-only retry).
+- **`CallerOrHubBug`** — a request or internal guard that can fail only because
+  of a defect, kept distinct from corruption.
+
+Concurrent staleness is not a class: a guarded write that matches zero rows is
+consumed inside adapters by reload-and-rederive
+([persistence-protocol](persistence-protocol.md)) unless the transaction's own
+premises made a match mandatory, so the taxonomy classifies only genuine
+failures after staleness handling.
 
 ## Open edges
 

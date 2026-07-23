@@ -176,7 +176,11 @@ deployment-side rules that code cannot enforce are stated in
 ## Redaction and logs
 
 The following never appear in logs, error text, or durable records: credential
-values, the key file path, `DATABASE_URL`, and raw catalog file content. For
+values, the key file path, `DATABASE_URL`, and raw catalog file content. Full
+user content never appears in logs: every tracing site logs phase, failure
+class, counts, and hub-minted aggregate identifiers, never conversation content
+(which identifiers may appear is
+[identity-and-commands](identity-and-commands.md) material). For
 provider-controlled evidence the guarantee is mechanism-bounded: text is
 scrubbed of the exact preparation-time credential value, as described below.
 Enforcement as implemented:
@@ -187,7 +191,9 @@ Enforcement as implemented:
   `AnthropicRuntime`'s `Debug` redacts its credential source and version header.
   Access errors carry reference and typed failure class only.
 - hubd logging is a compact INFO tracing subscriber; startup and runtime errors
-  log phase, failure class, counts, and aggregate ids only.
+  log phase, failure class, counts, and aggregate ids only. The
+  `crates/application` tracing sites emit the same typed fields; no call site in
+  the codebase passes accepted-input or assistant content to `tracing`.
 - Every provider-controlled text that leaves the Anthropic adapter — stream text
   and thinking deltas, tool-argument JSON, tool proposals, native error bodies,
   provider request ids, reported model identity, stop-sequence and finish
@@ -217,7 +223,11 @@ here because the surviving hub-side mechanics depend on them):
   truth, and rotation history is git history. Maintaining the same value in both
   channels is a defect. Kubernetes Secret objects are delivery artifacts of
   whichever channel produced them, never sources of truth; hand-editing one is a
-  defect because the next sync overwrites it.
+  defect because the next sync overwrites it. This split governs exactly the
+  provider and integration runtime credentials plus the bootstrap and deployment
+  material the channels themselves depend on, not every cluster-delivered
+  secret: owner-client authentication, runner enrollment, and the database
+  credential are separate open decisions outside it (see Open edges).
 - **Acyclic bootstrap chain.** The owner-held age identity (custodied outside
   git and outside operator sync) decrypts the sops channel; the sops channel
   delivers the operator's credential; the operator syncs the 1Password channel;
@@ -231,6 +241,19 @@ here because the surviving hub-side mechanics depend on them):
   `operator.1password.io/auto-restart: "false"` — the operator inherits
   auto-restart from wider scopes, and a restart-per-rotation deployment
   terminalizes in-flight work as `Lost` on every rotation.
+- **Optional mount; a missing Secret never gates boot.** The credential Secret
+  volume is declared `optional` (or an equivalently non-gating mount) so the pod
+  starts even when the Secret object is absent or a first sync has not completed
+  — during a restore, a deleted Secret, or bootstrap. A required volume would
+  turn a missing or unsynced credential into a boot failure and so block the
+  startup recovery scan that hubd's no-startup-preflight behavior protects
+  (INV-034); an absent credential surfaces at the effect boundary that needs it.
+  The deployment likewise verifies that the operator retains last-synced Secrets
+  across a manager outage, so a paused sync delays rotation propagation only,
+  never startup.
+- **Least-privilege Secret access.** The synced credential Secret's RBAC is
+  scoped to the hub's identity; no other cluster principal may be able to read
+  it.
 - **Revoke-last rotation.** Install the new value at the source of truth, wait
   out the propagation bound plus the longest expected in-flight provider call,
   then revoke the old value at the provider. Where a provider allows only one

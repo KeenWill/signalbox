@@ -210,6 +210,18 @@ questions below remain open.
 - **Actor-admissibility follow-ups.** See the authoritative routing and open
   edges in [identity-and-commands](spec/identity-and-commands.md).
 
+## Telemetry correlation
+
+- **Durable-command telemetry token.** Telemetry deliberately omits
+  caller-supplied `DurableCommandId` values today
+  ([identity-and-commands](spec/identity-and-commands.md)). The retired `dc1`
+  design — a versioned, domain-separated, truncated HMAC-SHA-256 token under a
+  deployment-owned key epoch, so caller-chosen identifiers stay non-enumerable
+  while correlation survives restart and rotation is an explicit epoch change —
+  is unimplemented and carries no current authority; git history holds the full
+  retired record, and recommissioning it is a fresh foundation decision. Blocks
+  per-command telemetry correlation.
+
 ## Protocols and persistence
 
 - **Browser transport.** Preserve authoritative-snapshot-plus-transient-stream

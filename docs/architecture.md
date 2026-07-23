@@ -235,9 +235,11 @@ in the same page; their listed operational refinements remain open.
 
 ## Explicitly open boundaries
 
-- Process-protocol implementation within the accepted client- and
-  process-protocol baselines (unimplemented design; no spec page yet): exact
-  browser transport and Swift generation remain open.
+- Client and process protocol: the retired protocol designs are unimplemented
+  and carry no current authority, so future client-protocol work is designed
+  fresh as a specification diff
+  ([open questions](open-questions.md#protocols-and-persistence)); exact browser
+  transport and Swift generation remain open.
 - Scheduler implementation within the accepted dispatch-fencing and
   scheduler-mechanics baseline
   ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)):
