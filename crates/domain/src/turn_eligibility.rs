@@ -2730,6 +2730,7 @@ fn reconstitute_active_acceptance_tail(
     }
 
     let mut expected_position = active_record.order.acceptance_position();
+    let mut pending_steering_seen = false;
     let origin_by_position = records_by_turn
         .values()
         .map(|record| {
@@ -2782,6 +2783,7 @@ fn reconstitute_active_acceptance_tail(
                 })
             }
             AcceptedInputDisposition::PendingSteering { binding } => {
+                pending_steering_seen = true;
                 !accepted_input_turns.contains_key(&accepted_input)
                     && !origin_by_position.contains_key(&entry.position)
                     && matches!(
@@ -2793,7 +2795,8 @@ fn reconstitute_active_acceptance_tail(
                     )
             }
             AcceptedInputDisposition::ConsumedAsSteering { .. } => {
-                !accepted_input_turns.contains_key(&accepted_input)
+                !pending_steering_seen
+                    && !accepted_input_turns.contains_key(&accepted_input)
                     && !origin_by_position.contains_key(&entry.position)
                     && matches!(
                         entry.delivery,
@@ -5060,6 +5063,57 @@ mod tests {
             aliased.failure(),
             &AcceptedInputSchedulingReconstitutionFailure::AcceptanceTailDispositionMismatch {
                 accepted_input: pending.accepted_input(),
+            }
+        );
+    }
+
+    /// S02 / S08 / INV-012 / INV-036: a prepared call consumes the complete
+    /// pending prefix; durable history cannot claim that it skipped an earlier
+    /// pending input and consumed a later one.
+    #[test]
+    fn s02_s08_inv012_inv036_active_tail_rejects_consumed_after_pending() {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let pending = accepted_origin(2);
+        let consumed = accepted_origin(3);
+        let mut tail = active.active_tail(&session);
+        tail.observed_last_position = consumed.position();
+        tail.entries.extend([
+            SessionAcceptanceTailEntryReconstitutionInput::new(
+                session.id(),
+                AcceptedInputLifecycle::new(
+                    pending.accepted_input(),
+                    AcceptedInputDisposition::PendingSteering {
+                        binding: crate::SteeringBinding::new(active.turn()),
+                    },
+                ),
+                pending.position(),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: active.turn(),
+                },
+            ),
+            SessionAcceptanceTailEntryReconstitutionInput::new(
+                session.id(),
+                AcceptedInputLifecycle::new(
+                    consumed.accepted_input(),
+                    AcceptedInputDisposition::ConsumedAsSteering {
+                        call: model_call_id(91),
+                    },
+                ),
+                consumed.position(),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: active.turn(),
+                },
+            ),
+        ]);
+
+        let error = active_input(&session, active, Some(tail))
+            .reconstitute()
+            .expect_err("a later consumed receipt cannot skip earlier pending steering");
+        assert_eq!(
+            error.failure(),
+            &AcceptedInputSchedulingReconstitutionFailure::AcceptanceTailDispositionMismatch {
+                accepted_input: consumed.accepted_input(),
             }
         );
     }

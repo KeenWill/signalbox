@@ -250,16 +250,17 @@ impl PostgresModelCallRepository {
     }
 
     /// Commits Prepared while consuming the complete locked steering inventory.
-    pub async fn prepare_initial_call<NextSteeringEntry>(
+    pub async fn prepare_initial_call<NextSteeringIdentities>(
         &self,
         session: SessionId,
         call: ModelCallId,
         failure_identities: FailedModelCallTurnIdentities,
         steering_frontier: signalbox_domain::ContextFrontierId,
-        mut next_steering_entry: NextSteeringEntry,
+        mut next_steering_identities: NextSteeringIdentities,
     ) -> Result<PrepareInitialModelCallOutcome, ModelCallRepositoryError>
     where
-        NextSteeringEntry: FnMut(AcceptedInputId) -> signalbox_domain::SemanticTranscriptEntryId,
+        NextSteeringIdentities:
+            FnMut(AcceptedInputId) -> (signalbox_domain::SemanticTranscriptEntryId, TurnId),
     {
         let mut transaction = self.pool.begin().await?;
         let result = async {
@@ -296,11 +297,22 @@ impl PostgresModelCallRepository {
                 };
             }
 
-            let steering_entries = execution
+            let steering_identities = execution
                 .active_turn()
                 .pending_steering()
                 .iter()
-                .map(|pending| next_steering_entry(pending.accepted_input()))
+                .map(|pending| {
+                    let accepted_input = pending.accepted_input();
+                    let (entry, turn) = next_steering_identities(accepted_input);
+                    (
+                        entry,
+                        PendingSteeringReclassificationIdentity::new(accepted_input, turn),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let steering_entries = steering_identities
+                .iter()
+                .map(|(entry, _)| *entry)
                 .collect::<Vec<_>>();
             let steering_snapshot = (!steering_entries.is_empty()).then_some(steering_frontier);
             let prepared = match execution.prepare_initial_call_consuming_steering(
@@ -318,7 +330,15 @@ impl PostgresModelCallRepository {
                     let failed = error
                         .execution()
                         .clone()
-                        .fail_target_resolution(resolution, failure_identities)
+                        .fail_target_resolution(
+                            resolution,
+                            failure_identities.with_pending_steering_reclassifications(
+                                steering_identities
+                                    .into_iter()
+                                    .map(|(_, reclassification)| reclassification)
+                                    .collect(),
+                            ),
+                        )
                         .map_err(|_| {
                             ModelCallRepositoryError::InvalidTransition(
                                 "target-resolution failure could not close fresh execution state",
@@ -735,17 +755,17 @@ impl PostgresModelCallRepository {
 impl PrepareModelCallTransaction for PostgresModelCallRepository {
     type Error = ModelCallRepositoryError;
 
-    async fn prepare<NextSteeringEntry>(
+    async fn prepare<NextSteeringIdentities>(
         &mut self,
         session: SessionId,
         call: ModelCallId,
         failure_identities: FailedModelCallTurnIdentities,
         steering_frontier: signalbox_domain::ContextFrontierId,
-        next_steering_entry: NextSteeringEntry,
+        next_steering_identities: NextSteeringIdentities,
     ) -> Result<PrepareModelCallOutcome, Self::Error>
     where
-        NextSteeringEntry:
-            FnMut(AcceptedInputId) -> signalbox_domain::SemanticTranscriptEntryId + Send,
+        NextSteeringIdentities:
+            FnMut(AcceptedInputId) -> (signalbox_domain::SemanticTranscriptEntryId, TurnId) + Send,
     {
         match self
             .prepare_initial_call(
@@ -753,7 +773,7 @@ impl PrepareModelCallTransaction for PostgresModelCallRepository {
                 call,
                 failure_identities,
                 steering_frontier,
-                next_steering_entry,
+                next_steering_identities,
             )
             .await
         {

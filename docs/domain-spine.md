@@ -2091,16 +2091,17 @@ pub enum PrepareModelCallOutcome {
 
 pub trait PrepareModelCallTransaction {
     type Error: ClassifyOperatorFailure;
-    fn prepare<NextSteeringEntry>(
+    fn prepare<NextSteeringIdentities>(
         &mut self,
         session: SessionId,
         call: ModelCallId,
         failure_identities: FailedModelCallTurnIdentities,
         steering_frontier: ContextFrontierId,
-        next_steering_entry: NextSteeringEntry,
+        next_steering_identities: NextSteeringIdentities,
     ) -> impl Future<Output = Result<PrepareModelCallOutcome, Self::Error>> + Send
     where
-        NextSteeringEntry: FnMut(AcceptedInputId) -> SemanticTranscriptEntryId + Send;
+        NextSteeringIdentities:
+            FnMut(AcceptedInputId) -> (SemanticTranscriptEntryId, TurnId) + Send;
 }
 
 pub trait FailPreparedModelCallTransaction {

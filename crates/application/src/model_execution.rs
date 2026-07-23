@@ -217,16 +217,17 @@ pub trait PrepareModelCallTransaction {
     type Error: ClassifyOperatorFailure;
 
     /// Runs the serialized prepare role with fresh application candidates.
-    fn prepare<NextSteeringEntry>(
+    fn prepare<NextSteeringIdentities>(
         &mut self,
         session: SessionId,
         call: ModelCallId,
         failure_identities: FailedModelCallTurnIdentities,
         steering_frontier: ContextFrontierId,
-        next_steering_entry: NextSteeringEntry,
+        next_steering_identities: NextSteeringIdentities,
     ) -> impl Future<Output = Result<PrepareModelCallOutcome, Self::Error>> + Send
     where
-        NextSteeringEntry: FnMut(AcceptedInputId) -> SemanticTranscriptEntryId + Send;
+        NextSteeringIdentities:
+            FnMut(AcceptedInputId) -> (SemanticTranscriptEntryId, TurnId) + Send;
 }
 
 /// Guarded transaction closing a trustworthy local pre-send failure.
@@ -916,7 +917,7 @@ where
             let ids = &mut self.ids;
             match prepare
                 .prepare(session, call, failure_identities, steering_frontier, |_| {
-                    ids.next_semantic_entry_id()
+                    (ids.next_semantic_entry_id(), ids.next_turn_id())
                 })
                 .await
             {
@@ -1625,16 +1626,17 @@ mod tests {
     impl PrepareModelCallTransaction for FakePrepare {
         type Error = FakeError;
 
-        async fn prepare<NextSteeringEntry>(
+        async fn prepare<NextSteeringIdentities>(
             &mut self,
             _session: SessionId,
             _call: ModelCallId,
             _failure_identities: FailedModelCallTurnIdentities,
             _steering_frontier: ContextFrontierId,
-            _next_steering_entry: NextSteeringEntry,
+            _next_steering_identities: NextSteeringIdentities,
         ) -> Result<PrepareModelCallOutcome, Self::Error>
         where
-            NextSteeringEntry: FnMut(AcceptedInputId) -> SemanticTranscriptEntryId + Send,
+            NextSteeringIdentities:
+                FnMut(AcceptedInputId) -> (SemanticTranscriptEntryId, TurnId) + Send,
         {
             self.calls += 1;
             self.outcomes

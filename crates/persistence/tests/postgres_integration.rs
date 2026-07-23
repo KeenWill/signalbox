@@ -895,7 +895,12 @@ async fn checkpoint_restart_model_call(
                     ContextFrontierId::from_uuid(Uuid::from_u128(seed + 13)),
                 ),
                 ContextFrontierId::from_uuid(Uuid::from_u128(seed + 14)),
-                |_| SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 15)),
+                |_| {
+                    (
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 15)),
+                        TurnId::from_uuid(Uuid::from_u128(seed + 16)),
+                    )
+                },
             )
             .await?,
         PrepareInitialModelCallOutcome::Checkpointed(checkpointed) if checkpointed == call
@@ -946,7 +951,12 @@ async fn authorize_checkpointed_model_call(
                     ContextFrontierId::from_uuid(Uuid::from_u128(seed + 16)),
                 ),
                 ContextFrontierId::from_uuid(Uuid::from_u128(seed + 17)),
-                |_| SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 18)),
+                |_| {
+                    (
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 18)),
+                        TurnId::from_uuid(Uuid::from_u128(seed + 19)),
+                    )
+                },
             )
             .await?,
         PrepareInitialModelCallOutcome::Ready { .. }
@@ -1460,7 +1470,12 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
                 ContextFrontierId::from_uuid(Uuid::from_u128(0xee8)),
             ),
             ContextFrontierId::from_uuid(Uuid::from_u128(0xfe8)),
-            |_| SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdf8)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdf8)),
+                    TurnId::from_uuid(Uuid::from_u128(0xdf9)),
+                )
+            },
         )
         .await?
     else {
@@ -1486,7 +1501,12 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
                 ContextFrontierId::from_uuid(Uuid::from_u128(0xee9)),
             ),
             ContextFrontierId::from_uuid(Uuid::from_u128(0xfe9)),
-            |_| SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdf9)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdf9)),
+                    TurnId::from_uuid(Uuid::from_u128(0xdfa)),
+                )
+            },
         )
         .await?
     else {
@@ -1556,7 +1576,12 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
                     ContextFrontierId::from_uuid(Uuid::from_u128(0xeea)),
                 ),
                 ContextFrontierId::from_uuid(Uuid::from_u128(0xfea)),
-                |_| SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdfa)),
+                |_| {
+                    (
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdfa)),
+                        TurnId::from_uuid(Uuid::from_u128(0xdfb)),
+                    )
+                },
             )
             .await?,
         PrepareInitialModelCallOutcome::NoWork
@@ -1804,7 +1829,10 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
                 ContextFrontierId::from_uuid(Uuid::from_u128(0x1ee6)),
                 terminal_frontier,
             ],
-            [],
+            [
+                TurnId::from_uuid(Uuid::from_u128(0x1ae2)),
+                TurnId::from_uuid(Uuid::from_u128(0x1ae3)),
+            ],
         ),
         repository.clone(),
         repository.clone(),
@@ -2228,7 +2256,12 @@ async fn s04_s08_s09_inv016_terminal_call_reclassifies_and_schedules_pending_ste
                     ContextFrontierId::from_uuid(Uuid::from_u128(0xef4)),
                 ),
                 ContextFrontierId::from_uuid(Uuid::from_u128(0xff4)),
-                |_| SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xcf4)),
+                |_| {
+                    (
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xcf4)),
+                        TurnId::from_uuid(Uuid::from_u128(0xcf5)),
+                    )
+                },
             )
             .await?,
         PrepareInitialModelCallOutcome::Checkpointed(checkpointed) if checkpointed == call
@@ -2385,12 +2418,13 @@ async fn s04_s08_s09_inv016_terminal_call_reclassifies_and_schedules_pending_ste
     Ok(())
 }
 
-/// S21 / INV-006 / INV-014 / INV-032: immutable target resolution failure
-/// creates no targetless call and atomically closes the prepared attempt and
-/// turn with its semantic failure boundary and typed outbox event.
+/// S08 / S21 / INV-006 / INV-014 / INV-032 / INV-036: immutable target
+/// resolution failure creates no targetless call, reclassifies the complete
+/// pending steering prefix, and atomically closes the prepared attempt and turn
+/// with its semantic failure boundary and typed outbox event.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s21_inv006_inv014_inv032_target_unavailable_closes_without_model_call()
+async fn s08_s21_inv006_inv014_inv032_inv036_target_unavailable_reclassifies_steering()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0x8f1));
@@ -2452,6 +2486,29 @@ async fn s21_inv006_inv014_inv032_target_unavailable_closes_without_model_call()
     };
     assert_eq!(activated.turn(), turn);
 
+    let pending_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x9f2));
+    let reclassified_turn = TurnId::from_uuid(Uuid::from_u128(0xaf2));
+    let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::PendingSteering(_),
+    )) = SubmitInputRepository::new(pool.clone())
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0x4f3)),
+                session,
+                UserContent::try_text("steering before target miss".to_owned())
+                    .expect("fixture steering is admitted"),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: turn,
+                },
+            ),
+            pending_input,
+            None,
+        )
+        .await?
+    else {
+        panic!("the target-miss fixture steering must remain pending");
+    };
+
     let targets = ModelTargetCatalog::try_from_definitions([])
         .expect("an empty immutable target catalog is valid");
     let repository =
@@ -2465,7 +2522,12 @@ async fn s21_inv006_inv014_inv032_target_unavailable_closes_without_model_call()
             call_candidate,
             FailedModelCallTurnIdentities::new(failure_entry, terminal_frontier),
             ContextFrontierId::from_uuid(Uuid::from_u128(0xff2)),
-            |_| SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xcf3)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xcf3)),
+                    reclassified_turn,
+                )
+            },
         )
         .await?
     else {
@@ -2473,6 +2535,24 @@ async fn s21_inv006_inv014_inv032_target_unavailable_closes_without_model_call()
     };
     assert_eq!(failed.turn(), turn);
     assert!(failed.call().is_none());
+
+    let reclassification_shape: (i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM accepted_input
+              WHERE accepted_input_id = $1
+                AND disposition_kind = 'reclassified_as_turn_origin'
+                AND origin_turn_id = $2),
+            (SELECT count(*) FROM queued_input_origin
+              WHERE accepted_input_id = $1
+                AND turn_id = $2
+                AND source_configuration_turn_id = $3)",
+    )
+    .bind(pending_input.into_uuid())
+    .bind(reclassified_turn.into_uuid())
+    .bind(turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(reclassification_shape, (1, 1));
 
     let durable_shape: (i64, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT

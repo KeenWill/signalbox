@@ -375,6 +375,20 @@ BEGIN
        OR malformed_count <> 0
        OR EXISTS (
             SELECT 1
+              FROM accepted_input AS pending
+              JOIN accepted_input AS consumed
+                ON consumed.session_id = pending.session_id
+               AND consumed.expected_active_turn_id
+                   = pending.expected_active_turn_id
+               AND consumed.disposition_kind = 'consumed_as_steering'
+               AND consumed.consuming_model_call_id = checked_model_call_id
+               AND consumed.acceptance_position > pending.acceptance_position
+             WHERE pending.session_id = checked_session
+               AND pending.expected_active_turn_id = checked_turn
+               AND pending.disposition_kind = 'pending_steering'
+       )
+       OR EXISTS (
+            SELECT 1
               FROM (
                     SELECT
                         accepted.acceptance_position,
