@@ -17,8 +17,15 @@ when present and otherwise requires that environment value. `signalbox-hubd`
 binds the socket with owner-only `0600` permissions. The configured path must be
 absolute. The hub canonicalizes its existing parent once and uses that resolved
 parent for the socket lifetime; the parent must be a directory owned by the
-hub's effective user and must not be group- or other-writable. Before binding,
-it handles the final path as follows:
+hub's effective user and must not be group- or other-writable.
+
+Before inspecting the final path, the hub opens or creates the adjacent
+`<socket-path>.lock` as a no-follow regular file owned by the effective user
+with exact `0600` permissions, takes its nonblocking exclusive advisory file
+lock, and holds that lock through final socket cleanup. Failure to open, verify,
+or lock the sidecar fails without touching the socket path. The sidecar remains
+after shutdown so a later hub can lock the same inode. While holding that
+lifetime path lock, the hub handles the final path as follows:
 
 1. an absent entry is available;
 2. an entry that is not a socket fails startup without modification;
@@ -29,17 +36,18 @@ it handles the final path as follows:
    binds; every other ownership, connection, or metadata result fails startup
    without modification.
 
-The bind itself must still create a new socket and never replace a raced entry.
-The hub creates an unlistening Unix stream socket, binds it, verifies that the
-socket's local address is the resolved path, and captures the new path entry's
-socket type, effective-user ownership, device, and inode with `lstat`. It then
-sets owner-only `0600` permissions and verifies with a second `lstat` that the
-same socket entry remains, retains that ownership, and has exactly that mode
-before calling `listen`; no connection can be queued before that sequence
-completes. Any address, identity, ownership, or permission mismatch fails
-startup and removes no raced entry. Graceful shutdown removes the path only
-after a final `lstat` proves it is still the socket device and inode captured by
-this hub.
+The path lock makes the final revalidation and removal indivisible with respect
+to another conforming hub. The bind itself must still create a new socket and
+never replace another entry. The hub creates an unlistening Unix stream socket,
+binds it, verifies that the socket's local address is the resolved path, and
+captures the new path entry's socket type, effective-user ownership, device, and
+inode with `lstat`. It then sets owner-only `0600` permissions and verifies with
+a second `lstat` that the same socket entry remains, retains that ownership, and
+has exactly that mode before calling `listen`; no connection can be queued
+before that sequence completes. Any address, identity, ownership, or permission
+mismatch fails startup and removes no raced entry. Graceful shutdown removes the
+path only after a final `lstat` proves it is still the socket device and inode
+captured by this hub, then releases the path lock.
 
 The transport is local-machine and single-user only. Version one's lack of
 protocol authentication is provisional; it has no authorization exchange or
@@ -188,8 +196,10 @@ One logical snapshot is a bounded message sequence sharing the request identity:
 
 Each `transcript_turn` has `turn_id` and one closed `state` object:
 
-- `queued`;
-- `active_running { current_attempt_id }`;
+- `queued { accepted_input_id, content }`;
+- `active_running { current_attempt_id, current_model_call }`, where
+  `current_model_call` is null before preparation or `{ model_call_id, state }`
+  with state exactly `prepared` or `in_flight`;
 - `active_awaiting_model_call_recovery { ended_attempt_id, recovery_model_call_id }`;
 - `failed { terminal_frontier_id }`;
 - `completed { terminal_frontier_id, terminal_attempt_id, terminal_model_call_id }`;
@@ -210,6 +220,9 @@ empty content has one final empty fragment. The 1 MiB content bound leaves room
 below the 8 MiB frame limit even when every byte requires worst-case JSON
 escaping.
 
+`entry_index` is zero-based and contiguous in frontier-member order; the first
+entry is zero and each later entry is exactly its predecessor plus one.
+
 A snapshot is authoritative only after the matching end message arrives and its
 counts, indices, fragment sequence, session, and cursor validate. A connection
 failure or error before then discards the partial snapshot. This bounded
@@ -227,10 +240,23 @@ Before migration or recovery, `signalbox-hubd` acquires
 `pg_try_advisory_lock(1396856881, 1213547057)` on one dedicated database
 connection and retains that connection—and therefore the session-level
 lock—until shutdown. Failure to acquire the fixed database-scoped guard fails
-startup. The two integer keys are the ASCII namespaces `SBX1` and `HUB1`. This
-enforces one hub process—and therefore one dispatcher and one process-local
-fan-out—for a database. Guard-session monitoring and fatal-loss behavior are
-owned by
+startup. The two integer keys are the ASCII namespaces `SBX1` and `HUB1`.
+
+The singleton `hub_fence_state` stores a positive generation. Every application
+pool connection acquires and retains a shared session advisory lock keyed by the
+ASCII namespace `SBF1` (`1396852273`) and this hub's generation before the
+connection becomes usable. A successor holding the singleton guard takes and
+retains the exclusive prior-generation fence, then transactionally advances the
+row before constructing its fenced pool. That exclusive request waits for all
+prior pooled sessions and prevents the old process from opening another usable
+connection. The first migration creates and initializes the row for a database
+that cannot have a prior fenced hub; later startups fence before running any
+newer migration. Exhaustion or corruption fails startup rather than wrapping.
+
+Together these guards enforce one active hub process—and therefore one
+dispatcher and one process-local fan-out—for a database, while preventing a
+successor's migration or recovery from overlapping an old hub's authoritative
+work. Guard-session monitoring and fatal-loss behavior are owned by
 [Hub runtime: startup order and shutdown](turn-lifecycle-and-scheduling.md#hub-runtime-startup-order-and-shutdown).
 For each attempt, the dispatcher:
 
@@ -260,6 +286,8 @@ these closed `event` objects:
 | Event                   | Additional members                                                            |
 | ----------------------- | ----------------------------------------------------------------------------- |
 | `session_created`       | none                                                                          |
+| `input_accepted`        | `accepted_input_id`, `turn_id`, `acceptance_position`, and `content`          |
+| `turn_activated`        | `turn_id` and `current_attempt_id`                                            |
 | `model_call_transition` | `turn_id`, `model_call_id`, and `state`                                       |
 | `turn_completed`        | `turn_id`, `model_call_id`, `completion_entry_id`, and `terminal_frontier_id` |
 | `turn_failed`           | `turn_id`, `failure_entry_id`, and `terminal_frontier_id`                     |
@@ -277,9 +305,10 @@ reading the repeatable-read transcript snapshot. It sends that snapshot first,
 then discards subscribed events at or below its cursor and sends matching
 session events above it in cursor order.
 
-This ordering closes the snapshot/subscription race: every transition committed
-before the snapshot is represented by its durable turn state even when it adds
-no transcript entry, while a transition committed after the snapshot has a
+This ordering closes the snapshot/subscription race: every listed client-visible
+transition committed before the snapshot is represented by its durable queued
+content, turn state, and current model-call projection even when it adds no
+semantic transcript entry, while a transition committed after the snapshot has a
 greater cursor and was observed by the preexisting subscription. A refused turn
 is therefore terminal in the initial snapshot and cannot leave `send` waiting
 for an event at or below the snapshot cursor. Previously seen transient display

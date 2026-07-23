@@ -9,17 +9,22 @@ use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
-    ContextFrontierId, ModelCallDisposition, ModelCallId, SemanticTranscriptEntryId, SessionId,
-    TurnId,
+    AcceptedInputId, ContextFrontierId, ModelCallDisposition, ModelCallId,
+    SemanticTranscriptEntryId, SessionId, SessionInputPosition, TurnAttemptId, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 
 use crate::{
     lock_inventory,
-    mapping::{session_id_from_uuid, session_id_to_uuid, turn_id_to_uuid},
+    mapping::{
+        accepted_input_id_to_uuid, input_position_from_numeric, input_position_to_numeric,
+        session_id_from_uuid, session_id_to_uuid, turn_id_to_uuid,
+    },
 };
 
 const SESSION_CREATED: &str = "session_created";
+const INPUT_ACCEPTED: &str = "input_accepted";
+const TURN_ACTIVATED: &str = "turn_activated";
 const TURN_FAILED: &str = "turn_failed";
 const MODEL_CALL_TRANSITION: &str = "model_call_transition";
 const TURN_COMPLETED: &str = "turn_completed";
@@ -59,6 +64,24 @@ impl DispatchedOutboxEvent {
 pub enum DispatchedOutboxEventKind {
     /// A session creation committed.
     SessionCreated,
+    /// An accepted input and its queued turn committed.
+    InputAccepted {
+        /// Accepted input.
+        accepted_input: AcceptedInputId,
+        /// Queued turn created for the input.
+        turn: TurnId,
+        /// Immutable per-session acceptance position.
+        acceptance_position: SessionInputPosition,
+        /// Exact accepted text.
+        content: String,
+    },
+    /// A queued turn atomically became active.
+    TurnActivated {
+        /// Activated turn.
+        turn: TurnId,
+        /// Initial current attempt.
+        current_attempt: TurnAttemptId,
+    },
     /// A turn closed as failed with its semantic marker and terminal frontier.
     TurnFailed {
         /// Failed turn.
@@ -107,7 +130,22 @@ pub enum DispatchedModelCallState {
     /// Exact call entered InFlight.
     InFlight,
     /// Exact call reached a terminal disposition.
-    Terminal(ModelCallDisposition),
+    Terminal(DispatchedModelCallDisposition),
+}
+
+/// Persistence-owned terminal disposition carried by a dispatched call record.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DispatchedModelCallDisposition {
+    /// The call committed authoritative completion.
+    Completed,
+    /// The call ended in a known failure.
+    KnownFailed,
+    /// The provider authoritatively refused.
+    Refused,
+    /// The call was durably cancelled.
+    Cancelled,
+    /// The physical outcome remained ambiguous.
+    Ambiguous,
 }
 
 /// Whether the synchronous consumer accepted one offered event.
@@ -143,8 +181,16 @@ pub enum OutboxCorruption {
     MissingDeliveryState,
     /// The locked singleton could not be advanced from the observed cursor.
     DeliveryStateChanged,
+    /// The singleton allocation row was absent.
+    MissingSequenceState,
+    /// The delivered cursor exceeded the allocator cursor.
+    DeliveryBeyondAllocatedSequence,
+    /// The allocator named a committed sequence whose header was absent.
+    MissingCommittedEventHeader,
     /// A stored cursor or sequence was not an unsigned 64-bit integer.
     InvalidSequence,
+    /// An input-accepted record carried an invalid positive position.
+    InvalidAcceptancePosition,
     /// An event header used an unsupported storage version.
     UnsupportedStorageVersion,
     /// An event header named no admitted typed record family.
@@ -160,7 +206,13 @@ impl fmt::Display for OutboxCorruption {
         formatter.write_str(match self {
             Self::MissingDeliveryState => "outbox delivery state is missing",
             Self::DeliveryStateChanged => "outbox delivery state changed unexpectedly",
+            Self::MissingSequenceState => "outbox sequence state is missing",
+            Self::DeliveryBeyondAllocatedSequence => {
+                "outbox delivery state exceeds the allocated sequence"
+            }
+            Self::MissingCommittedEventHeader => "outbox committed event header is missing",
             Self::InvalidSequence => "outbox sequence is invalid",
+            Self::InvalidAcceptancePosition => "outbox input acceptance position is invalid",
             Self::UnsupportedStorageVersion => "outbox storage version is unsupported",
             Self::UnsupportedEventKind => "outbox event kind is unsupported",
             Self::MissingTypedRecord => "outbox typed event record is missing",
@@ -251,6 +303,21 @@ impl OutboxDispatcher {
             return Ok(OutboxDispatchOutcome::Idle);
         };
         let Some(event) = load_event(&mut transaction, next).await? else {
+            let allocated: Option<Decimal> = sqlx::query_scalar(
+                "SELECT last_sequence
+                   FROM outbox_sequence_state
+                  WHERE singleton",
+            )
+            .fetch_optional(&mut *transaction)
+            .await?;
+            let allocated = allocated.ok_or(OutboxCorruption::MissingSequenceState)?;
+            let allocated = decode_nonnegative_sequence(allocated)?;
+            if allocated < delivered {
+                return Err(OutboxCorruption::DeliveryBeyondAllocatedSequence.into());
+            }
+            if allocated >= next {
+                return Err(OutboxCorruption::MissingCommittedEventHeader.into());
+            }
             transaction.rollback().await?;
             return Ok(OutboxDispatchOutcome::Idle);
         };
@@ -311,6 +378,47 @@ async fn load_event(
             )
             .await?;
             DispatchedOutboxEventKind::SessionCreated
+        }
+        INPUT_ACCEPTED => {
+            let row = sqlx::query(
+                "SELECT event.accepted_input_id, event.turn_id,
+                        event.acceptance_position, accepted.content_text
+                   FROM input_accepted_outbox_event AS event
+                   JOIN accepted_input AS accepted
+                     ON accepted.accepted_input_id = event.accepted_input_id
+                    AND accepted.session_id = event.session_id
+                    AND accepted.acceptance_position = event.acceptance_position
+                    AND accepted.origin_turn_id = event.turn_id
+                  WHERE event.event_sequence = $1",
+            )
+            .bind(Decimal::from(expected_sequence))
+            .fetch_optional(&mut **transaction)
+            .await?
+            .ok_or(OutboxCorruption::MissingTypedRecord)?;
+            let acceptance_position: Decimal = row.try_get("acceptance_position")?;
+            let acceptance_position = input_position_from_numeric(acceptance_position)
+                .map_err(|_| OutboxCorruption::InvalidAcceptancePosition)?;
+            DispatchedOutboxEventKind::InputAccepted {
+                accepted_input: AcceptedInputId::from_uuid(row.try_get("accepted_input_id")?),
+                turn: TurnId::from_uuid(row.try_get("turn_id")?),
+                acceptance_position,
+                content: row.try_get("content_text")?,
+            }
+        }
+        TURN_ACTIVATED => {
+            let row: Option<(Uuid, Uuid)> = sqlx::query_as(
+                "SELECT turn_id, current_attempt_id
+                   FROM turn_activated_outbox_event
+                  WHERE event_sequence = $1",
+            )
+            .bind(Decimal::from(expected_sequence))
+            .fetch_optional(&mut **transaction)
+            .await?;
+            let (turn, current_attempt) = row.ok_or(OutboxCorruption::MissingTypedRecord)?;
+            DispatchedOutboxEventKind::TurnActivated {
+                turn: TurnId::from_uuid(turn),
+                current_attempt: TurnAttemptId::from_uuid(current_attempt),
+            }
         }
         TURN_FAILED => {
             let row: Option<(Uuid, Uuid, Uuid)> = sqlx::query_as(
@@ -434,19 +542,19 @@ fn decode_model_call_state(
         ("prepared", None) => Ok(DispatchedModelCallState::Prepared),
         ("in_flight", None) => Ok(DispatchedModelCallState::InFlight),
         ("terminal", Some("completed")) => Ok(DispatchedModelCallState::Terminal(
-            ModelCallDisposition::Completed,
+            DispatchedModelCallDisposition::Completed,
         )),
         ("terminal", Some("known_failed")) => Ok(DispatchedModelCallState::Terminal(
-            ModelCallDisposition::KnownFailed,
+            DispatchedModelCallDisposition::KnownFailed,
         )),
         ("terminal", Some("refused")) => Ok(DispatchedModelCallState::Terminal(
-            ModelCallDisposition::Refused,
+            DispatchedModelCallDisposition::Refused,
         )),
         ("terminal", Some("cancelled")) => Ok(DispatchedModelCallState::Terminal(
-            ModelCallDisposition::Cancelled,
+            DispatchedModelCallDisposition::Cancelled,
         )),
         ("terminal", Some("ambiguous")) => Ok(DispatchedModelCallState::Terminal(
-            ModelCallDisposition::Ambiguous,
+            DispatchedModelCallDisposition::Ambiguous,
         )),
         _ => Err(OutboxCorruption::InvalidModelCallState),
     }
@@ -455,6 +563,17 @@ fn decode_model_call_state(
 pub(crate) enum OutboxEvent {
     SessionCreated {
         session: SessionId,
+    },
+    InputAccepted {
+        session: SessionId,
+        accepted_input: AcceptedInputId,
+        turn: TurnId,
+        acceptance_position: SessionInputPosition,
+    },
+    TurnActivated {
+        session: SessionId,
+        turn: TurnId,
+        current_attempt: TurnAttemptId,
     },
     TurnFailed {
         session: SessionId,
@@ -497,6 +616,26 @@ pub(crate) async fn append(
         OutboxEvent::SessionCreated { session } => {
             append_session_created(connection, session).await
         }
+        OutboxEvent::InputAccepted {
+            session,
+            accepted_input,
+            turn,
+            acceptance_position,
+        } => {
+            append_input_accepted(
+                connection,
+                session,
+                accepted_input,
+                turn,
+                acceptance_position,
+            )
+            .await
+        }
+        OutboxEvent::TurnActivated {
+            session,
+            turn,
+            current_attempt,
+        } => append_turn_activated(connection, session, turn, current_attempt).await,
         OutboxEvent::TurnFailed {
             session,
             turn,
@@ -557,6 +696,68 @@ async fn append_session_created(
     .execute(connection)
     .await?;
 
+    Ok(())
+}
+
+async fn append_input_accepted(
+    connection: &mut PgConnection,
+    session: SessionId,
+    accepted_input: AcceptedInputId,
+    turn: TurnId,
+    acceptance_position: SessionInputPosition,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "WITH header AS (
+            INSERT INTO outbox_event
+                (event_kind, storage_version, session_id)
+            VALUES ($1, $2, $3)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO input_accepted_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             accepted_input_id, turn_id, acceptance_position)
+         SELECT event_sequence, event_kind, storage_version, session_id,
+                $4, $5, $6
+           FROM header",
+    )
+    .bind(INPUT_ACCEPTED)
+    .bind(STORAGE_VERSION)
+    .bind(session_id_to_uuid(session))
+    .bind(accepted_input_id_to_uuid(accepted_input))
+    .bind(turn_id_to_uuid(turn))
+    .bind(input_position_to_numeric(acceptance_position))
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
+async fn append_turn_activated(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    current_attempt: TurnAttemptId,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "WITH header AS (
+            INSERT INTO outbox_event
+                (event_kind, storage_version, session_id)
+            VALUES ($1, $2, $3)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO turn_activated_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             turn_id, current_attempt_id)
+         SELECT event_sequence, event_kind, storage_version, session_id,
+                $4, $5
+           FROM header",
+    )
+    .bind(TURN_ACTIVATED)
+    .bind(STORAGE_VERSION)
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .bind(current_attempt.into_uuid())
+    .execute(connection)
+    .await?;
     Ok(())
 }
 

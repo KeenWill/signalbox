@@ -37,9 +37,9 @@ use signalbox_domain::{
     ReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult,
     ResolvedProviderTarget, SemanticTranscriptEntryId, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-    SessionId, SubmitInput, SubmitInputAppliedResult, SubmitInputReconstitutionFailure,
-    SubmitInputRejectedResult, SubmitInputResult, TranscriptAncestry, TurnAttemptId,
-    TurnConfigurationProvenance, TurnId, UserContent,
+    SessionId, SessionInputPosition, SubmitInput, SubmitInputAppliedResult,
+    SubmitInputReconstitutionFailure, SubmitInputRejectedResult, SubmitInputResult,
+    TranscriptAncestry, TurnAttemptId, TurnConfigurationProvenance, TurnId, UserContent,
 };
 use signalbox_persistence::{
     MIGRATOR,
@@ -52,7 +52,8 @@ use signalbox_persistence::{
         ModelCallRepositoryError, PostgresModelCallRepository, PrepareInitialModelCallOutcome,
     },
     outbox::{
-        OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
+        DispatchedOutboxEventKind, OutboxCorruption, OutboxDeliveryDecision, OutboxDispatchError,
+        OutboxDispatchOutcome, OutboxDispatcher,
     },
     replace_session_defaults::{
         ReplaceSessionDefaultsCorruption, ReplaceSessionDefaultsHandlingOutcome,
@@ -8455,7 +8456,7 @@ async fn s03_inv032_inv034_startup_recovery_and_outbox_commit_or_roll_back_toget
     .await?;
     assert_eq!(
         rolled_back,
-        ("active".into(), "prepared".into(), 0, 0, Decimal::ONE)
+        ("active".into(), "prepared".into(), 0, 0, Decimal::from(3))
     );
 
     sqlx::query(
@@ -8493,7 +8494,7 @@ async fn s03_inv032_inv034_startup_recovery_and_outbox_commit_or_roll_back_toget
     .await?;
     assert_eq!(
         committed,
-        ("terminal".into(), "ended".into(), 1, 1, Decimal::from(2))
+        ("terminal".into(), "ended".into(), 1, 1, Decimal::from(4))
     );
 
     pool.close().await;
@@ -10409,6 +10410,12 @@ async fn inv002_inv008_inv012_submit_corruption_and_position_exhaustion_fail_clo
     )
     .execute(&pool)
     .await?;
+    sqlx::query(
+        "ALTER TABLE input_accepted_outbox_event
+            DROP CONSTRAINT input_accepted_outbox_origin_fk",
+    )
+    .execute(&pool)
+    .await?;
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "UPDATE accepted_input
@@ -10772,6 +10779,58 @@ async fn s24_inv032_dispatcher_redelivers_after_cursor_commit_failure_in_order()
     Ok(())
 }
 
+/// S24 / INV-032: an allocator cursor beyond the delivered prefix requires its
+/// exact committed header; dispatcher idle is reserved for equal cursors.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_inv032_dispatcher_reports_a_missing_committed_header() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    sqlx::query(
+        "ALTER TABLE outbox_sequence_state
+         DISABLE TRIGGER outbox_sequence_requires_event",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE outbox_sequence_state
+            SET last_sequence = 1,
+                last_allocation_xid = pg_current_xact_id()
+          WHERE singleton",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE outbox_sequence_state
+         ENABLE TRIGGER outbox_sequence_requires_event",
+    )
+    .execute(&pool)
+    .await?;
+
+    let dispatcher = OutboxDispatcher::new(pool.clone());
+    assert!(matches!(
+        dispatcher
+            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+            .await,
+        Err(OutboxDispatchError::Corruption(
+            OutboxCorruption::MissingCommittedEventHeader
+        ))
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, Decimal>(
+            "SELECT delivered_through
+               FROM outbox_delivery_state
+              WHERE singleton",
+        )
+        .fetch_one(&pool)
+        .await?,
+        Decimal::ZERO
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S24 / INV-032: an event-producing transaction cannot mark its own
 /// uncommitted event delivered and thereby make restart recovery skip it.
 /// Both append-before-delivery and delivery-before-append orderings are covered.
@@ -10889,7 +10948,20 @@ async fn inv032_outbox_storage_rejects_truncate() -> Result<(), Box<dyn Error>> 
     assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE outbox_event CASCADE").await?;
     assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE session_created_outbox_event CASCADE")
         .await?;
+    assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE input_accepted_outbox_event CASCADE")
+        .await?;
+    assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE turn_activated_outbox_event CASCADE")
+        .await?;
     assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE turn_failed_outbox_event CASCADE")
+        .await?;
+    assert_outbox_truncate_rejected(
+        &pool,
+        "TRUNCATE TABLE model_call_transition_outbox_event CASCADE",
+    )
+    .await?;
+    assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE turn_completed_outbox_event CASCADE")
+        .await?;
+    assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE turn_refused_outbox_event CASCADE")
         .await?;
 
     pool.close().await;
@@ -11051,6 +11123,142 @@ async fn s01_inv012_inv032_create_session_first_handling_appends_exactly_once()
         .fetch_one(&pool)
         .await?;
     assert_eq!(typed_events, 1);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S01 / INV-012 / INV-032: acceptance and activation append their complete
+/// typed process transitions in the same commits, and command replay emits no
+/// duplicate before the dispatcher advances the exact ordered prefix.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s01_inv012_inv032_scheduling_transitions_dispatch_in_commit_order()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = SessionId::from_uuid(Uuid::from_u128(0xe61));
+    let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(0xe62));
+    let turn = TurnId::from_uuid(Uuid::from_u128(0xe63));
+    let attempt = TurnAttemptId::from_uuid(Uuid::from_u128(0xe64));
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(
+            0xe60,
+            0xe61,
+            ModelSelectionRequest::Direct(signalbox_domain::DirectModelSelection::from_uuid(
+                Uuid::from_u128(0xe65),
+            )),
+        ))
+        .await?;
+    let command = start_input(
+        0xe66,
+        0xe61,
+        "durable process input",
+        1,
+        ModelSelectionOverride::UseSessionDefault,
+    );
+    let repository = SubmitInputRepository::new(pool.clone());
+    let recorded = repository
+        .handle(command.clone(), accepted_input, Some(turn))
+        .await?;
+    assert_eq!(
+        repository
+            .handle(command, accepted_input, Some(turn))
+            .await?,
+        recorded
+    );
+    let activated = activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: session.into_uuid(),
+            origin_entry: Uuid::from_u128(0xe67),
+            starting_frontier: Uuid::from_u128(0xe68),
+            initial_attempt: attempt.into_uuid(),
+        },
+    )
+    .await?;
+    assert_eq!(activated.turn(), turn);
+
+    let dispatcher = OutboxDispatcher::new(pool.clone());
+    let mut created = None;
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|event| {
+                created = Some(event.clone());
+                OutboxDeliveryDecision::Delivered
+            })
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 1 }
+    );
+    let created = created.expect("the session creation event was offered");
+    assert_eq!(created.session(), session);
+    assert!(matches!(
+        created.kind(),
+        DispatchedOutboxEventKind::SessionCreated
+    ));
+
+    let mut accepted = None;
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|event| {
+                accepted = Some(event.clone());
+                OutboxDeliveryDecision::Delivered
+            })
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 2 }
+    );
+    let accepted = accepted.expect("the input acceptance event was offered");
+    assert_eq!(accepted.session(), session);
+    assert_eq!(
+        accepted.kind(),
+        &DispatchedOutboxEventKind::InputAccepted {
+            accepted_input,
+            turn,
+            acceptance_position: SessionInputPosition::first(),
+            content: "durable process input".to_owned(),
+        }
+    );
+
+    let mut activation = None;
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|event| {
+                activation = Some(event.clone());
+                OutboxDeliveryDecision::Delivered
+            })
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 3 }
+    );
+    let activation = activation.expect("the turn activation event was offered");
+    assert_eq!(activation.session(), session);
+    assert_eq!(
+        activation.kind(),
+        &DispatchedOutboxEventKind::TurnActivated {
+            turn,
+            current_attempt: attempt,
+        }
+    );
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+            .await?,
+        OutboxDispatchOutcome::Idle
+    );
+
+    let durable_counts: (i64, i64, Decimal) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM input_accepted_outbox_event
+              WHERE accepted_input_id = $1),
+            (SELECT count(*) FROM turn_activated_outbox_event
+              WHERE current_attempt_id = $2),
+            (SELECT delivered_through FROM outbox_delivery_state
+              WHERE singleton)",
+    )
+    .bind(accepted_input.into_uuid())
+    .bind(attempt.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(durable_counts, (1, 1, Decimal::from(3)));
 
     pool.close().await;
     drop(container);
