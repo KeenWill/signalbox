@@ -1,12 +1,11 @@
 //! Caller-selected accepted-input delivery treatment.
 //!
 //! The normative specification is
-//! `docs/spec/turn-lifecycle-and-scheduling.md` (originally ADR-0027).
-//! This module represents only the canonical typed
-//! caller payload: origin-producing requests carry model-selection choices
-//! bound to an expected session-defaults version, while safe-point steering
-//! carries only the caller's expected active turn and no independent
-//! configuration by construction.
+//! `docs/spec/turn-lifecycle-and-scheduling.md`. This module represents only
+//! the canonical typed caller payload: origin-producing requests carry
+//! model-selection choices bound to an expected session-defaults version,
+//! while safe-point steering carries only the caller's expected active turn
+//! and no independent configuration by construction.
 
 use crate::{ModelSelectionOverride, SessionConfigurationDefaultsVersion, TurnId};
 

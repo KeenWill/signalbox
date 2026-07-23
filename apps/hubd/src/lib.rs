@@ -1,8 +1,9 @@
 //! Hub-owned composition between turn activation and model execution.
 //!
-//! ADR-0044 makes this package the composition root. The scheduler pass below
-//! hands each complete activated-turn outcome to a fresh execution invocation;
-//! concrete provider selection remains an injected composition choice.
+//! docs/spec/runtime-substrate.md makes this package the composition root.
+//! The scheduler pass below hands each complete activated-turn outcome to a
+//! fresh execution invocation; concrete provider selection remains an
+//! injected composition choice.
 
 use std::{error::Error, fmt, future::Future};
 
@@ -543,11 +544,12 @@ impl ActivatedTurnExecution for PostgresScriptedModelExecution {
                 let outcome = match service.execute(session).await {
                     Ok(outcome) => outcome,
                     Err(error) if service.retained_state().is_some() => {
-                        // ADR-0045 gives same-incarnation evidence one
-                        // authoritative reconciliation pass before fatal
-                        // supervision hands authority to startup recovery. A
-                        // second failure does not replace the causal stage
-                        // error that created the retained obligation.
+                        // docs/spec/model-call-execution.md gives
+                        // same-incarnation evidence one authoritative
+                        // reconciliation pass before fatal supervision hands
+                        // authority to startup recovery. A second failure
+                        // does not replace the causal stage error that
+                        // created the retained obligation.
                         reconcile_retained_once(error, service.execute(session)).await?
                     }
                     Err(error) => return Err(RetainedModelExecutionError::Primary(error)),

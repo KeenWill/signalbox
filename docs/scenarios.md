@@ -6,7 +6,8 @@ intent the hub must commit before acknowledging, not a prescribed event-sourcing
 design. Invariant identifiers link to [the catalog](invariants.md).
 
 The scenarios are frozen design fixtures. New or changed normative behavior
-belongs in the record that owns it (an ADR or the [decision log](decisions.md));
+belongs in the record that owns it (the owning [spec page](spec/README.md) or
+the [decision log](decisions.md));
 a scenario's normative content changes or is added only alongside the decision
 that motivates it, and a decision introducing a new lifecycle edge adds or
 amends its scenario fixture in the same change. Test coverage is recorded
@@ -46,12 +47,14 @@ links to those tests.
   session, or payload is rejected rather than creating a duplicate.
 - **Required invariants:** INV-001, INV-003, INV-007, INV-008, INV-012.
 - **Remaining questions:** First client and process-protocol implementation.
-  Protocol semantics and compatibility are decided by ADR-0019 and ADR-0021; the
-  owner-global idempotency scope and typed relational command representation are
-  decided by ADR-0001 and ADR-0034; the baseline accepted-input content value is
-  decided by ADR-0037; the long-lived session aggregate and current-pointer load
-  boundary are decided by ADR-0038; actor attribution in the canonical command
-  payload and its replay equality are decided by ADR-0039.
+  Protocol semantics and compatibility remain future client- and
+  process-protocol work; the owner-global idempotency scope, the typed
+  relational command representation, and actor attribution in the canonical
+  command payload with its replay equality are decided in
+  [identity-and-commands](spec/identity-and-commands.md); the baseline
+  accepted-input content value, the long-lived session aggregate, and the
+  current-pointer load boundary are decided in
+  [sessions-and-transcript](spec/sessions-and-transcript.md).
 
 ## S02 — Stream a centrally called provider response
 
@@ -88,7 +91,9 @@ links to those tests.
 
 - **User intent:** Trust an acknowledgement even if the service restarts before
   work starts.
-- **Durable commands:** Under accepted ADR-0027, persist accepted input, origin
+- **Durable commands:** Under the accepted input-delivery semantics
+  ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)),
+  persist accepted input, origin
   turn, immutable acceptance position, any typed priority relation, and frozen
   baseline model-configuration provenance in one transaction before
   acknowledgement.
@@ -105,8 +110,10 @@ links to those tests.
   canceled, or requests reconciliation; it never silently vanishes. Duplicate
   recovery scans do not create duplicate turns.
 - **Required invariants:** INV-007–INV-012, INV-034.
-- **Remaining questions:** Scheduler sweep tuning and optional safeguards listed
-  by ADR-0010. Whether an individual provider call or tool attempt crossed its
+- **Remaining questions:** Scheduler sweep tuning and the optional scheduler
+  safeguards listed as open edges in
+  [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md).
+  Whether an individual provider call or tool attempt crossed its
   persisted issue boundary is classified by its own evidence; an attempt still
   in `Prepared` has not crossed the orchestration boundary.
 
@@ -248,7 +255,9 @@ links to those tests.
 
 - **User intent:** Stop current progress and begin different logical work from
   new input.
-- **Durable commands:** Under accepted ADR-0027, atomically persist the
+- **Durable commands:** Under the accepted interrupt-delivery semantics
+  ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)),
+  atomically persist the
   interrupting accepted input, successor configuration provenance, typed
   priority relation designating its turn as the active turn's immediate
   successor, and `AppliedInterruptProof` tied to the exact predecessor, plus its
@@ -294,7 +303,7 @@ links to those tests.
 - **Required invariants:** INV-007–INV-009, INV-012, INV-025, INV-028, INV-029.
 - **Remaining questions:** Provider/tool-specific cancellation evidence remains
   open. Child-cancellation propagation is excluded from the baseline and
-  reserved for ADR-0002.
+  reserved for the open [delegation decision](open-questions.md#delegation).
 
 ## S08 — Submit safe-point steering
 
@@ -310,8 +319,9 @@ links to those tests.
   consumption by call identity.
 - **State transitions:** Accepted input → pending steering → consumed by a later
   model call, or visibly reclassified as a queued turn origin if the target turn
-  terminates first. Every active wait retains the turn's session slot under
-  accepted ADR-0004.
+  terminates first. Every active wait retains the turn's session slot under the
+  accepted turn lifecycle
+  ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)).
 - **Transient updates:** Client shows “will apply at next safe point”; no
   mutation of the current provider stream.
 - **Owning component:** Hub decides safe-point boundaries and builds context;
@@ -408,7 +418,8 @@ links to those tests.
 - **Required invariants:** INV-009, INV-012, INV-019, INV-020, INV-027.
 - **Remaining questions:** Whether future reconsideration creates a new request,
   and the exact semantic rendering of the committed denial. Baseline
-  continuation in a new turn attempt is decided by ADR-0004's proposal.
+  continuation in a new turn attempt is decided by the accepted lifecycle design
+  ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)).
 
 ## S12 — Receive a stale or duplicated runner result
 
@@ -427,9 +438,10 @@ links to those tests.
   result, cancellation, or reconciliation state.
 - **Required invariants:** INV-011, INV-012, INV-021.
 - **Remaining questions:** Fence representation, retention of rejected evidence,
-  and result acknowledgement protocol. The compatibility window is decided by
-  ADR-0021; subscriber observation semantics and the committing-side update
-  mechanism are decided by ADR-0019 and ADR-0040, respectively.
+  and result acknowledgement protocol. The compatibility window and subscriber
+  observation semantics are decided by the accepted process- and client-protocol
+  baselines (unimplemented; no spec page yet); the committing-side update
+  mechanism is decided in [persistence-protocol](spec/persistence-protocol.md).
 
 ## S13 — Use an ambient-user runner
 
@@ -534,55 +546,61 @@ links to those tests.
 - **Remaining questions:** Deletion/retention, selectable transcript-frontier
   boundaries, multiple ancestry sources, and merge semantics (not initially
   required). Copy, reference, and shared-prefix storage are permitted
-  implementation choices when they preserve ADR-0030's resolved semantic
-  identities.
+  implementation choices when they preserve the accepted frontier semantics'
+  resolved semantic identities
+  ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)).
 
 ## S18 — Delegate to a child session
 
 - **User intent:** Assign related work to an independently browsable child and
   receive an explicit result.
-- **Durable commands:** Future ADR-0002 commands must add a delegated
+- **Durable commands:** Future delegation commands (open:
+  [delegation](open-questions.md#delegation)) must add a delegated
   creation-cause variant with an exact durable parent-work identity, create the
   child with that cause and a parent-work relation, persist task input, record a
   typed parent wait/reference, and later persist explicit result delivery.
 - **State transitions:** Child creation and execution use a distinct session.
   Parent wait, resume, result, and cancellation transitions are intentionally
-  not part of the first implementable turn state machine; ADR-0002 must add a
-  typed child-wait phase before delegation ships.
+  not part of the first implementable turn state machine; the delegation
+  decision must add a typed child-wait phase before delegation ships.
 - **Transient updates:** Child progress summaries and presence indicators.
 - **Owning component:** Hub owns relationships and scheduling; each session
   retains independent history.
-- **Failure behavior:** Once ADR-0002 defines the feature, restart must restore
+- **Failure behavior:** Once the delegation decision defines the feature,
+  restart must restore
   both child state and parent wait, and child failure must be delivered
   explicitly rather than disappearing into parent UI state. The current
   foundation does not permit an implementation to invent those transitions.
 - **Required invariants:** INV-003, INV-010, INV-031, INV-034.
-- **Remaining questions:** ADR-0002 must define the child-wait variant, result
-  representation, cancellation propagation, detached work, and resource limits.
-  Any accepted child wait retains the parent session slot unless ADR-0002 also
-  defines explicit branching or rebasing.
+- **Remaining questions:** The delegation decision must define the child-wait
+  variant, result representation, cancellation propagation, detached work, and
+  resource limits. Any accepted child wait retains the parent session slot
+  unless that decision also defines explicit branching or rebasing.
 
 ## S19 — Cancel a parent while child work is active
 
 - **User intent:** Stop parent work with a clear understanding of what happens
   to the child.
 - **Durable commands:** No baseline command is exposed for canceling a parent in
-  a child wait. ADR-0002 must define and atomically persist parent cancellation
-  together with an explicit child-disposition decision before enabling this
-  scenario.
-- **State transitions:** Reserved for ADR-0002; the first turn state machine has
-  no `AwaitingChild` phase and therefore no incomplete cancellation edge.
+  a child wait. The delegation decision must define and atomically persist
+  parent cancellation together with an explicit child-disposition decision
+  before enabling this scenario.
+- **State transitions:** Reserved for the delegation decision; the first turn
+  state machine has no `AwaitingChild` phase and therefore no incomplete
+  cancellation edge.
 - **Transient updates:** Cancellation progress for each physical attempt.
 - **Owning component:** Hub applies the eventual delegation policy; executors
   only respond to cancellation requests.
 - **Failure behavior:** A future policy may keep or cancel the child, but
   already-issued effects are never undone, the child never silently disappears,
   and ambiguous child effects remain reconcilable. Implementations must not
-  choose a policy before ADR-0002 is accepted.
+  choose a policy before the delegation decision is accepted.
 - **Required invariants:** INV-010, INV-025, INV-026, INV-029, INV-031, INV-034.
-- **Remaining questions:** ADR-0002 remains blocking for propagation,
-  detached-child support, result delivery after parent termination, and the
-  parent/child disposition model; archival coupling remains with ADR-0028.
+- **Remaining questions:** The delegation decision remains blocking for
+  propagation, detached-child support, result delivery after parent
+  termination, and the parent/child disposition model; archival coupling
+  remains with the open archive lifecycle decision
+  ([archival and retention](open-questions.md#archival-and-retention)).
 
 ## S20 — Resolve a curated model alias
 
@@ -602,8 +620,9 @@ links to those tests.
 - **Failure behavior:** Alias changes after input acceptance never alter queued
   or active work. Resolution failure creates no targetless call and fails the
   attempt and turn; it does not silently choose another model. A reported
-  identity different from the exact resolved target follows ADR-0005's full
-  timing rule: known failure while nonterminal; preserved ambiguity plus a fatal
+  identity different from the exact resolved target follows the accepted full
+  mismatch timing rule ([model-call-execution](spec/model-call-execution.md)):
+  known failure while nonterminal; preserved ambiguity plus a fatal
   cause on any still-live attempt, with turn failure only when no other
   unacknowledged ambiguity remains and reconciliation otherwise; typed
   invalidation and stop after completion while the turn is active; unchanged
@@ -614,7 +633,8 @@ links to those tests.
 - **Required invariants:** INV-008, INV-014, INV-017.
 - **Remaining questions:** Alias administration, visibility, and whether a
   future frozen alias policy may include fallback. Acceptance-time definition
-  freezing and pre-call target resolution are decided by ADR-0005.
+  freezing and pre-call target resolution are decided in
+  [model-call-execution](spec/model-call-execution.md).
 
 ## S21 — Execute an exact pinned model
 
@@ -657,8 +677,10 @@ links to those tests.
   knowledge of the hidden physical backend.
 - **Required invariants:** INV-014, INV-015, INV-017, INV-018.
 - **Remaining questions:** Provider identifier normalization and reproducibility
-  claims beyond observable model identity remain for ADR-0007; mismatch failure
-  is decided by accepted ADR-0005.
+  claims beyond observable model identity remain open ([model fallback and
+  provenance](open-questions.md#model-fallback-and-provenance)); mismatch
+  failure is decided in
+  [model-call-execution](spec/model-call-execution.md).
 
 ## S22 — Apply an availability fallback
 
@@ -677,8 +699,9 @@ links to those tests.
 - **Failure behavior:** If version one has no accepted fallback policy, stop
   explicitly instead. If fallback is later authorized, the alternate target is
   attempted only through its distinct call; a provider-reported mismatch against
-  either call's own exact target follows ADR-0005's timing-sensitive failure
-  rule and is never an allowed substitution. The scenario does not establish
+  either call's own exact target follows the accepted timing-sensitive mismatch
+  failure rule ([model-call-execution](spec/model-call-execution.md)) and is
+  never an allowed substitution. The scenario does not establish
   automatic fallback as accepted behavior.
 - **Required invariants:** INV-014, INV-017, INV-018.
 - **Remaining questions:** Whether fallback ships, qualifying failures,
@@ -705,8 +728,8 @@ links to those tests.
   leaves refusal non-authoritative; after terminal ambiguity it preserves that
   disposition, adds the fatal resolution to any still-live attempt, and after
   classification fails the turn only when no other unacknowledged ambiguity
-  remains or requires reconciliation otherwise. A future remediation ADR may add
-  a typed wait or continuation policy.
+  remains or requires reconciliation otherwise. A future remediation decision
+  may add a typed wait or continuation policy.
 - **Transient updates:** Refusal text may stream but becomes authoritative only
   when committed.
 - **Owning component:** Provider adapter reports; hub classifies and exposes
@@ -725,7 +748,10 @@ links to those tests.
 - **Required invariants:** INV-014, INV-017, INV-018, INV-032.
 - **Remaining questions:** Refusal taxonomy, user-facing remediation, and
   whether any explicit fallback is ever allowed. Provider-identity normalization
-  remains for ADR-0007, while mismatch disposition is accepted by ADR-0005.
+  remains open ([model fallback and
+  provenance](open-questions.md#model-fallback-and-provenance)), while the
+  mismatch disposition is accepted
+  ([model-call-execution](spec/model-call-execution.md)).
 
 ## S24 — Reconnect a client during active streaming
 
@@ -746,8 +772,9 @@ links to those tests.
 - **Required invariants:** INV-005, INV-012, INV-032, INV-033.
 - **Remaining questions:** Concrete snapshot/event schemas, delta sequencing,
   checkpointing, and browser transport. Protocol semantics and the compatibility
-  window are decided by ADR-0019 and ADR-0021; update-event derivation and
-  cursor delivery from committed state are decided by ADR-0040, whose retention
+  window are decided by the accepted client- and process-protocol baselines;
+  update-event derivation and cursor delivery from committed state are decided
+  in [persistence-protocol](spec/persistence-protocol.md), whose retention
   window remains open.
 
 ## S25 — Archive and restore a session
@@ -767,21 +794,24 @@ links to those tests.
   work is active or otherwise nonterminal must explicitly fail, wait, or request
   cancellation according to future policy; it never silently abandons work.
 - **Required invariants:** INV-010, INV-012, INV-013, INV-034.
-- **Remaining questions:** ADR-0028 must define archive eligibility,
-  nonterminal-work handling, restored lifecycle state, and effects on delegated
-  children or related sessions. Destructive retention and purge are separate
-  later scope under ADR-0029, not ordinary archive behavior.
+- **Remaining questions:** The open archive lifecycle decision
+  ([archival and retention](open-questions.md#archival-and-retention)) must
+  define archive eligibility, nonterminal-work handling, restored lifecycle
+  state, and effects on delegated children or related sessions. Destructive
+  retention and purge are separate later scope, not ordinary archive behavior.
 
 ## S26 — Manually regenerate a prior answer
 
 - **User intent:** Ask for another outcome related to a prior turn without
   erasing what happened before.
 - **Durable commands:** No baseline regeneration command is exposed. A future
-  ADR must create a new turn with a typed relation to the original, an
+  regeneration decision must create a new turn with a typed relation to the
+  original, an
   explicitly frozen effective configuration, an immutable source frontier, and
   defined queue placement while retaining the original turn, attempts, calls,
   and output unchanged.
-- **State transitions:** Reserved for the future regeneration ADR. The initial
+- **State transitions:** Reserved for the future regeneration decision. The
+  initial
   turn-origin enum contains only accepted-input origin and does not encode a
   half-defined regeneration transition.
 - **Transient updates:** A future client may visually group alternatives, but
@@ -795,7 +825,7 @@ links to those tests.
   as recovery of the original.
 - **Required invariants:** INV-001, INV-004, INV-006, INV-008, INV-012, INV-014,
   INV-015.
-- **Remaining questions:** A future regeneration ADR must decide command
+- **Remaining questions:** A future regeneration decision must decide command
   acceptance, FIFO interaction, exact historical source frontier, configuration
   freeze, and alternative-answer presentation before implementation.
 
@@ -840,8 +870,8 @@ links to those tests.
 
 ## Coverage note
 
-The accepted foundation ADRs govern retry identity and baseline input lifecycle.
-Delegation cancellation, fallback, capability vocabulary, safety policy, queue
-management, archive behavior, and protocol choices remain open. An ADR that
-changes a lifecycle should update the affected scenarios and cite the invariant
-changes it requires.
+The accepted foundation decisions govern retry identity and baseline input
+lifecycle. Delegation cancellation, fallback, capability vocabulary, safety
+policy, queue management, archive behavior, and protocol choices remain open. A
+decision that changes a lifecycle should update the affected scenarios and cite
+the invariant changes it requires.

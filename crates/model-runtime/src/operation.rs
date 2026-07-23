@@ -84,8 +84,8 @@ pub enum ToolChoice {
 /// The correlation value `C` is the caller's durable operation identity
 /// (Signalbox's `ModelCallId`, or any other caller identity), opaque to this
 /// layer. Adapters thread it onto every observation and the terminal report
-/// (ADR-0005: a runtime-generated identity is never authoritative
-/// correlation).
+/// (docs/spec/model-call-execution.md: a runtime-generated identity is never
+/// authoritative correlation).
 ///
 /// One operation authorizes at most one provider interaction. Nothing in
 /// this layer turns one operation into two requests; a retry or continuation
@@ -96,8 +96,9 @@ pub struct ModelOperation<C> {
     /// observation and evidence record.
     pub correlation: C,
     /// The non-secret credential reference pinned with this operation.
-    /// Adapters resolve its current value during preparation of each physical
-    /// request through [`crate::CredentialAccess`] (ADR-0017).
+    /// Adapters resolve its current value during preparation of each
+    /// physical request through [`crate::CredentialAccess`]
+    /// (docs/spec/runtime-substrate.md).
     pub credential_reference: CredentialReference,
     /// The caller's original model selection, for provenance.
     pub requested_target: RequestedTarget,

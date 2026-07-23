@@ -867,8 +867,9 @@ async fn execution_redacts_with_the_exact_credential_captured_by_preparation() {
 
 #[tokio::test]
 async fn provider_error_text_reflecting_the_key_is_redacted() {
-    // ADR-0017: evidence carries typed classes and rendered detail, never
-    // credential values — even when an endpoint reflects the key.
+    // Per `docs/spec/runtime-substrate.md`, evidence carries typed classes
+    // and rendered detail, never credential values — even when an endpoint
+    // reflects the key.
     let body = br#"{"error":{"message":"invalid bearer key_loop","type":"invalid_request_error",
                     "code":"invalid_api_key"}}"#;
     let server = CannedServer::serving(vec![http_response(

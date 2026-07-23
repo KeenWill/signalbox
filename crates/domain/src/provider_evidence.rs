@@ -1,11 +1,12 @@
 //! Provider-target observations, evidence records, and mismatch authority.
 //!
-//! ADR-0005 is normative. This module models the typed observation payload,
-//! the evidence record keyed by [`ProviderTargetEvidenceId`] with
-//! identifier-replay and reuse boundaries, the completed-call mismatch
-//! invalidation that is unique by invalidated call, and the validating
-//! producers for sealed mismatch facts that bind each
-//! [`ProviderTargetMismatchFailureRef`] to its exact validated call effect.
+//! docs/spec/model-call-execution.md is normative. This module models the
+//! typed observation payload, the evidence record keyed by
+//! [`ProviderTargetEvidenceId`] with identifier-replay and reuse
+//! boundaries, the completed-call mismatch invalidation that is unique by
+//! invalidated call, and the validating producers for sealed mismatch facts
+//! that bind each [`ProviderTargetMismatchFailureRef`] to its exact
+//! validated call effect.
 //! Trust classification of raw provider-reported data, outcome eligibility
 //! and authority transfer, the aggregate's classification precedence, and
 //! persistence are separate later slices; a value here does not prove those
@@ -21,11 +22,12 @@ use crate::{
 
 /// The typed payload of one trusted provider-target observation.
 ///
-/// The two variants are ADR-0005's exact `ProviderTargetObservation`
-/// algebra. Whether a reported identity is trusted, and how raw
-/// provider-reported data normalizes into [`ProviderModelIdentity`], are
-/// boundary and ADR-0007 scope; an absent reported identity is not
-/// representable as either variant.
+/// The two variants are the exact `ProviderTargetObservation` algebra in
+/// docs/spec/model-call-execution.md. Whether a reported identity is
+/// trusted, and how raw provider-reported data normalizes into
+/// [`ProviderModelIdentity`], are boundary scope and an open edge recorded
+/// in docs/spec/identity-and-commands.md; an absent reported identity is
+/// not representable as either variant.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ProviderTargetObservation {
     /// The reported identity matches the call's exact resolved target.
@@ -130,13 +132,13 @@ impl AppliedProviderTargetMismatch {
 /// The model call identity and its exact resolved target, read together
 /// from one canonical call record.
 ///
-/// ADR-0005 derives the target from the canonical call record inside the
-/// serialized transition. This value is the only way to hand a
-/// `(call, target)` pair to the recording boundary, and it can be built
-/// outside this module solely from a real [`CurrentModelCall`] or
-/// [`EndedModelCall`]. That prevents recording call A's observation against
-/// call B's target, which would durably accept a mislabeled match as
-/// trusted evidence.
+/// docs/spec/model-call-execution.md derives the target from the canonical
+/// call record inside the serialized transition. This value is the only
+/// way to hand a `(call, target)` pair to the recording boundary, and it
+/// can be built outside this module solely from a real [`CurrentModelCall`]
+/// or [`EndedModelCall`]. That prevents recording call A's observation
+/// against call B's target, which would durably accept a mislabeled match
+/// as trusted evidence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct CanonicalCallTarget {
     call: ModelCallId,
@@ -182,10 +184,10 @@ impl CanonicalCallTarget {
 
 /// One recorded provider-target observation for one model call.
 ///
-/// The record deliberately carries no copy of the exact target: ADR-0005
-/// derives the target from the canonical call record inside the serialized
-/// transition. S21 / INV-014: raw parts cannot claim a recorded evidence
-/// fact:
+/// The record deliberately carries no copy of the exact target:
+/// docs/spec/model-call-execution.md derives the target from the canonical
+/// call record inside the serialized transition. S21 / INV-014: raw parts
+/// cannot claim a recorded evidence fact:
 ///
 /// ```compile_fail
 /// use signalbox_domain::{
@@ -242,11 +244,12 @@ impl ProviderTargetEvidence {
     /// nonterminal call and produces the sealed fatal-mismatch fact.
     ///
     /// Nonterminality is established by the current-call type, and the call
-    /// must have crossed send authorization: ADR-0005's mismatch edge starts
-    /// at `InFlight` or `CancellationRequested`, because an unsent
-    /// `Prepared` call has no provider interaction that could report a
-    /// target. Outcome eligibility and the atomic `Terminal(KnownFailed)`
-    /// classification are the aggregate's transition.
+    /// must have crossed send authorization: the mismatch edge in
+    /// docs/spec/model-call-execution.md starts at `InFlight` or
+    /// `CancellationRequested`, because an unsent `Prepared` call has no
+    /// provider interaction that could report a target. Outcome eligibility
+    /// and the atomic `Terminal(KnownFailed)` classification are the
+    /// aggregate's transition.
     pub(crate) fn nonterminal_call_mismatch_fact(
         &self,
         call: &CurrentModelCall,
@@ -346,14 +349,15 @@ pub(crate) enum ProviderTargetMismatchCorrelationError {
 
 /// The durable provider-target evidence records keyed by identifier.
 ///
-/// ADR-0005: evidence-identifier lookup precedes current-state validation.
-/// This value owns that keyed boundary and the payload's consistency with
-/// the exact target derived from the canonical call record: recording with
-/// a fresh identifier validates and appends, replay of the same identifier
-/// with the structurally equal call and payload returns the recorded
-/// result, and reuse with a different call or payload is rejected without
-/// change. What a recorded observation then does to call, attempt, and turn
-/// state is the aggregate's serialized transition.
+/// docs/spec/model-call-execution.md: evidence-identifier lookup precedes
+/// current-state validation. This value owns that keyed boundary and the
+/// payload's consistency with the exact target derived from the canonical
+/// call record: recording with a fresh identifier validates and appends,
+/// replay of the same identifier with the structurally equal call and
+/// payload returns the recorded result, and reuse with a different call or
+/// payload is rejected without change. What a recorded observation then
+/// does to call, attempt, and turn state is the aggregate's serialized
+/// transition.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ProviderTargetEvidenceLog {
     records: BTreeMap<ProviderTargetEvidenceId, ProviderTargetEvidence>,
@@ -530,12 +534,13 @@ impl ProviderTargetEvidenceReuseError {
 
 /// The typed invalidation of one completed current-authority call.
 ///
-/// ADR-0005 makes this value unique by `invalidated_call`: the first valid
-/// mismatch fixes it, structurally equal evidence replay is idempotent, and
-/// later observations cannot duplicate or replace it. The value carries no
-/// exact target and no authority generation; both derive from the canonical
-/// call and transfer chain inside the serialized transition. S21 / INV-014:
-/// raw identities cannot claim an invalidation:
+/// docs/spec/model-call-execution.md makes this value unique by
+/// `invalidated_call`: the first valid mismatch fixes it, structurally
+/// equal evidence replay is idempotent, and later observations cannot
+/// duplicate or replace it. The value carries no exact target and no
+/// authority generation; both derive from the canonical call and transfer
+/// chain inside the serialized transition. S21 / INV-014: raw identities
+/// cannot claim an invalidation:
 ///
 /// ```compile_fail
 /// use signalbox_domain::{
@@ -643,13 +648,14 @@ impl ProviderTargetMismatchInvalidation {
 /// The durable completed-call mismatch invalidations keyed by invalidated
 /// call.
 ///
-/// ADR-0005 makes the invalidation unique by `invalidated_call`. This value
-/// owns that per-call uniqueness so admission cannot depend on a caller
-/// remembering to look up the existing invalidation: the log itself finds
-/// the at most one existing value for the call, the first valid correlated
-/// mismatch fixes the entry, a structurally equal evidence replay returns
-/// it, and any later observation for the same call is rejected without
-/// duplicating or replacing the fixed value.
+/// docs/spec/model-call-execution.md makes the invalidation unique by
+/// `invalidated_call`. This value owns that per-call uniqueness so
+/// admission cannot depend on a caller remembering to look up the existing
+/// invalidation: the log itself finds the at most one existing value for
+/// the call, the first valid correlated mismatch fixes the entry, a
+/// structurally equal evidence replay returns it, and any later observation
+/// for the same call is rejected without duplicating or replacing the fixed
+/// value.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ProviderTargetMismatchInvalidationLog {
     invalidations: BTreeMap<ModelCallId, ProviderTargetMismatchInvalidation>,

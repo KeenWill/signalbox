@@ -1,8 +1,9 @@
 //! Runtime scheduling over nonauthoritative session hints.
 //!
-//! ADR-0010 owns the durable-rows queue, same-process nudge, and periodic
-//! reconciliation mechanics. This module keeps both hint sources behind one
-//! application port and drives the existing authoritative eligibility pass.
+//! docs/spec/turn-lifecycle-and-scheduling.md owns the durable-rows queue,
+//! same-process nudge, and periodic reconciliation mechanics. This module
+//! keeps both hint sources behind one application port and drives the
+//! existing authoritative eligibility pass.
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},

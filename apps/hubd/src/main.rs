@@ -1,7 +1,9 @@
 //! Signalbox hub composition root.
 //!
-//! ADR-0044 keeps runtime, subscriber, deployment configuration, migration,
-//! startup ordering, and shutdown policy at this executable boundary.
+//! docs/spec/runtime-substrate.md and
+//! docs/spec/configuration-and-credentials.md keep runtime, subscriber,
+//! deployment configuration, migration, startup ordering, and shutdown
+//! policy at this executable boundary.
 
 use std::{
     env,

@@ -1,9 +1,11 @@
 //! Pinned provider-target turn fact, model-call records, and transitions.
 //!
-//! ADR-0005 and ADR-0030 are normative. This module models the exact
-//! hub-resolved provider/model target pinned as a durable turn fact before any
-//! model call exists, the current call record created from that fact and one
-//! resolved context-frontier snapshot, and the call-local predecessor matrix.
+//! docs/spec/model-call-execution.md and
+//! docs/spec/turn-lifecycle-and-scheduling.md are normative. This module
+//! models the exact hub-resolved provider/model target pinned as a durable
+//! turn fact before any model call exists, the current call record created
+//! from that fact and one resolved context-frontier snapshot, and the
+//! call-local predecessor matrix.
 //! The model-execution aggregate owns resolution and lifecycle correlation;
 //! provider-target evidence and later outcome-authority transfers remain
 //! separate slices. A standalone value is not proof that aggregate guards held.
@@ -19,8 +21,9 @@ crate::define_identity!(
     /// The hub-resolved exact target and trusted provider-reported
     /// observations share this space, so a mismatch stays a typed value
     /// comparison. How raw provider-reported data normalizes into this key,
-    /// and provenance beyond ADR-0005's typed baseline observation, remain
-    /// the open ADR-0007 questions.
+    /// and provenance beyond the typed baseline observation in
+    /// docs/spec/model-call-execution.md, remain open edges recorded in
+    /// docs/spec/identity-and-commands.md.
     ProviderModelIdentity
 );
 
@@ -48,9 +51,9 @@ impl ResolvedProviderTarget {
 
 /// The exact provider/model target pinned as a durable turn fact.
 ///
-/// ADR-0005 pins this fact before the first `ModelCallId` is created and
-/// requires every call in the turn to use it. S20 / S21 / INV-014: raw parts
-/// cannot claim that a turn pinned a target:
+/// docs/spec/model-call-execution.md pins this fact before the first
+/// `ModelCallId` is created and requires every call in the turn to use it.
+/// S20 / S21 / INV-014: raw parts cannot claim that a turn pinned a target:
 ///
 /// ```compile_fail
 /// use signalbox_domain::{PinnedProviderTarget, ResolvedProviderTarget, TurnId};
@@ -129,10 +132,11 @@ impl PinnedProviderTarget {
 
 /// The terminal physical disposition of one model call.
 ///
-/// The five variants are ADR-0005's exact `ModelCallDisposition` algebra.
-/// Which disposition a classification may select, and what each implies for
-/// the attempt and turn, are ADR-0004 and ADR-0005 aggregate rules outside
-/// this value.
+/// The five variants are the exact `ModelCallDisposition` algebra in
+/// docs/spec/model-call-execution.md. Which disposition a classification
+/// may select, and what each implies for the attempt and turn, are
+/// aggregate rules in docs/spec/turn-lifecycle-and-scheduling.md and
+/// docs/spec/model-call-execution.md, outside this value.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ModelCallDisposition {
     /// The provider completed a usable response.
@@ -150,9 +154,9 @@ pub enum ModelCallDisposition {
 
 /// The nonterminal states of one current model call.
 ///
-/// ADR-0005's `Terminal(ModelCallDisposition)` is the separate
-/// [`EndedModelCall`] record, so terminal state cannot re-enter these
-/// variants.
+/// The `Terminal(ModelCallDisposition)` state in
+/// docs/spec/model-call-execution.md is the separate [`EndedModelCall`]
+/// record, so terminal state cannot re-enter these variants.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum CurrentModelCallState {
     /// The call exists durably with its exact target and context frontier;
@@ -312,7 +316,8 @@ impl CurrentModelCall {
 
     /// Durably requests best-effort cancellation of remaining provider work.
     ///
-    /// ADR-0005's only cancellation-request edge starts at `InFlight`. An
+    /// The only cancellation-request edge in
+    /// docs/spec/model-call-execution.md starts at `InFlight`. An
     /// already-requested call and an unsent `Prepared` call are both
     /// rejected unchanged: the durable request exists at most once, and the
     /// unsent call ends through the proof-correlated unsent path instead.
@@ -394,9 +399,9 @@ impl CurrentModelCall {
 
 /// Immutable terminal history for one model call.
 ///
-/// ADR-0005 prohibits every transition out of `Terminal`; late evidence is
-/// separate audit/reconciliation evidence. This type exposes no transition
-/// back to a current call:
+/// docs/spec/model-call-execution.md prohibits every transition out of
+/// `Terminal`; late evidence is separate audit/reconciliation evidence.
+/// This type exposes no transition back to a current call:
 ///
 /// ```compile_fail
 /// use signalbox_domain::EndedModelCall;

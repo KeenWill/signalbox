@@ -1,4 +1,5 @@
--- Typed persistence for ADR-0027 session-defaults replacement.
+-- Typed persistence for session-defaults replacement
+-- (docs/spec/sessions-and-transcript.md).
 --
 -- The owner-global registry remains the single claim boundary. Its former
 -- reverse foreign key could name only CreateSession, so this migration replaces

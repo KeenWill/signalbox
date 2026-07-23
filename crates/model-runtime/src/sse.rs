@@ -10,7 +10,7 @@
 //! newlines, comment lines, a UTF-8 BOM at stream start, and `\n`, `\r\n`,
 //! or `\r` line terminators. The `id` and `retry` fields are parsed and
 //! ignored — no adapter resumes streams, and resuming would be a second
-//! request this layer must never make (ADR-0005).
+//! request this layer must never make (docs/spec/runtime-substrate.md).
 
 /// One framed SSE record.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -16,7 +16,7 @@ companion pages.
 ## Boundary and crate layout
 
 The runtime layer is three library crates, hand-rolled per the 2026-07-20
-[decision-ledger entry](../decisions.md) that closed ADR-0047's
+[decision-ledger entry](../decisions.md) that closed the substrate's
 vendor-versus-hand-roll question: one provider-neutral core crate plus
 separately named provider adapters, with SerdesAI as a design reference only.
 `signalbox-model-runtime` is the shared vocabulary; the Anthropic and OpenAI

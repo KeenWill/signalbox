@@ -1,11 +1,11 @@
 //! Session-defaults replacement orchestration.
 //!
-//! ADR-0027 admits the canonical compare-and-set command, ADR-0034 owns
-//! owner-global replay, and the domain replacement boundary owns typed
-//! applied-or-rejected results. This application slice constructs the
-//! canonical command and delegates exactly once to an atomic transaction
-//! port. Authoritative session loading and preparation remain inside that
-//! transaction.
+//! docs/spec/sessions-and-transcript.md admits the canonical compare-and-set
+//! command, docs/spec/identity-and-commands.md owns owner-global replay, and
+//! the domain replacement boundary owns typed applied-or-rejected results.
+//! This application slice constructs the canonical command and delegates
+//! exactly once to an atomic transaction port. Authoritative session loading
+//! and preparation remain inside that transaction.
 
 use std::future::Future;
 
@@ -19,11 +19,11 @@ use crate::InvalidDurableCommandId;
 
 /// The complete validated application request for replacing session defaults.
 ///
-/// Private fields ensure ADR-0033's nil and max command-identity sentinels
-/// cannot enter canonical command construction through this boundary. The
-/// request contains exactly the canonical command's caller-supplied fields and
-/// no loaded session, current version, installed version, or persistence
-/// representation.
+/// Private fields ensure the nil and max command-identity sentinels reserved
+/// by docs/spec/identity-and-commands.md cannot enter canonical command
+/// construction through this boundary. The request contains exactly the
+/// canonical command's caller-supplied fields and no loaded session, current
+/// version, installed version, or persistence representation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReplaceSessionDefaultsRequest {
     command_id: DurableCommandId,

@@ -38,10 +38,10 @@ Identities fall into three supply classes:
   `TurnId`, `TurnAttemptId`, `SemanticTranscriptEntryId`, `ContextFrontierId`,
   and `ModelCallId` today; `ProviderTargetEvidenceId`, `ToolRequestId`, and
   `ToolAttemptId` are assigned here but not yet minted (see Open edges). All
-  production generators mint UUIDv7 (`uuid::Uuid::now_v7()`). Why: ADR-0033's
-  recorded rationale is UUIDv7 insertion locality for append-heavy Postgres
-  B-tree keys without changing the 128-bit storage shape; no index-level
-  artifact measures this.
+  production generators mint UUIDv7 (`uuid::Uuid::now_v7()`). Why: the recorded
+  rationale for UUIDv7 is insertion locality for append-heavy Postgres B-tree
+  keys without changing the 128-bit storage shape; no index-level artifact
+  measures this.
 - **Configuration reference key** — `DirectModelSelection` and `ModelAlias`.
   Callers supply them inside command payloads to name owner-configured model
   selections; they persist in `uuid` columns (`direct_model_selection_id`,
@@ -53,7 +53,7 @@ Identities fall into three supply classes:
 It is persisted (`turn_lifecycle.pinned_provider_model_identity_id`,
 `model_call.resolved_provider_model_identity_id`) and supplied as an
 owner-configured key from hubd's model-configuration file; how provider-reported
-data normalizes into it is the open ADR-0007 question (see Open edges).
+data normalizes into it remains open (see Open edges).
 
 UUID contents are never semantic. No code derives acceptance order, queue order,
 lifecycle precedence, ancestry, ownership, or authorization from UUID bytes or
@@ -285,32 +285,35 @@ Typed error `Debug`/`Display` representations may contain a raw command
 identifier (for example `DifferentCommandKind` in the persistence repositories)
 and are treated as internal values; the telemetry paths log classification
 fields, not formatted errors. The keyed correlation-token scheme that would
-restore per-command telemetry correlation is designed (ADR-0046) but not
-implemented; command-scoped events currently carry no command correlation at
-all. See Open edges.
+restore per-command telemetry correlation is designed but not implemented;
+command-scoped events currently carry no command correlation at all. See Open
+edges.
 
 ## Open edges
 
-- The ADR-0046 durable-command telemetry token (`dc1` HMAC epoch scheme, mounted
+- The designed durable-command telemetry token (`dc1` HMAC epoch scheme, mounted
   epoch document, fail-closed startup validation, sanitized panic hook) is
   entirely unimplemented; telemetry currently omits durable-command correlation
   rather than tokenizing it.
 - `ReplaceSessionDefaults` v1 payload and storage carry no `actor` field despite
-  ADR-0039's adoption path expecting one from the kind's first accepted version;
-  the truthful `Owner` backfill via a kind-scoped storage version remains
-  available but unexercised.
-- `CreateSession` actor adoption remains an explicit owner choice (ADR-0039); v1
-  leaves its attribution implicit.
+  the accepted adoption path expecting one from the kind's first accepted
+  version; the truthful `Owner` backfill via a kind-scoped storage version
+  remains available but unexercised.
+- `CreateSession` actor adoption remains an explicit owner choice; v1 leaves its
+  attribution implicit.
 - No recorded-transition record family has adopted actor attribution;
   startup-scan terminalizations do not yet record a `Recovery` actor.
-- Wire field types and public identity encodings remain reserved
-  (ADR-0019/ADR-0021); no protocol surface exists and commands enter only
-  through in-process application services.
+- Wire field types and public identity encodings remain reserved for the future
+  client and process protocols
+  ([identity representation](../open-questions.md#identity-representation)); no
+  protocol surface exists and commands enter only through in-process application
+  services.
 - `ProviderTargetEvidenceId`, `ToolRequestId`, and `ToolAttemptId` have assigned
   supply classes but no production minting seam; generators land with their
   owning slices. `ProviderModelIdentity` is now persisted and
-  configuration-supplied; how provider-reported data normalizes into it remains
-  open (ADR-0007).
+  configuration-supplied; provider-identity normalization remains open ([model
+  fallback and
+  provenance](../open-questions.md#model-fallback-and-provenance)).
 - UUIDv7 timestamp disclosure and namespace scope must be reassessed before
   identities are exposed outside the single-owner boundary or treated as
   capabilities.

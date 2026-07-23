@@ -12,9 +12,8 @@ storage protocol and the outbox in
 [persistence-protocol](persistence-protocol.md); the typed model-runtime layer
 and hub runtime in [runtime-substrate](runtime-substrate.md); model
 configuration and credentials in
-[configuration-and-credentials](configuration-and-credentials.md). Distilled
-from ADR-0005, ADR-0042, ADR-0043, and ADR-0045; invariant tags cite
-[docs/invariants.md](../invariants.md).
+[configuration-and-credentials](configuration-and-credentials.md). Invariant
+tags cite [docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
 
@@ -41,8 +40,8 @@ The predecessor matrix:
 Storage enforces the matrix durably
 (`crates/persistence/migrations/202607220001_model_call_execution.sql`): the
 `model_call_changes_are_guarded` trigger rejects any insert whose state is not
-`Prepared`, any mutation of the eleven authorization-fact columns (the ADR-0017
-pinned credential reference joined them in
+`Prepared`, any mutation of the eleven authorization-fact columns (the pinned
+credential reference joined them in
 `202607220002_model_call_credential_reference.sql`), any non-monotonic
 transition, any rewrite of a terminal row, any unsent-terminal disposition other
 than `KnownFailed`/`Cancelled`, and any delete; `model_call_pinned_target_fk`
@@ -91,7 +90,8 @@ Every message keeps its source-qualified semantic-entry reference. Why:
 inherited entries need not come from a native turn in the current session, so
 role and provenance derive from the entry itself, never from turn grouping. The
 runtime bridge then maps these to provider wire messages; provider types never
-cross the application boundary (INV-002; ADR-0047).
+cross the application boundary (INV-002; layering rules in
+[runtime-substrate](runtime-substrate.md)).
 
 ## Staged execution
 
@@ -102,7 +102,8 @@ transaction is ever open across credential I/O or provider work.
 
 1. **Prepare transaction.** Locks the session, reconstitutes the aggregate, and
    either: reports no runnable work; creates and commits the exact `Prepared`
-   call with its pinned non-secret credential reference (ADR-0017), the
+   call with its pinned non-secret credential reference
+   ([configuration-and-credentials](configuration-and-credentials.md)), the
    turn-target pin, and a `ModelCallTransition` (`Prepared`) outbox event, then
    stops the invocation (`Checkpointed`); reloads an already-committed
    `Prepared` call read-only and returns its request material (`Ready`); closes
@@ -204,9 +205,10 @@ exactly-once claim.
 
 ## Provider observation classification
 
-Classification is an adapter contract consuming ADR-0043's full-request-send
-boundary; the hub never reinterprets SDK errors by retryability or exception
-type. The runtime bridge (`crates/model-provider-runtime/src/lib.rs`) maps the
+Classification is an adapter contract consuming the full-request-send boundary
+([runtime-substrate](runtime-substrate.md)); the hub never reinterprets SDK
+errors by retryability or exception type. The runtime bridge
+(`crates/model-provider-runtime/src/lib.rs`) maps the
 runtime's typed terminal evidence ([runtime-substrate](runtime-substrate.md)
 owns how evidence is derived) to exactly one disposition:
 
@@ -227,9 +229,9 @@ redacted-thinking, or tool-call parts fail the adapter stage closed as operator
 errors (the text-only slice cannot represent them). A provider-reported model
 differing from the expected exact spelling — in early observations or terminal
 evidence — also fails the adapter stage closed rather than classifying, because
-ADR-0005's mismatch evidence is not yet representable durably (see Open edges).
-Scripted providers declare their exact terminal observation; nothing is inferred
-from timing or injected I/O errors (ADR-0043).
+provider-target mismatch evidence is not yet representable durably (see Open
+edges). Scripted providers declare their exact terminal observation; nothing is
+inferred from timing or injected I/O errors.
 
 ## Terminal outcomes
 
@@ -243,7 +245,8 @@ persistence commits it atomically with its outbox rows
   last; the terminal frontier extends the call's exact source frontier with
   those entries. The single implemented writer (`persist_completed`) commits
   call disposition, attempt end, entries, marker, frontier, and turn lifecycle
-  in one transaction (ADR-0042's all-or-nothing boundary), so no committed state
+  in one transaction (the final-response all-or-nothing boundary), so no
+  committed state
   carries a prefix of the sequence, a completed turn without its marker, or the
   marker before its content; storage deduplicates the marker
   (`semantic_transcript_entry_turn_completed_once`), and the deferred
@@ -323,7 +326,7 @@ prints the semantic transcript; it is deliberately not the client protocol.
 
 ## Open edges
 
-- Provider-target mismatch evidence (ADR-0005's `ProviderTargetEvidence`,
+- Provider-target mismatch evidence (the designed `ProviderTargetEvidence`,
   mismatch-selects-`KnownFailed`, and post-completion invalidation) is
   unimplemented; the adapter fails closed with an operator error, so a
   mismatched call is classified `Ambiguous` by restart rather than `KnownFailed`
@@ -335,13 +338,13 @@ prints the semantic transcript; it is deliberately not the client protocol.
   `CancellationRequested` and the unsent-cancellation proof transition are
   sealed, unwired domain seams.
 - Streaming deltas are collected but never delivered as transient drafts, and
-  ADR-0045's early-observation pause/commit/resume path is unimplemented.
+  the designed early-observation pause/commit/resume path is unimplemented.
 - The aggregate admits at most one call per turn (with the one-row-per-attempt
   schema backstop); continuation calls and safe-point steering consumption are
   unimplemented — pending steering blocks preparation and is reclassified at
   terminalization.
 - A refused turn commits no refusal-content semantic entry; the variant remains
-  open under ADR-0042.
+  an open edge in [sessions-and-transcript](sessions-and-transcript.md).
 - `AssistantToolUse` construction is schema-blocked pending the reserved tool
   decisions.
 - Same-incarnation retained-evidence reconciliation gets exactly one production

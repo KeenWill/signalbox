@@ -7,7 +7,8 @@ use std::time::Duration;
 /// Carries no credential: the operation pins a non-secret
 /// `CredentialReference`, and the runtime resolves its current value through
 /// the caller-supplied `CredentialAccess` implementation during send
-/// preparation of each physical request (ADR-0017).
+/// preparation of each physical request
+/// (`docs/spec/configuration-and-credentials.md`).
 #[derive(Debug, Clone)]
 pub struct AnthropicConfig {
     /// Base URL of the API; the adapter appends `/v1/messages`. The scheme
@@ -22,8 +23,10 @@ pub struct AnthropicConfig {
     pub connect_timeout: Option<Duration>,
     /// Whole-exchange timeout, when the caller sets one. It covers the full
     /// exchange including body or stream delivery; firing after send is
-    /// boundary-loss evidence (ADR-0043 timeout rule). ADR-0043 selects no
-    /// timeout budget, so the default is none and the caller owns any budget.
+    /// boundary-loss evidence under the timeout rule in
+    /// `docs/spec/runtime-substrate.md`. No timeout budget is specified —
+    /// budgets remain an open edge in `docs/spec/model-call-execution.md` —
+    /// so the default is none and the caller owns any budget.
     pub exchange_timeout: Option<Duration>,
     /// Positive upper bound on one SSE record's size; zero is rejected at
     /// construction and larger records are stream-protocol-violation

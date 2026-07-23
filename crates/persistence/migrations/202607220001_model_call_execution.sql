@@ -1,4 +1,5 @@
--- ADR-0042/ADR-0043/ADR-0045 storage for the first text-only model call.
+-- Storage for the first text-only model call
+-- (docs/spec/model-call-execution.md; docs/spec/persistence-protocol.md).
 --
 -- The migration opens the existing guarded turn storage only for the decided
 -- initial execution states. Provider work remains outside transactions; these
@@ -261,8 +262,9 @@ ALTER TABLE queued_input_origin
         ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED;
 
--- ADR-0042 makes the provider target a turn-level pin established before any
--- physical call. Calls reference this fact rather than serving as its storage.
+-- The provider target is a turn-level pin established before any physical
+-- call (docs/spec/model-call-execution.md). Calls reference this fact rather
+-- than serving as its storage.
 ALTER TABLE turn_lifecycle
     ADD COLUMN pinned_provider_model_identity_id uuid,
     ADD CONSTRAINT turn_lifecycle_pinned_target_key
@@ -531,8 +533,9 @@ ALTER TABLE semantic_transcript_entry
                 AND completed_turn_id IS NOT NULL
             )
         ),
-    -- ADR-0042 names the representation, while its reserved tool decisions
-    -- intentionally withhold construction authority in this schema version.
+    -- docs/spec/sessions-and-transcript.md names the representation, while
+    -- its reserved tool decisions intentionally withhold construction
+    -- authority in this schema version.
     ADD CONSTRAINT semantic_transcript_entry_tool_use_unavailable
         CHECK (payload_kind <> 'assistant_tool_use'),
     ADD CONSTRAINT semantic_transcript_entry_turn_completed_once
@@ -1578,8 +1581,9 @@ BEGIN
 END;
 $$;
 
--- ADR-0040 typed records for the client-visible checkpoints committed by this
--- slice. They are persistence projections, not an ADR-0019 wire schema.
+-- Typed outbox records for the client-visible checkpoints committed by this
+-- slice (docs/spec/persistence-protocol.md). They are persistence
+-- projections, not a client wire schema.
 ALTER TABLE outbox_event
     DROP CONSTRAINT outbox_event_kind_closed,
     DROP CONSTRAINT outbox_event_storage_version_supported;

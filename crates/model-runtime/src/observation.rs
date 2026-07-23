@@ -1,10 +1,11 @@
 //! The observation stream an adapter emits while executing one operation.
 //!
-//! Observations are transient progress facts (ADR-0042: stream deltas are
-//! never canonical transcript history); the terminal evidence returned by
+//! Observations are transient progress facts
+//! (docs/spec/sessions-and-transcript.md, INV-032: stream deltas are never
+//! canonical transcript history); the terminal evidence returned by
 //! [`crate::ModelRuntime::execute`] is the authoritative summary. Every
 //! observation carries the caller's correlation identity verbatim
-//! (ADR-0005).
+//! (docs/spec/model-call-execution.md).
 
 use crate::evidence::{ExchangeFacts, FinishReason};
 use crate::target::ProviderReportedModel;
@@ -34,8 +35,9 @@ pub enum ObservationFact {
     /// A correlated provider response began: proof the boundary was crossed.
     ExchangeEstablished(ExchangeFacts),
     /// The provider reported the model identity serving this exchange.
-    /// Timing-sensitive under ADR-0005's mismatch rule, so it is surfaced as
-    /// soon as observed rather than only in terminal evidence.
+    /// Timing-sensitive under the mismatch rule in
+    /// docs/spec/model-call-execution.md, so it is surfaced as soon as
+    /// observed rather than only in terminal evidence.
     ProviderModelReported(ProviderReportedModel),
     /// A response-text fragment.
     TextDelta {

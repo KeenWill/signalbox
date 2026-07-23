@@ -970,9 +970,9 @@ async fn embedded_migrator_connects_and_is_idempotent() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// ADR-0017 / INV-014: the forward-only nullable credential-reference column
-/// remains compatible with historical rows, while a reference pinned on a new
-/// model call cannot be replaced or cleared.
+/// INV-014: the forward-only nullable credential-reference column remains
+/// compatible with historical rows, while a reference pinned on a new model
+/// call cannot be replaced or cleared.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv014_model_call_credential_reference_is_nullable_but_immutable()
@@ -1040,9 +1040,9 @@ async fn inv014_model_call_credential_reference_is_nullable_but_immutable()
     Ok(())
 }
 
-/// ADR-0045 / INV-006: an uncertain capability-failure closure is reconciled
-/// from exact durable Prepared or complete known-failure state, including its
-/// terminal attempt and call provenance, before any resubmission.
+/// INV-006: an uncertain capability-failure closure is reconciled from exact
+/// durable Prepared or complete known-failure state, including its terminal
+/// attempt and call provenance, before any resubmission.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv006_model_call_capability_failure_reread_distinguishes_pending_and_committed()
@@ -1223,8 +1223,9 @@ async fn inv006_model_call_capability_failure_reread_distinguishes_pending_and_c
     Ok(())
 }
 
-/// ADR-0045: retained non-completed observations converge only when their
-/// complete disposition-specific durable closure remains present.
+/// docs/spec/model-call-execution.md: retained non-completed observations
+/// converge only when their complete disposition-specific durable closure
+/// remains present.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn model_call_noncompleted_rereads_validate_each_durable_closure()
@@ -5690,8 +5691,8 @@ async fn s03_inv009_start_eligible_turn_false_wakeups_are_noops() -> Result<(), 
     Ok(())
 }
 
-/// S01 / INV-009 / ADR-0035: once the scheduler lock admits and prepares one
-/// exact queued candidate, a guarded activation that matches no row is durable
+/// S01 / INV-009: once the scheduler lock admits and prepares one exact
+/// queued candidate, a guarded activation that matches no row is durable
 /// divergence, not a stale wake-up, and rolls back every preceding write.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]

@@ -1,8 +1,9 @@
 //! Prior-process active-turn recovery before runtime scheduling.
 //!
-//! ADR-0010 and ADR-0044 require the inventory scan to finish before the
-//! scheduler starts. ADR-0036 owns the failed marker and terminal frontier,
-//! while INV-034 requires prior-process nonterminal attempts to end as Lost.
+//! docs/spec/turn-lifecycle-and-scheduling.md requires the inventory scan to
+//! finish before the scheduler starts. docs/spec/sessions-and-transcript.md
+//! owns the failed marker and terminal frontier, while INV-034 requires
+//! prior-process nonterminal attempts to end as Lost.
 
 use std::{error::Error, fmt, future::Future};
 
@@ -395,7 +396,8 @@ mod tests {
         assert!(!outcome.is_complete());
     }
 
-    /// ADR-0044: non-collision infrastructure failures stop startup.
+    /// docs/spec/turn-lifecycle-and-scheduling.md: non-collision
+    /// infrastructure failures stop startup.
     #[test]
     fn infrastructure_failure_is_not_retried() {
         let requested = session(1);

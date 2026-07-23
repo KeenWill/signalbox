@@ -6,8 +6,7 @@ loading in `apps/hubd/src/configuration.rs` and `apps/hubd/src/main.rs`, the
 static TOML catalog, and the provider bridge in `crates/model-provider-runtime`)
 together with the model-runtime crates it composes
 (`crates/model-runtime/src/credential.rs` and the redaction pipeline in
-`crates/model-runtime-anthropic/src/runtime.rs`). It distills ADR-0017 and the
-configuration clauses of ADR-0044 and ADR-0047. Invariant law lives in
+`crates/model-runtime-anthropic/src/runtime.rs`). Invariant law lives in
 [docs/invariants.md](../invariants.md), cited here by tag.
 
 ## Process configuration
@@ -17,8 +16,8 @@ environment at startup:
 
 - `DATABASE_URL` — complete PostgreSQL connection URL. Production connections
   force `sslmode=verify-full` regardless of URL parameters. This environment
-  channel is explicitly provisional under ADR-0044; the database-credential
-  delivery decision remains reserved (ADR-0032).
+  channel is explicitly provisional; the database-credential delivery decision
+  remains open (see Open edges).
 - `SIGNALBOX_CONFIG_FILE` — path to the static model/alias catalog (below).
 - `ANTHROPIC_API_KEY_FILE` — path to the file whose bytes are the current
   Anthropic API key value.
@@ -105,7 +104,7 @@ acknowledged work is configuration-independent (INV-034).
 ## Model-selection validation
 
 Validation happens at two boundaries, on frozen semantic meaning only —
-credential presence is never consulted (ADR-0017, INV-008):
+credential presence is never consulted (INV-008):
 
 - **At acceptance.** `SubmitInput` freezes the requested selection into the
   turn's effective configuration. A direct selection freezes without catalog
@@ -130,7 +129,7 @@ selection against the catalog before creating a session.
 
 ## Credential lifecycle
 
-The hub-side contract (originally ADR-0017) is implemented as follows, and the
+The hub-side credential contract is implemented as follows, and the
 deployment-side rules that code cannot enforce are stated in
 [Credential operations policy](#credential-operations-policy) below.
 
@@ -144,13 +143,13 @@ deployment-side rules that code cannot enforce are stated in
   the reference to the `ANTHROPIC_API_KEY_FILE` path and reads the file for
   every request preparation; nothing is cached. Why: atomic file replacement
   rotates the key without restarting hubd, and an in-flight call keeps the value
-  it authenticated with (ADR-0017). Resolution is reference-scoped: a foreign
+  it authenticated with. Resolution is reference-scoped: a foreign
   reference fails typed `Unmapped`; a missing file is `Unavailable`; an
   unreadable file is `Unreadable` — all reference-only errors.
 - **No startup preflight.** hubd never reads the key file at boot, so a missing
   or unsynced credential cannot block startup or the recovery scan. Why:
   recovery of acknowledged work must not depend on any provider's credential
-  (INV-034; ADR-0017).
+  (INV-034).
 - **Resolution timing.** The adapter resolves the pinned reference during send
   preparation of exactly one physical request — after the durable `Prepared`
   record, before send authorization — and the resulting value is scoped to that
@@ -165,8 +164,7 @@ deployment-side rules that code cannot enforce are stated in
   the turn fails — no automatic retry, no fallback (INV-014, INV-017, INV-018).
   Why: a missing credential is deployment misconfiguration, and retry or
   substitution would hide it. A provider rejecting the credential after send is
-  ordinary outcome evidence ([model-call-execution](model-call-execution.md),
-  ADR-0043).
+  ordinary outcome evidence ([model-call-execution](model-call-execution.md)).
 - **Durable references, never values.** Postgres never stores a credential
   value. Each new model call durably pins its non-secret credential reference at
   the `Prepared` insert (`model_call.credential_reference`), immutable
@@ -209,9 +207,8 @@ Enforcement as implemented:
 
 ## Credential operations policy
 
-Operational rules the deployment must honor; code cannot enforce them
-(originally decided as ADR-0017, retained here because the surviving hub-side
-mechanics depend on them):
+Operational rules the deployment must honor; code cannot enforce them (retained
+here because the surviving hub-side mechanics depend on them):
 
 - **One source of truth per secret.** 1Password owns runtime credentials: the
   vault item a reference resolves to is the source of truth, and rotation is an
@@ -254,25 +251,25 @@ mechanics depend on them):
   reference; resuming such a `Prepared` call fails closed as corruption rather
   than re-deriving the reference from configuration.
 - Multi-provider support and the reference-to-provider-component mapping are
-  undecided (reserved ADR-0007); today `provider = "anthropic"` and
-  `anthropic-primary` are hard-coded.
+  undecided; today `provider = "anthropic"` and `anthropic-primary` are
+  hard-coded.
 - The [credential operations policy](#credential-operations-policy) is
   operational discipline with no code or CI enforcement; violating it cannot be
   caught by any test.
-- `DATABASE_URL` via process environment is explicitly provisional (ADR-0044);
-  the database-credential delivery channel remains reserved (ADR-0032
-  follow-up).
+- `DATABASE_URL` via process environment is explicitly provisional; the
+  database-credential delivery channel remains an open decision.
 - hubd erases typed configuration diagnostics before logging: catalog-parse and
   Anthropic-construction variants (and connection and migration errors) collapse
   to a generic `Infrastructure` class plus phase, so startup logs cannot
   distinguish failure causes within the `Configuration` phase.
-- No connect or exchange timeout is configured in hubd composition (ADR-0043
-  assigns the budget to the caller); a hung provider exchange is bounded only by
+- No connect or exchange timeout is configured in hubd composition (the
+  evidence contract assigns the budget to the caller); a hung provider exchange
+  is bounded only by
   process shutdown — the 30-second grace window, then abandonment to startup
   recovery.
 - No cancellation channel exists in the hubd composition: the provider bridge
   passes `CancellationSignal::never()` to both runtime preparation and
   execution, so the adapter's cancellation-dependent guarantees (credential-read
   race, cancelled-before-send) are inert capability in the live system.
-- In-memory credential hygiene (zeroization or equivalent) is an ADR-0017 open
+- In-memory credential hygiene (zeroization or equivalent) remains an open
   question with no implementation.

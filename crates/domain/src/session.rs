@@ -1,14 +1,14 @@
 //! Session creation cause and transcript ancestry values.
 //!
-//! The normative specification is `docs/spec/sessions-and-transcript.md`
-//! (originally ADR-0003). Every session records two required,
-//! independent, immutable creation facts: a creation cause answering why the
-//! session exists, and a transcript ancestry answering where its initial
-//! semantic conversation context came from. This module represents those
-//! facts as pure values, together with the typed [`CreateSession`] caller
-//! payload, its baseline pre-commit candidate, and its purpose-specific
-//! reconstitution boundary. Durable storage and selection of a real frontier
-//! from source-session history remain later-slice work.
+//! The normative specification is `docs/spec/sessions-and-transcript.md`.
+//! Every session records two required, independent, immutable creation
+//! facts: a creation cause answering why the session exists, and a
+//! transcript ancestry answering where its initial semantic conversation
+//! context came from. This module represents those facts as pure values,
+//! together with the typed [`CreateSession`] caller payload, its baseline
+//! pre-commit candidate, and its purpose-specific reconstitution boundary.
+//! Durable storage and selection of a real frontier from source-session
+//! history remain later-slice work.
 
 use crate::{
     DurableCommandId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
@@ -19,10 +19,10 @@ use crate::{
 ///
 /// The first implementable cause is owner-initiated. Application-initiated,
 /// scheduled, delegated, and any other causes are reserved extension examples
-/// rather than valid baseline values: the ADR that enables one must add a
-/// typed variant carrying the exact durable initiating domain identity, so
-/// this type contains no uninhabitable placeholders. S18 / INV-003: a
-/// reserved example is not constructible:
+/// rather than valid baseline values: the spec revision that enables one
+/// must add a typed variant carrying the exact durable initiating domain
+/// identity, so this type contains no uninhabitable placeholders. S18 /
+/// INV-003: a reserved example is not constructible:
 ///
 /// ```compile_fail
 /// use signalbox_domain::SessionCreationCause;
@@ -187,12 +187,13 @@ impl SessionCreationProvenance {
 ///
 /// # Comparison payload
 ///
-/// Structural equality is the ADR-0001 durable-command comparison payload:
-/// every caller-supplied semantic field except the command identifier itself.
-/// Two creation payloads that differ only in `command_id` therefore compare
-/// equal, matching the sibling [`crate::DeliveryRequest`] payload, which omits
-/// command identity entirely. The replay/deduplication boundary looks up the
-/// claimed identifier separately and compares canonical payloads: equal replay
+/// Structural equality is the durable-command comparison payload of
+/// docs/spec/identity-and-commands.md: every caller-supplied semantic
+/// field except the command identifier itself. Two creation payloads that
+/// differ only in `command_id` therefore compare equal, matching the
+/// sibling [`crate::DeliveryRequest`] payload, which omits command identity
+/// entirely. The replay/deduplication boundary looks up the claimed
+/// identifier separately and compares canonical payloads: equal replay
 /// returns the recorded result, while the same identifier arriving with a
 /// different provenance or defaults payload is conflicting reuse.
 ///
@@ -272,9 +273,10 @@ impl CreateSession {
     }
 }
 
-/// ADR-0001: the durable-command comparison payload is every caller-supplied
-/// semantic field except the identifier itself, so equality and hashing cover
-/// the provenance facts and the defaults payload but not the command identity.
+/// docs/spec/identity-and-commands.md: the durable-command comparison
+/// payload is every caller-supplied semantic field except the identifier
+/// itself, so equality and hashing cover the provenance facts and the
+/// defaults payload but not the command identity.
 impl PartialEq for CreateSession {
     fn eq(&self, other: &Self) -> bool {
         self.provenance == other.provenance
@@ -322,11 +324,12 @@ impl InitialSession {
 
 /// The complete current session-level domain snapshot.
 ///
-/// ADR-0038 is the normative aggregate boundary. A session owns its semantic
-/// identity, immutable creation provenance, and the complete current
-/// configuration-defaults version selected by the durable pointer. Creation
-/// receipts, transcript history, turns, commands, and scheduler facts remain
-/// separate purpose-specific values.
+/// docs/spec/sessions-and-transcript.md defines the normative aggregate
+/// boundary. A session owns its semantic identity, immutable creation
+/// provenance, and the complete current configuration-defaults version
+/// selected by the durable pointer. Creation receipts, transcript history,
+/// turns, commands, and scheduler facts remain separate purpose-specific
+/// values.
 ///
 /// The fields are private and complete checked reconstitution is the only
 /// public producer:

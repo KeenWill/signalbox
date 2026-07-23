@@ -1,8 +1,9 @@
 //! First text-only model-call execution orchestration.
 //!
-//! ADR-0045 owns the staged transaction and provider-effect order. The
-//! application keeps persistence, provider capability preparation, send
-//! authorization, provider interaction, and terminal observation distinct.
+//! docs/spec/model-call-execution.md owns the staged transaction and
+//! provider-effect order. The application keeps persistence, provider
+//! capability preparation, send authorization, provider interaction, and
+//! terminal observation distinct.
 
 use std::{
     collections::HashMap,
@@ -344,9 +345,9 @@ pub enum RetainedModelCallObservationStatus {
 /// This state prevents a later service invocation or explicit composition
 /// handoff from repeating credential work, losing proof that provider entry
 /// never occurred, or dropping an unchanged terminal observation. INV-014 and
-/// ADR-0045 require a linear handoff token: callers may move it between service
-/// `into_parts` and `from_parts` handoffs, but cannot construct or clone
-/// evidence.
+/// docs/spec/model-call-execution.md require a linear handoff token: callers
+/// may move it between service `into_parts` and `from_parts` handoffs, but
+/// cannot construct or clone evidence.
 ///
 /// ```compile_fail
 /// use signalbox_application::RetainedModelCallExecutionState;
@@ -2197,9 +2198,9 @@ mod tests {
         assert_eq!(prepare.calls, 2);
     }
 
-    /// ADR-0045: a trustworthy capability failure survives a failed guarded
-    /// closure and explicit service decomposition, then resubmits without
-    /// repeating capability preparation.
+    /// docs/spec/model-call-execution.md: a trustworthy capability failure
+    /// survives a failed guarded closure and explicit service decomposition,
+    /// then resubmits without repeating capability preparation.
     #[tokio::test]
     async fn capability_failure_commit_retains_evidence_across_handoff() {
         let (request, _) = prepared_fixture();
@@ -2277,9 +2278,10 @@ mod tests {
         ));
     }
 
-    /// ADR-0045: a commit-ambiguous capability-failure closure is reread
-    /// before any resubmission, and a landed closure ends reconciliation
-    /// without repeating credential preparation or the guarded transaction.
+    /// docs/spec/model-call-execution.md: a commit-ambiguous
+    /// capability-failure closure is reread before any resubmission, and a
+    /// landed closure ends reconciliation without repeating credential
+    /// preparation or the guarded transaction.
     #[tokio::test]
     async fn ambiguous_capability_failure_commit_is_reread_before_resubmission() {
         let (request, _) = prepared_fixture();
@@ -2324,9 +2326,9 @@ mod tests {
         assert!(retained.is_none());
     }
 
-    /// ADR-0045: send authorization has no fresh candidate to replace after an
-    /// identity-collision classification, so the same session/call pair is not
-    /// retried in place.
+    /// docs/spec/model-call-execution.md: send authorization has no fresh
+    /// candidate to replace after an identity-collision classification, so
+    /// the same session/call pair is not retried in place.
     #[tokio::test]
     async fn authorization_identity_collision_returns_without_retrying_same_call() {
         let (request, _) = prepared_fixture();
@@ -2366,8 +2368,9 @@ mod tests {
         assert!(retained.is_none());
     }
 
-    /// ADR-0045: stale or stopped authority is an ordinary no-send result,
-    /// not a caller/hub defect and never provider entry.
+    /// docs/spec/model-call-execution.md: stale or stopped authority is an
+    /// ordinary no-send result, not a caller/hub defect and never provider
+    /// entry.
     #[tokio::test]
     async fn stale_authorization_returns_no_work_without_provider_entry() {
         let (request, _) = prepared_fixture();
@@ -2590,9 +2593,10 @@ mod tests {
         assert_eq!(provider.interaction_count(), 0);
     }
 
-    /// ADR-0045: a failed ambiguous-authorization reread retains the exact
-    /// non-consumption proof across handoff and later classifies a committed
-    /// `InFlight` authorization without invoking the provider.
+    /// docs/spec/model-call-execution.md: a failed ambiguous-authorization
+    /// reread retains the exact non-consumption proof across handoff and
+    /// later classifies a committed `InFlight` authorization without invoking
+    /// the provider.
     #[tokio::test]
     async fn ambiguous_authorization_reread_retains_non_consumption_across_handoff() {
         let (request, authorized) = prepared_fixture();
@@ -2697,8 +2701,8 @@ mod tests {
         ));
     }
 
-    /// ADR-0045 / INV-014: when an ambiguous authorization is proven to have
-    /// rolled back to Prepared, the unconsumed scripted interaction action can
+    /// INV-014: when an ambiguous authorization is proven to have rolled
+    /// back to Prepared, the unconsumed scripted interaction action can
     /// prepare again and still produces exactly one physical interaction.
     #[tokio::test]
     async fn s02_inv014_authorization_rollback_reprepares_one_scripted_interaction_action() {

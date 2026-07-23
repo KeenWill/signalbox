@@ -89,8 +89,10 @@ list of required commands and their setup notes — from the repository root.
 
 ### Scripted debug harness
 
-The `signalbox-debug` binary is a local harness, not the ADR-0019 client
-protocol. Against a disposable local PostgreSQL database it runs migrations,
+The `signalbox-debug` binary is a local harness, not the future client
+protocol (still open; see
+[client scope](docs/open-questions.md#client-scope)). Against a disposable
+local PostgreSQL database it runs migrations,
 creates one session, submits one input, lets the real scheduler execute a
 deterministic reply, and prints the terminal semantic transcript:
 

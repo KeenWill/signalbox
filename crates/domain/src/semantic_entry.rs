@@ -1,8 +1,8 @@
 //! Closed semantic transcript-entry values.
 //!
-//! ADR-0036 and ADR-0042 are normative. Entry construction remains sealed
-//! behind aggregate transitions and checked reconstitution boundaries that
-//! validate the referenced facts.
+//! docs/spec/sessions-and-transcript.md is normative. Entry construction
+//! remains sealed behind aggregate transitions and checked reconstitution
+//! boundaries that validate the referenced facts.
 
 use crate::{
     AcceptedInputId, ModelCallId, NonEmptyUnicodeText, NonEmptyUnicodeTextError,
@@ -12,7 +12,8 @@ use crate::{
 /// Exact assistant-owned text from one definitive provider response.
 ///
 /// This wrapper deliberately remains distinct from [`crate::UserContent`]
-/// even though both values share ADR-0037/ADR-0042's exact scalar rules.
+/// even though both values share the exact scalar rules in
+/// docs/spec/sessions-and-transcript.md.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct AssistantText(NonEmptyUnicodeText);
 
@@ -69,7 +70,7 @@ pub enum SemanticTranscriptEntryPayload {
     },
 }
 
-/// Compatibility spelling for code limited to ADR-0036's initial variants.
+/// Compatibility spelling for code limited to the initial entry variants.
 pub(crate) type InitialSemanticTranscriptEntryPayload = SemanticTranscriptEntryPayload;
 
 /// One immutable identified semantic transcript entry.
@@ -236,8 +237,8 @@ mod tests {
         ));
     }
 
-    /// ADR-0042 / INV-005: assistant text stays exact, remains distinct from
-    /// user content, and retains producing-call provenance.
+    /// INV-005: assistant text stays exact, remains distinct from user
+    /// content, and retains producing-call provenance.
     #[test]
     fn adr0042_inv005_assistant_text_is_exact_and_call_correlated() {
         let producing_call = crate::test_support::model_call_id(7);
@@ -264,8 +265,8 @@ mod tests {
         );
     }
 
-    /// ADR-0042 / INV-006: completion is an explicit turn marker distinct
-    /// from every physical model-call outcome.
+    /// INV-006: completion is an explicit turn marker distinct from every
+    /// physical model-call outcome.
     #[test]
     fn adr0042_inv006_completion_marker_names_the_exact_turn() {
         let turn = turn_id(9);

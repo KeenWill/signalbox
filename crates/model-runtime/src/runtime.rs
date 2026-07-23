@@ -14,16 +14,18 @@ use crate::preparation::PreparationOutcome;
 /// An implementation performs at most one provider interaction per call,
 /// emits observations to the sink in order, and always returns a
 /// [`TerminalReport`] — failures are typed evidence, not exceptions, so the
-/// caller can classify every outcome under ADR-0043. Implementations never
-/// retry, fall back, or issue a second request; uncertainty is reported as
-/// boundary-loss evidence, not resolved by repetition (ADR-0005).
+/// caller can classify every outcome under docs/spec/model-call-execution.md.
+/// Implementations never retry, fall back, or issue a second request;
+/// uncertainty is reported as boundary-loss evidence, not resolved by
+/// repetition (docs/spec/runtime-substrate.md).
 ///
-/// ADR-0045 requires two distinct stages. [`prepare`](Self::prepare) performs
-/// all validation, translation, serialization, credential access, and request
-/// construction without provider traffic. The caller may durably authorize
-/// the interaction only after that stage succeeds. [`execute`](Self::execute)
-/// then consumes the opaque capability and performs no second preparation or
-/// credential access.
+/// docs/spec/runtime-substrate.md requires two distinct stages.
+/// [`prepare`](Self::prepare) performs all validation, translation,
+/// serialization, credential access, and request construction without
+/// provider traffic. The caller may durably authorize the interaction only
+/// after that stage succeeds. [`execute`](Self::execute) then consumes the
+/// opaque capability and performs no second preparation or credential
+/// access.
 pub trait ModelRuntime<C> {
     /// The adapter-owned, non-cloneable, nonserializable one-shot request
     /// capability produced by preparation and consumed by execution.

@@ -1,11 +1,10 @@
 //! Accepted-input disposition lifecycle.
 //!
 //! The normative specification is
-//! `docs/spec/turn-lifecycle-and-scheduling.md` (originally ADR-0027).
-//! An accepted input either originates a turn,
-//! waits as pending steering bound to its source turn, is consumed by an
-//! exact model call, or is reclassified as new turn-origin work when its
-//! source turn terminates before a safe point.
+//! `docs/spec/turn-lifecycle-and-scheduling.md`. An accepted input either
+//! originates a turn, waits as pending steering bound to its source turn, is
+//! consumed by an exact model call, or is reclassified as new turn-origin
+//! work when its source turn terminates before a safe point.
 
 use crate::{AcceptedInputId, ModelCallId, TurnId};
 
@@ -24,7 +23,8 @@ use crate::{AcceptedInputId, ModelCallId, TurnId};
 /// transaction boundaries, and it does not validate model-call ownership,
 /// presence of the steering input in the consuming call's context frontier,
 /// turn termination, or inherited configuration. Aggregate transitions and
-/// persistence guards own those ADR-0027 requirements.
+/// persistence guards own those requirements from
+/// `docs/spec/turn-lifecycle-and-scheduling.md`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AcceptedInputLifecycle {
     id: AcceptedInputId,

@@ -81,8 +81,10 @@ Implemented table families (across the twelve migrations):
 - `session`, `session_defaults_version`, `session_current_defaults`,
   `session_scheduler`;
 - `accepted_input`, `queued_input_origin`, `turn_lifecycle`, `turn_attempt`;
-- `model_call` (ADR-0042 execution state, its turn-level provider-target pin on
-  `turn_lifecycle`, and its pinned `credential_reference`);
+- `model_call` (execution state owned by
+  [model-call-execution](model-call-execution.md), its turn-level
+  provider-target pin on `turn_lifecycle`, and its pinned
+  `credential_reference`);
 - `semantic_transcript_entry`, `context_frontier`, `context_frontier_member`;
 - the outbox family (below).
 
@@ -230,9 +232,9 @@ Two standing constraints (recorded beside the code):
 
 ## Reconstitution
 
-Reconstitution is domain-owned and fail-closed (ADR-0035 pattern, implemented
-for the session, command-receipt, scheduling, and model-call execution
-projections). The adapter performs only the boundary step — decode columns,
+Reconstitution is domain-owned and fail-closed (implemented for the session,
+command-receipt, scheduling, and model-call execution projections). The adapter
+performs only the boundary step — decode columns,
 check discriminators and ordinals, assemble the complete checked input — and the
 domain performs pure validation and returns one canonical value or a typed
 failure (INV-001, INV-002, INV-006). Concretely: `SessionReconstitutionInput`
@@ -339,8 +341,8 @@ rather than only surfacing the flag.
 ## Transactional outbox
 
 Committed client-observable transitions become update events only through the
-ADR-0040 outbox family (INV-032 mechanism; observation semantics are protocol
-scope). Implemented storage:
+transactional-outbox family (INV-032 mechanism; observation semantics are
+protocol scope). Implemented storage:
 
 - `outbox_event` header (allocator-owned `event_sequence`, closed `event_kind`,
   `storage_version`, `session_id`) plus one typed record table per kind —
@@ -383,7 +385,7 @@ unrepresentable.
   `model_call_transition`, `turn_completed`, and `turn_refused`; input
   acceptance, activation, and defaults replacement commit no events yet, pending
   the protocol projections that define client visibility.
-- Outbox retention and pruning of delivered rows are undecided (ADR-0040).
+- Outbox retention and pruning of delivered rows are undecided.
 - Attempt continuation is deliberately blocked: a `turn_attempt` with a
   predecessor is rejected (`turn_attempt_continuation_unavailable`) until
   durable wait/closure storage exists.
@@ -396,7 +398,7 @@ unrepresentable.
   them by migration.
 - Interrupt application is unavailable: a matched interrupt fails explicitly
   (`InterruptApplicationUnavailable`) without claiming its identifier.
-- ADR-0022 aggregate-map rows for model calls landed (`model_call`, the
+- The designed aggregate-map rows for model calls landed (`model_call`, the
   turn-level target pin, the pinned credential reference); provider evidence,
   authority transfers, cancellation intent, interrupt-proof storage, and tool
   tables are not yet in the schema.

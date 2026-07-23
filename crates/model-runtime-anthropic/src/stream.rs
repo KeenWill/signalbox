@@ -5,7 +5,8 @@
 //! stop reason before `message_stop`, and `message_stop` itself as the only
 //! terminal marker. A stream that ends any other way is explicit
 //! incomplete-stream or protocol-violation evidence with the partial facts
-//! retained — never silent success (ADR-0043's ambiguous branch).
+//! retained — never silent success (the ambiguous branch of
+//! `docs/spec/model-call-execution.md`).
 //!
 //! Unknown SSE *event names* and unknown *delta types* are tolerated, as the
 //! provider documents additive evolution of both. An unrecognized *content

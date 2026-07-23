@@ -1,10 +1,12 @@
 //! Bridge from the application-owned model-call port to a Layer-1 runtime.
 //!
-//! ADR-0047 keeps runtime types out of the domain and application crates. This
-//! crate is the outward adapter: it translates one checked application
-//! operation, moves the runtime's opaque one-shot capability across durable
-//! authorization, and maps typed terminal evidence into ADR-0043's domain
-//! dispositions. It owns no retry, fallback, lifecycle, or durable state.
+//! The layer boundary in docs/spec/runtime-substrate.md keeps runtime types
+//! out of the domain and application crates. This crate is the outward
+//! adapter: it translates one checked application operation, moves the
+//! runtime's opaque one-shot capability across durable authorization, and
+//! maps typed terminal evidence into the domain dispositions defined in
+//! docs/spec/model-call-execution.md. It owns no retry, fallback, lifecycle,
+//! or durable state.
 
 use std::{collections::HashMap, error::Error, fmt, sync::Arc};
 
@@ -444,10 +446,11 @@ fn classify_terminal(
     }) || reported_model(&evidence)
         .is_some_and(|reported| reported.as_str() != expected_provider_model)
     {
-        // ADR-0005 forbids collapsing mismatch evidence into an ordinary
-        // provider failure. Provider identity normalization and its durable
-        // provenance schema remain an owner-gated open question, so fail the
-        // adapter stage closed instead of committing the wrong lifecycle.
+        // docs/spec/model-call-execution.md forbids collapsing mismatch
+        // evidence into an ordinary provider failure. Provider identity
+        // normalization and its durable provenance schema remain an
+        // owner-gated open question, so fail the adapter stage closed
+        // instead of committing the wrong lifecycle.
         return Err(RuntimeModelCallProviderError::UnrepresentableProviderTargetMismatch);
     }
 

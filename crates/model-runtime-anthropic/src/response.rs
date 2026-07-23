@@ -83,8 +83,9 @@ pub(crate) fn convert_block(block: WireResponseBlock) -> Option<AssistantPart> {
 /// missing the envelope's required fields (`type: "message"`,
 /// `role: "assistant"`, `id`, `model`, `usage`), carrying an unrecognized
 /// content-block type, or missing its stop reason — is boundary-loss
-/// evidence (ADR-0043: a success status without valid completion material
-/// is not definitive), with the facts observed before the defect retained.
+/// evidence (per `docs/spec/runtime-substrate.md`, a success status without
+/// valid completion material is not definitive), with the facts observed
+/// before the defect retained.
 pub(crate) fn decode_buffered_response<C: Clone>(
     body: &[u8],
     exchange: ExchangeFacts,

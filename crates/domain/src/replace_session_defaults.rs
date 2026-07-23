@@ -1,11 +1,12 @@
 //! Canonical session-defaults replacement command and terminal results.
 //!
-//! Session-defaults replacement (`docs/spec/sessions-and-transcript.md`,
-//! originally ADR-0027) admits one idempotent owner command that installs a
-//! complete replacement as the next immutable defaults version. ADR-0034
-//! fixes structural command equality and typed applied-or-rejected results,
-//! while ADR-0035 requires complete checked reconstitution from durable
-//! facts. This module owns that pure domain
+//! Session-defaults replacement (`docs/spec/sessions-and-transcript.md`)
+//! admits one idempotent owner command that installs a complete replacement
+//! as the next immutable defaults version.
+//! `docs/spec/identity-and-commands.md` fixes structural command equality
+//! and typed applied-or-rejected results, while
+//! `docs/spec/persistence-protocol.md` requires complete checked
+//! reconstitution from durable facts. This module owns that pure domain
 //! boundary. It performs no lookup, persistence, command claim, or
 //! acknowledgement.
 
@@ -148,8 +149,8 @@ impl ReplaceSessionDefaults {
     }
 }
 
-/// ADR-0034 comparison equality covers every caller field except the command
-/// identifier itself.
+/// docs/spec/identity-and-commands.md comparison equality covers every
+/// caller field except the command identifier itself.
 impl PartialEq for ReplaceSessionDefaults {
     fn eq(&self, other: &Self) -> bool {
         self.session == other.session

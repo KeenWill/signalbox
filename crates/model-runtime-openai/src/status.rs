@@ -1,14 +1,14 @@
-//! Exhaustive native error classification (ADR-0043).
+//! Exhaustive native error classification (`docs/spec/runtime-substrate.md`).
 //!
-//! ADR-0043 requires each real adapter to define an exhaustive, mutually
-//! exclusive mapping of its provider-native terminal statuses and payloads.
-//! Chat Completions carries the specific condition in `error.code` or
-//! `error.type` while the HTTP status carries the category, so envelope
-//! classification consults a recognized code, then a recognized type, then
-//! the status table. The mapping uses first-match arms, so exhaustiveness and
-//! mutual exclusivity hold by construction. Unknown combinations land in
-//! [`ProviderErrorKind::Unrecognized`] with the native material retained on
-//! the evidence rather than being guessed at.
+//! The runtime-substrate spec requires each real adapter to define an
+//! exhaustive, mutually exclusive mapping of its provider-native terminal
+//! statuses and payloads. Chat Completions carries the specific condition in
+//! `error.code` or `error.type` while the HTTP status carries the category,
+//! so envelope classification consults a recognized code, then a recognized
+//! type, then the status table. The mapping uses first-match arms, so
+//! exhaustiveness and mutual exclusivity hold by construction. Unknown
+//! combinations land in [`ProviderErrorKind::Unrecognized`] with the native
+//! material retained on the evidence rather than being guessed at.
 
 use signalbox_model_runtime::ProviderErrorKind;
 
@@ -100,8 +100,9 @@ mod tests {
 
     #[test]
     fn credential_rejection_is_typed_not_string_matched() {
-        // ADR-0017/ADR-0043: provider-side credential rejection must stay
-        // distinguishable without reading rendered messages.
+        // `docs/spec/runtime-substrate.md`: provider-side credential
+        // rejection must stay distinguishable without reading rendered
+        // messages.
         assert_eq!(
             classify_error(401, Some("invalid_api_key")),
             ProviderErrorKind::CredentialRejected

@@ -1,12 +1,12 @@
 //! Durable accepted-input queue-order facts and pure order derivation.
 //!
 //! The normative specification is
-//! `docs/spec/turn-lifecycle-and-scheduling.md` (originally ADR-0027).
-//! Accepted origin work records one immutable
-//! acceptance position and either ordinary priority or the typed interrupt
-//! relation that places it immediately after an exact predecessor. Deriving
-//! the total order requires the complete currently known fact set for one
-//! session; no individual queue-order value can name a starting predecessor.
+//! `docs/spec/turn-lifecycle-and-scheduling.md`. Accepted origin work records
+//! one immutable acceptance position and either ordinary priority or the
+//! typed interrupt relation that places it immediately after an exact
+//! predecessor. Deriving the total order requires the complete currently
+//! known fact set for one session; no individual queue-order value can name a
+//! starting predecessor.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -214,12 +214,12 @@ pub enum AcceptedInputQueueOrderError {
     },
     /// An interrupt claimed an acceptance position no later than its target.
     ///
-    /// This check is an interpretation, not a quoted rule: ADR-0027 accepts
-    /// the active-work modes "only when `expected_active_turn` is the
-    /// session's current active turn", and a turn that is already active has
-    /// an origin input accepted at an earlier position, so interrupt facts
-    /// violating this chronology cannot have been produced by valid
-    /// acceptance.
+    /// This check is an interpretation, not a quoted rule:
+    /// `docs/spec/turn-lifecycle-and-scheduling.md` accepts the active-work
+    /// modes "only when `expected_active_turn` is the session's current
+    /// active turn", and a turn that is already active has an origin input
+    /// accepted at an earlier position, so interrupt facts violating this
+    /// chronology cannot have been produced by valid acceptance.
     InterruptPositionNotAfterPredecessor {
         /// The interrupt-origin turn.
         turn: TurnId,
@@ -234,9 +234,9 @@ pub enum AcceptedInputQueueOrderError {
     /// than a previously accepted interrupt had already reached.
     ///
     /// This check is an interpretation, not a quoted rule: it formalizes
-    /// ADR-0027's "a later request must target the new authoritative active
-    /// state" as monotonic advancement of interrupt targets through the
-    /// derived total order.
+    /// the rule in `docs/spec/turn-lifecycle-and-scheduling.md` that "a later
+    /// request must target the new authoritative active state" as monotonic
+    /// advancement of interrupt targets through the derived total order.
     InterruptPredecessorChronologyReversed {
         /// The earlier-accepted interrupt-origin turn.
         earlier_interrupt: TurnId,

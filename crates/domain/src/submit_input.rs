@@ -1,9 +1,12 @@
 //! Canonical durable input submission and authoritative-state preparation.
 //!
-//! ADR-0027 owns accepted-input delivery, configuration, ordering, and
-//! disposition semantics. ADR-0034 owns structural replay equality, ADR-0035
-//! owns checked reconstitution, ADR-0037 owns content, and ADR-0039 owns
-//! actor attribution. This slice prepares accepted origin work with no active
+//! docs/spec/turn-lifecycle-and-scheduling.md owns accepted-input delivery,
+//! ordering, and disposition semantics;
+//! docs/spec/configuration-and-credentials.md owns configuration
+//! validation; docs/spec/identity-and-commands.md owns structural replay
+//! equality and actor attribution; docs/spec/persistence-protocol.md owns
+//! checked reconstitution; and docs/spec/sessions-and-transcript.md owns
+//! content. This slice prepares accepted origin work with no active
 //! turn or after the exact active turn, and pending steering for the exact
 //! active turn. Applied and rejected replay validate complete canonical source
 //! or predecessor origin facts, including the current lifecycle and queue facts
@@ -46,7 +49,8 @@ pub struct SubmitInput {
 impl SubmitInput {
     /// Constructs the complete canonical typed payload for the baseline owner.
     ///
-    /// ADR-0039 admits no non-owner actor at this durable-command boundary.
+    /// docs/spec/identity-and-commands.md admits no non-owner actor at
+    /// this durable-command boundary.
     pub const fn new(
         command_id: DurableCommandId,
         session: SessionId,
@@ -825,9 +829,10 @@ struct SubmitInputTurnOriginReconstitutionFacts {
 ///
 /// The source's canonical origin retains a flat chain so directly created and
 /// previously reclassified turns use the same checked boundary without
-/// recursive validation or destruction. The terminal disposition admits every
-/// ADR-0027 terminal outcome and is correlated with its explicit owning turn
-/// during submission reconstitution.
+/// recursive validation or destruction. The terminal disposition admits
+/// every terminal outcome in docs/spec/turn-lifecycle-and-scheduling.md and
+/// is correlated with its explicit owning turn during submission
+/// reconstitution.
 #[derive(Clone, Debug)]
 pub struct SubmitInputTerminalSourceReconstitutionInput {
     origin: SubmitInputTurnOriginReconstitutionInput,
@@ -2800,7 +2805,7 @@ mod tests {
         );
     }
 
-    /// S01 / INV-012 / ADR-0039: comparison excludes only command identity and
+    /// S01 / INV-012: comparison excludes only command identity and
     /// includes the fixed owner actor, session, exact content, delivery
     /// discriminator, and every delivery field.
     #[test]
@@ -4297,9 +4302,9 @@ mod tests {
         );
     }
 
-    /// INV-002 / INV-012 / ADR-0039: every applied-path reconstitution
-    /// failure variant is reachable from exactly one cross-wired fact and
-    /// fails closed instead of constructing authority.
+    /// INV-002 / INV-012: every applied-path reconstitution failure variant
+    /// is reachable from exactly one cross-wired fact and fails closed
+    /// instead of constructing authority.
     #[test]
     fn inv002_inv012_applied_reconstitution_rejects_every_cross_wired_fact() {
         assert_applied_fact_fails_closed(
@@ -4433,9 +4438,9 @@ mod tests {
         );
     }
 
-    /// INV-012 / ADR-0039: the baseline rejected-result projections fail
-    /// closed for independently cross-wired actor, session, delivery,
-    /// configuration, alias, and position facts.
+    /// INV-012: the baseline rejected-result projections fail closed for
+    /// independently cross-wired actor, session, delivery, configuration,
+    /// alias, and position facts.
     #[test]
     fn inv012_rejected_reconstitution_rejects_every_cross_wired_fact() {
         let start = start_command(1, "hello", 1);

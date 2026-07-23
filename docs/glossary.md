@@ -71,13 +71,13 @@ further semantic effects without rewriting the call. Deferred design; see
 
 A logical request for one named tool operation with normalized arguments, policy
 state, and eventual logical outcome. Deferred design; see
-[tool safety](open-questions.md#tool-safety-reserved-adr-0011-adr-0012-adr-0013-adr-0014).
+[tool safety](open-questions.md#tool-safety).
 
 ## Tool attempt
 
 One physical effort by a hub-local or runner-local executor to perform a tool
 request. Deferred design; see
-[tool safety](open-questions.md#tool-safety-reserved-adr-0011-adr-0012-adr-0013-adr-0014).
+[tool safety](open-questions.md#tool-safety).
 
 ## Creation cause
 
@@ -115,38 +115,38 @@ authority for turn cancellation. See
 An outbound-connected process that declares capabilities and execution-boundary
 properties, then performs selected runner-local tool attempts under one
 deployment identity. Deferred design; see
-[scheduling and runners](open-questions.md#scheduling-and-runners-reserved-adr-0008).
+[scheduling and runners](open-questions.md#scheduling-and-runners).
 
 ## Runner property evidence
 
 The declared, configured, verified, and effective evidence distinctions used
 when selecting and explaining a runner. Deferred design; see
-[scheduling and runners](open-questions.md#scheduling-and-runners-reserved-adr-0008).
+[scheduling and runners](open-questions.md#scheduling-and-runners).
 
 ## Execution boundary
 
 The actual identity and isolation properties of a runner deployment, such as OS
 user, container, sandbox, and filesystem scope. Deferred design; see
-[scheduling and runners](open-questions.md#scheduling-and-runners-reserved-adr-0008).
+[scheduling and runners](open-questions.md#scheduling-and-runners).
 
 ## Tool policy
 
 Hub-owned evaluation that determines whether a specific logical tool request is
 allowed, denied, or requires confirmation, plus any placement or constraint
 decision. Deferred design; see
-[tool safety](open-questions.md#tool-safety-reserved-adr-0011-adr-0012-adr-0013-adr-0014).
+[tool safety](open-questions.md#tool-safety).
 
 ## Approval
 
 A recorded human decision permitting or denying one exact logical tool request
 as presented to the user. Deferred design; see
-[tool safety](open-questions.md#tool-safety-reserved-adr-0011-adr-0012-adr-0013-adr-0014).
+[tool safety](open-questions.md#tool-safety).
 
 ## Executor placement
 
 The selected location for a physical tool attempt: a hub-local executor or a
 runner-local executor on an identified runner. Deferred design; see
-[scheduling and runners](open-questions.md#scheduling-and-runners-reserved-adr-0008).
+[scheduling and runners](open-questions.md#scheduling-and-runners).
 
 ## Known failure
 

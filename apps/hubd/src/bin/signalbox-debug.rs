@@ -1,9 +1,9 @@
 //! Local assistant-reply harness.
 //!
-//! This binary is deliberately not the ADR-0019 client protocol. It accepts
-//! either one deterministic reply or an explicit Anthropic smoke mode, runs
-//! the real scheduler and PostgreSQL path, then prints the resulting semantic
-//! transcript.
+//! This binary is deliberately not a client protocol; the client process
+//! protocol remains future work. It accepts either one deterministic reply
+//! or an explicit Anthropic smoke mode, runs the real scheduler and
+//! PostgreSQL path, then prints the resulting semantic transcript.
 
 use std::{
     env,

@@ -1,4 +1,5 @@
-//! Provider-neutral credential access boundary (ADR-0017).
+//! Provider-neutral credential access boundary
+//! (docs/spec/runtime-substrate.md).
 
 use std::future::Future;
 
@@ -92,7 +93,8 @@ impl std::error::Error for CredentialAccessError {}
 /// request.
 ///
 /// Adapters call this for every request rather than caching a value, so
-/// mounted-secret rotation is visible without restarting the hub (ADR-0017).
+/// mounted-secret rotation is visible without restarting the hub
+/// (docs/spec/configuration-and-credentials.md).
 pub trait CredentialAccess: Send + Sync {
     /// Reads the current value for `reference`.
     fn resolve(

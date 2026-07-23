@@ -1,10 +1,10 @@
 //! Typed terminal evidence for one executed operation.
 //!
 //! Adapters report facts; the caller classifies them. Every variant is
-//! structured so the caller can reach ADR-0043's model-call dispositions
-//! without inspecting any rendered string: strings appear only as retained
-//! detail inside an already-classified variant, never as the thing that
-//! decides the variant.
+//! structured so the caller can reach the model-call dispositions of
+//! docs/spec/model-call-execution.md without inspecting any rendered string:
+//! strings appear only as retained detail inside an already-classified
+//! variant, never as the thing that decides the variant.
 
 use crate::message::AssistantPart;
 use crate::target::ProviderReportedModel;
@@ -22,11 +22,11 @@ pub struct TerminalReport<C> {
 
 /// What provably happened to the one authorized provider interaction.
 ///
-/// # Intended ADR-0043 mapping
+/// # Intended disposition mapping
 ///
 /// This crate cannot import the domain's `ModelCallDisposition`; the caller
-/// owns classification. The intended mapping, per ADR-0043's
-/// full-request-send rule:
+/// owns classification. The intended mapping, per the full-request-send rule
+/// in docs/spec/model-call-execution.md:
 ///
 /// | Evidence | Intended disposition |
 /// |---|---|
@@ -34,12 +34,12 @@ pub struct TerminalReport<C> {
 /// | [`Refused`](Self::Refused) | `Refused` |
 /// | [`ProviderError`](Self::ProviderError) | `KnownFailed` (a complete, correlated definitive provider error response; credential rejection stays distinguishable via [`ProviderErrorKind::CredentialRejected`]) |
 /// | [`CancellationConfirmed`](Self::CancellationConfirmed) | `Cancelled` — a complete, correlated response definitively confirming provider cancellation |
-/// | [`ProvenUnsent`](Self::ProvenUnsent) | `KnownFailed`, or `Cancelled` when the cause is [`UnsentCause::CancelledBeforeSend`] and the caller holds ADR-0005's applied-interrupt proof |
+/// | [`ProvenUnsent`](Self::ProvenUnsent) | `KnownFailed`, or `Cancelled` when the cause is [`UnsentCause::CancelledBeforeSend`] and the caller holds the applied-interrupt proof required by docs/spec/model-call-execution.md |
 /// | [`BoundaryLoss`](Self::BoundaryLoss) | `Ambiguous` — the request crossed or may have crossed the acceptance-capable boundary and no definitive response classifies it |
 ///
 /// A provider-reported model identity is carried as a separate fact where
-/// observed; comparing it with the resolved target (ADR-0005's mismatch
-/// rule) is the caller's work.
+/// observed; comparing it with the resolved target (the mismatch rule in
+/// docs/spec/model-call-execution.md) is the caller's work.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TerminalEvidence {
     /// A complete, correlated provider response with a terminal success
@@ -51,10 +51,11 @@ pub enum TerminalEvidence {
     /// A complete, correlated definitive provider error response.
     ProviderError(ProviderErrorEvidence),
     /// A complete, correlated provider response definitively confirming
-    /// provider-side cancellation (ADR-0043's cancellation-response
-    /// branch). Neither in-repository adapter's provider documents such a
-    /// response today; the variant keeps the vocabulary total so an adapter
-    /// that observes one is never forced to misclassify it.
+    /// provider-side cancellation (the cancellation-response branch in
+    /// docs/spec/model-call-execution.md). Neither in-repository adapter's
+    /// provider documents such a response today; the variant keeps the
+    /// vocabulary total so an adapter that observes one is never forced to
+    /// misclassify it.
     CancellationConfirmed(CancellationConfirmedEvidence),
     /// The request provably never reached an acceptance-capable boundary.
     ProvenUnsent(ProvenUnsentEvidence),
@@ -238,12 +239,13 @@ pub struct ProviderErrorEvidence {
     /// Correlated exchange facts.
     pub exchange: ExchangeFacts,
     /// The model identity the provider reported before or with the error,
-    /// when observed — retained here so ADR-0005's mismatch precedence can
-    /// be applied from the authoritative terminal report alone.
+    /// when observed — retained here so the mismatch precedence in
+    /// docs/spec/model-call-execution.md can be applied from the
+    /// authoritative terminal report alone.
     pub reported_model: Option<ProviderReportedModel>,
     /// The adapter's exhaustive classification of the provider's native
-    /// error (ADR-0043: each adapter owns an exhaustive, mutually exclusive
-    /// native mapping).
+    /// error (docs/spec/runtime-substrate.md: each adapter owns an
+    /// exhaustive, mutually exclusive native mapping).
     pub kind: ProviderErrorKind,
     /// The provider's native error material, retained verbatim as evidence.
     /// Classification never reads it.
@@ -254,13 +256,15 @@ pub struct ProviderErrorEvidence {
 
 /// The adapter's classification of a definitive provider error response.
 ///
-/// Every kind maps to ADR-0043 `KnownFailed`; the kinds exist so the caller
-/// can apply finer policy — ADR-0017's credential boundary, rate-limit
-/// accounting — without string inspection.
+/// Every kind maps to `KnownFailed` in docs/spec/model-call-execution.md;
+/// the kinds exist so the caller can apply finer policy — the credential
+/// boundary of docs/spec/runtime-substrate.md, rate-limit accounting —
+/// without string inspection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderErrorKind {
-    /// The provider rejected the request's credential (ADR-0017: always
-    /// known failure, with precedence over refusal).
+    /// The provider rejected the request's credential
+    /// (docs/spec/configuration-and-credentials.md: always known failure,
+    /// with precedence over refusal).
     CredentialRejected,
     /// The credential is valid but not permitted this operation.
     PermissionDenied,
@@ -304,7 +308,8 @@ pub struct CancellationConfirmedEvidence {
     /// Correlated exchange facts.
     pub exchange: ExchangeFacts,
     /// The model identity reported by the definitive cancellation response,
-    /// when present; retained for ADR-0005 target-mismatch precedence.
+    /// when present; retained for the target-mismatch precedence of
+    /// docs/spec/model-call-execution.md.
     pub reported_model: Option<ProviderReportedModel>,
     /// The provider's native confirmation material, retained verbatim.
     pub native: NativeErrorFacts,
@@ -328,10 +333,11 @@ pub enum UnsentCause {
     ConnectFailed(TransportFacts),
     /// The request write began but did not complete, and the selected
     /// provider and transport contract proves partial input could not have
-    /// been accepted or acted on (ADR-0043's incomplete-write proof). The
-    /// in-repository HTTP adapters never construct this: an HTTP server can
-    /// begin acting before end-of-request framing, so their incomplete
-    /// writes are boundary-loss evidence instead.
+    /// been accepted or acted on (the incomplete-write proof of
+    /// docs/spec/model-call-execution.md). The in-repository HTTP adapters
+    /// never construct this: an HTTP server can begin acting before
+    /// end-of-request framing, so their incomplete writes are boundary-loss
+    /// evidence instead.
     SendIncompleteProvenUnacceptable(TransportFacts),
 }
 
@@ -339,9 +345,10 @@ pub enum UnsentCause {
 /// after the request crossed or may have crossed the acceptance-capable
 /// boundary.
 ///
-/// The intended ADR-0043 classification for every cause is `Ambiguous`; the
-/// causes exist so the caller and an operator can see *which* ambiguity
-/// occurred without string inspection.
+/// The intended classification for every cause, per
+/// docs/spec/model-call-execution.md, is `Ambiguous`; the causes exist so
+/// the caller and an operator can see *which* ambiguity occurred without
+/// string inspection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundaryLossEvidence {
     /// How the exchange was lost.
@@ -353,7 +360,8 @@ pub struct BoundaryLossEvidence {
     pub reported_model: Option<ProviderReportedModel>,
     /// A finish reason reported before the loss, when observed. A reported
     /// refusal here is not refusal evidence: the exchange did not complete,
-    /// so ADR-0043's completed-exchange precondition for `Refused` is unmet.
+    /// so the completed-exchange precondition for `Refused` in
+    /// docs/spec/model-call-execution.md is unmet.
     pub finish_reported: Option<FinishReason>,
     /// Usage reported before the loss.
     pub usage: TokenUsage,
@@ -409,7 +417,8 @@ pub enum StreamInterruption {
     TransportFailure(TransportFacts),
     /// A caller-configured local deadline elapsed mid-stream, keeping the
     /// typed timeout cause visible inside the incomplete-stream fact
-    /// (ADR-0043: a timeout after full send is ambiguous).
+    /// (docs/spec/model-call-execution.md: a timeout after full send is
+    /// ambiguous).
     TimedOut(TransportFacts),
 }
 

@@ -94,7 +94,7 @@ covers:
 
 Test names or metadata should reference scenario and invariant identifiers when
 the connection is meaningful, for example `S12_INV011_rejects_stale_generation`.
-The concrete required cases for each slice live with the ADR or decision that
+The concrete required cases for each slice live with the decision that
 authorizes it and in the tests themselves.
 
 ## Validation

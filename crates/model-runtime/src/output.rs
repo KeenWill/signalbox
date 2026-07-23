@@ -3,7 +3,7 @@
 //! Decoding is a pure function over already-delivered response material.
 //! It never performs a model call: when decoding fails, the failure is
 //! returned as a typed class and any repair attempt is a new, explicitly
-//! authorized operation owned by the caller (ADR-0005).
+//! authorized operation owned by the caller (docs/spec/runtime-substrate.md).
 
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;

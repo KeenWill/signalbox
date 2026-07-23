@@ -1,4 +1,5 @@
-//! Typed in-transaction appends to the ADR-0040 outbox.
+//! Typed in-transaction appends to the transactional outbox
+//! (docs/spec/persistence-protocol.md).
 //!
 //! The functions in this module accept the caller's existing PostgreSQL
 //! connection. They never begin or commit a transaction, so the state-changing
