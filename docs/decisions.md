@@ -9,6 +9,40 @@ that constrains several components — require a full record under
 [decisions/](decisions/README.md) instead. Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-22 — Two-phase living-specification restructure
+
+**Context.** An owner audit of review traffic (roughly 330 classified review
+threads) found about a third of documentation-PR review effort was mutual
+consistency maintenance of the accepted-record web (19 of 28 accepted records
+edited after acceptance, ~35 edit events in eight days), while the highest-value
+review category was checking documentation claims against code. The accepted
+records mix decided history, deferred design space, and implemented behavior,
+and each new record widens the consistency surface every later change must
+preserve.
+
+**Decision.** Adopt a living specification under `docs/spec/`: subsystem pages
+describing implemented behavior only, verified against a stated ref, with
+one-sentence rationales on load-bearing choices and a per-page open-edges
+inventory pointing at deferred work. Phase one is additive: the accepted-record
+corpus remains the record of authority, and on conflict it wins. Phase two flips
+authority to the specification plus the invariant catalog and domain spine,
+slims the satellite documents, swaps citations, and retires the accepted-record
+corpus, leaving the mapping index in `docs/spec/README.md` as the pointer; git
+history is the archive. New designs are thereafter proposed as specification
+diffs riding with their implementing stacks.
+
+**Rejected alternatives.** Freeze accepted-record bodies and layer superseding
+records: relocates the churn into supersession ceremony and override chains that
+every reader must resolve. Keep the fully living record web: the measured
+amendment and reconciliation cost grows with the corpus. Delete records without
+distilled replacements: implemented-behavior semantics would survive only in git
+archaeology.
+
+**Affects.** `docs/spec/` (new). In phase two: `docs/decisions/` (retirement),
+`docs/invariants.md`, `docs/glossary.md`, `docs/target-model.md`,
+`docs/decisions/README.md`, `AGENTS.md`, `.coderabbit.yaml`, and rustdoc
+citations of accepted records.
+
 ## 2026-07-22 — Failed-terminal provenance backfill fails closed
 
 **Context.** Migration `202607220003_failed_terminal_execution.sql` adds exact
