@@ -477,6 +477,11 @@ impl StreamDecoder {
                     "tool call at index {index} terminated without reporting arguments"
                 )));
             }
+            if let Err(error) = validate_provider_json_nesting(builder.arguments.as_bytes()) {
+                return Some(self.violation(format!(
+                    "tool call at index {index} arguments exceed the JSON bound: {error}"
+                )));
+            }
             let proposal = ToolCallProposal {
                 id: ToolCallId::new(id),
                 name: ToolName::new(name),
@@ -758,6 +763,42 @@ mod tests {
                 fragment: "{\"city\":".to_string(),
             },
         }));
+    }
+
+    #[test]
+    fn overdeep_fragmented_tool_arguments_are_a_protocol_violation() {
+        let depth = PROVIDER_JSON_NESTING_LIMIT + 1;
+        let opening = "[".repeat(depth);
+        let closing = format!("null{}", "]".repeat(depth));
+        let opening = serde_json::to_string(&opening).expect("fixture JSON string serializes");
+        let closing = serde_json::to_string(&closing).expect("fixture JSON string serializes");
+        let first_arguments = format!(
+            "data: {{\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
+             \"model\":\"model-exact-1\",\"choices\":[{{\"index\":0,\"delta\":{{\
+             \"role\":\"assistant\",\"tool_calls\":[{{\"index\":0,\"id\":\"call_1\",\
+             \"type\":\"function\",\"function\":{{\"name\":\"lookup\",\
+             \"arguments\":{opening}}}}}]}}}}]}}\n\n"
+        );
+        let second_arguments = format!(
+            "data: {{\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
+             \"choices\":[{{\"index\":0,\"delta\":{{\"tool_calls\":[{{\"index\":0,\
+             \"function\":{{\"arguments\":{closing}}}}}]}}}}]}}\n\n"
+        );
+        let finish = b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
+            \"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n";
+        let (terminal, _) = drive(&[
+            first_arguments.as_bytes(),
+            second_arguments.as_bytes(),
+            finish,
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("overdeep reassembled tool arguments must fail the stream");
+        };
+        let LossCause::StreamProtocolViolation { detail } = loss.cause else {
+            panic!("deep streamed arguments must surface as protocol loss");
+        };
+        assert!(detail.contains("128-container nesting limit"));
     }
 
     #[test]

@@ -79,6 +79,11 @@ pub(crate) fn convert_tool_call(call: &WireResponseToolCall) -> Result<ToolCallP
         // malformed call into an executable zero-argument one.
         return Err("tool call is missing its arguments".to_string());
     };
+    if let Err(error) = validate_provider_json_nesting(arguments.as_bytes()) {
+        return Err(format!(
+            "tool call arguments exceed the provider JSON bound: {error}"
+        ));
+    }
     Ok(ToolCallProposal {
         id: ToolCallId::new(id.clone()),
         name: ToolName::new(name.clone()),
@@ -818,6 +823,31 @@ mod tests {
         };
         let LossCause::ResponseUnintelligible { detail } = loss.cause else {
             panic!("deep success JSON must be response-unintelligible evidence");
+        };
+        assert!(detail.contains("128-container nesting limit"));
+    }
+
+    #[test]
+    fn overdeep_buffered_tool_arguments_are_response_unintelligible() {
+        let depth = PROVIDER_JSON_NESTING_LIMIT + 1;
+        let arguments = format!("{}null{}", "[".repeat(depth), "]".repeat(depth));
+        let arguments = serde_json::to_string(&arguments).expect("fixture JSON string serializes");
+        let body = format!(
+            r#"{{
+                "id":"chatcmpl_1","object":"chat.completion","model":"model-exact-1",
+                "choices":[{{"index":0,"message":{{"role":"assistant","tool_calls":[{{
+                    "id":"call_1","type":"function","function":{{
+                        "name":"lookup","arguments":{arguments}
+                    }}
+                }}]}},"finish_reason":"tool_calls"}}]
+            }}"#
+        );
+
+        let TerminalEvidence::BoundaryLoss(loss) = decode(&body).0 else {
+            panic!("overdeep buffered tool arguments must not become a proposal");
+        };
+        let LossCause::ResponseUnintelligible { detail } = loss.cause else {
+            panic!("deep buffered arguments must be response-unintelligible evidence");
         };
         assert!(detail.contains("128-container nesting limit"));
     }
