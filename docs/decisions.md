@@ -10,6 +10,28 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-23 — Reuse Serde and uuid for the closed process wire crate
+
+**Context.** The version-one process boundary needs closed tagged JSON shapes,
+canonical full-range decimal strings, canonical UUID strings, and explicit
+version rejection without leaking domain or storage types. Serde, serde_json,
+and uuid are already pinned elsewhere in the workspace.
+
+**Decision.** The focused `signalbox-process-protocol` crate directly uses those
+three existing dependencies. Serde derives the closed tagged shapes;
+serde_json's `arbitrary_precision` feature preserves an arbitrary integer
+version long enough to reject it as unsupported before decoding its payload; and
+uuid parses values behind custom lowercase-hyphenated and command-sentinel
+checks. The crate owns framing and wire validation only.
+
+**Rejected alternatives.** A handwritten JSON parser would duplicate escaping,
+UTF-8, and number handling. Raw string identifiers would defer canonical checks
+to every adapter. A schema generator or protocol framework would add a larger
+toolchain and compatibility policy than exact version one needs.
+
+**Affects.** `crates/process-protocol`, the workspace member inventory, and its
+lockfile package entry; no domain or application public type changes.
+
 ## 2026-07-23 — Trust only root or the hub user in socket ancestry
 
 **Context.** A non-writable ancestor owned by a different unprivileged user is
@@ -179,28 +201,6 @@ recovery and permit overlapping work during the loss window. A shorter interval
 adds unnecessary steady database traffic before measurements justify it.
 
 **Affects.** The hub runtime supervisor and its dedicated PostgreSQL guard task.
-
-## 2026-07-23 — Reuse Serde and uuid for the closed process wire crate
-
-**Context.** The version-one process boundary needs closed tagged JSON shapes,
-canonical full-range decimal strings, canonical UUID strings, and explicit
-version rejection without leaking domain or storage types. Serde, serde_json,
-and uuid are already pinned elsewhere in the workspace.
-
-**Decision.** The focused `signalbox-process-protocol` crate directly uses those
-three existing dependencies. Serde derives the closed tagged shapes;
-serde_json's `arbitrary_precision` feature preserves an arbitrary integer
-version long enough to reject it as unsupported before decoding its payload; and
-uuid parses values behind custom lowercase-hyphenated and command-sentinel
-checks. The crate owns framing and wire validation only.
-
-**Rejected alternatives.** A handwritten JSON parser would duplicate escaping,
-UTF-8, and number handling. Raw string identifiers would defer canonical checks
-to every adapter. A schema generator or protocol framework would add a larger
-toolchain and compatibility policy than exact version one needs.
-
-**Affects.** `crates/process-protocol`, the workspace member inventory, and its
-lockfile package entry; no domain or application public type changes.
 
 ## 2026-07-23 — Local version-one process protocol and terminal client
 
