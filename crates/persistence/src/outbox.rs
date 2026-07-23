@@ -207,6 +207,8 @@ pub enum OutboxCorruption {
     UnsupportedEventKind,
     /// The header's required typed record was absent.
     MissingTypedRecord,
+    /// A lifecycle transition disagreed with authoritative durable state.
+    InvalidLifecycleEventCorrelation,
     /// A terminal typed record disagreed with authoritative durable state.
     InvalidTerminalEventCorrelation,
     /// A model-call transition had an inconsistent or unknown state shape.
@@ -231,6 +233,9 @@ impl fmt::Display for OutboxCorruption {
             Self::UnsupportedStorageVersion => "outbox storage version is unsupported",
             Self::UnsupportedEventKind => "outbox event kind is unsupported",
             Self::MissingTypedRecord => "outbox typed event record is missing",
+            Self::InvalidLifecycleEventCorrelation => {
+                "outbox lifecycle event correlations are invalid"
+            }
             Self::InvalidTerminalEventCorrelation => {
                 "outbox terminal event correlations are invalid"
             }
@@ -459,15 +464,33 @@ async fn load_event(
             }
         }
         TURN_ACTIVATED => {
-            let row: Option<(Uuid, Uuid)> = sqlx::query_as(
-                "SELECT turn_id, current_attempt_id
-                   FROM turn_activated_outbox_event
-                  WHERE event_sequence = $1",
+            let row: Option<(Uuid, Uuid, bool)> = sqlx::query_as(
+                "SELECT event.turn_id, event.current_attempt_id,
+                        turn.turn_id IS NOT NULL AS lifecycle_correlated
+                   FROM turn_activated_outbox_event AS event
+                   LEFT JOIN turn_lifecycle AS turn
+                     ON turn.turn_id = event.turn_id
+                    AND turn.session_id = event.session_id
+                    AND (
+                        (
+                            turn.state_kind = 'active'
+                            AND turn.current_attempt_id = event.current_attempt_id
+                        )
+                        OR (
+                            turn.state_kind = 'terminal'
+                            AND turn.terminal_attempt_id = event.current_attempt_id
+                        )
+                    )
+                  WHERE event.event_sequence = $1",
             )
             .bind(Decimal::from(expected_sequence))
             .fetch_optional(&mut **transaction)
             .await?;
-            let (turn, current_attempt) = row.ok_or(OutboxCorruption::MissingTypedRecord)?;
+            let (turn, current_attempt, lifecycle_correlated) =
+                row.ok_or(OutboxCorruption::MissingTypedRecord)?;
+            if !lifecycle_correlated {
+                return Err(OutboxCorruption::InvalidLifecycleEventCorrelation.into());
+            }
             DispatchedOutboxEventKind::TurnActivated {
                 turn: TurnId::from_uuid(turn),
                 current_attempt: TurnAttemptId::from_uuid(current_attempt),
@@ -504,10 +527,18 @@ async fn load_event(
         }
         MODEL_CALL_TRANSITION => {
             let row = sqlx::query(
-                "SELECT turn_id, model_call_id, call_state_kind,
-                        terminal_disposition_kind
-                   FROM model_call_transition_outbox_event
-                  WHERE event_sequence = $1",
+                "SELECT event.turn_id, event.model_call_id,
+                        event.call_state_kind,
+                        event.terminal_disposition_kind,
+                        call.state_kind AS authoritative_state_kind,
+                        call.terminal_disposition_kind
+                            AS authoritative_terminal_disposition_kind
+                   FROM model_call_transition_outbox_event AS event
+                   LEFT JOIN model_call AS call
+                     ON call.model_call_id = event.model_call_id
+                    AND call.turn_id = event.turn_id
+                    AND call.session_id = event.session_id
+                  WHERE event.event_sequence = $1",
             )
             .bind(Decimal::from(expected_sequence))
             .fetch_optional(&mut **transaction)
@@ -515,10 +546,22 @@ async fn load_event(
             .ok_or(OutboxCorruption::MissingTypedRecord)?;
             let state_kind: String = row.try_get("call_state_kind")?;
             let terminal_disposition: Option<String> = row.try_get("terminal_disposition_kind")?;
+            let state = decode_model_call_state(&state_kind, terminal_disposition.as_deref())?;
+            if matches!(state, DispatchedModelCallState::Terminal(_)) {
+                let authoritative_state_kind: Option<String> =
+                    row.try_get("authoritative_state_kind")?;
+                let authoritative_terminal_disposition: Option<String> =
+                    row.try_get("authoritative_terminal_disposition_kind")?;
+                if authoritative_state_kind.as_deref() != Some("terminal")
+                    || authoritative_terminal_disposition != terminal_disposition
+                {
+                    return Err(OutboxCorruption::InvalidTerminalEventCorrelation.into());
+                }
+            }
             DispatchedOutboxEventKind::ModelCallTransition {
                 turn: TurnId::from_uuid(row.try_get("turn_id")?),
                 call: ModelCallId::from_uuid(row.try_get("model_call_id")?),
-                state: decode_model_call_state(&state_kind, terminal_disposition.as_deref())?,
+                state,
             }
         }
         TURN_COMPLETED => {
