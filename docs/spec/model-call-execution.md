@@ -1,8 +1,8 @@
 # Model-call execution
 
 This page describes the implemented model-call orchestration chain as it exists
-on `origin/agent/m3-model-call-anthropic-runtime` (the M3 stack head): rendering
-a context frontier into provider messages, the staged prepare / authorize-send /
+on `main` after the M3 stack merged (verified at `c0db59c`): rendering a context
+frontier into provider messages, the staged prepare / authorize-send /
 commit-observation effects, assistant content and turn completion, provider
 failure classification into physical dispositions, and the retry prohibition.
 Turn and attempt lifecycle law lives in
@@ -43,12 +43,14 @@ The predecessor matrix:
 Storage enforces the matrix durably
 (`crates/persistence/migrations/202607220001_model_call_execution.sql`): the
 `model_call_changes_are_guarded` trigger rejects any insert whose state is not
-`Prepared`, any mutation of the ten authorization-fact columns, any
-non-monotonic transition, any rewrite of a terminal row, any unsent-terminal
-disposition other than `KnownFailed`/`Cancelled`, and any delete;
-`model_call_pinned_target_fk` forces every call row's resolved target to equal
-the turn's pinned target. Why: the schema backstops the aggregate against any
-buggy or racing writer, not just the audited one.
+`Prepared`, any mutation of the eleven authorization-fact columns (the ADR-0017
+pinned credential reference joined them in
+`202607220002_model_call_credential_reference.sql`), any non-monotonic
+transition, any rewrite of a terminal row, any unsent-terminal disposition other
+than `KnownFailed`/`Cancelled`, and any delete; `model_call_pinned_target_fk`
+forces every call row's resolved target to equal the turn's pinned target. Why:
+the schema backstops the aggregate against any buggy or racing writer, not just
+the audited one.
 
 The provider target is pinned as a turn-level fact before any call exists: the
 turn's frozen selection resolves through an immutable configured
@@ -102,19 +104,20 @@ transaction is ever open across credential I/O or provider work.
 
 1. **Prepare transaction.** Locks the session, reconstitutes the aggregate, and
    either: reports no runnable work; creates and commits the exact `Prepared`
-   call, the turn-target pin, and a `ModelCallTransition` (`Prepared`) outbox
-   event, then stops the invocation (`Checkpointed`); reloads an
-   already-committed `Prepared` call read-only and returns its request material
-   (`Ready`); closes target-resolution failure as an atomic no-call
-   attempt-and-turn failure; or refuses because acknowledged steering is
-   pending. A new `Prepared` call is never advanced to `InFlight` in its
-   creating transaction. Why: committing durable call identity before any
-   external step means a crash can never produce a provider effect with nothing
-   durable to classify.
+   call with its pinned non-secret credential reference (ADR-0017), the
+   turn-target pin, and a `ModelCallTransition` (`Prepared`) outbox event, then
+   stops the invocation (`Checkpointed`); reloads an already-committed
+   `Prepared` call read-only and returns its request material (`Ready`); closes
+   target-resolution failure as an atomic no-call attempt-and-turn failure; or
+   refuses because acknowledged steering is pending. A new `Prepared` call is
+   never advanced to `InFlight` in its creating transaction. Why: committing
+   durable call identity before any external step means a crash can never
+   produce a provider effect with nothing durable to classify.
 2. **Capability preparation (no transaction).** The provider adapter resolves
-   its credential internally and builds an opaque, one-shot, call-bound send
-   capability; application and domain code only move the value and cannot
-   inspect, persist, or log it (INV-035;
+   its credential internally from the call's durably pinned reference (reloading
+   a `Prepared` call without one fails closed) and builds an opaque, one-shot,
+   call-bound send capability; application and domain code only move the value
+   and cannot inspect, persist, or log it (INV-035;
    [configuration-and-credentials](configuration-and-credentials.md)). Why: a
    nonserializable one-shot value makes credential escape and capability reuse
    structurally impossible rather than a review convention. A trustworthy
@@ -145,8 +148,9 @@ transaction is ever open across credential I/O or provider work.
    terminal frontier, and outbox rows.
 
 Failure keeps its stage: `ModelCallExecutionError` names which of prepare,
-render, capability, capability-failure commit, authorization, authorization
-reread, provider, or observation commit failed.
+render, capability, capability-failure commit, capability-failure reread,
+authorization, authorization reread, authorization reconciliation, provider, or
+observation commit failed.
 
 ### Identity minting and commit ambiguity
 
@@ -246,11 +250,11 @@ persistence commits it atomically with its outbox rows
   in one transaction (ADR-0042's all-or-nothing boundary), so no committed state
   carries a prefix of the sequence, a completed turn without its marker, or the
   marker before its content; storage deduplicates the marker
-  (`semantic_transcript_entry_turn_completed_once`) but the
-  completed-turn-has-marker direction is transactional discipline, not a schema
-  constraint. Why: a physically completed call is not a completed turn, so
-  completion is an explicit aggregate fact rather than an inference from call
-  state.
+  (`semantic_transcript_entry_turn_completed_once`), and the deferred
+  final-state constraint triggers reject at commit a completed terminal turn
+  without exactly one marker. Why: a physically completed call is not a
+  completed turn, so completion is an explicit aggregate fact rather than an
+  inference from call state.
 - **KnownFailed / Cancelled.** The call keeps its exact physical disposition;
   the attempt ends `KnownFailure`; the turn fails with a `TurnFailed` entry and
   terminal frontier. A physical cancellation without an applied-interrupt proof
@@ -285,12 +289,13 @@ ordering primitive; in this slice the execution service is its sole consumer.
 ## Crash, restart, and supervision
 
 hubd (`apps/hubd/src/lib.rs`, `main.rs`) wraps execution in
-`FatalExecutionSupervisor`: any post-activation stage failure raises a fatal
-signal, the scheduler stops, and the process exits nonzero so the next
-incarnation's startup scan regains authority. Why: startup recovery is the one
-audited path that classifies an issued call from durable evidence, so a live
-process that cannot construct a trustworthy result must stop rather than
-improvise.
+`FatalExecutionSupervisor`: a post-activation stage failure — after at most one
+same-incarnation reconciliation pass when retained evidence exists — raises a
+fatal signal, the scheduler stops (in-flight work bounded by a shutdown grace
+window), and the process exits nonzero so the next incarnation's startup scan
+regains authority. Why: startup recovery is the one audited path that classifies
+an issued call from durable evidence, so a live process that cannot construct a
+trustworthy result must stop rather than improvise.
 
 Startup recovery (`crates/persistence/src/startup.rs`), inside the same
 per-session locked transaction as the general scan (INV-034):
@@ -343,8 +348,11 @@ prints the semantic transcript; it is deliberately not the client protocol.
   open under ADR-0042.
 - `AssistantToolUse` construction is schema-blocked pending the reserved tool
   decisions.
-- Same-incarnation retained-observation reconciliation exists in the service but
-  production wiring escalates every stage failure fatally, so the drain path is
-  exercised only by tests.
+- Same-incarnation retained-evidence reconciliation gets exactly one production
+  pass (`reconcile_retained_once`) before fatal escalation; repeated
+  same-incarnation drains are exercised only by tests.
 - No timeout budget bounds provider work; a hung stream blocks the attempt until
   operator restart.
+- No system prompt is composed or sent: the bridge always leaves `ModelSettings`
+  `system` empty; system-prompt projection from session configuration remains
+  deferred.

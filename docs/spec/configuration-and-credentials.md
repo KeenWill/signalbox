@@ -1,11 +1,11 @@
 # Configuration and credentials
 
 This page describes the implemented configuration and credential behavior of
-Signalbox, verified against the `agent/m3-model-call-anthropic-runtime` stack
-head (hubd configuration loading in `apps/hubd/src/configuration.rs` and
-`apps/hubd/src/main.rs`, the static TOML catalog, and the provider bridge in
-`crates/model-provider-runtime`) together with the model-runtime crates it
-composes (`crates/model-runtime/src/credential.rs` and the redaction pipeline in
+Signalbox, verified against merged `main` at `c0db59c` (hubd configuration
+loading in `apps/hubd/src/configuration.rs` and `apps/hubd/src/main.rs`, the
+static TOML catalog, and the provider bridge in `crates/model-provider-runtime`)
+together with the model-runtime crates it composes
+(`crates/model-runtime/src/credential.rs` and the redaction pipeline in
 `crates/model-runtime-anthropic/src/runtime.rs`). It distills ADR-0017 and the
 configuration clauses of ADR-0044 and ADR-0047. Invariant law lives in
 [docs/invariants.md](../invariants.md), cited here by tag.
@@ -137,10 +137,10 @@ not enforced by code.
 
 - **Reference/value split.** A `CredentialReference` is the non-secret durable
   name of one credential; a `CredentialValue` carries the secret bytes.
-  References are safe in configuration, errors, and logs; values are safe only
-  at the adapter boundary. Why: rotation preserves the durable name so no record
-  or log ever needs the secret (INV-035). One reference exists today: the
-  composition constant `anthropic-primary`.
+  References are safe in configuration, errors, logs, and durable records;
+  values are safe only at the adapter boundary. Why: rotation preserves the
+  durable name so no record or log ever needs the secret (INV-035). One
+  reference exists today: the composition constant `anthropic-primary`.
 - **File-based supply, reread per preparation.** `FileCredentialAccess` binds
   the reference to the `ANTHROPIC_API_KEY_FILE` path and reads the file for
   every request preparation; nothing is cached. Why: atomic file replacement
@@ -168,8 +168,13 @@ not enforced by code.
   substitution would hide it. A provider rejecting the credential after send is
   ordinary outcome evidence ([model-call-execution](model-call-execution.md),
   ADR-0043).
-- **No durable credential state.** Postgres stores neither credential values nor
-  references; no credential column exists anywhere in the schema.
+- **Durable references, never values.** Postgres never stores a credential
+  value. Each new model call durably pins its non-secret credential reference at
+  the `Prepared` insert (`model_call.credential_reference`), immutable
+  thereafter under the authorization-facts trigger; the column is nullable only
+  for rows predating the migration. Resuming a stored `Prepared` call
+  re-supplies the stored reference, and a stored call with no reference fails
+  closed as corruption.
 
 ## Redaction and logs
 
@@ -213,9 +218,9 @@ Enforcement as implemented:
   reconstitution's `CallTargetMismatch` cross-check fails closed only for a
   session with a live stored call; for everything else, not retargeting a
   `selection_id` is deployment discipline.
-- ADR-0017's durable credential-reference record at the target-pinning boundary
-  is unimplemented; recovery re-supplies the single composition constant from
-  configuration.
+- Model calls predating the credential-reference migration carry a NULL stored
+  reference; resuming such a `Prepared` call fails closed as corruption rather
+  than re-deriving the reference from configuration.
 - Multi-provider support and the reference-to-provider-component mapping are
   undecided (reserved ADR-0007); today `provider = "anthropic"` and
   `anthropic-primary` are hard-coded.

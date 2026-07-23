@@ -2,7 +2,7 @@
 
 This page describes the implemented identity, durable-command, and telemetry
 correlation behavior of Signalbox as verified against `main` at commit
-`6567423`. The behavior lives in `crates/domain` (identity newtypes, command
+`c0db59c`. The behavior lives in `crates/domain` (identity newtypes, command
 payloads, actor attribution, replay equality), `crates/application` (identity
 generation, command boundaries), `crates/persistence` (the owner-global command
 registry and typed record families), and `apps/hubd` (telemetry wiring). Storage
@@ -34,13 +34,13 @@ Identities fall into three supply classes:
   correctness comes from the owner-global durable claim plus canonical payload
   comparison, never from trusting a caller's clock or version bits (INV-012).
 - **Hub-minted durable-fact identity** — `SessionId`, `AcceptedInputId`,
-  `TurnId`, `TurnAttemptId`, `SemanticTranscriptEntryId`, and
-  `ContextFrontierId` today; `ModelCallId`, `ProviderTargetEvidenceId`,
-  `ToolRequestId`, and `ToolAttemptId` are assigned here but not yet minted (see
-  Open edges). All production generators mint UUIDv7 (`uuid::Uuid::now_v7()`).
-  Why: ADR-0033's recorded rationale is UUIDv7 insertion locality for
-  append-heavy Postgres B-tree keys without changing the 128-bit storage shape;
-  no index-level artifact measures this.
+  `TurnId`, `TurnAttemptId`, `SemanticTranscriptEntryId`, `ContextFrontierId`,
+  and `ModelCallId` today; `ProviderTargetEvidenceId`, `ToolRequestId`, and
+  `ToolAttemptId` are assigned here but not yet minted (see Open edges). All
+  production generators mint UUIDv7 (`uuid::Uuid::now_v7()`). Why: ADR-0033's
+  recorded rationale is UUIDv7 insertion locality for append-heavy Postgres
+  B-tree keys without changing the 128-bit storage shape; no index-level
+  artifact measures this.
 - **Configuration reference key** — `DirectModelSelection` and `ModelAlias`.
   Callers supply them inside command payloads to name owner-configured model
   selections; they persist in `uuid` columns (`direct_model_selection_id`,
@@ -49,7 +49,9 @@ Identities fall into three supply classes:
   accepted identity.
 
 `ProviderModelIdentity` names the hub's normalized provider/model value space.
-It is not persisted and has no production supply seam; how provider-reported
+It is persisted (`turn_lifecycle.pinned_provider_model_identity_id`,
+`model_call.resolved_provider_model_identity_id`) and supplied as an
+owner-configured key from hubd's model-configuration file; how provider-reported
 data normalizes into it is the open ADR-0007 question (see Open edges).
 
 UUID contents are never semantic. No code derives acceptance order, queue order,
@@ -74,16 +76,17 @@ crate cannot mint an identity. `crates/application` enables the `v7` feature and
 defines one generator trait per orchestration slice, each with a production
 UUIDv7 implementation:
 
-| Generator                            | Mints                                                             |
-| ------------------------------------ | ----------------------------------------------------------------- |
-| `UuidV7SessionIdGenerator`           | `SessionId`                                                       |
-| `UuidV7SubmitInputIdGenerator`       | `AcceptedInputId`, `TurnId`                                       |
-| `UuidV7StartEligibleTurnIdGenerator` | `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnAttemptId` |
-| `UuidV7StartupScanIdGenerator`       | `SemanticTranscriptEntryId`, `ContextFrontierId`                  |
+| Generator                             | Mints                                                                                               |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `UuidV7SessionIdGenerator`            | `SessionId`                                                                                         |
+| `UuidV7SubmitInputIdGenerator`        | `AcceptedInputId`, `TurnId`                                                                         |
+| `UuidV7StartEligibleTurnIdGenerator`  | `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnAttemptId`                                   |
+| `UuidV7StartupScanIdGenerator`        | `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnId` (reclassified successors)                |
+| `UuidV7ModelCallExecutionIdGenerator` | `ModelCallId`, `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnId` (reclassified successors) |
 
-`ModelCallId`, `ProviderTargetEvidenceId`, `ToolRequestId`, and `ToolAttemptId`
-exist as domain types but have no production minting seam yet; their generators
-land with their owning slices.
+`ProviderTargetEvidenceId`, `ToolRequestId`, and `ToolAttemptId` exist as domain
+types but have no production minting seam yet; their generators land with their
+owning slices.
 
 Orchestration generates a fresh candidate immediately before the domain
 transition that creates the fact, and the persistence adapter maps
@@ -106,12 +109,12 @@ contents (INV-002). `crates/persistence/src/mapping.rs` defines named conversion
 functions for `DurableCommandId`, `SessionId`, `AcceptedInputId`, and `TurnId`;
 the remaining persisted kinds (`TurnAttemptId`, `ContextFrontierId`,
 `SemanticTranscriptEntryId`, `DirectModelSelection`, `ModelAlias`,
-`ToolRequestId`) cross the SQL boundary through inline `from_uuid`/`into_uuid`
-calls at typed repository call sites (for example
-`crates/persistence/src/submit_input.rs` and `start_eligible_turn.rs`). Every
-crossing is explicit; none is derive-generated. Version ordinals and queue
-positions use checked `numeric(20, 0)` mappings in `mapping.rs` and are not
-identities.
+`ModelCallId`, `ProviderModelIdentity`, `ToolRequestId`) cross the SQL boundary
+through inline `from_uuid`/`into_uuid` calls at typed repository call sites (for
+example `crates/persistence/src/submit_input.rs`, `start_eligible_turn.rs`, and
+`model_execution.rs`). Every crossing is explicit; none is derive-generated.
+Version ordinals and queue positions use checked `numeric(20, 0)` mappings in
+`mapping.rs` and are not identities.
 
 Telemetry renders identities in two forms. Application sites render the
 lowercase hyphenated RFC 9562 form (`session_id = %session.as_uuid()` in
@@ -297,11 +300,11 @@ all. See Open edges.
 - Wire field types and public identity encodings remain reserved
   (ADR-0019/ADR-0021); no protocol surface exists and commands enter only
   through in-process application services.
-- `ModelCallId`, `ProviderTargetEvidenceId`, `ToolRequestId`, and
-  `ToolAttemptId` have assigned supply classes but no production minting seam;
-  generators land with their owning slices. `ProviderModelIdentity` additionally
-  has no persistence and no supply seam; how provider-reported data normalizes
-  into it remains open (ADR-0007).
+- `ProviderTargetEvidenceId`, `ToolRequestId`, and `ToolAttemptId` have assigned
+  supply classes but no production minting seam; generators land with their
+  owning slices. `ProviderModelIdentity` is now persisted and
+  configuration-supplied; how provider-reported data normalizes into it remains
+  open (ADR-0007).
 - UUIDv7 timestamp disclosure and namespace scope must be reassessed before
   identities are exposed outside the single-owner boundary or treated as
   capabilities.

@@ -1,7 +1,7 @@
 # Persistence protocol
 
 This page describes the implemented persistence protocol of the Signalbox hub as
-it exists in `crates/persistence` (source and migrations) at commit `6567423` on
+it exists in `crates/persistence` (source and migrations) at commit `c0db59c` on
 `main`. It covers the Postgres representation, migration discipline, durable
 command storage and replay equality, the fail-closed reconstitution boundary,
 the lock protocol, pending-steering durable state, the corruption taxonomy,
@@ -50,8 +50,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — nine files, `202607180001` through
-`202607210001` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — eleven files, `202607180001` through
+`202607220002` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -76,13 +76,15 @@ is the durable statement of record, and no state is rebuilt by replaying events
 constraints over current-state rows; an event log would move them back into
 projection code.
 
-Implemented table families (across the nine migrations):
+Implemented table families (across the eleven migrations):
 
 - `durable_command` plus typed command records (`create_session_command`,
   `replace_session_defaults_command`, `submit_input_command`);
 - `session`, `session_defaults_version`, `session_current_defaults`,
   `session_scheduler`;
 - `accepted_input`, `queued_input_origin`, `turn_lifecycle`, `turn_attempt`;
+- `model_call` (ADR-0042 execution state, its turn-level provider-target pin on
+  `turn_lifecycle`, and its pinned `credential_reference`);
 - `semantic_transcript_entry`, `context_frontier`, `context_frontier_member`;
 - the outbox family (below).
 
@@ -92,9 +94,12 @@ Representation rules, all enforced in the schema:
   variant payload columns constrained present exactly when the discriminator
   requires them (for example `turn_lifecycle_state_payload_shape`). The
   implemented sets are exactly the admitted slices: turn state
-  `queued`/`active`/`terminal`, active phase `running` only, terminal
-  disposition `failed` only, attempt state `prepared`/`running`/`ended` with end
-  variant `without_stop` and six end dispositions.
+  `queued`/`active`/`terminal`, active phase `running` or
+  `awaiting_model_call_recovery`, terminal disposition
+  `failed`/`completed`/`refused`, attempt state `prepared`/`running`/`ended`
+  with end variant `without_stop` and six end dispositions, and model-call state
+  `prepared`/`in_flight`/`cancellation_requested`/`terminal` with terminal
+  dispositions `completed`/`known_failed`/`refused`/`cancelled`/`ambiguous`.
 - Immutable fact tables carry `BEFORE UPDATE OR DELETE` triggers that raise
   (`reject_immutable_record_change`), making append-only a database property,
   not a convention. Mutable lifecycle tables carry guard triggers instead:
@@ -116,7 +121,11 @@ Representation rules, all enforced in the schema:
   `active`, taking `FOR UPDATE` on that `turn_lifecycle` row, and
   `turn_terminal_requires_closed_pending_steering` rejects a terminal transition
   while pending steering naming the turn remains
-  (`turn_lifecycle_pending_steering_closed`).
+  (`turn_lifecycle_pending_steering_closed`). Migration `202607220001` adds the
+  closure: a guard trigger (`reject_invalid_accepted_input_change`) replaces
+  plain append-only on `accepted_input` and admits exactly one update —
+  `pending_steering` → `reclassified_as_turn_origin` setting a fresh
+  `origin_turn_id` with every other column unchanged.
 - Cross-table completeness uses deferrable-initially-deferred foreign keys and
   constraint triggers so rows of one atomic fact can be inserted in any order
   inside a transaction while every commit boundary sees the complete shape: each
@@ -195,11 +204,13 @@ Locks per transaction, in acquisition order:
   pending-steering acceptance additionally locks the named active
   `turn_lifecycle` row `FOR UPDATE` at commit time, inside the deferred
   source-turn trigger.
-- **StartEligibleTurn** and **startup recovery**: the `session_scheduler` row
-  `FOR UPDATE` is the only explicit lock (session existence is checked with a
-  bare `EXISTS`). The session row is locked only `KEY SHARE`, implicitly, by the
-  inserts' foreign keys, and the candidate `turn_lifecycle` row is locked by the
-  guarded `UPDATE` itself.
+- **StartEligibleTurn**, **startup recovery**, and the **model-call execution
+  transactions** (prepare, authorize, observation commit, restart recovery — all
+  in `model_execution.rs`, reusing the same inventory statement): the
+  `session_scheduler` row `FOR UPDATE` is the only explicit lock (session
+  existence is checked with a bare `EXISTS`). The session row is locked only
+  `KEY SHARE`, implicitly, by the inserts' foreign keys, and the candidate
+  `turn_lifecycle` row is locked by the guarded `UPDATE` itself.
 - **ReplaceSessionDefaults**: no explicit pre-lock; the compare-and-set `UPDATE`
   on the `session_current_defaults` pointer row is the serialization point, and
   its `session_defaults_version` insert takes `FOR KEY SHARE` on the session row
@@ -221,18 +232,20 @@ Two standing constraints (recorded beside the code):
 ## Reconstitution
 
 Reconstitution is domain-owned and fail-closed (ADR-0035 pattern, implemented
-for the session, command-receipt, and scheduling projections). The adapter
-performs only the boundary step — decode columns, check discriminators and
-ordinals, assemble the complete checked input — and the domain performs pure
-validation and returns one canonical value or a typed failure (INV-001, INV-002,
-INV-006). Concretely: `SessionReconstitutionInput` for the current session,
-`SubmitInputReconstitutionInput` (with turn-origin and acceptance-tail inputs)
-for command receipts, and `AcceptedInputSchedulingProjection` for the session's
-complete queue and lifecycle state. The scheduling load proves its own
-completeness — it counts `queued_input_origin` against `turn_lifecycle` and
-fails on mismatch — rather than trusting whichever rows a filter returned.
-Active-phase and acceptance-tail validation semantics are owned by
-[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md).
+for the session, command-receipt, scheduling, and model-call execution
+projections). The adapter performs only the boundary step — decode columns,
+check discriminators and ordinals, assemble the complete checked input — and the
+domain performs pure validation and returns one canonical value or a typed
+failure (INV-001, INV-002, INV-006). Concretely: `SessionReconstitutionInput`
+for the current session, `SubmitInputReconstitutionInput` (with turn-origin and
+acceptance-tail inputs) for command receipts,
+`AcceptedInputSchedulingProjection` for the session's complete queue and
+lifecycle state, and `ModelCallExecutionReconstitutionInput` for the active
+turn's pinned provider target and complete call history. The scheduling load
+proves its own completeness — it counts `queued_input_origin` against
+`turn_lifecycle` and fails on mismatch — rather than trusting whichever rows a
+filter returned. Active-phase and acceptance-tail validation semantics are owned
+by [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md).
 
 Persisted data is never normalized into a nearby valid state; malformed durable
 rows produce typed corruption errors, authorize no effect, and are not repaired
@@ -248,16 +261,18 @@ the dangerous corruption cases are rows that look individually valid while their
 cross-record correlations are not, so authority comes only from complete
 validated projections, never from raw identifiers.
 
-Startup recovery terminalizes a lost active turn as failed, with one deferral
-branch: when a durable pending-steering row names the active turn, the domain
-refuses the failure preparation, the recovery transaction rolls back with
-`StartupScanSessionOutcome::DeferredPendingSteering` (`startup.rs`), and
-`apps/hubd` refuses to enter scheduling (`recovery_blocked`) rather than run
-with an unrecovered session. The schema guard
+Startup recovery terminalizes a lost active turn as failed, with the deferral
+branch now confined to evidence-free turns: when the lost turn holds no model
+call and a pending-steering row names it, the transaction rolls back
+`DeferredPendingSteering` and hubd refuses scheduling (`recovery_blocked`); a
+turn holding a `Prepared` call fails with its pending steering atomically
+reclassified to successor origins, and an in-flight call recovers into the
+`awaiting_model_call_recovery` wait. The schema guard
 (`turn_lifecycle_pending_steering_closed`) enforces the same refusal
 independently at commit. Why: a pending-steering row is an accepted delivery
-obligation with no implemented closure; terminalizing its source turn would
-strand it, so recovery fails closed instead.
+obligation; where no reclassification closure applies (an evidence-free lost
+turn), terminalizing its source turn would strand it, so recovery fails closed
+instead.
 
 ## Corruption taxonomy
 
@@ -275,41 +290,45 @@ Registry inspection has its own closed set (`RegistryCorruption`):
 `UnsupportedKind`, `UnsupportedVersion`, `MissingTypedRecord`,
 `ConflictingTypedRecords`.
 
-Three error families implement the shared operator taxonomy
+Four error families implement the shared operator taxonomy
 (`ClassifyOperatorFailure`, classifying into `OperatorFailureClass`): startup
 scan (`StartupScanRepositoryError`), turn activation
-(`StartEligibleTurnRepositoryError`), and the eligibility sweep
-(`PostgresEligibilitySweepError`). The classes:
-`Infrastructure { commit_ambiguous }` (the operation did not complete;
-retryable), `FailClosedCorruption` (committed rows cannot construct the accepted
-domain value; nothing proceeds), `IdentityCollision` (a fresh hub-minted
-identity collided with a durable one; detected either by the domain seam or by
-mapping the violated unique constraint out of the database error), and
-`CallerOrHubBug`. The command-handling error families draw the same
-corruption/infrastructure distinctions in their variants but implement no
-operator classification yet (open edge). Startup-scan corruption additionally
-carries the scoped active turn so operational policy can isolate the affected
-session while remaining fail-closed.
+(`StartEligibleTurnRepositoryError`), the eligibility sweep
+(`PostgresEligibilitySweepError`), and the model-call repository
+(`ModelCallRepositoryError`). The classes: `Infrastructure { commit_ambiguous }`
+(the operation did not complete; retryable), `FailClosedCorruption` (committed
+rows cannot construct the accepted domain value; nothing proceeds),
+`IdentityCollision` (a fresh hub-minted identity collided with a durable one;
+detected either by the domain seam or by mapping the violated unique constraint
+out of the database error), and `CallerOrHubBug`. The command-handling error
+families draw the same corruption/infrastructure distinctions in their variants
+but implement no operator classification yet (open edge). Startup-scan
+corruption additionally carries the scoped active turn so operational policy can
+isolate the affected session while remaining fail-closed.
 
 ## Commit-ambiguity handling
 
 Transactions whose effects cannot be re-derived from a caller-held command
 identifier classify commit failures. `commit_failure_is_ambiguous` (in
-`start_eligible_turn.rs` and `startup.rs`) treats a database-reported error as
-ambiguous only for SQLSTATE `08007` (transaction resolution unknown) and `40003`
-(statement completion unknown); any non-database failure awaiting the commit
-response (lost connection, IO error) is ambiguous; every other database-reported
-commit rejection is a definite failure. The flag surfaces as
-`Infrastructure { commit_ambiguous: true }` so the caller knows durable state
-may or may not include the transaction. Why: activation and recovery mint fresh
-identities instead of claiming a command identifier, so a lost commit response
-cannot be resolved by replay and must be reported as ambiguous rather than
-guessed.
+`start_eligible_turn.rs`, `startup.rs`, and `model_execution.rs`) treats a
+database-reported error as ambiguous only for SQLSTATE `08007` (transaction
+resolution unknown) and `40003` (statement completion unknown); any non-database
+failure awaiting the commit response (lost connection, IO error) is ambiguous;
+every other database-reported commit rejection is a definite failure. The flag
+surfaces as `Infrastructure { commit_ambiguous: true }` so the caller knows
+durable state may or may not include the transaction. Why: activation and
+recovery mint fresh identities instead of claiming a command identifier, so a
+lost commit response cannot be resolved by replay and must be reported as
+ambiguous rather than guessed.
 
 Command-handling adapters carry no ambiguity flag: retrying the same
 `DurableCommandId` replays through the registry and either returns the recorded
 result (the commit won) or handles the command fresh (it never claimed), which
 resolves the ambiguity exactly (INV-012).
+
+The model-call repository additionally resolves an ambiguous authorization
+commit by rereading exact durable authority (`reread_ambiguous_authorization`)
+rather than only surfacing the flag.
 
 ## Transactional outbox
 
@@ -319,10 +338,12 @@ scope). Implemented storage:
 
 - `outbox_event` header (allocator-owned `event_sequence`, closed `event_kind`,
   `storage_version`, `session_id`) plus one typed record table per kind —
-  `session_created_outbox_event` and `turn_failed_outbox_event` — with a
-  deferred trigger requiring exactly one typed record per header. The header and
-  typed record tables are append-only (`reject_immutable_record_change`), and
-  all five outbox tables reject `TRUNCATE`.
+  `session_created_outbox_event`, `turn_failed_outbox_event`,
+  `model_call_transition_outbox_event`, `turn_completed_outbox_event`, and
+  `turn_refused_outbox_event` — with a deferred trigger requiring exactly one
+  typed record per header. The header and typed record tables are append-only
+  (`reject_immutable_record_change`), and all eight outbox tables reject
+  `TRUNCATE`.
 - `outbox_sequence_state`, a mutable singleton row (deletion rejected): a
   `BEFORE INSERT` trigger on the header allocates `last_sequence + 1` by
   updating the singleton, whose row lock is held to transaction end, and a
@@ -340,37 +361,42 @@ existing connection; it never begins or commits a transaction, so the
 state-changing adapter owns the atomic boundary and no post-commit publish step
 exists in application code. Implemented appends: CreateSession handling appends
 `session_created`; startup recovery's terminalization appends `turn_failed` (a
-pending-steering deferral rolls back and appends nothing). A guarded transition
-that changes zero rows appends zero events. Why: writing the event in the
-committing transaction makes the dual-write failure (state without event, or
-event without state) unrepresentable.
+pending-steering deferral rolls back and appends nothing). Model-call state
+transitions append `model_call_transition`, completion closure appends
+`turn_completed`, refusal closure appends `turn_refused`, and known-failure
+closure appends `turn_failed`. A guarded transition that changes zero rows
+appends zero events. Why: writing the event in the committing transaction makes
+the dual-write failure (state without event, or event without state)
+unrepresentable.
 
 ## Open edges
 
 - No outbox publisher, drain task, or subscription layer exists;
   `outbox_delivery_state` is advanced only by integration tests.
-- The outbox event-kind set is only `session_created` and `turn_failed`; input
+- The outbox event-kind set is `session_created`, `turn_failed`,
+  `model_call_transition`, `turn_completed`, and `turn_refused`; input
   acceptance, activation, and defaults replacement commit no events yet, pending
   the protocol projections that define client visibility.
 - Outbox retention and pruning of delivered rows are undecided (ADR-0040).
 - Attempt continuation is deliberately blocked: a `turn_attempt` with a
   predecessor is rejected (`turn_attempt_continuation_unavailable`) until
   durable wait/closure storage exists.
-- Pending-steering closure is unimplemented: no path consumes a
-  `pending_steering` row, so its guards block the source turn's terminalization
-  and block hub startup recovery (`recovery_blocked`) until safe-point
-  application exists.
+- Pending-steering reclassification is implemented at source-turn
+  terminalization (`reclassified_as_turn_origin`); in-turn safe-point
+  consumption remains unimplemented, and evidence-free startup recovery (no
+  model call) still defers (`recovery_blocked`).
 - Frontier lineage checks in migration `202607180004` assume `none` ancestry and
   `ordinary` priority only; fork ancestry and interrupt priority must replace
   them by migration.
 - Interrupt application is unavailable: a matched interrupt fails explicitly
   (`InterruptApplicationUnavailable`) without claiming its identifier.
-- ADR-0022 aggregate-map rows for model calls, provider evidence, authority
-  transfers, cancellation intent, interrupt-proof storage, and tool tables are
-  not yet in the schema.
+- ADR-0022 aggregate-map rows for model calls landed (`model_call`, the
+  turn-level target pin, the pinned credential reference); provider evidence,
+  authority transfers, cancellation intent, interrupt-proof storage, and tool
+  tables are not yet in the schema.
 - Command-handling error families implement no `ClassifyOperatorFailure`;
-  operator classification covers only startup scan, turn activation, and the
-  eligibility sweep.
+  operator classification covers only startup scan, turn activation, the
+  eligibility sweep, and the model-call repository.
 - Submit-path scaling: the complete scheduling projection (content included)
   loads under the session lock per submission; a bounded-read representation
   remains undesigned (docs/open-questions.md).

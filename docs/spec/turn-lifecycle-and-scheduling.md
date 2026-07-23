@@ -2,7 +2,7 @@
 
 This page specifies the implemented behavior of turns, turn attempts,
 eligibility derivation, the scheduler, and startup recovery as verified against
-the working tree at commit `6567423` (main). Code homes:
+the working tree at commit `c0db59c` (main). Code homes:
 `crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
 `context_frontier,queue_order}.rs`, `crates/application/src/{scheduler,`
 `start_eligible_turn,startup_scan,submit_input}.rs`,
@@ -24,19 +24,24 @@ accepted-input origin under one frozen effective configuration (ADR-0004;
 configuration freeze is [identity-and-commands](identity-and-commands.md)
 scope). The implemented slice stores three lifecycle states per turn
 (`turn_lifecycle.state_kind`): `queued`, `active`, and `terminal`, with the
-terminal disposition kind closed to `failed`. The domain `TurnDisposition`
-algebra carries all five accepted variants — `Completed`, `Refused`, `Failed`,
+terminal disposition kind closed to `failed`, `completed`, and `refused`
+(migration `202607220001`). The domain `TurnDisposition` algebra carries all
+five accepted variants — `Completed`, `Refused`, `Failed`,
 `Cancelled { cause }`, `ReconciliationRequired { marker }` — but `Cancelled` is
 constructible only from an `AppliedInterruptProof` and `ReconciliationRequired`
-only from a sealed `ReconciliationMarker`, and no committed transition currently
-produces any terminal disposition other than `Failed`.
+only from a sealed `ReconciliationMarker`, and committed transitions now produce
+`Completed`, `Refused`, and `Failed` (model-call terminal closure); no committed
+transition produces `Cancelled` or `ReconciliationRequired`.
 
 The domain `ActiveTurnPhase` algebra is `Running { current_attempt }`,
 `AwaitingApproval { request }`, and
 `AwaitingRecoveryDecision { ambiguous_operations }`. Every active phase retains
 the session's progressing slot (`retains_progressing_slot()` is unconditionally
-true; INV-009). Storage and reconstitution currently admit only the `Running`
-phase; wait phases have no storage rows and no production constructors (see
+true; INV-009). Storage and reconstitution admit the `running` and
+`awaiting_model_call_recovery` phases; `AwaitingRecoveryDecision` is
+reconstituted from an ambiguous terminal model call plus its ended `ambiguous`
+attempt, while `StopRequested` and `AwaitingApproval` still have no storage rows
+or production constructors (see
 [Evidence-bearing reconstitution](#evidence-bearing-reconstitution)).
 
 At most one turn per session is `active`. Enforcement is layered:
@@ -99,7 +104,9 @@ types means restart cannot construct a state the accepted lifecycle prohibits.
 
 Committed attempt facts today are exactly: the initial `Prepared` attempt
 created by activation, a stored `running` state kind admitted by reconstitution,
-and the startup scan's `Ended(WithoutStop(Lost))`. `turn_attempt` storage
+the startup scan's `Ended(WithoutStop(Lost))`, and the model-call slice's
+`Ended(WithoutStop(_))` closures with dispositions `turn_completed`,
+`turn_refused`, `known_failure`, and `ambiguous`. `turn_attempt` storage
 enforces one initial attempt per turn (`turn_attempt_one_initial_per_turn`), at
 most one live attempt per turn (`turn_attempt_one_live_per_turn`,
 `WHERE state_kind <> 'ended'` — the durable form of exclusive tenure), and a
@@ -210,13 +217,14 @@ the sweep (ADR-0010, INV-007).
   nothing is lost because the rows are the queue.
 
 The initial sweep runs as soon as the work source is first polled, seeding the
-scheduler after startup recovery. The scheduler activates turns only: it has no
-dispatch path, and no dispatch, tool-attempt, or generation storage exists in
-this scope. The workspace does contain model-runtime crates (`model-runtime`,
-`model-runtime-openai`, `model-runtime-anthropic` — ADR-0047 Layer-1 libraries,
-each executing one explicitly authorized model operation against a provider),
-but they are unwired: hubd, application, and persistence declare no dependency
-on them, and nothing schedules them.
+scheduler after startup recovery. Activation returns the activated turn
+(`StartEligibleTurnOutcome::Activated(Box<ActivatedAcceptedInputTurn>)`), and
+hubd's `ActivatedTurnPass` hands it to an `ActivatedTurnExecution` —
+`ModelCallExecutionService` over the `ModelCallProvider` port — so each pass
+activates and then drives the turn's model call. hubd depends on
+`model-runtime`/`model-runtime-anthropic` through the `model-provider-runtime`
+bridge; application and persistence still declare no runtime-crate dependency.
+Tool-attempt storage still does not exist.
 
 ## Startup scan and recovery
 
@@ -231,8 +239,12 @@ the same scheduler-row lock ordering as every other lifecycle writer. Each
 transaction reconstitutes the complete scheduling projection and lets the domain
 prepare the recovery (`prepare_active_turn_lost_failure`):
 
-- the current attempt (stored `prepared` or `running`) ends `WithoutStop(Lost)`
-  — startup never fabricates a live end (INV-034);
+- for an evidence-free turn (no model call), the current attempt ends
+  `WithoutStop(Lost)`; a turn holding a `Prepared` model call ends
+  `WithoutStop(KnownFailure)` with the call closed `known_failed`, and an
+  in-flight or cancellation-requested call ends the attempt `ambiguous` and
+  parks the turn in the `awaiting_model_call_recovery` wait instead of
+  terminalizing — startup never fabricates a live end (INV-034);
 - one `TurnFailed` semantic entry is appended, and the terminal frontier is
   derived as the starting frontier plus that marker (entry payloads are
   [sessions-and-transcript](sessions-and-transcript.md) scope);
@@ -248,17 +260,19 @@ confirmed-interrupt evidence, and the version-one no-automatic-retry policy
 (ADR-0005, [model-call-execution](model-call-execution.md)) makes the recovered
 turn fail rather than silently retry.
 
-A session whose acceptance tail contains pending steering is not terminalized:
-recovery defers with the exact blocking accepted input, and hubd fails startup
-with the blocker count rather than start scheduling (open edge). Identity
-collisions are retried with fresh candidates; infrastructure and fail-closed
-corruption stop startup visibly. The scan is idempotent — a rerun inventories
-only work still active, and a stale observation rolls back as `NoActiveTurn`.
-There is no process-incarnation column and no lease: under the single-hub
-deployment contract, every nonterminal attempt observed at startup is a
-prior-process abandonment (INV-010). That contract is an operational assumption
-with no code enforcement — the advisory singleton guard is an unadopted open
-edge, and a second concurrent hub would violate the premise undetected.
+Only an evidence-free session (active turn with no model call) whose tail
+contains pending steering defers with the blocking accepted input and fails hub
+startup; when the lost turn holds a `Prepared` model call, recovery fails the
+turn and atomically reclassifies each pending-steering row as a fresh queued
+successor turn origin (`reclassified_as_turn_origin`). Identity collisions are
+retried with fresh candidates; infrastructure and fail-closed corruption stop
+startup visibly. The scan is idempotent — a rerun inventories only work still
+active, and a stale observation rolls back as `NoActiveTurn`. There is no
+process-incarnation column and no lease: under the single-hub deployment
+contract, every nonterminal attempt observed at startup is a prior-process
+abandonment (INV-010). That contract is an operational assumption with no code
+enforcement — the advisory singleton guard is an unadopted open edge, and a
+second concurrent hub would violate the premise undetected.
 
 ## Occupied-slot input handling
 
@@ -273,8 +287,12 @@ delivery outcomes implemented here are:
 - `NextSafePoint` records the input as `PendingSteering` with a
   configuration-free binding to the exact active source turn; its acceptance
   position derives from the validated session acceptance tail. No turn is
-  created. No consumption or reclassification path exists yet (open edge), which
-  is why pending steering blocks startup recovery.
+  created. A reclassification path now exists: terminalization of the source
+  turn reclassifies pending steering into a queued successor origin turn that
+  inherits the source turn's configuration
+  (`queued_input_origin.source_configuration_turn_id`); in-turn safe-point
+  consumption still does not exist, and evidence-free startup recovery still
+  defers on pending steering.
 - `AfterCurrentTurn` creates an ordinary queued origin turn with frozen
   configuration and an immutable acceptance position; it fixes no predecessor
   until eligibility.
@@ -319,11 +337,12 @@ ADR-0041's validation pattern is implemented for the scheduling seam: stored
 active phases are conclusions derived from complete owner facts, never trusted
 discriminators.
 
-- Only evidence-free `Prepared` and `Running` current attempts can be
-  reconstituted. `StopRequested`, `AwaitingApproval`, and
-  `AwaitingRecoveryDecision` inputs have no production constructors
-  (compile-fail-tested); a stored proof-shaped payload or bare wait subject
-  cannot become a phase until a complete correlated owner projection exists.
+- `AwaitingRecoveryDecision` now reconstitutes from complete model-call owner
+  facts (an `ambiguous` terminal call correlated with its ended `ambiguous`
+  attempt); `StopRequested` and `AwaitingApproval` inputs still have no
+  production constructors (compile-fail-tested); a stored proof-shaped payload
+  or bare wait subject cannot become a phase until a complete correlated owner
+  projection exists.
 - Every active turn's projection must carry a session-scoped acceptance tail
   anchored at the turn's exact origin and extending gap-free through the
   observed last acceptance position, with unique identities, same- session
@@ -340,8 +359,10 @@ rather than repairs, and no effect is authorized from a failed reconstruction
 
 ## Hub runtime: startup order and shutdown
 
-hubd is the composition root. It reads `DATABASE_URL` from the process
-environment (explicitly provisional; delivery-channel decision is
+hubd is the composition root. It reads `DATABASE_URL`, `SIGNALBOX_CONFIG_FILE`
+(the model-configuration TOML naming provider targets, selections, and aliases),
+and `ANTHROPIC_API_KEY_FILE` from the process environment (explicitly
+provisional; delivery-channel decision is
 [configuration-and-credentials](configuration-and-credentials.md) scope),
 connects, then runs migrate → scan → schedule; any phase failure is a failed
 startup with a classified, key-bearing log line and a failure exit code.
@@ -362,25 +383,26 @@ over the shared pool; no shared locked service instance exists.
 - Interrupt application is deferred: `SubmitInput::Interrupt` against the active
   turn is a nonclaiming failure until the `StopRequested` slice adds application
   and ADR-0027's recorded rejections.
-- `StopRequested`, `AwaitingApproval`, and `AwaitingRecoveryDecision` have no
-  storage or reconstitution; ADR-0041 requires complete owner projections before
-  any evidence-bearing phase lands.
+- `StopRequested` and `AwaitingApproval` have no storage or reconstitution
+  (`AwaitingRecoveryDecision` now has both); ADR-0041 requires complete owner
+  projections before any evidence-bearing phase lands.
 - Direct fatal terminalization (ADR-0031) has sealed domain derivation values
   (`fatal_mismatch` module) but no aggregate transition or commit path.
-- Dispatch fencing (ADR-0009) is unimplemented in this scope: no tool-attempt,
-  dispatch, or generation storage or scheduler dispatch path exists; the
-  workspace's model-runtime crates (ADR-0047) are unwired libraries with no hub,
-  application, or persistence dependency.
+- Dispatch fencing (ADR-0009) is partially implemented: `model_call` storage,
+  the `AttemptDispatchGate`, and the hubd dispatch path now exist; only
+  tool-attempt storage and tool dispatch remain absent.
 - The eligible terminal-failure path (queued turn fixes its start and fails
   without an attempt for a structurally unexecutable configuration, ADR-0027) is
   unimplemented; activation is the only eligibility outcome.
 - Ancestry-derived sessions cannot be scheduled (`UnsupportedSessionAncestry`);
   ancestry-to-first-frontier resolution is unimplemented.
-- Pending safe-point steering has no consumption or reclassification path, and
-  any session with pending steering blocks hub startup entirely until the
-  reclassification slice lands.
-- Startup recovery covers only evidence-free attempts; classification of issued
-  operations, stop-cause recovery, and wait reconstruction await their slices.
+- Pending safe-point steering is reclassified into a queued successor origin at
+  source-turn terminalization; in-turn safe-point consumption is still absent,
+  and only evidence-free startup recovery defers on pending steering.
+- Startup recovery now classifies model-call evidence (a `Prepared` call closes
+  as a known failure; an in-flight call parks the turn as ambiguous in
+  `awaiting_model_call_recovery`); stop-cause recovery and wait reconstruction
+  for the remaining phases still await their slices.
 - The single-hub advisory singleton guard and per-session scan gating (ADR-0010
   refinements) are not adopted; sweep interval and fairness tuning remain
   operational open questions.

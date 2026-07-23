@@ -2,16 +2,15 @@
 
 This page specifies the Layer-1 typed model-runtime boundary as implemented in
 `crates/model-runtime`, `crates/model-runtime-anthropic`, and
-`crates/model-runtime-openai`, verified against `main` at commit `6567423` (the
-merges of #137, #138, #139). It covers the provider-neutral operation,
-observation, and evidence vocabulary; SSE framing; structured-output and tool
-decode; `ScriptedModel`; the two provider adapters; and the in-process
-credential-access boundary. Layer-2 authorization and evidence classification
-(`model-call-execution`), credential channels, delivery, and rotation discipline
-(`configuration-and-credentials`), and the authoritative transcript commit
-(`sessions-and-transcript`) are delegated to companion pages that are planned
-but not yet written; every such delegation below is a forward reference (see
-Open edges).
+`crates/model-runtime-openai`, verified against `main` at commit `c0db59c`. It
+covers the provider-neutral operation, observation, and evidence vocabulary; SSE
+framing; structured-output and tool decode; `ScriptedModel`; the two provider
+adapters; and the in-process credential-access boundary. Layer-2 authorization
+and evidence classification (`model-call-execution`), credential channels,
+delivery, and rotation discipline (`configuration-and-credentials`), and the
+authoritative transcript commit (`sessions-and-transcript`) are delegated to
+companion pages that are planned but not yet written; every such delegation
+below is a forward reference (see Open edges).
 
 ## Boundary and crate layout
 
@@ -317,16 +316,18 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are planned
   awaits an upload-proving transport or evidence source.
 - `CancellationConfirmed` and `SendIncompleteProvenUnacceptable` are
   vocabulary-total variants no in-repository adapter constructs today.
-- No production `CredentialAccess` implementation (the mounted-secret file
-  reader) exists in the workspace; adapters run only against test resolvers.
-- The two-consumer restriction on Layer-1 crates (provider adapters and the hub
-  composition root) remains a review-time contract; no manifest allowlist check
-  exists.
+- A production `CredentialAccess` implementation exists: hubd's
+  `FileCredentialAccess` reads the key file named by `ANTHROPIC_API_KEY_FILE`
+  per resolve and feeds the production `AnthropicRuntime`.
+- The Layer-1 consumer set is now three kinds — provider adapters, the
+  `model-provider-runtime` bridge crate, and the hub composition root; the
+  restriction remains a review-time contract with no manifest allowlist check.
 - ADR-0047 deferred vendor-versus-hand-roll to a Phase-0 substrate audit; the
   landed crates are hand-rolled and no recorded decision closes that question.
-- No Layer-2 consumer wires `ModelRuntime` yet; port conformance is exercised
-  only by adapter unit and loopback tests (the execution service is planned
-  `model-call-execution` scope).
+- A Layer-2 consumer now wires `ModelRuntime`: `crates/model-provider-runtime`'s
+  `RuntimeModelCallProvider` implements the application's `ModelCallProvider`
+  port over any `ModelRuntime<ModelCallId>`, and hubd runs the Anthropic adapter
+  through it behind `ModelCallExecutionService`.
 - The companion pages this page delegates to — `model-call-execution`,
   `sessions-and-transcript`, and `configuration-and-credentials` — do not exist
   in the repository yet; every delegation is a forward reference to planned

@@ -3,7 +3,7 @@
 This page specifies the implemented behavior of session creation and ancestry,
 session-level configuration defaults and their replacement, the long-lived
 session aggregate, semantic transcript entries, accepted-input user content, and
-actor attribution. It was verified against the working tree at commit `6567423`
+actor attribution. It was verified against the working tree at commit `c0db59c`
 (current `main`): `crates/domain` (`session.rs`, `configuration.rs`,
 `replace_session_defaults.rs`, `semantic_entry.rs`, `turn_eligibility.rs`,
 `user_content.rs`, `actor.rs`, `submit_input.rs`), `crates/application`
@@ -192,17 +192,24 @@ its own `SemanticTranscriptEntryId`, a source session, and a closed payload
 and closed:
 
 - `OriginAcceptedInput { accepted_input }` — the exact accepted input whose
-  origin turn became eligible; and
+  origin turn became eligible;
 - `TurnFailed { turn }` — an explicit marker that the turn terminalized as
-  failed.
+  failed;
+- `AssistantText { producing_call, value }` — exact assistant text with
+  outcome-authoritative producing-call provenance;
+- `AssistantToolUse { producing_call, request }` — typed, but storage rejects it
+  (`semantic_transcript_entry_tool_use_unavailable`) until the reserved tool
+  decisions land; and
+- `TurnCompleted { turn }` — the explicit final marker for a completed turn.
 
 There is no generic text, role, metadata, or "other" payload. Entry identity is
 distinct from accepted-input and turn identity (INV-001); equal content in two
 inputs yields distinct entries. Entry construction is sealed inside the domain
-crate — the checked constructor is `pub(crate)` — and has exactly three
-producers, all in `crates/domain/src/turn_eligibility.rs`: the eligibility
-activation, the lost-active-turn failure preparation that builds the
-`TurnFailed` marker, and checked scheduling reconstitution.
+crate — the checked constructor is `pub(crate)` — and its producers live in two
+modules: `turn_eligibility.rs` (eligibility activation, lost-active-turn failure
+preparation, checked scheduling reconstitution) and `model_execution.rs`
+(terminal completion building the `AssistantText` entries plus `TurnCompleted`
+marker, and known-failure closure building `TurnFailed`).
 
 `OriginAcceptedInput` references the accepted input's identity; it never copies
 content. Why: two authoritative content copies could diverge and would need an
@@ -211,13 +218,15 @@ unnecessary precedence rule.
 Storage (`semantic_transcript_entry`, migration
 `202607180004_turn_lifecycle_storage.sql`) enforces globally unique entry
 identity, at most one origin entry per accepted input, at most one failed marker
-per turn, closed payload-shape checks, same-session references, and append-only
-rows (INV-005). The origin-disposition guard arrived later: migration
-`202607180005_occupied_slot_submit_input.sql` — the migration that first admits
-the `pending_steering` disposition — replaces the entry/turn-state trigger so an
-origin entry additionally requires its input's `origin_of` disposition
-(constraint `semantic_transcript_entry_origin_disposition`); pending steering
-can never appear as a semantic origin.
+per turn, at most one completion marker per turn
+(`semantic_transcript_entry_turn_completed_once`, migration `202607220001`,
+which also widened the closed payload-shape checks), same-session references,
+and append-only rows (INV-005). The origin-disposition guard arrived later:
+migration `202607180005_occupied_slot_submit_input.sql` — the migration that
+first admits the `pending_steering` disposition — replaces the entry/turn-state
+trigger so an origin entry additionally requires its input's `origin_of`
+disposition (constraint `semantic_transcript_entry_origin_disposition`); pending
+steering can never appear as a semantic origin.
 
 ### When entries come to exist
 
@@ -238,15 +247,18 @@ practice. Deferred constraint triggers around
 commit bidirectionally: a queued turn carries zero origin or failure entries; a
 started turn carries exactly one correlated origin entry, and its starting
 frontier ends with exactly that entry; a failed turn's terminal frontier is its
-starting frontier plus exactly its failure marker. A writer that diverges from
-the transactional practice above is rejected at the commit boundary.
+starting frontier plus exactly its failure marker; a completed turn's terminal
+frontier is its starting frontier plus its producing call's assistant entries
+plus exactly its completion marker last; and a refused turn's terminal frontier
+is a distinct equal-content copy of its starting frontier (migration
+`202607220001` redefines the assertion). A writer that diverges from the
+transactional practice above is rejected at the commit boundary.
 
-The one implemented `TurnFailed` producer is startup recovery: the scan's
-transaction that terminalizes a lost active turn as failed appends the marker
-after every earlier committed entry and emits a `turn_failed` update event
-atomically. A later successor's starting frontier retains the failed
-predecessor's exact terminal prefix, including that marker. Turn and attempt
-lifecycle doctrine is
+`TurnFailed` now has two producers — the model-call known-failure closure and
+startup recovery — each appending the marker after every earlier committed entry
+and emitting a `turn_failed` update event atomically. A later successor's
+starting frontier retains the failed predecessor's exact terminal prefix,
+including that marker. Turn and attempt lifecycle doctrine is
 [ADR-0004](../decisions/0004-turn-and-attempt-lifecycle.md), the entry commit
 boundaries are
 [ADR-0036](../decisions/0036-initial-semantic-transcript-entries.md), and
@@ -268,8 +280,10 @@ policy; search or display projections may normalize without changing accepted
 intent.
 
 The accepted input owns the one immutable authoritative content value; the
-`accepted_input` row is append-only, and semantic history references it rather
-than copying it (INV-005, INV-007).
+`accepted_input` row admits exactly one guarded update — pending-steering
+reclassification to `reclassified_as_turn_origin`, which changes only the
+disposition and fresh origin turn, never content (migration `202607220001`) —
+and semantic history references it rather than copying it (INV-005, INV-007).
 
 ### Bounds
 
@@ -333,11 +347,11 @@ no implemented boundary constructs them.
   are recorded as open questions in ADR-0003.
 - ADR-0027/ADR-0036's static eligible-failure path (terminalize at eligibility
   without an attempt, committing origin plus failed marker in one transaction)
-  has no implemented producer; startup recovery is the only committed
-  `TurnFailed` source today.
-- Assistant-content and completed-turn semantic entries are accepted design
-  (ADR-0042) with no implementation; refusal, cancellation, reconciliation,
-  steering, tool, approval, and delegation entry variants remain open.
+  has no implemented producer; startup recovery and the model-call known-failure
+  closure are the committed `TurnFailed` sources today.
+- Assistant-text and completed-turn semantic entries are implemented (ADR-0042);
+  the tool-use variant is typed but storage-blocked; refusal, cancellation,
+  reconciliation, steering, approval, and delegation entry variants remain open.
 - Provider-prompt and client transcript rendering projections over semantic
   entries are not implemented.
 - `ReplaceSessionDefaults` carries no `actor` field although ADR-0039 slated it
