@@ -90,8 +90,9 @@ not a historical fact.
 
 Session configuration defaults are model-selection-only in the baseline; the
 selection algebra, configuration freeze at acceptance, and per-turn effective
-configuration are owned by [identity-and-commands](identity-and-commands.md) and
-[configuration-and-credentials](configuration-and-credentials.md). Defaults are
+configuration are owned by
+[configuration-and-credentials](configuration-and-credentials.md) and
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md). Defaults are
 immutable versions with a positive `u64` ordinal:
 
 - session creation establishes version one;
