@@ -1,7 +1,6 @@
 //! Terminal client for the closed local Signalbox process protocol.
 
 use std::{
-    collections::HashSet,
     ffi::OsString,
     io::{Read, Write},
     path::PathBuf,
@@ -11,12 +10,12 @@ use std::{
 use arguments::{Command, ParseOutcome};
 use connection::ProcessClient;
 use error::ClientError;
-use presentation::{Output, TranscriptEntryIdentity};
+use presentation::{Output, SnapshotSelection};
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ErrorCode, InputContent,
     ModelCallDisposition, ModelCallState, ModelSelection, ServerMessage, SessionEvent, TurnState,
 };
-use transcript::{TranscriptSnapshot, read_snapshot};
+use transcript::{SnapshotIdentitySet, SnapshotRecord, TranscriptSnapshot, read_snapshot};
 use uuid::Uuid;
 
 mod arguments;
@@ -36,8 +35,8 @@ pub async fn run(
     stderr: &mut dyn Write,
 ) -> ExitCode {
     let parsed = match arguments::parse(arguments) {
-        Ok(ParseOutcome::Help) => {
-            return if writeln!(stdout, "{}", arguments::USAGE).is_ok() {
+        Ok(ParseOutcome::Help(help)) => {
+            return if write!(stdout, "{help}").is_ok() {
                 ExitCode::SUCCESS
             } else {
                 ExitCode::FAILURE
@@ -45,7 +44,7 @@ pub async fn run(
         }
         Ok(ParseOutcome::Run(arguments)) => arguments,
         Err(error) => {
-            let _ = writeln!(stderr, "error: {error}\n\n{}", arguments::USAGE);
+            let _ = write!(stderr, "{error}");
             return ExitCode::from(2);
         }
     };
@@ -100,8 +99,8 @@ async fn execute(
             .await
         }
         Command::Transcript { session_id } => {
-            let snapshot = transcript(&mut client, session_id).await?;
-            output.snapshot(&snapshot)?;
+            let mut snapshot = transcript(&mut client, session_id).await?;
+            output.snapshot(&mut snapshot)?;
             Ok(())
         }
         Command::Follow { session_id } => follow(&mut client, &mut output, session_id).await,
@@ -254,18 +253,14 @@ async fn send(
 
     match await_turn_terminal(client, session_id, turn_id).await? {
         TurnTerminal::Completed => {
-            let snapshot = transcript(client, session_id).await?;
-            if !matches!(
-                snapshot.turn_state(turn_id),
-                Some(TurnState::Completed { .. })
-            ) {
+            let mut snapshot = transcript(client, session_id).await?;
+            let state = snapshot.turn_state(turn_id)?;
+            if !matches!(state.as_ref(), Some(TurnState::Completed { .. })) {
                 return Err(ClientError::Protocol(
                     "terminal reread did not retain completed turn state",
                 ));
             }
-            for text in snapshot.assistant_texts(turn_id)? {
-                output.assistant_text(text)?;
-            }
+            write_assistant_texts(&mut snapshot, output, turn_id)?;
             Ok(())
         }
         TurnTerminal::Failed => Err(ClientError::TurnFailed),
@@ -289,8 +284,9 @@ async fn await_turn_terminal(
         let mut connection = client
             .request(ClientRequest::FollowSession { session_id })
             .await?;
-        let snapshot = read_snapshot(&mut connection, session_id).await?;
-        if let Some(terminal) = terminal_snapshot_state(snapshot.turn_state(turn_id))? {
+        let mut snapshot = read_snapshot(&mut connection, session_id).await?;
+        let state = snapshot.turn_state(turn_id)?;
+        if let Some(terminal) = terminal_snapshot_state(state.as_ref())? {
             return Ok(terminal);
         }
         let mut observed_cursor = snapshot.cursor();
@@ -309,9 +305,9 @@ async fn await_turn_terminal(
                         return Ok(terminal);
                     }
                     if model_call_recovery_transition(&event, turn_id) {
-                        let refreshed = transcript(client, session_id).await?;
-                        let Some(terminal) =
-                            terminal_snapshot_state(refreshed.turn_state(turn_id))?
+                        let mut refreshed = transcript(client, session_id).await?;
+                        let refreshed_state = refreshed.turn_state(turn_id)?;
+                        let Some(terminal) = terminal_snapshot_state(refreshed_state.as_ref())?
                         else {
                             return Err(ClientError::Protocol(
                                 "an ambiguous model call did not produce recovery or terminal state",
@@ -406,13 +402,13 @@ async fn follow(
     output: &mut Output<'_>,
     session_id: CanonicalUuid,
 ) -> Result<(), ClientError> {
-    let mut displayed_entries = HashSet::<TranscriptEntryIdentity>::new();
+    let mut displayed_entries = SnapshotIdentitySet::new()?;
     loop {
         let mut connection = client
             .request(ClientRequest::FollowSession { session_id })
             .await?;
-        let snapshot = read_snapshot(&mut connection, session_id).await?;
-        output.snapshot_new_entries(&snapshot, &mut displayed_entries)?;
+        let mut snapshot = read_snapshot(&mut connection, session_id).await?;
+        output.followed_snapshot(&mut snapshot, &mut displayed_entries)?;
         let mut observed_cursor = snapshot.cursor();
         loop {
             match connection.message().await? {
@@ -426,12 +422,13 @@ async fn follow(
                     }
                     observed_cursor = cursor.value();
                     output.event(observed_cursor, session_id, &event)?;
-                    if terminal_event_state_for_any_turn(&event) {
-                        let refreshed = transcript(client, session_id).await?;
-                        output.snapshot_new_entries(&refreshed, &mut displayed_entries)?;
-                        // Only consumed follow frames advance this cursor. The
-                        // side snapshot may be newer than buffered transition
-                        // events that still require ordered presentation.
+                    if let Some(selection) = terminal_snapshot_selection(&event) {
+                        let mut refreshed = transcript(client, session_id).await?;
+                        output.terminal_material(
+                            &mut refreshed,
+                            &mut displayed_entries,
+                            selection,
+                        )?;
                     }
                 }
                 ServerMessage::Error {
@@ -453,13 +450,68 @@ async fn follow(
     }
 }
 
-fn terminal_event_state_for_any_turn(event: &SessionEvent) -> bool {
-    matches!(
-        event,
-        SessionEvent::TurnCompleted { .. }
-            | SessionEvent::TurnFailed { .. }
-            | SessionEvent::TurnRefused { .. }
-    )
+fn terminal_snapshot_selection(event: &SessionEvent) -> Option<SnapshotSelection> {
+    match event {
+        SessionEvent::TurnCompleted {
+            turn_id,
+            model_call_id,
+            ..
+        } => Some(SnapshotSelection::Completed {
+            turn_id: *turn_id,
+            model_call_id: *model_call_id,
+        }),
+        SessionEvent::TurnFailed { turn_id, .. } => {
+            Some(SnapshotSelection::Failed { turn_id: *turn_id })
+        }
+        SessionEvent::TurnRefused {
+            turn_id,
+            model_call_id,
+            ..
+        } => Some(SnapshotSelection::Refused {
+            turn_id: *turn_id,
+            model_call_id: *model_call_id,
+        }),
+        SessionEvent::SessionCreated {}
+        | SessionEvent::InputAccepted { .. }
+        | SessionEvent::TurnActivated { .. }
+        | SessionEvent::ModelCallTransition { .. } => None,
+    }
+}
+
+fn write_assistant_texts(
+    snapshot: &mut TranscriptSnapshot,
+    output: &mut Output<'_>,
+    selected_turn: CanonicalUuid,
+) -> Result<(), ClientError> {
+    let mut selected_entry = false;
+    for record in snapshot.replay()? {
+        match record? {
+            SnapshotRecord::Entry(entry) => {
+                selected_entry = matches!(
+                    entry.kind,
+                    transcript::SnapshotEntryKind::Text(
+                        signalbox_process_protocol::TranscriptTextEntry::Assistant {
+                            turn_id,
+                            ..
+                        }
+                    ) if turn_id == selected_turn
+                );
+            }
+            SnapshotRecord::Content(content) if selected_entry => {
+                let ends_with_newline = content.content.as_str().ends_with('\n');
+                output.assistant_text_fragment(
+                    content.content.as_str(),
+                    content.final_fragment,
+                    ends_with_newline,
+                )?;
+                if content.final_fragment {
+                    selected_entry = false;
+                }
+            }
+            SnapshotRecord::Turn(_) | SnapshotRecord::Content(_) => {}
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

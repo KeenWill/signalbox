@@ -12,7 +12,16 @@ name = "signalbox"
 path = "src/main.rs"
 
 [dependencies]
+clap = { version = "4.6.4", default-features = false, features = [
+    "derive",
+    "error-context",
+    "help",
+    "std",
+    "suggestions",
+    "usage",
+] }
 signalbox-process-protocol = { path = "../../crates/process-protocol" }
+tempfile = "3.27.0"
 tokio = { version = "1.53.0", default-features = false, features = [
     "io-util",
     "macros",

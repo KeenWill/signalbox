@@ -1,15 +1,8 @@
-use std::{collections::VecDeque, ffi::OsString, fmt, path::PathBuf};
+use std::{ffi::OsString, fmt, iter, path::PathBuf};
 
+use clap::{ArgGroup, Args as ClapArgs, CommandFactory, Parser, Subcommand, error::ErrorKind};
 use signalbox_process_protocol::{CanonicalU64, CanonicalUuid, CommandId, ModelSelection};
 use uuid::Uuid;
-
-pub(crate) const USAGE: &str = "\
-usage:
-  signalbox [--socket PATH] [--raw-output] create (--model UUID | --alias UUID) [--command-id UUID]
-  signalbox [--socket PATH] [--raw-output] list
-  signalbox [--socket PATH] [--raw-output] send SESSION [--command-id UUID --defaults-version DECIMAL]
-  signalbox [--socket PATH] [--raw-output] transcript SESSION
-  signalbox [--socket PATH] [--raw-output] follow SESSION";
 
 #[derive(Debug)]
 pub(crate) struct Arguments {
@@ -40,259 +33,177 @@ pub(crate) enum Command {
 
 #[derive(Debug)]
 pub(crate) enum ParseOutcome {
-    Help,
+    Help(String),
     Run(Arguments),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct UsageError {
-    message: &'static str,
-}
-
-impl UsageError {
-    const fn new(message: &'static str) -> Self {
-        Self { message }
-    }
-}
+#[derive(Debug)]
+pub(crate) struct UsageError(clap::Error);
 
 impl fmt::Display for UsageError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.message)
+        self.0.fmt(formatter)
     }
 }
 
 impl std::error::Error for UsageError {}
 
+#[derive(Debug, Parser)]
+#[command(
+    name = "signalbox",
+    about = "Terminal client for the local Signalbox process protocol",
+    disable_version_flag = true,
+    args_override_self = false
+)]
+struct Cli {
+    /// Override SIGNALBOX_SOCKET_PATH.
+    #[arg(long, value_name = "PATH")]
+    socket: Option<PathBuf>,
+    /// Write process-derived text without terminal-safe escaping.
+    #[arg(long)]
+    raw_output: bool,
+    #[command(subcommand)]
+    command: CliCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum CliCommand {
+    /// Create a session.
+    Create(CreateArguments),
+    /// List current sessions.
+    List,
+    /// Submit standard input and print the reply after completion.
+    Send(SendArguments),
+    /// Print one authoritative session transcript.
+    Transcript(SessionArguments),
+    /// Print a snapshot and follow durable session updates.
+    Follow(SessionArguments),
+}
+
+#[derive(Debug, ClapArgs)]
+#[command(group(
+    ArgGroup::new("selection")
+        .required(true)
+        .multiple(false)
+        .args(["model", "alias"])
+))]
+struct CreateArguments {
+    /// Select a model configuration directly.
+    #[arg(long, value_name = "UUID", value_parser = canonical_uuid)]
+    model: Option<CanonicalUuid>,
+    /// Select a configured model alias.
+    #[arg(long, value_name = "UUID", value_parser = canonical_uuid)]
+    alias: Option<CanonicalUuid>,
+    /// Reuse an exact non-reserved durable command identity.
+    #[arg(long, value_name = "UUID", value_parser = command_id)]
+    command_id: Option<CommandId>,
+}
+
+#[derive(Debug, ClapArgs)]
+struct SendArguments {
+    /// Session to receive standard-input content.
+    #[arg(value_name = "SESSION", value_parser = canonical_uuid)]
+    session_id: CanonicalUuid,
+    /// Reuse an exact non-reserved durable command identity.
+    #[arg(
+        long,
+        value_name = "UUID",
+        requires = "defaults_version",
+        value_parser = command_id
+    )]
+    command_id: Option<CommandId>,
+    /// Exact defaults version paired with a recovery command identity.
+    #[arg(
+        long,
+        value_name = "DECIMAL",
+        requires = "command_id",
+        value_parser = canonical_u64
+    )]
+    defaults_version: Option<CanonicalU64>,
+}
+
+#[derive(Debug, ClapArgs)]
+struct SessionArguments {
+    /// Selected session.
+    #[arg(value_name = "SESSION", value_parser = canonical_uuid)]
+    session_id: CanonicalUuid,
+}
+
 pub(crate) fn parse(
     values: impl IntoIterator<Item = OsString>,
 ) -> Result<ParseOutcome, UsageError> {
-    let mut values = values.into_iter().collect::<VecDeque<_>>();
-    let mut socket = None;
-    let mut raw_output = false;
-
-    loop {
-        match front_text(&values)? {
-            Some("--help" | "-h") => return Ok(ParseOutcome::Help),
-            Some("--socket") => {
-                values.pop_front();
-                if socket.is_some() {
-                    return Err(UsageError::new("--socket may be supplied only once"));
-                }
-                socket = Some(PathBuf::from(
-                    values
-                        .pop_front()
-                        .ok_or(UsageError::new("--socket requires a path"))?,
-                ));
-            }
-            Some("--raw-output") => {
-                values.pop_front();
-                if raw_output {
-                    return Err(UsageError::new("--raw-output may be supplied only once"));
-                }
-                raw_output = true;
-            }
-            Some(value) if value.starts_with('-') => {
-                return Err(UsageError::new("unknown global option"));
-            }
-            _ => break,
+    let values = iter::once(OsString::from("signalbox")).chain(values);
+    let parsed = match Cli::try_parse_from(values) {
+        Ok(parsed) => parsed,
+        Err(error) if error.kind() == ErrorKind::DisplayHelp => {
+            return Ok(ParseOutcome::Help(error.to_string()));
         }
-    }
-
-    let command = text(
-        values
-            .pop_front()
-            .ok_or(UsageError::new("a command is required"))?,
-    )?;
-    let command = match command.as_str() {
-        "create" => parse_create(&mut values)?,
-        "list" => {
-            require_empty(&values)?;
-            Command::List
-        }
-        "send" => parse_send(&mut values)?,
-        "transcript" => parse_session_only(&mut values, false)?,
-        "follow" => parse_session_only(&mut values, true)?,
-        _ => return Err(UsageError::new("unknown command")),
+        Err(error) => return Err(UsageError(error)),
+    };
+    let command = match parsed.command {
+        CliCommand::Create(arguments) => Command::Create {
+            selection: match (arguments.model, arguments.alias) {
+                (Some(selection_id), None) => ModelSelection::Direct { selection_id },
+                (None, Some(alias_id)) => ModelSelection::Alias { alias_id },
+                (None, None) | (Some(_), Some(_)) => {
+                    return Err(UsageError(Cli::command().error(
+                        ErrorKind::ArgumentConflict,
+                        "create requires exactly one of --model or --alias",
+                    )));
+                }
+            },
+            command_id: arguments.command_id,
+        },
+        CliCommand::List => Command::List,
+        CliCommand::Send(arguments) => Command::Send {
+            session_id: arguments.session_id,
+            command_id: arguments.command_id,
+            defaults_version: arguments.defaults_version,
+        },
+        CliCommand::Transcript(arguments) => Command::Transcript {
+            session_id: arguments.session_id,
+        },
+        CliCommand::Follow(arguments) => Command::Follow {
+            session_id: arguments.session_id,
+        },
     };
     Ok(ParseOutcome::Run(Arguments {
-        socket,
-        raw_output,
+        socket: parsed.socket,
+        raw_output: parsed.raw_output,
         command,
     }))
 }
 
-fn parse_create(values: &mut VecDeque<OsString>) -> Result<Command, UsageError> {
-    let mut selection = None;
-    let mut command_id = None;
-    while let Some(option) = values.pop_front() {
-        match text(option)?.as_str() {
-            "--model" => {
-                set_selection(
-                    &mut selection,
-                    ModelSelection::Direct {
-                        selection_id: canonical_uuid(take_text(
-                            values,
-                            "--model requires a UUID",
-                        )?)?,
-                    },
-                )?;
-            }
-            "--alias" => {
-                set_selection(
-                    &mut selection,
-                    ModelSelection::Alias {
-                        alias_id: canonical_uuid(take_text(values, "--alias requires a UUID")?)?,
-                    },
-                )?;
-            }
-            "--command-id" => {
-                if command_id.is_some() {
-                    return Err(UsageError::new("--command-id may be supplied only once"));
-                }
-                command_id = Some(command_id_value(take_text(
-                    values,
-                    "--command-id requires a UUID",
-                )?)?);
-            }
-            _ => return Err(UsageError::new("unknown create option")),
-        }
-    }
-    Ok(Command::Create {
-        selection: selection.ok_or(UsageError::new(
-            "create requires exactly one of --model or --alias",
-        ))?,
-        command_id,
-    })
-}
-
-fn set_selection(
-    current: &mut Option<ModelSelection>,
-    selection: ModelSelection,
-) -> Result<(), UsageError> {
-    if current.replace(selection).is_some() {
-        Err(UsageError::new(
-            "create requires exactly one of --model or --alias",
-        ))
-    } else {
-        Ok(())
-    }
-}
-
-fn parse_send(values: &mut VecDeque<OsString>) -> Result<Command, UsageError> {
-    let session_id = canonical_uuid(take_text(values, "send requires a session UUID")?)?;
-    let mut command_id = None;
-    let mut defaults_version = None;
-    while let Some(option) = values.pop_front() {
-        match text(option)?.as_str() {
-            "--command-id" => {
-                if command_id.is_some() {
-                    return Err(UsageError::new("--command-id may be supplied only once"));
-                }
-                command_id = Some(command_id_value(take_text(
-                    values,
-                    "--command-id requires a UUID",
-                )?)?);
-            }
-            "--defaults-version" => {
-                if defaults_version.is_some() {
-                    return Err(UsageError::new(
-                        "--defaults-version may be supplied only once",
-                    ));
-                }
-                defaults_version = Some(canonical_u64(take_text(
-                    values,
-                    "--defaults-version requires a decimal value",
-                )?)?);
-            }
-            _ => return Err(UsageError::new("unknown send option")),
-        }
-    }
-    if command_id.is_some() != defaults_version.is_some() {
-        return Err(UsageError::new(
-            "--command-id and --defaults-version must be supplied together",
-        ));
-    }
-    Ok(Command::Send {
-        session_id,
-        command_id,
-        defaults_version,
-    })
-}
-
-fn parse_session_only(
-    values: &mut VecDeque<OsString>,
-    follow: bool,
-) -> Result<Command, UsageError> {
-    let session_id = canonical_uuid(take_text(values, "a session UUID is required")?)?;
-    require_empty(values)?;
-    Ok(if follow {
-        Command::Follow { session_id }
-    } else {
-        Command::Transcript { session_id }
-    })
-}
-
-fn take_text(values: &mut VecDeque<OsString>, missing: &'static str) -> Result<String, UsageError> {
-    text(values.pop_front().ok_or(UsageError::new(missing))?)
-}
-
-fn front_text(values: &VecDeque<OsString>) -> Result<Option<&str>, UsageError> {
-    values
-        .front()
-        .map(|value| {
-            value
-                .to_str()
-                .ok_or(UsageError::new("arguments must be valid UTF-8"))
-        })
-        .transpose()
-}
-
-fn text(value: OsString) -> Result<String, UsageError> {
-    value
-        .into_string()
-        .map_err(|_| UsageError::new("arguments must be valid UTF-8"))
-}
-
-fn canonical_uuid(value: String) -> Result<CanonicalUuid, UsageError> {
-    let parsed = Uuid::parse_str(&value).map_err(|_| UsageError::new("UUID is invalid"))?;
+fn canonical_uuid(value: &str) -> Result<CanonicalUuid, String> {
+    let parsed = Uuid::parse_str(value).map_err(|_| "UUID is invalid".to_owned())?;
     if parsed.hyphenated().to_string() != value {
-        return Err(UsageError::new(
-            "UUID must be lowercase canonical hyphenated text",
-        ));
+        return Err("UUID must be lowercase canonical hyphenated text".to_owned());
     }
     Ok(CanonicalUuid::from_uuid(parsed))
 }
 
-fn command_id_value(value: String) -> Result<CommandId, UsageError> {
+fn command_id(value: &str) -> Result<CommandId, String> {
     CommandId::try_from_uuid(canonical_uuid(value)?.into_uuid())
-        .map_err(|_| UsageError::new("command UUID uses a reserved value"))
+        .map_err(|_| "command UUID uses a reserved value".to_owned())
 }
 
-fn canonical_u64(value: String) -> Result<CanonicalU64, UsageError> {
+fn canonical_u64(value: &str) -> Result<CanonicalU64, String> {
     if value.is_empty()
         || (value.len() > 1 && value.starts_with('0'))
         || !value.bytes().all(|byte| byte.is_ascii_digit())
     {
-        return Err(UsageError::new(
-            "decimal value must use its shortest unsigned spelling",
-        ));
+        return Err("decimal value must use its shortest unsigned spelling".to_owned());
     }
     let parsed = value
         .parse::<u64>()
-        .map_err(|_| UsageError::new("decimal value exceeds the unsigned 64-bit range"))?;
+        .map_err(|_| "decimal value exceeds the unsigned 64-bit range".to_owned())?;
     Ok(CanonicalU64::new(parsed))
-}
-
-fn require_empty(values: &VecDeque<OsString>) -> Result<(), UsageError> {
-    if values.is_empty() {
-        Ok(())
-    } else {
-        Err(UsageError::new("unexpected command argument"))
-    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+
     use super::{Command, ParseOutcome, parse};
 
     #[test]
@@ -340,5 +251,14 @@ mod tests {
             .is_err()
         );
         assert!(parse(["create"].map(Into::into)).is_err());
+    }
+
+    #[test]
+    fn help_is_generated_by_clap() {
+        let Ok(ParseOutcome::Help(help)) = parse([OsString::from("--help")]) else {
+            panic!("help must be recognized");
+        };
+        assert!(help.contains("Usage: signalbox"));
+        assert!(help.contains("Commands:"));
     }
 }

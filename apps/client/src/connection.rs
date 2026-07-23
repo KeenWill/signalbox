@@ -71,12 +71,16 @@ impl Connection {
     }
 
     pub(crate) async fn message(&mut self) -> Result<ServerMessage, ClientError> {
+        Ok(self.frame().await?.message().clone())
+    }
+
+    pub(crate) async fn frame(&mut self) -> Result<ServerFrame, ClientError> {
         let line = read_frame_line(&mut self.reader).await?;
         let frame: ServerFrame = decode_server_line(&line)?;
         if frame.request_id() != self.request_id {
             return Err(ClientError::Protocol("response request identity mismatch"));
         }
-        Ok(frame.message().clone())
+        Ok(frame)
     }
 }
 
