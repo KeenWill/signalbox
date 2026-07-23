@@ -2664,13 +2664,16 @@ fn reconstitute_inner(
                     } if expected_active_turn == consumed.source_turn
                 )
         });
-        let model_call_matches = model_call_inputs.get(call).zip(source_record).is_some_and(
-            |(model_call, record)| {
-                let lifecycle_matches = match &record.state {
+        let model_call_matches =
+            model_call_inputs
+                .get(call)
+                .zip(source_record)
+                .is_some_and(|(model_call, record)| {
+                    let lifecycle_matches = match &record.state {
                     AcceptedInputTurnSchedulingRecordState::Queued => false,
                     AcceptedInputTurnSchedulingRecordState::Active { phase, .. } => {
                         model_call.attempt() == phase.current_attempt
-                            && match (phase.state, model_call.state()) {
+                            && match (&phase.state, model_call.state()) {
                                 (
                                     StoredActiveTurnPhase::Prepared,
                                     crate::ModelCallReconstitutionState::Prepared,
@@ -2682,7 +2685,7 @@ fn reconstitute_inner(
                                 (
                                     StoredActiveTurnPhase::StopRequested { call, .. },
                                     crate::ModelCallReconstitutionState::CancellationRequested,
-                                ) => call == model_call.id(),
+                                ) => *call == model_call.id(),
                                 (
                                     StoredActiveTurnPhase::AwaitingModelCallRecovery {
                                         call, ..
@@ -2690,7 +2693,7 @@ fn reconstitute_inner(
                                     crate::ModelCallReconstitutionState::Terminal(
                                         ModelCallDisposition::Ambiguous,
                                     ),
-                                ) => call == model_call.id(),
+                                ) => *call == model_call.id(),
                                 _ => false,
                             }
                     }
@@ -2760,12 +2763,12 @@ fn reconstitute_inner(
                                 )
                     }
                 };
-                model_call.turn() == consumed.source_turn
-                    && semantic_source_turn == consumed.source_turn
-                    && model_call.selection() == *record.origin_configuration.effective().model()
-                    && lifecycle_matches
-            },
-        );
+                    model_call.turn() == consumed.source_turn
+                        && semantic_source_turn == consumed.source_turn
+                        && model_call.selection()
+                            == *record.origin_configuration.effective().model()
+                        && lifecycle_matches
+                });
         if accepted_input_turns.contains_key(&accepted_input)
             || !source_record_matches
             || !model_call_matches
@@ -2828,7 +2831,8 @@ fn reconstitute_inner(
                 starting_frontier, ..
             }
             | AcceptedInputTurnSchedulingRecordState::TerminalReconciliationRequired {
-                starting_frontier, ..
+                starting_frontier,
+                ..
             } => Some(starting_frontier),
         };
         let exact_frontier_matches = starting_frontier
@@ -6883,6 +6887,7 @@ mod tests {
         let origin_entry = FailedTerminalReconstitutionFacts::matching_origin_entry();
         let failure_entry = FailedTerminalReconstitutionFacts::matching_failure_entry();
         let steering_entry = semantic_entry(32);
+        let consumed = accepted_origin(2);
         let call_frontier = frontier(42);
         let terminal_frontier = FailedTerminalReconstitutionFacts::matching_terminal_frontier();
         let call_id = model_call_id(50);
@@ -6893,7 +6898,7 @@ mod tests {
                 steering_entry.id(),
                 session.id(),
                 InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput {
-                    accepted_input: accepted_input_id(70),
+                    accepted_input: consumed.accepted_input(),
                     source_turn: failed.turn(),
                 },
             ));
@@ -6928,6 +6933,15 @@ mod tests {
                 )],
                 vec![call],
             )
+            .with_consumed_steering_facts(vec![ConsumedSteeringReconstitutionInput::new(
+                session.id(),
+                AcceptedInputLifecycle::new(
+                    consumed.accepted_input(),
+                    AcceptedInputDisposition::ConsumedAsSteering { call: call_id },
+                ),
+                consumed.position(),
+                failed.turn(),
+            )])
             .reconstitute()
             .expect("failed terminal call provenance is fully correlated");
         assert_eq!(
@@ -7202,7 +7216,8 @@ mod tests {
     fn s02_s04_s09_inv005_inv009_inv015_completed_frontier_becomes_successor_prefix() {
         let session = current_session();
         let predecessor = accepted_origin(1);
-        let successor = accepted_origin(2);
+        let consumed = accepted_origin(2);
+        let successor = accepted_origin(3);
         let origin_entry = semantic_entry(30);
         let steering_entry = semantic_entry(31);
         let assistant_entry = semantic_entry(32);
@@ -7290,7 +7305,7 @@ mod tests {
                 steering_entry.id(),
                 session.id(),
                 InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput {
-                    accepted_input: accepted_input_id(70),
+                    accepted_input: consumed.accepted_input(),
                     source_turn: predecessor.turn(),
                 },
             );
@@ -7350,6 +7365,17 @@ mod tests {
                 )],
                 vec![call],
             )
+            .with_consumed_steering_facts(vec![ConsumedSteeringReconstitutionInput::new(
+                session.id(),
+                AcceptedInputLifecycle::new(
+                    consumed.accepted_input(),
+                    AcceptedInputDisposition::ConsumedAsSteering {
+                        call: completing_call,
+                    },
+                ),
+                consumed.position(),
+                predecessor.turn(),
+            )])
             .reconstitute()
             .expect("the completed predecessor is fully correlated");
 
@@ -7540,7 +7566,8 @@ mod tests {
     fn s02_s04_s09_inv005_inv009_inv015_refused_frontier_becomes_successor_prefix() {
         let session = current_session();
         let predecessor = accepted_origin(1);
-        let successor = accepted_origin(2);
+        let consumed = accepted_origin(2);
+        let successor = accepted_origin(3);
         let origin_entry = semantic_entry(30);
         let steering_entry = semantic_entry(31);
         let starting_frontier = frontier(40);
@@ -7627,7 +7654,7 @@ mod tests {
                 steering_entry.id(),
                 session.id(),
                 InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput {
-                    accepted_input: accepted_input_id(70),
+                    accepted_input: consumed.accepted_input(),
                     source_turn: predecessor.turn(),
                 },
             );
@@ -7658,6 +7685,17 @@ mod tests {
                 )],
                 vec![call],
             )
+            .with_consumed_steering_facts(vec![ConsumedSteeringReconstitutionInput::new(
+                session.id(),
+                AcceptedInputLifecycle::new(
+                    consumed.accepted_input(),
+                    AcceptedInputDisposition::ConsumedAsSteering {
+                        call: refusing_call,
+                    },
+                ),
+                consumed.position(),
+                predecessor.turn(),
+            )])
             .reconstitute()
             .expect("the refused predecessor is fully correlated");
 

@@ -1893,7 +1893,7 @@ fn prepared_matches_stopped(
                         == execution.origin_content(*accepted_input)
                 }
                 _ => true,
-             })
+            })
 }
 
 async fn lock_session(
