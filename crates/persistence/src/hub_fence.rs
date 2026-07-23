@@ -9,7 +9,7 @@ use sqlx::{
     postgres::{PgConnectOptions, PgPoolOptions},
 };
 
-use crate::MIGRATOR;
+use crate::{MIGRATOR, lock_inventory};
 
 /// Migration that first establishes the durable hub-fence singleton.
 pub const HUB_FENCE_MIGRATION_VERSION: i64 = 202607230001;
@@ -44,14 +44,9 @@ pub async fn advance_hub_fence(
     connection: &mut PgConnection,
 ) -> Result<HubFenceGeneration, HubFenceError> {
     let mut transaction = connection.begin().await?;
-    let stored: Option<Decimal> = sqlx::query_scalar(
-        "SELECT generation
-           FROM hub_fence_state
-          WHERE singleton
-          FOR UPDATE",
-    )
-    .fetch_optional(&mut *transaction)
-    .await?;
+    let stored: Option<Decimal> = sqlx::query_scalar(lock_inventory::HUB_FENCE_GENERATION)
+        .fetch_optional(&mut *transaction)
+        .await?;
     let prior = stored
         .ok_or(HubFenceCorruption::MissingState)?
         .to_u64()
