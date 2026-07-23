@@ -1,18 +1,19 @@
 # Living specification
 
-These pages describe **implemented behavior**, verified against the code refs
-named in each page's preamble. They are the phase-1 draft of the documentation
-restructure decided 2026-07-22: additive only. The ADR corpus under
-[docs/decisions](../decisions) remains the record of authority until phase 2
-lands (satellite-doc slimming, AGENTS.md and reviewer-config repointing, ADR
-retirement with this mapping as the pointer). During this deliberately short
-coexistence window the pages are descriptive mirrors, not a second authority:
-where a page and an ADR disagree, the ADR corpus wins and the page carries the
-defect.
+These pages, together with [invariants.md](../invariants.md) (laws, with
+INV-tagged tests as the enforcement of record) and
+[domain-spine.md](../domain-spine.md) (public API shapes), are the normative
+specification of Signalbox's implemented behavior; `AGENTS.md` defines the
+authority model. Each page names the code ref it was last verified against and
+is updated in the same pull request as any behavior change it describes. The
+historical ADR corpus these pages distilled is retired: the
+[ADR mapping](#adr-mapping) below resolves every record number to its
+destination, and git history is the archive.
 
 Conventions: pages state implemented behavior only; load-bearing design choices
 carry one-sentence "Why:" rationales; invariant references use INV tags resolved
-in [invariants.md](../invariants.md); deferred or undecided items appear in each
+in [invariants.md](../invariants.md); deferred or undecided items are recorded
+in [open-questions.md](../open-questions.md) and surfaced as pointers in each
 page's "Open edges" section; a topic normatively owned by a sibling page is
 linked, never restated.
 

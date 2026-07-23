@@ -1,13 +1,37 @@
 # Decision log
 
-An append-only, dated record of decisions below foundation weight, newest first.
-Each entry states context, the decision, rejected alternatives, and what it
-affects, in roughly ten to twenty lines. Foundation-weight changes — altering
-accepted ADR semantics, moving a boundary between domain, storage, wire, or
-framework representations, weakening an invariant, or introducing a technology
-that constrains several components — require a full record under
-[decisions/](decisions/README.md) instead. Unresolved questions live in
+An append-only, dated record of recorded decisions, newest first. Each entry
+states context, the decision, rejected alternatives, and what it affects, in
+roughly ten to twenty lines. Foundation-weight changes — changing normative
+semantics in a `docs/spec/` page beyond recording implemented behavior, moving a
+boundary between domain, storage, wire, or framework representations, weakening
+an invariant, or introducing a technology that constrains several components —
+are proposed as a specification diff at the bottom of the implementing stack and
+recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
+
+## 2026-07-23 — Review-wave amendments: stale-head declines and exhaust-loop escalation
+
+**Context.** The adaptive review-wave rule continues waves while the latest wave
+produced an accepted finding. Review-traffic measurement across the
+milestone-three era surfaced two recurring failure modes: reviewers re-reporting
+already-fixed findings against a stale head, and waves whose accepted findings
+are predominantly defects introduced by the previous wave's own fixes — the loop
+consuming its exhaust.
+
+**Decision.** Two standing amendments to the finished-pull-request rules in
+`AGENTS.md`: a re-report of an already-fixed finding made against a stale head
+is declined by standing policy, naming the fixing commit; and when more than
+half of a wave's accepted findings are defects in code the previous wave's fixes
+introduced, the run stops and escalates to the owner instead of continuing.
+
+**Rejected alternatives.** Per-content-type wave caps: measured provider-
+adapter reviews kept producing real findings through late waves, so a fixed cap
+discards real defects. Leaving the rule unamended: both failure modes recur and
+burn review rounds without converging.
+
+**Affects.** `AGENTS.md` finished-pull-request rules; every reviewed pull
+request.
 
 ## 2026-07-22 — Two-phase living-specification restructure
 
