@@ -2042,6 +2042,33 @@ mod tests {
     }
 
     #[test]
+    fn streamed_response_overflow_is_typed_protocol_loss() {
+        let mut streamed_bytes = MAX_STREAMED_RESPONSE_BYTES;
+        let mut framing = SseFraming::new(1024);
+        let mut decoder = StreamDecoder::new(ExchangeFacts::default(), false);
+        let mut observations = Vec::new();
+        let mut cancellation = CancellationSignal::never();
+
+        let evidence = process_streamed_chunk(
+            b"x",
+            &mut streamed_bytes,
+            &mut framing,
+            &mut decoder,
+            &"call-1".to_string(),
+            &mut observations,
+            &mut cancellation,
+        );
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = evidence else {
+            panic!("an oversized streamed response must fail closed as boundary loss");
+        };
+        assert!(matches!(
+            loss.cause,
+            LossCause::StreamProtocolViolation { .. }
+        ));
+    }
+
+    #[test]
     fn terminal_record_in_budget_wins_over_coalesced_trailing_bytes() {
         let mut bytes = b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
             \"model\":\"model-exact-1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\

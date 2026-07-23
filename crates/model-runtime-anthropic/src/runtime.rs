@@ -1685,6 +1685,33 @@ mod tests {
     }
 
     #[test]
+    fn streamed_response_overflow_is_typed_protocol_loss() {
+        let mut streamed_bytes = MAX_STREAMED_RESPONSE_BYTES;
+        let mut framing = SseFraming::new(1024);
+        let mut decoder = StreamDecoder::with_stop_sequences(ExchangeFacts::default(), Vec::new());
+        let mut observations = Vec::new();
+        let mut cancellation = CancellationSignal::never();
+
+        let evidence = process_streamed_chunk(
+            b"x",
+            &mut streamed_bytes,
+            &mut framing,
+            &mut decoder,
+            &"call-1".to_string(),
+            &mut observations,
+            &mut cancellation,
+        );
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = evidence else {
+            panic!("an oversized streamed response must fail closed as boundary loss");
+        };
+        assert!(matches!(
+            loss.cause,
+            LossCause::StreamProtocolViolation { .. }
+        ));
+    }
+
+    #[test]
     fn terminal_record_in_budget_wins_over_coalesced_trailing_bytes() {
         let mut bytes = b"event: message_start\n\
             data: {\"type\":\"message_start\",\"message\":{\"type\":\"message\",\

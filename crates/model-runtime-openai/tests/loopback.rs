@@ -33,6 +33,8 @@ use signalbox_model_runtime_openai::{
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
+const OVERSIZED_PROVIDER_RESPONSE_BYTES: usize = 8 * 1024 * 1024 + 1;
+
 /// A loopback server that answers each accepted connection with the next
 /// canned response and records every raw request it read.
 struct CannedServer {
@@ -523,6 +525,30 @@ async fn a_redirect_is_never_followed_and_surfaces_as_evidence() {
         1,
         "one authorized send must remain exactly one physical request"
     );
+}
+
+#[tokio::test]
+async fn buffered_response_overflow_is_typed_body_loss() {
+    let body = vec![b' '; OVERSIZED_PROVIDER_RESPONSE_BYTES];
+    let server = CannedServer::serving(vec![http_response(
+        "200 OK",
+        &[("content-type", "application/json")],
+        &body,
+    )])
+    .await;
+    let runtime = runtime_for(&server.base_url);
+
+    let (report, _) = execute(
+        &runtime,
+        operation("call-buffer-overflow"),
+        CancellationSignal::never(),
+    )
+    .await;
+
+    let TerminalEvidence::BoundaryLoss(loss) = report.evidence else {
+        panic!("an oversized buffered response must fail closed as boundary loss");
+    };
+    assert!(matches!(loss.cause, LossCause::ResponseBodyLost(_)));
 }
 
 #[tokio::test]
