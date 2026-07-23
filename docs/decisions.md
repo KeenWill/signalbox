@@ -69,6 +69,65 @@ unrelated work.
 **Affects.** Version-one `submit_input` admission and connection-failure
 isolation; domain content and transcript fragment limits do not change.
 
+## 2026-07-23 — Bound each single-hub guard ping at one second
+
+**Context.** The recorded guard polling cadence does not bound how long one
+`PgConnection::ping` may remain pending. An unbounded response wait would also
+leave fatal guard-loss detection unbounded during a database stall or network
+partition.
+
+**Decision.** Give each guard-check query a separate one-second response
+deadline. A deadline expiry is fatal guard loss for that hub incarnation, just
+like a database error; the runtime does not retry or reacquire in place. Treat
+one second as a provisional operational threshold independent of the polling
+cadence.
+
+**Rejected alternatives.** No query deadline can stall the supervisor
+indefinitely. Retrying within the incarnation delays guarded startup recovery
+without proving that the same session still owns authority. A longer threshold
+widens the ambiguous-health window; a shorter one increases false fatal exits
+under ordinary transient latency before measurements justify that trade.
+
+**Affects.** The response deadline and failure classification of
+`SingleHubGuard::check`; it does not change the polling cadence or the
+generation-fence protocol.
+
+## 2026-07-23 — Bind follow rereads to their terminal trigger
+
+**Context.** A transcript reread started by one terminal follow event can
+observe later committed turns. Presenting every new entry from that reread lets
+later content appear before the still-buffered events that introduced it;
+identity deduplication can then hide the content at its ordered position.
+
+**Decision.** A terminal-triggered side reread supplies only the semantic
+material attributable to that exact terminal event. Its newer cursor does not
+make later snapshot material presentation-eligible or advance the primary
+follow stream.
+
+**Rejected alternatives.** Rendering every new snapshot entry reorders the
+durable event stream. Advancing to the reread cursor discards transition-only
+events, while historical as-of snapshots would add a new storage contract.
+
+**Affects.** Terminal-client follow presentation and its ordering tests.
+
+## 2026-07-23 — Require an owner-private socket parent
+
+**Context.** Some Unix-domain-socket implementations do not enforce the socket
+node's permission bits. A `0755` immediate parent therefore permits another
+local user to reach an otherwise owner-mode socket, contrary to version one's
+single-user trust boundary.
+
+**Decision.** Require the resolved immediate socket parent to be owned by the
+hub's effective user with traditional permission mode exactly `0700`. Ancestor
+replacement checks remain separately required.
+
+**Rejected alternatives.** Relying on the socket node's `0600` mode is not
+portable. Peer authentication has no accepted version-one identity model, and a
+platform-specific exception would make the same protocol path carry different
+trust guarantees.
+
+**Affects.** Local process-socket deployment, validation, and startup tests.
+
 ## 2026-07-23 — Bound the local process-socket backlog at 128
 
 **Context.** The guarded Unix listener must select a finite kernel accept queue.
