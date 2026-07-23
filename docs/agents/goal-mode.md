@@ -1,17 +1,17 @@
 # Goal-mode operating rules
 
 Rules for autonomous milestone-delivering runs (for example Codex Goal mode).
-[`AGENTS.md`](../AGENTS.md) carries the rules that bind every agent and every
+[`AGENTS.md`](../../AGENTS.md) carries the rules that bind every agent and every
 pull request; this file adds only what governs choosing, executing, and
 finishing a milestone.
 
 ## Selecting a milestone
 
-- Milestones come from the [priority order](target-model.md#priority-order) in
-  the target model: take the earliest unfinished step whose blocking decisions
-  are accepted, or propose that step's blocking decision as the milestone. The
-  priority order is binding for selection; the target model's concept
-  descriptions are directional and yield to accepted records.
+- Milestones come from the [priority order](../target-model.md#priority-order)
+  in the target model: take the earliest unfinished step whose blocking
+  decisions are accepted, or propose that step's blocking decision as the
+  milestone. The priority order is binding for selection; the target model's
+  concept descriptions are directional and yield to accepted records.
 - A milestone delivers one coherent capability toward its step — or, when the
   step is blocked, the proposal that unblocks it.
 - Any new public domain or application type ships with a consumer in the same

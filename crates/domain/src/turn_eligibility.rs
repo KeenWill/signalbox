@@ -4690,7 +4690,7 @@ mod tests {
     /// One accepted turn origin whose sole identity/order knob is its
     /// acceptance ordinal. Turn and accepted-input identities descend as the
     /// ordinal ascends, so identity order cannot accidentally stand in for
-    /// durable acceptance order (`docs/testing-style.md`, rule 4).
+    /// durable acceptance order (`docs/agents/testing-style.md`, rule 4).
     #[derive(Clone, Copy)]
     struct OriginFixture {
         acceptance: u64,
