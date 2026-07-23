@@ -46,6 +46,7 @@ use crate::{LocalProcessListener, LocalSocketError};
 
 const OUTBOX_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const PROCESS_UPDATE_CAPACITY: usize = 1_024;
+const MAX_SUBMITTED_INPUT_BYTES: usize = 1024 * 1024;
 
 /// The hub-owned local protocol runtime: one outbox dispatcher, one bounded
 /// fan-out, and one guarded Unix listener.
@@ -168,6 +169,7 @@ fn inspect_connection_completion(
             drop(error);
             Ok(())
         }
+        Some(Ok(Err(ProcessConnectionError::Encode(FrameEncodeError::OversizedFrame)))) => Ok(()),
         Some(Ok(Err(ProcessConnectionError::Encode(error)))) => {
             Err(ProcessRuntimeError::Encode(error))
         }
@@ -433,7 +435,7 @@ where
         )
         .await;
     };
-    let Ok(content) = UserContent::try_text(content.as_str().to_owned()) else {
+    let Ok(content) = admitted_user_content(&content) else {
         return write_error(
             writer,
             request_id,
@@ -517,6 +519,13 @@ where
             .await
         }
     }
+}
+
+fn admitted_user_content(content: &InputContent) -> Result<UserContent, ()> {
+    if content.as_str().len() > MAX_SUBMITTED_INPUT_BYTES {
+        return Err(());
+    }
+    UserContent::try_text(content.as_str().to_owned()).map_err(|_| ())
 }
 
 async fn handle_read_transcript<Writer>(
@@ -1363,13 +1372,17 @@ mod tests {
     use std::{error::Error, io};
 
     use signalbox_process_protocol::{
-        MAX_CONTENT_FRAGMENT_BYTES, ServerMessage, decode_server_line,
+        CanonicalU64, CanonicalUuid, FrameEncodeError, InputContent, MAX_CONTENT_FRAGMENT_BYTES,
+        ServerFrame, ServerMessage, SessionEvent, TurnState, decode_server_line,
+        encode_server_line,
     };
     use tokio::io::{AsyncReadExt, BufReader, duplex};
+    use uuid::Uuid;
 
     use super::{
-        IncomingLine, MAX_FRAME_BYTES, RequestId, read_frame_line, wire_model_call_state,
-        write_content,
+        IncomingLine, MAX_FRAME_BYTES, MAX_SUBMITTED_INPUT_BYTES, ProcessConnectionError,
+        RequestId, admitted_user_content, inspect_connection_completion, read_frame_line,
+        wire_model_call_state, write_content,
     };
     use signalbox_persistence::outbox::{DispatchedModelCallDisposition, DispatchedModelCallState};
     use signalbox_process_protocol::{ModelCallDisposition, ModelCallState};
@@ -1401,8 +1414,65 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn submitted_input_bound_keeps_reflected_frames_representable() -> Result<(), Box<dyn Error>> {
+        let content = InputContent::new("\u{1}".repeat(MAX_SUBMITTED_INPUT_BYTES));
+        assert!(admitted_user_content(&content).is_ok());
+        assert!(
+            admitted_user_content(&InputContent::new(
+                "x".repeat(MAX_SUBMITTED_INPUT_BYTES + 1)
+            ))
+            .is_err()
+        );
+
+        let request_id = RequestId::try_new(u64::MAX)?;
+        let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(u128::MAX));
+        let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(u128::MAX - 1));
+        let accepted_input_id = CanonicalUuid::from_uuid(Uuid::from_u128(u128::MAX - 2));
+        let frames = [
+            ServerFrame::try_new(
+                request_id,
+                ServerMessage::TranscriptTurn {
+                    turn_id,
+                    acceptance_position: CanonicalU64::new(u64::MAX),
+                    state: TurnState::Queued {
+                        accepted_input_id,
+                        content: content.clone(),
+                    },
+                },
+            )?,
+            ServerFrame::try_new(
+                request_id,
+                ServerMessage::SessionEvent {
+                    cursor: CanonicalU64::new(u64::MAX),
+                    session_id,
+                    event: SessionEvent::InputAccepted {
+                        accepted_input_id,
+                        turn_id,
+                        acceptance_position: CanonicalU64::new(u64::MAX),
+                        content,
+                    },
+                },
+            )?,
+        ];
+        for frame in frames {
+            assert!(encode_server_line(&frame)?.len() <= MAX_FRAME_BYTES);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_connection_frame_does_not_fail_the_runtime() {
+        assert!(
+            inspect_connection_completion(Some(Ok(Err(ProcessConnectionError::Encode(
+                FrameEncodeError::OversizedFrame
+            )))))
+            .is_ok()
+        );
+    }
+
     #[tokio::test]
-    async fn s24_runtime_content_writer_preserves_empty_and_multibyte_text()
+    async fn runtime_content_writer_preserves_empty_and_multibyte_text()
     -> Result<(), Box<dyn Error>> {
         let request_id = RequestId::try_new(7)?;
         let text = format!(
@@ -1460,7 +1530,7 @@ mod tests {
     }
 
     #[test]
-    fn s24_every_persistence_terminal_call_disposition_has_a_wire_projection() {
+    fn every_persistence_terminal_call_disposition_has_a_wire_projection() {
         let cases = [
             (
                 DispatchedModelCallDisposition::Completed,

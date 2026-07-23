@@ -19,7 +19,7 @@ use signalbox_persistence::{
     local_test_connection_options, migrate, scheduler::PostgresEligibilitySweep,
 };
 use signalbox_process_protocol::{
-    CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, InputContent,
+    CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ErrorCode, InputContent,
     ModelSelection, RequestId, ServerFrame, ServerMessage, SessionEvent, TurnState,
     decode_server_line, encode_client_line,
 };
@@ -43,6 +43,7 @@ const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_NAME: &str = "signalbox_process_runtime";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
+const OVERSIZED_SUBMITTED_INPUT_BYTES: usize = 1024 * 1024 + 1;
 
 async fn postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -195,6 +196,25 @@ async fn s24_process_runtime_serves_snapshot_first_follow_without_a_race()
 
     commands
         .request(
+            30,
+            ClientRequest::SubmitInput {
+                command_id: command()?,
+                session_id,
+                content: InputContent::new("x".repeat(OVERSIZED_SUBMITTED_INPUT_BYTES)),
+                expected_defaults_version: CanonicalU64::new(1),
+            },
+        )
+        .await?;
+    assert!(matches!(
+        commands.response().await?.message(),
+        ServerMessage::Error {
+            code: ErrorCode::InvalidRequest,
+            ..
+        }
+    ));
+
+    commands
+        .request(
             3,
             ClientRequest::SubmitInput {
                 command_id: command()?,
@@ -232,33 +252,38 @@ async fn s24_process_runtime_serves_snapshot_first_follow_without_a_race()
         }
     };
     let mut saw_first_turn = false;
-    loop {
-        match transcript.response().await?.message() {
-            ServerMessage::TranscriptTurn {
-                turn_id,
-                acceptance_position,
-                state:
-                    TurnState::Queued {
-                        content,
-                        accepted_input_id: _,
-                    },
-            } if *turn_id == first_turn
-                && acceptance_position.value() == 1
-                && content.as_str() == "first input" =>
-            {
-                saw_first_turn = true;
+    timeout(Duration::from_secs(5), async {
+        loop {
+            match transcript.response().await?.message() {
+                ServerMessage::TranscriptTurn {
+                    turn_id,
+                    acceptance_position,
+                    state:
+                        TurnState::Queued {
+                            content,
+                            accepted_input_id: _,
+                        },
+                } if *turn_id == first_turn
+                    && acceptance_position.value() == 1
+                    && content.as_str() == "first input" =>
+                {
+                    saw_first_turn = true;
+                }
+                ServerMessage::TranscriptSnapshotEnd {
+                    session_id: snapshot_session,
+                    cursor,
+                    ..
+                } if *snapshot_session == session_id && cursor.value() == transcript_cursor => {
+                    return Ok::<(), Box<dyn Error>>(());
+                }
+                ServerMessage::Error { code, .. } => {
+                    return Err(io::Error::other(format!("transcript failed: {code:?}")).into());
+                }
+                _ => {}
             }
-            ServerMessage::TranscriptSnapshotEnd {
-                session_id: snapshot_session,
-                cursor,
-                ..
-            } if *snapshot_session == session_id && cursor.value() == transcript_cursor => break,
-            ServerMessage::Error { code, .. } => {
-                return Err(io::Error::other(format!("transcript failed: {code:?}")).into());
-            }
-            _ => {}
         }
-    }
+    })
+    .await??;
     assert!(saw_first_turn);
 
     let mut follow = Connection::connect(socket_directory.socket()).await?;
@@ -274,18 +299,21 @@ async fn s24_process_runtime_serves_snapshot_first_follow_without_a_race()
             return Err(io::Error::other(format!("unexpected follow start: {message:?}")).into());
         }
     };
-    loop {
-        if matches!(
-            follow.response().await?.message(),
-            ServerMessage::TranscriptSnapshotEnd {
-                session_id: snapshot_session,
-                cursor,
-                ..
-            } if *snapshot_session == session_id && cursor.value() == follow_cursor
-        ) {
-            break;
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                follow.response().await?.message(),
+                ServerMessage::TranscriptSnapshotEnd {
+                    session_id: snapshot_session,
+                    cursor,
+                    ..
+                } if *snapshot_session == session_id && cursor.value() == follow_cursor
+            ) {
+                return Ok::<(), Box<dyn Error>>(());
+            }
         }
-    }
+    })
+    .await??;
 
     commands
         .request(

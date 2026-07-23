@@ -10,6 +10,27 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-23 — Bound process-protocol input at 1 MiB
+
+**Context.** A submitted input is later reflected inside one queued-turn frame
+and one durable-update frame. Allowing content to consume nearly the entire 8
+MiB inbound frame leaves no room for those larger wrappers and lets an accepted
+value become unrepresentable.
+
+**Decision.** The local process server admits at most 1 MiB of UTF-8 input
+content and rejects a larger value before application construction or mutation.
+At that bound, even one-byte control characters with worst-case JSON escaping
+leave the enclosing version-one server frames below 8 MiB.
+
+**Rejected alternatives.** Relying only on the aggregate frame cap admits values
+that cannot be reflected. Fragmenting queued states and live input events would
+add correlated multi-frame state to two more protocol paths without a daily
+client need. Treating an outbound overflow as hub-fatal lets one connection stop
+unrelated work.
+
+**Affects.** Version-one `submit_input` admission and connection-failure
+isolation; domain content and transcript fragment limits do not change.
+
 ## 2026-07-23 — Bound the local process-socket backlog at 128
 
 **Context.** The guarded Unix listener must select a finite kernel accept queue.

@@ -126,6 +126,11 @@ treatment in version one. If a turn is already active, the normal typed
 application result is returned as a rejection; the protocol does not guess an
 interrupt, steering, or after-current treatment.
 
+Submitted `content` is limited to 1 MiB of UTF-8. The hub applies that boundary
+before application construction or mutation and returns `invalid_request` when
+it is exceeded. This leaves enough space for worst-case JSON escaping when the
+same accepted content is projected in a queued turn or durable update event.
+
 ## Server messages
 
 Message objects carry a required string `type` and reject fields not admitted by
@@ -177,6 +182,10 @@ The error-code set in version one is:
 
 Errors contain no database URL, socket path, credential path or value, SQL,
 caller content, or provider payload.
+
+An oversized outbound frame terminates only its connection. Other encoding
+failures remain fatal evidence that the runtime cannot satisfy the closed wire
+contract.
 
 ## Transcript snapshots
 
