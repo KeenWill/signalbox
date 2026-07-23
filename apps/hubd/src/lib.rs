@@ -21,11 +21,15 @@ use signalbox_persistence::model_execution::{
 use tokio::sync::watch;
 
 mod configuration;
+mod local_socket;
+mod single_hub;
 
 pub use configuration::{
     ANTHROPIC_CREDENTIAL_REFERENCE, FileCredentialAccess, HubModelConfiguration,
     HubModelConfigurationError,
 };
+pub use local_socket::{LocalProcessListener, LocalSocketError};
+pub use single_hub::{SingleHubGuard, SingleHubGuardError};
 
 /// Per-activation model execution constructed by the hub composition root.
 pub trait ActivatedTurnExecution {

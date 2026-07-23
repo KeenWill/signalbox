@@ -10,6 +10,27 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-23 — Use Rustix for guarded Unix-socket construction
+
+**Context.** The process socket must remain unlistening until its path identity,
+effective-user ownership, and exact permissions are verified. The standard
+library binds and listens in one operation and exposes neither the effective
+user ID nor a separate safe bind/listen sequence. Workspace code also forbids
+unsafe blocks.
+
+**Decision.** hubd directly uses the already locked Rustix crate with only its
+filesystem, network, process, and standard-library features. Rustix supplies
+safe effective-user lookup and the unlistening Unix socket operations; the
+result is converted to Tokio only after path verification and `listen`.
+
+**Rejected alternatives.** `std::os::unix::net::UnixListener::bind` listens too
+early. A local `libc` adapter would require unsafe code and duplicate a
+well-audited syscall abstraction. A subprocess user-ID lookup would add parsing
+and executable-path failure modes without solving separate bind/listen.
+
+**Affects.** The hub-owned local process transport and its direct dependency
+surface; no domain, persistence, or wire representation changes.
+
 ## 2026-07-23 — Poll the single-hub guard once per second
 
 **Context.** A PostgreSQL session advisory lock is released when its dedicated
