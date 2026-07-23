@@ -388,17 +388,21 @@ async fn assert_outbox_truncate_rejected(
     Ok(())
 }
 
+/// Derives the direct model selection installed by the outbox session fixture.
+fn outbox_session_fixture_model_selection(session_seed: u128) -> DirectModelSelection {
+    DirectModelSelection::from_uuid(Uuid::from_u128(session_seed ^ 0x2000))
+}
+
 /// Inserts the complete pre-outbox session record family for allocator tests.
 ///
-/// The command and model identities derive from the one session seed so the
-/// fixture states only the session identity those tests observe.
+/// The command and model identities derive from the one session seed.
 async fn insert_outbox_session_fixture(
     pool: &PgPool,
     session_seed: u128,
 ) -> Result<Uuid, sqlx::Error> {
     let session = Uuid::from_u128(session_seed);
     let command = Uuid::from_u128(session_seed ^ 0x1000);
-    let model = Uuid::from_u128(session_seed ^ 0x2000);
+    let model = outbox_session_fixture_model_selection(session_seed);
     let mut transaction = pool.begin().await?;
 
     sqlx::query(
@@ -427,7 +431,7 @@ async fn insert_outbox_session_fixture(
          VALUES ($1, 1, 'direct', $2, NULL)",
     )
     .bind(session)
-    .bind(model)
+    .bind(model.into_uuid())
     .execute(&mut *transaction)
     .await?;
     sqlx::query(
@@ -451,7 +455,7 @@ async fn insert_outbox_session_fixture(
          )",
     )
     .bind(command)
-    .bind(model)
+    .bind(model.into_uuid())
     .bind(session)
     .execute(&mut *transaction)
     .await?;
@@ -10645,6 +10649,7 @@ async fn s24_inv032_outbox_delivery_prefix_is_stable() -> Result<(), Box<dyn Err
 async fn s24_process_session_summary_sequence_matches_repeatable_projection()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
+    let earlier_selection = outbox_session_fixture_model_selection(0xe31);
     let earlier_session = insert_outbox_session_fixture(&pool, 0xe31).await?;
     let later_session = Uuid::from_u128(0xe32);
     let alias = ModelAlias::from_uuid(Uuid::from_u128(0xae32));
@@ -10661,9 +10666,7 @@ async fn s24_process_session_summary_sequence_matches_repeatable_projection()
     assert_eq!(summaries[0].defaults_version(), 1);
     assert_eq!(
         summaries[0].model_selection(),
-        ProcessModelSelection::Direct(DirectModelSelection::from_uuid(Uuid::from_u128(
-            0xe31 ^ 0x2000
-        )))
+        ProcessModelSelection::Direct(earlier_selection)
     );
     assert_eq!(summaries[1].session().into_uuid(), later_session);
     assert_eq!(summaries[1].defaults_version(), 1);
