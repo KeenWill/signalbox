@@ -10,6 +10,33 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-23 — Import the native Swift client as a snapshot under clients/native
+
+**Context.** The owner's private monorepo holds a working SwiftUI client for the
+legacy llm-hub protocol, with deterministic mock-hub flows, capture scripts, and
+golden screenshots. Signalbox needs that client and its agent-visible UI
+iteration loop, but importing monorepo history would import identity and require
+auditing every commit.
+
+**Decision.** Copy the tree at the monorepo's current main state, with the
+stashed screenshot refresh applied, into `clients/native/` as a snapshot without
+git history; the tree was audited clean and scrubbed of private endpoints. Bazel
+build files are excluded — the xcodeproj and shell scripts stand alone, and a
+second build system in a Cargo repo is unjustified until polyglot builds hurt.
+The Tart VM scripts are retained inert: GitHub-hosted macOS runners lack nested
+virtualization, so Tart CI requires self-hosted Apple Silicon or a managed Tart
+service and is deferred with the rest of Swift CI. Screenshot goldens are
+included at roughly 40 MB because the agent-visible UI iteration loop is the
+point of the import. Renaming from LLMHubNative and rewiring to the Signalbox
+process protocol are deferred to the rewire milestone.
+
+**Rejected alternatives.** Cherry-picking history imports identity and requires
+auditing 107 commits. Rewriting with the client as inspiration discards roughly
+55 percent backend-agnostic SwiftUI and the screenshot infrastructure that works
+today.
+
+**Affects.** `clients/native/` (new), `docs/decisions.md`.
+
 ## 2026-07-23 — Poll durable model-call cancellation every 25 milliseconds
 
 **Context.** Capability preparation and provider invocation need one same-call
