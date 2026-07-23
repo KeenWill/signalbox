@@ -143,21 +143,6 @@ identifiers refer to [scenarios.md](scenarios.md).
   policy, including backoff and resource limits, is a separate decision the
   accepted no-retry policy leaves open. Blocks retry features. (S02, S04, S22)
 
-## Provider call security
-
-- **Outbound TLS posture for provider calls.** Certificate-verification
-  requirements, trust roots, TLS-version floor, and any proxy allowance for the
-  hub's outbound provider connections are undecided. Blocks the first outbound
-  provider adapter. (S02, S04, S20–S23)
-- **Provider response-size limits.** Whether and where the hub bounds provider
-  response bodies and streamed deltas before they reach parsing and storage.
-  Blocks the first outbound provider adapter. (S02, S04, S24)
-- **Provider call timeout budgets.** See the authoritative open edge in
-  [model-call-execution](spec/model-call-execution.md).
-- **Provider-response parsing hardening.** Parsing limits and rejection behavior
-  for provider responses under the malicious-model-output threat model. Blocks
-  the first outbound provider adapter. (S02, S04, S23)
-
 ## Scheduling and runners
 
 Dispatch fencing and initial scheduler mechanics are decided, specified in
