@@ -1,7 +1,8 @@
 //! Durable accepted-input queue-order facts and pure order derivation.
 //!
-//! ADR-0027 (`docs/decisions/0027-input-delivery-lifecycle.md`) is the
-//! normative specification. Accepted origin work records one immutable
+//! The normative specification is
+//! `docs/spec/turn-lifecycle-and-scheduling.md` (originally ADR-0027).
+//! Accepted origin work records one immutable
 //! acceptance position and either ordinary priority or the typed interrupt
 //! relation that places it immediately after an exact predecessor. Deriving
 //! the total order requires the complete currently known fact set for one

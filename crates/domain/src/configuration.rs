@@ -1,7 +1,8 @@
 //! Baseline model-selection configuration.
 //!
-//! ADR-0027 (`docs/decisions/0027-input-delivery-lifecycle.md`) is the
-//! normative specification. The first implementable effective configuration
+//! The normative specification is
+//! `docs/spec/configuration-and-credentials.md` (originally ADR-0027).
+//! The first implementable effective configuration
 //! is deliberately model-selection-only: one frozen direct or alias model
 //! selection, provider-default parameters, and disabled known-provider-failure
 //! retry and model fallback. Custom parameters, instructions, tool

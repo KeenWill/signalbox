@@ -10,8 +10,9 @@ actor attribution. It was verified against the working tree at commit `bf39f5f`
 (`create_session.rs`, `load_session.rs`, `replace_session_defaults.rs`,
 `submit_input.rs`), and `crates/persistence` (sources and migrations). Where a
 law is cited as `INV-NNN`, [invariants.md](../invariants.md) is the catalog of
-record; where mechanics owned by another decision are summarized, the owning ADR
-under [docs/decisions](../decisions) is cited inline.
+record; where mechanics owned by another decision are summarized, the owning
+sibling page is linked inline, with historical ADR names resolved by the
+[ADR mapping](README.md#adr-mapping).
 
 ## Session identity and creation provenance
 
@@ -41,10 +42,9 @@ append-only.
 `CreateSession` carries the durable command identity, the provenance pair, and
 one complete unversioned initial defaults value. Structural equality excludes
 only the command identifier (INV-012); durable-command storage and
-structural-equality doctrine is
-[ADR-0034](../decisions/0034-durable-command-storage-and-equality.md), and
-identity generation, supply, and encoding is
-[ADR-0033](../decisions/0033-identity-generation-supply-and-encoding.md).
+structural-equality doctrine (originally ADR-0034) and identity generation,
+supply, and encoding (originally ADR-0033) are owned by
+[identity-and-commands](identity-and-commands.md).
 
 Application orchestration (`crates/application/src/create_session.rs`):
 
@@ -73,7 +73,7 @@ reverse foreign key (migrations `202607180001_create_session.sql`,
 this set is append-only except `session_current_defaults`: its one row per
 session is the deliberately mutable pointer that defaults replacement later
 moves in place. The same transaction appends a `session_created` update event to
-the outbox ([ADR-0040](../decisions/0040-transactional-outbox.md)).
+the outbox ([persistence-protocol](persistence-protocol.md)).
 
 Command claim, fail-closed replay reconstitution, and conflicting-reuse
 resolution follow the shared durable-command contract owned by
@@ -92,9 +92,9 @@ not a historical fact.
 
 Session configuration defaults are model-selection-only in the baseline; the
 selection algebra, configuration freeze at acceptance, and per-turn effective
-configuration are owned by
-[ADR-0027](../decisions/0027-input-delivery-lifecycle.md). Defaults are
-immutable versions with a positive `u64` ordinal:
+configuration are owned by [identity-and-commands](identity-and-commands.md) and
+[configuration-and-credentials](configuration-and-credentials.md) (ADR-0027).
+Defaults are immutable versions with a positive `u64` ordinal:
 
 - session creation establishes version one;
 - each replacement installs the checked successor ordinal as a new immutable row
@@ -254,10 +254,9 @@ startup recovery — each appending the marker after every earlier committed ent
 and emitting a `turn_failed` update event atomically. A later successor's
 starting frontier retains the failed predecessor's exact terminal prefix,
 including that marker. Turn and attempt lifecycle doctrine is
-[ADR-0004](../decisions/0004-turn-and-attempt-lifecycle.md), the entry commit
-boundaries are
-[ADR-0036](../decisions/0036-initial-semantic-transcript-entries.md), and
-update-event delivery is [ADR-0040](../decisions/0040-transactional-outbox.md).
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), the entry
+commit boundaries are this page's own material (originally ADR-0036), and
+update-event delivery is [persistence-protocol](persistence-protocol.md).
 
 ## User content
 

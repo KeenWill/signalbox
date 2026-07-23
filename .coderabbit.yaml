@@ -27,8 +27,7 @@ reviews:
           3. Prose beyond the citations — totality claims, coverage narration, test-by-test description — is a Fail; the INV-tagged tests themselves are the statement of coverage.
           Evidence must come from the PR head tree — the cited tests may be added by this same PR. Report each failing cell with its INV ID and the missing evidence. If docs/invariants.md is changed but no Enforcement cell is, Pass.
 
-      # verdict logic for the decision-weight rules owned by AGENTS.md and
-      # docs/decisions/README.md
+      # verdict logic for the decision-weight rules owned by AGENTS.md
       - name: "Decisions recorded at the correct weight"
         mode: warning
         instructions: |-

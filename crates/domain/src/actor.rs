@@ -1,7 +1,7 @@
 //! Typed provenance for durable commands and recorded transitions.
 //!
-//! ADR-0039 (`docs/decisions/0039-actor-attribution.md`) is the normative
-//! specification. This value records agency only; it grants no lifecycle,
+//! The normative specification is `docs/spec/identity-and-commands.md`
+//! (originally ADR-0039). This value records agency only; it grants no lifecycle,
 //! authentication, authorization, or approval authority.
 
 use crate::{ToolRequestId, TurnId};

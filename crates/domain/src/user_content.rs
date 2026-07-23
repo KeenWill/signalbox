@@ -1,7 +1,7 @@
 //! Baseline accepted-input user content.
 //!
-//! ADR-0037 (`docs/decisions/0037-baseline-user-content.md`) is the normative
-//! specification. The baseline is one exact text variant. Construction
+//! The normative specification is `docs/spec/sessions-and-transcript.md`
+//! (originally ADR-0037). The baseline is one exact text variant. Construction
 //! rejects empty text and U+0000 while preserving every other scalar,
 //! whitespace character, and line ending unchanged.
 

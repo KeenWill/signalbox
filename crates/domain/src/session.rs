@@ -1,7 +1,7 @@
 //! Session creation cause and transcript ancestry values.
 //!
-//! ADR-0003 (`docs/decisions/0003-session-creation-and-transcript-ancestry.md`)
-//! is the normative specification. Every session records two required,
+//! The normative specification is `docs/spec/sessions-and-transcript.md`
+//! (originally ADR-0003). Every session records two required,
 //! independent, immutable creation facts: a creation cause answering why the
 //! session exists, and a transcript ancestry answering where its initial
 //! semantic conversation context came from. This module represents those

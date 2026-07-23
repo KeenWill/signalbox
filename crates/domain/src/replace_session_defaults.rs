@@ -1,10 +1,11 @@
 //! Canonical session-defaults replacement command and terminal results.
 //!
-//! ADR-0027 (`docs/decisions/0027-input-delivery-lifecycle.md`) admits one
-//! idempotent owner command that installs a complete replacement as the next
-//! immutable defaults version. ADR-0034 fixes structural command equality and
-//! typed applied-or-rejected results, while ADR-0035 requires complete checked
-//! reconstitution from durable facts. This module owns that pure domain
+//! Session-defaults replacement (`docs/spec/sessions-and-transcript.md`,
+//! originally ADR-0027) admits one idempotent owner command that installs a
+//! complete replacement as the next immutable defaults version. ADR-0034
+//! fixes structural command equality and typed applied-or-rejected results,
+//! while ADR-0035 requires complete checked reconstitution from durable
+//! facts. This module owns that pure domain
 //! boundary. It performs no lookup, persistence, command claim, or
 //! acknowledgement.
 
