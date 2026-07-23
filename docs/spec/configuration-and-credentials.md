@@ -11,7 +11,7 @@ together with the model-runtime crates it composes
 
 ## Process configuration
 
-`signalbox-hubd` reads exactly three deployment values from the process
+`signalbox-hubd` reads exactly four deployment values from the process
 environment at startup:
 
 - `DATABASE_URL` — complete PostgreSQL connection URL. Production connections
@@ -21,6 +21,9 @@ environment at startup:
 - `SIGNALBOX_CONFIG_FILE` — path to the static model/alias catalog (below).
 - `ANTHROPIC_API_KEY_FILE` — path to the file whose bytes are the current
   Anthropic API key value.
+- `SIGNALBOX_SOCKET_PATH` — local Unix-socket path for the version-one
+  [process protocol](process-protocol.md), which owns its binding and trust
+  semantics.
 
 A missing or empty value, an unreadable or invalid catalog file, or a failed
 Anthropic runtime construction fails startup at the `Configuration` phase,

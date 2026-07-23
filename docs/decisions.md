@@ -10,6 +10,40 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-23 — Local version-one process protocol and terminal client
+
+**Context.** Signalbox has durable sessions, input, model execution, final
+transcript content, and a transactional outbox, but no supported client process
+boundary or outbox consumer. The retired ADR-0019 protocol was never implemented
+or distilled and carries no authority. The owner predecided the version-one
+transport, framing, and trust posture in the 2026-07-23 session.
+
+**Decision.** Version one is a Unix domain stream socket at the required
+`SIGNALBOX_SOCKET_PATH`, with owner-only permissions, versioned JSON-lines, and
+a required `version` on every message. It has no protocol authentication on the
+single-user machine; that no-authentication posture is provisional, with
+authenticated transports and remote clients kept open as an upgrade path. A thin
+`signalbox` terminal client is the daily surface; the debug harness remains
+separate. The protocol supplies create/list, submit, transcript snapshot, and
+snapshot-first follow operations. Exactly one hubd dispatcher offers each next
+committed outbox event before transactionally advancing the durable prefix,
+yielding ordered at-least-once delivery. It polls idle storage every 50 ms, the
+process fan-out retains 1,024 events, and frames are capped at 8 MiB.
+
+**Rejected alternatives.** Resurrecting the retired protocol wholesale: it has
+no accepted semantics. HTTP or a remote socket: either expands version one or
+creates an unauthenticated remote boundary. Authentication on the local socket:
+there is no accepted client-identity or revocation model. Persisting token
+deltas: drafts are nonauthoritative and the durable outbox already defines the
+reconnect boundary. A full-screen TUI first: it adds presentation work before
+the process boundary is exercised.
+
+**Affects.** New [process-protocol](spec/process-protocol.md), the protocol and
+terminal-client crates, hubd configuration/composition, outbox consumption,
+INV-032/INV-033 enforcement, S01/S02/S24, and
+[open questions](open-questions.md#protocols-and-persistence). Authenticated
+transports and remote clients remain explicitly open upgrade paths.
+
 ## 2026-07-23 — Review-wave amendments: stale-head declines and exhaust-loop escalation
 
 **Context.** The adaptive review-wave rule continues waves while the latest wave

@@ -230,6 +230,12 @@ questions below remain open.
 
 ## Protocols and persistence
 
+- **Authenticated transports and remote clients.** Version one is the
+  single-user local Unix-socket protocol specified by
+  [process-protocol](spec/process-protocol.md), with no protocol authentication.
+  Any remote transport must first decide client identity, authentication,
+  authorization, revocation, and credential delivery; it is an upgrade path, not
+  a compatible deployment mode for version one. (S01, S24)
 - **Browser transport.** Preserve authoritative-snapshot-plus-transient-stream
   semantics; technology open. Blocks the web client. (S02, S24)
 - **Persistence implementation within the accepted relational baseline.**
@@ -271,10 +277,11 @@ questions below remain open.
 
 ## Client scope
 
-- **First client and interface form (CLI, TUI, web, or Swift).** Leaning: the
-  smallest interface that exercises reconnect, approval, and provenance; a thin
-  terminal client is plausible but not accepted. Deferrable until the hub slice
-  is framed. (S01, S02, S10, S24)
+- **Client forms after the terminal baseline.** The
+  [process-protocol](spec/process-protocol.md) selects a thin terminal client as
+  the first daily surface. TUI, web, and Swift clients remain unselected and
+  must preserve the protocol's authoritative-snapshot replacement rule. (S01,
+  S02, S10, S24)
 - **Apple client code organization.** Defer until the protocol and the first
   native slice are known. (S01, S24)
 - **Web client technology (Rust/Wasm or TypeScript).** No leaning until the
