@@ -13,6 +13,8 @@ use crate::{
     transcript::{SnapshotEntry, SnapshotEntryKind, TranscriptSnapshot},
 };
 
+pub(crate) type TranscriptEntryIdentity = (CanonicalUuid, CanonicalUuid);
+
 pub(crate) struct Output<'a> {
     stdout: &'a mut dyn Write,
     stderr: &'a mut dyn Write,
@@ -64,10 +66,10 @@ impl<'a> Output<'a> {
     pub(crate) fn snapshot_new_entries(
         &mut self,
         snapshot: &TranscriptSnapshot,
-        displayed: &mut HashSet<CanonicalUuid>,
+        displayed: &mut HashSet<TranscriptEntryIdentity>,
     ) -> io::Result<()> {
         for entry in snapshot.entries() {
-            if displayed.insert(entry.entry_id) {
+            if displayed.insert(transcript_entry_identity(entry)) {
                 self.snapshot_entry(entry)?;
             }
         }
@@ -207,6 +209,10 @@ impl<'a> Output<'a> {
     }
 }
 
+fn transcript_entry_identity(entry: &SnapshotEntry) -> TranscriptEntryIdentity {
+    (entry.source_session_id, entry.entry_id)
+}
+
 fn model_call_state(state: ModelCallState) -> &'static str {
     match state {
         ModelCallState::Prepared {} => "prepared",
@@ -236,7 +242,13 @@ fn control_safe(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::control_safe;
+    use std::collections::HashSet;
+
+    use signalbox_process_protocol::{CanonicalUuid, TranscriptEntry};
+    use uuid::Uuid;
+
+    use super::{control_safe, transcript_entry_identity};
+    use crate::transcript::{SnapshotEntry, SnapshotEntryKind};
 
     #[test]
     fn terminal_safe_text_preserves_line_feed_and_escapes_c0_del_and_c1() {
@@ -245,5 +257,26 @@ mod tests {
             "a\n\\u{9}\\u{1b}\\u{7f}\\u{85}z"
         );
         assert_eq!(control_safe("café\u{1f980}"), "café\u{1f980}");
+    }
+
+    #[test]
+    fn follow_dedup_qualifies_entry_identity_by_source_session() {
+        let entry_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let entries = [
+            SnapshotEntry {
+                source_session_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+                entry_id,
+                kind: SnapshotEntryKind::Marker(TranscriptEntry::TurnCompleted { turn_id }),
+            },
+            SnapshotEntry {
+                source_session_id: CanonicalUuid::from_uuid(Uuid::from_u128(4)),
+                entry_id,
+                kind: SnapshotEntryKind::Marker(TranscriptEntry::TurnCompleted { turn_id }),
+            },
+        ];
+        let mut displayed = HashSet::new();
+        assert!(displayed.insert(transcript_entry_identity(&entries[0])));
+        assert!(displayed.insert(transcript_entry_identity(&entries[1])));
     }
 }

@@ -11,7 +11,7 @@ use std::{
 use arguments::{Command, ParseOutcome};
 use connection::ProcessClient;
 use error::ClientError;
-use presentation::Output;
+use presentation::{Output, TranscriptEntryIdentity};
 use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ErrorCode, InputContent, ModelSelection,
     ServerMessage, SessionEvent, TurnState,
@@ -378,7 +378,7 @@ async fn follow(
     output: &mut Output<'_>,
     session_id: CanonicalUuid,
 ) -> Result<(), ClientError> {
-    let mut displayed_entries = HashSet::new();
+    let mut displayed_entries = HashSet::<TranscriptEntryIdentity>::new();
     loop {
         let mut connection = client
             .request(ClientRequest::FollowSession { session_id })
