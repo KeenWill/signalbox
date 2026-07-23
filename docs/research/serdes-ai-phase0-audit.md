@@ -1,13 +1,17 @@
 # SerdesAI Phase-0 audit
 
+> Dated research intake (2026-07-21). Record citations (ADR-NNNN) refer to the
+> retired ADR corpus; resolve them through the
+> [ADR mapping](../spec/README.md#adr-mapping). Current requirements live in the
+> [living specification](../spec/README.md), which supersedes any requirement
+> stated here.
+
 - Date: 2026-07-20
 - Status: research intake, proposal-grade input only; where this document and a
   merged ADR disagree, the ADR wins
 - Audited snapshot: `janfeddersen-wq/serdesAI` @
   `1424128b0c64d9c2403eb0896cde881777941669`, workspace version 0.2.6, MIT
-- Assessed against: [ADR-0005](../decisions/0005-model-call-retry-semantics.md)
-  (retry and acceptance-boundary rules) and
-  [ADR-0043](../decisions/0043-provider-failure-classification.md)
+- Assessed against: ADR-0005 (retry and acceptance-boundary rules) and ADR-0043
   (failure-classification vocabulary)
 - Scope: the ten research questions from the external exploration handoff,
   prioritized Q4, Q2, Q3, Q8, Q1, plus a retry-wrapper assessment. Audit
@@ -85,8 +89,7 @@ are `ModelResponseStreamEvent` =
 content but no run, operation, or request identifier
 (`serdes-ai-core/src/messages/events.rs:17-31`). So no caller ID can appear *on*
 events — but none is needed for correlation at this layer, because the caller
-invokes one request and exclusively owns the returned stream. Under
-[ADR-0005's](../decisions/0005-model-call-retry-semantics.md)
+invokes one request and exclusively owns the returned stream. Under ADR-0005's
 one-authorization-one-call model, Signalbox holds the stream for exactly one
 `ModelCallId` and can tag every observation itself. Correlation is by
 construction, not by field.
@@ -131,8 +134,7 @@ There is no explicit boundary observation anywhere. What exists:
   `From<reqwest::Error> for ModelError`
   (`serdes-ai-models/src/error.rs:454-470`), which maps `is_timeout()` →
   `Timeout(30s hardcoded)`, `is_connect()` → `Connection`, else `Other`. Nothing
-  records whether the request body write completed —
-  [ADR-0043's](../decisions/0043-provider-failure-classification.md) decisive
+  records whether the request body write completed — ADR-0043's decisive
   full-request-send boundary is not observed. A pre-connect failure (provably
   unsent under that ADR) and a post-send connection loss (must be `Ambiguous`)
   can surface as the same `ModelError::Connection` / `ModelError::Timeout`
@@ -149,14 +151,13 @@ There is no explicit boundary observation anywhere. What exists:
 **Answer:** one authorized send remains one physical request only when redirect
 following is disabled, reqwest's default protocol-NACK retry is replaced with
 `reqwest::retry::never()` (or an equivalent explicit no-retry policy), and no
-retry wrapper is used, as required by
-[ADR-0005](../decisions/0005-model-call-retry-semantics.md). The default client
-can replay through either redirects or its protocol retry policy (see the
-retry-wrapper finding). Separately, response handling must map only complete,
-correlated, provider-recognized responses to definitive outcomes; unrecognized
-or truncated responses use ADR-0043's evidence fallback. A trustworthy
-send-progress signal when no complete response arrives still requires
-per-adapter surgery on the send/error code.
+retry wrapper is used, as required by ADR-0005. The default client can replay
+through either redirects or its protocol retry policy (see the retry-wrapper
+finding). Separately, response handling must map only complete, correlated,
+provider-recognized responses to definitive outcomes; unrecognized or truncated
+responses use ADR-0043's evidence fallback. A trustworthy send-progress signal
+when no complete response arrives still requires per-adapter surgery on the
+send/error code.
 
 ### Q3 — error evidence vs ADR-0043's categories
 
@@ -164,8 +165,7 @@ The canonical classification is `ModelFailureKind`
 (`serdes-ai-core/src/errors.rs:13-46`) reached via
 `ClassifyModelFailure::model_failure()`
 (`serdes-ai-models/src/error.rs:332-451`). It is a *retryability* taxonomy, not
-an *evidence* taxonomy. Mapping against
-[ADR-0043's](../decisions/0043-provider-failure-classification.md) dispositions:
+an *evidence* taxonomy. Mapping against ADR-0043's dispositions:
 
 | ADR-0043 category                         | SerdesAI representation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | Evidence preserved?                                                                                                                                  |
 | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -175,14 +175,13 @@ an *evidence* taxonomy. Mapping against
 | `Refused`                                 | Absent as a category. OpenAI refusal payloads become `ModelError::ContentFiltered` (`serdes-ai-models/src/openai/chat.rs:380-382`, `serdes-ai-models/src/openai/responses.rs:1015-1016`), which classifies as `ModelFailureKind::Other` (`serdes-ai-models/src/error.rs:441-443`). An Anthropic `refusal` stop reason falls through `_ => FinishReason::Stop` and is silently reported as normal completion (`serdes-ai-models/src/anthropic/model.rs:516-522`, `serdes-ai-models/src/anthropic/stream.rs:413-421`)                       | No; the Anthropic case is actively misleading                                                                                                        |
 | `Cancelled`                               | `ModelError::Cancelled` and `ModelFailureKind::Cancelled` exist (`serdes-ai-models/src/error.rs:84-85`), but no adapter constructs them from provider evidence; there is no cancellation-token input on the `Model` trait                                                                                                                                                                                                                                                                                                                 | Type exists, evidence path does not                                                                                                                  |
 | Premature EOF                             | Anthropic: excellent — EOF before `message_stop` → `IncompleteStream` (`serdes-ai-models/src/anthropic/stream.rs:174-188`), `message_stop` with open blocks → error (`serdes-ai-models/src/anthropic/stream.rs:371-380`), malformed event → error (`serdes-ai-models/src/anthropic/stream.rs:224-233`). OpenAI chat: absent — EOF without `[DONE]` ends the stream silently as if successful (`serdes-ai-models/src/openai/stream.rs:125-146`), malformed chunks are logged and dropped (`serdes-ai-models/src/openai/stream.rs:323-326`) | Anthropic yes, OpenAI no                                                                                                                             |
-| `Ambiguous`                               | No representation. Worse, the conditions [ADR-0043](../decisions/0043-provider-failure-classification.md) classifies as `Ambiguous` (timeout after send, connection loss, incomplete stream) are precisely what `is_transient()` marks retryable (`serdes-ai-core/src/errors.rs:57-72`: `Timeout`, `Connection`, `IncompleteStream` are all transient)                                                                                                                                                                                    | No — the taxonomy's polarity is inverted relative to ADR-0043                                                                                        |
+| `Ambiguous`                               | No representation. Worse, the conditions ADR-0043 classifies as `Ambiguous` (timeout after send, connection loss, incomplete stream) are precisely what `is_transient()` marks retryable (`serdes-ai-core/src/errors.rs:57-72`: `Timeout`, `Connection`, `IncompleteStream` are all transient)                                                                                                                                                                                                                                            | No — the taxonomy's polarity is inverted relative to ADR-0043                                                                                        |
 
 **Answer:** definitive provider error responses preserve enough typed evidence
-to build [ADR-0043's](../decisions/0043-provider-failure-classification.md)
-native-status mapping on top. Proven-unsent vs ambiguous is not recoverable from
-the error types, refusal is collapsed or mislabeled, and the built-in
-retryability semantics contradict that ADR's rule that SDK "transient" labels
-never authorize repetition.
+to build ADR-0043's native-status mapping on top. Proven-unsent vs ambiguous is
+not recoverable from the error types, refusal is collapsed or mislabeled, and
+the built-in retryability semantics contradict that ADR's rule that SDK
+"transient" labels never authorize repetition.
 
 ### Retry wrapper vs ADR-0005
 
@@ -201,8 +200,7 @@ interaction, invisible at the source level. Signalbox compliance therefore
 requires a client built with redirects disabled (injected via `with_client`,
 `serdes-ai-models/src/anthropic/model.rs:79`,
 `serdes-ai-models/src/openai/chat.rs:85`); omitting `RetryingModel` alone does
-not satisfy [ADR-0005](../decisions/0005-model-call-retry-semantics.md). If
-used:
+not satisfy ADR-0005. If used:
 
 - **Is every physical attempt observable?** No. The executor
   (`serdes-ai-retries/src/executor.rs:34-106`) exposes no per-attempt hook,
@@ -210,9 +208,8 @@ used:
   inside `RetryExhausted` / `RetryDeadlineExceeded`
   (`serdes-ai-models/src/error.rs:127-148`). A successful second attempt is
   indistinguishable from a first-attempt success at the API surface. This fails
-  [ADR-0005's](../decisions/0005-model-call-retry-semantics.md) requirement that
-  every authorization to attempt a provider interaction be a distinct durable
-  call.
+  ADR-0005's requirement that every authorization to attempt a provider
+  interaction be a distinct durable call.
 - **Can retries be provably confined to a pre-send boundary?** No. The
   classifier retries anything `is_retryable()`
   (`serdes-ai-models/src/retry.rs:61-69`), which includes post-send evidence
@@ -220,12 +217,10 @@ used:
   For streams it retries when the *first stream item* is an error
   (`serdes-ai-models/src/retry.rs:133-153`) — "no caller-visible output yet" is
   a delivery fact, not proof the provider never accepted the request. A
-  first-event connection reset after a fully sent request is
-  [ADR-0043](../decisions/0043-provider-failure-classification.md) `Ambiguous`,
-  and `RetryingModel` would silently re-send it — precisely
-  [ADR-0005's](../decisions/0005-model-call-retry-semantics.md) prohibited
-  duplicate-risk path. The suppression guard after visible output
-  (`serdes-ai-models/src/retry.rs:461-496` test) limits duplication of
+  first-event connection reset after a fully sent request is ADR-0043
+  `Ambiguous`, and `RetryingModel` would silently re-send it — precisely
+  ADR-0005's prohibited duplicate-risk path. The suppression guard after visible
+  output (`serdes-ai-models/src/retry.rs:461-496` test) limits duplication of
   *observed* output only.
 
 The separate `FallbackModel` has the same shape: it stops falling back only
@@ -242,8 +237,7 @@ fork requirement.
   populate `vendor_id` from the provider message/completion ID
   (`serdes-ai-models/src/anthropic/model.rs:539`,
   `serdes-ai-models/src/openai/chat.rs:433`) and `model_name` from the
-  provider-reported model — the raw material for
-  [ADR-0005's](../decisions/0005-model-call-retry-semantics.md)
+  provider-reported model — the raw material for ADR-0005's
   `ProviderTargetObservation`.
 - Usage: `RequestUsage` includes cache-creation/read token fields, populated by
   Anthropic (`serdes-ai-models/src/anthropic/model.rs:524-531`).
@@ -255,9 +249,8 @@ fork requirement.
   the parser is boxed into the type-erased `StreamedResponse`
   (`serdes-ai-models/src/anthropic/model.rs:668-671`), so in streaming mode the
   provider message ID and reported model identity are unobservable by any
-  consumer. Target-mismatch detection during streaming —
-  [ADR-0005's](../decisions/0005-model-call-retry-semantics.md) timing-sensitive
-  rule — is currently impossible without modifying the parser.
+  consumer. Target-mismatch detection during streaming — ADR-0005's
+  timing-sensitive rule — is currently impossible without modifying the parser.
 - Streaming (OpenAI chat): `finish_reason` is consumed only to emit `PartEnd`
   events (`serdes-ai-models/src/openai/stream.rs:292-320`); usage is requested
   (`include_usage: true`, `serdes-ai-models/src/openai/chat.rs:360`) but the
@@ -292,18 +285,16 @@ immediately and take priority over text output
 (`serdes-ai-agent/src/run.rs:476-481`); output validation failure appends a
 retry prompt and re-enters the loop up to `max_output_retries`
 (`serdes-ai-agent/src/run.rs:495-503`) — i.e., hidden repair model calls with no
-external authorization, conflicting with
-[ADR-0005](../decisions/0005-model-call-retry-semantics.md). Failed tools are
-retried in an inner loop up to a per-tool `max_retries`
+external authorization, conflicting with ADR-0005. Failed tools are retried in
+an inner loop up to a per-tool `max_retries`
 (`serdes-ai-agent/src/run.rs:594-601`); that is a tool-lifecycle issue, not a
 model-call retry. The loop exposes no Signalbox `ToolAttemptId` or independently
-authorized, fenced dispatch for each execution as required by
-[ADR-0009](../decisions/0009-dispatch-fencing.md). An OpenAI refusal surfaces as
-a `ContentFiltered` error that aborts the run, and an Anthropic refusal is
-invisible (Q3). The hidden model repair conflicts with
-[ADR-0005](../decisions/0005-model-call-retry-semantics.md); tool re-execution
-conflicts with the separate durable tool-attempt and dispatch lifecycle. This is
-the expected result: the loop is the layer Signalbox replaces.
+authorized, fenced dispatch for each execution as required by ADR-0009. An
+OpenAI refusal surfaces as a `ContentFiltered` error that aborts the run, and an
+Anthropic refusal is invisible (Q3). The hidden model repair conflicts with
+ADR-0005; tool re-execution conflicts with the separate durable tool-attempt and
+dispatch lifecycle. This is the expected result: the loop is the layer Signalbox
+replaces.
 
 ### Q8 — tool execution disabled, decoding and schemas retained
 
@@ -362,12 +353,10 @@ streaming-integrity pattern (`StreamComplete` + premature-EOF rejection) as a
 design template; provider wire types and SSE parsing structure.
 
 Conflicting with durable semantics: the retry/fallback wrappers' post-send
-repetition ([ADR-0005](../decisions/0005-model-call-retry-semantics.md));
-retryability-first error taxonomy including `IncompleteStream`-is-transient
-([ADR-0043](../decisions/0043-provider-failure-classification.md)); the agent
-loop's hidden model repair and tool auto-retry (Q7); refusal collapsed into
-errors or silence (Q3); usage-limit enforcement via in-process counters rather
-than durable budgets.
+repetition (ADR-0005); retryability-first error taxonomy including
+`IncompleteStream`-is-transient (ADR-0043); the agent loop's hidden model repair
+and tool auto-retry (Q7); refusal collapsed into errors or silence (Q3);
+usage-limit enforcement via in-process counters rather than durable budgets.
 
 ## (b) Inferences (labeled as such)
 
@@ -414,18 +403,16 @@ design.
 Why hand-roll beats vendoring selected crates:
 
 1. The code Signalbox must trust most is exactly the code that needs rewriting.
-   [ADR-0043](../decisions/0043-provider-failure-classification.md) compliance
-   lives in the send/error/stream-terminal paths; those are deficient (Q2's
-   unobservable boundary, Q3's inverted taxonomy, OpenAI's silent-truncation
-   streaming) and rewriting them in a vendored tree is the same work as writing
-   them in a Signalbox-owned module, minus the inherited surface.
+   ADR-0043 compliance lives in the send/error/stream-terminal paths; those are
+   deficient (Q2's unobservable boundary, Q3's inverted taxonomy, OpenAI's
+   silent-truncation streaming) and rewriting them in a vendored tree is the
+   same work as writing them in a Signalbox-owned module, minus the inherited
+   surface.
 2. Vendoring cannot be surgical. The minimum compiling closure is eight crates
    (Q1), importing the retry/fallback wrappers and retryability helpers whose
-   semantics [ADR-0005](../decisions/0005-model-call-retry-semantics.md) and
-   [ADR-0043](../decisions/0043-provider-failure-classification.md) prohibit.
-   Keeping prohibited-but-present API surface (`is_retryable()`,
-   `RetryingModel`, `FallbackModel`) inside the repo invites accidental use;
-   deleting it is a fork with extra steps.
+   semantics ADR-0005 and ADR-0043 prohibit. Keeping prohibited-but-present API
+   surface (`is_retryable()`, `RetryingModel`, `FallbackModel`) inside the repo
+   invites accidental use; deleting it is a fork with extra steps.
 3. The useful design patterns are small and stable. Wire structs, SSE framing,
    and the part vocabulary are a minority of the code and change slowly; they
    can guide clean-room Signalbox-owned types at a fraction of the inherited
@@ -484,6 +471,4 @@ providers.
 - External exploration handoff, `rust-llm-runtime-signalbox-handoff.md`
   (2026-07-20): research-question charter and repo-health facts noted as
   unverified where used
-- [ADR-0005](../decisions/0005-model-call-retry-semantics.md),
-  [ADR-0009](../decisions/0009-dispatch-fencing.md), and
-  [ADR-0043](../decisions/0043-provider-failure-classification.md)
+- ADR-0005, ADR-0009, and ADR-0043

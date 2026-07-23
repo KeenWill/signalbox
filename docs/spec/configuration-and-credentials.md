@@ -130,10 +130,9 @@ selection against the catalog before creating a session.
 
 ## Credential lifecycle
 
-ADR-0017's hub-side contract is implemented as follows. Deployment channel
-ownership (which store is a secret's source of truth, mounted-secret delivery,
-rotation overlap discipline) is operational policy recorded in ADR-0017 and is
-not enforced by code.
+The hub-side contract (originally ADR-0017) is implemented as follows, and the
+deployment-side rules that code cannot enforce are stated in
+[Credential operations policy](#credential-operations-policy) below.
 
 - **Reference/value split.** A `CredentialReference` is the non-secret durable
   name of one credential; a `CredentialValue` carries the secret bytes.
@@ -208,6 +207,39 @@ Enforcement as implemented:
   `crates/model-runtime-anthropic/tests/loopback.rs`, and
   `apps/hubd/src/configuration.rs` enforce this boundary.
 
+## Credential operations policy
+
+Operational rules the deployment must honor; code cannot enforce them
+(originally decided as ADR-0017, retained here because the surviving hub-side
+mechanics depend on them):
+
+- **One source of truth per secret.** 1Password owns runtime credentials: the
+  vault item a reference resolves to is the source of truth, and rotation is an
+  edit to it. sops-age-in-git owns bootstrap and deployment material (including
+  the operator's own credential): the encrypted file in git is the source of
+  truth, and rotation history is git history. Maintaining the same value in both
+  channels is a defect. Kubernetes Secret objects are delivery artifacts of
+  whichever channel produced them, never sources of truth; hand-editing one is a
+  defect because the next sync overwrites it.
+- **Acyclic bootstrap chain.** The owner-held age identity (custodied outside
+  git and outside operator sync) decrypts the sops channel; the sops channel
+  delivers the operator's credential; the operator syncs the 1Password channel;
+  the hub consumes mounted artifacts. No cluster workload may reach the age
+  identity through the 1Password channel.
+- **Mounted-volume delivery, never environment variables.** Runtime credentials
+  arrive as an operator-synced Secret mounted as a volume and read per use
+  (`subPath` mounts are prohibited — they never refresh). Rotation therefore
+  propagates within the operator polling interval plus the kubelet sync period,
+  without a restart. The hub deployment must explicitly set
+  `operator.1password.io/auto-restart: "false"` — the operator inherits
+  auto-restart from wider scopes, and a restart-per-rotation deployment
+  terminalizes in-flight work as `Lost` on every rotation.
+- **Revoke-last rotation.** Install the new value at the source of truth, wait
+  out the propagation bound plus the longest expected in-flight provider call,
+  then revoke the old value at the provider. Where a provider allows only one
+  active key, rotation has an honest known-failure window; the mitigation is
+  narrower propagation configuration, never silent retry.
+
 ## Open edges
 
 - Catalog alias definitions are parsed and validated but not wired into input
@@ -224,9 +256,9 @@ Enforcement as implemented:
 - Multi-provider support and the reference-to-provider-component mapping are
   undecided (reserved ADR-0007); today `provider = "anthropic"` and
   `anthropic-primary` are hard-coded.
-- ADR-0017's deployment obligations (channel ownership, optional mounted Secret,
-  auto-restart disablement, revoke-last rotation, retain-on-outage verification)
-  are operational policy with no code enforcement.
+- The [credential operations policy](#credential-operations-policy) is
+  operational discipline with no code or CI enforcement; violating it cannot be
+  caught by any test.
 - `DATABASE_URL` via process environment is explicitly provisional (ADR-0044);
   the database-credential delivery channel remains reserved (ADR-0032
   follow-up).
