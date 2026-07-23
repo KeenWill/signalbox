@@ -59,6 +59,11 @@ protocol authentication is provisional; it has no authorization exchange or
 remote transport. Socket filesystem access is the deployment boundary; it is not
 represented as application-level owner proof.
 
+The hub owns at most 128 accepted connection tasks. At that limit it leaves new
+connections in the bounded listener backlog until an active task exits, then
+resumes accepting. The limit counts long-lived follow connections and ordinary
+request connections alike.
+
 Why: the first client needs a small local process boundary, while remote access
 would require an authenticated identity and revocation design that does not yet
 exist.
@@ -134,7 +139,9 @@ interrupt, steering, or after-current treatment.
 Submitted `content` is limited to 1 MiB of UTF-8. The hub applies that boundary
 before application construction or mutation and returns `invalid_request` when
 it is exceeded. This leaves enough space for worst-case JSON escaping when the
-same accepted content is projected in a queued turn or durable update event.
+same accepted content is projected in a queued turn or durable update event. The
+exact capacity choice is recorded in the
+[input-bound decision](../decisions.md#2026-07-23--bound-process-protocol-input-at-1-mib).
 
 ## Server messages
 

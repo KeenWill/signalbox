@@ -116,11 +116,11 @@ ANTHROPIC_API_KEY_FILE=/path/to/anthropic-api-key \
   "Reply with exactly: signalbox smoke ok"
 ```
 
-Production `signalbox-hubd` requires `DATABASE_URL`, `SIGNALBOX_CONFIG_FILE`,
-`ANTHROPIC_API_KEY_FILE`, and `SIGNALBOX_SOCKET_PATH`. The process boundary is
-specified in the [process protocol](docs/spec/process-protocol.md); model
-configuration and credential delivery are recorded in the
-[decision log](docs/decisions.md).
+Production process configuration is specified in
+[configuration and credentials](docs/spec/configuration-and-credentials.md#process-configuration).
+The process boundary is specified in the
+[process protocol](docs/spec/process-protocol.md); model configuration and
+credential delivery are recorded in the [decision log](docs/decisions.md).
 
 ## License
 

@@ -1,6 +1,6 @@
 //! Local process-protocol serving and durable outbox fan-out.
 
-use std::{error::Error, fmt, io, time::Duration};
+use std::{error::Error, fmt, future::Future, io, time::Duration};
 
 use signalbox_application::{
     CreateSessionError, CreateSessionOutcome, CreateSessionRequest, CreateSessionService,
@@ -45,7 +45,8 @@ use tokio::{
 use crate::{LocalProcessListener, LocalSocketError};
 
 const OUTBOX_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
-const PROCESS_UPDATE_CAPACITY: usize = 1_024;
+const PROCESS_UPDATE_CAPACITY: usize = 64;
+const MAX_ACTIVE_CONNECTIONS: usize = 128;
 const MAX_SUBMITTED_INPUT_BYTES: usize = 1024 * 1024;
 
 /// The hub-owned local protocol runtime: one outbox dispatcher, one bounded
@@ -138,7 +139,7 @@ async fn serve_connections(
         }
         tokio::select! {
             () = wait_for_shutdown(&mut shutdown) => break,
-            accepted = listener.accept() => {
+            accepted = listener.accept(), if connections.len() < MAX_ACTIVE_CONNECTIONS => {
                 let (stream, _) = accepted.map_err(ProcessRuntimeError::Accept)?;
                 connections.spawn(serve_connection(
                     stream,
@@ -568,22 +569,43 @@ where
 {
     let mut subscription = updates.subscribe();
     let selected_session = SessionId::from_uuid(session_id.into_uuid());
-    let snapshot = match ProcessReadRepository::new(pool.clone())
-        .read_transcript(selected_session)
-        .await
-    {
+    let snapshot_result = run_until_shutdown(
+        &mut shutdown,
+        ProcessReadRepository::new(pool.clone()).read_transcript(selected_session),
+    )
+    .await;
+    let Some(snapshot_result) = snapshot_result else {
+        return Ok(());
+    };
+    let snapshot = match snapshot_result {
         Ok(Some(snapshot)) => snapshot,
         Ok(None) => {
-            return write_error(
-                writer,
-                request_id,
-                ProtocolError::without_detail(ErrorCode::NotFound),
+            return run_until_shutdown(
+                &mut shutdown,
+                write_error(
+                    writer,
+                    request_id,
+                    ProtocolError::without_detail(ErrorCode::NotFound),
+                ),
             )
-            .await;
+            .await
+            .unwrap_or(Ok(()));
         }
-        Err(error) => return write_process_read_error(writer, request_id, error).await,
+        Err(error) => {
+            return run_until_shutdown(
+                &mut shutdown,
+                write_process_read_error(writer, request_id, error),
+            )
+            .await
+            .unwrap_or(Ok(()));
+        }
     };
-    write_snapshot(writer, request_id, &snapshot).await?;
+    let Some(snapshot_write) =
+        run_until_shutdown(&mut shutdown, write_snapshot(writer, request_id, &snapshot)).await
+    else {
+        return Ok(());
+    };
+    snapshot_write?;
     let mut observed_cursor = snapshot.cursor();
 
     loop {
@@ -594,13 +616,16 @@ where
         let update = match update {
             Ok(update) => update,
             Err(broadcast::error::RecvError::Lagged(_)) => {
-                write_error(
-                    writer,
-                    request_id,
-                    ProtocolError::without_detail(ErrorCode::ResyncRequired),
+                return run_until_shutdown(
+                    &mut shutdown,
+                    write_error(
+                        writer,
+                        request_id,
+                        ProtocolError::without_detail(ErrorCode::ResyncRequired),
+                    ),
                 )
-                .await?;
-                return Ok(());
+                .await
+                .unwrap_or(Ok(()));
             }
             Err(broadcast::error::RecvError::Closed) => return Ok(()),
         };
@@ -611,16 +636,23 @@ where
         if update.session != selected_session {
             continue;
         }
-        write_message(
-            writer,
-            request_id,
-            ServerMessage::SessionEvent {
-                cursor: CanonicalU64::new(update.cursor),
-                session_id,
-                event: update.event.wire(),
-            },
+        let Some(event_write) = run_until_shutdown(
+            &mut shutdown,
+            write_message(
+                writer,
+                request_id,
+                ServerMessage::SessionEvent {
+                    cursor: CanonicalU64::new(update.cursor),
+                    session_id,
+                    event: update.event.wire(),
+                },
+            ),
         )
-        .await?;
+        .await
+        else {
+            return Ok(());
+        };
+        event_write?;
     }
 }
 
@@ -1033,6 +1065,19 @@ async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
     }
 }
 
+async fn run_until_shutdown<Output, Operation>(
+    shutdown: &mut watch::Receiver<bool>,
+    operation: Operation,
+) -> Option<Output>
+where
+    Operation: Future<Output = Output>,
+{
+    tokio::select! {
+        () = wait_for_shutdown(shutdown) => None,
+        output = operation => Some(output),
+    }
+}
+
 fn wire_uuid(value: uuid::Uuid) -> CanonicalUuid {
     CanonicalUuid::from_uuid(value)
 }
@@ -1376,13 +1421,17 @@ mod tests {
         ServerFrame, ServerMessage, SessionEvent, TurnState, decode_server_line,
         encode_server_line,
     };
-    use tokio::io::{AsyncReadExt, BufReader, duplex};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt, BufReader, duplex},
+        sync::watch,
+        time::{Duration, timeout},
+    };
     use uuid::Uuid;
 
     use super::{
         IncomingLine, MAX_FRAME_BYTES, MAX_SUBMITTED_INPUT_BYTES, ProcessConnectionError,
         RequestId, admitted_user_content, inspect_connection_completion, read_frame_line,
-        wire_model_call_state, write_content,
+        run_until_shutdown, wire_model_call_state, write_content,
     };
     use signalbox_persistence::outbox::{DispatchedModelCallDisposition, DispatchedModelCallState};
     use signalbox_process_protocol::{ModelCallDisposition, ModelCallState};
@@ -1469,6 +1518,27 @@ mod tests {
             )))))
             .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn blocked_follow_write_is_cancelled_by_shutdown() -> Result<(), Box<dyn Error>> {
+        let (mut writer, _reader) = duplex(1);
+        writer.write_all(b"x").await?;
+        let (shutdown, mut shutdown_receiver) = watch::channel(false);
+        let blocked_write = tokio::spawn(async move {
+            run_until_shutdown(
+                &mut shutdown_receiver,
+                writer.write_all(b"blocked follow output"),
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+
+        shutdown.send(true)?;
+
+        let outcome = timeout(Duration::from_secs(1), blocked_write).await??;
+        assert!(outcome.is_none());
+        Ok(())
     }
 
     #[tokio::test]

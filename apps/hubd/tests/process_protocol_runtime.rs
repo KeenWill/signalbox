@@ -139,7 +139,7 @@ fn command() -> Result<CommandId, Box<dyn Error>> {
     Ok(CommandId::try_from_uuid(Uuid::now_v7())?)
 }
 
-/// S24 / INV-032 / INV-033: the guarded process runtime serves every
+/// S24 / INV-032: the guarded process runtime serves every
 /// version-one operation, and a follow subscription formed before its snapshot
 /// observes the next committed outbox event strictly above that snapshot's
 /// cursor.

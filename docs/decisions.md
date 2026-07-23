@@ -10,6 +10,24 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-23 — Bound accepted process connections at 128
+
+**Context.** A finite socket backlog does not bound tasks after acceptance.
+Long-lived follow streams or idle clients could otherwise cause hubd to retain
+an unbounded number of connection tasks, readers, writers, and fan-out
+receivers.
+
+**Decision.** Own at most 128 accepted process-connection tasks. When the limit
+is full, stop accepting until one task exits; the guarded listener's existing
+128-entry kernel backlog remains the queue for additional local attempts.
+
+**Rejected alternatives.** Leaving accepted tasks unbounded converts local
+connection churn into unbounded memory growth. Closing every attempt above the
+limit makes short bursts fail despite the already bounded listener queue.
+
+**Affects.** Process-protocol connection admission and runtime task ownership;
+application command admission and the wire contract do not change.
+
 ## 2026-07-23 — Bound process-protocol input at 1 MiB
 
 **Context.** A submitted input is later reflected inside one queued-turn frame
@@ -70,6 +88,7 @@ and executable-path failure modes without solving separate bind/listen.
 
 **Affects.** The hub-owned local process transport and its direct dependency
 surface; no domain, persistence, or wire representation changes.
+
 ## 2026-07-23 — Bound process fan-out retention at 64 events
 
 **Context.** The initial version-one design retained 1,024 update events while
