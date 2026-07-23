@@ -208,7 +208,9 @@ A transcript snapshot is read in one PostgreSQL repeatable-read, read-only
 transaction. The transaction observes all of:
 
 - the global last committed outbox sequence, returned as `cursor`; and
-- the selected session's latest authoritative semantic frontier; and
+- the selected session's latest authoritative semantic frontier, selected from
+  the tip of persisted turn-start predecessor lineage rather than acceptance
+  order; and
 - every turn in acceptance order with its authoritative lifecycle state.
 
 One logical snapshot is a bounded message sequence sharing the request identity:

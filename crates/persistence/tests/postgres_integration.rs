@@ -1314,6 +1314,84 @@ async fn model_call_noncompleted_rereads_validate_each_durable_closure()
             .await?,
         RetainedModelCallObservationStatus::AlreadyCommitted
     );
+    let refused_sequence: Decimal = sqlx::query_scalar(
+        "SELECT event_sequence
+           FROM turn_refused_outbox_event
+          WHERE turn_id = $1",
+    )
+    .bind(refused.turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE turn_lifecycle
+            DROP CONSTRAINT turn_lifecycle_terminal_attempt_fk,
+            DROP CONSTRAINT turn_lifecycle_terminal_call_fk",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET terminal_attempt_id = $1,
+                terminal_model_call_id = $2
+          WHERE turn_id = $3",
+    )
+    .bind(Uuid::from_u128(refused_seed + 19))
+    .bind(Uuid::from_u128(refused_seed + 20))
+    .bind(refused.turn.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "ALTER TABLE outbox_delivery_state
+         DISABLE TRIGGER outbox_delivery_advances_prefix",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE outbox_delivery_state
+            SET delivered_through = $1 - 1,
+                last_delivery_xid = pg_current_xact_id()
+          WHERE singleton",
+    )
+    .bind(refused_sequence)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE outbox_delivery_state
+         ENABLE TRIGGER outbox_delivery_advances_prefix",
+    )
+    .execute(&pool)
+    .await?;
+    assert!(matches!(
+        OutboxDispatcher::new(pool.clone())
+            .dispatch_next(|_| panic!("cross-wired refused ownership must not be offered"))
+            .await,
+        Err(OutboxDispatchError::Corruption(
+            OutboxCorruption::InvalidTerminalEventCorrelation
+        ))
+    ));
+    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET terminal_attempt_id = $1,
+                terminal_model_call_id = $2
+          WHERE turn_id = $3",
+    )
+    .bind(refused.attempt.into_uuid())
+    .bind(refused.call.into_uuid())
+    .bind(refused.turn.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
     sqlx::query("ALTER TABLE turn_refused_outbox_event DISABLE TRIGGER USER")
         .execute(&pool)
         .await?;
@@ -1669,6 +1747,85 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
     .fetch_one(&pool)
     .await?;
     assert_eq!(durable_shape, (1, 1, 1, 1, 1, 3, 1, 1, 1));
+
+    let completion_sequence: Decimal = sqlx::query_scalar(
+        "SELECT event_sequence
+           FROM turn_completed_outbox_event
+          WHERE turn_id = $1",
+    )
+    .bind(turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE turn_lifecycle
+            DROP CONSTRAINT turn_lifecycle_terminal_attempt_fk,
+            DROP CONSTRAINT turn_lifecycle_terminal_call_fk",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET terminal_attempt_id = $1,
+                terminal_model_call_id = $2
+          WHERE turn_id = $3",
+    )
+    .bind(Uuid::from_u128(0xbad1))
+    .bind(Uuid::from_u128(0xbad2))
+    .bind(turn.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "ALTER TABLE outbox_delivery_state
+         DISABLE TRIGGER outbox_delivery_advances_prefix",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE outbox_delivery_state
+            SET delivered_through = $1 - 1,
+                last_delivery_xid = pg_current_xact_id()
+          WHERE singleton",
+    )
+    .bind(completion_sequence)
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE outbox_delivery_state
+         ENABLE TRIGGER outbox_delivery_advances_prefix",
+    )
+    .execute(&pool)
+    .await?;
+    assert!(matches!(
+        OutboxDispatcher::new(pool.clone())
+            .dispatch_next(|_| panic!("cross-wired terminal ownership must not be offered"))
+            .await,
+        Err(OutboxDispatchError::Corruption(
+            OutboxCorruption::InvalidTerminalEventCorrelation
+        ))
+    ));
+    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET terminal_attempt_id = $1,
+                terminal_model_call_id = $2
+          WHERE turn_id = $3",
+    )
+    .bind(attempt.into_uuid())
+    .bind(call.into_uuid())
+    .bind(turn.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
 
     sqlx::query("ALTER TABLE turn_completed_outbox_event DISABLE TRIGGER USER")
         .execute(&pool)
@@ -2229,7 +2386,7 @@ async fn s04_s08_s09_inv016_terminal_call_reclassifies_and_schedules_pending_ste
         successor
     );
 
-    let durable: (String, Uuid, Uuid, String, i64) = sqlx::query_as(
+    let durable: (String, Uuid, Uuid, String, i64, i64) = sqlx::query_as(
         "SELECT accepted.disposition_kind,
                 accepted.expected_active_turn_id,
                 accepted.origin_turn_id,
@@ -2244,7 +2401,13 @@ async fn s04_s08_s09_inv016_terminal_call_reclassifies_and_schedules_pending_ste
                     AND queued.frozen_model_kind IS NULL
                     AND queued.model_parameters IS NULL
                     AND queued.known_provider_failure_retry IS NULL
-                    AND queued.model_fallback IS NULL)
+                    AND queued.model_fallback IS NULL),
+                (SELECT count(*)
+                   FROM input_accepted_outbox_event AS event
+                  WHERE event.accepted_input_id = $1
+                    AND event.session_id = $2
+                    AND event.turn_id = $3
+                    AND event.acceptance_position = accepted.acceptance_position)
            FROM accepted_input AS accepted
            JOIN turn_lifecycle AS successor
              ON successor.turn_id = accepted.origin_turn_id
@@ -2264,6 +2427,7 @@ async fn s04_s08_s09_inv016_terminal_call_reclassifies_and_schedules_pending_ste
             source_turn.into_uuid(),
             successor.into_uuid(),
             "queued".into(),
+            1,
             1,
         )
     );
@@ -11768,6 +11932,69 @@ async fn s01_inv012_inv032_scheduling_transitions_dispatch_in_commit_order()
     .fetch_one(&pool)
     .await?;
     assert_eq!(durable_counts, (1, 1, Decimal::from(3)));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S01 / INV-012 / INV-032: an accepted-input event is dispatchable only when
+/// its content still matches the immutable accepting command.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s01_inv012_inv032_dispatcher_rejects_crosswired_accepted_content()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(0xe72));
+    let turn = TurnId::from_uuid(Uuid::from_u128(0xe73));
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0xe70, 0xe71, direct(0xe74)))
+        .await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                0xe75,
+                0xe71,
+                "authoritative command content",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            accepted_input,
+            Some(turn),
+        )
+        .await?;
+
+    let dispatcher = OutboxDispatcher::new(pool.clone());
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 1 }
+    );
+
+    sqlx::query("ALTER TABLE accepted_input DISABLE TRIGGER accepted_input_is_append_only")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE accepted_input
+            SET content_text = 'cross-wired accepted content'
+          WHERE accepted_input_id = $1",
+    )
+    .bind(accepted_input.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE accepted_input ENABLE TRIGGER accepted_input_is_append_only")
+        .execute(&pool)
+        .await?;
+
+    assert!(matches!(
+        dispatcher
+            .dispatch_next(|_| panic!("cross-wired accepted content must not be offered"))
+            .await,
+        Err(OutboxDispatchError::Corruption(
+            OutboxCorruption::MissingTypedRecord
+        ))
+    ));
 
     pool.close().await;
     drop(container);

@@ -434,6 +434,14 @@ async fn load_event(
                     AND accepted.session_id = event.session_id
                     AND accepted.acceptance_position = event.acceptance_position
                     AND accepted.origin_turn_id = event.turn_id
+                   JOIN submit_input_command AS command
+                     ON command.command_id = accepted.accepting_command_id
+                    AND command.session_id = event.session_id
+                    AND command.result_session_id = event.session_id
+                    AND command.result_kind = 'applied'
+                    AND command.result_accepted_input_id = event.accepted_input_id
+                    AND command.content_kind = 'text'
+                    AND command.content_text = accepted.content_text
                   WHERE event.event_sequence = $1",
             )
             .bind(Decimal::from(expected_sequence))
@@ -524,10 +532,12 @@ async fn load_event(
                     AND turn.state_kind = 'terminal'
                     AND turn.terminal_disposition_kind = 'completed'
                     AND turn.terminal_frontier_id = event.terminal_frontier_id
+                    AND turn.terminal_model_call_id = event.model_call_id
                    JOIN model_call AS call
                      ON call.model_call_id = event.model_call_id
                     AND call.turn_id = event.turn_id
                     AND call.session_id = event.session_id
+                    AND call.turn_attempt_id = turn.terminal_attempt_id
                     AND call.state_kind = 'terminal'
                     AND call.terminal_disposition_kind = 'completed'
                    JOIN semantic_transcript_entry AS completion
@@ -560,10 +570,12 @@ async fn load_event(
                     AND turn.state_kind = 'terminal'
                     AND turn.terminal_disposition_kind = 'refused'
                     AND turn.terminal_frontier_id = event.terminal_frontier_id
+                    AND turn.terminal_model_call_id = event.model_call_id
                    JOIN model_call AS call
                      ON call.model_call_id = event.model_call_id
                     AND call.turn_id = event.turn_id
                     AND call.session_id = event.session_id
+                    AND call.turn_attempt_id = turn.terminal_attempt_id
                     AND call.state_kind = 'terminal'
                     AND call.terminal_disposition_kind = 'refused'
                   WHERE event.event_sequence = $1",
