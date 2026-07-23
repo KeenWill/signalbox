@@ -79,7 +79,8 @@ fn render_frontier_messages<'a>(
     let mut messages = Vec::new();
     for (source, payload) in entries {
         match payload {
-            SemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input } => {
+            SemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input }
+            | SemanticTranscriptEntryPayload::SteeringAcceptedInput { accepted_input, .. } => {
                 let content = origin_content(*accepted_input).ok_or(
                     ModelFrontierRenderingError::MissingOriginContent {
                         entry: source,
@@ -208,11 +209,6 @@ pub enum PrepareModelCallOutcome {
     },
     /// Immutable target resolution failed and the turn closed atomically.
     TargetUnavailable(Box<FailedModelCallTurn>),
-    /// Acknowledged steering prevents this model-call safe point.
-    PendingSteering {
-        /// The earliest accepted input proving that steering remains pending.
-        accepted_input: AcceptedInputId,
-    },
 }
 
 /// Authoritative transaction that prepares or reloads one initial model call.
@@ -221,12 +217,17 @@ pub trait PrepareModelCallTransaction {
     type Error: ClassifyOperatorFailure;
 
     /// Runs the serialized prepare role with fresh application candidates.
-    fn prepare(
+    fn prepare<NextSteeringIdentities>(
         &mut self,
         session: SessionId,
         call: ModelCallId,
         failure_identities: FailedModelCallTurnIdentities,
-    ) -> impl Future<Output = Result<PrepareModelCallOutcome, Self::Error>> + Send;
+        steering_frontier: ContextFrontierId,
+        next_steering_identities: NextSteeringIdentities,
+    ) -> impl Future<Output = Result<PrepareModelCallOutcome, Self::Error>> + Send
+    where
+        NextSteeringIdentities:
+            FnMut(AcceptedInputId) -> (SemanticTranscriptEntryId, TurnId) + Send;
 }
 
 /// Guarded transaction closing a trustworthy local pre-send failure.
@@ -512,7 +513,11 @@ pub enum ModelCallExecutionOutcome {
     Checkpointed(ModelCallId),
     /// Target resolution failed before call creation.
     TargetUnavailable(Box<FailedModelCallTurn>),
-    /// Pending steering prevents preparation.
+    /// Compatibility-only result retained for existing exhaustive callers.
+    ///
+    /// Atomic steering consumption means this execution service no longer
+    /// produces the variant; callers must not treat it as a reachable
+    /// preparation-blocked state.
     PendingSteering {
         /// The earliest accepted input proving that steering remains pending.
         accepted_input: AcceptedInputId,
@@ -911,9 +916,13 @@ where
         let prepared = loop {
             let call = self.ids.next_model_call_id();
             let failure_identities = self.next_failed_identities();
-            match self
-                .prepare
-                .prepare(session, call, failure_identities)
+            let steering_frontier = self.ids.next_context_frontier_id();
+            let prepare = &mut self.prepare;
+            let ids = &mut self.ids;
+            match prepare
+                .prepare(session, call, failure_identities, steering_frontier, |_| {
+                    (ids.next_semantic_entry_id(), ids.next_turn_id())
+                })
                 .await
             {
                 Ok(PrepareModelCallOutcome::NoWork) => {
@@ -928,9 +937,6 @@ where
                 }) => break (request, credential_reference),
                 Ok(PrepareModelCallOutcome::TargetUnavailable(failed)) => {
                     return Ok(ModelCallExecutionOutcome::TargetUnavailable(failed));
-                }
-                Ok(PrepareModelCallOutcome::PendingSteering { accepted_input }) => {
-                    return Ok(ModelCallExecutionOutcome::PendingSteering { accepted_input });
                 }
                 Err(error)
                     if error.operator_failure_class()
@@ -1212,6 +1218,7 @@ pub struct ScriptedModelCallProvider {
     steps: std::collections::VecDeque<ScriptedModelCallStep>,
     capability_preparation_count: usize,
     interaction_count: usize,
+    last_prepared_messages: Option<Box<[ModelConversationMessage]>>,
 }
 
 impl ScriptedModelCallProvider {
@@ -1225,6 +1232,7 @@ impl ScriptedModelCallProvider {
             steps: steps.into_iter().collect(),
             capability_preparation_count: 0,
             interaction_count: 0,
+            last_prepared_messages: None,
         }
     }
 
@@ -1242,6 +1250,12 @@ impl ScriptedModelCallProvider {
     pub fn remaining_step_count(&self) -> usize {
         self.steps.len()
     }
+
+    /// Borrows the exact messages most recently presented for capability
+    /// preparation.
+    pub fn last_prepared_messages(&self) -> Option<&[ModelConversationMessage]> {
+        self.last_prepared_messages.as_deref()
+    }
 }
 
 impl ModelCallProvider for ScriptedModelCallProvider {
@@ -1254,6 +1268,7 @@ impl ModelCallProvider for ScriptedModelCallProvider {
     ) -> impl Future<Output = Result<ModelCallCapabilityPreparation<Self::Capability>, Self::Error>> + Send
     {
         self.capability_preparation_count += 1;
+        self.last_prepared_messages = Some(operation.messages().to_vec().into_boxed_slice());
         let step = self.steps.front().cloned();
         if matches!(
             &step,
@@ -1615,12 +1630,18 @@ mod tests {
     impl PrepareModelCallTransaction for FakePrepare {
         type Error = FakeError;
 
-        async fn prepare(
+        async fn prepare<NextSteeringIdentities>(
             &mut self,
             _session: SessionId,
             _call: ModelCallId,
             _failure_identities: FailedModelCallTurnIdentities,
-        ) -> Result<PrepareModelCallOutcome, Self::Error> {
+            _steering_frontier: ContextFrontierId,
+            _next_steering_identities: NextSteeringIdentities,
+        ) -> Result<PrepareModelCallOutcome, Self::Error>
+        where
+            NextSteeringIdentities:
+                FnMut(AcceptedInputId) -> (SemanticTranscriptEntryId, TurnId) + Send,
+        {
             self.calls += 1;
             self.outcomes
                 .pop_front()

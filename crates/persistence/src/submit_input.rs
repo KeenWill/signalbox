@@ -10,15 +10,15 @@ use signalbox_domain::{
     AcceptedInputSchedulingProjection, AcceptedInputSchedulingReconstitutionFailure,
     AcceptedInputSchedulingReconstitutionInput, AcceptedInputStartingLineage,
     AcceptedInputTurnSchedulingRecord, AcceptedInputTurnSchedulingRecordState,
-    ActiveTurnSchedulingReconstitutionInput, Actor, AssistantText, ContextFrontierId,
-    DeliveryRequest, DirectModelSelection, DurableCommandId,
-    FailedTurnExecutionReconstitutionInput, FrozenAliasDefinition, FrozenModelSelection,
-    ModelAlias, ModelCallDisposition, ModelCallId, ModelCallReconstitutionInput,
-    ModelCallReconstitutionState, ModelSelectionOverride, ModelSelectionRequest,
-    NonEmptyUnicodeTextFailure, OriginConfiguration, PerInputConfigurationChoices,
-    PinnedProviderTargetReconstitutionInput, PreparedSubmitInput, ProviderModelIdentity,
-    ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget,
-    SemanticTranscriptEntryId,
+    ActiveTurnSchedulingReconstitutionInput, Actor, AssistantText,
+    ConsumedSteeringReconstitutionInput, ContextFrontierId, DeliveryRequest, DirectModelSelection,
+    DurableCommandId, FailedTurnExecutionReconstitutionInput, FrozenAliasDefinition,
+    FrozenModelSelection, ModelAlias, ModelCallDisposition, ModelCallId,
+    ModelCallReconstitutionInput, ModelCallReconstitutionState, ModelSelectionOverride,
+    ModelSelectionRequest, NonEmptyUnicodeTextFailure, OriginConfiguration,
+    PerInputConfigurationChoices, PinnedProviderTargetReconstitutionInput, PreparedSubmitInput,
+    ProviderModelIdentity, ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput,
+    ResolvedProviderTarget, SemanticTranscriptEntryId,
     SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session,
     SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
@@ -1297,6 +1297,32 @@ pub(crate) async fn load_scheduling_projection(
     let active_acceptance_tail =
         load_active_acceptance_tail(connection, session_id, &turns).await?;
 
+    let consumed_steering_rows = sqlx::query(
+        "SELECT session_id, accepted_input_id, acceptance_position, expected_active_turn_id,
+                consuming_model_call_id
+           FROM accepted_input
+          WHERE session_id = $1
+            AND disposition_kind = 'consumed_as_steering'
+          ORDER BY acceptance_position",
+    )
+    .bind(session_id_to_uuid(session_id))
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut consumed_steering = Vec::with_capacity(consumed_steering_rows.len());
+    for row in consumed_steering_rows {
+        let call = ModelCallId::from_uuid(required(&row, "consuming_model_call_id")?);
+        required_model_calls.insert(call.into_uuid());
+        consumed_steering.push(ConsumedSteeringReconstitutionInput::new(
+            session_id_from_uuid(required(&row, "session_id")?),
+            AcceptedInputLifecycle::new(
+                accepted_input_id_from_uuid(required(&row, "accepted_input_id")?),
+                AcceptedInputDisposition::ConsumedAsSteering { call },
+            ),
+            decode_position(&row, "acceptance_position")?,
+            turn_id_from_uuid(required(&row, "expected_active_turn_id")?),
+        ));
+    }
+
     let required_model_call_ids = required_model_calls.iter().copied().collect::<Vec<_>>();
     let model_call_rows = sqlx::query(
         "SELECT
@@ -1444,6 +1470,7 @@ pub(crate) async fn load_scheduling_projection(
             semantic_entry_id,
             payload_kind,
             origin_accepted_input_id,
+            steering_source_turn_id,
             failed_turn_id,
             assistant_text_value,
             producing_model_call_id,
@@ -1475,6 +1502,7 @@ pub(crate) async fn load_scheduling_projection(
         let entry = SemanticTranscriptEntryId::from_uuid(entry_uuid);
         let payload_kind: String = required(&row, "payload_kind")?;
         let origin: Option<Uuid> = row.try_get("origin_accepted_input_id")?;
+        let steering_source_turn: Option<Uuid> = row.try_get("steering_source_turn_id")?;
         let failed_turn: Option<Uuid> = row.try_get("failed_turn_id")?;
         let assistant_text: Option<String> = row.try_get("assistant_text_value")?;
         let producing_call: Option<Uuid> = row.try_get("producing_model_call_id")?;
@@ -1483,23 +1511,37 @@ pub(crate) async fn load_scheduling_projection(
         let payload = match (
             payload_kind.as_str(),
             origin,
+            steering_source_turn,
             failed_turn,
             assistant_text,
             producing_call,
             tool_request,
             completed_turn,
         ) {
-            ("origin_accepted_input", Some(origin), None, None, None, None, None) => {
+            ("origin_accepted_input", Some(origin), None, None, None, None, None, None) => {
                 InitialSemanticTranscriptEntryPayload::OriginAcceptedInput {
                     accepted_input: accepted_input_id_from_uuid(origin),
                 }
             }
-            ("turn_failed", None, Some(turn), None, None, None, None) => {
+            (
+                "steering_accepted_input",
+                Some(accepted_input),
+                Some(source_turn),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ) => InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput {
+                accepted_input: accepted_input_id_from_uuid(accepted_input),
+                source_turn: turn_id_from_uuid(source_turn),
+            },
+            ("turn_failed", None, None, Some(turn), None, None, None, None) => {
                 InitialSemanticTranscriptEntryPayload::TurnFailed {
                     turn: turn_id_from_uuid(turn),
                 }
             }
-            ("assistant_text", None, None, Some(text), Some(call), None, None) => {
+            ("assistant_text", None, None, None, Some(text), Some(call), None, None) => {
                 InitialSemanticTranscriptEntryPayload::AssistantText {
                     producing_call: ModelCallId::from_uuid(call),
                     value: AssistantText::try_new(text).map_err(|error| {
@@ -1510,19 +1552,20 @@ pub(crate) async fn load_scheduling_projection(
                     })?,
                 }
             }
-            ("assistant_tool_use", None, None, None, Some(call), Some(request), None) => {
+            ("assistant_tool_use", None, None, None, None, Some(call), Some(request), None) => {
                 InitialSemanticTranscriptEntryPayload::AssistantToolUse {
                     producing_call: ModelCallId::from_uuid(call),
                     request: ToolRequestId::from_uuid(request),
                 }
             }
-            ("turn_completed", None, None, None, None, None, Some(turn)) => {
+            ("turn_completed", None, None, None, None, None, None, Some(turn)) => {
                 InitialSemanticTranscriptEntryPayload::TurnCompleted {
                     turn: turn_id_from_uuid(turn),
                 }
             }
             (
                 "origin_accepted_input"
+                | "steering_accepted_input"
                 | "turn_failed"
                 | "assistant_text"
                 | "assistant_tool_use"
@@ -1533,10 +1576,11 @@ pub(crate) async fn load_scheduling_projection(
                 _,
                 _,
                 _,
+                _,
             ) => {
                 return Err(SubmitInputCorruption::Inconsistent("semantic entry payload").into());
             }
-            (value, _, _, _, _, _, _) => {
+            (value, _, _, _, _, _, _, _) => {
                 return Err(SubmitInputCorruption::Unsupported {
                     field: "semantic entry payload_kind",
                     value: value.to_owned(),
@@ -1617,6 +1661,7 @@ pub(crate) async fn load_scheduling_projection(
         active_acceptance_tail,
     )
     .with_model_call_facts(pinned_targets, model_calls)
+    .with_consumed_steering_facts(consumed_steering)
     .reconstitute()
     .map_err(|error| {
         let (_, failure) = error.into_parts();
@@ -1706,6 +1751,7 @@ async fn load_active_acceptance_tail(
             acceptance_position,
             disposition_kind,
             origin_turn_id,
+            consuming_model_call_id,
             delivery_kind,
             expected_active_turn_id,
             expected_defaults_version,
@@ -1743,12 +1789,19 @@ async fn load_active_acceptance_tail(
         )?;
         let disposition_kind: String = required(&row, "disposition_kind")?;
         let origin_turn: Option<Uuid> = row.try_get("origin_turn_id")?;
-        let disposition = match (disposition_kind.as_str(), origin_turn, delivery) {
-            ("origin_of", Some(origin), _) => {
+        let consuming_call: Option<Uuid> = row.try_get("consuming_model_call_id")?;
+        let disposition = match (
+            disposition_kind.as_str(),
+            origin_turn,
+            consuming_call,
+            delivery,
+        ) {
+            ("origin_of", Some(origin), None, _) => {
                 AcceptedInputDisposition::OriginOf(turn_id_from_uuid(origin))
             }
             (
                 "pending_steering",
+                None,
                 None,
                 DeliveryRequest::NextSafePoint {
                     expected_active_turn,
@@ -1759,18 +1812,32 @@ async fn load_active_acceptance_tail(
             (
                 "reclassified_as_turn_origin",
                 Some(origin),
+                None,
                 DeliveryRequest::NextSafePoint { .. },
             ) => AcceptedInputDisposition::ReclassifiedAsTurnOrigin {
                 turn: turn_id_from_uuid(origin),
                 reason: SteeringReclassificationReason::NoSafePointBeforeTerminal,
             },
-            ("origin_of" | "pending_steering" | "reclassified_as_turn_origin", _, _) => {
+            ("consumed_as_steering", None, Some(call), DeliveryRequest::NextSafePoint { .. }) => {
+                AcceptedInputDisposition::ConsumedAsSteering {
+                    call: ModelCallId::from_uuid(call),
+                }
+            }
+            (
+                "origin_of"
+                | "pending_steering"
+                | "reclassified_as_turn_origin"
+                | "consumed_as_steering",
+                _,
+                _,
+                _,
+            ) => {
                 return Err(SubmitInputCorruption::Inconsistent(
                     "active acceptance-tail disposition",
                 )
                 .into());
             }
-            (value, _, _) => {
+            (value, _, _, _) => {
                 return Err(SubmitInputCorruption::Unsupported {
                     field: "active acceptance-tail disposition_kind",
                     value: value.to_owned(),

@@ -5,16 +5,17 @@
     reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
 )]
 
-use std::{collections::VecDeque, error::Error, future::Future, sync::Arc};
+use std::{collections::VecDeque, error::Error, sync::Arc};
 
 use rust_decimal::Decimal;
 use signalbox_application::{
     AuthorizeModelCallOutcome, CommitModelCallObservationTransaction, CreateSessionError,
     CreateSessionOutcome, CreateSessionRequest, CreateSessionService, EligibilityNudge,
     EligibilityNudgeOutcome, EligibilitySweep, InProcessAttemptDispatchGate, LoadSessionService,
-    ModelCallAuthorizationReread, ModelCallCredentialReference, ModelCallExecutionIdGenerator,
-    ModelCallExecutionOutcome, ModelCallExecutionService, ReplaceSessionDefaultsOutcome,
-    ReplaceSessionDefaultsRequest, ReplaceSessionDefaultsService, RetainedCapabilityFailureStatus,
+    ModelCallAuthorizationReread, ModelCallCredentialReference, ModelCallExecutionError,
+    ModelCallExecutionIdGenerator, ModelCallExecutionOutcome, ModelCallExecutionService,
+    ModelConversationMessage, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
+    ReplaceSessionDefaultsService, RetainedCapabilityFailureStatus,
     RetainedModelCallObservationStatus, ScriptedModelCallProvider, ScriptedModelCallStep,
     SessionIdGenerator, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
     StartEligibleTurnService, StartupScanIdGenerator, StartupScanService,
@@ -44,7 +45,8 @@ use signalbox_persistence::{
     },
     local_test_connection_options, migrate,
     model_execution::{
-        ModelCallRepositoryError, PostgresModelCallRepository, PrepareInitialModelCallOutcome,
+        ModelCallCorruption, ModelCallIdentityCollision, ModelCallRepositoryError,
+        PostgresModelCallRepository, PrepareInitialModelCallOutcome,
     },
     replace_session_defaults::{
         ReplaceSessionDefaultsCorruption, ReplaceSessionDefaultsHandlingOutcome,
@@ -894,6 +896,13 @@ async fn checkpoint_restart_model_call(
                     SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 12)),
                     ContextFrontierId::from_uuid(Uuid::from_u128(seed + 13)),
                 ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 14)),
+                |_| {
+                    (
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 15)),
+                        TurnId::from_uuid(Uuid::from_u128(seed + 16)),
+                    )
+                },
             )
             .await?,
         PrepareInitialModelCallOutcome::Checkpointed(checkpointed) if checkpointed == call
@@ -943,6 +952,13 @@ async fn authorize_checkpointed_model_call(
                     SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 15)),
                     ContextFrontierId::from_uuid(Uuid::from_u128(seed + 16)),
                 ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 17)),
+                |_| {
+                    (
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 18)),
+                        TurnId::from_uuid(Uuid::from_u128(seed + 19)),
+                    )
+                },
             )
             .await?,
         PrepareInitialModelCallOutcome::Ready { .. }
@@ -1455,6 +1471,13 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde8)),
                 ContextFrontierId::from_uuid(Uuid::from_u128(0xee8)),
             ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0xfe8)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdf8)),
+                    TurnId::from_uuid(Uuid::from_u128(0xdf9)),
+                )
+            },
         )
         .await?
     else {
@@ -1479,6 +1502,13 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde9)),
                 ContextFrontierId::from_uuid(Uuid::from_u128(0xee9)),
             ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0xfe9)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdf9)),
+                    TurnId::from_uuid(Uuid::from_u128(0xdfa)),
+                )
+            },
         )
         .await?
     else {
@@ -1547,6 +1577,13 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
                     SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdea)),
                     ContextFrontierId::from_uuid(Uuid::from_u128(0xeea)),
                 ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xfea)),
+                |_| {
+                    (
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdfa)),
+                        TurnId::from_uuid(Uuid::from_u128(0xdfb)),
+                    )
+                },
             )
             .await?,
         PrepareInitialModelCallOutcome::NoWork
@@ -1676,9 +1713,11 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
     Ok(())
 }
 
-/// S02 / INV-014 / INV-015: the application service and its four PostgreSQL
-/// ports preserve the separate Prepared checkpoint, provider effect, and
-/// terminal observation commits for one deterministic assistant reply.
+/// S02 / S08 / INV-005 / INV-012 / INV-014 / INV-015 / INV-036: the scripted
+/// application path consumes multiple steering inputs at preparation, renders
+/// them to the provider in acceptance order, rejects noncontiguous stored
+/// snapshot ordinals before resume, preserves the staged terminal commits, and
+/// replays each immutable pending-steering receipt after consumption.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s02_inv014_inv015_application_service_completes_scripted_reply()
@@ -1724,6 +1763,47 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
         activation.execute(session).await?,
         StartEligibleTurnOutcome::Activated(_)
     ));
+    let steering_inputs = [
+        AcceptedInputId::from_uuid(Uuid::from_u128(0x19e2)),
+        AcceptedInputId::from_uuid(Uuid::from_u128(0x19e3)),
+    ];
+    let submit_repository = SubmitInputRepository::new(pool.clone());
+    let first_steering_command = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0x14e3)),
+        session,
+        UserContent::try_text(String::from("first steering"))
+            .expect("fixture steering content is admitted"),
+        DeliveryRequest::NextSafePoint {
+            expected_active_turn: turn,
+        },
+    );
+    let first_steering = submit_repository
+        .handle(first_steering_command.clone(), steering_inputs[0], None)
+        .await?;
+    assert!(matches!(
+        &first_steering,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::PendingSteering(_)
+        ))
+    ));
+    let second_steering_command = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0x14e4)),
+        session,
+        UserContent::try_text(String::from("second steering"))
+            .expect("fixture steering content is admitted"),
+        DeliveryRequest::NextSafePoint {
+            expected_active_turn: turn,
+        },
+    );
+    let second_steering = submit_repository
+        .handle(second_steering_command.clone(), steering_inputs[1], None)
+        .await?;
+    assert!(matches!(
+        &second_steering,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::PendingSteering(_)
+        ))
+    ));
 
     let provider_identity = ProviderModelIdentity::from_uuid(Uuid::from_u128(0x1fe1));
     let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
@@ -1734,27 +1814,129 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
     let repository =
         PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
     let call = ModelCallId::from_uuid(Uuid::from_u128(0x1ce2));
+    let corrupt_snapshot_unused_call = ModelCallId::from_uuid(Uuid::from_u128(0x1ce4));
     let unused_call = ModelCallId::from_uuid(Uuid::from_u128(0x1ce3));
     let assistant_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1de4));
     let completion_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1de5));
+    let steering_entries = [
+        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1de6)),
+        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1de7)),
+    ];
+    let steering_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0x1ee2));
     let terminal_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0x1ee4));
     let assistant_text = AssistantText::try_new(String::from("service assistant reply"))
         .expect("fixture assistant content is admitted");
+    let mut reused_frontier_entries = [
+        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1df8)),
+        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1df9)),
+    ]
+    .into_iter();
+    let mut reused_frontier_turns = [
+        TurnId::from_uuid(Uuid::from_u128(0x1af8)),
+        TurnId::from_uuid(Uuid::from_u128(0x1af9)),
+    ]
+    .into_iter();
+    let collision = repository
+        .prepare_initial_call(
+            session,
+            call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1dfa)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x1ef8)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0x1ee1)),
+            |_| {
+                (
+                    reused_frontier_entries
+                        .next()
+                        .expect("one entry candidate per pending steering input"),
+                    reused_frontier_turns
+                        .next()
+                        .expect("one turn candidate per pending steering input"),
+                )
+            },
+        )
+        .await
+        .expect_err("a reused steering-frontier identity must be retryable");
+    assert!(
+        matches!(
+            collision,
+            ModelCallRepositoryError::IdentityCollision(
+                ModelCallIdentityCollision::TerminalFrontier
+            )
+        ),
+        "unexpected reused-frontier result: {collision:?}"
+    );
+    let collision = repository
+        .prepare_initial_call(
+            session,
+            call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1df0)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x1ef0)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0x1ef1)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1de1)),
+                    TurnId::from_uuid(Uuid::from_u128(0x1af0)),
+                )
+            },
+        )
+        .await
+        .expect_err("a steering identity already in the frontier must be retryable");
+    assert!(matches!(
+        collision,
+        ModelCallRepositoryError::IdentityCollision(ModelCallIdentityCollision::SemanticEntry)
+    ));
+    let duplicate_candidate = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1df1));
+    let collision = repository
+        .prepare_initial_call(
+            session,
+            call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1df2)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x1ef2)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0x1ef3)),
+            |_| {
+                (
+                    duplicate_candidate,
+                    TurnId::from_uuid(Uuid::from_u128(0x1af1)),
+                )
+            },
+        )
+        .await
+        .expect_err("duplicate generated steering identities must be retryable");
+    assert!(matches!(
+        collision,
+        ModelCallRepositoryError::IdentityCollision(ModelCallIdentityCollision::SemanticEntry)
+    ));
     let mut service = ModelCallExecutionService::new(
         FixedModelCallExecutionIds::new(
-            [call, unused_call],
+            [call, corrupt_snapshot_unused_call, unused_call],
             [
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1de2)),
+                steering_entries[0],
+                steering_entries[1],
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1daa)),
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1de3)),
                 assistant_entry,
                 completion_entry,
             ],
             [
-                ContextFrontierId::from_uuid(Uuid::from_u128(0x1ee2)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x1ee5)),
+                steering_frontier,
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x1eaa)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x1eab)),
                 ContextFrontierId::from_uuid(Uuid::from_u128(0x1ee3)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x1ee6)),
                 terminal_frontier,
             ],
-            [],
+            [
+                TurnId::from_uuid(Uuid::from_u128(0x1ae2)),
+                TurnId::from_uuid(Uuid::from_u128(0x1ae3)),
+            ],
         ),
         repository.clone(),
         repository.clone(),
@@ -1772,6 +1954,55 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
         service.execute(session).await?,
         ModelCallExecutionOutcome::Checkpointed(call)
     );
+    sqlx::query("ALTER TABLE context_frontier_member DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE context_frontier_member
+            SET member_position = 4
+          WHERE owning_session_id = $1
+            AND context_frontier_id = $2
+            AND member_position = 3",
+    )
+    .bind(session.into_uuid())
+    .bind(steering_frontier.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE context_frontier_member ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    let corrupt_snapshot = service
+        .execute(session)
+        .await
+        .expect_err("the noncontiguous call snapshot must fail closed");
+    assert!(
+        matches!(
+            corrupt_snapshot,
+            ModelCallExecutionError::Prepare(ModelCallRepositoryError::Corruption(
+                ModelCallCorruption::Scheduling(SubmitInputCorruption::Inconsistent(
+                    "context frontier contiguous membership"
+                ))
+            ))
+        ),
+        "unexpected noncontiguous-snapshot result: {corrupt_snapshot:?}"
+    );
+    sqlx::query("ALTER TABLE context_frontier_member DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE context_frontier_member
+            SET member_position = 3
+          WHERE owning_session_id = $1
+            AND context_frontier_id = $2
+            AND member_position = 4",
+    )
+    .bind(session.into_uuid())
+    .bind(steering_frontier.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE context_frontier_member ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
     let ModelCallExecutionOutcome::ObservationCommitted(outcome) = service.execute(session).await?
     else {
         panic!("the resumed prepared call must commit its scripted observation")
@@ -1791,24 +2022,112 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
     let (_, _, _, _, _, provider, _, _) = service.into_parts();
     assert_eq!(provider.capability_preparation_count(), 1);
     assert_eq!(provider.interaction_count(), 1);
+    let messages = provider
+        .last_prepared_messages()
+        .expect("the scripted provider observed the prepared messages");
+    assert_eq!(messages.len(), 3);
+    assert!(matches!(
+        &messages[0],
+        ModelConversationMessage::User {
+            accepted_input: message_input,
+            content,
+            ..
+        } if *message_input == accepted_input
+            && content.text().as_str() == "service user request"
+    ));
+    assert!(matches!(
+        &messages[1],
+        ModelConversationMessage::User {
+            accepted_input: message_input,
+            content,
+            ..
+        } if *message_input == steering_inputs[0]
+            && content.text().as_str() == "first steering"
+    ));
+    assert!(matches!(
+        &messages[2],
+        ModelConversationMessage::User {
+            accepted_input: message_input,
+            content,
+            ..
+        } if *message_input == steering_inputs[1]
+            && content.text().as_str() == "second steering"
+    ));
 
-    let durable_terminal: (i64, i64) = sqlx::query_as(
+    let durable_terminal: (i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
             (SELECT count(*) FROM model_call
               WHERE model_call_id = $1
                 AND state_kind = 'terminal'
-                AND terminal_disposition_kind = 'completed'),
+                AND terminal_disposition_kind = 'completed'
+                AND context_frontier_id = $4),
             (SELECT count(*) FROM turn_lifecycle
               WHERE turn_id = $2
                 AND state_kind = 'terminal'
-                AND terminal_frontier_id = $3)",
+                AND terminal_frontier_id = $3),
+            (SELECT count(*) FROM accepted_input
+              WHERE accepted_input_id = ANY($5)
+                AND disposition_kind = 'consumed_as_steering'
+                AND consuming_model_call_id = $1),
+            (SELECT count(*) FROM semantic_transcript_entry
+              WHERE semantic_entry_id = ANY($6)
+                AND payload_kind = 'steering_accepted_input'
+                AND steering_source_turn_id = $2)",
     )
     .bind(call.into_uuid())
     .bind(turn.into_uuid())
     .bind(terminal_frontier.into_uuid())
+    .bind(steering_frontier.into_uuid())
+    .bind(steering_inputs.map(AcceptedInputId::into_uuid).to_vec())
+    .bind(
+        steering_entries
+            .map(SemanticTranscriptEntryId::into_uuid)
+            .to_vec(),
+    )
     .fetch_one(&pool)
     .await?;
-    assert_eq!(durable_terminal, (1, 1));
+    assert_eq!(durable_terminal, (1, 1, 2, 2));
+    let successor_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x19e4));
+    let successor_turn = TurnId::from_uuid(Uuid::from_u128(0x1ae4));
+    let successor = submit_repository
+        .handle(
+            start_input(
+                0x14e5,
+                0x18e1,
+                "request after consumed-steering restart",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            successor_input,
+            Some(successor_turn),
+        )
+        .await?;
+    assert!(matches!(
+        successor,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::TurnOrigin(_)
+        ))
+    ));
+    assert_eq!(
+        submit_repository
+            .handle(
+                first_steering_command,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x19f2)),
+                None,
+            )
+            .await?,
+        first_steering
+    );
+    assert_eq!(
+        submit_repository
+            .handle(
+                second_steering_command,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x19f3)),
+                None,
+            )
+            .await?,
+        second_steering
+    );
 
     pool.close().await;
     drop(container);
@@ -2143,6 +2462,13 @@ async fn s04_s08_s09_inv016_terminal_call_reclassifies_and_schedules_pending_ste
                     SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdf4)),
                     ContextFrontierId::from_uuid(Uuid::from_u128(0xef4)),
                 ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xff4)),
+                |_| {
+                    (
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xcf4)),
+                        TurnId::from_uuid(Uuid::from_u128(0xcf5)),
+                    )
+                },
             )
             .await?,
         PrepareInitialModelCallOutcome::Checkpointed(checkpointed) if checkpointed == call
@@ -2299,12 +2625,13 @@ async fn s04_s08_s09_inv016_terminal_call_reclassifies_and_schedules_pending_ste
     Ok(())
 }
 
-/// S21 / INV-006 / INV-014 / INV-032: immutable target resolution failure
-/// creates no targetless call and atomically closes the prepared attempt and
-/// turn with its semantic failure boundary and typed outbox event.
+/// S08 / S21 / INV-006 / INV-014 / INV-032 / INV-036: immutable target
+/// resolution failure creates no targetless call, reclassifies the complete
+/// pending steering prefix, and atomically closes the prepared attempt and turn
+/// with its semantic failure boundary and typed outbox event.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s21_inv006_inv014_inv032_target_unavailable_closes_without_model_call()
+async fn s08_s21_inv006_inv014_inv032_inv036_target_unavailable_reclassifies_steering()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0x8f1));
@@ -2366,6 +2693,29 @@ async fn s21_inv006_inv014_inv032_target_unavailable_closes_without_model_call()
     };
     assert_eq!(activated.turn(), turn);
 
+    let pending_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x9f2));
+    let reclassified_turn = TurnId::from_uuid(Uuid::from_u128(0xaf2));
+    let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::PendingSteering(_),
+    )) = SubmitInputRepository::new(pool.clone())
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0x4f3)),
+                session,
+                UserContent::try_text("steering before target miss".to_owned())
+                    .expect("fixture steering is admitted"),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: turn,
+                },
+            ),
+            pending_input,
+            None,
+        )
+        .await?
+    else {
+        panic!("the target-miss fixture steering must remain pending");
+    };
+
     let targets = ModelTargetCatalog::try_from_definitions([])
         .expect("an empty immutable target catalog is valid");
     let repository =
@@ -2373,11 +2723,40 @@ async fn s21_inv006_inv014_inv032_target_unavailable_closes_without_model_call()
     let call_candidate = ModelCallId::from_uuid(Uuid::from_u128(0xcf2));
     let failure_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdf2));
     let terminal_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0xef2));
+    let collision = repository
+        .prepare_initial_call(
+            session,
+            call_candidate,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdf3)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xef3)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0xff1)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xcf4)),
+                    turn,
+                )
+            },
+        )
+        .await
+        .expect_err("a source-turn fallback candidate must be retryable");
+    assert!(matches!(
+        collision,
+        ModelCallRepositoryError::IdentityCollision(ModelCallIdentityCollision::ReclassifiedTurn)
+    ));
     let PrepareInitialModelCallOutcome::TargetUnavailable(failed) = repository
         .prepare_initial_call(
             session,
             call_candidate,
             FailedModelCallTurnIdentities::new(failure_entry, terminal_frontier),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0xff2)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xcf3)),
+                    reclassified_turn,
+                )
+            },
         )
         .await?
     else {
@@ -2385,6 +2764,24 @@ async fn s21_inv006_inv014_inv032_target_unavailable_closes_without_model_call()
     };
     assert_eq!(failed.turn(), turn);
     assert!(failed.call().is_none());
+
+    let reclassification_shape: (i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM accepted_input
+              WHERE accepted_input_id = $1
+                AND disposition_kind = 'reclassified_as_turn_origin'
+                AND origin_turn_id = $2),
+            (SELECT count(*) FROM queued_input_origin
+              WHERE accepted_input_id = $1
+                AND turn_id = $2
+                AND source_configuration_turn_id = $3)",
+    )
+    .bind(pending_input.into_uuid())
+    .bind(reclassified_turn.into_uuid())
+    .bind(turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(reclassification_shape, (1, 1));
 
     let durable_shape: (i64, i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
@@ -7560,6 +7957,20 @@ async fn occupied_slot_mixed_acceptances_serialize_positions_and_effects()
 async fn occupied_slot_schema_constraints_and_checked_decode_fail_closed()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
+    let steering_frontier_assertion: String = sqlx::query_scalar(
+        "SELECT pg_get_functiondef(oid)
+           FROM pg_proc
+          WHERE proname = 'assert_model_call_steering_final_state'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(steering_frontier_assertion.contains(
+        "earlier.disposition_kind IN (
+                    'pending_steering',
+                    'reclassified_as_turn_origin'
+               )"
+    ));
+
     CreateSessionRepository::new(pool.clone())
         .handle(prepared(0x461, 0x861, direct(0xc61)))
         .await?;
@@ -8493,38 +8904,12 @@ async fn s03_inv032_inv034_startup_recovery_and_outbox_commit_or_roll_back_toget
     Ok(())
 }
 
-#[track_caller]
-fn assert_restart_scan_visibly_defers_pending_steering(
-    scan: &mut StartupScanService<FixedStartupScanIds, PostgresStartupScanRepository>,
-    session: SessionId,
-) -> impl Future<Output = Result<(), Box<dyn Error>>> + '_ {
-    let caller = std::panic::Location::caller();
-    async move {
-        let outcome = scan.execute().await?;
-        assert_eq!(
-            outcome.recovered_turn_count(),
-            0,
-            "restart scan asserted at {caller} must not recover pending steering"
-        );
-        assert_eq!(
-            outcome.pending_steering_sessions(),
-            &[session],
-            "restart scan asserted at {caller} must report its pending-steering blocker"
-        );
-        assert!(
-            !outcome.is_complete(),
-            "restart scan asserted at {caller} must remain incomplete"
-        );
-        Ok(())
-    }
-}
-
-/// S08 / INV-016 / INV-034: a restart scan never treats pending steering as a
-/// stop cause or silently drops it; the source remains active and each scan
-/// returns the same visible session blocker without adding terminal facts.
+/// S08 / S09 / INV-016 / INV-034 / INV-036: evidence-free restart recovery
+/// ends the abandoned source attempt and atomically reclassifies pending
+/// steering, leaving no startup blocker on replay.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s08_inv016_inv034_restart_scan_visibly_defers_pending_steering_unchanged()
+async fn s08_s09_inv016_inv034_inv036_restart_reclassifies_pending_steering()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, database_url) = migrated_postgres().await?;
     let session_uuid = Uuid::from_u128(0x7c1);
@@ -8595,13 +8980,19 @@ async fn s08_inv016_inv034_restart_scan_visibly_defers_pending_steering_unchange
                 ContextFrontierId::from_uuid(Uuid::from_u128(0xfc1)),
                 ContextFrontierId::from_uuid(Uuid::from_u128(0xfc2)),
             ],
-        ),
+        )
+        .with_reclassified_turns([TurnId::from_uuid(Uuid::from_u128(0xac2))]),
         PostgresStartupScanRepository::new(restarted_pool.clone()),
     );
 
-    let session = SessionId::from_uuid(session_uuid);
-    assert_restart_scan_visibly_defers_pending_steering(&mut scan, session).await?;
-    assert_restart_scan_visibly_defers_pending_steering(&mut scan, session).await?;
+    let first = scan.execute().await?;
+    assert_eq!(first.recovered_turn_count(), 1);
+    assert!(first.pending_steering_sessions().is_empty());
+    assert!(first.is_complete());
+    let replay = scan.execute().await?;
+    assert_eq!(replay.recovered_turn_count(), 0);
+    assert!(replay.pending_steering_sessions().is_empty());
+    assert!(replay.is_complete());
 
     let recovery_events: (i64, i64) = sqlx::query_as(
         "SELECT
@@ -8613,29 +9004,45 @@ async fn s08_inv016_inv034_restart_scan_visibly_defers_pending_steering_unchange
     .bind(session_uuid)
     .fetch_one(&restarted_pool)
     .await?;
-    assert_eq!(recovery_events, (0, 0));
+    assert_eq!(recovery_events, (1, 1));
 
-    let unchanged: (String, String, i64, i64, i64) = sqlx::query_as(
+    let recovered: (String, String, i64, i64, String, Uuid, String) = sqlx::query_as(
         "SELECT turn.state_kind,
                 attempt.state_kind,
                 (SELECT count(*) FROM semantic_transcript_entry
                   WHERE payload_kind = 'turn_failed' AND failed_turn_id = $1),
                 (SELECT count(*) FROM context_frontier
                   WHERE owning_session_id = $2),
-                (SELECT count(*) FROM accepted_input
-                  WHERE accepted_input_id = $3
-                    AND disposition_kind = 'pending_steering')
+                accepted.disposition_kind,
+                accepted.origin_turn_id,
+                successor.state_kind
            FROM turn_lifecycle AS turn
            JOIN turn_attempt AS attempt
-             ON attempt.turn_attempt_id = turn.current_attempt_id
+             ON attempt.turn_attempt_id = $4
+            JOIN accepted_input AS accepted
+              ON accepted.accepted_input_id = $3
+            JOIN turn_lifecycle AS successor
+              ON successor.turn_id = accepted.origin_turn_id
           WHERE turn.turn_id = $1",
     )
     .bind(turn_uuid)
     .bind(session_uuid)
     .bind(pending_input.into_uuid())
+    .bind(attempt_uuid)
     .fetch_one(&restarted_pool)
     .await?;
-    assert_eq!(unchanged, ("active".into(), "prepared".into(), 0, 1, 1));
+    assert_eq!(
+        recovered,
+        (
+            "terminal".into(),
+            "ended".into(),
+            1,
+            2,
+            "reclassified_as_turn_origin".into(),
+            Uuid::from_u128(0xac2),
+            "queued".into(),
+        )
+    );
     assert_eq!(
         PostgresStartupScanRepository::new(restarted_pool.clone())
             .recover(
@@ -8644,12 +9051,10 @@ async fn s08_inv016_inv034_restart_scan_visibly_defers_pending_steering_unchange
                     SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xec3)),
                     ContextFrontierId::from_uuid(Uuid::from_u128(0xfc3)),
                 ),
-                |_| panic!("the no-call recovery must leave pending steering deferred"),
+                |_| panic!("the completed recovery has no pending steering"),
             )
             .await?,
-        StartupScanSessionOutcome::DeferredPendingSteering {
-            accepted_input: pending_input,
-        }
+        StartupScanSessionOutcome::NoActiveTurn
     );
 
     restarted_pool.close().await;

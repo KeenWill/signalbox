@@ -30,18 +30,21 @@ use signalbox_domain::{
     ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
     ModelTargetCatalog, ModelTargetDefinition, PendingSteeringReclassificationIdentity,
     PinnedProviderTargetReconstitutionInput, PreparedModelCallRequest, ProviderModelIdentity,
-    ReclassifiedPendingSteeringTurn, RefusedModelCallTurn, ResolvedProviderTarget,
-    SemanticTranscriptEntry, SemanticTranscriptEntryPayload, SessionId, TurnId,
+    ReclassifiedPendingSteeringTurn, RefusedModelCallTurn,
+    ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget, SemanticTranscriptEntry,
+    SemanticTranscriptEntryPayload, SemanticTranscriptEntryRef, SessionId, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
 use crate::{
-    mapping::{session_id_to_uuid, turn_id_to_uuid},
+    mapping::{
+        durable_command_id_from_uuid, session_id_from_uuid, session_id_to_uuid, turn_id_to_uuid,
+    },
     outbox::{self, ModelCallOutboxState, OutboxEvent},
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
     submit_input::{
-        StoredTurnOriginKey, SubmitInputCorruption, SubmitInputRepositoryError,
-        load_scheduling_projection, load_turn_origin_graph,
+        SubmitInputCorruption, SubmitInputRepositoryError, load_scheduling_projection,
+        require_recorded_batch,
     },
 };
 
@@ -246,13 +249,19 @@ impl PostgresModelCallRepository {
         }
     }
 
-    /// Commits Prepared before returning any provider request material.
-    pub async fn prepare_initial_call(
+    /// Commits Prepared while consuming the complete locked steering inventory.
+    pub async fn prepare_initial_call<NextSteeringIdentities>(
         &self,
         session: SessionId,
         call: ModelCallId,
         failure_identities: FailedModelCallTurnIdentities,
-    ) -> Result<PrepareInitialModelCallOutcome, ModelCallRepositoryError> {
+        steering_frontier: signalbox_domain::ContextFrontierId,
+        mut next_steering_identities: NextSteeringIdentities,
+    ) -> Result<PrepareInitialModelCallOutcome, ModelCallRepositoryError>
+    where
+        NextSteeringIdentities:
+            FnMut(AcceptedInputId) -> (signalbox_domain::SemanticTranscriptEntryId, TurnId),
+    {
         let mut transaction = self.pool.begin().await?;
         let result = async {
             lock_session(&mut transaction, session).await?;
@@ -288,27 +297,70 @@ impl PostgresModelCallRepository {
                 };
             }
 
-            let prepared = match execution.prepare_initial_call(call) {
-                Ok(prepared) => prepared,
-                Err(error)
-                    if let ModelCallPreparationFailure::PendingSteering { accepted_input } =
-                        error.failure() =>
-                {
-                    return Ok((
-                        false,
-                        PrepareInitialModelCallOutcome::PendingSteering { accepted_input },
+            let mut reserved_entries = execution
+                .frontier_entries()
+                .map(signalbox_domain::SemanticTranscriptEntry::identity)
+                .collect::<std::collections::BTreeSet<_>>();
+            let mut steering_identities =
+                Vec::with_capacity(execution.active_turn().pending_steering().len());
+            for pending in execution.active_turn().pending_steering() {
+                let accepted_input = pending.accepted_input();
+                let (entry, turn) = next_steering_identities(accepted_input);
+                if !reserved_entries.insert(entry) {
+                    return Err(ModelCallRepositoryError::IdentityCollision(
+                        ModelCallIdentityCollision::SemanticEntry,
                     ));
                 }
+                steering_identities.push((
+                    entry,
+                    PendingSteeringReclassificationIdentity::new(accepted_input, turn),
+                ));
+            }
+            let steering_entries = steering_identities
+                .iter()
+                .map(|(entry, _)| *entry)
+                .collect::<Vec<_>>();
+            if !steering_entries.is_empty()
+                && steering_frontier == execution.start().frontier().snapshot()
+            {
+                return Err(ModelCallRepositoryError::IdentityCollision(
+                    ModelCallIdentityCollision::TerminalFrontier,
+                ));
+            }
+            let steering_snapshot = (!steering_entries.is_empty()).then_some(steering_frontier);
+            let prepared = match execution.prepare_initial_call_consuming_steering(
+                call,
+                steering_entries,
+                steering_snapshot,
+            ) {
+                Ok(prepared) => prepared,
                 Err(error) if error.failure() == ModelCallPreparationFailure::TargetUnavailable => {
                     let resolution = error.target_resolution_error().ok_or(
                         ModelCallRepositoryError::InvalidTransition(
                             "target-unavailable result omitted its resolution proof",
                         ),
                     )?;
+                    let source_turn = error.execution().turn();
+                    let reclassifications = steering_identities
+                        .into_iter()
+                        .map(|(_, reclassification)| reclassification)
+                        .collect::<Vec<_>>();
+                    let mut proposed_turns = BTreeSet::new();
+                    for reclassification in &reclassifications {
+                        record_reclassified_turn_candidate(
+                            source_turn,
+                            reclassification.turn(),
+                            &mut proposed_turns,
+                        )?;
+                    }
                     let failed = error
                         .execution()
                         .clone()
-                        .fail_target_resolution(resolution, failure_identities)
+                        .fail_target_resolution(
+                            resolution,
+                            failure_identities
+                                .with_pending_steering_reclassifications(reclassifications),
+                        )
                         .map_err(|_| {
                             ModelCallRepositoryError::InvalidTransition(
                                 "target-resolution failure could not close fresh execution state",
@@ -725,14 +777,26 @@ impl PostgresModelCallRepository {
 impl PrepareModelCallTransaction for PostgresModelCallRepository {
     type Error = ModelCallRepositoryError;
 
-    async fn prepare(
+    async fn prepare<NextSteeringIdentities>(
         &mut self,
         session: SessionId,
         call: ModelCallId,
         failure_identities: FailedModelCallTurnIdentities,
-    ) -> Result<PrepareModelCallOutcome, Self::Error> {
+        steering_frontier: signalbox_domain::ContextFrontierId,
+        next_steering_identities: NextSteeringIdentities,
+    ) -> Result<PrepareModelCallOutcome, Self::Error>
+    where
+        NextSteeringIdentities:
+            FnMut(AcceptedInputId) -> (signalbox_domain::SemanticTranscriptEntryId, TurnId) + Send,
+    {
         match self
-            .prepare_initial_call(session, call, failure_identities)
+            .prepare_initial_call(
+                session,
+                call,
+                failure_identities,
+                steering_frontier,
+                next_steering_identities,
+            )
             .await
         {
             Err(ModelCallRepositoryError::NoLiveExecution) => Ok(PrepareModelCallOutcome::NoWork),
@@ -1337,14 +1401,18 @@ fn prepared_matches_authorized(
         && prepared
             .frontier_entries()
             .eq(authorized.frontier_entries())
-        && prepared.frontier_entries().all(|entry| {
-            let SemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input } =
-                entry.payload()
-            else {
-                return true;
-            };
-            prepared.origin_content(*accepted_input) == authorized.origin_content(*accepted_input)
-        })
+        && prepared
+            .frontier_entries()
+            .all(|entry| match entry.payload() {
+                SemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input }
+                | SemanticTranscriptEntryPayload::SteeringAcceptedInput {
+                    accepted_input, ..
+                } => {
+                    prepared.origin_content(*accepted_input)
+                        == authorized.origin_content(*accepted_input)
+                }
+                _ => true,
+            })
 }
 
 async fn lock_session(
@@ -1408,18 +1476,37 @@ async fn require_live_execution_with_targets(
         .resolved_snapshot(active_turn.start().frontier().snapshot())
         .cloned()
         .ok_or(ModelCallCorruption::Missing("starting snapshot"))?;
-    let frontier_entries = starting_snapshot
-        .ordered_entries()
+    let (pinned_target, calls) =
+        load_live_turn_calls(connection, requested_session, active_turn.turn()).await?;
+    let call_snapshot = match calls
+        .first()
+        .filter(|call| call.frontier() != starting_snapshot.frontier().snapshot())
+    {
+        Some(call) => {
+            Some(load_call_snapshot(connection, requested_session, call.frontier()).await?)
+        }
+        None => None,
+    };
+    let frontier_references = call_snapshot.as_ref().map_or_else(
+        || starting_snapshot.ordered_entries().collect::<Vec<_>>(),
+        |snapshot| snapshot.ordered_entries().to_vec(),
+    );
+    let frontier_entries = frontier_references
+        .iter()
         .map(|reference| {
             scheduling
-                .semantic_entry(reference)
+                .semantic_entry(*reference)
                 .cloned()
                 .ok_or(ModelCallCorruption::Missing("frontier semantic entry"))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let origin_contents = load_origin_contents(connection, &frontier_entries).await?;
-    let (pinned_target, calls) =
-        load_live_turn_calls(connection, requested_session, active_turn.turn()).await?;
+    let pending_steering = active_turn
+        .pending_steering()
+        .iter()
+        .map(signalbox_domain::PendingSteeringInput::accepted_input)
+        .collect::<Vec<_>>();
+    let origin_contents =
+        load_origin_contents(connection, &frontier_entries, &pending_steering).await?;
     let recovered_targets;
     let targets = if let Some(targets) = configured_targets {
         targets.clone()
@@ -1435,7 +1522,7 @@ async fn require_live_execution_with_targets(
         recovered_targets
     };
 
-    ModelCallExecutionReconstitutionInput::new(
+    let mut input = ModelCallExecutionReconstitutionInput::new(
         active_turn,
         targets,
         starting_snapshot,
@@ -1443,78 +1530,145 @@ async fn require_live_execution_with_targets(
         origin_contents,
         pinned_target,
         calls,
-    )
-    .reconstitute()
-    .map_err(|error| {
+    );
+    if let Some(call_snapshot) = call_snapshot {
+        input = input.with_call_snapshot(call_snapshot);
+    }
+    input.reconstitute().map_err(|error| {
         let (_, failure) = error.into_parts();
         ModelCallCorruption::Execution(failure).into()
     })
 }
 
+async fn load_call_snapshot(
+    connection: &mut PgConnection,
+    session: SessionId,
+    frontier: signalbox_domain::ContextFrontierId,
+) -> Result<ResolvedContextFrontierReconstitutionInput, ModelCallRepositoryError> {
+    let declared_count = sqlx::query_scalar::<_, Decimal>(
+        "SELECT member_count
+           FROM context_frontier
+          WHERE owning_session_id = $1
+            AND context_frontier_id = $2",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(frontier.into_uuid())
+    .fetch_optional(&mut *connection)
+    .await?
+    .ok_or(ModelCallCorruption::Missing("model-call snapshot"))?;
+    let rows = sqlx::query_as::<_, (Decimal, Uuid, Uuid)>(
+        "SELECT member_position, source_session_id, semantic_entry_id
+           FROM context_frontier_member
+          WHERE owning_session_id = $1
+            AND context_frontier_id = $2
+          ORDER BY member_position",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(frontier.into_uuid())
+    .fetch_all(&mut *connection)
+    .await?;
+    let actual_count = u64::try_from(rows.len())
+        .map_err(|_| ModelCallCorruption::Inconsistent("model-call snapshot member count"))?;
+    if declared_count != Decimal::from(actual_count) {
+        return Err(ModelCallCorruption::Inconsistent("model-call snapshot member count").into());
+    }
+    let ordered_entries = rows
+        .into_iter()
+        .enumerate()
+        .map(|(index, (position, source_session, semantic_entry))| {
+            let expected_position = u64::try_from(index + 1).map_err(|_| {
+                ModelCallCorruption::Inconsistent("model-call snapshot member positions")
+            })?;
+            if position != Decimal::from(expected_position) {
+                return Err(ModelCallCorruption::Inconsistent(
+                    "model-call snapshot member positions",
+                )
+                .into());
+            }
+            Ok(SemanticTranscriptEntryRef::from_source(
+                session_id_from_uuid(source_session),
+                signalbox_domain::SemanticTranscriptEntryId::from_uuid(semantic_entry),
+            ))
+        })
+        .collect::<Result<Vec<_>, ModelCallRepositoryError>>()?;
+    Ok(ResolvedContextFrontierReconstitutionInput::new(
+        session,
+        frontier,
+        ordered_entries,
+    ))
+}
+
 async fn load_origin_contents(
     connection: &mut PgConnection,
     entries: &[SemanticTranscriptEntry],
+    pending_steering: &[AcceptedInputId],
 ) -> Result<Vec<ModelCallOriginContent>, ModelCallRepositoryError> {
     let accepted_inputs = entries
         .iter()
         .filter_map(|entry| match entry.payload() {
-            SemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input } => {
-                Some(accepted_input.into_uuid())
+            SemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input }
+            | SemanticTranscriptEntryPayload::SteeringAcceptedInput { accepted_input, .. } => {
+                Some(*accepted_input)
             }
             SemanticTranscriptEntryPayload::TurnFailed { .. }
             | SemanticTranscriptEntryPayload::AssistantText { .. }
             | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
             | SemanticTranscriptEntryPayload::TurnCompleted { .. } => None,
         })
-        .collect::<Vec<_>>();
+        .chain(pending_steering.iter().copied())
+        .collect::<BTreeSet<_>>();
     if accepted_inputs.is_empty() {
         return Ok(Vec::new());
     }
+    let accepted_input_uuids = accepted_inputs
+        .iter()
+        .map(|accepted_input| accepted_input.into_uuid())
+        .collect::<Vec<_>>();
     let rows = sqlx::query(
-        "SELECT accepted_input_id, session_id, origin_turn_id
+        "SELECT accepted_input_id, accepting_command_id
            FROM accepted_input
           WHERE accepted_input_id = ANY($1)
           ORDER BY accepted_input_id",
     )
-    .bind(&accepted_inputs)
+    .bind(&accepted_input_uuids)
     .fetch_all(&mut *connection)
     .await?;
-    if rows.len() != accepted_inputs.len() {
-        return Err(ModelCallCorruption::Missing("origin accepted input receipt").into());
+    if rows.len() != accepted_input_uuids.len() {
+        return Err(ModelCallCorruption::Missing("accepted input receipt").into());
     }
     let mut loaded = BTreeSet::new();
-    let mut roots = BTreeSet::<StoredTurnOriginKey>::new();
-    let mut origin_by_accepted = BTreeMap::new();
+    let mut command_by_accepted = BTreeMap::new();
     for row in rows {
         let accepted: Uuid = required(&row, "accepted_input_id")?;
-        if !accepted_inputs.contains(&accepted) || !loaded.insert(accepted) {
-            return Err(ModelCallCorruption::Inconsistent("origin receipt inventory").into());
+        if !accepted_input_uuids.contains(&accepted) || !loaded.insert(accepted) {
+            return Err(ModelCallCorruption::Inconsistent("accepted receipt inventory").into());
         }
-        let key = (
-            required(&row, "session_id")?,
-            required(&row, "origin_turn_id")?,
-        );
-        roots.insert(key);
-        if origin_by_accepted.insert(accepted, key).is_some() {
-            return Err(ModelCallCorruption::Inconsistent("origin receipt inventory").into());
+        let command = durable_command_id_from_uuid(required(&row, "accepting_command_id")?)
+            .map_err(|_| ModelCallCorruption::Inconsistent("accepting command identity"))?;
+        if command_by_accepted
+            .insert(AcceptedInputId::from_uuid(accepted), command)
+            .is_some()
+        {
+            return Err(ModelCallCorruption::Inconsistent("accepted receipt inventory").into());
         }
     }
-    let origins = load_turn_origin_graph(connection, &roots)
+    let commands = command_by_accepted.values().copied().collect::<Vec<_>>();
+    let recorded = require_recorded_batch(connection, &commands)
         .await
         .map_err(map_scheduling_error)?;
     accepted_inputs
         .into_iter()
         .map(|accepted| {
-            let key = origin_by_accepted
+            let command = command_by_accepted
                 .get(&accepted)
-                .ok_or(ModelCallCorruption::Missing("origin turn correlation"))?;
-            let origin = origins
-                .get(key)
-                .ok_or(ModelCallCorruption::Missing("origin turn graph"))?;
-            let content = ModelCallOriginContent::from_reconstituted_turn_origin(origin)
-                .ok_or(ModelCallCorruption::Inconsistent("origin turn content"))?;
-            if content.accepted_input().into_uuid() != accepted {
-                return Err(ModelCallCorruption::Inconsistent("origin content identity").into());
+                .ok_or(ModelCallCorruption::Missing("accepted command correlation"))?;
+            let submit = recorded
+                .get(command)
+                .ok_or(ModelCallCorruption::Missing("accepted submit command"))?;
+            let content = ModelCallOriginContent::from_recorded_submit(submit)
+                .ok_or(ModelCallCorruption::Inconsistent("accepted input content"))?;
+            if content.accepted_input() != accepted {
+                return Err(ModelCallCorruption::Inconsistent("accepted content identity").into());
             }
             Ok(content)
         })
@@ -1677,6 +1831,67 @@ async fn insert_prepared_call(
 ) -> Result<(), ModelCallRepositoryError> {
     let call = prepared.call();
     let (kind, direct, alias, alias_selected) = encode_selection(call.selection());
+    for steering in prepared.consumed_steering() {
+        let SemanticTranscriptEntryPayload::SteeringAcceptedInput {
+            accepted_input,
+            source_turn,
+        } = steering.semantic_entry().payload()
+        else {
+            return Err(ModelCallCorruption::Inconsistent("steering semantic payload").into());
+        };
+        if *source_turn != prepared.turn()
+            || *accepted_input != steering.accepted_input().id()
+            || !matches!(
+                steering.accepted_input().disposition(),
+                AcceptedInputDisposition::ConsumedAsSteering {
+                    call: consuming_call
+                } if *consuming_call == call.id()
+            )
+        {
+            return Err(
+                ModelCallCorruption::Inconsistent("steering consumption correlation").into(),
+            );
+        }
+        sqlx::query(
+            "INSERT INTO semantic_transcript_entry
+                (source_session_id, semantic_entry_id, payload_kind,
+                 origin_accepted_input_id, steering_source_turn_id)
+             VALUES ($1, $2, 'steering_accepted_input', $3, $4)",
+        )
+        .bind(session_id_to_uuid(
+            steering.semantic_entry().source_session(),
+        ))
+        .bind(steering.semantic_entry().identity().into_uuid())
+        .bind(accepted_input.into_uuid())
+        .bind(turn_id_to_uuid(*source_turn))
+        .execute(&mut *connection)
+        .await?;
+    }
+    if let Some(snapshot) = prepared.steering_snapshot() {
+        insert_snapshot(connection, snapshot).await?;
+    }
+    for steering in prepared.consumed_steering() {
+        let rows = sqlx::query(
+            "UPDATE accepted_input
+                SET disposition_kind = 'consumed_as_steering',
+                    consuming_model_call_id = $1
+              WHERE accepted_input_id = $2
+                AND session_id = $3
+                AND disposition_kind = 'pending_steering'
+                AND origin_turn_id IS NULL
+                AND consuming_model_call_id IS NULL
+                AND delivery_kind = 'next_safe_point'
+                AND expected_active_turn_id = $4",
+        )
+        .bind(call.id().into_uuid())
+        .bind(steering.accepted_input().id().into_uuid())
+        .bind(session_id_to_uuid(prepared.session()))
+        .bind(turn_id_to_uuid(prepared.turn()))
+        .execute(&mut *connection)
+        .await?
+        .rows_affected();
+        require_single(rows, "consumed steering accepted input")?;
+    }
     let pinned_rows = sqlx::query(
         "UPDATE turn_lifecycle
             SET pinned_provider_model_identity_id = $1
