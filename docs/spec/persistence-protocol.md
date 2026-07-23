@@ -128,7 +128,13 @@ Representation rules, all enforced in the schema:
   `accepted_input` and admits only `pending_steering` →
   `reclassified_as_turn_origin`, setting a fresh `origin_turn_id`, or
   `pending_steering` → `consumed_as_steering`, setting the exact
-  `consuming_model_call_id`, with every other column unchanged.
+  `consuming_model_call_id`, with every other column unchanged. Consumed
+  steering additionally requires one correlated `steering_accepted_input`
+  semantic entry in that call's frontier, naming the same accepted input and
+  source turn. Reclassified steering instead requires its queued origin and
+  terminal source proof. Those lifecycle checks preserve the immutable
+  next-safe-point command receipt, so equal replay after either transition still
+  returns the original applied pending-steering result (INV-012, INV-016).
 - Cross-table completeness uses deferrable-initially-deferred foreign keys and
   constraint triggers so rows of one atomic fact can be inserted in any order
   inside a transaction while every commit boundary sees the complete shape: each

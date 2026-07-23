@@ -80,7 +80,7 @@ UUIDv7 implementation:
 | Generator                             | Mints                                                                                               |
 | ------------------------------------- | --------------------------------------------------------------------------------------------------- |
 | `UuidV7SessionIdGenerator`            | `SessionId`                                                                                         |
-| `UuidV7SubmitInputIdGenerator`        | `AcceptedInputId`, `TurnId`                                                                         |
+| `UuidV7SubmitInputIdGenerator`        | `AcceptedInputId`, `TurnId`, `SemanticTranscriptEntryId`, `ContextFrontierId`                       |
 | `UuidV7StartEligibleTurnIdGenerator`  | `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnAttemptId`                                   |
 | `UuidV7StartupScanIdGenerator`        | `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnId` (reclassified successors)                |
 | `UuidV7ModelCallExecutionIdGenerator` | `ModelCallId`, `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnId` (reclassified successors) |
@@ -91,13 +91,17 @@ owning slices.
 
 Orchestration generates each fresh candidate immediately before the domain
 transition that creates the fact. Fixed-cardinality candidates are minted before
-the transaction. When cardinality becomes authoritative only under the
-repository lock — currently one reclassified successor per locked pending
-steering input — orchestration instead passes an application-owned generator
-closure into the transaction port; the adapter invokes it under that lock and
-immediately supplies the typed value to the domain transition. Persistence never
-owns or synthesizes an identity, and no Postgres column has an
-identity-generating default (verified across all migrations).
+the transaction; the submit slice's entry and frontier candidates close an
+interrupt directly when it proves pre-send cancellation. When cardinality
+becomes authoritative only under the repository lock, orchestration instead
+passes an application-owned generator closure into the transaction port. Initial
+call preparation draws one steering semantic-entry candidate and one fallback
+reclassified-successor candidate per locked pending input; terminal closure and
+startup recovery draw one reclassified successor per locked pending input. The
+adapter invokes each closure under the lock and immediately supplies the typed
+value to the domain transition. Persistence never owns or synthesizes an
+identity, and no Postgres column has an identity-generating default (verified
+across all migrations).
 
 Why: the domain transition still receives a typed identity while the domain
 remains generation-free and deterministic, without pre-lock inventory reads. A
@@ -166,11 +170,16 @@ redefined for occupied-slot pending steering in `202607180005`) enforces effect
 correlation at every transaction boundary: an `applied` turn-origin row must
 agree field-by-field with exactly one committed `accepted_input` plus
 `queued_input_origin` effect, including the frozen model configuration; an
-applied `next_safe_point` row instead correlates with exactly one
+applied `next_safe_point` row instead initially correlates with exactly one
 `pending_steering` accepted input naming the expected active turn, with no
 `queued_input_origin` effect permitted; a `rejected` row must have no
 accepted-input effect; and an `unknown_model_alias` rejection must match real
-alias evidence in `session_defaults_version`. Why: replay returns recorded
+alias evidence in `session_defaults_version`. The next-safe-point receipt
+remains immutable when that accepted input later becomes consumed steering or a
+reclassified origin. Equal replay returns its original
+`Applied(PendingSteering)` result only after the accepted input's current
+lifecycle passes the correlation checks owned by
+[persistence-protocol](persistence-protocol.md). Why: replay returns recorded
 results as truth, so an applied record without its exact committed effect must
 be unable to commit.
 
