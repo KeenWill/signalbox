@@ -550,7 +550,8 @@ impl ModelCallExecution {
                 SemanticTranscriptEntryPayload::TurnFailed { .. }
                 | SemanticTranscriptEntryPayload::AssistantText { .. }
                 | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
-                | SemanticTranscriptEntryPayload::TurnCompleted { .. } => None,
+                | SemanticTranscriptEntryPayload::TurnCompleted { .. }
+                | SemanticTranscriptEntryPayload::TurnCancelled { .. } => None,
             })
             .collect();
         Ok(PreparedModelCallRequest {
