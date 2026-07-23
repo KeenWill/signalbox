@@ -37,11 +37,13 @@ invalid limit (see Open edges). The two file paths are accepted without I/O at
 configuration time; only the catalog file is actually read during startup. The
 key file is never read at startup (see credential lifecycle below).
 
-The Anthropic endpoint parameters are composition-fixed at the adapter defaults;
-no deployment knob exists for them. The
-[runtime-substrate](runtime-substrate.md) page owns those transport defaults and
-their exchange bound, together with startup ordering, migration, the recovery
-scan, and shutdown policy.
+The deployed hub supplies no Anthropic endpoint or timeout knob; it constructs
+the adapter with its defaults. The [runtime-substrate](runtime-substrate.md)
+page owns those transport defaults, positive caller-level exchange-timeout
+overrides, and the whole-exchange bound. Startup ordering, recovery scanning,
+and shutdown policy are
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) scope;
+migration behavior is [persistence-protocol](persistence-protocol.md) scope.
 
 The local `signalbox-debug` harness reads `SIGNALBOX_DEBUG_DATABASE_URL` plus
 the same two file variables in its `--anthropic` mode; it is a development
@@ -284,5 +286,5 @@ here because the surviving hub-side mechanics depend on them):
   Anthropic-construction variants (and connection and migration errors) collapse
   to a generic `Infrastructure` class plus phase, so startup logs cannot
   distinguish failure causes within the `Configuration` phase.
-- In-memory credential hygiene (zeroization or equivalent) remains an open
-  question with no implementation.
+- [Identity, credentials, and resource governance](../open-questions.md#identity-credentials-and-resource-governance)
+  owns the unresolved in-memory credential-hygiene question.
