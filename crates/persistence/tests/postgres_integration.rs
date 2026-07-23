@@ -1593,10 +1593,11 @@ async fn model_call_noncompleted_rereads_validate_each_durable_closure()
     Ok(())
 }
 
-/// S03 / S09 / INV-008 / INV-012 / INV-014 / INV-015: interrupting an issued
-/// call atomically records its stop proof and cancellation request; the
-/// durable signal resolves, physical cancellation closes the turn, and both
-/// command and observation replays converge on the recorded outcome.
+/// S03 / S09 / INV-006 / INV-008 / INV-012 / INV-014 / INV-015: interrupting
+/// an issued call atomically records its stop proof and cancellation request;
+/// the durable signal resolves, physical cancellation closes the turn with its
+/// exact attempt history, and both command and observation replays converge on
+/// the recorded outcome.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn issued_interrupt_requests_and_confirms_durable_cancellation() -> Result<(), Box<dyn Error>>
@@ -1741,6 +1742,41 @@ async fn issued_interrupt_requests_and_confirms_durable_cancellation() -> Result
             .await?,
         interrupt_outcome
     );
+
+    sqlx::query("ALTER TABLE turn_attempt DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO turn_attempt
+            (turn_attempt_id, turn_id, session_id, continued_from_attempt_id,
+             state_kind, end_variant, end_disposition)
+         VALUES ($1, $2, $3, $4, 'ended', 'without_stop', 'known_failure')",
+    )
+    .bind(Uuid::from_u128(seed + 26))
+    .bind(fixture.turn.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.attempt.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_attempt ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    let cardinality_error = sqlx::query("SELECT assert_turn_lifecycle_final_state($1)")
+        .bind(fixture.turn.into_uuid())
+        .execute(&pool)
+        .await
+        .expect_err("a cancelled turn cannot hide an additional ended attempt");
+    assert_eq!(
+        cardinality_error
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into())
+    );
+    assert!(cardinality_error.as_database_error().is_some_and(|error| {
+        error
+            .message()
+            .contains("lacks its exact single ended attempt history")
+    }));
 
     pool.close().await;
     drop(container);

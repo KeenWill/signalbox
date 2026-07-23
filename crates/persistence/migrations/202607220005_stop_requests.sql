@@ -1702,6 +1702,8 @@ BEGIN
         RETURN;
     END IF;
 
+    PERFORM assert_terminal_started_turn_common_final_state(checked_turn_id);
+
     IF NOT EXISTS (
         SELECT 1
           FROM turn_attempt
