@@ -1,5 +1,4 @@
--- Typed outbox projection for the startup Lost recovery slice
--- (docs/spec/persistence-protocol.md).
+-- ADR-0040 typed outbox projection for the startup Lost recovery slice.
 
 ALTER TABLE outbox_event
     DROP CONSTRAINT outbox_event_kind_closed,

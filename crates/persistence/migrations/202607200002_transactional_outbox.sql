@@ -1,4 +1,4 @@
--- Transactional-outbox storage foundation (docs/spec/persistence-protocol.md).
+-- ADR-0040 transactional-outbox storage foundation.
 --
 -- A transaction reserves an event sequence by inserting an outbox header.
 -- The allocation trigger updates the singleton sequence row, whose row lock is
