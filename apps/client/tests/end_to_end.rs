@@ -164,9 +164,22 @@ async fn terminal_client_completes_an_offline_scripted_conversation() -> Result<
 {
     let (container, pool) = postgres().await?;
     let socket_directory = SocketDirectory::create()?;
-    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x9101));
-    let target =
-        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(0x9102)));
+    let selection_uuid = Uuid::from_u128(0x9101);
+    let target_uuid = Uuid::from_u128(0x9102);
+    let selection = DirectModelSelection::from_uuid(selection_uuid);
+    let target = ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(target_uuid));
+    let model_configuration = HubModelConfiguration::parse(&format!(
+        r#"
+version = 1
+
+[[models]]
+selection_id = "{selection_uuid}"
+target_id = "{target_uuid}"
+provider = "anthropic"
+provider_model = "scripted-terminal"
+max_output_tokens = 64
+"#
+    ))?;
     let targets =
         ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(selection, target)])
             .expect("the fixture target definition is unique");
@@ -193,7 +206,12 @@ async fn terminal_client_completes_an_offline_scripted_conversation() -> Result<
     let sweep = PostgresEligibilitySweep::new(pool.clone());
     let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
     let listener = LocalProcessListener::bind(socket_directory.socket())?;
-    let process_runtime = ProcessRuntime::new(listener, pool.clone(), eligibility_nudge);
+    let process_runtime = ProcessRuntime::new(
+        listener,
+        pool.clone(),
+        eligibility_nudge,
+        model_configuration,
+    );
     let (execution, fatal_execution) =
         FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
             PostgresModelCallRepository::new(
@@ -338,7 +356,12 @@ async fn terminal_client_completes_the_real_anthropic_path() -> Result<(), Box<d
     let sweep = PostgresEligibilitySweep::new(pool.clone());
     let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
     let listener = LocalProcessListener::bind(socket_directory.socket())?;
-    let process_runtime = ProcessRuntime::new(listener, pool.clone(), eligibility_nudge);
+    let process_runtime = ProcessRuntime::new(
+        listener,
+        pool.clone(),
+        eligibility_nudge,
+        model_configuration,
+    );
     let (execution, fatal_execution) =
         FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
             PostgresModelCallRepository::new(pool.clone(), targets, credential_reference),

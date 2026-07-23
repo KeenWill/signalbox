@@ -13,8 +13,8 @@ use connection::ProcessClient;
 use error::ClientError;
 use presentation::{Output, TranscriptEntryIdentity};
 use signalbox_process_protocol::{
-    CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ErrorCode, InputContent, ModelSelection,
-    ServerMessage, SessionEvent, TurnState,
+    CanonicalU64, CanonicalUuid, ClientRequest, CommandId, ErrorCode, InputContent,
+    ModelCallDisposition, ModelCallState, ModelSelection, ServerMessage, SessionEvent, TurnState,
 };
 use transcript::{TranscriptSnapshot, read_snapshot};
 use uuid::Uuid;
@@ -112,22 +112,27 @@ fn socket_path(
     override_path: Option<PathBuf>,
     socket_environment: Option<OsString>,
 ) -> Result<PathBuf, ClientError> {
-    match override_path {
-        Some(path) if !path.as_os_str().is_empty() => Ok(path),
-        Some(_) => Err(ClientError::Input("--socket requires a nonempty path")),
+    let path = match override_path {
+        Some(path) if !path.as_os_str().is_empty() => path,
+        Some(_) => return Err(ClientError::Input("--socket requires a nonempty path")),
         None => {
             let value = socket_environment.ok_or(ClientError::Input(
                 "set SIGNALBOX_SOCKET_PATH or pass --socket",
             ))?;
             if value.is_empty() {
-                Err(ClientError::Input(
+                return Err(ClientError::Input(
                     "set SIGNALBOX_SOCKET_PATH or pass --socket",
-                ))
-            } else {
-                Ok(PathBuf::from(value))
+                ));
             }
+            PathBuf::from(value)
         }
+    };
+    if !path.is_absolute() {
+        return Err(ClientError::Input(
+            "the local process socket path must be absolute",
+        ));
     }
+    Ok(path)
 }
 
 fn read_input(stdin: &mut dyn Read) -> Result<String, ClientError> {
@@ -303,6 +308,17 @@ async fn await_turn_terminal(
                     if let Some(terminal) = terminal_event_state(&event, turn_id) {
                         return Ok(terminal);
                     }
+                    if model_call_recovery_transition(&event, turn_id) {
+                        let refreshed = transcript(client, session_id).await?;
+                        let Some(terminal) =
+                            terminal_snapshot_state(refreshed.turn_state(turn_id))?
+                        else {
+                            return Err(ClientError::Protocol(
+                                "an ambiguous model call did not produce recovery or terminal state",
+                            ));
+                        };
+                        return Ok(terminal);
+                    }
                 }
                 ServerMessage::Error {
                     code: ErrorCode::ResyncRequired,
@@ -321,6 +337,19 @@ async fn await_turn_terminal(
             }
         }
     }
+}
+
+fn model_call_recovery_transition(event: &SessionEvent, selected_turn: CanonicalUuid) -> bool {
+    matches!(
+        event,
+        SessionEvent::ModelCallTransition {
+            turn_id,
+            state: ModelCallState::Terminal {
+                disposition: ModelCallDisposition::Ambiguous,
+            },
+            ..
+        } if *turn_id == selected_turn
+    )
 }
 
 fn terminal_snapshot_state(state: Option<&TurnState>) -> Result<Option<TurnTerminal>, ClientError> {
@@ -515,12 +544,17 @@ fn selection_display(selection: ModelSelection) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsString, io::Cursor, process::ExitCode};
+    use std::{ffi::OsString, io::Cursor, path::PathBuf, process::ExitCode};
 
-    use signalbox_process_protocol::{CanonicalUuid, TurnState};
+    use signalbox_process_protocol::{
+        CanonicalUuid, ModelCallDisposition, ModelCallState, SessionEvent, TurnState,
+    };
     use uuid::Uuid;
 
-    use super::{MAX_INPUT_CONTENT_BYTES, read_input, run, terminal_snapshot_state};
+    use super::{
+        MAX_INPUT_CONTENT_BYTES, model_call_recovery_transition, read_input, run, socket_path,
+        terminal_snapshot_state,
+    };
     use crate::error::ClientError;
 
     #[test]
@@ -559,6 +593,40 @@ mod tests {
         assert!(matches!(
             terminal_snapshot_state(Some(&state)),
             Err(ClientError::TurnRecoveryRequired)
+        ));
+    }
+
+    #[test]
+    fn configured_socket_paths_must_be_absolute() {
+        assert!(matches!(
+            socket_path(Some(PathBuf::from("relative.sock")), None),
+            Err(ClientError::Input(
+                "the local process socket path must be absolute"
+            ))
+        ));
+        assert!(matches!(
+            socket_path(None, Some(OsString::from("relative.sock"))),
+            Err(ClientError::Input(
+                "the local process socket path must be absolute"
+            ))
+        ));
+    }
+
+    #[test]
+    fn selected_turn_ambiguous_model_call_requests_recovery_reread() {
+        let selected_turn = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let event = SessionEvent::ModelCallTransition {
+            turn_id: selected_turn,
+            model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+            state: ModelCallState::Terminal {
+                disposition: ModelCallDisposition::Ambiguous,
+            },
+        };
+
+        assert!(model_call_recovery_transition(&event, selected_turn));
+        assert!(!model_call_recovery_transition(
+            &event,
+            CanonicalUuid::from_uuid(Uuid::from_u128(3))
         ));
     }
 

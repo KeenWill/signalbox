@@ -26,12 +26,11 @@ these capabilities directionally — accepted records decide them — and severa
 (fork selection, delegation, steering consumption) remain
 [open decisions](docs/open-questions.md).
 
-> **Status:** design and foundation phase, not yet a usable product. The initial
-> domain and persistence slices exist behind accepted decisions — session
-> creation and loading, defaults replacement, durable input acceptance, and
-> eligible-turn activation — plus the first offline and Anthropic model-call
-> paths; runners and clients are milestones ahead, and APIs, protocols, and
-> storage details are not yet stable.
+> **Status:** early implementation phase; APIs, protocols, and storage details
+> are not yet stable. The initial domain and persistence slices now support a
+> local hub process protocol, terminal client, scheduler, and offline and
+> Anthropic model-call paths. Remote runners and graphical clients remain future
+> milestones.
 
 ```text
  Terminal       Web       macOS / iOS
