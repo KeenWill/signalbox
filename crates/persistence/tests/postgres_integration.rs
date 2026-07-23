@@ -52,7 +52,8 @@ use signalbox_persistence::{
         ModelCallRepositoryError, PostgresModelCallRepository, PrepareInitialModelCallOutcome,
     },
     outbox::{
-        OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
+        OutboxCorruption, OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome,
+        OutboxDispatcher,
     },
     replace_session_defaults::{
         ReplaceSessionDefaultsCorruption, ReplaceSessionDefaultsHandlingOutcome,
@@ -10765,6 +10766,58 @@ async fn s24_inv032_dispatcher_redelivers_after_cursor_commit_failure_in_order()
         .fetch_one(&pool)
         .await?,
         Decimal::from(2)
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S24 / INV-032: an allocator cursor beyond the delivered prefix requires its
+/// exact committed header; dispatcher idle is reserved for equal cursors.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_inv032_dispatcher_reports_a_missing_committed_header() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    sqlx::query(
+        "ALTER TABLE outbox_sequence_state
+         DISABLE TRIGGER outbox_sequence_requires_event",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE outbox_sequence_state
+            SET last_sequence = 1,
+                last_allocation_xid = pg_current_xact_id()
+          WHERE singleton",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE outbox_sequence_state
+         ENABLE TRIGGER outbox_sequence_requires_event",
+    )
+    .execute(&pool)
+    .await?;
+
+    let dispatcher = OutboxDispatcher::new(pool.clone());
+    assert!(matches!(
+        dispatcher
+            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+            .await,
+        Err(OutboxDispatchError::Corruption(
+            OutboxCorruption::MissingCommittedEventHeader
+        ))
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, Decimal>(
+            "SELECT delivered_through
+               FROM outbox_delivery_state
+              WHERE singleton",
+        )
+        .fetch_one(&pool)
+        .await?,
+        Decimal::ZERO
     );
 
     pool.close().await;

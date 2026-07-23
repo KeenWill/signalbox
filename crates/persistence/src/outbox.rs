@@ -107,7 +107,22 @@ pub enum DispatchedModelCallState {
     /// Exact call entered InFlight.
     InFlight,
     /// Exact call reached a terminal disposition.
-    Terminal(ModelCallDisposition),
+    Terminal(DispatchedModelCallDisposition),
+}
+
+/// Persistence-owned terminal disposition carried by a dispatched call record.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DispatchedModelCallDisposition {
+    /// The call committed authoritative completion.
+    Completed,
+    /// The call ended in a known failure.
+    KnownFailed,
+    /// The provider authoritatively refused.
+    Refused,
+    /// The call was durably cancelled.
+    Cancelled,
+    /// The physical outcome remained ambiguous.
+    Ambiguous,
 }
 
 /// Whether the synchronous consumer accepted one offered event.
@@ -143,6 +158,12 @@ pub enum OutboxCorruption {
     MissingDeliveryState,
     /// The locked singleton could not be advanced from the observed cursor.
     DeliveryStateChanged,
+    /// The singleton allocation row was absent.
+    MissingSequenceState,
+    /// The delivered cursor exceeded the allocator cursor.
+    DeliveryBeyondAllocatedSequence,
+    /// The allocator named a committed sequence whose header was absent.
+    MissingCommittedEventHeader,
     /// A stored cursor or sequence was not an unsigned 64-bit integer.
     InvalidSequence,
     /// An event header used an unsupported storage version.
@@ -160,6 +181,11 @@ impl fmt::Display for OutboxCorruption {
         formatter.write_str(match self {
             Self::MissingDeliveryState => "outbox delivery state is missing",
             Self::DeliveryStateChanged => "outbox delivery state changed unexpectedly",
+            Self::MissingSequenceState => "outbox sequence state is missing",
+            Self::DeliveryBeyondAllocatedSequence => {
+                "outbox delivery state exceeds the allocated sequence"
+            }
+            Self::MissingCommittedEventHeader => "outbox committed event header is missing",
             Self::InvalidSequence => "outbox sequence is invalid",
             Self::UnsupportedStorageVersion => "outbox storage version is unsupported",
             Self::UnsupportedEventKind => "outbox event kind is unsupported",
@@ -251,6 +277,21 @@ impl OutboxDispatcher {
             return Ok(OutboxDispatchOutcome::Idle);
         };
         let Some(event) = load_event(&mut transaction, next).await? else {
+            let allocated: Option<Decimal> = sqlx::query_scalar(
+                "SELECT last_sequence
+                   FROM outbox_sequence_state
+                  WHERE singleton",
+            )
+            .fetch_optional(&mut *transaction)
+            .await?;
+            let allocated = allocated.ok_or(OutboxCorruption::MissingSequenceState)?;
+            let allocated = decode_nonnegative_sequence(allocated)?;
+            if allocated < delivered {
+                return Err(OutboxCorruption::DeliveryBeyondAllocatedSequence.into());
+            }
+            if allocated >= next {
+                return Err(OutboxCorruption::MissingCommittedEventHeader.into());
+            }
             transaction.rollback().await?;
             return Ok(OutboxDispatchOutcome::Idle);
         };
@@ -434,19 +475,19 @@ fn decode_model_call_state(
         ("prepared", None) => Ok(DispatchedModelCallState::Prepared),
         ("in_flight", None) => Ok(DispatchedModelCallState::InFlight),
         ("terminal", Some("completed")) => Ok(DispatchedModelCallState::Terminal(
-            ModelCallDisposition::Completed,
+            DispatchedModelCallDisposition::Completed,
         )),
         ("terminal", Some("known_failed")) => Ok(DispatchedModelCallState::Terminal(
-            ModelCallDisposition::KnownFailed,
+            DispatchedModelCallDisposition::KnownFailed,
         )),
         ("terminal", Some("refused")) => Ok(DispatchedModelCallState::Terminal(
-            ModelCallDisposition::Refused,
+            DispatchedModelCallDisposition::Refused,
         )),
         ("terminal", Some("cancelled")) => Ok(DispatchedModelCallState::Terminal(
-            ModelCallDisposition::Cancelled,
+            DispatchedModelCallDisposition::Cancelled,
         )),
         ("terminal", Some("ambiguous")) => Ok(DispatchedModelCallState::Terminal(
-            ModelCallDisposition::Ambiguous,
+            DispatchedModelCallDisposition::Ambiguous,
         )),
         _ => Err(OutboxCorruption::InvalidModelCallState),
     }
