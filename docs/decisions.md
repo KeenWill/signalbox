@@ -101,8 +101,8 @@ identity deduplication can then hide the content at its ordered position.
 
 **Decision.** A terminal-triggered side reread supplies only the semantic
 material attributable to that exact terminal event. Its newer cursor does not
-make later snapshot material presentation-eligible or advance the primary
-follow stream.
+make later snapshot material presentation-eligible or advance the primary follow
+stream.
 
 **Rejected alternatives.** Rendering every new snapshot entry reorders the
 durable event stream. Advancing to the reread cursor discards transition-only
