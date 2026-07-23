@@ -65,7 +65,10 @@ represented as application-level owner proof.
 The hub owns at most 128 accepted connection tasks. At that limit it leaves new
 connections in the bounded listener backlog until an active task exits, then
 resumes accepting. The limit counts long-lived follow connections and ordinary
-request connections alike.
+request connections alike. At most eight connection tasks may accumulate an
+inbound frame simultaneously; the others wait without a growing frame
+accumulator. Together with the 8 MiB frame cap, this bounds aggregate raw
+inbound-frame accumulation at 64 MiB.
 
 Why: the first client needs a small local process boundary, while remote access
 would require an authenticated identity and revocation design that does not yet
@@ -208,7 +211,9 @@ A transcript snapshot is read in one PostgreSQL repeatable-read, read-only
 transaction. The transaction observes all of:
 
 - the global last committed outbox sequence, returned as `cursor`; and
-- the selected session's latest authoritative semantic frontier; and
+- the selected session's latest authoritative semantic frontier, selected from
+  the tip of persisted turn-start predecessor lineage rather than acceptance
+  order; and
 - every turn in acceptance order with its authoritative lifecycle state.
 
 One logical snapshot is a bounded message sequence sharing the request identity:

@@ -4,7 +4,11 @@
 //! domain aggregates. Both public reads use one read-only repeatable-read
 //! transaction so the hub can map a complete, stable projection explicitly.
 
-use std::{error::Error, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    fmt,
+};
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
@@ -399,6 +403,8 @@ impl ProcessReadRepository {
                 turn.acceptance_position,
                 turn.origin_accepted_input_id,
                 turn.state_kind,
+                turn.start_lineage_kind,
+                turn.immediate_predecessor_turn_id,
                 turn.starting_frontier_id,
                 turn.terminal_frontier_id,
                 turn.active_phase_kind,
@@ -430,14 +436,30 @@ impl ProcessReadRepository {
         .await?;
 
         let mut turns = Vec::with_capacity(turn_rows.len());
-        let mut latest_frontier = None;
+        let mut started_turns = BTreeMap::new();
         for row in turn_rows {
             let decoded = decode_transcript_turn(&row)?;
-            if let Some(frontier) = decoded.latest_frontier {
-                latest_frontier = Some(frontier);
+            match (decoded.start_lineage, decoded.latest_frontier) {
+                (None, None) => {}
+                (Some(lineage), Some(frontier)) => {
+                    if started_turns
+                        .insert(decoded.turn.turn(), (lineage, frontier))
+                        .is_some()
+                    {
+                        return Err(
+                            ProcessReadCorruption::Inconsistent("duplicate started turn").into(),
+                        );
+                    }
+                }
+                _ => {
+                    return Err(
+                        ProcessReadCorruption::Inconsistent("started turn frontier shape").into(),
+                    );
+                }
             }
             turns.push(decoded.turn);
         }
+        let latest_frontier = latest_execution_frontier(&started_turns)?;
         let entries =
             load_transcript_entries(&mut transaction, requested_session, latest_frontier).await?;
 
@@ -485,7 +507,84 @@ fn decode_session_summary(row: &PgRow) -> Result<ProcessSessionSummary, ProcessR
 
 struct DecodedTurn {
     turn: ProcessTranscriptTurn,
+    start_lineage: Option<DecodedStartLineage>,
     latest_frontier: Option<ContextFrontierId>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DecodedStartLineage {
+    FirstInSession,
+    After(TurnId),
+}
+
+fn latest_execution_frontier(
+    started_turns: &BTreeMap<TurnId, (DecodedStartLineage, ContextFrontierId)>,
+) -> Result<Option<ContextFrontierId>, ProcessReadError> {
+    if started_turns.is_empty() {
+        return Ok(None);
+    }
+
+    let mut root_count = 0_usize;
+    let mut successor_by_predecessor = BTreeMap::new();
+    for (turn, (lineage, _)) in started_turns {
+        match lineage {
+            DecodedStartLineage::FirstInSession => root_count += 1,
+            DecodedStartLineage::After(predecessor) => {
+                if !started_turns.contains_key(predecessor)
+                    || successor_by_predecessor
+                        .insert(*predecessor, *turn)
+                        .is_some()
+                {
+                    return Err(
+                        ProcessReadCorruption::Inconsistent("turn execution lineage").into(),
+                    );
+                }
+            }
+        }
+    }
+    if root_count != 1 {
+        return Err(ProcessReadCorruption::Inconsistent("turn execution lineage").into());
+    }
+
+    let mut tips = started_turns
+        .keys()
+        .filter(|turn| !successor_by_predecessor.contains_key(turn));
+    let tip = *tips.next().ok_or(ProcessReadCorruption::Inconsistent(
+        "turn execution lineage",
+    ))?;
+    if tips.next().is_some() {
+        return Err(ProcessReadCorruption::Inconsistent("turn execution lineage").into());
+    }
+
+    let mut visited = BTreeSet::new();
+    let mut current = tip;
+    loop {
+        if !visited.insert(current) {
+            return Err(ProcessReadCorruption::Inconsistent("turn execution lineage").into());
+        }
+        match started_turns
+            .get(&current)
+            .ok_or(ProcessReadCorruption::Inconsistent(
+                "turn execution lineage",
+            ))?
+            .0
+        {
+            DecodedStartLineage::FirstInSession => break,
+            DecodedStartLineage::After(predecessor) => current = predecessor,
+        }
+    }
+    if visited.len() != started_turns.len() {
+        return Err(ProcessReadCorruption::Inconsistent("turn execution lineage").into());
+    }
+
+    Ok(Some(
+        started_turns
+            .get(&tip)
+            .ok_or(ProcessReadCorruption::Inconsistent(
+                "turn execution lineage",
+            ))?
+            .1,
+    ))
 }
 
 fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> {
@@ -511,6 +610,33 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         return Err(ProcessReadCorruption::Inconsistent("turn accepted-input correlation").into());
     }
     let state_kind: String = required(row, "state_kind")?;
+    let start_lineage_kind: Option<String> = row.try_get("start_lineage_kind")?;
+    let immediate_predecessor: Option<Uuid> = row.try_get("immediate_predecessor_turn_id")?;
+    let start_lineage = match (
+        state_kind.as_str(),
+        start_lineage_kind.as_deref(),
+        immediate_predecessor,
+    ) {
+        ("queued", None, None) => None,
+        ("active" | "terminal", Some("first_in_session"), None) => {
+            Some(DecodedStartLineage::FirstInSession)
+        }
+        ("active" | "terminal", Some("after"), Some(predecessor)) => {
+            Some(DecodedStartLineage::After(TurnId::from_uuid(predecessor)))
+        }
+        ("queued" | "active" | "terminal", Some(value), _)
+            if !matches!(value, "first_in_session" | "after") =>
+        {
+            return Err(ProcessReadCorruption::Unsupported {
+                field: "turn start lineage kind",
+                value: value.to_owned(),
+            }
+            .into());
+        }
+        _ => {
+            return Err(ProcessReadCorruption::Inconsistent("turn start lineage shape").into());
+        }
+    };
     let starting_frontier: Option<Uuid> = row.try_get("starting_frontier_id")?;
     let terminal_frontier: Option<Uuid> = row.try_get("terminal_frontier_id")?;
     let active_phase: Option<String> = row.try_get("active_phase_kind")?;
@@ -707,6 +833,7 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
             acceptance_position,
             state,
         },
+        start_lineage,
         latest_frontier,
     })
 }
@@ -932,5 +1059,59 @@ fn decode_positive(value: Decimal, field: &'static str) -> Result<u64, ProcessRe
         Err(ProcessReadCorruption::InvalidOrdinal(field))
     } else {
         Ok(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use signalbox_domain::{ContextFrontierId, TurnId};
+    use sqlx::types::Uuid;
+
+    use super::{DecodedStartLineage, latest_execution_frontier};
+
+    fn turn(value: u128) -> TurnId {
+        TurnId::from_uuid(Uuid::from_u128(value))
+    }
+
+    fn frontier(value: u128) -> ContextFrontierId {
+        ContextFrontierId::from_uuid(Uuid::from_u128(value))
+    }
+
+    /// S24 / INV-032: acceptance order A, B, C may execute as A, C, B; the
+    /// process snapshot selects B's frontier from persisted start lineage.
+    #[test]
+    fn s24_inv032_latest_frontier_follows_execution_lineage() {
+        let first = turn(1);
+        let second = turn(2);
+        let interrupt = turn(3);
+        let started = BTreeMap::from([
+            (first, (DecodedStartLineage::FirstInSession, frontier(11))),
+            (
+                second,
+                (DecodedStartLineage::After(interrupt), frontier(12)),
+            ),
+            (interrupt, (DecodedStartLineage::After(first), frontier(13))),
+        ]);
+
+        assert_eq!(
+            latest_execution_frontier(&started).expect("the lineage is one complete chain"),
+            Some(frontier(12))
+        );
+    }
+
+    /// INV-032: a branched persisted execution lineage cannot choose one
+    /// authoritative snapshot frontier and therefore fails closed.
+    #[test]
+    fn inv032_latest_frontier_rejects_branched_execution_lineage() {
+        let first = turn(1);
+        let started = BTreeMap::from([
+            (first, (DecodedStartLineage::FirstInSession, frontier(11))),
+            (turn(2), (DecodedStartLineage::After(first), frontier(12))),
+            (turn(3), (DecodedStartLineage::After(first), frontier(13))),
+        ]);
+
+        assert!(latest_execution_frontier(&started).is_err());
     }
 }
