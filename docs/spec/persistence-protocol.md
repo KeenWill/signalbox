@@ -48,18 +48,20 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — twelve files, `202607180001` through
-`202607220003` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — thirteen files, `202607180001` through
+`202607230001` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
 behavior, relied on but not demonstrated in this repo. `.gitattributes` pins
 migration files to LF so checksums do not vary by platform, and a build script
-re-embeds the set whenever a file changes. The production binary wires the
-required ordering (INV-034): `apps/hubd` (`migrate_scan_then_schedule`) runs
-`migrate` as its first startup phase, then the startup scan, then the scheduler.
-Why: checksummed forward-only files make every schema change a reviewed,
-immutable artifact, so a deployed database's history is never silently edited.
+re-embeds the set whenever a file changes. The production binary holds the
+singleton hub guard and fences the prior pool generation, then runs `migrate` as
+its first schema phase, followed by the startup scan and runtime (INV-034). The
+fence migration's first installation is the sole case without a prior fenced
+pool, because no earlier schema can have admitted one. Why: checksummed
+forward-only files make every schema change a reviewed, immutable artifact, so a
+deployed database's history is never silently edited.
 
 Container-backed integration tests (`postgres-integration` feature, ignored by
 default, failing loudly when Docker is absent) exercise the real constraints,
@@ -74,7 +76,7 @@ is the durable statement of record, and no state is rebuilt by replaying events
 constraints over current-state rows; an event log would move them back into
 projection code.
 
-Implemented table families (across the twelve migrations):
+Implemented table families (across the thirteen migrations):
 
 - `durable_command` plus typed command records (`create_session_command`,
   `replace_session_defaults_command`, `submit_input_command`);
@@ -86,6 +88,8 @@ Implemented table families (across the twelve migrations):
   provider-target pin on `turn_lifecycle`, and its pinned
   `credential_reference`);
 - `semantic_transcript_entry`, `context_frontier`, `context_frontier_member`;
+- the singleton `hub_fence_state`, which supplies the generation used by
+  hub-owned session advisory pool fences;
 - the outbox family (below).
 
 Representation rules, all enforced in the schema:
@@ -349,11 +353,12 @@ protocol scope). Implemented storage:
 
 - `outbox_event` header (allocator-owned `event_sequence`, closed `event_kind`,
   `storage_version`, `session_id`) plus one typed record table per kind —
-  `session_created_outbox_event`, `turn_failed_outbox_event`,
+  `session_created_outbox_event`, `input_accepted_outbox_event`,
+  `turn_activated_outbox_event`, `turn_failed_outbox_event`,
   `model_call_transition_outbox_event`, `turn_completed_outbox_event`, and
   `turn_refused_outbox_event` — with a deferred trigger requiring exactly one
   typed record per header. The header and typed record tables are append-only
-  (`reject_immutable_record_change`), and all eight outbox tables reject
+  (`reject_immutable_record_change`), and all ten outbox tables reject
   `TRUNCATE`.
 - `outbox_sequence_state`, a mutable singleton row (deletion rejected): a
   `BEFORE INSERT` trigger on the header allocates `last_sequence + 1` by
@@ -371,14 +376,15 @@ Appends happen only through the crate-private `outbox::append` on the caller's
 existing connection; it never begins or commits a transaction, so the
 state-changing adapter owns the atomic boundary and no post-commit publish step
 exists in application code. Implemented appends: CreateSession handling appends
-`session_created`; startup recovery's terminalization appends `turn_failed` (a
-pending-steering deferral rolls back and appends nothing). Model-call state
-transitions append `model_call_transition`, completion closure appends
-`turn_completed`, refusal closure appends `turn_refused`, and known-failure
-closure appends `turn_failed`. A guarded transition that changes zero rows
-appends zero events. Why: writing the event in the committing transaction makes
-the dual-write failure (state without event, or event without state)
-unrepresentable.
+`session_created`; an applied turn-origin SubmitInput appends `input_accepted`;
+and eligibility activation appends `turn_activated`. Startup recovery's
+terminalization appends `turn_failed` (a pending-steering deferral rolls back
+and appends nothing). Model-call state transitions append
+`model_call_transition`, completion closure appends `turn_completed`, refusal
+closure appends `turn_refused`, and known-failure closure appends `turn_failed`.
+A guarded transition that changes zero rows appends zero events. Why: writing
+the event in the committing transaction makes the dual-write failure (state
+without event, or event without state) unrepresentable.
 
 The public `OutboxDispatcher` is the storage-side single-consumer seam. It locks
 the delivery singleton, decodes exactly the next typed event, invokes a

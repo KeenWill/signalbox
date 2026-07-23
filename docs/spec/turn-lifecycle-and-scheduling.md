@@ -390,30 +390,39 @@ hubd is the composition root. It reads exactly `DATABASE_URL`,
 selections, and aliases), `ANTHROPIC_API_KEY_FILE`, and `SIGNALBOX_SOCKET_PATH`
 from the process environment (the provisional configuration channels are
 [configuration-and-credentials](configuration-and-credentials.md) scope). It
-connects, acquires the single-hub guard, migrates, completes recovery scan,
-binds the process socket, then concurrently admits protocol requests, dispatches
-the outbox, and schedules eligible work. No request, dispatch cursor advance, or
-scheduler pass occurs before recovery completes. Any phase failure is a failed
-startup with a classified, key-bearing log line and a failure exit code. The
-dedicated guard connection is checked once per second while the runtime is
-active. Losing that session is a fatal runtime failure: admission, dispatch, and
-scheduling stop together, and the process exits after the shared grace window
-instead of reconnecting without the database-scoped guard. Observability and the
-operator failure taxonomy are [runtime-substrate](runtime-substrate.md) scope.
+connects, acquires the single-hub guard, fences the prior pool incarnation,
+migrates, completes recovery scan, binds the process socket, then concurrently
+admits protocol requests, dispatches the outbox, and schedules eligible work. On
+a database without the fence migration, the guarded first migration creates the
+fence row before the hub initializes its first fenced pool. No request, dispatch
+cursor advance, or scheduler pass occurs before recovery completes. Any phase
+failure is a failed startup with a classified, key-bearing log line and a
+failure exit code.
+
+The dedicated guard connection is checked once per second while the runtime is
+active. Losing that session is a fatal fencing event: admission, dispatch, and
+scheduling are cancelled without the graceful-shutdown window, all pooled
+connections are terminated, and the process exits instead of reconnecting or
+reacquiring in place. A successor can acquire the singleton guard immediately
+but cannot pass the exclusive prior-generation fence until those old pooled
+sessions are gone, so its migration and recovery never overlap them.
+Observability and the operator failure taxonomy are
+[runtime-substrate](runtime-substrate.md) scope.
 
 On SIGINT/SIGTERM the listener stops accepting requests, follow streams are
 closed, the dispatcher stops starting transactions, and the scheduler stops
 admitting passes. Finite request handlers, the current dispatcher transaction,
 and in-flight scheduler passes share the bounded 30-second grace window to let
-authoritative transactions commit or abort. A clean exit removes only this hub's
-revalidated socket, releases the advisory guard by closing its dedicated
-connection, then closes the pool. Window expiry abandons remaining tasks, warns,
-and skips the unbounded pool drain. Why shutdown is polish, not correctness:
-abrupt exit at any point is safe because durable rows plus the next guarded
-startup scan recover work and the durable outbox cursor redelivers an
-uncommitted offer (INV-032, INV-034), so the grace window buys only latency.
-Repositories and services are cheap per-invocation clones over the shared pool;
-no shared locked service instance exists.
+authoritative transactions commit or abort. A clean exit closes the fenced pool,
+removes only this hub's revalidated socket, and releases the advisory locks by
+closing its dedicated guard connection. Window expiry abandons remaining tasks,
+warns, and skips the unbounded pool drain; process exit releases its sessions.
+Why signal-driven shutdown is polish, not correctness: abrupt exit at any point
+is safe because durable rows plus the next guarded startup scan recover work and
+the durable outbox cursor redelivers an uncommitted offer (INV-032, INV-034), so
+the grace window buys only latency. Repositories and services are cheap
+per-invocation clones over the shared pool; no shared locked service instance
+exists.
 
 ## Open edges
 
