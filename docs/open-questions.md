@@ -45,6 +45,19 @@ accepted records; those numbers remain reserved for their topics.
   provider/client rendering remain open. Blocks those extensions, not the first
   `SubmitInput` slice. (S01, S03, S08)
 
+## Model-input projection
+
+- **Projection and summarization beyond the M3 role mapping.** The
+  [M3 rendering decision](decisions.md#2026-07-22--render-the-initial-model-frontier-by-semantic-entry-role)
+  fixes only the admitted text-entry role mapping and exact frontier order.
+  Semantic compaction, selective omission, summarization, rebasing, and
+  context-window policy remain routed to
+  [ADR-0030's extension gate](decisions/0030-context-frontier-snapshots.md#extension-implications)
+  and
+  [ADR-0036's open-question routing](decisions/0036-initial-semantic-transcript-entries.md#open-questions),
+  including their foundation-decision requirements. Blocks those extensions, not
+  the admitted text-only M3 rendering. (S02, S17)
+
 ## Delegation (reserved ADR-0002)
 
 - **Parent cancellation propagation to active delegated children.** Leaning:
@@ -99,11 +112,12 @@ accepted records; those numbers remain reserved for their topics.
 
 ## Configuration categories
 
-- **Additional effective-configuration categories.** Custom parameters,
-  instructions, tool enablement/configuration, placement constraints, per-turn
-  resources, and interpreting-policy selections are unavailable baseline
-  capabilities; a future subsystem ADR must extend the request, session-default,
-  override, and effective-value algebras together (ADR-0027). Blocks those
+- **Additional effective-configuration categories.** System prompts, prompt
+  templates, custom parameters, instructions, tool enablement/configuration,
+  placement constraints, per-turn resources, and interpreting-policy selections
+  are unavailable baseline capabilities; a future subsystem ADR must extend the
+  request, session-default, override, and effective-value algebras together
+  ([ADR-0027](decisions/0027-input-delivery-lifecycle.md)). Blocks those
   capabilities. (S02, S05, S13–S16)
 
 ## Model fallback and provenance (reserved ADR-0006, ADR-0007)
