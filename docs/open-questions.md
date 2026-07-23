@@ -192,6 +192,9 @@ questions below remain open.
 - **Runner enrollment, authentication, and revocation.** Strong runner identity
   distinct from capability claims, with rotation. Blocks remote runners. (S05,
   S06, S12–S16)
+- **In-memory credential hygiene.** Zeroization or equivalent handling remains
+  undecided, with no implementation. Blocks production hardening, not the
+  current file-backed credential path.
 - **First-release resource limits.** Leaning: explicit bounded concurrency and
   configurable usage limits at effect boundaries. Blocks public release.
   (S02–S06, S13–S18)
