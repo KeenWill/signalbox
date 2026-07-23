@@ -99,6 +99,8 @@ pub enum OpenAiConstructionError {
         /// The parser's rendered description.
         detail: String,
     },
+    /// The configured whole-exchange timeout is zero.
+    InvalidExchangeTimeout,
     /// The configured SSE record limit cannot admit any record bytes.
     InvalidSseRecordLimit,
     /// The HTTP client could not be constructed.
@@ -112,6 +114,9 @@ impl std::fmt::Display for OpenAiConstructionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidBaseUrl { detail } => write!(f, "invalid base URL: {detail}"),
+            Self::InvalidExchangeTimeout => {
+                f.write_str("exchange timeout must be greater than zero")
+            }
             Self::InvalidSseRecordLimit => {
                 f.write_str("SSE record limit must be greater than zero")
             }
@@ -132,6 +137,10 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
     /// Per `docs/spec/runtime-substrate.md`, the client is configured so
     /// that a single send is provably a single request:
     ///
+    /// - **TLS uses rustls with the platform verifier and a TLS 1.2 floor.**
+    ///   Certificate and hostname verification remain enabled.
+    /// - **Ambient proxy discovery is disabled** (`no_proxy()`), so provider
+    ///   credentials cannot traverse an environment-selected intermediary.
     /// - **Redirect following is disabled** ([`Policy::none`]). reqwest's
     ///   default policy follows up to ten redirects and, on a 307 or 308
     ///   response, replays the buffered POST body — a hidden second physical
@@ -152,12 +161,16 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
     ///   connect failure provably precede any request byte, which is what
     ///   lets [`UnsentCause::ConnectFailed`] claim proven-unsent.
     ///
-    /// No timeout budget is specified — timeout budgets remain an open edge
-    /// in `docs/spec/model-call-execution.md`: both timeouts default to none
-    /// and are caller-owned configuration.
+    /// The caller may leave the separate connect timeout unset, but every
+    /// exchange has a positive whole-exchange timeout that covers connection
+    /// establishment, response headers, and buffered or streamed body
+    /// delivery.
     pub fn new(config: OpenAiConfig, credentials: A) -> Result<Self, OpenAiConstructionError> {
         if config.sse_record_limit == 0 {
             return Err(OpenAiConstructionError::InvalidSseRecordLimit);
+        }
+        if config.exchange_timeout.is_zero() {
+            return Err(OpenAiConstructionError::InvalidExchangeTimeout);
         }
         // Parse and validate the caller's base independently. Appending first
         // can turn an authority-less value such as `https://` into the
@@ -187,6 +200,16 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
                 detail: format!("unsupported scheme {:?}", completions_url.scheme()),
             });
         }
+        if completions_url.scheme() == "http"
+            && !completions_url
+                .host_str()
+                .and_then(|host| host.parse::<std::net::IpAddr>().ok())
+                .is_some_and(|address| address.is_loopback())
+        {
+            return Err(OpenAiConstructionError::InvalidBaseUrl {
+                detail: "plain HTTP requires a literal loopback IP host".to_string(),
+            });
+        }
         if completions_url.host_str().is_none() {
             return Err(OpenAiConstructionError::InvalidBaseUrl {
                 detail: "base URL must carry an authority".to_string(),
@@ -200,14 +223,17 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
             .pop_if_empty()
             .extend(["v1", "chat", "completions"]);
         let mut builder = Client::builder()
+            .tls_backend_rustls()
+            .tls_version_min(reqwest::tls::Version::TLS_1_2)
+            .tls_danger_accept_invalid_certs(false)
+            .tls_danger_accept_invalid_hostnames(false)
+            .no_proxy()
             .redirect(Policy::none())
             .retry(reqwest::retry::never())
-            .pool_max_idle_per_host(0);
+            .pool_max_idle_per_host(0)
+            .timeout(config.exchange_timeout);
         if let Some(timeout) = config.connect_timeout {
             builder = builder.connect_timeout(timeout);
-        }
-        if let Some(timeout) = config.exchange_timeout {
-            builder = builder.timeout(timeout);
         }
         let client =
             builder

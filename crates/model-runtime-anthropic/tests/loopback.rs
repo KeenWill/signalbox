@@ -14,6 +14,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, CompletionFinish, ConversationMessage, DeliveryMode,
@@ -748,6 +749,45 @@ fn base_url_user_information_is_rejected_at_construction() {
 }
 
 #[test]
+fn plain_http_requires_a_literal_loopback_ip_host() {
+    for base_url in [
+        "http://example.com",
+        "http://localhost:8080",
+        "http://192.0.2.1",
+    ] {
+        let mut config = AnthropicConfig::new();
+        config.base_url = base_url.to_string();
+
+        assert!(
+            matches!(
+                AnthropicRuntime::new(config, FixedKey),
+                Err(AnthropicConstructionError::InvalidBaseUrl { .. })
+            ),
+            "{base_url} must not be admitted without transport security"
+        );
+    }
+}
+
+#[test]
+fn the_default_exchange_timeout_is_ten_minutes() {
+    assert_eq!(
+        AnthropicConfig::new().exchange_timeout,
+        Duration::from_secs(10 * 60)
+    );
+}
+
+#[test]
+fn a_zero_exchange_timeout_is_rejected_at_construction() {
+    let mut config = AnthropicConfig::new();
+    config.exchange_timeout = Duration::ZERO;
+
+    assert!(matches!(
+        AnthropicRuntime::new(config, FixedKey),
+        Err(AnthropicConstructionError::InvalidExchangeTimeout)
+    ));
+}
+
+#[test]
 fn a_zero_sse_record_limit_is_rejected_at_construction() {
     let mut config = AnthropicConfig::new();
     config.sse_record_limit = 0;
@@ -1067,6 +1107,45 @@ fn a_base_url_with_query_or_fragment_fails_construction() {
         error,
         signalbox_model_runtime_anthropic::AnthropicConstructionError::InvalidBaseUrl { .. }
     ));
+}
+
+#[test]
+fn an_authority_less_base_url_fails_construction() {
+    let mut config = AnthropicConfig::new();
+    config.base_url = "https://".to_string();
+
+    let error = AnthropicRuntime::new(config, FixedKey)
+        .expect_err("an absent authority must not be repaired from the endpoint path");
+
+    assert!(matches!(
+        error,
+        signalbox_model_runtime_anthropic::AnthropicConstructionError::InvalidBaseUrl { .. }
+    ));
+}
+
+#[tokio::test]
+async fn a_base_url_path_is_preserved_when_the_endpoint_is_appended() {
+    let server = CannedServer::serving(vec![http_response(
+        "400 Bad Request",
+        &[("content-type", "application/json")],
+        br#"{"type":"error","error":{"type":"invalid_request_error"}}"#,
+    )])
+    .await;
+    let mut config = AnthropicConfig::new();
+    config.base_url = format!("{}/proxy", server.base_url);
+    let runtime =
+        AnthropicRuntime::new(config, FixedKey).expect("path-bearing base URL constructs");
+
+    let _ = execute(
+        &runtime,
+        operation("call-base-path"),
+        CancellationSignal::never(),
+    )
+    .await;
+
+    let requests = server.recorded_requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].starts_with("POST /proxy/v1/messages HTTP/1.1\r\n"));
 }
 
 #[test]

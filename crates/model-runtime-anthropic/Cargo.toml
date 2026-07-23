@@ -9,8 +9,8 @@ publish.workspace = true
 
 [dependencies]
 futures-util = { version = "0.3.31", default-features = false, features = ["std"] }
-reqwest = { version = "0.12.24", default-features = false, features = [
-    "rustls-tls-native-roots",
+reqwest = { version = "0.13.4", default-features = false, features = [
+    "rustls",
     "stream",
 ] }
 serde = { version = "1.0.219", features = ["derive"] }

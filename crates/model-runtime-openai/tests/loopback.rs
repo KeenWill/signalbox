@@ -14,6 +14,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, CompletionFinish, ConversationMessage, DeliveryMode,
@@ -773,6 +774,45 @@ fn base_url_user_information_is_rejected_at_construction() {
     assert!(matches!(
         OpenAiRuntime::new(config, FixedKey),
         Err(OpenAiConstructionError::InvalidBaseUrl { .. })
+    ));
+}
+
+#[test]
+fn plain_http_requires_a_literal_loopback_ip_host() {
+    for base_url in [
+        "http://example.com",
+        "http://localhost:8080",
+        "http://192.0.2.1",
+    ] {
+        let mut config = OpenAiConfig::new();
+        config.base_url = base_url.to_string();
+
+        assert!(
+            matches!(
+                OpenAiRuntime::new(config, FixedKey),
+                Err(OpenAiConstructionError::InvalidBaseUrl { .. })
+            ),
+            "{base_url} must not be admitted without transport security"
+        );
+    }
+}
+
+#[test]
+fn the_default_exchange_timeout_is_ten_minutes() {
+    assert_eq!(
+        OpenAiConfig::new().exchange_timeout,
+        Duration::from_secs(10 * 60)
+    );
+}
+
+#[test]
+fn a_zero_exchange_timeout_is_rejected_at_construction() {
+    let mut config = OpenAiConfig::new();
+    config.exchange_timeout = Duration::ZERO;
+
+    assert!(matches!(
+        OpenAiRuntime::new(config, FixedKey),
+        Err(OpenAiConstructionError::InvalidExchangeTimeout)
     ));
 }
 
