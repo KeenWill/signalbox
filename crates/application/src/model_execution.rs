@@ -322,6 +322,8 @@ pub enum ModelCallAuthorizationReread {
     /// The authorization committed, but an interrupt stopped it before this
     /// process entered the provider.
     CancellationRequested(Box<StopRequestedModelCallTurn>),
+    /// An interrupt already terminalized this exact unsent call as Cancelled.
+    Cancelled,
 }
 
 /// Fresh transaction committing a provider-neutral terminal observation.
@@ -905,6 +907,9 @@ where
                             .commit_terminal_observation(retained_session, cancellation)
                             .await;
                     }
+                    Ok(ModelCallAuthorizationReread::Cancelled) => {
+                        return Ok(ModelCallExecutionOutcome::NoWork);
+                    }
                     Err(error) => {
                         self.retained_state = Some(RetainedModelCallExecutionState {
                             state:
@@ -1054,6 +1059,11 @@ where
                         return self
                             .commit_terminal_observation(session, cancellation)
                             .await;
+                    }
+                    Ok(ModelCallAuthorizationReread::Cancelled) => {
+                        drop(capability);
+                        drop(permit);
+                        return Ok(ModelCallExecutionOutcome::NoWork);
                     }
                     Err(reread_error) => {
                         drop(capability);
@@ -2810,6 +2820,55 @@ mod tests {
         assert_eq!(observation.observed, vec![retained]);
         assert_eq!(provider.capability_preparation_count(), 1);
         assert_eq!(provider.interaction_count(), 0);
+    }
+
+    /// INV-014 / INV-037: an ambiguous authorization reread accepts a complete
+    /// concurrent direct cancellation of the exact unsent call as
+    /// authoritative no-work without entering the provider.
+    #[tokio::test]
+    async fn inv014_inv037_ambiguous_authorization_accepts_terminal_cancellation() {
+        let (request, _) = prepared_fixture();
+        let session = request.session();
+        let mut service = ModelCallExecutionService::new(
+            FixedIds::baseline(),
+            FakePrepare {
+                outcomes: [Ok(ready(request))].into(),
+                calls: 0,
+            },
+            UnusedFailure,
+            FakeAuthorization {
+                outcomes: [Err(FakeError::CommitAmbiguous)].into(),
+                rereads: [Ok(ModelCallAuthorizationReread::Cancelled)].into(),
+                calls: 0,
+                reread_calls: 0,
+            },
+            FakeObservation {
+                commit_errors: VecDeque::new(),
+                rereads: VecDeque::new(),
+                observed: Vec::new(),
+                commit_calls: 0,
+                reread_calls: 0,
+            },
+            ScriptedModelCallProvider::new([ScriptedModelCallStep::Return(
+                ModelCallTerminalObservation::KnownFailed,
+            )]),
+            InProcessAttemptDispatchGate::default(),
+        );
+
+        assert_eq!(
+            service
+                .execute(session)
+                .await
+                .expect("the complete terminal cancellation is authoritative"),
+            ModelCallExecutionOutcome::NoWork
+        );
+        let (_, _, _, authorization, observation, provider, _, retained) = service.into_parts();
+        assert_eq!(authorization.calls, 1);
+        assert_eq!(authorization.reread_calls, 1);
+        assert_eq!(observation.commit_calls, 0);
+        assert_eq!(provider.capability_preparation_count(), 1);
+        assert_eq!(provider.interaction_count(), 0);
+        assert!(retained.is_none());
     }
 
     /// docs/spec/model-call-execution.md: a failed ambiguous-authorization

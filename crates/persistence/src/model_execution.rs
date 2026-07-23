@@ -640,6 +640,67 @@ impl PostgresModelCallRepository {
         let mut transaction = self.pool.begin().await?;
         let result = async {
             lock_session(&mut transaction, session).await?;
+            let stored = sqlx::query(
+                "SELECT model_call_id, turn_id, turn_attempt_id,
+                        selection_kind, direct_model_selection_id,
+                        frozen_model_alias_id, frozen_alias_selected_direct_id,
+                        resolved_provider_model_identity_id, context_frontier_id,
+                        state_kind, terminal_disposition_kind
+                   FROM model_call
+                  WHERE session_id = $1
+                    AND model_call_id = $2",
+            )
+            .bind(session_id_to_uuid(session))
+            .bind(prepared.call().id().into_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(ModelCallCorruption::Missing(
+                "ambiguous authorization model call",
+            ))?;
+            let stored = decode_model_call(stored)?;
+            if stored.state()
+                == ModelCallReconstitutionState::Terminal(ModelCallDisposition::Cancelled)
+            {
+                let stored_members =
+                    load_frontier_members(&mut transaction, session, stored.frontier().into_uuid())
+                        .await?;
+                let exact_request = prepared.session() == session
+                    && prepared.turn() == stored.turn()
+                    && prepared.attempt() == stored.attempt()
+                    && prepared.call().id() == stored.id()
+                    && prepared.call().selection() == stored.selection()
+                    && prepared.call().target() == stored.target()
+                    && prepared.call().frontier().snapshot() == stored.frontier()
+                    && prepared
+                        .frontier_entries()
+                        .map(|entry| {
+                            (
+                                session_id_to_uuid(entry.source_session()),
+                                entry.identity().into_uuid(),
+                            )
+                        })
+                        .eq(stored_members);
+                if !exact_request {
+                    return Err(ModelCallRepositoryError::InvalidTransition(
+                        "ambiguous authorization reread changed terminal request",
+                    ));
+                }
+                if prepared_cancellation_closure_matches(
+                    &mut transaction,
+                    session,
+                    stored.turn().into_uuid(),
+                    stored.attempt().into_uuid(),
+                    stored.id().into_uuid(),
+                    stored.frontier().into_uuid(),
+                )
+                .await?
+                {
+                    return Ok(ModelCallAuthorizationReread::Cancelled);
+                }
+                return Err(ModelCallRepositoryError::InvalidTransition(
+                    "ambiguous authorization terminal cancellation closure is incomplete",
+                ));
+            }
             let execution = require_exact_call(
                 require_live_execution(&mut transaction, session, &self.targets).await?,
                 prepared.call().id(),

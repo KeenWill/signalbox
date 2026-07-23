@@ -2317,6 +2317,7 @@ pub enum ModelCallAuthorizationReread {
     Prepared,
     InFlight(Box<AuthorizedModelCall>),
     CancellationRequested(Box<StopRequestedModelCallTurn>),
+    Cancelled,
 }
 
 pub trait CommitModelCallObservationTransaction {

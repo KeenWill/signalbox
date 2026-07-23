@@ -1344,12 +1344,13 @@ async fn inv006_model_call_capability_failure_reread_distinguishes_pending_and_c
     Ok(())
 }
 
-/// INV-006 / INV-037: a retained capability failure accepts an exact
-/// interrupt-caused cancellation of the still-Prepared call as authoritative
-/// no-work, and rejects an incomplete cancellation closure.
+/// INV-006 / INV-014 / INV-037: retained capability failure and ambiguous
+/// authorization rereads accept an exact interrupt-caused cancellation of the
+/// still-Prepared call as authoritative no-work, and reject an incomplete
+/// cancellation closure.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv006_inv037_capability_failure_reread_accepts_prepared_cancellation()
+async fn inv006_inv014_inv037_failure_rereads_accept_prepared_cancellation()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7580;
@@ -1363,6 +1364,28 @@ async fn inv006_inv037_capability_failure_reread_accepts_prepared_cancellation()
     .expect("one restart fixture target forms a catalog");
     let repository =
         PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
+    let PrepareInitialModelCallOutcome::Ready {
+        request: prepared, ..
+    } = repository
+        .prepare_initial_call(
+            fixture.session,
+            ModelCallId::from_uuid(Uuid::from_u128(seed + 22)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 23)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 24)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 25)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 26)),
+                    TurnId::from_uuid(Uuid::from_u128(seed + 27)),
+                )
+            },
+        )
+        .await?
+    else {
+        panic!("the fixture call must resume from its Prepared checkpoint")
+    };
 
     SubmitInputRepository::new(pool.clone())
         .handle(
@@ -1385,6 +1408,12 @@ async fn inv006_inv037_capability_failure_reread_accepts_prepared_cancellation()
             .await?,
         RetainedCapabilityFailureStatus::Cancelled
     );
+    assert_eq!(
+        repository
+            .reread_ambiguous_authorization(fixture.session, &prepared)
+            .await?,
+        ModelCallAuthorizationReread::Cancelled
+    );
 
     sqlx::query("ALTER TABLE turn_cancelled_outbox_event DISABLE TRIGGER USER")
         .execute(&pool)
@@ -1402,6 +1431,14 @@ async fn inv006_inv037_capability_failure_reread_accepts_prepared_cancellation()
             .await,
         Err(ModelCallRepositoryError::InvalidTransition(
             "retained capability failure cancellation closure is incomplete"
+        ))
+    ));
+    assert!(matches!(
+        repository
+            .reread_ambiguous_authorization(fixture.session, &prepared)
+            .await,
+        Err(ModelCallRepositoryError::InvalidTransition(
+            "ambiguous authorization terminal cancellation closure is incomplete"
         ))
     ));
 
