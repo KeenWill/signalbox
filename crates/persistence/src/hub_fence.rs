@@ -47,17 +47,21 @@ pub async fn advance_hub_fence(
     let stored: Option<Decimal> = sqlx::query_scalar(lock_inventory::HUB_FENCE_GENERATION)
         .fetch_optional(&mut *transaction)
         .await?;
+    let stored = stored.ok_or(HubFenceCorruption::MissingState)?;
     let prior = stored
-        .ok_or(HubFenceCorruption::MissingState)?
         .to_u64()
         .filter(|generation| *generation > 0)
         .ok_or(HubFenceCorruption::InvalidGeneration)?;
+    if stored != Decimal::from(prior) {
+        return Err(HubFenceCorruption::InvalidGeneration.into());
+    }
     let next = prior
         .checked_add(1)
         .ok_or(HubFenceCorruption::GenerationExhausted)?;
+    let prior_key = advisory_key(prior);
 
-    sqlx::query("SELECT pg_advisory_lock($1)")
-        .bind(advisory_key(prior))
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(prior_key)
         .execute(&mut *transaction)
         .await?;
     let advanced: Option<Decimal> = sqlx::query_scalar(
@@ -72,10 +76,35 @@ pub async fn advance_hub_fence(
     .fetch_optional(&mut *transaction)
     .await?;
     let advanced = advanced.ok_or(HubFenceCorruption::StateChanged)?;
-    if advanced.to_u64() != Some(next) {
+    if advanced != Decimal::from(next) {
         return Err(HubFenceCorruption::InvalidGeneration.into());
     }
-    transaction.commit().await?;
+
+    let retained: bool = match sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+        .bind(prior_key)
+        .fetch_one(&mut *transaction)
+        .await
+    {
+        Ok(retained) => retained,
+        Err(error) => {
+            transaction.rollback().await?;
+            let _unlocked: bool = sqlx::query_scalar("SELECT pg_advisory_unlock($1)")
+                .bind(prior_key)
+                .fetch_one(connection)
+                .await?;
+            return Err(error.into());
+        }
+    };
+    if !retained {
+        return Err(HubFenceCorruption::FenceRetentionFailed.into());
+    }
+    if let Err(error) = transaction.commit().await {
+        let _unlocked: bool = sqlx::query_scalar("SELECT pg_advisory_unlock($1)")
+            .bind(prior_key)
+            .fetch_one(connection)
+            .await?;
+        return Err(error.into());
+    }
     Ok(HubFenceGeneration(next))
 }
 
@@ -116,6 +145,8 @@ pub enum HubFenceCorruption {
     GenerationExhausted,
     /// The locked singleton did not advance from the observed generation.
     StateChanged,
+    /// The prior-generation lock could not be retained for the hub lifetime.
+    FenceRetentionFailed,
 }
 
 impl fmt::Display for HubFenceCorruption {
@@ -125,6 +156,7 @@ impl fmt::Display for HubFenceCorruption {
             Self::InvalidGeneration => "hub fence generation is invalid",
             Self::GenerationExhausted => "hub fence generation is exhausted",
             Self::StateChanged => "hub fence state changed unexpectedly",
+            Self::FenceRetentionFailed => "hub fence could not retain the prior generation",
         })
     }
 }
