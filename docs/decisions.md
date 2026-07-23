@@ -25,12 +25,14 @@ rustls platform verifier and byte streaming explicitly. Require certificate and
 hostname verification against platform roots, TLS 1.2 or newer, and HTTPS for
 every non-loopback target; admit plain HTTP only to an IP-literal loopback host
 for deterministic tests. Disable ambient proxies, redirects, protocol retries,
-and idle reuse explicitly. Retain the already-enforced 8 MiB cumulative buffered
-and streamed limits and the configurable positive SSE record bound. Before typed
-parsing, newly reject provider JSON nested beyond 128 containers. A buffered
-parse rejection is response loss, a streamed rejection is protocol violation,
-and an invalid error envelope still falls back to its definitive HTTP status.
-Require a positive whole-exchange timeout from connect through body completion,
+and idle reuse explicitly. Accept CDLA-Permissive-2.0 in the dependency license
+policy solely for `webpki-root-certs`, the platform verifier's bundled fallback
+root data. Retain the already-enforced 8 MiB cumulative buffered and streamed
+limits and the configurable positive SSE record bound. Before typed parsing,
+newly reject provider JSON nested beyond 128 containers. A buffered parse
+rejection is response loss, a streamed rejection is protocol violation, and an
+invalid error envelope still falls back to its definitive HTTP status. Require a
+positive whole-exchange timeout from connect through body completion,
 provisionally ten minutes by default. Revisit that default through a later
 ordinary decision after production latency observations can justify
 provider/model-specific budgets without weakening the always-bounded contract.
@@ -40,15 +42,18 @@ ambient proxy routing, and an unbounded exchange. Native TLS or reqwest's
 changeable default backend would make behavior platform-dependent beyond the
 chosen root verifier. TLS 1.3-only would exclude supported provider endpoints
 without a demonstrated need. WebPKI-only roots would ignore owner-managed
-platform trust; arbitrary custom roots or proxy configuration need an explicit
-operational trust decision. A token-derived response bound does not constrain
-errors, whitespace, or protocol overhead. Byte bounds alone limit memory but do
-not give parsing depth an explicit malicious-input contract.
+platform trust; rejecting the root-data license would therefore reject the
+selected platform verifier, while a broader license-policy exception would admit
+unrelated dependencies. Arbitrary custom roots or proxy configuration need an
+explicit operational trust decision. A token-derived response bound does not
+constrain errors, whitespace, or protocol overhead. Byte bounds alone limit
+memory but do not give parsing depth an explicit malicious-input contract.
 
 **Affects.** `crates/model-runtime`, both provider-adapter crates, reqwest and
 its resolved dependency graph, provider loopback tests,
 [runtime-substrate](spec/runtime-substrate.md), the timeout edge in
-[model-call-execution](spec/model-call-execution.md), and priority-order step 4.
+[model-call-execution](spec/model-call-execution.md), the dependency license
+policy, and priority-order step 4.
 
 ## 2026-07-23 — Poll durable model-call cancellation every 25 milliseconds
 
