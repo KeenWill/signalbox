@@ -890,6 +890,14 @@ impl ServerFrame {
         }
         match &self.message {
             ServerMessage::Error { code, detail, .. } => {
+                if !self.request_id.is_correlated()
+                    && !matches!(
+                        code,
+                        ErrorCode::MalformedFrame | ErrorCode::UnsupportedVersion
+                    )
+                {
+                    return Err(FrameValidationError::UncorrelatedApplicationError);
+                }
                 if (*code == ErrorCode::Rejected) != detail.value().is_some() {
                     return Err(FrameValidationError::ErrorDetailShape);
                 }
@@ -936,6 +944,8 @@ pub enum FrameValidationError {
     UncorrelatedClientRequest,
     /// A success response used reserved correlation identity zero.
     UncorrelatedSuccess,
+    /// A non-framing error used reserved correlation identity zero.
+    UncorrelatedApplicationError,
     /// Rejection detail did not match the error code.
     ErrorDetailShape,
 }
@@ -946,6 +956,7 @@ impl fmt::Display for FrameValidationError {
             Self::UnsupportedVersion => "frame version is unsupported",
             Self::UncorrelatedClientRequest => "client request identity is uncorrelated",
             Self::UncorrelatedSuccess => "successful server message is uncorrelated",
+            Self::UncorrelatedApplicationError => "application server error is uncorrelated",
             Self::ErrorDetailShape => "server error detail does not match its code",
         })
     }
@@ -1352,6 +1363,29 @@ mod tests {
             },
         )?;
         assert_eq!(decode_server_line(&encode_server_line(&error)?)?, error);
+        let version_error = ServerFrame::try_new(
+            RequestId::uncorrelated(),
+            ServerMessage::Error {
+                code: ErrorCode::UnsupportedVersion,
+                message: "unsupported version".to_owned(),
+                detail: ErrorDetail::none(),
+            },
+        )?;
+        assert_eq!(
+            decode_server_line(&encode_server_line(&version_error)?)?,
+            version_error
+        );
+        assert!(
+            ServerFrame::try_new(
+                RequestId::uncorrelated(),
+                ServerMessage::Error {
+                    code: ErrorCode::NotFound,
+                    message: "not found".to_owned(),
+                    detail: ErrorDetail::none(),
+                },
+            )
+            .is_err()
+        );
         assert!(
             ServerFrame::try_new(RequestId::uncorrelated(), ServerMessage::SessionsStart {},)
                 .is_err()
