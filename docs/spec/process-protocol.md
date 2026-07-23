@@ -21,8 +21,11 @@ hub's effective user and must not be group- or other-writable. Every resolved
 ancestor up to the filesystem root must also resist same-machine replacement: a
 group- or other-writable ancestor is accepted only when it has the sticky bit
 and the next path component toward the socket is owned by the hub's effective
-user. A non-sticky writable ancestor or a sticky writable ancestor containing a
-component owned by another user fails startup.
+user. Every ancestor must itself be owned by either root or the hub's effective
+user, so an unprivileged different owner cannot make a currently protected
+directory writable after validation. An untrusted owner, a non-sticky writable
+ancestor, or a sticky writable ancestor containing a component owned by another
+user fails startup.
 
 Before inspecting the final path, the hub opens or creates the adjacent
 `<socket-path>.lock` as a no-follow regular file owned by the effective user
@@ -346,15 +349,17 @@ state from the initial snapshot or waits for its durable terminal event, rereads
 the authoritative transcript, and prints the committed assistant text. A client
 that observes `active_awaiting_model_call_recovery` in the initial snapshot
 exits with a typed nonzero recovery-required diagnostic: version one has no
-writer that can complete that wait. A client disconnect never cancels model
-work. After each terminal turn event, `follow` uses a separate connection to
-read and validate a fresh authoritative transcript before it resumes printing
-later followed events. That side reread does not advance the follow connection's
-observed cursor: only events consumed from the subscribed connection do so, and
-every buffered event remains eligible for ordered presentation. Final durable
-content is deduplicated by source-qualified semantic-entry identity while
-transition-only events remain visible instead of being suppressed by a newer
-side snapshot.
+writer that can complete that wait. When the selected turn instead emits a live
+terminal `ambiguous` model-call transition, `send` rereads the authoritative
+snapshot and produces that same diagnostic if the turn has entered the recovery
+wait. A client disconnect never cancels model work. After each terminal turn
+event, `follow` uses a separate connection to read and validate a fresh
+authoritative transcript before it resumes printing later followed events. That
+side reread does not advance the follow connection's observed cursor: only
+events consumed from the subscribed connection do so, and every buffered event
+remains eligible for ordered presentation. Final durable content is deduplicated
+by source-qualified semantic-entry identity while transition-only events remain
+visible instead of being suppressed by a newer side snapshot.
 
 ## Terminal client
 
@@ -381,16 +386,17 @@ requires the exact `--defaults-version`, and the two flags are rejected unless
 supplied together. The client never silently substitutes a new command identity
 for an ambiguous attempt. It uses a fresh nonzero request identity per
 connection, renders only known version-one messages, and exits nonzero on
-protocol or application errors. After completion, `send` rereads and prints only
-authoritative committed assistant text produced for its exact turn. A failed or
-refused turn produces a typed diagnostic and a nonzero exit without reply text.
-`follow` prints the initial transcript and subsequent typed durable updates
-until interrupted. By default every process-derived text field written to a
-terminal preserves line feed but renders every other C0 code point, DEL, and C1
-code points as visible `\u{...}` escapes, preventing ESC/OSC execution.
-`--raw-output` is the explicit opt-in that writes those fields unchanged; the
-same safe-rendering choice covers assistant text, typed diagnostics, and durable
-updates.
+protocol or application errors other than the follow-specific `resync_required`
+control case, which reconnects for a fresh snapshot. After completion, `send`
+rereads and prints only authoritative committed assistant text produced for its
+exact turn. A failed or refused turn produces a typed diagnostic and a nonzero
+exit without reply text. `follow` prints the initial transcript and subsequent
+typed durable updates until interrupted. By default every process-derived text
+field written to a terminal preserves line feed but renders every other C0 code
+point, DEL, and C1 code points as visible `\u{...}` escapes, preventing ESC/OSC
+execution. `--raw-output` is the explicit opt-in that writes those fields
+unchanged; the same safe-rendering choice covers assistant text, typed
+diagnostics, and durable updates.
 
 The existing `signalbox-debug` binary is unchanged and remains a development
 harness, not a protocol client.
