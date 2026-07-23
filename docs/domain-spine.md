@@ -505,7 +505,8 @@ pub struct SubmitInputTurnOriginAppliedResult { /* private */ }
 // sealed: SubmitInput preparation or checked applied reconstitution
 impl SubmitInputTurnOriginAppliedResult {
     // accessors: accepted_input(), session(), turn(), disposition(),
-    // queue_order(), acceptance_position(), origin_configuration()
+    // queue_order(), acceptance_position(), origin_configuration(),
+    // applied_interrupt()
 }
 
 pub struct SubmitInputPendingSteeringAppliedResult { /* private */ }
@@ -544,6 +545,16 @@ pub enum SubmitInputRejectedResult {
         session: SessionId,
         last: SessionInputPosition,
     },
+    SafePointUnavailableWhileStopping {
+        session: SessionId,
+        active_turn: TurnId,
+        existing_command: DurableCommandId,
+    },
+    InterruptAlreadyApplied {
+        session: SessionId,
+        active_turn: TurnId,
+        existing_command: DurableCommandId,
+    },
 }
 
 pub struct PreparedSubmitInput { /* private */ }
@@ -568,7 +579,7 @@ pub enum SubmitInputPreparationFailure {
         accepted_input: AcceptedInputId,
     },
     ActiveTurnProjectionMissing,
-    InterruptApplicationUnavailable,
+    InterruptQueueOrderInvalid,
 }
 
 pub struct SubmitInputTerminalSourceReconstitutionInput { /* private */ }
@@ -577,6 +588,12 @@ impl SubmitInputTerminalSourceReconstitutionInput {
         origin: SubmitInputTurnOriginReconstitutionInput,
         turn: TurnId,
         disposition: TurnDisposition,
+    ) -> Self;
+    pub fn interrupted_model_call_reconciliation(
+        origin: SubmitInputTurnOriginReconstitutionInput,
+        turn: TurnId,
+        ambiguous_call: ModelCallId,
+        interrupt: AppliedInterruptProof,
     ) -> Self;
 }
 
@@ -639,6 +656,23 @@ impl SubmitInputReconstitutionInput {
         accepted_content: UserContent,
         accepted_delivery: DeliveryRequest,
         accepted_position: SessionInputPosition,
+    ) -> Self;
+    pub const fn rejected_safe_point_unavailable_while_stopping(
+        command: SubmitInput,
+        stored_actor: Actor,
+        result_session: SessionId,
+        result_active_turn: TurnId,
+        active_turn_origin: SubmitInputTurnOriginReconstitutionInput,
+        existing_interrupt: AppliedInterruptCommandResult,
+    ) -> Self;
+    pub const fn rejected_interrupt_already_applied(
+        command: SubmitInput,
+        stored_actor: Actor,
+        result_session: SessionId,
+        result_active_turn: TurnId,
+        result_existing_command: DurableCommandId,
+        active_turn_origin: SubmitInputTurnOriginReconstitutionInput,
+        existing_interrupt: AppliedInterruptCommandResult,
     ) -> Self;
     pub const fn rejected_session_not_found(
         command: SubmitInput,
@@ -728,7 +762,6 @@ pub enum SubmitInputReconstitutionFailure {
     RejectionActiveTurnOriginMismatch,
     RejectionActiveTurnOriginCommandReused,
     RejectionHasNoExplicitOriginConfiguration,
-    InterruptConfigurationRejectionUnavailable,
     ExpectedDefaultsVersionMismatch,
     RejectedDefaultsVersionsAreEqual,
     DefaultsSessionMismatch,
@@ -738,7 +771,8 @@ pub enum SubmitInputReconstitutionFailure {
     UnknownAliasMismatch,
     RejectionDidNotSelectAlias,
     PositionIsNotExhausted,
-    PositionExhaustionDeliveryUnavailable,
+    StoppingRejectionMismatch,
+    ExistingInterruptMismatch,
 }
 
 pub struct SubmitInputReconstitutionError { /* private */ }
@@ -897,7 +931,10 @@ impl ReconciliationMarker {
 pub enum ActiveTurnPhase {
     Running { current_attempt: CurrentTurnAttempt },
     AwaitingApproval { request: ToolRequestId },
-    AwaitingRecoveryDecision { ambiguous_operations: NonEmptyIssuedOperationRefs },
+    AwaitingRecoveryDecision {
+        ambiguous_operations: NonEmptyIssuedOperationRefs,
+        applied_interrupt: Option<AppliedInterruptProof>,
+    },
 }
 impl ActiveTurnPhase {
     pub const fn retains_progressing_slot(&self) -> bool;  // always true
@@ -932,7 +969,7 @@ pub enum AcceptedInputTurnSchedulingRecordState {
         starting_lineage: AcceptedInputStartingLineage,
         starting_frontier: ContextFrontierId,
         completing_attempt: TurnAttemptId,
-        completing_attempt_disposition: UnstoppedAttemptDisposition,
+        completing_attempt_end: TerminalAttemptEndReconstitutionInput,
         completing_call: ModelCallId,
         terminal_frontier: ContextFrontierId,
     },
@@ -940,8 +977,23 @@ pub enum AcceptedInputTurnSchedulingRecordState {
         starting_lineage: AcceptedInputStartingLineage,
         starting_frontier: ContextFrontierId,
         refusing_attempt: TurnAttemptId,
-        refusing_attempt_disposition: UnstoppedAttemptDisposition,
+        refusing_attempt_end: TerminalAttemptEndReconstitutionInput,
         refusing_call: ModelCallId,
+        terminal_frontier: ContextFrontierId,
+    },
+    TerminalCancelled {
+        starting_lineage: AcceptedInputStartingLineage,
+        starting_frontier: ContextFrontierId,
+        terminal_execution: CancelledTurnExecutionReconstitutionInput,
+        terminal_frontier: ContextFrontierId,
+    },
+    TerminalReconciliationRequired {
+        starting_lineage: AcceptedInputStartingLineage,
+        starting_frontier: ContextFrontierId,
+        reconciling_attempt: TurnAttemptId,
+        reconciling_attempt_end: TerminalAttemptEndReconstitutionInput,
+        ambiguous_call: ModelCallId,
+        interrupt: AppliedInterruptCommandResult,
         terminal_frontier: ContextFrontierId,
     },
 }
@@ -959,7 +1011,41 @@ impl FailedTurnExecutionReconstitutionInput {
         attempt_disposition: UnstoppedAttemptDisposition,
         ended_call: ModelCallId,
     ) -> Self;
-    // accessors: owning_turn(), ended_attempt(), attempt_disposition(), ended_call()
+    pub const fn attempt_only_after_cancellation(
+        owning_turn: TurnId,
+        ended_attempt: TurnAttemptId,
+        disposition: CancellationStopDisposition,
+        interrupt: AppliedInterruptCommandResult,
+    ) -> Self;
+    pub const fn with_call_after_cancellation(
+        owning_turn: TurnId,
+        ended_attempt: TurnAttemptId,
+        disposition: CancellationStopDisposition,
+        interrupt: AppliedInterruptCommandResult,
+        ended_call: ModelCallId,
+    ) -> Self;
+    // accessors: owning_turn(), ended_attempt(), attempt_end(), ended_call()
+}
+
+pub struct TerminalAttemptEndReconstitutionInput { /* private */ }
+impl TerminalAttemptEndReconstitutionInput {
+    pub const fn without_stop(disposition: UnstoppedAttemptDisposition) -> Self;
+    pub const fn after_cancellation(
+        disposition: CancellationStopDisposition,
+        interrupt: AppliedInterruptCommandResult,
+    ) -> Self;
+    // accessors: end(), interrupt()
+}
+
+pub struct CancelledTurnExecutionReconstitutionInput { /* private */ }
+impl CancelledTurnExecutionReconstitutionInput {
+    pub const fn new(
+        owning_turn: TurnId,
+        ended_attempt: TurnAttemptId,
+        attempt_end: TerminalAttemptEndReconstitutionInput,
+        ended_call: Option<ModelCallId>,
+        interrupt: AppliedInterruptCommandResult,
+    ) -> Self;
 }
 
 pub struct ActiveTurnSchedulingReconstitutionInput { /* private */ }
@@ -972,6 +1058,12 @@ impl ActiveTurnSchedulingReconstitutionInput {
         owning_turn: TurnId,
         current_attempt: TurnAttemptId,
     ) -> Self;
+    pub const fn stop_requested(
+        owning_turn: TurnId,
+        current_attempt: TurnAttemptId,
+        call: ModelCallId,
+        interrupt: AppliedInterruptCommandResult,
+    ) -> Self;
     pub const fn awaiting_model_call_recovery(
         owning_turn: TurnId,
         ended_attempt: TurnAttemptId,
@@ -981,6 +1073,18 @@ impl ActiveTurnSchedulingReconstitutionInput {
         owning_turn: TurnId,
         ended_attempt: TurnAttemptId,
         ambiguous_call: ModelCallId,
+    ) -> Self;
+    pub const fn awaiting_model_call_recovery_after_cancellation(
+        owning_turn: TurnId,
+        ended_attempt: TurnAttemptId,
+        ambiguous_call: ModelCallId,
+        interrupt: AppliedInterruptCommandResult,
+    ) -> Self;
+    pub const fn awaiting_model_call_recovery_after_cancellation_restart(
+        owning_turn: TurnId,
+        ended_attempt: TurnAttemptId,
+        ambiguous_call: ModelCallId,
+        interrupt: AppliedInterruptCommandResult,
     ) -> Self;
     // accessor: owning_turn()
 }
@@ -1132,6 +1236,7 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
     MissingOriginEntry { turn: TurnId },
     MissingFailureEntry { turn: TurnId },
     MissingCompletionEntry { turn: TurnId },
+    MissingCancellationEntry { turn: TurnId },
     CurrentAttemptOwnershipMismatch { turn: TurnId, attempt: TurnAttemptId },
     TerminalAttemptOwnershipMismatch { turn: TurnId, attempt: TurnAttemptId },
     TerminalAttemptEndMismatch { turn: TurnId, attempt: TurnAttemptId },
@@ -1201,6 +1306,8 @@ pub enum AcceptedInputTurnSchedulingStatus {
     TerminalFailed,
     TerminalCompleted,
     TerminalRefused,
+    TerminalCancelled,
+    TerminalReconciliationRequired,
 }
 
 pub struct AcceptedInputTurnSchedulingProjection { /* private */ }
@@ -1223,6 +1330,11 @@ impl AcceptedInputSchedulingProjection {
     ) -> Option<&AcceptedInputTurnSchedulingProjection>;
     pub fn active_turn(&self) -> Option<&AcceptedInputTurnSchedulingProjection>;
     pub fn active_turn_execution(&self) -> Option<ActivatedAcceptedInputTurn>;
+    pub fn apply_interrupt_to_model_call_recovery(
+        self,
+        interrupt: AppliedInterruptCommandResult,
+        identities: AmbiguousModelCallTurnIdentities,
+    ) -> Result<ReconciliationRequiredModelCallTurn, ModelCallClosureError>;
     pub fn earliest_queued_turn(&self)
         -> Option<&AcceptedInputTurnSchedulingProjection>;
     pub fn prepare_earliest_queued_activation(
@@ -1611,7 +1723,17 @@ impl ModelCallExecution {
         self,
         failure_identities: FailedModelCallTurnIdentities,
     ) -> Result<FailedModelCallTurn, ModelCallClosureError>;
+    pub fn apply_interrupt(
+        self,
+        interrupt: AppliedInterruptCommandResult,
+        identities: CancelledModelCallTurnIdentities,
+    ) -> Result<ModelCallInterruptOutcome, ModelCallClosureError>;
+    pub fn recover_after_restart(
+        self,
+        failure_identities: FailedModelCallTurnIdentities,
+    ) -> Result<ModelCallTerminalOutcome, ModelCallClosureError>;
     pub fn resume_in_flight_call(&self) -> Option<AuthorizedModelCall>;
+    pub fn resume_cancellation_requested_call(&self) -> Option<StopRequestedModelCallTurn>;
 }
 pub enum ModelCallPreparationFailure {
     TargetUnavailable,
@@ -1655,24 +1777,46 @@ pub struct CompletedModelCallIdentities { /* private */ }
 // constructor plus with_pending_steering_reclassifications(...)
 pub struct FailedModelCallTurnIdentities { /* private */ }
 // constructor plus with_pending_steering_reclassifications(...)
+pub struct CancelledModelCallTurnIdentities { /* private */ }
+// constructor plus with_pending_steering_reclassifications(...) and into_ambiguous()
+pub struct PhysicalCancellationModelCallTurnIdentities { /* private */ }
+// constructor plus with_pending_steering_reclassifications(...)
 pub struct RefusedModelCallTurnIdentities { /* private */ }
+// constructor plus with_pending_steering_reclassifications(...)
+pub struct AmbiguousModelCallTurnIdentities { /* private */ }
 // constructor plus with_pending_steering_reclassifications(...)
 pub enum ModelCallTerminalIdentities {
     Completed(CompletedModelCallIdentities),
     Failed(FailedModelCallTurnIdentities),
+    PhysicalCancellation(PhysicalCancellationModelCallTurnIdentities),
     Refused(RefusedModelCallTurnIdentities),
-    Ambiguous,
+    Ambiguous(AmbiguousModelCallTurnIdentities),
 }
 pub enum ModelCallTerminalOutcome {
     Completed(CompletedModelCallTurn),
     Failed(FailedModelCallTurn),
+    Cancelled(CancelledModelCallTurn),
     Refused(RefusedModelCallTurn),
+    ReconciliationRequired(ReconciliationRequiredModelCallTurn),
     AwaitingRecovery(AmbiguousModelCallTurn),
+}
+pub enum ModelCallInterruptOutcome {
+    Cancelled(CancelledModelCallTurn),
+    CancellationRequested(StopRequestedModelCallTurn),
+    ReconciliationRequired(ReconciliationRequiredModelCallTurn),
 }
 pub struct CompletedModelCallTurn { /* private */ }
 pub struct FailedModelCallTurn { /* private */ }
+pub struct CancelledModelCallTurn { /* private */ }
+// accessors: session(), turn(), call(), attempt(), disposition(),
+// cancellation_entry(), terminal_snapshot(), reclassified_pending_steering()
+pub struct StopRequestedModelCallTurn { /* private */ }
+// accessors: session(), turn(), call(), attempt(), interrupt(), observation_correlation()
 pub struct RefusedModelCallTurn { /* private */ }
 // each terminal turn exposes reclassified_pending_steering()
+pub struct ReconciliationRequiredModelCallTurn { /* private */ }
+// accessors: session(), turn(), call(), attempt(), disposition(),
+// terminal_snapshot(), reclassified_pending_steering()
 pub struct ReclassifiedPendingSteeringTurn { /* private */ }
 // sealed: successful model-call terminalization with exact pending identities
 impl ReclassifiedPendingSteeringTurn {
@@ -1684,6 +1828,7 @@ pub enum ModelCallClosureError {
     IdentityShapeMismatch,
     CallStateMismatch,
     ObservationCorrelationMismatch,
+    InterruptCorrelationMismatch,
     AttemptStateMismatch,
     TargetResolutionMismatch,
     AssistantIdentityCountMismatch,
@@ -1758,6 +1903,7 @@ pub enum SemanticTranscriptEntryPayload {
     AssistantText { producing_call: ModelCallId, value: AssistantText },
     AssistantToolUse { producing_call: ModelCallId, request: ToolRequestId },
     TurnCompleted { turn: TurnId },
+    TurnCancelled { turn: TurnId },
 }
 
 pub struct SemanticTranscriptEntry { /* private */ }
@@ -1824,9 +1970,10 @@ impl ProviderTargetMismatchInvalidationLog {
 
 ## domain: applied_interrupt
 
-Another deliberately tiny public surface: the submit-input correlation seam that
-produces `AppliedInterruptCommandResult` is module-private, reserved for a later
-transaction-owning adapter.
+Another deliberately tiny public surface: construction of
+`AppliedInterruptCommandResult` remains module-private, while the sealed
+`SubmitInputTurnOriginAppliedResult::applied_interrupt()` projection exposes the
+exact result produced by live preparation or checked reconstitution.
 
 ```rust
 pub struct AppliedInterruptProof { /* private */ }
@@ -1837,8 +1984,8 @@ impl AppliedInterruptProof {
 }
 
 pub struct AppliedInterruptCommandResult { /* private */ }
-// sealed: no public producer yet; module-private correlation of an applied
-// submit-input result constructs it in a later slice
+// sealed construction; SubmitInputTurnOriginAppliedResult::applied_interrupt()
+// is the sole public projection of a checked applied result
 impl AppliedInterruptCommandResult {
     // accessors: proof(), session(), accepted_input(), successor(), successor_order()
 }
@@ -2145,6 +2292,7 @@ pub trait FailPreparedModelCallTransaction {
 pub enum RetainedCapabilityFailureStatus {
     Pending,
     AlreadyCommitted,
+    Cancelled,
 }
 
 pub trait AuthorizeModelCallTransaction {
@@ -2159,6 +2307,11 @@ pub trait AuthorizeModelCallTransaction {
         session: SessionId,
         prepared: &PreparedModelCallRequest,
     ) -> impl Future<Output = Result<ModelCallAuthorizationReread, Self::Error>> + Send;
+    fn cancellation_signal(
+        &self,
+        session: SessionId,
+        call: ModelCallId,
+    ) -> impl Future<Output = ()> + Send + 'static;
 }
 
 pub enum AuthorizeModelCallOutcome {
@@ -2169,6 +2322,8 @@ pub enum AuthorizeModelCallOutcome {
 pub enum ModelCallAuthorizationReread {
     Prepared,
     InFlight(Box<AuthorizedModelCall>),
+    CancellationRequested(Box<StopRequestedModelCallTurn>),
+    Cancelled,
 }
 
 pub trait CommitModelCallObservationTransaction {
@@ -2198,25 +2353,31 @@ pub struct RetainedModelCallExecutionState { /* private */ }
 
 pub enum ModelCallCapabilityPreparation<Capability> {
     Ready(Capability),
+    Cancelled,
     KnownFailure,
 }
 
 pub trait ModelCallProvider {
     type Capability;
     type Error: ClassifyOperatorFailure;
-    fn prepare_capability(
+    fn prepare_capability<Cancellation>(
         &mut self,
         operation: PreparedModelOperation,
+        cancellation: Cancellation,
     ) -> impl Future<Output = Result<ModelCallCapabilityPreparation<Self::Capability>, Self::Error>>
-           + Send;
-    fn invoke<AcceptancePossible>(
+           + Send
+    where
+        Cancellation: Future<Output = ()> + Send + 'static;
+    fn invoke<AcceptancePossible, Cancellation>(
         &mut self,
         authorized: AuthorizedModelCall,
         capability: Self::Capability,
         acceptance_possible: AcceptancePossible,
+        cancellation: Cancellation,
     ) -> impl Future<Output = Result<CorrelatedModelCallTerminalObservation, Self::Error>> + Send
     where
-        AcceptancePossible: FnOnce() + Send;
+        AcceptancePossible: FnOnce() + Send,
+        Cancellation: Future<Output = ()> + Send + 'static;
 }
 
 pub trait ModelCallExecutionIdGenerator {
@@ -2658,6 +2819,8 @@ impl SubmitInputRequest {
 pub trait SubmitInputIdGenerator {
     fn next_accepted_input_id(&mut self) -> AcceptedInputId;
     fn next_turn_id(&mut self) -> TurnId;
+    fn next_semantic_entry_id(&mut self) -> SemanticTranscriptEntryId;
+    fn next_context_frontier_id(&mut self) -> ContextFrontierId;
 }
 
 pub struct UuidV7SubmitInputIdGenerator;  // Default; impl SubmitInputIdGenerator
@@ -2670,12 +2833,16 @@ pub enum SubmitInputOutcome {
 pub trait SubmitInputTransaction {
     type Error;
 
-    fn handle(
+    fn handle<NextTurn>(
         &mut self,
         command: SubmitInput,
         accepted_input: AcceptedInputId,
         turn: Option<TurnId>,
-    ) -> impl Future<Output = Result<SubmitInputOutcome, Self::Error>> + Send;
+        cancellation_identities: CancelledModelCallTurnIdentities,
+        next_reclassified_turn: NextTurn,
+    ) -> impl Future<Output = Result<SubmitInputOutcome, Self::Error>> + Send
+    where
+        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send;
 }
 
 pub struct SubmitInputService<Generator, Transaction, Nudge> { /* private */ }
@@ -2684,7 +2851,7 @@ impl<Generator, Transaction, Nudge> SubmitInputService<Generator, Transaction, N
     pub fn into_parts(self) -> (Generator, Transaction, Nudge);
 }
 impl<
-    Generator: SubmitInputIdGenerator,
+    Generator: SubmitInputIdGenerator + Send,
     Transaction: SubmitInputTransaction,
     Nudge: EligibilityNudge,
 > SubmitInputService<Generator, Transaction, Nudge>
@@ -2710,17 +2877,17 @@ impl<
 | domain: submit_input                  | 15                   |
 | domain: queue_order                   | 5 (+1 free fn)       |
 | domain: turn_lifecycle                | 10                   |
-| domain: turn_eligibility              | 25                   |
+| domain: turn_eligibility              | 27                   |
 | domain: turn_attempt                  | 13                   |
 | domain: model_call                    | 12                   |
-| domain: model_execution               | 34                   |
+| domain: model_execution               | 41                   |
 | domain: context_frontier              | 6                    |
 | domain: semantic_entry                | 4                    |
 | domain: provider_evidence             | 5                    |
 | domain: applied_interrupt             | 2                    |
 | domain: fatal_mismatch                | 0                    |
 | domain: replace_session_defaults      | 13                   |
-| **signalbox-domain total**            | **202 (+1 free fn)** |
+| **signalbox-domain total**            | **211 (+1 free fn)** |
 | application: create_session           | 8 (incl. 2 traits)   |
 | application: load_session             | 2 (incl. 1 trait)    |
 | application: model_execution          | 28 (incl. 7 traits)  |

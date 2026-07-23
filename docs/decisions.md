@@ -10,6 +10,30 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-23 — Poll durable model-call cancellation every 25 milliseconds
+
+**Context.** Capability preparation and provider invocation need one same-call
+cancellation future that observes stop intent committed by another transaction
+or process. PostgreSQL is the durable authority, while the current adapter has
+no database-notification channel. Polling frequency fixes both cancellation
+latency and steady-state query load.
+
+**Decision.** The PostgreSQL model-call adapter polls the call's durable state
+every 25 milliseconds and resolves the signal when it observes
+`cancellation_requested` or `terminal`. Missed ticks delay from the next
+observation instead of bursting to catch up. This provisional interval bounds
+ordinary observation latency near 25 milliseconds while issuing at most about 40
+state reads per second for each active signal.
+
+**Rejected alternatives.** A process-local notification cannot observe another
+process or survive handoff. PostgreSQL `LISTEN`/`NOTIFY` would add connection
+and reconnection coordination to this slice. A longer interval lowers read load
+but slows stop response; a shorter interval raises load without a demonstrated
+latency requirement.
+
+**Affects.** PostgreSQL model-call authorization, capability-preparation and
+provider-invocation cancellation, and operational database load.
+
 ## 2026-07-23 — Atomic steering consumption and proof-bearing stop requests
 
 **Context.** The M3 pending-steering boundary deliberately left safe-point

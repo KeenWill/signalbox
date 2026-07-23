@@ -8,7 +8,7 @@
 //! docs/spec/model-call-execution.md. It owns no retry, fallback, lifecycle,
 //! or durable state.
 
-use std::{collections::HashMap, error::Error, fmt, sync::Arc};
+use std::{collections::HashMap, error::Error, fmt, future::Future, sync::Arc};
 
 use signalbox_application::{
     ClassifyOperatorFailure, ModelCallCapabilityPreparation, ModelCallProvider,
@@ -21,7 +21,7 @@ use signalbox_domain::{
 use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, ConversationMessage, CredentialReference, ModelOperation,
     ModelRuntime, ModelSettings, Observation, ObservationFact, ObservationSink, PreparationOutcome,
-    ProviderReportedModel, RequestedTarget, ResolvedTarget, TerminalEvidence,
+    ProviderReportedModel, RequestedTarget, ResolvedTarget, TerminalEvidence, UnsentCause,
 };
 
 /// One exact provider-model spelling and baseline request limit for a durable
@@ -293,10 +293,14 @@ where
     type Capability = RuntimeModelCallCapability<R::Prepared>;
     type Error = RuntimeModelCallProviderError;
 
-    async fn prepare_capability(
+    async fn prepare_capability<Cancellation>(
         &mut self,
         operation: PreparedModelOperation,
-    ) -> Result<ModelCallCapabilityPreparation<Self::Capability>, Self::Error> {
+        cancellation: Cancellation,
+    ) -> Result<ModelCallCapabilityPreparation<Self::Capability>, Self::Error>
+    where
+        Cancellation: Future<Output = ()> + Send + 'static,
+    {
         let request = operation.request();
         let call = request.call();
         let credential =
@@ -338,7 +342,7 @@ where
         let provider_model = definition.provider_model().to_owned();
         match self
             .runtime
-            .prepare(runtime_operation, CancellationSignal::never())
+            .prepare(runtime_operation, CancellationSignal::when(cancellation))
             .await
         {
             PreparationOutcome::Prepared(prepared) => Ok(ModelCallCapabilityPreparation::Ready(
@@ -350,8 +354,11 @@ where
             )),
             PreparationOutcome::Cancelled {
                 correlation: returned,
+            } => {
+                require_correlation(correlation, returned)?;
+                Ok(ModelCallCapabilityPreparation::Cancelled)
             }
-            | PreparationOutcome::Failed {
+            PreparationOutcome::Failed {
                 correlation: returned,
                 ..
             } => {
@@ -368,14 +375,16 @@ where
         }
     }
 
-    async fn invoke<AcceptancePossible>(
+    async fn invoke<AcceptancePossible, Cancellation>(
         &mut self,
         authorized: AuthorizedModelCall,
         capability: Self::Capability,
         acceptance_possible: AcceptancePossible,
+        cancellation: Cancellation,
     ) -> Result<signalbox_domain::CorrelatedModelCallTerminalObservation, Self::Error>
     where
         AcceptancePossible: FnOnce() + Send,
+        Cancellation: Future<Output = ()> + Send + 'static,
     {
         if !capability.binding.matches(&authorized) {
             return Err(RuntimeModelCallProviderError::AuthorizationMismatch);
@@ -392,7 +401,7 @@ where
             .execute(
                 capability.prepared,
                 &mut observations,
-                CancellationSignal::never(),
+                CancellationSignal::when(cancellation),
             )
             .await;
         require_correlation(correlation, report.correlation)?;
@@ -474,9 +483,13 @@ fn classify_terminal(
             Ok(ModelCallTerminalObservation::Completed { assistant_text })
         }
         TerminalEvidence::Refused(_) => Ok(ModelCallTerminalObservation::Refused),
-        TerminalEvidence::ProviderError(_) | TerminalEvidence::ProvenUnsent(_) => {
-            Ok(ModelCallTerminalObservation::KnownFailed)
-        }
+        TerminalEvidence::ProviderError(_)
+        | TerminalEvidence::ProvenUnsent(signalbox_model_runtime::ProvenUnsentEvidence {
+            cause: UnsentCause::ConnectFailed(_) | UnsentCause::SendIncompleteProvenUnacceptable(_),
+        }) => Ok(ModelCallTerminalObservation::KnownFailed),
+        TerminalEvidence::ProvenUnsent(signalbox_model_runtime::ProvenUnsentEvidence {
+            cause: UnsentCause::CancelledBeforeSend,
+        }) => Ok(ModelCallTerminalObservation::Cancelled),
         TerminalEvidence::CancellationConfirmed(_) => Ok(ModelCallTerminalObservation::Cancelled),
         TerminalEvidence::BoundaryLoss(_) => Ok(ModelCallTerminalObservation::Ambiguous),
     }
@@ -654,6 +667,17 @@ mod tests {
             )
             .expect("typed non-acceptance evidence is supported"),
             ModelCallTerminalObservation::KnownFailed
+        );
+        assert_eq!(
+            classify_terminal(
+                TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence {
+                    cause: UnsentCause::CancelledBeforeSend,
+                }),
+                &[],
+                "model-exact",
+            )
+            .expect("pre-send cancellation evidence is supported"),
+            ModelCallTerminalObservation::Cancelled
         );
         assert_eq!(
             classify_terminal(

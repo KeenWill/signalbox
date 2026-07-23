@@ -75,6 +75,11 @@ pub enum SemanticTranscriptEntryPayload {
         /// The turn that terminalized as completed.
         turn: TurnId,
     },
+    /// The explicit final marker for an interrupt-cancelled turn.
+    TurnCancelled {
+        /// The turn that terminalized as cancelled.
+        turn: TurnId,
+    },
 }
 
 /// Compatibility spelling for code limited to the initial entry variants.

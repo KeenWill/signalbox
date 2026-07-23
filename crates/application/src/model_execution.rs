@@ -14,12 +14,14 @@ use std::{
 };
 
 use signalbox_domain::{
-    AcceptedInputId, AssistantText, AuthorizedModelCall, CompletedModelCallIdentities,
-    ContextFrontierId, CorrelatedModelCallTerminalObservation, FailedModelCallTurn,
-    FailedModelCallTurnIdentities, ModelCallId, ModelCallTerminalIdentities,
-    ModelCallTerminalObservation, ModelCallTerminalOutcome, PreparedModelCallRequest,
+    AcceptedInputId, AmbiguousModelCallTurnIdentities, AssistantText, AuthorizedModelCall,
+    CompletedModelCallIdentities, ContextFrontierId, CorrelatedModelCallTerminalObservation,
+    FailedModelCallTurn, FailedModelCallTurnIdentities, ModelCallId, ModelCallTerminalIdentities,
+    ModelCallTerminalObservation, ModelCallTerminalOutcome,
+    PhysicalCancellationModelCallTurnIdentities, PreparedModelCallRequest,
     RefusedModelCallTurnIdentities, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
-    SemanticTranscriptEntryRef, SessionId, TurnAttemptId, TurnId, UserContent,
+    SemanticTranscriptEntryRef, SessionId, StopRequestedModelCallTurn, TurnAttemptId, TurnId,
+    UserContent,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
@@ -107,6 +109,7 @@ fn render_frontier_messages<'a>(
                 });
             }
             SemanticTranscriptEntryPayload::TurnFailed { .. }
+            | SemanticTranscriptEntryPayload::TurnCancelled { .. }
             | SemanticTranscriptEntryPayload::TurnCompleted { .. } => {}
         }
     }
@@ -265,6 +268,8 @@ pub enum RetainedCapabilityFailureStatus {
     Pending,
     /// The exact known-failure closure is already represented durably.
     AlreadyCommitted,
+    /// A racing interrupt authoritatively cancelled the prepared call.
+    Cancelled,
 }
 
 /// Distinct transaction that durably authorizes one physical send.
@@ -285,6 +290,17 @@ pub trait AuthorizeModelCallTransaction {
         session: SessionId,
         prepared: &PreparedModelCallRequest,
     ) -> impl Future<Output = Result<ModelCallAuthorizationReread, Self::Error>> + Send;
+
+    /// Returns a same-call signal that resolves when durable state forbids
+    /// continuing provider work.
+    ///
+    /// The returned future owns its adapter state so it can outlive this
+    /// borrow and race capability preparation or physical invocation.
+    fn cancellation_signal(
+        &self,
+        session: SessionId,
+        call: ModelCallId,
+    ) -> impl Future<Output = ()> + Send + 'static;
 }
 
 /// Result of freshly rechecking one send-authorization hint.
@@ -303,6 +319,11 @@ pub enum ModelCallAuthorizationReread {
     Prepared,
     /// The authorization committed; this exact issued call was not consumed.
     InFlight(Box<AuthorizedModelCall>),
+    /// The authorization committed, but an interrupt stopped it before this
+    /// process entered the provider.
+    CancellationRequested(Box<StopRequestedModelCallTurn>),
+    /// An interrupt already terminalized this exact unsent call as Cancelled.
+    Cancelled,
 }
 
 /// Fresh transaction committing a provider-neutral terminal observation.
@@ -397,6 +418,8 @@ enum RetainedModelCallExecutionStateKind {
 pub enum ModelCallCapabilityPreparation<Capability> {
     /// A call-bound one-shot capability is ready to move into provider work.
     Ready(Capability),
+    /// Durable authority changed while the capability was being prepared.
+    Cancelled,
     /// A trustworthy ordinary local failure occurred before send authorization.
     KnownFailure,
 }
@@ -409,20 +432,25 @@ pub trait ModelCallProvider {
     type Error: ClassifyOperatorFailure;
 
     /// Resolves credentials internally and prepares an exact call capability.
-    fn prepare_capability(
+    fn prepare_capability<Cancellation>(
         &mut self,
         operation: PreparedModelOperation,
-    ) -> impl Future<Output = Result<ModelCallCapabilityPreparation<Self::Capability>, Self::Error>> + Send;
+        cancellation: Cancellation,
+    ) -> impl Future<Output = Result<ModelCallCapabilityPreparation<Self::Capability>, Self::Error>> + Send
+    where
+        Cancellation: Future<Output = ()> + Send + 'static;
 
     /// Consumes one capability after durable send authorization.
-    fn invoke<AcceptancePossible>(
+    fn invoke<AcceptancePossible, Cancellation>(
         &mut self,
         authorized: AuthorizedModelCall,
         capability: Self::Capability,
         acceptance_possible: AcceptancePossible,
+        cancellation: Cancellation,
     ) -> impl Future<Output = Result<CorrelatedModelCallTerminalObservation, Self::Error>> + Send
     where
-        AcceptancePossible: FnOnce() + Send;
+        AcceptancePossible: FnOnce() + Send,
+        Cancellation: Future<Output = ()> + Send + 'static;
 }
 
 /// Supplies all hub-minted execution candidates.
@@ -837,6 +865,9 @@ where
                                 ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(call),
                             );
                         }
+                        Ok(RetainedCapabilityFailureStatus::Cancelled) => {
+                            return Ok(ModelCallExecutionOutcome::NoWork);
+                        }
                         Err(error) => {
                             self.retained_state = Some(RetainedModelCallExecutionState {
                                 state:
@@ -867,6 +898,17 @@ where
                         return self
                             .commit_terminal_observation(retained_session, non_consumption)
                             .await;
+                    }
+                    Ok(ModelCallAuthorizationReread::CancellationRequested(stopped)) => {
+                        let cancellation = stopped
+                            .observation_correlation()
+                            .bind_terminal_observation(ModelCallTerminalObservation::Cancelled);
+                        return self
+                            .commit_terminal_observation(retained_session, cancellation)
+                            .await;
+                    }
+                    Ok(ModelCallAuthorizationReread::Cancelled) => {
+                        return Ok(ModelCallExecutionOutcome::NoWork);
                     }
                     Err(error) => {
                         self.retained_state = Some(RetainedModelCallExecutionState {
@@ -954,8 +996,16 @@ where
         let prepared_request = (*prepared).clone();
         let operation = PreparedModelOperation::render(*prepared, credential_reference)
             .map_err(ModelCallExecutionError::Render)?;
-        let capability = match self.provider.prepare_capability(operation).await {
+        let preparation_cancellation = self.authorization.cancellation_signal(session, call);
+        let capability = match self
+            .provider
+            .prepare_capability(operation, preparation_cancellation)
+            .await
+        {
             Ok(ModelCallCapabilityPreparation::Ready(capability)) => capability,
+            Ok(ModelCallCapabilityPreparation::Cancelled) => {
+                return Ok(ModelCallExecutionOutcome::NoWork);
+            }
             Ok(ModelCallCapabilityPreparation::KnownFailure) => {
                 return self.commit_capability_known_failure(session, call).await;
             }
@@ -1000,6 +1050,21 @@ where
                             .commit_terminal_observation(session, non_consumption)
                             .await;
                     }
+                    Ok(ModelCallAuthorizationReread::CancellationRequested(stopped)) => {
+                        drop(capability);
+                        drop(permit);
+                        let cancellation = stopped
+                            .observation_correlation()
+                            .bind_terminal_observation(ModelCallTerminalObservation::Cancelled);
+                        return self
+                            .commit_terminal_observation(session, cancellation)
+                            .await;
+                    }
+                    Ok(ModelCallAuthorizationReread::Cancelled) => {
+                        drop(capability);
+                        drop(permit);
+                        return Ok(ModelCallExecutionOutcome::NoWork);
+                    }
                     Err(reread_error) => {
                         drop(capability);
                         drop(permit);
@@ -1020,9 +1085,15 @@ where
             Err(error) => return Err(ModelCallExecutionError::Authorization(error)),
         };
         let acceptance_possible = move || drop(permit);
+        let invocation_cancellation = self.authorization.cancellation_signal(session, call);
         let observation = self
             .provider
-            .invoke(authorized, capability, acceptance_possible)
+            .invoke(
+                authorized,
+                capability,
+                acceptance_possible,
+                invocation_cancellation,
+            )
             .await;
         let observation = observation.map_err(ModelCallExecutionError::Provider)?;
 
@@ -1148,13 +1219,23 @@ where
                     self.ids.next_context_frontier_id(),
                 ))
             }
-            ModelCallTerminalObservation::KnownFailed | ModelCallTerminalObservation::Cancelled => {
+            ModelCallTerminalObservation::KnownFailed => {
                 ModelCallTerminalIdentities::Failed(self.next_failed_identities())
+            }
+            ModelCallTerminalObservation::Cancelled => {
+                ModelCallTerminalIdentities::PhysicalCancellation(
+                    PhysicalCancellationModelCallTurnIdentities::new(
+                        self.ids.next_semantic_entry_id(),
+                        self.ids.next_context_frontier_id(),
+                    ),
+                )
             }
             ModelCallTerminalObservation::Refused => ModelCallTerminalIdentities::Refused(
                 RefusedModelCallTurnIdentities::new(self.ids.next_context_frontier_id()),
             ),
-            ModelCallTerminalObservation::Ambiguous => ModelCallTerminalIdentities::Ambiguous,
+            ModelCallTerminalObservation::Ambiguous => ModelCallTerminalIdentities::Ambiguous(
+                AmbiguousModelCallTurnIdentities::new(self.ids.next_context_frontier_id()),
+            ),
         }
     }
 }
@@ -1164,6 +1245,8 @@ where
 pub enum ScriptedModelCallStep {
     /// Capability preparation returns a trustworthy ordinary failure.
     CapabilityKnownFailure,
+    /// Capability preparation observes durable cancellation.
+    CapabilityCancelled,
     /// Capability preparation reports an operator failure.
     CapabilityOperatorFailure,
     /// Capability succeeds but provider interaction reports no observation.
@@ -1262,11 +1345,15 @@ impl ModelCallProvider for ScriptedModelCallProvider {
     type Capability = ScriptedModelCallCapability;
     type Error = ScriptedModelCallError;
 
-    fn prepare_capability(
+    fn prepare_capability<Cancellation>(
         &mut self,
         operation: PreparedModelOperation,
+        cancellation: Cancellation,
     ) -> impl Future<Output = Result<ModelCallCapabilityPreparation<Self::Capability>, Self::Error>> + Send
+    where
+        Cancellation: Future<Output = ()> + Send + 'static,
     {
+        drop(cancellation);
         self.capability_preparation_count += 1;
         self.last_prepared_messages = Some(operation.messages().to_vec().into_boxed_slice());
         let step = self.steps.front().cloned();
@@ -1274,6 +1361,7 @@ impl ModelCallProvider for ScriptedModelCallProvider {
             &step,
             Some(
                 ScriptedModelCallStep::CapabilityKnownFailure
+                    | ScriptedModelCallStep::CapabilityCancelled
                     | ScriptedModelCallStep::CapabilityOperatorFailure
             )
         ) {
@@ -1283,6 +1371,9 @@ impl ModelCallProvider for ScriptedModelCallProvider {
             match step.ok_or(ScriptedModelCallError::ScriptExhausted)? {
                 ScriptedModelCallStep::CapabilityKnownFailure => {
                     Ok(ModelCallCapabilityPreparation::KnownFailure)
+                }
+                ScriptedModelCallStep::CapabilityCancelled => {
+                    Ok(ModelCallCapabilityPreparation::Cancelled)
                 }
                 ScriptedModelCallStep::CapabilityOperatorFailure => {
                     Err(ScriptedModelCallError::CapabilityOperatorFailure)
@@ -1295,15 +1386,18 @@ impl ModelCallProvider for ScriptedModelCallProvider {
         }
     }
 
-    fn invoke<AcceptancePossible>(
+    fn invoke<AcceptancePossible, Cancellation>(
         &mut self,
         authorized: AuthorizedModelCall,
         capability: Self::Capability,
         acceptance_possible: AcceptancePossible,
+        cancellation: Cancellation,
     ) -> impl Future<Output = Result<CorrelatedModelCallTerminalObservation, Self::Error>> + Send
     where
         AcceptancePossible: FnOnce() + Send,
+        Cancellation: Future<Output = ()> + Send + 'static,
     {
+        drop(cancellation);
         self.interaction_count += 1;
         let prepared = capability.operation.request();
         let step = if prepared.session() != authorized.session()
@@ -1338,6 +1432,7 @@ impl ModelCallProvider for ScriptedModelCallProvider {
                     Err(ScriptedModelCallError::InteractionOperatorFailure)
                 }
                 ScriptedModelCallStep::CapabilityKnownFailure
+                | ScriptedModelCallStep::CapabilityCancelled
                 | ScriptedModelCallStep::CapabilityOperatorFailure => {
                     Err(ScriptedModelCallError::ScriptExhausted)
                 }
@@ -1750,6 +1845,14 @@ mod tests {
                 .pop_front()
                 .expect("one fake authorization reread")
         }
+
+        fn cancellation_signal(
+            &self,
+            _session: SessionId,
+            _call: ModelCallId,
+        ) -> impl Future<Output = ()> + Send + 'static {
+            std::future::pending()
+        }
     }
 
     #[derive(Debug)]
@@ -1772,6 +1875,14 @@ mod tests {
             _prepared: &PreparedModelCallRequest,
         ) -> Result<ModelCallAuthorizationReread, Self::Error> {
             panic!("unused authorization reread")
+        }
+
+        fn cancellation_signal(
+            &self,
+            _session: SessionId,
+            _call: ModelCallId,
+        ) -> impl Future<Output = ()> + Send + 'static {
+            std::future::pending()
         }
     }
 
@@ -1798,6 +1909,14 @@ mod tests {
             _prepared: &PreparedModelCallRequest,
         ) -> Result<ModelCallAuthorizationReread, Self::Error> {
             panic!("a known no-send result needs no reread")
+        }
+
+        fn cancellation_signal(
+            &self,
+            _session: SessionId,
+            _call: ModelCallId,
+        ) -> impl Future<Output = ()> + Send + 'static {
+            std::future::pending()
         }
     }
 
@@ -1878,21 +1997,27 @@ mod tests {
         type Capability = ();
         type Error = FakeError;
 
-        async fn prepare_capability(
+        async fn prepare_capability<Cancellation>(
             &mut self,
             _operation: PreparedModelOperation,
-        ) -> Result<ModelCallCapabilityPreparation<Self::Capability>, Self::Error> {
+            _cancellation: Cancellation,
+        ) -> Result<ModelCallCapabilityPreparation<Self::Capability>, Self::Error>
+        where
+            Cancellation: Future<Output = ()> + Send + 'static,
+        {
             panic!("unused provider capability preparation")
         }
 
-        async fn invoke<AcceptancePossible>(
+        async fn invoke<AcceptancePossible, Cancellation>(
             &mut self,
             _authorized: AuthorizedModelCall,
             _capability: Self::Capability,
             _acceptance_possible: AcceptancePossible,
+            _cancellation: Cancellation,
         ) -> Result<CorrelatedModelCallTerminalObservation, Self::Error>
         where
             AcceptancePossible: FnOnce() + Send,
+            Cancellation: Future<Output = ()> + Send + 'static,
         {
             panic!("unused provider interaction")
         }
@@ -1909,21 +2034,27 @@ mod tests {
         type Capability = PreparedModelOperation;
         type Error = FakeError;
 
-        async fn prepare_capability(
+        async fn prepare_capability<Cancellation>(
             &mut self,
             operation: PreparedModelOperation,
-        ) -> Result<ModelCallCapabilityPreparation<Self::Capability>, Self::Error> {
+            _cancellation: Cancellation,
+        ) -> Result<ModelCallCapabilityPreparation<Self::Capability>, Self::Error>
+        where
+            Cancellation: Future<Output = ()> + Send + 'static,
+        {
             Ok(ModelCallCapabilityPreparation::Ready(operation))
         }
 
-        fn invoke<AcceptancePossible>(
+        fn invoke<AcceptancePossible, Cancellation>(
             &mut self,
             _authorized: AuthorizedModelCall,
             _capability: Self::Capability,
             acceptance_possible: AcceptancePossible,
+            _cancellation: Cancellation,
         ) -> impl Future<Output = Result<CorrelatedModelCallTerminalObservation, Self::Error>> + Send
         where
             AcceptancePossible: FnOnce() + Send,
+            Cancellation: Future<Output = ()> + Send + 'static,
         {
             self.interaction_count += 1;
             let crossed = Arc::clone(&self.crossed);
@@ -2219,6 +2350,37 @@ mod tests {
         assert_eq!(prepare.calls, 2);
     }
 
+    /// INV-037: durable cancellation during capability preparation is
+    /// authoritative no-work, not a local capability failure to terminalize.
+    #[tokio::test]
+    async fn inv037_capability_preparation_cancellation_stops_without_failure_commit() {
+        let (request, _) = prepared_fixture();
+        let session = request.session();
+        let mut service = ModelCallExecutionService::new(
+            FixedIds::baseline(),
+            FakePrepare {
+                outcomes: [Ok(ready(request))].into(),
+                calls: 0,
+            },
+            UnusedFailure,
+            UnusedAuthorization,
+            UnusedObservation,
+            ScriptedModelCallProvider::new([ScriptedModelCallStep::CapabilityCancelled]),
+            InProcessAttemptDispatchGate::default(),
+        );
+
+        assert_eq!(
+            service
+                .execute(session)
+                .await
+                .expect("durable cancellation is authoritative"),
+            ModelCallExecutionOutcome::NoWork
+        );
+        let (_, prepare, _, _, _, provider, ..) = service.into_parts();
+        assert_eq!(prepare.calls, 1);
+        assert_eq!(provider.capability_preparation_count(), 1);
+    }
+
     /// docs/spec/model-call-execution.md: a trustworthy capability failure
     /// survives a failed guarded closure and explicit service decomposition,
     /// then resubmits without repeating capability preparation.
@@ -2297,6 +2459,52 @@ mod tests {
                 },
             }) if retained_session == session && retained_call == call
         ));
+    }
+
+    /// INV-037: if an interrupt wins after capability preparation reported a
+    /// known failure, the retained reread accepts the durable cancellation as
+    /// authoritative no-work rather than retrying failure closure forever.
+    #[tokio::test]
+    async fn inv037_capability_failure_race_rereads_cancellation_as_no_work() {
+        let (request, _) = prepared_fixture();
+        let session = request.session();
+        let mut service = ModelCallExecutionService::new(
+            FixedIds::baseline(),
+            FakePrepare {
+                outcomes: [Ok(ready(request))].into(),
+                calls: 0,
+            },
+            FakeFailure {
+                errors: [FakeError::Infrastructure].into(),
+                rereads: [Ok(RetainedCapabilityFailureStatus::Cancelled)].into(),
+                calls: 0,
+                reread_calls: 0,
+            },
+            UnusedAuthorization,
+            UnusedObservation,
+            ScriptedModelCallProvider::new([ScriptedModelCallStep::CapabilityKnownFailure]),
+            InProcessAttemptDispatchGate::default(),
+        );
+
+        assert!(matches!(
+            service.execute(session).await,
+            Err(ModelCallExecutionError::CapabilityFailureCommit(
+                FakeError::Infrastructure
+            ))
+        ));
+        assert_eq!(
+            service
+                .execute(identity(99, SessionId::from_uuid))
+                .await
+                .expect("the cancellation reread is authoritative"),
+            ModelCallExecutionOutcome::NoWork
+        );
+        let (_, prepare, failure, _, _, provider, _, retained) = service.into_parts();
+        assert_eq!(prepare.calls, 1);
+        assert_eq!(failure.calls, 1);
+        assert_eq!(failure.reread_calls, 1);
+        assert_eq!(provider.capability_preparation_count(), 1);
+        assert!(retained.is_none());
     }
 
     /// docs/spec/model-call-execution.md: a commit-ambiguous
@@ -2612,6 +2820,55 @@ mod tests {
         assert_eq!(observation.observed, vec![retained]);
         assert_eq!(provider.capability_preparation_count(), 1);
         assert_eq!(provider.interaction_count(), 0);
+    }
+
+    /// INV-014 / INV-037: an ambiguous authorization reread accepts a complete
+    /// concurrent direct cancellation of the exact unsent call as
+    /// authoritative no-work without entering the provider.
+    #[tokio::test]
+    async fn inv014_inv037_ambiguous_authorization_accepts_terminal_cancellation() {
+        let (request, _) = prepared_fixture();
+        let session = request.session();
+        let mut service = ModelCallExecutionService::new(
+            FixedIds::baseline(),
+            FakePrepare {
+                outcomes: [Ok(ready(request))].into(),
+                calls: 0,
+            },
+            UnusedFailure,
+            FakeAuthorization {
+                outcomes: [Err(FakeError::CommitAmbiguous)].into(),
+                rereads: [Ok(ModelCallAuthorizationReread::Cancelled)].into(),
+                calls: 0,
+                reread_calls: 0,
+            },
+            FakeObservation {
+                commit_errors: VecDeque::new(),
+                rereads: VecDeque::new(),
+                observed: Vec::new(),
+                commit_calls: 0,
+                reread_calls: 0,
+            },
+            ScriptedModelCallProvider::new([ScriptedModelCallStep::Return(
+                ModelCallTerminalObservation::KnownFailed,
+            )]),
+            InProcessAttemptDispatchGate::default(),
+        );
+
+        assert_eq!(
+            service
+                .execute(session)
+                .await
+                .expect("the complete terminal cancellation is authoritative"),
+            ModelCallExecutionOutcome::NoWork
+        );
+        let (_, _, _, authorization, observation, provider, _, retained) = service.into_parts();
+        assert_eq!(authorization.calls, 1);
+        assert_eq!(authorization.reread_calls, 1);
+        assert_eq!(observation.commit_calls, 0);
+        assert_eq!(provider.capability_preparation_count(), 1);
+        assert_eq!(provider.interaction_count(), 0);
+        assert!(retained.is_none());
     }
 
     /// docs/spec/model-call-execution.md: a failed ambiguous-authorization

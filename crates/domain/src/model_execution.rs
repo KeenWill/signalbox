@@ -13,17 +13,19 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     AcceptedInputDisposition, AcceptedInputId, AcceptedInputLifecycle, AcceptedInputQueueOrder,
-    AcceptedInputTurnStart, ActivatedAcceptedInputTurn, ActiveTurnPhase, AssistantText,
-    ContextFrontierId, CurrentModelCall, CurrentModelCallState, CurrentTurnAttempt,
-    CurrentTurnAttemptState, DirectModelSelection, EffectiveConfiguration, EndedModelCall,
-    EndedTurnAttempt, FrozenModelSelection, ModelCallDisposition, ModelCallId,
+    AcceptedInputTurnStart, ActivatedAcceptedInputTurn, ActiveTurnPhase,
+    AppliedInterruptCommandResult, AppliedInterruptProof, AssistantText, AttemptEnd,
+    CancellationStopDisposition, ContextFrontierId, CurrentModelCall, CurrentModelCallState,
+    CurrentTurnAttempt, CurrentTurnAttemptState, DirectModelSelection, EffectiveConfiguration,
+    EndedModelCall, EndedTurnAttempt, FrozenModelSelection, ModelCallDisposition, ModelCallId,
     ModelCallReconstitutionInput, NonEmptyIssuedOperationRefs, OriginConfiguration,
-    PinnedProviderTarget, PinnedProviderTargetReconstitutionInput, ReconstitutedModelCall,
-    ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput,
+    PinnedProviderTarget, PinnedProviderTargetReconstitutionInput, ReconciliationMarker,
+    ReconstitutedModelCall, ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput,
     ResolvedContextFrontierSnapshot, ResolvedProviderTarget, SemanticTranscriptEntry,
     SemanticTranscriptEntryId, SemanticTranscriptEntryPayload, SessionId, SteeringBinding,
     SteeringReclassificationReason, SubmitInputResult, SubmitInputTurnOriginReconstitutionInput,
-    TurnAttemptId, TurnDisposition, TurnId, UnstoppedAttemptDisposition, UserContent,
+    TurnAttemptId, TurnAttemptStopCauses, TurnDisposition, TurnId, UnstoppedAttemptDisposition,
+    UserContent,
 };
 
 /// One immutable configured direct-selection to exact-target definition.
@@ -548,7 +550,8 @@ impl ModelCallExecution {
                 SemanticTranscriptEntryPayload::TurnFailed { .. }
                 | SemanticTranscriptEntryPayload::AssistantText { .. }
                 | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
-                | SemanticTranscriptEntryPayload::TurnCompleted { .. } => None,
+                | SemanticTranscriptEntryPayload::TurnCompleted { .. }
+                | SemanticTranscriptEntryPayload::TurnCancelled { .. } => None,
             })
             .collect();
         Ok(PreparedModelCallRequest {
@@ -618,6 +621,99 @@ impl ModelCallExecution {
         })
     }
 
+    /// Reconstructs an issued call whose exact interrupt was durably accepted
+    /// before this process entered the provider.
+    pub fn resume_cancellation_requested_call(&self) -> Option<StopRequestedModelCallTurn> {
+        let call = self.current_call.clone()?;
+        let CurrentTurnAttemptState::StopRequested {
+            causes: TurnAttemptStopCauses::CancellationOnly { interrupt },
+        } = self.current_attempt.state()
+        else {
+            return None;
+        };
+        if call.state() != CurrentModelCallState::CancellationRequested {
+            return None;
+        }
+        Some(StopRequestedModelCallTurn {
+            session: self.session,
+            turn: self.turn,
+            call,
+            attempt: self.current_attempt.clone(),
+            interrupt: *interrupt,
+        })
+    }
+
+    /// Applies one exactly correlated interrupt to the current initial-call
+    /// execution.
+    pub fn apply_interrupt(
+        self,
+        interrupt: AppliedInterruptCommandResult,
+        identities: CancelledModelCallTurnIdentities,
+    ) -> Result<ModelCallInterruptOutcome, ModelCallClosureError> {
+        let proof = interrupt.proof();
+        if interrupt.session() != self.session
+            || proof.predecessor() != self.turn
+            || interrupt.successor() == self.turn
+            || interrupt.successor_order().priority()
+                != (crate::AcceptedInputQueuePriority::InterruptImmediatelyAfter {
+                    predecessor: self.turn,
+                })
+        {
+            return Err(ModelCallClosureError::InterruptCorrelationMismatch);
+        }
+        match (
+            self.current_attempt.state(),
+            self.current_call.as_ref().map(CurrentModelCall::state),
+        ) {
+            (CurrentTurnAttemptState::Prepared, None)
+            | (CurrentTurnAttemptState::Prepared, Some(CurrentModelCallState::Prepared)) => {
+                let reclassified_pending_steering = reclassify_pending_steering(
+                    &self.active_turn,
+                    &identities.pending_steering_reclassifications,
+                )?;
+                let ended_call = self
+                    .current_call
+                    .map(|call| call.end_cancelled_unsent(proof))
+                    .transpose()
+                    .map_err(|_| ModelCallClosureError::CallStateMismatch)?;
+                let cancelled = close_cancelled_turn(
+                    ModelCallTurnScope {
+                        session: self.session,
+                        turn: self.turn,
+                    },
+                    self.current_attempt,
+                    ended_call,
+                    self.current_snapshot,
+                    proof,
+                    identities,
+                    reclassified_pending_steering,
+                )?;
+                Ok(ModelCallInterruptOutcome::Cancelled(cancelled))
+            }
+            (CurrentTurnAttemptState::Running, Some(CurrentModelCallState::InFlight)) => {
+                let attempt = self
+                    .current_attempt
+                    .request_cancellation(proof)
+                    .map_err(|_| ModelCallClosureError::AttemptStateMismatch)?;
+                let call = self
+                    .current_call
+                    .ok_or(ModelCallClosureError::CallStateMismatch)?
+                    .request_cancellation()
+                    .map_err(|_| ModelCallClosureError::CallStateMismatch)?;
+                Ok(ModelCallInterruptOutcome::CancellationRequested(
+                    StopRequestedModelCallTurn {
+                        session: self.session,
+                        turn: self.turn,
+                        call,
+                        attempt,
+                        interrupt: proof,
+                    },
+                ))
+            }
+            _ => Err(ModelCallClosureError::AttemptStateMismatch),
+        }
+    }
+
     /// Applies one provider observation to freshly reloaded issued state.
     ///
     /// docs/spec/model-call-execution.md requires the observation
@@ -644,20 +740,36 @@ impl ModelCallExecution {
         {
             return Err(ModelCallClosureError::ObservationCorrelationMismatch);
         }
-        if call.state() != CurrentModelCallState::InFlight
-            || self.current_attempt.state() != &CurrentTurnAttemptState::Running
-        {
+        let lifecycle_valid = matches!(
+            (self.current_attempt.state(), call.state()),
+            (
+                CurrentTurnAttemptState::Running,
+                CurrentModelCallState::InFlight
+            ) | (
+                CurrentTurnAttemptState::StopRequested {
+                    causes: TurnAttemptStopCauses::CancellationOnly { .. }
+                },
+                CurrentModelCallState::CancellationRequested
+            )
+        );
+        if !lifecycle_valid {
             return Err(ModelCallClosureError::CallStateMismatch);
         }
-        let reclassified_pending_steering =
-            if observation.observation.disposition() == ModelCallDisposition::Ambiguous {
-                Box::new([])
-            } else {
-                reclassify_pending_steering(
-                    &self.active_turn,
-                    identities.pending_steering_reclassifications(),
-                )?
-            };
+        let reclassified_pending_steering = if observation.observation.disposition()
+            == ModelCallDisposition::Ambiguous
+            && !matches!(
+                self.current_attempt.state(),
+                CurrentTurnAttemptState::StopRequested {
+                    causes: TurnAttemptStopCauses::CancellationOnly { .. }
+                }
+            ) {
+            Box::new([])
+        } else {
+            reclassify_pending_steering(
+                &self.active_turn,
+                identities.pending_steering_reclassifications(),
+            )?
+        };
         apply_terminal_observation(
             ModelCallTurnScope {
                 session: self.session,
@@ -794,7 +906,46 @@ impl ModelCallExecution {
                 ))
             }
             CurrentModelCallState::CancellationRequested => {
-                Err(ModelCallClosureError::AttemptStateMismatch)
+                let CurrentTurnAttemptState::StopRequested {
+                    causes: TurnAttemptStopCauses::CancellationOnly { interrupt },
+                } = self.current_attempt.state()
+                else {
+                    return Err(ModelCallClosureError::AttemptStateMismatch);
+                };
+                let proof = *interrupt;
+                let call = call
+                    .end_classified(ModelCallDisposition::Ambiguous)
+                    .map_err(|_| ModelCallClosureError::CallStateMismatch)?;
+                let call_id = call.id();
+                let reclassified_pending_steering = reclassify_pending_steering(
+                    &self.active_turn,
+                    &failure_identities.pending_steering_reclassifications,
+                )?;
+                let terminal_snapshot = self
+                    .current_snapshot
+                    .derive_appending_candidate(failure_identities.terminal_frontier, Vec::new())
+                    .map_err(|_| ModelCallClosureError::FrontierDerivationFailed)?;
+                let attempt = self
+                    .current_attempt
+                    .end_after_cancellation(proof, CancellationStopDisposition::Lost)
+                    .map_err(|_| ModelCallClosureError::AttemptStateMismatch)?;
+                let ambiguous_operations = NonEmptyIssuedOperationRefs::try_from_operations([
+                    crate::IssuedOperationRef::ModelCall(call_id),
+                ])
+                .map_err(|_| ModelCallClosureError::AmbiguityConstructionFailed)?;
+                let marker =
+                    ReconciliationMarker::from_interrupt_ambiguity(ambiguous_operations, proof);
+                Ok(ModelCallTerminalOutcome::ReconciliationRequired(
+                    ReconciliationRequiredModelCallTurn {
+                        session: self.session,
+                        turn: self.turn,
+                        call,
+                        attempt,
+                        disposition: TurnDisposition::ReconciliationRequired { marker },
+                        terminal_snapshot,
+                        reclassified_pending_steering,
+                    },
+                ))
             }
         }
     }
@@ -1187,6 +1338,16 @@ fn apply_terminal_observation(
     reclassified_pending_steering: Box<[ReclassifiedPendingSteeringTurn]>,
 ) -> Result<ModelCallTerminalOutcome, ModelCallClosureError> {
     let ModelCallTurnScope { session, turn } = scope;
+    let cancellation_proof = match attempt.state() {
+        CurrentTurnAttemptState::StopRequested {
+            causes: TurnAttemptStopCauses::CancellationOnly { interrupt },
+        } => Some(*interrupt),
+        CurrentTurnAttemptState::Prepared
+        | CurrentTurnAttemptState::Running
+        | CurrentTurnAttemptState::StopRequested {
+            causes: TurnAttemptStopCauses::FatalMismatch(_),
+        } => None,
+    };
     let disposition = observation.disposition();
     let source_frontier = call.frontier();
     let ended_call = call
@@ -1197,9 +1358,12 @@ fn apply_terminal_observation(
             let ModelCallTerminalIdentities::Completed(identities) = identities else {
                 return Err(ModelCallClosureError::IdentityShapeMismatch);
             };
-            let ended_attempt = attempt
-                .end_without_stop(UnstoppedAttemptDisposition::TurnCompleted)
-                .map_err(|_| ModelCallClosureError::AttemptStateMismatch)?;
+            let ended_attempt = match cancellation_proof {
+                Some(proof) => attempt
+                    .end_after_cancellation(proof, CancellationStopDisposition::TurnCompleted),
+                None => attempt.end_without_stop(UnstoppedAttemptDisposition::TurnCompleted),
+            }
+            .map_err(|_| ModelCallClosureError::AttemptStateMismatch)?;
             let completed = complete_turn(
                 scope,
                 ended_call,
@@ -1211,15 +1375,54 @@ fn apply_terminal_observation(
             )?;
             Ok(ModelCallTerminalOutcome::Completed(completed))
         }
-        ModelCallTerminalObservation::KnownFailed | ModelCallTerminalObservation::Cancelled => {
+        ModelCallTerminalObservation::KnownFailed => {
             let ModelCallTerminalIdentities::Failed(identities) = identities else {
                 return Err(ModelCallClosureError::IdentityShapeMismatch);
             };
-            let failed = close_failed_turn(
-                scope,
-                attempt,
-                Some(ended_call),
-                ResolvedContextFrontierSnapshot::try_from_candidate(
+            let source = ResolvedContextFrontierSnapshot::try_from_candidate(
+                session,
+                source_frontier.snapshot(),
+                frontier_entries
+                    .iter()
+                    .map(SemanticTranscriptEntry::reference)
+                    .collect(),
+            )
+            .map_err(|_| ModelCallClosureError::FrontierDerivationFailed)?;
+            let failed = match cancellation_proof {
+                Some(proof) => close_failed_turn_after_cancellation(
+                    scope,
+                    attempt,
+                    ended_call,
+                    source,
+                    proof,
+                    identities,
+                    reclassified_pending_steering,
+                ),
+                None => close_failed_turn(
+                    scope,
+                    attempt,
+                    Some(ended_call),
+                    source,
+                    identities,
+                    UnstoppedAttemptDisposition::KnownFailure,
+                    reclassified_pending_steering,
+                ),
+            }?;
+            Ok(ModelCallTerminalOutcome::Failed(failed))
+        }
+        ModelCallTerminalObservation::Cancelled => match cancellation_proof {
+            Some(proof) => {
+                let ModelCallTerminalIdentities::PhysicalCancellation(identities) = identities
+                else {
+                    return Err(ModelCallClosureError::IdentityShapeMismatch);
+                };
+                let identities = CancelledModelCallTurnIdentities {
+                    cancellation_entry: identities.terminal_entry,
+                    terminal_frontier: identities.terminal_frontier,
+                    pending_steering_reclassifications: identities
+                        .pending_steering_reclassifications,
+                };
+                let source = ResolvedContextFrontierSnapshot::try_from_candidate(
                     session,
                     source_frontier.snapshot(),
                     frontier_entries
@@ -1227,20 +1430,61 @@ fn apply_terminal_observation(
                         .map(SemanticTranscriptEntry::reference)
                         .collect(),
                 )
-                .map_err(|_| ModelCallClosureError::FrontierDerivationFailed)?,
-                identities,
-                UnstoppedAttemptDisposition::KnownFailure,
-                reclassified_pending_steering,
-            )?;
-            Ok(ModelCallTerminalOutcome::Failed(failed))
-        }
+                .map_err(|_| ModelCallClosureError::FrontierDerivationFailed)?;
+                close_cancelled_turn(
+                    scope,
+                    attempt,
+                    Some(ended_call),
+                    source,
+                    proof,
+                    identities,
+                    reclassified_pending_steering,
+                )
+                .map(ModelCallTerminalOutcome::Cancelled)
+            }
+            None => {
+                let ModelCallTerminalIdentities::PhysicalCancellation(identities) = identities
+                else {
+                    return Err(ModelCallClosureError::IdentityShapeMismatch);
+                };
+                let identities = FailedModelCallTurnIdentities {
+                    failure_entry: identities.terminal_entry,
+                    terminal_frontier: identities.terminal_frontier,
+                    pending_steering_reclassifications: identities
+                        .pending_steering_reclassifications,
+                };
+                let source = ResolvedContextFrontierSnapshot::try_from_candidate(
+                    session,
+                    source_frontier.snapshot(),
+                    frontier_entries
+                        .iter()
+                        .map(SemanticTranscriptEntry::reference)
+                        .collect(),
+                )
+                .map_err(|_| ModelCallClosureError::FrontierDerivationFailed)?;
+                close_failed_turn(
+                    scope,
+                    attempt,
+                    Some(ended_call),
+                    source,
+                    identities,
+                    UnstoppedAttemptDisposition::KnownFailure,
+                    reclassified_pending_steering,
+                )
+                .map(ModelCallTerminalOutcome::Failed)
+            }
+        },
         ModelCallTerminalObservation::Refused => {
             let ModelCallTerminalIdentities::Refused(identities) = identities else {
                 return Err(ModelCallClosureError::IdentityShapeMismatch);
             };
-            let ended_attempt = attempt
-                .end_without_stop(UnstoppedAttemptDisposition::TurnRefused)
-                .map_err(|_| ModelCallClosureError::AttemptStateMismatch)?;
+            let ended_attempt = match cancellation_proof {
+                Some(proof) => {
+                    attempt.end_after_cancellation(proof, CancellationStopDisposition::TurnRefused)
+                }
+                None => attempt.end_without_stop(UnstoppedAttemptDisposition::TurnRefused),
+            }
+            .map_err(|_| ModelCallClosureError::AttemptStateMismatch)?;
             let source = ResolvedContextFrontierSnapshot::try_from_candidate(
                 session,
                 source_frontier.snapshot(),
@@ -1264,26 +1508,58 @@ fn apply_terminal_observation(
             }))
         }
         ModelCallTerminalObservation::Ambiguous => {
-            if !matches!(identities, ModelCallTerminalIdentities::Ambiguous) {
+            let ModelCallTerminalIdentities::Ambiguous(identities) = identities else {
                 return Err(ModelCallClosureError::IdentityShapeMismatch);
-            }
+            };
             let call_id = ended_call.id();
-            let ended_attempt = attempt
-                .end_without_stop(UnstoppedAttemptDisposition::Ambiguous)
-                .map_err(|_| ModelCallClosureError::AttemptStateMismatch)?;
+            let ended_attempt = match cancellation_proof {
+                Some(proof) => {
+                    attempt.end_after_cancellation(proof, CancellationStopDisposition::Ambiguous)
+                }
+                None => attempt.end_without_stop(UnstoppedAttemptDisposition::Ambiguous),
+            }
+            .map_err(|_| ModelCallClosureError::AttemptStateMismatch)?;
             let ambiguous_operations = NonEmptyIssuedOperationRefs::try_from_operations([
                 crate::IssuedOperationRef::ModelCall(call_id),
             ])
             .map_err(|_| ModelCallClosureError::AmbiguityConstructionFailed)?;
-            Ok(ModelCallTerminalOutcome::AwaitingRecovery(
-                AmbiguousModelCallTurn {
+            if let Some(proof) = cancellation_proof {
+                let source = ResolvedContextFrontierSnapshot::try_from_candidate(
                     session,
-                    turn,
-                    call: ended_call,
-                    attempt: ended_attempt,
-                    ambiguous_operations,
-                },
-            ))
+                    source_frontier.snapshot(),
+                    frontier_entries
+                        .iter()
+                        .map(SemanticTranscriptEntry::reference)
+                        .collect(),
+                )
+                .map_err(|_| ModelCallClosureError::FrontierDerivationFailed)?;
+                let terminal_snapshot = source
+                    .derive_appending_candidate(identities.terminal_frontier, Vec::new())
+                    .map_err(|_| ModelCallClosureError::FrontierDerivationFailed)?;
+                let marker =
+                    ReconciliationMarker::from_interrupt_ambiguity(ambiguous_operations, proof);
+                Ok(ModelCallTerminalOutcome::ReconciliationRequired(
+                    ReconciliationRequiredModelCallTurn {
+                        session,
+                        turn,
+                        call: ended_call,
+                        attempt: ended_attempt,
+                        disposition: TurnDisposition::ReconciliationRequired { marker },
+                        terminal_snapshot,
+                        reclassified_pending_steering,
+                    },
+                ))
+            } else {
+                Ok(ModelCallTerminalOutcome::AwaitingRecovery(
+                    AmbiguousModelCallTurn {
+                        session,
+                        turn,
+                        call: ended_call,
+                        attempt: ended_attempt,
+                        ambiguous_operations,
+                    },
+                ))
+            }
         }
     }
 }
@@ -1413,6 +1689,85 @@ impl FailedModelCallTurnIdentities {
     }
 }
 
+/// Fresh identities for an interrupt-cancelled turn.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CancelledModelCallTurnIdentities {
+    cancellation_entry: SemanticTranscriptEntryId,
+    terminal_frontier: ContextFrontierId,
+    pending_steering_reclassifications: Vec<PendingSteeringReclassificationIdentity>,
+}
+
+/// Fresh identities for a physical-cancellation observation.
+///
+/// The freshly reloaded attempt decides whether the terminal entry is a
+/// proof-bearing cancellation marker or an ordinary failure marker. This
+/// shape lets the application mint one collision domain without guessing
+/// whether a concurrent interrupt committed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PhysicalCancellationModelCallTurnIdentities {
+    terminal_entry: SemanticTranscriptEntryId,
+    terminal_frontier: ContextFrontierId,
+    pending_steering_reclassifications: Vec<PendingSteeringReclassificationIdentity>,
+}
+
+impl PhysicalCancellationModelCallTurnIdentities {
+    /// Supplies the terminal-marker and terminal-frontier identities.
+    pub fn new(
+        terminal_entry: SemanticTranscriptEntryId,
+        terminal_frontier: ContextFrontierId,
+    ) -> Self {
+        Self {
+            terminal_entry,
+            terminal_frontier,
+            pending_steering_reclassifications: Vec::new(),
+        }
+    }
+
+    /// Supplies one fresh successor identity per pending steering input, in
+    /// session acceptance order.
+    pub fn with_pending_steering_reclassifications(
+        mut self,
+        identities: Vec<PendingSteeringReclassificationIdentity>,
+    ) -> Self {
+        self.pending_steering_reclassifications = identities;
+        self
+    }
+}
+
+impl CancelledModelCallTurnIdentities {
+    /// Supplies the cancellation marker and terminal-frontier identities.
+    pub fn new(
+        cancellation_entry: SemanticTranscriptEntryId,
+        terminal_frontier: ContextFrontierId,
+    ) -> Self {
+        Self {
+            cancellation_entry,
+            terminal_frontier,
+            pending_steering_reclassifications: Vec::new(),
+        }
+    }
+
+    /// Supplies one fresh successor identity per pending steering input, in
+    /// session acceptance order.
+    pub fn with_pending_steering_reclassifications(
+        mut self,
+        identities: Vec<PendingSteeringReclassificationIdentity>,
+    ) -> Self {
+        self.pending_steering_reclassifications = identities;
+        self
+    }
+
+    /// Reuses the terminal frontier and pending-steering successors when an
+    /// interrupt closes an existing ambiguity wait instead of emitting a
+    /// cancellation marker.
+    pub fn into_ambiguous(self) -> AmbiguousModelCallTurnIdentities {
+        AmbiguousModelCallTurnIdentities {
+            terminal_frontier: self.terminal_frontier,
+            pending_steering_reclassifications: self.pending_steering_reclassifications,
+        }
+    }
+}
+
 /// Fresh identity for a refusal terminal frontier.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RefusedModelCallTurnIdentities {
@@ -1447,10 +1802,15 @@ pub enum ModelCallTerminalIdentities {
     Completed(CompletedModelCallIdentities),
     /// Known-failure or cause-free physical-cancellation identities.
     Failed(FailedModelCallTurnIdentities),
+    /// Physical-cancellation identities whose semantic meaning is selected
+    /// from the freshly reloaded stop state.
+    PhysicalCancellation(PhysicalCancellationModelCallTurnIdentities),
     /// Refusal terminal-frontier identity.
     Refused(RefusedModelCallTurnIdentities),
-    /// Ambiguity creates no semantic entry or frontier.
-    Ambiguous,
+    /// Ambiguity identities used only when a stop requires terminal
+    /// reconciliation; ordinary ambiguity ignores them while retaining the
+    /// slot.
+    Ambiguous(AmbiguousModelCallTurnIdentities),
 }
 
 /// One terminal or durable-wait result from the observation transaction.
@@ -1460,10 +1820,25 @@ pub enum ModelCallTerminalOutcome {
     Completed(CompletedModelCallTurn),
     /// The call and turn failed atomically.
     Failed(FailedModelCallTurn),
+    /// The applied interrupt and physical evidence cancelled the turn.
+    Cancelled(CancelledModelCallTurn),
     /// The provider refusal terminalized the turn.
     Refused(RefusedModelCallTurn),
+    /// An applied interrupt and exact ambiguity set require reconciliation.
+    ReconciliationRequired(ReconciliationRequiredModelCallTurn),
     /// Physical ambiguity ended the attempt and retained the slot.
     AwaitingRecovery(AmbiguousModelCallTurn),
+}
+
+/// Result of atomically applying one matching interrupt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ModelCallInterruptOutcome {
+    /// Unsent work ended directly and released the turn slot.
+    Cancelled(CancelledModelCallTurn),
+    /// Issued work retained the slot while durable cancellation was requested.
+    CancellationRequested(StopRequestedModelCallTurn),
+    /// An existing physical-ambiguity wait closed under the applied interrupt.
+    ReconciliationRequired(ReconciliationRequiredModelCallTurn),
 }
 
 impl ModelCallTerminalIdentities {
@@ -1471,9 +1846,39 @@ impl ModelCallTerminalIdentities {
         match self {
             Self::Completed(identities) => &identities.pending_steering_reclassifications,
             Self::Failed(identities) => &identities.pending_steering_reclassifications,
+            Self::PhysicalCancellation(identities) => {
+                &identities.pending_steering_reclassifications
+            }
             Self::Refused(identities) => &identities.pending_steering_reclassifications,
-            Self::Ambiguous => &[],
+            Self::Ambiguous(identities) => &identities.pending_steering_reclassifications,
         }
+    }
+}
+
+/// Fresh identities needed only when ambiguity terminalizes under a stop.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AmbiguousModelCallTurnIdentities {
+    terminal_frontier: ContextFrontierId,
+    pending_steering_reclassifications: Vec<PendingSteeringReclassificationIdentity>,
+}
+
+impl AmbiguousModelCallTurnIdentities {
+    /// Supplies the candidate terminal frontier for proof-bearing
+    /// reconciliation.
+    pub const fn new(terminal_frontier: ContextFrontierId) -> Self {
+        Self {
+            terminal_frontier,
+            pending_steering_reclassifications: Vec::new(),
+        }
+    }
+
+    /// Supplies one fresh successor identity per pending steering input.
+    pub fn with_pending_steering_reclassifications(
+        mut self,
+        identities: Vec<PendingSteeringReclassificationIdentity>,
+    ) -> Self {
+        self.pending_steering_reclassifications = identities;
+        self
     }
 }
 
@@ -1628,6 +2033,100 @@ impl FailedModelCallTurn {
     }
 }
 
+/// One interrupt-cancelled turn commit candidate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CancelledModelCallTurn {
+    session: SessionId,
+    turn: TurnId,
+    call: Option<EndedModelCall>,
+    attempt: EndedTurnAttempt,
+    disposition: TurnDisposition,
+    cancellation_entry: SemanticTranscriptEntry,
+    terminal_snapshot: ResolvedContextFrontierSnapshot,
+    reclassified_pending_steering: Box<[ReclassifiedPendingSteeringTurn]>,
+}
+
+impl CancelledModelCallTurn {
+    /// Returns the owning session.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+    /// Returns the cancelled turn.
+    pub const fn turn(&self) -> TurnId {
+        self.turn
+    }
+    /// Borrows the physical call when one existed.
+    pub const fn call(&self) -> Option<&EndedModelCall> {
+        self.call.as_ref()
+    }
+    /// Borrows the ended attempt.
+    pub const fn attempt(&self) -> &EndedTurnAttempt {
+        &self.attempt
+    }
+    /// Borrows the proof-bearing cancelled disposition.
+    pub const fn disposition(&self) -> &TurnDisposition {
+        &self.disposition
+    }
+    /// Borrows the explicit cancellation marker.
+    pub const fn cancellation_entry(&self) -> &SemanticTranscriptEntry {
+        &self.cancellation_entry
+    }
+    /// Borrows the complete terminal frontier.
+    pub const fn terminal_snapshot(&self) -> &ResolvedContextFrontierSnapshot {
+        &self.terminal_snapshot
+    }
+    /// Returns queued turns created from every pending steering input.
+    pub fn reclassified_pending_steering(&self) -> &[ReclassifiedPendingSteeringTurn] {
+        &self.reclassified_pending_steering
+    }
+}
+
+/// One durable cancellation request retaining the active turn slot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StopRequestedModelCallTurn {
+    session: SessionId,
+    turn: TurnId,
+    call: CurrentModelCall,
+    attempt: CurrentTurnAttempt,
+    interrupt: AppliedInterruptProof,
+}
+
+impl StopRequestedModelCallTurn {
+    /// Returns the owning session.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+    /// Returns the stopped active turn.
+    pub const fn turn(&self) -> TurnId {
+        self.turn
+    }
+    /// Borrows the exact cancellation-requested call.
+    pub const fn call(&self) -> &CurrentModelCall {
+        &self.call
+    }
+    /// Borrows the proof-bearing stop-requested attempt.
+    pub const fn attempt(&self) -> &CurrentTurnAttempt {
+        &self.attempt
+    }
+    /// Returns the applied interrupt authorizing cancellation.
+    pub const fn interrupt(&self) -> AppliedInterruptProof {
+        self.interrupt
+    }
+
+    /// Returns the issued facts binding a provider-neutral cancellation
+    /// observation to this exact stopped authorization.
+    pub const fn observation_correlation(&self) -> IssuedModelCallCorrelation {
+        IssuedModelCallCorrelation {
+            session: self.session,
+            turn: self.turn,
+            attempt: self.attempt.id(),
+            call: self.call.id(),
+            target: self.call.target(),
+            frontier: self.call.frontier().snapshot(),
+        }
+    }
+}
+
 /// One refused-turn commit candidate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RefusedModelCallTurn {
@@ -1658,6 +2157,49 @@ impl RefusedModelCallTurn {
         &self.attempt
     }
     /// Borrows the refused turn disposition.
+    pub const fn disposition(&self) -> &TurnDisposition {
+        &self.disposition
+    }
+    /// Borrows the terminal frontier.
+    pub const fn terminal_snapshot(&self) -> &ResolvedContextFrontierSnapshot {
+        &self.terminal_snapshot
+    }
+    /// Returns queued turns created from every pending steering input.
+    pub fn reclassified_pending_steering(&self) -> &[ReclassifiedPendingSteeringTurn] {
+        &self.reclassified_pending_steering
+    }
+}
+
+/// One proof-bearing reconciliation-required commit candidate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReconciliationRequiredModelCallTurn {
+    session: SessionId,
+    turn: TurnId,
+    call: EndedModelCall,
+    attempt: EndedTurnAttempt,
+    disposition: TurnDisposition,
+    terminal_snapshot: ResolvedContextFrontierSnapshot,
+    reclassified_pending_steering: Box<[ReclassifiedPendingSteeringTurn]>,
+}
+
+impl ReconciliationRequiredModelCallTurn {
+    /// Returns the owning session.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+    /// Returns the turn whose ambiguity requires reconciliation.
+    pub const fn turn(&self) -> TurnId {
+        self.turn
+    }
+    /// Borrows the exact ambiguous physical call.
+    pub const fn call(&self) -> &EndedModelCall {
+        &self.call
+    }
+    /// Borrows the proof-bearing ended attempt.
+    pub const fn attempt(&self) -> &EndedTurnAttempt {
+        &self.attempt
+    }
+    /// Borrows the exact reconciliation disposition and marker.
     pub const fn disposition(&self) -> &TurnDisposition {
         &self.disposition
     }
@@ -1713,6 +2255,9 @@ pub enum ModelCallClosureError {
     CallStateMismatch,
     /// The observation names different issued authority than fresh state.
     ObservationCorrelationMismatch,
+    /// The applied interrupt does not name this exact session, predecessor,
+    /// and immediate successor relation.
+    InterruptCorrelationMismatch,
     /// The attempt cannot take the required terminal transition.
     AttemptStateMismatch,
     /// Claimed target-resolution failure does not match this execution's
@@ -1847,7 +2392,8 @@ fn reconstitute(
             SemanticTranscriptEntryPayload::TurnFailed { .. }
             | SemanticTranscriptEntryPayload::AssistantText { .. }
             | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
-            | SemanticTranscriptEntryPayload::TurnCompleted { .. } => None,
+            | SemanticTranscriptEntryPayload::TurnCompleted { .. }
+            | SemanticTranscriptEntryPayload::TurnCancelled { .. } => None,
         };
         if let Some(accepted_input) = accepted_input {
             if !origin_contents.contains_key(&accepted_input) {
@@ -1995,6 +2541,12 @@ fn reconstitute(
                 CurrentTurnAttemptState::Running,
                 Some(CurrentModelCallState::InFlight)
             )
+            | (
+                CurrentTurnAttemptState::StopRequested {
+                    causes: TurnAttemptStopCauses::CancellationOnly { .. }
+                },
+                Some(CurrentModelCallState::CancellationRequested)
+            )
     );
     if !lifecycle_valid {
         return Err(fail(
@@ -2061,6 +2613,64 @@ fn reclassify_pending_steering(
         });
     }
     Ok(reclassified.into_boxed_slice())
+}
+
+pub(crate) fn apply_interrupt_to_recovery_wait(
+    active_turn: ActivatedAcceptedInputTurn,
+    call: EndedModelCall,
+    attempt: EndedTurnAttempt,
+    source_snapshot: ResolvedContextFrontierSnapshot,
+    interrupt: AppliedInterruptCommandResult,
+    identities: AmbiguousModelCallTurnIdentities,
+) -> Result<ReconciliationRequiredModelCallTurn, ModelCallClosureError> {
+    let proof = interrupt.proof();
+    let ActiveTurnPhase::AwaitingRecoveryDecision {
+        ambiguous_operations,
+        applied_interrupt: None,
+    } = active_turn.phase()
+    else {
+        return Err(ModelCallClosureError::AttemptStateMismatch);
+    };
+    if interrupt.session() != active_turn.session()
+        || proof.predecessor() != active_turn.turn()
+        || interrupt.successor() == active_turn.turn()
+        || interrupt.successor_order().priority()
+            != (crate::AcceptedInputQueuePriority::InterruptImmediatelyAfter {
+                predecessor: active_turn.turn(),
+            })
+        || ambiguous_operations.operation_count() != 1
+        || !ambiguous_operations.contains(crate::IssuedOperationRef::ModelCall(call.id()))
+        || call.turn() != active_turn.turn()
+        || call.attempt() != attempt.id()
+        || call.disposition() != ModelCallDisposition::Ambiguous
+        || call.frontier() != source_snapshot.frontier()
+    {
+        return Err(ModelCallClosureError::InterruptCorrelationMismatch);
+    }
+    let reclassified_pending_steering =
+        reclassify_pending_steering(&active_turn, &identities.pending_steering_reclassifications)?;
+    let terminal_snapshot = source_snapshot
+        .derive_appending_candidate(identities.terminal_frontier, Vec::new())
+        .map_err(|_| ModelCallClosureError::FrontierDerivationFailed)?;
+    if !matches!(
+        attempt.end(),
+        AttemptEnd::WithoutStop {
+            disposition: UnstoppedAttemptDisposition::Ambiguous | UnstoppedAttemptDisposition::Lost,
+        }
+    ) {
+        return Err(ModelCallClosureError::AttemptStateMismatch);
+    }
+    let marker =
+        ReconciliationMarker::from_interrupt_ambiguity(ambiguous_operations.clone(), proof);
+    Ok(ReconciliationRequiredModelCallTurn {
+        session: active_turn.session(),
+        turn: active_turn.turn(),
+        call,
+        attempt,
+        disposition: TurnDisposition::ReconciliationRequired { marker },
+        terminal_snapshot,
+        reclassified_pending_steering,
+    })
 }
 
 fn complete_turn(
@@ -2147,10 +2757,50 @@ fn close_failed_turn(
     attempt_disposition: UnstoppedAttemptDisposition,
     reclassified_pending_steering: Box<[ReclassifiedPendingSteeringTurn]>,
 ) -> Result<FailedModelCallTurn, ModelCallClosureError> {
-    let ModelCallTurnScope { session, turn } = scope;
     let ended_attempt = attempt
         .end_without_stop(attempt_disposition)
         .map_err(|_| ModelCallClosureError::AttemptStateMismatch)?;
+    assemble_failed_turn(
+        scope,
+        ended_attempt,
+        call,
+        source,
+        identities,
+        reclassified_pending_steering,
+    )
+}
+
+fn close_failed_turn_after_cancellation(
+    scope: ModelCallTurnScope,
+    attempt: CurrentTurnAttempt,
+    call: EndedModelCall,
+    source: ResolvedContextFrontierSnapshot,
+    proof: AppliedInterruptProof,
+    identities: FailedModelCallTurnIdentities,
+    reclassified_pending_steering: Box<[ReclassifiedPendingSteeringTurn]>,
+) -> Result<FailedModelCallTurn, ModelCallClosureError> {
+    let ended_attempt = attempt
+        .end_after_cancellation(proof, CancellationStopDisposition::KnownFailure)
+        .map_err(|_| ModelCallClosureError::AttemptStateMismatch)?;
+    assemble_failed_turn(
+        scope,
+        ended_attempt,
+        Some(call),
+        source,
+        identities,
+        reclassified_pending_steering,
+    )
+}
+
+fn assemble_failed_turn(
+    scope: ModelCallTurnScope,
+    ended_attempt: EndedTurnAttempt,
+    call: Option<EndedModelCall>,
+    source: ResolvedContextFrontierSnapshot,
+    identities: FailedModelCallTurnIdentities,
+    reclassified_pending_steering: Box<[ReclassifiedPendingSteeringTurn]>,
+) -> Result<FailedModelCallTurn, ModelCallClosureError> {
+    let ModelCallTurnScope { session, turn } = scope;
     let failure_entry = SemanticTranscriptEntry::from_validated_parts(
         identities.failure_entry,
         session,
@@ -2169,6 +2819,45 @@ fn close_failed_turn(
         attempt: ended_attempt,
         disposition: TurnDisposition::Failed,
         failure_entry,
+        terminal_snapshot,
+        reclassified_pending_steering,
+    })
+}
+
+fn close_cancelled_turn(
+    scope: ModelCallTurnScope,
+    attempt: CurrentTurnAttempt,
+    call: Option<EndedModelCall>,
+    source: ResolvedContextFrontierSnapshot,
+    proof: AppliedInterruptProof,
+    identities: CancelledModelCallTurnIdentities,
+    reclassified_pending_steering: Box<[ReclassifiedPendingSteeringTurn]>,
+) -> Result<CancelledModelCallTurn, ModelCallClosureError> {
+    let ModelCallTurnScope { session, turn } = scope;
+    if proof.predecessor() != turn {
+        return Err(ModelCallClosureError::InterruptCorrelationMismatch);
+    }
+    let ended_attempt = attempt
+        .end_after_cancellation(proof, CancellationStopDisposition::Cancelled)
+        .map_err(|_| ModelCallClosureError::AttemptStateMismatch)?;
+    let cancellation_entry = SemanticTranscriptEntry::from_validated_parts(
+        identities.cancellation_entry,
+        session,
+        SemanticTranscriptEntryPayload::TurnCancelled { turn },
+    );
+    let terminal_snapshot = source
+        .derive_appending_candidate(
+            identities.terminal_frontier,
+            vec![cancellation_entry.reference()],
+        )
+        .map_err(|_| ModelCallClosureError::FrontierDerivationFailed)?;
+    Ok(CancelledModelCallTurn {
+        session,
+        turn,
+        call,
+        attempt: ended_attempt,
+        disposition: TurnDisposition::Cancelled { cause: proof },
+        cancellation_entry,
         terminal_snapshot,
         reclassified_pending_steering,
     })
@@ -2499,6 +3188,50 @@ mod tests {
         turn: TurnId,
     ) -> Vec<PendingSteeringReclassificationIdentity> {
         vec![PendingSteeringReclassificationIdentity::new(pending, turn)]
+    }
+
+    fn applied_interrupt(execution: &ModelCallExecution) -> AppliedInterruptCommandResult {
+        AppliedInterruptCommandResult::from_correlated_submit(
+            crate::test_support::command_id(30),
+            execution.session(),
+            execution.turn(),
+            accepted_input_id(31),
+            turn_id(32),
+            AcceptedInputQueueOrder::interrupt_immediately_after(
+                crate::SessionInputPosition::try_from_u64(2)
+                    .expect("the interrupt acceptance position is positive"),
+                execution.turn(),
+            ),
+        )
+        .expect("the fixture interrupt is exactly correlated")
+    }
+
+    fn stop_requested_execution(
+        execution: ModelCallExecution,
+    ) -> (ModelCallExecution, AppliedInterruptCommandResult) {
+        let interrupt = applied_interrupt(&execution);
+        let outcome = execution
+            .clone()
+            .apply_interrupt(
+                interrupt,
+                CancelledModelCallTurnIdentities::new(
+                    semantic_transcript_entry_id(33),
+                    context_frontier_id(34),
+                ),
+            )
+            .expect("an issued call accepts the matching interrupt");
+        let ModelCallInterruptOutcome::CancellationRequested(stopped) = outcome else {
+            panic!("issued work requests physical cancellation");
+        };
+        let mut reloaded = execution;
+        reloaded.current_attempt = stopped.attempt().clone();
+        reloaded.current_call = Some(stopped.call().clone());
+        reloaded.active_turn = reloaded
+            .active_turn
+            .with_phase_for_test(ActiveTurnPhase::Running {
+                current_attempt: stopped.attempt().clone(),
+            });
+        (reloaded, interrupt)
     }
 
     fn assert_one_reclassified_turn(
@@ -3059,6 +3792,253 @@ mod tests {
         );
     }
 
+    /// S07 / INV-006 / INV-029 / INV-037: interruption before a physical
+    /// call exists ends the attempt and turn directly with the sole applied
+    /// proof and one explicit cancellation marker.
+    #[test]
+    fn s07_inv006_inv029_inv037_interrupt_cancels_unprepared_work_directly() {
+        let execution = active_execution();
+        let interrupt = applied_interrupt(&execution);
+        let expected_turn = execution.turn();
+        let outcome = execution
+            .apply_interrupt(
+                interrupt,
+                CancelledModelCallTurnIdentities::new(
+                    semantic_transcript_entry_id(33),
+                    context_frontier_id(34),
+                ),
+            )
+            .expect("a matching interrupt cancels unsent work");
+        let ModelCallInterruptOutcome::Cancelled(cancelled) = outcome else {
+            panic!("unsent work is terminally cancelled");
+        };
+
+        assert!(cancelled.call().is_none());
+        assert_eq!(
+            cancelled.attempt().end(),
+            &crate::AttemptEnd::AfterCancellation {
+                cause: interrupt.proof(),
+                disposition: CancellationStopDisposition::Cancelled,
+            }
+        );
+        assert_eq!(
+            cancelled.disposition(),
+            &TurnDisposition::Cancelled {
+                cause: interrupt.proof(),
+            }
+        );
+        assert!(matches!(
+            cancelled.cancellation_entry().payload(),
+            SemanticTranscriptEntryPayload::TurnCancelled { turn }
+                if *turn == expected_turn
+        ));
+    }
+
+    /// S07 / INV-006 / INV-029 / INV-037: a prepared but unsent call closes
+    /// as proof-bearing cancellation without crossing send authorization.
+    #[test]
+    fn s07_inv006_inv029_inv037_interrupt_cancels_prepared_call_directly() {
+        let execution = prepared_execution();
+        let interrupt = applied_interrupt(&execution);
+        let outcome = execution
+            .apply_interrupt(
+                interrupt,
+                CancelledModelCallTurnIdentities::new(
+                    semantic_transcript_entry_id(33),
+                    context_frontier_id(34),
+                ),
+            )
+            .expect("a matching interrupt cancels a prepared call");
+        let ModelCallInterruptOutcome::Cancelled(cancelled) = outcome else {
+            panic!("a prepared call is terminally cancelled");
+        };
+
+        assert_eq!(
+            cancelled
+                .call()
+                .expect("the prepared call remains immutable history")
+                .disposition(),
+            ModelCallDisposition::Cancelled
+        );
+        assert_eq!(
+            cancelled.attempt().end(),
+            &crate::AttemptEnd::AfterCancellation {
+                cause: interrupt.proof(),
+                disposition: CancellationStopDisposition::Cancelled,
+            }
+        );
+    }
+
+    /// S07 / INV-006 / INV-029 / INV-037: issued work durably records the
+    /// same cancellation authority on the attempt and call while retaining
+    /// the active slot.
+    #[test]
+    fn s07_inv006_inv029_inv037_interrupt_requests_issued_call_cancellation() {
+        let execution = in_flight_execution();
+        let interrupt = applied_interrupt(&execution);
+        let outcome = execution
+            .apply_interrupt(
+                interrupt,
+                CancelledModelCallTurnIdentities::new(
+                    semantic_transcript_entry_id(33),
+                    context_frontier_id(34),
+                ),
+            )
+            .expect("a matching interrupt stops issued work");
+        let ModelCallInterruptOutcome::CancellationRequested(stopped) = outcome else {
+            panic!("issued work retains the slot while cancellation is requested");
+        };
+
+        assert_eq!(
+            stopped.attempt().state(),
+            &CurrentTurnAttemptState::StopRequested {
+                causes: TurnAttemptStopCauses::CancellationOnly {
+                    interrupt: interrupt.proof(),
+                },
+            }
+        );
+        assert_eq!(
+            stopped.call().state(),
+            CurrentModelCallState::CancellationRequested
+        );
+        assert_eq!(stopped.interrupt(), interrupt.proof());
+    }
+
+    /// S07 / INV-006 / INV-029 / INV-037: confirmed physical cancellation
+    /// after a durable stop request is the evidence that releases the slot as
+    /// `Cancelled`.
+    #[test]
+    fn s07_inv006_inv029_inv037_confirmed_cancellation_terminalizes_stopped_call() {
+        let (execution, interrupt) = stop_requested_execution(in_flight_execution());
+        let observation =
+            correlated_observation(&execution, ModelCallTerminalObservation::Cancelled);
+        let outcome = execution
+            .apply_terminal_observation(
+                observation,
+                ModelCallTerminalIdentities::PhysicalCancellation(
+                    PhysicalCancellationModelCallTurnIdentities::new(
+                        semantic_transcript_entry_id(35),
+                        context_frontier_id(36),
+                    ),
+                ),
+            )
+            .expect("confirmed cancellation closes the stopped call");
+        let ModelCallTerminalOutcome::Cancelled(cancelled) = outcome else {
+            panic!("physical cancellation plus exact proof cancels the turn");
+        };
+
+        assert_eq!(
+            cancelled
+                .call()
+                .expect("the issued call remains terminal history")
+                .disposition(),
+            ModelCallDisposition::Cancelled
+        );
+        assert_eq!(
+            cancelled.attempt().end(),
+            &crate::AttemptEnd::AfterCancellation {
+                cause: interrupt.proof(),
+                disposition: CancellationStopDisposition::Cancelled,
+            }
+        );
+    }
+
+    /// S07 / INV-006 / INV-029: outcome-authoritative completion racing a
+    /// stop request wins while retaining the interrupt in attempt history.
+    #[test]
+    fn s07_inv006_inv029_completion_race_preserves_outcome_and_stop_history() {
+        let (execution, interrupt) = stop_requested_execution(in_flight_execution());
+        let observation = correlated_observation(
+            &execution,
+            ModelCallTerminalObservation::Completed {
+                assistant_text: vec![
+                    AssistantText::try_new("race winner".to_owned()).expect("nonempty text"),
+                ],
+            },
+        );
+        let outcome = execution
+            .apply_terminal_observation(
+                observation,
+                ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                    vec![semantic_transcript_entry_id(35)],
+                    semantic_transcript_entry_id(36),
+                    context_frontier_id(37),
+                )),
+            )
+            .expect("definitive completion wins the cancellation race");
+        let ModelCallTerminalOutcome::Completed(completed) = outcome else {
+            panic!("definitive completion remains authoritative");
+        };
+
+        assert_eq!(
+            completed.attempt().end(),
+            &crate::AttemptEnd::AfterCancellation {
+                cause: interrupt.proof(),
+                disposition: CancellationStopDisposition::TurnCompleted,
+            }
+        );
+    }
+
+    /// S04 / S07 / INV-025 / INV-029: an applied interrupt makes
+    /// unacknowledged call ambiguity terminal reconciliation, preserving the
+    /// exact operation and stop proof while releasing the slot.
+    #[test]
+    fn s04_s07_inv025_inv029_stopped_ambiguity_requires_reconciliation() {
+        let pending = accepted_input_id(40);
+        let execution = with_pending_steering(in_flight_execution(), pending);
+        let source_turn = execution.turn();
+        let (execution, interrupt) = stop_requested_execution(execution);
+        let observation =
+            correlated_observation(&execution, ModelCallTerminalObservation::Ambiguous);
+        let outcome = execution
+            .apply_terminal_observation(
+                observation,
+                ModelCallTerminalIdentities::Ambiguous(
+                    AmbiguousModelCallTurnIdentities::new(context_frontier_id(41))
+                        .with_pending_steering_reclassifications(one_reclassification(
+                            pending,
+                            turn_id(42),
+                        )),
+                ),
+            )
+            .expect("stopped ambiguity is exactly representable");
+        let ModelCallTerminalOutcome::ReconciliationRequired(reconciliation) = outcome else {
+            panic!("stopped ambiguity must release the slot through reconciliation");
+        };
+
+        assert_eq!(
+            reconciliation.attempt().end(),
+            &crate::AttemptEnd::AfterCancellation {
+                cause: interrupt.proof(),
+                disposition: CancellationStopDisposition::Ambiguous,
+            }
+        );
+        let TurnDisposition::ReconciliationRequired { marker } = reconciliation.disposition()
+        else {
+            panic!("the terminal disposition carries its complete marker");
+        };
+        assert_eq!(
+            marker.reason(),
+            &crate::ReconciliationReason::InterruptRequiresReconciliation {
+                interrupt: interrupt.proof(),
+            }
+        );
+        assert_eq!(marker.ambiguous_operations().operation_count(), 1);
+        assert!(
+            marker
+                .ambiguous_operations()
+                .contains(crate::IssuedOperationRef::ModelCall(
+                    reconciliation.call().id()
+                ))
+        );
+        assert_one_reclassified_turn(
+            reconciliation.reclassified_pending_steering(),
+            pending,
+            source_turn,
+            turn_id(42),
+        );
+    }
+
     /// S02 / INV-006 / INV-014 / INV-034: an authoritative reread of a durably
     /// issued call reconstructs the same provider-facing correlation without
     /// authorizing or transitioning it a second time.
@@ -3336,7 +4316,12 @@ mod tests {
         let observation =
             correlated_observation(&execution, ModelCallTerminalObservation::Ambiguous);
         let outcome = execution
-            .apply_terminal_observation(observation, ModelCallTerminalIdentities::Ambiguous)
+            .apply_terminal_observation(
+                observation,
+                ModelCallTerminalIdentities::Ambiguous(AmbiguousModelCallTurnIdentities::new(
+                    context_frontier_id(43),
+                )),
+            )
             .expect("ambiguous evidence is representable");
         let ModelCallTerminalOutcome::AwaitingRecovery(waiting) = outcome else {
             panic!("ambiguous evidence selects recovery wait");
@@ -3499,10 +4484,12 @@ mod tests {
         let outcome = execution
             .apply_terminal_observation(
                 observation,
-                ModelCallTerminalIdentities::Failed(FailedModelCallTurnIdentities::new(
-                    semantic_transcript_entry_id(10),
-                    context_frontier_id(11),
-                )),
+                ModelCallTerminalIdentities::PhysicalCancellation(
+                    PhysicalCancellationModelCallTurnIdentities::new(
+                        semantic_transcript_entry_id(10),
+                        context_frontier_id(11),
+                    ),
+                ),
             )
             .expect("cause-free physical cancellation is admissible");
         let ModelCallTerminalOutcome::Failed(failed) = outcome else {
