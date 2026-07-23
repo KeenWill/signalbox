@@ -349,10 +349,12 @@ exits with a typed nonzero recovery-required diagnostic: version one has no
 writer that can complete that wait. A client disconnect never cancels model
 work. After each terminal turn event, `follow` uses a separate connection to
 read and validate a fresh authoritative transcript before it resumes printing
-later followed events. It then discards buffered events at or below the fresh
-snapshot cursor and resumes only with events above that cursor. Final durable
-content therefore replaces the earlier presentation without interrupting the
-follow subscription or replaying updates already represented by the reread.
+later followed events. That side reread does not advance the follow connection's
+observed cursor: only events consumed from the subscribed connection do so, and
+every buffered event remains eligible for ordered presentation. Final durable
+content is deduplicated by source-qualified semantic-entry identity while
+transition-only events remain visible instead of being suppressed by a newer
+side snapshot.
 
 ## Terminal client
 
