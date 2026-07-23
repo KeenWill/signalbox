@@ -9,6 +9,206 @@ that constrains several components — require a full record under
 [decisions/](decisions/README.md) instead. Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-22 — Failed-terminal provenance backfill fails closed
+
+**Context.** Migration `202607220003_failed_terminal_execution.sql` adds exact
+execution provenance to failed terminal turns (`terminal_attempt_id`,
+`terminal_model_call_id`) so recovery paths cannot substitute unrelated
+identities. Historical failed rows predate these columns, terminal
+`turn_lifecycle` rows are immutable under `turn_lifecycle_changes_are_guarded`,
+and a failed turn's stored history could in principle hold ambiguous attempt or
+call records.
+
+**Decision.** The forward migration derives provenance only when it is
+unambiguous: it aborts (`turn_lifecycle_failed_execution_backfill`, SQLSTATE
+23514\) if any failed terminal turn carries more than one attempt or call, an
+attempt that is not `ended`/`without_stop` with disposition
+`known_failure`/`lost`, or a call that is not a terminal
+`known_failed`/`cancelled` correlated to its exact attempt. The immutability
+trigger is disabled for exactly the one guarded backfill UPDATE inside the same
+transaction and re-enabled before the new deferred final-state assertion is
+installed — the first and only sanctioned exception to terminal-row
+immutability. The new assertion closes failed-terminal execution provenance to
+at most one ended attempt with an optional `known_failed` or `cancelled`
+terminal call.
+
+**Rejected alternatives.** Backfill NULLs and let load-time checks reject later:
+rows readable today would become corruption reports at an arbitrary future read.
+Guess among multiple historical records: silent substitution is the exact defect
+this slice removes. Relax the guard permanently for terminal metadata: that
+would erase the immutability guarantee for every future writer.
+
+**Affects.**
+`crates/persistence/migrations/202607220003_failed_terminal_execution.sql`, the
+failed-branch reconstitution in `crates/domain` and its persistence loaders, and
+INV-006/INV-014 enforcement. Future failure flows that produce retries,
+stop-caused ends, or accepted-ambiguity failures must widen the final-state
+assertion in a new migration.
+
+## 2026-07-22 — M3 pending-steering fail-closed boundary
+
+**Context.** The owner predecided the M3 boundary while the steering and
+cancellation milestone still owns the combined `StopRequested`, steering
+semantic-history, and reclassification design. A `NextSafePoint` input can be
+durably acknowledged after turn activation but before the first model call is
+prepared. The accepted ADRs require eventual atomic consumption, but the
+semantic payload, correlations, ordering, transaction, and restart semantics for
+that consumption remain deliberately open.
+
+**Decision.** M3 model-call preparation fails closed while any pending steering
+exists. The accepted cost is a liveness gap: the acknowledged input can strand
+the active turn's first call, but no input is dropped. Across a process restart,
+startup recovery retains the unchanged active turn, prepared attempt, and
+pending input; creates no failure entry, terminal frontier, or outbox event; and
+returns `DeferredPendingSteering`. The incomplete scan makes hub boot fail with
+the recovery-blocked outcome before scheduling starts. The steering and
+cancellation milestone must decide the deferred semantic entry and payload,
+accepted-input and source-turn correlations, multi-input ordering, atomic
+consume-and-prepare transaction, and restart/reconstitution behavior, then
+replace this guard with that atomic transition.
+
+**Rejected alternatives.** Inventing only an M3 steering entry or partial
+transaction would decide foundation semantics piecemeal. Ignoring the pending
+input or preparing from the old frontier would drop acknowledged work. Startup
+terminalization would treat steering as a stop cause and consume facts without
+the deferred authority.
+
+**Affects.** Initial model-call preparation, the INV-016 fail-closed test,
+startup-scan completion, hub boot, and the steering/cancellation milestone's
+reopening obligation.
+
+## 2026-07-22 — Pin model-call credential references on the call record
+
+**Context.** [ADR-0017](decisions/0017-credential-lifecycle.md) requires the
+non-secret credential reference selected with an exact provider target to
+survive restart, while deferring its concrete persistence shape. The initial
+provider composition instead supplied a process-wide reference during request
+preparation, which could re-derive a different scope for already-prepared work
+after deployment configuration changed.
+
+**Decision.** Add a forward-only nullable `credential_reference` column to the
+model-call record. Every newly prepared call writes its current non-secret
+reference in the same transaction that pins the exact target. A resumed prepared
+call must reload that stored reference and fails closed if a historical row
+predating the column has none; startup recovery still reads no credential. Carry
+the reloaded application value into the runtime bridge, which converts it to the
+runtime boundary type only while preparing the request.
+
+**Rejected alternatives.** Re-deriving the reference from current deployment
+configuration violates ADR-0017 across restart. Storing credential bytes is
+forbidden. Putting the reference in domain values would cross the credential
+boundary, while placing it only on the turn would obscure which physical call
+consumed it and complicate later continuation policy.
+
+**Affects.** The model-call migration and persistence adapter, application
+prepared-operation API and domain spine, runtime bridge, hub composition, and
+INV-035 enforcement index.
+
+## 2026-07-22 — Anthropic credentials come from one reread file
+
+**Context.** The first production Anthropic composition needs to resolve
+ADR-0017's non-secret credential reference during each request preparation,
+without putting the secret in process arguments, model configuration, durable
+records, telemetry, or tests. The owner selected the deployment channel for this
+milestone.
+
+**Decision.** Require `ANTHROPIC_API_KEY_FILE` at the hubd composition root.
+Bind its path to the non-secret `anthropic-primary` reference and reread the
+file as raw bytes for every request preparation, so file replacement rotates the
+credential without a restart. Neither the path nor bytes appear in shared
+diagnostics. The file must contain only the header-ready key bytes.
+
+**Rejected alternatives.** Reading key bytes directly from an environment
+variable exposes the secret through a broader process channel. Caching the file
+at startup hides rotation. Putting the path or value in model TOML mixes secret
+delivery with non-secret model policy.
+
+**Affects.** `apps/hubd` production and Anthropic debug composition,
+`FileCredentialAccess`, deployment documentation, and INV-035 tests; no test
+requires a credential or live provider.
+
+## 2026-07-22 — Versioned static model configuration maps durable keys to Anthropic
+
+**Context.** The earlier static-TOML decision deliberately left its layout open.
+Production model execution now needs one correlated source for immutable domain
+selection/target keys, exact Anthropic model spellings, the required
+output-token ceiling, and alias definitions.
+
+**Decision.** Require `SIGNALBOX_CONFIG_FILE` to name strict TOML version 1.
+Each `models` row supplies `selection_id`, `target_id`, provider `anthropic`, an
+unpadded nonempty `provider_model`, and a positive `max_output_tokens`; each
+optional `aliases` row maps `alias_id` to a configured `selection_id`. Reject
+unknown fields, duplicate selections or aliases, conflicting target meanings,
+dangling aliases, unsupported providers, and invalid values at startup. Use
+buffered delivery with otherwise unset runtime settings. Parse with narrowly
+featured `toml_edit`, already present in the resolved workspace dependency
+graph, and construct checked domain/runtime values explicitly.
+
+**Rejected alternatives.** Deriving durable UUIDs from provider strings would
+make normalization an implicit hash convention. Separate domain and runtime
+files could drift after target resolution. Environment variables per model do
+not provide a versioned, reviewable catalog. A hand-written TOML parser would
+duplicate syntax handling without strengthening the checked mappings.
+
+**Affects.** `apps/hubd` configuration and example file, the runtime-port bridge
+catalog, production target resolution, and the real-provider smoke command; no
+database schema or accepted ADR changes.
+
+## 2026-07-22 — Direct dependencies for the offline hub driver
+
+**Context.** The smoke-critical composition slice adds a local executable that
+drives one exact session through the real PostgreSQL scheduler path, plus an
+end-to-end test that supplies its own PostgreSQL 18.4 instance. The hub package
+previously consumed database and UUID values only through narrower library
+interfaces, so those crates were not direct dependencies.
+
+**Decision.** Add narrowly featured SQLx PostgreSQL/Tokio support and UUIDv7 as
+direct `signalbox-hubd` dependencies for the local driver. Add the same focused
+testcontainers-modules PostgreSQL/ring feature set already used by persistence
+as a dev-dependency for its isolated end-to-end tests. Keep provider transport,
+retry, protocol, and production configuration dependencies out of this slice.
+
+**Rejected alternatives.** Re-exporting SQLx or UUID through persistence would
+blur crate ownership to avoid honest direct dependencies. Sharing the
+persistence integration-test crate is impossible across Cargo test targets and
+would couple hub composition assertions to persistence-private fixtures. A
+developer-managed database would make the end-to-end test stateful and
+non-hermetic.
+
+**Affects.** `apps/hubd/Cargo.toml`, its debug executable and end-to-end tests,
+the workspace lockfile, the PostgreSQL CI job, and the public application
+activation method used by the hub-owned asynchronous pass. No domain API,
+schema, provider choice, or production credential source changes.
+
+## 2026-07-22 — Render the initial model frontier by semantic entry role
+
+**Context.** The first model-call application slice must project ADR-0030's
+ordered semantic frontier into the provider-neutral text messages consumed by
+the runtime bridge. The accepted records fix origin and assistant entry
+semantics but leave this initial rendering choice open, and inherited entries
+need not have been created by a native turn in the current session.
+
+**Decision.** Traverse the exact frontier order. Render each
+`OriginAcceptedInput` entry and its checked receipt content as a user message,
+and each `AssistantText` entry as an assistant message. Preserve the entry's
+source-qualified reference and content provenance in the application value; skip
+terminal markers, which delimit history but carry no message content. Fail
+closed on the still-gated assistant tool-use variant. Do not infer a native turn
+from an entry or group entries into turns.
+
+**Rejected alternatives.** Render every entry as user content: assistant
+provenance and conversational role would be lost. Infer roles or grouping from
+turn ownership: inherited semantic entries do not imply native-turn ownership.
+Send terminal markers as text: that would invent model-visible content. Flatten
+directly into an Anthropic request: provider wire types would cross the
+application boundary.
+
+**Affects.** `crates/application/src/model_execution.rs`, its public
+provider-neutral operation/message values, the application service tests, and
+the later model-runtime bridge. Rich content, tool execution, provider/client
+rendering beyond these admitted baseline entries, and prompt templating remain
+open.
+
 ## 2026-07-21 — Distinct provider error type and code evidence
 
 **Context.** Provider error envelopes can carry both a categorical type token

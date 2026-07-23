@@ -909,6 +909,11 @@ impl SubmitInputTurnOriginReconstitutionInput {
         });
         origin
     }
+
+    pub(crate) fn validated_origin_content(&self) -> Option<(AcceptedInputId, UserContent)> {
+        let validated = validate_turn_origin_reconstitution_input(self)?;
+        Some((validated.accepted_input, validated.content))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1821,6 +1826,8 @@ struct ValidatedTurnOrigin {
     session: SessionId,
     turn: TurnId,
     acceptance_position: SessionInputPosition,
+    accepted_input: AcceptedInputId,
+    content: UserContent,
     accepted_inputs: HashSet<AcceptedInputId>,
     command_ids: HashSet<DurableCommandId>,
     turns: HashSet<TurnId>,
@@ -1833,6 +1840,8 @@ fn validate_turn_origin_reconstitution_input(
         session: SessionId,
         turn: TurnId,
         acceptance_position: SessionInputPosition,
+        accepted_input: AcceptedInputId,
+        content: UserContent,
     }
 
     let mut validated: Option<ValidatedOriginPosition> = None;
@@ -1904,6 +1913,8 @@ fn validate_turn_origin_reconstitution_input(
             session: applied.session(),
             turn,
             acceptance_position: applied.acceptance_position(),
+            accepted_input: applied.accepted_input(),
+            content: facts.receipt.command().content().clone(),
         });
     }
 
@@ -1912,6 +1923,8 @@ fn validate_turn_origin_reconstitution_input(
         session: validated.session,
         turn: validated.turn,
         acceptance_position: validated.acceptance_position,
+        accepted_input: validated.accepted_input,
+        content: validated.content,
         accepted_inputs,
         command_ids,
         turns,
@@ -3645,6 +3658,18 @@ mod tests {
                 ..
             }) if *active_turn == turn_id(8)
         ));
+    }
+
+    /// S08 / INV-005 / INV-016: model rendering recovers the final accepted
+    /// input's exact user content from a fully checked reclassification chain.
+    #[test]
+    fn s08_inv005_inv016_reclassified_origin_preserves_renderable_user_content() {
+        let origin = reclassified_turn_origin();
+        let content = crate::ModelCallOriginContent::from_reconstituted_turn_origin(&origin)
+            .expect("the canonical reclassified origin has exact accepted content");
+
+        assert_eq!(content.accepted_input(), accepted_input_id(0x73));
+        assert_eq!(content.content().text().as_str(), "reclassified steering");
     }
 
     /// Replays a rejection whose reclassified origin's source turn ended with

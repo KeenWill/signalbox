@@ -1,14 +1,16 @@
 //! Atomic PostgreSQL recovery of prior-process active attempts.
 
-use std::{error::Error, fmt};
+use std::{collections::BTreeSet, error::Error, fmt};
 
 use rust_decimal::Decimal;
 use signalbox_application::{
     ClassifyOperatorFailure, OperatorFailureClass, StartupScanRepository, StartupScanSessionOutcome,
 };
 use signalbox_domain::{
-    AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities, AttemptEnd,
-    InitialSemanticTranscriptEntryPayload, PreparedAcceptedInputTurnFailure, SessionId,
+    AcceptedInputId, AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities,
+    AttemptEnd, CurrentModelCallState, FailedModelCallTurnIdentities, ModelCallTerminalOutcome,
+    PendingSteeringReclassificationIdentity, PreparedAcceptedInputTurnFailure,
+    SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload, SessionId,
     TurnDisposition, TurnId, UnstoppedAttemptDisposition,
 };
 use sqlx::{PgConnection, PgPool, types::Uuid};
@@ -17,6 +19,10 @@ use crate::{
     mapping::{
         input_position_to_numeric, session_id_from_uuid, session_id_to_uuid, turn_id_from_uuid,
         turn_id_to_uuid,
+    },
+    model_execution::{
+        ModelCallCorruption, ModelCallIdentityCollision, ModelCallRepositoryError,
+        persist_terminal_outcome, require_live_execution_for_restart,
     },
     outbox,
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
@@ -30,6 +36,8 @@ pub enum StartupScanIdentityCollision {
     FailureEntry,
     /// The proposed terminal context-frontier identity already exists.
     TerminalFrontier,
+    /// A proposed reclassified successor-turn identity already exists.
+    ReclassifiedTurn,
 }
 
 impl fmt::Display for StartupScanIdentityCollision {
@@ -37,6 +45,7 @@ impl fmt::Display for StartupScanIdentityCollision {
         let identity = match self {
             Self::FailureEntry => "failure semantic-entry",
             Self::TerminalFrontier => "terminal context-frontier",
+            Self::ReclassifiedTurn => "reclassified successor-turn",
         };
         write!(formatter, "{identity} identity already exists")
     }
@@ -55,6 +64,8 @@ pub enum StartupScanCorruption {
     CurrentSession(SessionCorruption),
     /// Complete scheduling records fail checked persistence mapping.
     Scheduling(SubmitInputCorruption),
+    /// Complete model-call records fail checked persistence mapping.
+    ModelCall(ModelCallCorruption),
 }
 
 impl fmt::Display for StartupScanCorruption {
@@ -76,6 +87,7 @@ impl fmt::Display for StartupScanCorruption {
                     "startup-scan scheduling projection is invalid: {error}"
                 )
             }
+            Self::ModelCall(error) => error.fmt(formatter),
         }
     }
 }
@@ -216,13 +228,23 @@ impl PostgresStartupScanRepository {
     }
 
     /// Locks one session and atomically terminalizes its prior-process attempt.
-    pub async fn recover(
+    pub async fn recover<NextTurn>(
         &self,
         session: SessionId,
         identities: AcceptedInputTurnFailureIdentities,
-    ) -> Result<StartupScanSessionOutcome, StartupScanRepositoryError> {
+        next_reclassified_turn: NextTurn,
+    ) -> Result<StartupScanSessionOutcome, StartupScanRepositoryError>
+    where
+        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+    {
         let mut transaction = self.pool.begin().await?;
-        let decision = recover_in_transaction(&mut transaction, session, identities).await;
+        let decision = recover_in_transaction(
+            &mut transaction,
+            session,
+            identities,
+            next_reclassified_turn,
+        )
+        .await;
 
         match decision {
             Ok(TransactionDecision::Commit(outcome)) => {
@@ -253,20 +275,29 @@ impl StartupScanRepository for PostgresStartupScanRepository {
         PostgresStartupScanRepository::active_sessions(self).await
     }
 
-    async fn recover(
+    async fn recover<NextTurn>(
         &mut self,
         session: SessionId,
         identities: AcceptedInputTurnFailureIdentities,
-    ) -> Result<StartupScanSessionOutcome, Self::Error> {
-        PostgresStartupScanRepository::recover(self, session, identities).await
+        next_reclassified_turn: NextTurn,
+    ) -> Result<StartupScanSessionOutcome, Self::Error>
+    where
+        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+    {
+        PostgresStartupScanRepository::recover(self, session, identities, next_reclassified_turn)
+            .await
     }
 }
 
-async fn recover_in_transaction(
+async fn recover_in_transaction<NextTurn>(
     connection: &mut PgConnection,
     requested_session: SessionId,
     identities: AcceptedInputTurnFailureIdentities,
-) -> Result<TransactionDecision, StartupScanRepositoryError> {
+    next_reclassified_turn: NextTurn,
+) -> Result<TransactionDecision, StartupScanRepositoryError>
+where
+    NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+{
     // This is the same scheduler-row lock ordering used by every lifecycle
     // writer. Reconstitution and all guarded writes happen while it is held.
     let session_uuid = session_id_to_uuid(requested_session);
@@ -284,18 +315,23 @@ async fn recover_in_transaction(
         identities,
         session_exists,
         scheduler_session,
+        next_reclassified_turn,
     )
     .await
     .map_err(|error| error.with_corruption_turn(active_turn.map(turn_id_from_uuid)))
 }
 
-async fn recover_locked_session(
+async fn recover_locked_session<NextTurn>(
     connection: &mut PgConnection,
     requested_session: SessionId,
     identities: AcceptedInputTurnFailureIdentities,
     session_exists: bool,
     scheduler_session: Option<Uuid>,
-) -> Result<TransactionDecision, StartupScanRepositoryError> {
+    mut next_reclassified_turn: NextTurn,
+) -> Result<TransactionDecision, StartupScanRepositoryError>
+where
+    NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+{
     if scheduler_session.is_none() {
         if session_exists {
             return Err(StartupScanCorruption::Missing("session scheduler row").into());
@@ -318,6 +354,76 @@ async fn recover_locked_session(
     let scheduling = load_scheduling_projection(connection, session)
         .await
         .map_err(map_scheduling_error)?;
+
+    let Some(active_turn) = scheduling.active_turn_execution() else {
+        return Ok(TransactionDecision::Rollback(
+            StartupScanSessionOutcome::NoActiveTurn,
+        ));
+    };
+    if !matches!(
+        active_turn.phase(),
+        signalbox_domain::ActiveTurnPhase::Running { .. }
+    ) {
+        return Ok(TransactionDecision::Rollback(
+            StartupScanSessionOutcome::NoActiveTurn,
+        ));
+    }
+    let pending_steering = active_turn
+        .pending_steering()
+        .first()
+        .map(signalbox_domain::PendingSteeringInput::accepted_input);
+
+    let model_execution = require_live_execution_for_restart(connection, requested_session)
+        .await
+        .map_err(map_model_call_error)?;
+    if let Some(call_state) = model_execution.current_call().map(|call| call.state()) {
+        let mut failure_identities = FailedModelCallTurnIdentities::new(
+            identities.failure_entry(),
+            identities.terminal_frontier(),
+        );
+        if call_state == CurrentModelCallState::Prepared {
+            let mut proposed_turns = BTreeSet::new();
+            let mut reclassifications = Vec::new();
+            for pending in model_execution.active_turn().pending_steering() {
+                let accepted_input = pending.accepted_input();
+                let proposed_turn = next_reclassified_turn(accepted_input);
+                record_reclassified_turn_candidate(
+                    model_execution.turn(),
+                    proposed_turn,
+                    &mut proposed_turns,
+                )?;
+                reclassifications.push(PendingSteeringReclassificationIdentity::new(
+                    accepted_input,
+                    proposed_turn,
+                ));
+            }
+            failure_identities =
+                failure_identities.with_pending_steering_reclassifications(reclassifications);
+        }
+        let outcome = model_execution
+            .recover_after_restart(failure_identities)
+            .map_err(|_| {
+                StartupScanCorruption::Inconsistent("model-call restart classification")
+            })?;
+        if !matches!(
+            outcome,
+            ModelCallTerminalOutcome::Failed(_) | ModelCallTerminalOutcome::AwaitingRecovery(_)
+        ) {
+            return Err(StartupScanCorruption::Inconsistent("model-call restart outcome").into());
+        }
+        persist_terminal_outcome(connection, &outcome)
+            .await
+            .map_err(map_model_call_error)?;
+        return Ok(TransactionDecision::Commit(
+            StartupScanSessionOutcome::RecoveredModelCall(Box::new(outcome)),
+        ));
+    }
+
+    if let Some(accepted_input) = pending_steering {
+        return Ok(TransactionDecision::Rollback(
+            StartupScanSessionOutcome::DeferredPendingSteering { accepted_input },
+        ));
+    }
 
     let prepared = match scheduling.prepare_active_turn_lost_failure(identities) {
         Ok(prepared) => prepared,
@@ -367,7 +473,7 @@ async fn insert_prepared_failure(
     let session = failed.session();
     let turn = failed.turn();
     if failure_entry.source_session() != session
-        || failure_entry.payload() != (InitialSemanticTranscriptEntryPayload::TurnFailed { turn })
+        || failure_entry.payload() != &(InitialSemanticTranscriptEntryPayload::TurnFailed { turn })
         || terminal_snapshot.frontier().owning_session() != session
         || terminal_snapshot.frontier().snapshot() != failed.terminal_frontier()
         || failed.disposition() != &TurnDisposition::Failed
@@ -452,7 +558,9 @@ async fn insert_prepared_failure(
             SET state_kind = 'terminal',
                 terminal_frontier_id = $1,
                 active_phase_kind = NULL,
+                terminal_attempt_id = current_attempt_id,
                 current_attempt_id = NULL,
+                terminal_model_call_id = NULL,
                 terminal_disposition_kind = 'failed'
           WHERE turn_id = $2
             AND session_id = $3
@@ -513,6 +621,48 @@ fn map_scheduling_error(error: SubmitInputRepositoryError) -> StartupScanReposit
     }
 }
 
+fn map_model_call_error(error: ModelCallRepositoryError) -> StartupScanRepositoryError {
+    match error {
+        ModelCallRepositoryError::Database { source, .. } => source.into(),
+        ModelCallRepositoryError::Corruption(source) => {
+            StartupScanCorruption::ModelCall(source).into()
+        }
+        ModelCallRepositoryError::IdentityCollision(ModelCallIdentityCollision::SemanticEntry) => {
+            StartupScanRepositoryError::IdentityCollision(
+                StartupScanIdentityCollision::FailureEntry,
+            )
+        }
+        ModelCallRepositoryError::IdentityCollision(
+            ModelCallIdentityCollision::TerminalFrontier,
+        ) => StartupScanRepositoryError::IdentityCollision(
+            StartupScanIdentityCollision::TerminalFrontier,
+        ),
+        ModelCallRepositoryError::IdentityCollision(
+            ModelCallIdentityCollision::ReclassifiedTurn,
+        ) => StartupScanRepositoryError::IdentityCollision(
+            StartupScanIdentityCollision::ReclassifiedTurn,
+        ),
+        ModelCallRepositoryError::IdentityCollision(ModelCallIdentityCollision::ModelCall)
+        | ModelCallRepositoryError::NoLiveExecution
+        | ModelCallRepositoryError::InvalidTransition(_) => {
+            StartupScanCorruption::Inconsistent("model-call recovery transition").into()
+        }
+    }
+}
+
+fn record_reclassified_turn_candidate(
+    source_turn: TurnId,
+    proposed_turn: TurnId,
+    proposed_turns: &mut BTreeSet<TurnId>,
+) -> Result<(), StartupScanRepositoryError> {
+    if proposed_turn == source_turn || !proposed_turns.insert(proposed_turn) {
+        return Err(StartupScanRepositoryError::IdentityCollision(
+            StartupScanIdentityCollision::ReclassifiedTurn,
+        ));
+    }
+    Ok(())
+}
+
 fn identity_collision(error: &sqlx::Error) -> Option<StartupScanIdentityCollision> {
     match error
         .as_database_error()
@@ -539,14 +689,50 @@ fn commit_failure_is_ambiguous(error: &sqlx::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{borrow::Cow, error::Error, fmt, io};
+    use std::{borrow::Cow, collections::BTreeSet, error::Error, fmt, io};
 
     use signalbox_application::{ClassifyOperatorFailure, OperatorFailureClass};
     use signalbox_domain::TurnId;
     use sqlx::error::{DatabaseError, ErrorKind};
     use sqlx::types::Uuid;
 
-    use super::{StartupScanCorruption, StartupScanRepositoryError, commit_failure_is_ambiguous};
+    use super::{
+        StartupScanCorruption, StartupScanIdentityCollision, StartupScanRepositoryError,
+        commit_failure_is_ambiguous, record_reclassified_turn_candidate,
+    };
+
+    /// INV-034: a generated source-turn identity is a retryable collision, not
+    /// durable corruption.
+    #[test]
+    fn inv034_generated_successor_source_candidate_is_a_retryable_collision() {
+        let source = TurnId::from_uuid(Uuid::from_u128(1));
+        let mut proposed = BTreeSet::new();
+
+        assert!(matches!(
+            record_reclassified_turn_candidate(source, source, &mut proposed),
+            Err(StartupScanRepositoryError::IdentityCollision(
+                StartupScanIdentityCollision::ReclassifiedTurn
+            ))
+        ));
+    }
+
+    /// INV-034: a duplicate generated successor is a retryable collision, not
+    /// durable corruption.
+    #[test]
+    fn inv034_generated_successor_duplicate_is_a_retryable_collision() {
+        let source = TurnId::from_uuid(Uuid::from_u128(1));
+        let successor = TurnId::from_uuid(Uuid::from_u128(2));
+        let mut proposed = BTreeSet::new();
+
+        record_reclassified_turn_candidate(source, successor, &mut proposed)
+            .expect("the first source-safe successor is accepted");
+        assert!(matches!(
+            record_reclassified_turn_candidate(source, successor, &mut proposed),
+            Err(StartupScanRepositoryError::IdentityCollision(
+                StartupScanIdentityCollision::ReclassifiedTurn
+            ))
+        ));
+    }
 
     #[derive(Debug)]
     struct ServerCommitFailure {

@@ -14,6 +14,7 @@ mod context_frontier;
 mod delivery_request;
 mod fatal_mismatch;
 mod model_call;
+mod model_execution;
 mod provider_evidence;
 mod queue_order;
 mod replace_session_defaults;
@@ -46,7 +47,23 @@ pub use context_frontier::{
 pub use delivery_request::{DeliveryRequest, PerInputConfigurationChoices};
 pub use model_call::{
     CurrentModelCall, CurrentModelCallState, EndedModelCall, ModelCallDisposition,
-    PinnedProviderTarget, ProviderModelIdentity, ResolvedProviderTarget,
+    ModelCallReconstitutionFailure, ModelCallReconstitutionInput, ModelCallReconstitutionState,
+    PinnedProviderTarget, PinnedProviderTargetReconstitutionInput, ProviderModelIdentity,
+    ReconstitutedModelCall, ResolvedProviderTarget,
+};
+pub use model_execution::{
+    AmbiguousModelCallTurn, AuthorizedModelCall, CompletedModelCallIdentities,
+    CompletedModelCallTurn, CorrelatedModelCallTerminalObservation, FailedModelCallTurn,
+    FailedModelCallTurnIdentities, IssuedModelCallCorrelation, ModelCallAuthorizationError,
+    ModelCallAuthorizationFailure, ModelCallClosureError, ModelCallExecution,
+    ModelCallExecutionReconstitutionError, ModelCallExecutionReconstitutionFailure,
+    ModelCallExecutionReconstitutionInput, ModelCallOriginContent, ModelCallPreparationError,
+    ModelCallPreparationFailure, ModelCallResumeFailure, ModelCallTerminalIdentities,
+    ModelCallTerminalObservation, ModelCallTerminalOutcome, ModelTargetCatalog,
+    ModelTargetCatalogError, ModelTargetDefinition, ModelTargetResolutionError,
+    PendingSteeringReclassificationIdentity, PreparedInitialModelCall, PreparedModelCallRequest,
+    ReclassifiedPendingSteeringTurn, RefusedModelCallTurn, RefusedModelCallTurnIdentities,
+    ResolvedModelSelection,
 };
 pub use provider_evidence::{
     ProviderTargetEvidence, ProviderTargetEvidenceLog, ProviderTargetMismatchInvalidation,
@@ -64,8 +81,9 @@ pub use replace_session_defaults::{
     ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult,
     ReplaceSessionDefaultsSessionNotFound, ReplaceSessionDefaultsVersionExhausted,
 };
+pub(crate) use semantic_entry::InitialSemanticTranscriptEntryPayload;
 pub use semantic_entry::{
-    InitialSemanticTranscriptEntryPayload, SemanticTranscriptEntry,
+    AssistantText, SemanticTranscriptEntry, SemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput,
 };
 pub use session::{
@@ -100,6 +118,7 @@ pub use turn_eligibility::{
     AcceptedInputTurnSchedulingProjection, AcceptedInputTurnSchedulingRecord,
     AcceptedInputTurnSchedulingRecordState, AcceptedInputTurnSchedulingStatus,
     ActivatedAcceptedInputTurn, ActiveTurnSchedulingReconstitutionInput, FailedAcceptedInputTurn,
+    FailedTurnExecutionReconstitutionInput, PendingSteeringInput,
     PreparedAcceptedInputTurnActivation, PreparedAcceptedInputTurnFailure,
     SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
 };

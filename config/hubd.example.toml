@@ -1,0 +1,13 @@
+# Signalbox hub model configuration, version 1.
+version = 1
+
+[[models]]
+selection_id = "10000000-0000-4000-8000-000000000001"
+target_id = "20000000-0000-4000-8000-000000000001"
+provider = "anthropic"
+provider_model = "claude-haiku-4-5-20251001"
+max_output_tokens = 64
+
+[[aliases]]
+alias_id = "30000000-0000-4000-8000-000000000001"
+selection_id = "10000000-0000-4000-8000-000000000001"

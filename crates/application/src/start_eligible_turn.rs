@@ -116,7 +116,12 @@ where
         self.transaction.handle(session, identities).await
     }
 
-    pub(crate) fn execute_with_cloned_transaction(
+    /// Starts one pass while retaining the stateful identity generator.
+    ///
+    /// The transaction is cloned into the returned owned future so scheduler
+    /// adapters can satisfy a `'static` future boundary without cloning and
+    /// rewinding the generator.
+    pub fn execute_with_cloned_transaction(
         &mut self,
         session: SessionId,
     ) -> impl Future<Output = Result<StartEligibleTurnOutcome, Transaction::Error>> + Send + 'static
