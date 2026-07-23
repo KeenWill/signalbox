@@ -66,6 +66,51 @@ pub enum ModelConversationMessage {
     },
 }
 
+fn render_frontier_messages<'a>(
+    entries: impl IntoIterator<
+        Item = (
+            SemanticTranscriptEntryRef,
+            &'a SemanticTranscriptEntryPayload,
+        ),
+    >,
+    mut origin_content: impl FnMut(AcceptedInputId) -> Option<UserContent>,
+) -> Result<Box<[ModelConversationMessage]>, ModelFrontierRenderingError> {
+    let mut messages = Vec::new();
+    for (source, payload) in entries {
+        match payload {
+            SemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input } => {
+                let content = origin_content(*accepted_input).ok_or(
+                    ModelFrontierRenderingError::MissingOriginContent {
+                        entry: source,
+                        accepted_input: *accepted_input,
+                    },
+                )?;
+                messages.push(ModelConversationMessage::User {
+                    source,
+                    accepted_input: *accepted_input,
+                    content,
+                });
+            }
+            SemanticTranscriptEntryPayload::AssistantText {
+                producing_call,
+                value,
+            } => messages.push(ModelConversationMessage::Assistant {
+                source,
+                producing_call: *producing_call,
+                content: value.clone(),
+            }),
+            SemanticTranscriptEntryPayload::AssistantToolUse { .. } => {
+                return Err(ModelFrontierRenderingError::UnsupportedAssistantToolUse {
+                    entry: source,
+                });
+            }
+            SemanticTranscriptEntryPayload::TurnFailed { .. }
+            | SemanticTranscriptEntryPayload::TurnCompleted { .. } => {}
+        }
+    }
+    Ok(messages.into_boxed_slice())
+}
+
 /// A checked prepared call plus its provider-neutral ordered messages.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedModelOperation {
@@ -79,43 +124,16 @@ impl PreparedModelOperation {
         request: PreparedModelCallRequest,
         credential_reference: ModelCallCredentialReference,
     ) -> Result<Self, ModelFrontierRenderingError> {
-        let mut messages = Vec::new();
-        for entry in request.frontier_entries() {
-            match entry.payload() {
-                SemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input } => {
-                    let content = request.origin_content(*accepted_input).cloned().ok_or(
-                        ModelFrontierRenderingError::MissingOriginContent {
-                            entry: entry.reference(),
-                            accepted_input: *accepted_input,
-                        },
-                    )?;
-                    messages.push(ModelConversationMessage::User {
-                        source: entry.reference(),
-                        accepted_input: *accepted_input,
-                        content,
-                    });
-                }
-                SemanticTranscriptEntryPayload::AssistantText {
-                    producing_call,
-                    value,
-                } => messages.push(ModelConversationMessage::Assistant {
-                    source: entry.reference(),
-                    producing_call: *producing_call,
-                    content: value.clone(),
-                }),
-                SemanticTranscriptEntryPayload::AssistantToolUse { .. } => {
-                    return Err(ModelFrontierRenderingError::UnsupportedAssistantToolUse {
-                        entry: entry.reference(),
-                    });
-                }
-                SemanticTranscriptEntryPayload::TurnFailed { .. }
-                | SemanticTranscriptEntryPayload::TurnCompleted { .. } => {}
-            }
-        }
+        let messages = render_frontier_messages(
+            request
+                .frontier_entries()
+                .map(|entry| (entry.reference(), entry.payload())),
+            |accepted_input| request.origin_content(accepted_input).cloned(),
+        )?;
         Ok(Self {
             request,
             credential_reference,
-            messages: messages.into_boxed_slice(),
+            messages,
         })
     }
 
@@ -1316,6 +1334,7 @@ impl ModelCallProvider for ScriptedModelCallProvider {
 mod tests {
     use std::{collections::VecDeque, sync::Arc};
 
+    use expect_test::expect;
     use signalbox_domain::{
         AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputQueueOrder,
         AcceptedInputSchedulingReconstitutionInput, AcceptedInputTurnActivationIdentities,
@@ -1917,6 +1936,205 @@ mod tests {
         assert_eq!(source.source_session(), identity(1, SessionId::from_uuid));
         assert_eq!(*accepted_input, identity(3, AcceptedInputId::from_uuid));
         assert_eq!(content.text().as_str(), "exact user request");
+    }
+
+    /// S02 / INV-015: mixed semantic content keeps exact role order and
+    /// source-qualified provenance, including entries created by a different
+    /// session; terminal markers do not invent provider-visible messages.
+    #[test]
+    fn s02_inv015_frontier_rendering_preserves_mixed_roles_and_inherited_sources() {
+        let inherited_session = identity(90, SessionId::from_uuid);
+        let current_session = identity(1, SessionId::from_uuid);
+        let inherited_input = identity(91, AcceptedInputId::from_uuid);
+        let current_input = identity(92, AcceptedInputId::from_uuid);
+        let failed_input = identity(99, AcceptedInputId::from_uuid);
+        let producing_call = identity(93, ModelCallId::from_uuid);
+        let inherited_content =
+            UserContent::try_text(String::from("inherited user request")).expect("valid text");
+        let current_content =
+            UserContent::try_text(String::from("current user request")).expect("valid text");
+        let failed_content =
+            UserContent::try_text(String::from("failed user request")).expect("valid text");
+        let assistant_text = AssistantText::try_new(String::from("inherited assistant reply"))
+            .expect("valid assistant text");
+        let origin_contents = std::collections::HashMap::from([
+            (inherited_input, inherited_content.clone()),
+            (current_input, current_content.clone()),
+            (failed_input, failed_content.clone()),
+        ]);
+        let entries = [
+            (
+                SemanticTranscriptEntryRef::from_source(
+                    inherited_session,
+                    identity(94, SemanticTranscriptEntryId::from_uuid),
+                ),
+                SemanticTranscriptEntryPayload::OriginAcceptedInput {
+                    accepted_input: inherited_input,
+                },
+            ),
+            (
+                SemanticTranscriptEntryRef::from_source(
+                    inherited_session,
+                    identity(95, SemanticTranscriptEntryId::from_uuid),
+                ),
+                SemanticTranscriptEntryPayload::AssistantText {
+                    producing_call,
+                    value: assistant_text.clone(),
+                },
+            ),
+            (
+                SemanticTranscriptEntryRef::from_source(
+                    inherited_session,
+                    identity(96, SemanticTranscriptEntryId::from_uuid),
+                ),
+                SemanticTranscriptEntryPayload::TurnCompleted {
+                    turn: identity(97, TurnId::from_uuid),
+                },
+            ),
+            (
+                SemanticTranscriptEntryRef::from_source(
+                    current_session,
+                    identity(98, SemanticTranscriptEntryId::from_uuid),
+                ),
+                SemanticTranscriptEntryPayload::OriginAcceptedInput {
+                    accepted_input: failed_input,
+                },
+            ),
+            (
+                SemanticTranscriptEntryRef::from_source(
+                    current_session,
+                    identity(100, SemanticTranscriptEntryId::from_uuid),
+                ),
+                SemanticTranscriptEntryPayload::TurnFailed {
+                    turn: identity(101, TurnId::from_uuid),
+                },
+            ),
+            (
+                SemanticTranscriptEntryRef::from_source(
+                    current_session,
+                    identity(102, SemanticTranscriptEntryId::from_uuid),
+                ),
+                SemanticTranscriptEntryPayload::OriginAcceptedInput {
+                    accepted_input: current_input,
+                },
+            ),
+        ];
+
+        let messages = render_frontier_messages(
+            entries.iter().map(|(source, payload)| (*source, payload)),
+            |accepted_input| origin_contents.get(&accepted_input).cloned(),
+        )
+        .expect("the admitted mixed text frontier renders");
+
+        expect![[r#"
+            [
+                User {
+                    source: SemanticTranscriptEntryRef {
+                        source_session: SessionId(
+                            00000000-0000-0000-0000-00000000005a,
+                        ),
+                        entry: SemanticTranscriptEntryId(
+                            00000000-0000-0000-0000-00000000005e,
+                        ),
+                    },
+                    accepted_input: AcceptedInputId(
+                        00000000-0000-0000-0000-00000000005b,
+                    ),
+                    content: Text {
+                        value: NonEmptyUnicodeText(
+                            "inherited user request",
+                        ),
+                    },
+                },
+                Assistant {
+                    source: SemanticTranscriptEntryRef {
+                        source_session: SessionId(
+                            00000000-0000-0000-0000-00000000005a,
+                        ),
+                        entry: SemanticTranscriptEntryId(
+                            00000000-0000-0000-0000-00000000005f,
+                        ),
+                    },
+                    producing_call: ModelCallId(
+                        00000000-0000-0000-0000-00000000005d,
+                    ),
+                    content: AssistantText(
+                        NonEmptyUnicodeText(
+                            "inherited assistant reply",
+                        ),
+                    ),
+                },
+                User {
+                    source: SemanticTranscriptEntryRef {
+                        source_session: SessionId(
+                            00000000-0000-0000-0000-000000000001,
+                        ),
+                        entry: SemanticTranscriptEntryId(
+                            00000000-0000-0000-0000-000000000062,
+                        ),
+                    },
+                    accepted_input: AcceptedInputId(
+                        00000000-0000-0000-0000-000000000063,
+                    ),
+                    content: Text {
+                        value: NonEmptyUnicodeText(
+                            "failed user request",
+                        ),
+                    },
+                },
+                User {
+                    source: SemanticTranscriptEntryRef {
+                        source_session: SessionId(
+                            00000000-0000-0000-0000-000000000001,
+                        ),
+                        entry: SemanticTranscriptEntryId(
+                            00000000-0000-0000-0000-000000000066,
+                        ),
+                    },
+                    accepted_input: AcceptedInputId(
+                        00000000-0000-0000-0000-00000000005c,
+                    ),
+                    content: Text {
+                        value: NonEmptyUnicodeText(
+                            "current user request",
+                        ),
+                    },
+                },
+            ]
+        "#]]
+        .assert_debug_eq(&messages);
+        assert_eq!(
+            &messages[0],
+            &ModelConversationMessage::User {
+                source: entries[0].0,
+                accepted_input: inherited_input,
+                content: inherited_content,
+            }
+        );
+        assert_eq!(
+            &messages[1],
+            &ModelConversationMessage::Assistant {
+                source: entries[1].0,
+                producing_call,
+                content: assistant_text,
+            }
+        );
+        assert_eq!(
+            &messages[2],
+            &ModelConversationMessage::User {
+                source: entries[3].0,
+                accepted_input: failed_input,
+                content: failed_content,
+            }
+        );
+        assert_eq!(
+            &messages[3],
+            &ModelConversationMessage::User {
+                source: entries[5].0,
+                accepted_input: current_input,
+                content: current_content,
+            }
+        );
     }
 
     /// S02 / INV-014: a newly committed Prepared checkpoint ends
