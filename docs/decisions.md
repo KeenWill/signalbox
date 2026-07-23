@@ -28,7 +28,17 @@ separate. The protocol supplies create/list, submit, transcript snapshot, and
 snapshot-first follow operations. Exactly one hubd dispatcher offers each next
 committed outbox event before transactionally advancing the durable prefix,
 yielding ordered at-least-once delivery. It polls idle storage every 50 ms, the
-process fan-out retains 1,024 events, and frames are capped at 8 MiB.
+process fan-out retains 1,024 events, and frames are capped at 8 MiB. One hub
+per database is enforced by holding the dedicated
+`pg_try_advisory_lock(1396856881, 1213547057)` connection from before migration
+through shutdown. Socket cleanup uses refused-connect plus same-device/inode
+revalidation inside an effective-user-owned, non-group/other-writable resolved
+parent, never unconditional replacement. Transcript snapshots include
+authoritative turn state and use start/turn/entry/content/end frames with text
+fragments capped at 1 MiB, so valid transcripts are not capped at one frame.
+Mutation command identities are caller-visible and reusable after ambiguity;
+submit requests also carry the exact expected defaults version that participates
+in durable command equality.
 
 **Rejected alternatives.** Resurrecting the retired protocol wholesale: it has
 no accepted semantics. HTTP or a remote socket: either expands version one or
@@ -36,7 +46,13 @@ creates an unauthenticated remote boundary. Authentication on the local socket:
 there is no accepted client-identity or revocation model. Persisting token
 deltas: drafts are nonauthoritative and the durable outbox already defines the
 reconnect boundary. A full-screen TUI first: it adds presentation work before
-the process boundary is exercised.
+the process boundary is exercised. Treating single-hub deployment as an
+unenforced convention or sharing only a database cursor between several
+process-local fan-outs: either permits followers to miss events. Unconditionally
+unlinking an existing socket: it can destroy a live listener. One-frame
+snapshots: the existing transcript has no aggregate size bound. Generating a new
+command identity after an ambiguous result or deriving submit defaults only
+inside the hub: either defeats exact durable replay.
 
 **Affects.** New [process-protocol](spec/process-protocol.md), the protocol and
 terminal-client crates, hubd configuration/composition, outbox consumption,

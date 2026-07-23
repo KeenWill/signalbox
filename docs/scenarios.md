@@ -44,16 +44,18 @@ those tests.
   current-state validation; a command rejected after construction cannot later
   become valid under the same identifier. Corrected domain intent then needs a
   new identifier, and reuse of a claimed identifier for another command kind,
-  session, or payload is rejected rather than creating a duplicate.
+  session, or payload is rejected rather than creating a duplicate. The terminal
+  client prints a generated command identity before I/O and accepts it again; an
+  ambiguous submit is retried with that identity and the same caller-observed
+  defaults version rather than silently becoming new work.
 - **Required invariants:** INV-001, INV-003, INV-007, INV-008, INV-012.
 - **Remaining questions:** Authenticated remote and browser clients remain
-  future work under [process-protocol](spec/process-protocol.md); the
-  owner-global idempotency scope, the typed relational command representation,
-  and actor attribution in the canonical command payload with its replay
-  equality are decided in
-  [identity-and-commands](spec/identity-and-commands.md); the baseline
-  accepted-input content value, the long-lived session aggregate, and the
-  current-pointer load boundary are decided in
+  [open](open-questions.md#protocols-and-persistence); the owner-global
+  idempotency scope, the typed relational command representation, and actor
+  attribution in the canonical command payload with its replay equality are
+  decided in [identity-and-commands](spec/identity-and-commands.md); the
+  baseline accepted-input content value, the long-lived session aggregate, and
+  the current-pointer load boundary are decided in
   [sessions-and-transcript](spec/sessions-and-transcript.md).
 
 ## S02 — Stream a centrally called provider response
@@ -760,9 +762,9 @@ those tests.
 - **User intent:** Resume observing current work without corrupting the
   transcript or relying on every delta having persisted.
 - **Durable commands:** Client subscribes to process-local fan-out before
-  requesting an authoritative repeatable-read snapshot and outbox cursor, then
-  follows matching events above that cursor; no new logical work is created
-  merely by reconnecting.
+  requesting an authoritative repeatable-read snapshot of transcript entries,
+  turn states, and the outbox cursor, then follows matching events above that
+  cursor; no new logical work is created merely by reconnecting.
 - **State transitions:** Client disconnected → synchronized snapshot → live
   observer; server-side turn remains unchanged.
 - **Transient updates:** Previously seen draft may be replaced. Version one
@@ -772,7 +774,10 @@ those tests.
   reconciles presentation.
 - **Failure behavior:** A bounded-fan-out overrun causes an explicit
   `resync_required` and another snapshot, not guessed updates. If the call
-  finished while disconnected, the final durable content replaces the draft.
+  finished or refused while disconnected, terminal turn state in the snapshot
+  prevents a waiter from depending on an already-covered event. Large
+  transcripts arrive as validated bounded frames; a partial sequence is never
+  authoritative. Final durable content replaces any draft.
 - **Required invariants:** INV-005, INV-012, INV-032, INV-033.
 - **Remaining questions:** Transient-delta sequencing, checkpointing, browser
   transport, and compatibility beyond exact version one remain

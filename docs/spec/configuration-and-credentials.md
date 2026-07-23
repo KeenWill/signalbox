@@ -42,8 +42,10 @@ key file is never read at startup (see credential lifecycle below).
 The Anthropic endpoint parameters are composition-fixed at the adapter defaults
 (public API base URL, `anthropic-version: 2023-06-01`, no connect or exchange
 timeout, 8 MiB SSE record cap); no deployment knob exists for them. Startup
-ordering, migration, the recovery scan, and shutdown policy are the
-[runtime-substrate](runtime-substrate.md) page's material.
+ordering, migration, the recovery scan, and shutdown policy are
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) material; the
+socket boundary and single-hub guard are [process-protocol](process-protocol.md)
+material.
 
 The local `signalbox-debug` harness reads `SIGNALBOX_DEBUG_DATABASE_URL` plus
 the same two file variables in its `--anthropic` mode; it is a development

@@ -238,6 +238,19 @@ questions below remain open.
   a compatible deployment mode for version one. (S01, S24)
 - **Browser transport.** Preserve authoritative-snapshot-plus-transient-stream
   semantics; technology open. Blocks the web client. (S02, S24)
+- **Compatibility after exact process-protocol version one.** Version one
+  rejects every other version and unknown field. A future compatibility window,
+  negotiation scheme, and generated-client policy remain undecided. Blocks a
+  version-two protocol, not version one. (S01, S24)
+- **Transient model-update relay.** Version one carries durable outbox
+  transitions and final transcript content only. Whether provider token deltas
+  cross the process boundary, and the required draft identity, sequencing,
+  replacement, backpressure, and redaction rules, remain undecided. Blocks
+  live-token display, not durable follow. (S02, S24)
+- **Process-protocol operation expansion.** Defaults replacement, delivery
+  treatments other than `StartWhenNoActiveTurn`, cancellation, approval, tools,
+  and administrative operations need their owning product slices and exact wire
+  projections. Blocks only those operations. (S01–S10)
 - **Persistence implementation within the accepted relational baseline.**
   [persistence-protocol](spec/persistence-protocol.md) closes the broad
   stable-storage question, selects the driver, pool, migration, runtime, and
@@ -268,9 +281,12 @@ questions below remain open.
   The
   [decision log](decisions.md#2026-07-20--adversarial-audit-corrective-package)
   owns its accepted scheduling disposition. (S03, S04, S17)
-- **Update-event retention, pruning, and multi-process fan-out.** See the
-  authoritative open edges in
-  [persistence-protocol](spec/persistence-protocol.md).
+- **Update-event retention, pruning, and multiple hub processes.** Version one
+  retains every outbox row, advances one durable delivered-through prefix, and
+  enforces one hub process per database so one process-local fan-out observes
+  every dispatch. A pruning watermark, follower retention guarantees, and any
+  later multiple-hub shared-fan-out mechanism remain undecided. Blocks pruning
+  and multi-hub deployment, not the version-one dispatcher. (S24)
 - **Swift client type generation.** Leaning: generated boundary types mapped to
   hand-written client domain types. Deferrable until the Swift client. (S01,
   S24)

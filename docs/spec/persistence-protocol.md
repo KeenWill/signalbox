@@ -378,13 +378,10 @@ unrepresentable.
 
 ## Open edges
 
-- No outbox publisher, drain task, or subscription layer exists;
-  `outbox_delivery_state` is advanced only by integration tests.
-- The outbox event-kind set is `session_created`, `turn_failed`,
-  `model_call_transition`, `turn_completed`, and `turn_refused`; input
-  acceptance, activation, and defaults replacement commit no events yet, pending
-  the protocol projections that define client visibility.
-- Outbox retention and pruning of delivered rows are undecided.
+- The version-one outbox dispatcher and process-local subscription layer are
+  specified by [process-protocol](process-protocol.md).
+- Deferred outbox retention, pruning, and multiple-hub fan-out are cataloged in
+  [open questions](../open-questions.md#protocols-and-persistence).
 - Attempt continuation is deliberately blocked: a `turn_attempt` with a
   predecessor is rejected (`turn_attempt_continuation_unavailable`) until
   durable wait/closure storage exists.

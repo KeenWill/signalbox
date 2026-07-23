@@ -14,8 +14,24 @@ tag. Durable update storage and the delivered-through cursor are owned by
 Version one uses one Unix domain stream socket at the path supplied in
 `SIGNALBOX_SOCKET_PATH`. The hub and terminal client both require that
 deployment value. `signalbox-hubd` binds the socket with owner-only `0600`
-permissions, refuses to replace an existing filesystem entry at the configured
-path, and removes the socket entry after graceful listener shutdown.
+permissions. The configured path must be absolute. The hub canonicalizes its
+existing parent once and uses that resolved parent for the socket lifetime; the
+parent must be a directory owned by the hub's effective user and must not be
+group- or other-writable. Before binding, it handles the final path as follows:
+
+1. an absent entry is available;
+2. an entry that is not a socket fails startup without modification;
+3. a socket that accepts a connection is live and fails startup; and
+4. a socket owned by the effective user whose connection fails with
+   `ConnectionRefused` is stale only if a second `lstat` still observes the same
+   socket device and inode. The hub removes only that revalidated entry and then
+   binds; every other ownership, connection, or metadata result fails startup
+   without modification.
+
+The bind itself must still create a new socket and never replace a raced entry.
+The listener does not accept requests until its permissions have been set and
+verified as `0600`. Graceful shutdown removes the path only after a final
+`lstat` proves it is still the socket device and inode created by this hub.
 
 The transport is local-machine and single-user only. Version one's lack of
 protocol authentication is provisional; it has no authorization exchange or
@@ -65,13 +81,13 @@ errors self-describing without connection-global negotiation state.
 Request objects carry a required string `type` and reject fields not admitted by
 that variant.
 
-| Type              | Additional required members                                                                    | Meaning                                                                                                                                                            |
-| ----------------- | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `create_session`  | `command_id` (canonical UUID string), `initial_model_selection` (selection object)             | Create an owner-initiated session with no ancestry and establish defaults version one.                                                                             |
-| `list_sessions`   | none                                                                                           | Read all current sessions as summaries, ordered by session identity.                                                                                               |
-| `submit_input`    | `command_id` (canonical UUID string), `session_id` (canonical UUID string), `content` (string) | Submit exact owner text as `StartWhenNoActiveTurn`, using the session's current defaults version and no per-input model override.                                  |
-| `read_transcript` | `session_id` (canonical UUID string)                                                           | Read one authoritative durable transcript snapshot and its observation cursor.                                                                                     |
-| `follow_session`  | `session_id` (canonical UUID string)                                                           | Receive an initial authoritative snapshot, then this process incarnation's ordered durable update events committed after the snapshot cursor for the same session. |
+| Type              | Additional required members                                                                                                        | Meaning                                                                                                                                                            |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `create_session`  | `command_id` (canonical UUID string), `initial_model_selection` (selection object)                                                 | Create an owner-initiated session with no ancestry and establish defaults version one.                                                                             |
+| `list_sessions`   | none                                                                                                                               | Read all current sessions as summaries, ordered by session identity.                                                                                               |
+| `submit_input`    | `command_id` and `session_id` (canonical UUID strings), `content` (string), `expected_defaults_version` (canonical decimal string) | Submit exact owner text as `StartWhenNoActiveTurn`, using the caller-observed defaults version and no per-input model override.                                    |
+| `read_transcript` | `session_id` (canonical UUID string)                                                                                               | Read one authoritative durable transcript snapshot and its observation cursor.                                                                                     |
+| `follow_session`  | `session_id` (canonical UUID string)                                                                                               | Receive an initial authoritative snapshot, then this process incarnation's ordered durable update events committed after the snapshot cursor for the same session. |
 
 A selection object is exactly one of:
 
@@ -82,7 +98,11 @@ Canonical UUID strings are lowercase hyphenated values. Nil and all-ones command
 identities fail request validation before application construction. The server
 does not generate mutation command identities on a client's behalf. Equal
 command retransmission therefore reaches the existing durable replay boundary; a
-new request identity does not change command meaning (INV-012).
+new request identity does not change command meaning (INV-012). The expected
+defaults version is part of the canonical submit payload. A caller retries an
+ambiguous submission with the same command identity, session, content, expected
+version, and treatment; changing any of them is a conflicting reuse, not
+recovery.
 
 `submit_input` deliberately exposes only the daily sequential-conversation
 treatment in version one. If a turn is already active, the normal typed
@@ -92,19 +112,37 @@ interrupt, steering, or after-current treatment.
 ## Server messages
 
 Message objects carry a required string `type` and reject fields not admitted by
-that variant. Every accepted non-follow request produces exactly one of:
+that variant. Every accepted `create_session` or `submit_input` request produces
+exactly one of:
 
 - `session_created` with `session_id`;
-- `sessions` with a `sessions` array of session summaries;
-- `input_submitted` with `session_id`, `accepted_input_id`, and either the
-  created `turn_id` or the typed non-turn disposition;
-- `transcript_snapshot` with `session_id`, `cursor`, and ordered `entries`;
+- `input_submitted` with `session_id`, `accepted_input_id`,
+  `acceptance_position`, and `turn_id`;
 - `error` with a stable `code` and a non-sensitive `message`.
 
+In the server shapes below, notation such as `queued` or
+`terminal { disposition }` means a closed JSON object with `"type":"queued"` or
+`"type":"terminal"` plus exactly the named members.
+
 A session summary contains `session_id`, `defaults_version`, and
-`model_selection`. Identifiers are canonical UUID strings. Request identities,
-ordinal versions, and outbox cursors are canonical decimal strings, preserving
+`model_selection`. A successful `list_sessions` response is `sessions_start`,
+one `session_summary` per result in session-identity order, then
+`sessions_end { session_count }`. The summaries are read in one read-only
+repeatable-read transaction, and the sequence becomes authoritative only after
+the end message and count validate. This avoids an aggregate frame-size limit.
+Identifiers are canonical UUID strings. Request identities, ordinal versions,
+indices, counts, and outbox cursors are canonical decimal strings, preserving
 their full unsigned 64-bit range without JSON-number precision loss.
+
+An application rejection is an `error` with `code = "rejected"` and a required
+closed `detail` object. For the version-one treatment, its exact variants are
+`session_not_found { session_id }`,
+`active_turn_present { session_id, active_turn_id }`,
+`defaults_version_mismatch { session_id, expected, current }`,
+`unknown_model_alias { session_id, alias_id }`, and
+`acceptance_position_exhausted { session_id, last }`. Other error codes have no
+`detail`. An equal replay returns the same success or rejection projection as
+the first handling.
 
 The error-code set in version one is:
 
@@ -126,17 +164,49 @@ caller content, or provider payload.
 ## Transcript snapshots
 
 A transcript snapshot is read in one PostgreSQL repeatable-read, read-only
-transaction. The transaction observes both:
+transaction. The transaction observes all of:
 
 - the global last committed outbox sequence, returned as `cursor`; and
-- the selected session's latest authoritative semantic frontier.
+- the selected session's latest authoritative semantic frontier; and
+- every turn in acceptance order with its authoritative lifecycle state.
 
-The snapshot emits frontier entries in member order. The version-one entry
-objects are `user`, `assistant`, `turn_completed`, and `turn_failed`. They carry
-their semantic-entry identity and exact typed subject; user and assistant
-variants additionally carry exact committed text. Assistant entries also name
-their producing call and owning turn. A session with no semantic frontier has an
-empty transcript.
+One logical snapshot is a bounded message sequence sharing the request identity:
+
+1. `transcript_snapshot_start { session_id, cursor }`;
+2. one `transcript_turn` per turn, with canonical decimal `acceptance_position`;
+3. the entry messages below in frontier-member order; and
+4. `transcript_snapshot_end { session_id, cursor, turn_count, entry_count }`.
+
+Each `transcript_turn` has `turn_id` and one closed `state` object:
+
+- `queued`;
+- `active_running { current_attempt_id }`;
+- `active_awaiting_model_call_recovery { ended_attempt_id, recovery_model_call_id }`;
+- `failed { terminal_frontier_id }`;
+- `completed { terminal_frontier_id, terminal_attempt_id, terminal_model_call_id }`;
+  or
+- `refused { terminal_frontier_id, terminal_attempt_id, terminal_model_call_id }`.
+
+Each non-text frontier member is one `transcript_entry` with `entry_index`,
+`source_session_id`, `entry_id`, and one closed `entry` object:
+`turn_completed { turn_id }` or `turn_failed { turn_id }`. A text member begins
+with
+`transcript_text_entry { entry_index, source_session_id, entry_id, entry }`. Its
+`entry` is either `user { accepted_input_id, turn_id }` or
+`assistant { turn_id, model_call_id }`. It is followed by one or more
+`transcript_content` messages carrying the same `entry_index`, a zero-based
+`fragment_index`, `final_fragment`, and `content_fragment`. The content is split
+only at UTF-8 scalar boundaries into fragments of at most 1 MiB of UTF-8; even
+empty content has one final empty fragment. The 1 MiB content bound leaves room
+below the 8 MiB frame limit even when every byte requires worst-case JSON
+escaping.
+
+A snapshot is authoritative only after the matching end message arrives and its
+counts, indices, fragment sequence, session, and cursor validate. A connection
+failure or error before then discards the partial snapshot. This bounded
+multi-frame representation can carry every valid durable transcript rather than
+making aggregate transcript size a frame-size precondition. A session with no
+semantic frontier has no entry messages.
 
 The wire snapshot is a presentation projection, not a domain `Session`, a
 storage record, or a provider prompt. Unknown stored variants fail closed until
@@ -144,7 +214,13 @@ a protocol version maps them.
 
 ## Durable update dispatch
 
-`signalbox-hubd` runs exactly one outbox dispatcher. For each attempt it:
+Before migration or recovery, `signalbox-hubd` acquires
+`pg_try_advisory_lock(1396856881, 1213547057)` on one dedicated database
+connection and retains that connection—and therefore the session-level
+lock—until shutdown. Failure to acquire the fixed database-scoped guard fails
+startup. The two integer keys are the ASCII namespaces `SBX1` and `HUB1`. This
+enforces one hub process—and therefore one dispatcher and one process-local
+fan-out—for a database. For each attempt, the dispatcher:
 
 1. starts a PostgreSQL transaction and locks the singleton
    `outbox_delivery_state`;
@@ -166,11 +242,21 @@ followers does not block durable cursor advancement: reconnecting clients use a
 fresh authoritative snapshot. A follower that overruns the bounded fan-out
 receives `resync_required` and reconnects for another snapshot.
 
-The version-one update variants are the already implemented outbox family:
-`session_created`, `model_call_transition`, `turn_completed`, `turn_failed`, and
-`turn_refused`. Each `session_event` message carries `cursor`, `session_id`, and
-the variant's typed identities and state. Storage-version columns are not
-exposed as wire-version fields.
+Each `session_event` message carries `cursor`, `session_id`, and exactly one of
+these closed `event` objects:
+
+| Event                   | Additional members                                                            |
+| ----------------------- | ----------------------------------------------------------------------------- |
+| `session_created`       | none                                                                          |
+| `model_call_transition` | `turn_id`, `model_call_id`, and `state`                                       |
+| `turn_completed`        | `turn_id`, `model_call_id`, `completion_entry_id`, and `terminal_frontier_id` |
+| `turn_failed`           | `turn_id`, `failure_entry_id`, and `terminal_frontier_id`                     |
+| `turn_refused`          | `turn_id`, `model_call_id`, and `terminal_frontier_id`                        |
+
+The model-call `state` object is exactly `prepared`, `in_flight`, or
+`terminal { disposition }`; terminal disposition is one of `completed`,
+`known_failed`, `refused`, `cancelled`, or `ambiguous`. Storage-version columns
+are not exposed as wire-version fields.
 
 ## Follow synchronization
 
@@ -179,33 +265,45 @@ reading the repeatable-read transcript snapshot. It sends that snapshot first,
 then discards subscribed events at or below its cursor and sends matching
 session events above it in cursor order.
 
-This ordering closes the snapshot/subscription race: a transition committed
-before the snapshot is represented by durable state; a transition committed
-after the snapshot has a greater cursor and was observed by the preexisting
-subscription. Previously seen transient display state may always be replaced by
-the new snapshot (INV-032).
+This ordering closes the snapshot/subscription race: every transition committed
+before the snapshot is represented by its durable turn state even when it adds
+no transcript entry, while a transition committed after the snapshot has a
+greater cursor and was observed by the preexisting subscription. A refused turn
+is therefore terminal in the initial snapshot and cannot leave `send` waiting
+for an event at or below the snapshot cursor. Previously seen transient display
+state may always be replaced by the new snapshot (INV-032).
 
 Version one forwards durable transition events only. Provider token deltas
 remain transient inside the model-runtime boundary and are not added to the
-outbox. The terminal `send` command follows the submitted turn, waits for its
-durable terminal event, rereads the authoritative transcript, and prints the
-committed assistant text. A client disconnect never cancels model work.
+outbox. The terminal `send` command follows the submitted turn, accepts terminal
+state from the initial snapshot or waits for its durable terminal event, rereads
+the authoritative transcript, and prints the committed assistant text. A client
+disconnect never cancels model work.
 
 ## Terminal client
 
 The `signalbox` binary is the daily version-one surface. It accepts a global
 `--socket <path>` override or reads `SIGNALBOX_SOCKET_PATH`, and provides:
 
-- `create --model <selection-uuid>` or `create --alias <alias-uuid>`;
+- `create (--model <selection-uuid> | --alias <alias-uuid>) [--command-id <uuid>]`;
 - `list`;
-- `send <session-uuid> <text>`;
+- `send <session-uuid> <text> [--command-id <uuid> --defaults-version <decimal>]`;
 - `transcript <session-uuid>`;
 - `follow <session-uuid>`.
 
-The client generates a fresh UUIDv7 durable command identity for `create` and
-`send`, uses a fresh nonzero request identity per connection, renders only known
-version-one messages, and exits nonzero on protocol or application errors.
-`send` prints only authoritative committed assistant text for its exact turn.
+When `--command-id` is absent, the client generates a fresh UUIDv7 identity and
+prints it to standard error before any socket I/O. `send` first reads the
+session summary and uses its defaults version, then prints that expected version
+to standard error before sending the mutation. Thus every value needed to replay
+an ambiguous command is visible before its commit can become ambiguous. For
+recovery, the user supplies the printed command identity; `send` then also
+requires the exact `--defaults-version`, and the two flags are rejected unless
+supplied together. The client never silently substitutes a new command identity
+for an ambiguous attempt. It uses a fresh nonzero request identity per
+connection, renders only known version-one messages, and exits nonzero on
+protocol or application errors. After completion, `send` rereads and prints only
+authoritative committed assistant text produced for its exact turn. A failed or
+refused turn produces a typed diagnostic and a nonzero exit without reply text.
 `follow` prints the initial transcript and subsequent typed durable updates
 until interrupted.
 
@@ -214,14 +312,8 @@ harness, not a protocol client.
 
 ## Open edges
 
-- Authenticated transports, remote clients, revocation, and client authority
-  remain open.
-- Browser transport and any compatibility window beyond exact version one remain
-  open.
-- Update-event retention, pruning, and multi-process fan-out remain open in
-  [persistence-protocol](persistence-protocol.md).
-- Transient provider-delta relay, draft identity and delta sequencing remain
-  open; version one exposes durable progress and final content only.
-- Protocol operations for defaults replacement, delivery treatments other than
-  `StartWhenNoActiveTurn`, cancellation, approval, and tools await their owning
-  product slices.
+Deferred transport, compatibility, update-stream, retention, and operation
+questions are cataloged under
+[Protocols and persistence](../open-questions.md#protocols-and-persistence);
+later client-form choices are cataloged under
+[Client scope](../open-questions.md#client-scope).
