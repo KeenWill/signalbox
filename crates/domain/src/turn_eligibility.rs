@@ -2286,6 +2286,7 @@ fn reconstitute_inner(
         let source_record = records_by_turn.get(&consumed.source_turn).copied();
         let source_record_matches = source_record.is_some_and(|record| {
             !matches!(record.state, AcceptedInputTurnSchedulingRecordState::Queued)
+                && record.order.acceptance_position() < consumed.acceptance_position
         });
         let active_tail_matches = input.active_acceptance_tail.as_ref().is_some_and(|tail| {
             tail.entries.iter().any(|candidate| {
@@ -4941,6 +4942,18 @@ mod tests {
             .input()
             .reconstitute()
             .expect("matching consumed steering reconstructs");
+
+        let mut nonfollowing_position =
+            ConsumedSteeringReconstitutionFacts::matching(&session, active, consumed);
+        nonfollowing_position.consumed_steering[0].acceptance_position = active.position();
+        nonfollowing_position.acceptance_tail.entries[1].position = active.position();
+        nonfollowing_position.acceptance_tail.observed_last_position = active.position();
+        assert_eq!(
+            assert_input_rejects_unchanged(nonfollowing_position.input()),
+            AcceptedInputSchedulingReconstitutionFailure::ConsumedSteeringMismatch {
+                accepted_input: consumed.accepted_input(),
+            }
+        );
 
         let mut nonexistent =
             ConsumedSteeringReconstitutionFacts::matching(&session, active, consumed);
