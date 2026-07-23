@@ -39,11 +39,11 @@ async fn postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dy
     Ok((container, pool, database_url))
 }
 
-/// S24: the fixed session advisory guard admits one hub, refuses an overlap,
-/// and releases only when its dedicated connection closes.
+/// The fixed session advisory guard admits one hub, refuses an overlap, and
+/// releases only when its dedicated connection closes.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s24_single_hub_guard_is_exclusive_for_the_database() -> Result<(), Box<dyn Error>> {
+async fn single_hub_guard_is_exclusive_for_the_database() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = postgres().await?;
     let guard = SingleHubGuard::acquire(&pool).await?;
 
@@ -60,11 +60,11 @@ async fn s24_single_hub_guard_is_exclusive_for_the_database() -> Result<(), Box<
     Ok(())
 }
 
-/// S24: losing the exact PostgreSQL session is fatal evidence; the guard does
-/// not reconnect or reacquire behind the runtime's back.
+/// Losing the exact PostgreSQL session is observable; the guard does not
+/// reconnect or reacquire behind the runtime's back.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s24_single_hub_guard_loss_is_observable() -> Result<(), Box<dyn Error>> {
+async fn single_hub_guard_loss_is_observable() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = postgres().await?;
     let mut guard = SingleHubGuard::acquire(&pool).await?;
 
@@ -77,12 +77,11 @@ async fn s24_single_hub_guard_loss_is_observable() -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
-/// S24: a successor holds the singleton guard but cannot advance its durable
-/// generation until every prior application-pool session releases its shared
-/// generation lock.
+/// A successor cannot advance its durable generation until every prior
+/// application-pool session releases its shared generation lock.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s24_successor_waits_for_every_prior_fenced_pool_session() -> Result<(), Box<dyn Error>> {
+async fn successor_waits_for_every_prior_fenced_pool_session() -> Result<(), Box<dyn Error>> {
     let (container, bootstrap, database_url) = postgres().await?;
     bootstrap.close().await;
     let options = local_test_connection_options(&database_url)?;
