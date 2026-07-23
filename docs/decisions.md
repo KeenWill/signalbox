@@ -16,12 +16,12 @@ recorded here (see `AGENTS.md`). Unresolved questions live in
 cumulative 8 MiB buffered and streamed response bounds, per-record SSE bounds,
 strict terminal-integrity parsing, and credential sanitization, but the
 provider-call-security questions still left TLS, proxy, timeout, and
-malicious-output posture undecided. Reqwest 0.13 also changes the Rustls feature
+malicious-output posture undecided. Reqwest 0.13 also changes the rustls feature
 and platform-root integration while retaining unsafe-for-Signalbox defaults for
 redirects, protocol-NACK retries, ambient proxies, and an absent timeout.
 
 **Decision.** Take reqwest 0.13 with default features disabled and select its
-Rustls platform verifier and byte streaming explicitly. Require certificate and
+rustls platform verifier and byte streaming explicitly. Require certificate and
 hostname verification against platform roots, TLS 1.2 or newer, and HTTPS for
 every non-loopback target; admit plain HTTP only to an IP-literal loopback host
 for deterministic tests. Disable ambient proxies, redirects, protocol retries,
