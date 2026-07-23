@@ -10,6 +10,27 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-23 — Bound concurrent inbound frame buffers at eight
+
+**Context.** The 128 accepted process connections could each retain nearly one
+8 MiB partial frame indefinitely, making the connection-count limit alone admit
+roughly 1 GiB of raw inbound payload before reader and request overhead.
+
+**Decision.** Reserve one of eight shared inbound-frame slots before a
+connection begins accumulating its next frame. A slot is held through frame
+decoding, so raw frame accumulation is bounded at 64 MiB; other accepted
+connections wait without a growing frame accumulator and remain
+shutdown-aware.
+
+**Rejected alternatives.** Lowering the 8 MiB frame cap changes the recorded
+wire contract. A read deadline invents timing semantics and still permits the
+same peak. Byte-granular reservations add accounting complexity without a
+current need for differently sized concurrent limits.
+
+**Affects.** Process-runtime inbound memory capacity only; accepted-connection
+admission, frame validity, request ordering, and application admission do not
+change.
+
 ## 2026-07-23 — Bound accepted process connections at 128
 
 **Context.** A finite socket backlog does not bound tasks after acceptance.

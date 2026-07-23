@@ -1,6 +1,6 @@
 //! Local process-protocol serving and durable outbox fan-out.
 
-use std::{error::Error, fmt, future::Future, io, time::Duration};
+use std::{error::Error, fmt, future::Future, io, sync::Arc, time::Duration};
 
 use signalbox_application::{
     CreateSessionError, CreateSessionOutcome, CreateSessionRequest, CreateSessionService,
@@ -37,7 +37,7 @@ use sqlx::PgPool;
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader},
     net::UnixStream,
-    sync::{broadcast, watch},
+    sync::{OwnedSemaphorePermit, Semaphore, broadcast, watch},
     task::{JoinError, JoinSet},
     time::sleep,
 };
@@ -47,6 +47,7 @@ use crate::{HubModelConfiguration, LocalProcessListener, LocalSocketError};
 const OUTBOX_IDLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const PROCESS_UPDATE_CAPACITY: usize = 64;
 const MAX_ACTIVE_CONNECTIONS: usize = 128;
+const MAX_BUFFERED_INBOUND_FRAMES: usize = 8;
 const MAX_SUBMITTED_INPUT_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Debug)]
@@ -55,6 +56,7 @@ struct ConnectionServices {
     eligibility_nudge: InProcessEligibilityNudge,
     model_configuration: HubModelConfiguration,
     updates: broadcast::Sender<ProcessUpdate>,
+    inbound_frame_budget: Arc<Semaphore>,
 }
 
 /// The hub-owned local protocol runtime: one outbox dispatcher, one bounded
@@ -150,6 +152,7 @@ async fn serve_connections(
         eligibility_nudge,
         model_configuration,
         updates,
+        inbound_frame_budget: Arc::new(Semaphore::new(MAX_BUFFERED_INBOUND_FRAMES)),
     };
     let mut connections = JoinSet::new();
     loop {
@@ -194,6 +197,9 @@ fn inspect_connection_completion(
         Some(Ok(Err(ProcessConnectionError::EncodeInvariant))) => {
             Err(ProcessRuntimeError::EncodeInvariant)
         }
+        Some(Ok(Err(ProcessConnectionError::InboundFrameBudgetClosed))) => {
+            Err(ProcessRuntimeError::InboundFrameBudgetClosed)
+        }
         Some(Err(error)) => Err(ProcessRuntimeError::ConnectionTask(error)),
     }
 }
@@ -210,6 +216,12 @@ async fn serve_connection(
         if shutdown_requested(&shutdown) {
             return Ok(());
         }
+        let Some(frame_buffer_permit) =
+            acquire_inbound_frame_permit(Arc::clone(&services.inbound_frame_budget), &mut shutdown)
+                .await?
+        else {
+            return Ok(());
+        };
         let line = tokio::select! {
             () = wait_for_shutdown(&mut shutdown) => return Ok(()),
             line = read_frame_line(&mut reader) => line?,
@@ -245,6 +257,7 @@ async fn serve_connection(
                 return Ok(());
             }
         };
+        drop(frame_buffer_permit);
         let request_id = frame.request_id();
         let request = frame.request().clone();
         let follows = matches!(request, ClientRequest::FollowSession { .. });
@@ -259,6 +272,18 @@ async fn serve_connection(
         if follows {
             return Ok(());
         }
+    }
+}
+
+async fn acquire_inbound_frame_permit(
+    budget: Arc<Semaphore>,
+    shutdown: &mut watch::Receiver<bool>,
+) -> Result<Option<OwnedSemaphorePermit>, ProcessConnectionError> {
+    tokio::select! {
+        () = wait_for_shutdown(shutdown) => Ok(None),
+        permit = budget.acquire_owned() => permit
+            .map(Some)
+            .map_err(|_| ProcessConnectionError::InboundFrameBudgetClosed),
     }
 }
 
@@ -1383,6 +1408,7 @@ enum ProcessConnectionError {
     Io(io::Error),
     Encode(FrameEncodeError),
     EncodeInvariant,
+    InboundFrameBudgetClosed,
 }
 
 impl From<io::Error> for ProcessConnectionError {
@@ -1405,6 +1431,9 @@ impl fmt::Display for ProcessConnectionError {
             Self::EncodeInvariant => {
                 "the local process connection could not represent an internal value"
             }
+            Self::InboundFrameBudgetClosed => {
+                "the local process connection lost its inbound frame budget"
+            }
         })
     }
 }
@@ -1414,7 +1443,7 @@ impl Error for ProcessConnectionError {
         match self {
             Self::Io(error) => Some(error),
             Self::Encode(error) => Some(error),
-            Self::EncodeInvariant => None,
+            Self::EncodeInvariant | Self::InboundFrameBudgetClosed => None,
         }
     }
 }
@@ -1428,6 +1457,8 @@ pub enum ProcessRuntimeError {
     Encode(FrameEncodeError),
     /// Runtime-owned values could not be represented by the closed wire contract.
     EncodeInvariant,
+    /// The runtime-owned aggregate inbound frame budget closed unexpectedly.
+    InboundFrameBudgetClosed,
     /// A connection task panicked or was cancelled unexpectedly.
     ConnectionTask(JoinError),
     /// The durable outbox dispatcher failed.
@@ -1445,6 +1476,9 @@ impl fmt::Display for ProcessRuntimeError {
             Self::Encode(_) => "the local process server could not encode a frame",
             Self::EncodeInvariant => {
                 "the local process server could not represent an internal value"
+            }
+            Self::InboundFrameBudgetClosed => {
+                "the local process server lost its inbound frame budget"
             }
             Self::ConnectionTask(_) => "a local process connection task failed",
             Self::Dispatch(_) => "the durable process-update dispatcher failed",
@@ -1464,14 +1498,16 @@ impl Error for ProcessRuntimeError {
             Self::ConnectionTask(error) => Some(error),
             Self::Dispatch(error) => Some(error),
             Self::CleanupSocket(error) => Some(error),
-            Self::EncodeInvariant | Self::UnexpectedDispatcherRetry => None,
+            Self::EncodeInvariant
+            | Self::InboundFrameBudgetClosed
+            | Self::UnexpectedDispatcherRetry => None,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{error::Error, io};
+    use std::{error::Error, io, sync::Arc};
 
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, FrameEncodeError, InputContent, MAX_CONTENT_FRAGMENT_BYTES,
@@ -1480,15 +1516,16 @@ mod tests {
     };
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt, BufReader, duplex},
-        sync::watch,
+        sync::{Semaphore, watch},
         time::{Duration, timeout},
     };
     use uuid::Uuid;
 
     use super::{
-        IncomingLine, MAX_FRAME_BYTES, MAX_SUBMITTED_INPUT_BYTES, ProcessConnectionError,
-        RequestId, admitted_user_content, inspect_connection_completion, read_frame_line,
-        run_until_shutdown, wire_model_call_state, write_content,
+        IncomingLine, MAX_BUFFERED_INBOUND_FRAMES, MAX_FRAME_BYTES, MAX_SUBMITTED_INPUT_BYTES,
+        ProcessConnectionError, RequestId, acquire_inbound_frame_permit, admitted_user_content,
+        inspect_connection_completion, read_frame_line, run_until_shutdown, wire_model_call_state,
+        write_content,
     };
     use signalbox_persistence::outbox::{DispatchedModelCallDisposition, DispatchedModelCallState};
     use signalbox_process_protocol::{ModelCallDisposition, ModelCallState};
@@ -1517,6 +1554,53 @@ mod tests {
             read_frame_line(&mut oversized_reader).await?,
             Some(IncomingLine::Oversized)
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn inbound_frame_budget_bounds_raw_accumulation_and_waits_for_shutdown()
+    -> Result<(), Box<dyn Error>> {
+        assert_eq!(
+            MAX_BUFFERED_INBOUND_FRAMES * MAX_FRAME_BYTES,
+            64 * 1024 * 1024
+        );
+        let budget = Arc::new(Semaphore::new(MAX_BUFFERED_INBOUND_FRAMES));
+        let (shutdown, shutdown_receiver) = watch::channel(false);
+        let mut permits = Vec::new();
+        for _ in 0..MAX_BUFFERED_INBOUND_FRAMES {
+            permits.push(
+                acquire_inbound_frame_permit(Arc::clone(&budget), &mut shutdown_receiver.clone())
+                    .await?
+                    .ok_or_else(|| io::Error::other("the running fixture must acquire a permit"))?,
+            );
+        }
+
+        assert!(
+            timeout(
+                Duration::from_millis(20),
+                acquire_inbound_frame_permit(Arc::clone(&budget), &mut shutdown_receiver.clone()),
+            )
+            .await
+            .is_err(),
+            "the ninth frame accumulator must wait"
+        );
+
+        drop(permits.pop());
+        let released = timeout(
+            Duration::from_secs(1),
+            acquire_inbound_frame_permit(Arc::clone(&budget), &mut shutdown_receiver.clone()),
+        )
+        .await??
+        .ok_or_else(|| io::Error::other("a released frame slot must be acquired"))?;
+        permits.push(released);
+
+        shutdown.send(true)?;
+        assert!(
+            acquire_inbound_frame_permit(Arc::clone(&budget), &mut shutdown_receiver.clone())
+                .await?
+                .is_none(),
+            "a connection waiting for the full budget must stop on shutdown"
+        );
         Ok(())
     }
 
