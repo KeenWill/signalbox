@@ -256,7 +256,7 @@ inferred from timing or injected I/O errors.
 
 ## Terminal outcomes
 
-`apply_terminal_observation` derives one of five outcomes from fresh state, and
+`apply_terminal_observation` derives one of six outcomes from fresh state, and
 persistence commits it atomically with its outbox rows
 ([persistence-protocol](persistence-protocol.md)):
 
@@ -302,10 +302,10 @@ persistence commits it atomically with its outbox rows
 Completion and refusal races against `StopRequested` end through their typed
 `AfterCancellation` dispositions while retaining their ordinary turn outcomes.
 
-Every non-ambiguous outcome atomically reclassifies each pending steering input
-into a fresh queued successor turn at its original acceptance position
-(`NoSafePointBeforeTerminal`), inheriting the source turn's effective
-configuration; see
+Every terminal turn outcome, including proof-bearing reconciliation, atomically
+reclassifies each pending steering input into a fresh queued successor turn at
+its original acceptance position (`NoSafePointBeforeTerminal`), inheriting the
+source turn's effective configuration; see
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) (INV-016).
 
 ## Serialization and locking
