@@ -35,8 +35,9 @@ source.
 **Living specification.** A pull request that changes behavior described by a
 `docs/spec/` page updates the owning section in the same pull request, exactly
 as the spine rule above. Pages state implemented behavior only; deferred or
-undecided work appears in a page's Open edges list and in
-`docs/open-questions.md`, never as speculative prose.
+undecided work is recorded in `docs/open-questions.md` — its one home — and a
+page's Open edges list carries pointers to it, never substantive speculative
+prose.
 
 **Finished pull requests.** The owner merges every pull request; deliver each
 one finished and awaiting owner merge:
@@ -70,9 +71,9 @@ one finished and awaiting owner merge:
   awaits owner merge. After five waves on one pull request, stop and escalate to
   the owner regardless of hit rate, reporting the wave history in one line. A
   re-report of an already-fixed finding made against a stale head is declined by
-  standing policy, naming the fixing commit. When a wave's accepted findings are
-  predominantly defects in code the previous wave's fixes introduced, stop and
-  escalate to the owner instead of continuing the loop.
+  standing policy, naming the fixing commit. When more than half of a wave's
+  accepted findings are defects in code the previous wave's fixes introduced,
+  stop and escalate to the owner instead of continuing the loop.
 
 **Stacked pull requests.** Stacks may grow as deep as the work requires; the
 owner merges in batches, so never wait on a merge to continue. Keep every stack
@@ -107,10 +108,12 @@ framework representations, weakening an invariant, introducing a technology that
 constrains several components, or closing an open question whose resolution has
 any of these effects — are proposed as a specification diff reviewed at the
 bottom of the implementing stack, with a `docs/decisions.md` entry recording the
-choice; owner merge is acceptance. Do not silently change a foundational
-decision or close a recorded open question. Keep domain types distinct from
-storage records, protocol messages, and framework types. Keep pull requests
-narrow and reviewable.
+choice; owner merge is acceptance. A foundation spec-diff describes the behavior
+its stack implements and merges only together with that stack, so `main` never
+carries specification prose for unimplemented behavior. Do not silently change a
+foundational decision or close a recorded open question. Keep domain types
+distinct from storage records, protocol messages, and framework types. Keep pull
+requests narrow and reviewable.
 
 Tests reference the scenario and invariant identifiers they enforce when the
 connection is meaningful (for example `S12_INV011_rejects_stale_generation`, or
