@@ -49,6 +49,7 @@ and executable-path failure modes without solving separate bind/listen.
 
 **Affects.** The hub-owned local process transport and its direct dependency
 surface; no domain, persistence, or wire representation changes.
+
 ## 2026-07-23 — Bound process fan-out retention at 64 events
 
 **Context.** The initial version-one design retained 1,024 update events while
