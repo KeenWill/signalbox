@@ -297,19 +297,19 @@ suffix, so transport batching cannot erase earlier evidence or a terminal
 marker.
 
 Before serde sees a buffered success body or JSON SSE record, a shared
-allocation-free scanner rejects JSON nested beyond 128 containers, including
-unknown fields and `RawValue` material. Unknown fields remain tolerated for
-additive provider evolution, but they receive the same byte and nesting limits
-as known fields. Malformed or over-depth HTTP-200 JSON is
-`ResponseUnintelligible` boundary loss. Over-depth streamed material and
-malformed known-event JSON are terminal stream protocol violations; unknown
-event names remain additively tolerated and their bounded payloads are discarded
-without typed parsing. A malformed or over-depth body attached to a definitive
-4xx/5xx status cannot erase that definitive exchange: the adapter falls back to
-status classification and retains only bounded, credential-sanitized native
-material. Why: hostile provider output may consume only fixed memory/depth
-budgets and can never be upgraded into completion by truncation or permissive
-parsing.
+allocation-free scanner rejects JSON nested beyond 127 containers, matching
+serde_json's admitted recursion boundary and including unknown fields and
+`RawValue` material. Unknown fields remain tolerated for additive provider
+evolution, but they receive the same byte and nesting limits as known fields.
+Malformed or over-depth HTTP-200 JSON is `ResponseUnintelligible` boundary loss.
+Over-depth streamed material and malformed known-event JSON are terminal stream
+protocol violations; unknown event names remain additively tolerated and their
+bounded payloads are discarded without typed parsing. A malformed or over-depth
+body attached to a definitive 4xx/5xx status cannot erase that definitive
+exchange: the adapter falls back to status classification and retains only
+bounded, credential-sanitized native material. Why: hostile provider output may
+consume only fixed memory/depth budgets and can never be upgraded into
+completion by truncation or permissive parsing.
 
 Stream integrity, Anthropic: the decoder enforces the Messages stream protocol —
 `message_start` first with a complete envelope (discriminators, id, model, input

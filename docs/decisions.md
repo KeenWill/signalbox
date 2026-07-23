@@ -31,13 +31,14 @@ explicitly. Accept CDLA-Permissive-2.0 in the dependency license policy solely
 for `webpki-root-certs`, the platform verifier's bundled fallback root data.
 Retain the already-enforced 8 MiB cumulative buffered and streamed limits and
 the configurable positive SSE record bound. Before typed parsing, newly reject
-provider JSON nested beyond 128 containers. A buffered parse rejection is
-response loss, a streamed rejection is protocol violation, and an invalid error
-envelope still falls back to its definitive HTTP status. Require a positive
-whole-exchange timeout from connect through body completion, provisionally ten
-minutes by default. Revisit that default through a later ordinary decision after
-production latency observations can justify provider/model-specific budgets
-without weakening the always-bounded contract.
+provider JSON nested beyond 127 containers, matching serde_json's admitted
+recursion boundary. A buffered parse rejection is response loss, a streamed
+rejection is protocol violation, and an invalid error envelope still falls back
+to its definitive HTTP status. Require a positive whole-exchange timeout from
+connect through body completion, provisionally ten minutes by default. Revisit
+that default through a later ordinary decision after production latency
+observations can justify provider/model-specific budgets without weakening the
+always-bounded contract.
 
 **Rejected alternatives.** Reqwest defaults permit hidden redirect/retry sends,
 ambient proxy routing, and an unbounded exchange. Native TLS or reqwest's
