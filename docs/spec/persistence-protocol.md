@@ -371,13 +371,15 @@ Appends happen only through the crate-private `outbox::append` on the caller's
 existing connection; it never begins or commits a transaction, so the
 state-changing adapter owns the atomic boundary and no post-commit publish step
 exists in application code. Implemented appends: CreateSession handling appends
-`session_created`; startup recovery's terminalization appends `turn_failed`.
+`session_created`; startup recovery appends `turn_failed` for a failed lost turn
+and `turn_reconciliation_required` when stopped issued work becomes ambiguous.
 Model-call state transitions append `model_call_transition`, completion closure
 appends `turn_completed`, refusal closure appends `turn_refused`, and
 known-failure closure appends `turn_failed`; interrupt-confirmed cancellation
-appends `turn_cancelled`. A guarded transition that changes zero rows appends
-zero events. Why: writing the event in the committing transaction makes the
-dual-write failure (state without event, or event without state)
+appends `turn_cancelled`, and live stopped ambiguity appends
+`turn_reconciliation_required`. A guarded transition that changes zero rows
+appends zero events. Why: writing the event in the committing transaction makes
+the dual-write failure (state without event, or event without state)
 unrepresentable.
 
 ## Open edges

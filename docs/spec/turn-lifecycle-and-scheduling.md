@@ -24,14 +24,15 @@ accepted-input origin under one frozen effective configuration (configuration
 freeze is [identity-and-commands](identity-and-commands.md) scope). The
 implemented slice stores three lifecycle states per turn
 (`turn_lifecycle.state_kind`): `queued`, `active`, and `terminal`, with the
-terminal disposition kind closed to `failed`, `completed`, `refused`, and
-`cancelled` (migrations `202607220001` and `202607220005`). The domain
-`TurnDisposition` algebra carries all five accepted variants — `Completed`,
-`Refused`, `Failed`, `Cancelled { cause }`, `ReconciliationRequired { marker }`
-— but `Cancelled` is constructible only from an `AppliedInterruptProof` and
-`ReconciliationRequired` only from a sealed `ReconciliationMarker`. Committed
-transitions produce `Completed`, `Refused`, `Failed`, and proof-bearing
-`Cancelled`; none produces `ReconciliationRequired`.
+terminal disposition kind closed to `failed`, `completed`, `refused`,
+`cancelled`, and `reconciliation_required` (migrations `202607220001` and
+`202607220005`). The domain `TurnDisposition` algebra carries all five accepted
+variants — `Completed`, `Refused`, `Failed`, `Cancelled { cause }`,
+`ReconciliationRequired { marker }` — but `Cancelled` is constructible only from
+an `AppliedInterruptProof` and `ReconciliationRequired` only from a sealed
+`ReconciliationMarker`. Committed transitions produce every variant: interrupted
+physical ambiguity produces proof-bearing `ReconciliationRequired`, while
+confirmed interrupted cancellation produces proof-bearing `Cancelled`.
 
 The domain `ActiveTurnPhase` algebra is `Running { current_attempt }`,
 `AwaitingApproval { request }`, and
@@ -261,14 +262,15 @@ end (INV-034):
   call as its exact ambiguity set, an equal-content terminal frontier, and the
   interrupt reason.
 
-In the two failing branches only: one `TurnFailed` semantic entry is appended,
-and the terminal frontier is derived as the starting frontier plus that marker
-(entry payloads are [sessions-and-transcript](sessions-and-transcript.md)
-scope); the turn terminalizes `Failed`, releasing the slot via one guarded
-attempt-end update and one guarded lifecycle update, each required to match
-exactly one row; and a `turn_failed` outbox record is appended in the same
-transaction (outbox mechanics are
-[persistence-protocol](persistence-protocol.md) scope).
+In the two failing branches only: one `TurnFailed` semantic entry is appended.
+The evidence-free branch extends the starting frontier; the prepared-call branch
+extends that call's exact source frontier, which already contains every steering
+entry consumed when the call was prepared. The turn terminalizes `Failed`,
+releasing the slot via one guarded attempt-end update and one guarded lifecycle
+update, each required to match exactly one row; and a `turn_failed` outbox
+record is appended in the same transaction (entry payloads are
+[sessions-and-transcript](sessions-and-transcript.md) scope; outbox mechanics
+are [persistence-protocol](persistence-protocol.md) scope).
 
 Why `Failed`: the evidence-free slice stores no operations, waits, or stop
 causes, so an abandoned tenure has no sufficient completion, refusal, or
