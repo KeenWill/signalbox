@@ -1167,9 +1167,10 @@ fn encode_line<T: Serialize>(frame: &T) -> Result<Vec<u8>, FrameEncodeError> {
 
 fn checked_line_content(line: &[u8], allow_uncorrelated: bool) -> Result<&[u8], FrameDecodeError> {
     if line.len() > MAX_FRAME_BYTES {
+        let content = line.strip_suffix(b"\n").unwrap_or(line);
         return Err(FrameDecodeError {
             kind: FrameDecodeErrorKind::OversizedFrame,
-            request_id: RequestId::uncorrelated(),
+            request_id: recover_request_id(content, allow_uncorrelated),
         });
     }
     let Some(content) = line.strip_suffix(b"\n") else {
@@ -1528,9 +1529,13 @@ mod tests {
     }
 
     #[test]
-    fn inv012_command_sentinels_and_zero_client_request_id_are_rejected() {
+    fn inv012_command_sentinels_are_rejected() {
         assert_command_sentinel_rejected("00000000-0000-0000-0000-000000000000");
         assert_command_sentinel_rejected("ffffffff-ffff-ffff-ffff-ffffffffffff");
+    }
+
+    #[test]
+    fn inv033_zero_client_request_id_is_rejected() {
         assert!(
             decode_client_line(&line(
                 r#"{"version":1,"request_id":"0","request":{"type":"list_sessions"}}"#
@@ -1705,8 +1710,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_exact_newline_framing_and_size_are_enforced() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn inv033_exact_newline_framing_is_enforced() -> Result<(), Box<dyn std::error::Error>> {
         let frame = ClientFrame::try_new(request(1)?, ClientRequest::ListSessions {})?;
         let encoded = encode_client_line(&frame)?;
         assert_eq!(encoded.last(), Some(&b'\n'));
@@ -1725,8 +1729,25 @@ mod tests {
         let multiline = decode_client_line(&multiline).expect_err("embedded LF must be malformed");
         assert_eq!(multiline.kind(), FrameDecodeErrorKind::MalformedFrame);
         assert_eq!(multiline.request_id().value(), 1);
-        assert!(decode_client_line(&vec![b' '; super::MAX_FRAME_BYTES + 1]).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn inv033_oversized_complete_frame_preserves_recoverable_request_id() {
+        let oversized = format!(
+            r#"{{"version":1,"request_id":"9","request":{{"type":"list_sessions","padding":"{}"}}}}"#,
+            "x".repeat(super::MAX_FRAME_BYTES)
+        );
+        let error = decode_client_line(&line(&oversized))
+            .expect_err("a complete frame over the byte cap must be rejected");
+
+        assert_eq!(error.kind(), FrameDecodeErrorKind::OversizedFrame);
+        assert_eq!(error.request_id().value(), 9);
+
+        let unparseable = decode_client_line(&vec![b' '; super::MAX_FRAME_BYTES + 1])
+            .expect_err("an unparseable oversized frame must be rejected");
+        assert_eq!(unparseable.kind(), FrameDecodeErrorKind::OversizedFrame);
+        assert_eq!(unparseable.request_id().value(), 0);
     }
 
     #[test]
