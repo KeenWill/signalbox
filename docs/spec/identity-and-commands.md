@@ -89,19 +89,25 @@ UUIDv7 implementation:
 types but have no production minting seam yet; their generators land with their
 owning slices.
 
-Orchestration generates a fresh candidate immediately before the domain
-transition that creates the fact, and the persistence adapter maps
-already-minted values only — no Postgres column has an identity-generating
-default (verified across all migrations). Why: the domain transition needs the
-typed identity before persistence, and keeping the domain generation-free keeps
-it deterministic. A transaction that aborts leaves an unused candidate but no
-durable fact. Recovery reconstitutes committed facts under their stored
-identities; the startup scan's generator mints identities only for the new facts
-it records — the `TurnFailed` semantic entry, the terminal frontier, and a fresh
-successor `TurnId` per pending-steering input it reclassifies (INV-007). On
-equal command replay the recorded receipt is returned, which may name a
-different identity than the fresh candidate generated for that invocation — the
-candidate is discarded.
+Orchestration generates each fresh candidate immediately before the domain
+transition that creates the fact. Fixed-cardinality candidates are minted before
+the transaction. When cardinality becomes authoritative only under the
+repository lock — currently one reclassified successor per locked pending
+steering input — orchestration instead passes an application-owned generator
+closure into the transaction port; the adapter invokes it under that lock and
+immediately supplies the typed value to the domain transition. Persistence never
+owns or synthesizes an identity, and no Postgres column has an
+identity-generating default (verified across all migrations).
+
+Why: the domain transition still receives a typed identity while the domain
+remains generation-free and deterministic, without pre-lock inventory reads. A
+transaction that aborts leaves an unused candidate but no durable fact. Recovery
+reconstitutes committed facts under their stored identities; the startup scan's
+generator mints identities only for the new facts it records — the `TurnFailed`
+semantic entry, the terminal frontier, and a fresh successor `TurnId` per
+pending-steering input it reclassifies (INV-007). On equal command replay the
+recorded receipt is returned, which may name a different identity than the fresh
+candidate generated for that invocation — the candidate is discarded.
 
 ## Encoding
 

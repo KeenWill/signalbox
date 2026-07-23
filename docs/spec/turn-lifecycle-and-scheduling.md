@@ -317,17 +317,16 @@ delivery outcomes implemented here are:
   until eligibility.
 - `Interrupt` targeting the active turn atomically accepts a configured
   immediate-successor origin, constructs the exact `AppliedInterruptProof`, and
-  applies the predecessor transition (INV-029, INV-037). A prepared attempt ends
-  directly `AfterCancellation(Cancelled)` and the turn terminalizes
-  `Cancelled { cause }`; a prepared call, when present, closes unsent as
-  `Cancelled`. Before that terminal transition releases the slot, the same
-  transaction reclassifies every pending steering input against the interrupted
-  turn as an ordered queued successor origin. An issued call changes to
-  `CancellationRequested` while the attempt retains the slot as
-  `StopRequested(CancellationOnly)`. A next-safe-point request against that
-  stopping turn records `SafePointUnavailableWhileStopping`; equal interrupt
-  replay returns the original applied result, while a distinct later interrupt
-  cannot replace the existing proof.
+  applies the predecessor transition (INV-029, INV-037). Before any terminal
+  transition releases the slot, the same transaction reclassifies every pending
+  steering input against the interrupted turn as an ordered queued successor
+  origin. Call, attempt, and turn terminalization follow
+  [model-call-execution](model-call-execution.md#terminal-outcomes). A
+  next-safe-point request against a stopping turn records
+  `SafePointUnavailableWhileStopping`; equal interrupt replay returns the
+  original applied result. A distinct later interrupt records
+  `InterruptAlreadyApplied { active_turn, existing_command }` without accepting
+  an input or replacing the existing proof.
 
 ## Context frontier snapshots
 

@@ -151,8 +151,9 @@ that may already be terminal (INV-037).
    (`SendCommenced`); if no acceptance report ever arrives, it is released when
    the provider interaction returns, and the ambiguous-authorization reread
    paths drop it before returning. Why: holding the gate across the authorize
-   commit and send start prevents a stop transition and a new physical send from
-   passing one another in-process.
+   commit and send start serializes execution-service passes for that attempt
+   across the acceptance-capable boundary; it does not serialize interrupt
+   application.
 4. **Provider interaction (no transaction).** The provider port is invoked at
    most once per invocation, and exactly once only after the `InFlight` commit
    is known. It consumes the capability exactly once and returns one
@@ -320,6 +321,10 @@ statement granularity, not within the statement. Why: one lock statement issued
 first in every transaction makes per-session serialization total and lock-order
 cycles impossible. The in-process per-attempt dispatch gate is the only other
 ordering primitive; in this slice the execution service is its sole consumer.
+Interrupt application deliberately does not acquire it: once `InFlight` commits,
+the call is issued work, so a later interrupt durably requests cancellation and
+the runtime signal races any provider progress without claiming that acceptance
+was prevented.
 
 ## Crash, restart, and supervision
 
