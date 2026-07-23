@@ -1007,6 +1007,17 @@ impl SessionAcceptanceTailReconstitutionInput {
     // accessors: session(), anchor(), observed_last_position(), entries()
 }
 
+pub struct ConsumedSteeringReconstitutionInput { /* private */ }
+impl ConsumedSteeringReconstitutionInput {
+    pub const fn new(
+        session: SessionId,
+        accepted_input: AcceptedInputLifecycle,
+        acceptance_position: SessionInputPosition,
+        source_turn: TurnId,
+    ) -> Self;
+    // accessors: session(), accepted_input(), acceptance_position(), source_turn()
+}
+
 pub struct PendingSteeringInput { /* private */ }
 // sealed: checked AcceptedInputSchedulingProjection::active_turn_execution
 impl PendingSteeringInput {
@@ -1070,8 +1081,13 @@ impl AcceptedInputSchedulingReconstitutionInput {
         pinned_targets: Vec<PinnedProviderTargetReconstitutionInput>,
         model_calls: Vec<ModelCallReconstitutionInput>,
     ) -> Self;
+    pub fn with_consumed_steering_facts(
+        self,
+        consumed_steering: Vec<ConsumedSteeringReconstitutionInput>,
+    ) -> Self;
     // accessors: session(), turns(), semantic_entries(), snapshots(),
-    // pinned_targets(), model_calls(), active_acceptance_tail()
+    // pinned_targets(), model_calls(), consumed_steering(),
+    // active_acceptance_tail()
 }
 
 pub enum AcceptedInputSchedulingReconstitutionFailure {
@@ -1089,6 +1105,10 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
     SemanticEntrySubjectMissing { entry: SemanticTranscriptEntryId },
     SemanticEntryStateMismatch { entry: SemanticTranscriptEntryId },
     DuplicateSemanticEntryForSubject { entry: SemanticTranscriptEntryId },
+    ConsumedSteeringSessionMismatch { accepted_input: AcceptedInputId },
+    DuplicateConsumedSteering { accepted_input: AcceptedInputId },
+    SteeringSemanticEntryMismatch { entry: SemanticTranscriptEntryId },
+    ConsumedSteeringMismatch { accepted_input: AcceptedInputId },
     UnsupportedSemanticEntry { entry: SemanticTranscriptEntryId },
     SemanticEntryCallMissing {
         entry: SemanticTranscriptEntryId,
@@ -2690,7 +2710,7 @@ impl<
 | domain: submit_input                  | 15                   |
 | domain: queue_order                   | 5 (+1 free fn)       |
 | domain: turn_lifecycle                | 10                   |
-| domain: turn_eligibility              | 24                   |
+| domain: turn_eligibility              | 25                   |
 | domain: turn_attempt                  | 13                   |
 | domain: model_call                    | 12                   |
 | domain: model_execution               | 34                   |
@@ -2700,7 +2720,7 @@ impl<
 | domain: applied_interrupt             | 2                    |
 | domain: fatal_mismatch                | 0                    |
 | domain: replace_session_defaults      | 13                   |
-| **signalbox-domain total**            | **201 (+1 free fn)** |
+| **signalbox-domain total**            | **202 (+1 free fn)** |
 | application: create_session           | 8 (incl. 2 traits)   |
 | application: load_session             | 2 (incl. 1 trait)    |
 | application: model_execution          | 28 (incl. 7 traits)  |

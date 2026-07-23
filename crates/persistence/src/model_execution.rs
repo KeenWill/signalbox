@@ -1401,14 +1401,18 @@ fn prepared_matches_authorized(
         && prepared
             .frontier_entries()
             .eq(authorized.frontier_entries())
-        && prepared.frontier_entries().all(|entry| {
-            let SemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input } =
-                entry.payload()
-            else {
-                return true;
-            };
-            prepared.origin_content(*accepted_input) == authorized.origin_content(*accepted_input)
-        })
+        && prepared
+            .frontier_entries()
+            .all(|entry| match entry.payload() {
+                SemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input }
+                | SemanticTranscriptEntryPayload::SteeringAcceptedInput {
+                    accepted_input, ..
+                } => {
+                    prepared.origin_content(*accepted_input)
+                        == authorized.origin_content(*accepted_input)
+                }
+                _ => true,
+            })
 }
 
 async fn lock_session(

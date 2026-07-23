@@ -10,15 +10,15 @@ use signalbox_domain::{
     AcceptedInputSchedulingProjection, AcceptedInputSchedulingReconstitutionFailure,
     AcceptedInputSchedulingReconstitutionInput, AcceptedInputStartingLineage,
     AcceptedInputTurnSchedulingRecord, AcceptedInputTurnSchedulingRecordState,
-    ActiveTurnSchedulingReconstitutionInput, Actor, AssistantText, ContextFrontierId,
-    DeliveryRequest, DirectModelSelection, DurableCommandId,
-    FailedTurnExecutionReconstitutionInput, FrozenAliasDefinition, FrozenModelSelection,
-    ModelAlias, ModelCallDisposition, ModelCallId, ModelCallReconstitutionInput,
-    ModelCallReconstitutionState, ModelSelectionOverride, ModelSelectionRequest,
-    NonEmptyUnicodeTextFailure, OriginConfiguration, PerInputConfigurationChoices,
-    PinnedProviderTargetReconstitutionInput, PreparedSubmitInput, ProviderModelIdentity,
-    ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget,
-    SemanticTranscriptEntryId,
+    ActiveTurnSchedulingReconstitutionInput, Actor, AssistantText,
+    ConsumedSteeringReconstitutionInput, ContextFrontierId, DeliveryRequest, DirectModelSelection,
+    DurableCommandId, FailedTurnExecutionReconstitutionInput, FrozenAliasDefinition,
+    FrozenModelSelection, ModelAlias, ModelCallDisposition, ModelCallId,
+    ModelCallReconstitutionInput, ModelCallReconstitutionState, ModelSelectionOverride,
+    ModelSelectionRequest, NonEmptyUnicodeTextFailure, OriginConfiguration,
+    PerInputConfigurationChoices, PinnedProviderTargetReconstitutionInput, PreparedSubmitInput,
+    ProviderModelIdentity, ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput,
+    ResolvedProviderTarget, SemanticTranscriptEntryId,
     SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session,
     SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
@@ -1297,6 +1297,32 @@ pub(crate) async fn load_scheduling_projection(
     let active_acceptance_tail =
         load_active_acceptance_tail(connection, session_id, &turns).await?;
 
+    let consumed_steering_rows = sqlx::query(
+        "SELECT session_id, accepted_input_id, acceptance_position, expected_active_turn_id,
+                consuming_model_call_id
+           FROM accepted_input
+          WHERE session_id = $1
+            AND disposition_kind = 'consumed_as_steering'
+          ORDER BY acceptance_position",
+    )
+    .bind(session_id_to_uuid(session_id))
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut consumed_steering = Vec::with_capacity(consumed_steering_rows.len());
+    for row in consumed_steering_rows {
+        let call = ModelCallId::from_uuid(required(&row, "consuming_model_call_id")?);
+        required_model_calls.insert(call.into_uuid());
+        consumed_steering.push(ConsumedSteeringReconstitutionInput::new(
+            session_id_from_uuid(required(&row, "session_id")?),
+            AcceptedInputLifecycle::new(
+                accepted_input_id_from_uuid(required(&row, "accepted_input_id")?),
+                AcceptedInputDisposition::ConsumedAsSteering { call },
+            ),
+            decode_position(&row, "acceptance_position")?,
+            turn_id_from_uuid(required(&row, "expected_active_turn_id")?),
+        ));
+    }
+
     let required_model_call_ids = required_model_calls.iter().copied().collect::<Vec<_>>();
     let model_call_rows = sqlx::query(
         "SELECT
@@ -1635,6 +1661,7 @@ pub(crate) async fn load_scheduling_projection(
         active_acceptance_tail,
     )
     .with_model_call_facts(pinned_targets, model_calls)
+    .with_consumed_steering_facts(consumed_steering)
     .reconstitute()
     .map_err(|error| {
         let (_, failure) = error.into_parts();

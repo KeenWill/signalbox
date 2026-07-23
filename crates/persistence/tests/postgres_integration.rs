@@ -1971,14 +1971,21 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
     sqlx::query("ALTER TABLE context_frontier_member ENABLE TRIGGER USER")
         .execute(&pool)
         .await?;
-    assert!(matches!(
-        service.execute(session).await,
-        Err(ModelCallExecutionError::Prepare(
-            ModelCallRepositoryError::Corruption(ModelCallCorruption::Inconsistent(
-                "model-call snapshot member positions"
+    let corrupt_snapshot = service
+        .execute(session)
+        .await
+        .expect_err("the noncontiguous call snapshot must fail closed");
+    assert!(
+        matches!(
+            corrupt_snapshot,
+            ModelCallExecutionError::Prepare(ModelCallRepositoryError::Corruption(
+                ModelCallCorruption::Scheduling(SubmitInputCorruption::Inconsistent(
+                    "context frontier contiguous membership"
+                ))
             ))
-        ))
-    ));
+        ),
+        "unexpected noncontiguous-snapshot result: {corrupt_snapshot:?}"
+    );
     sqlx::query("ALTER TABLE context_frontier_member DISABLE TRIGGER USER")
         .execute(&pool)
         .await?;
@@ -2080,6 +2087,27 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
     .fetch_one(&pool)
     .await?;
     assert_eq!(durable_terminal, (1, 1, 2, 2));
+    let successor_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x19e4));
+    let successor_turn = TurnId::from_uuid(Uuid::from_u128(0x1ae4));
+    let successor = submit_repository
+        .handle(
+            start_input(
+                0x14e5,
+                0x18e1,
+                "request after consumed-steering restart",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            successor_input,
+            Some(successor_turn),
+        )
+        .await?;
+    assert!(matches!(
+        successor,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::TurnOrigin(_)
+        ))
+    ));
     assert_eq!(
         submit_repository
             .handle(

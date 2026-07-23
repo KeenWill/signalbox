@@ -383,6 +383,52 @@ impl SessionAcceptanceTailReconstitutionInput {
     }
 }
 
+/// Complete stored subject facts for one consumed steering semantic entry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConsumedSteeringReconstitutionInput {
+    session: SessionId,
+    accepted_input: AcceptedInputLifecycle,
+    acceptance_position: SessionInputPosition,
+    source_turn: TurnId,
+}
+
+impl ConsumedSteeringReconstitutionInput {
+    /// Supplies the accepted input's exact stored consumption and source turn.
+    pub const fn new(
+        session: SessionId,
+        accepted_input: AcceptedInputLifecycle,
+        acceptance_position: SessionInputPosition,
+        source_turn: TurnId,
+    ) -> Self {
+        Self {
+            session,
+            accepted_input,
+            acceptance_position,
+            source_turn,
+        }
+    }
+
+    /// Returns the stored owning session.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    /// Borrows the accepted input and its consumed disposition.
+    pub const fn accepted_input(&self) -> &AcceptedInputLifecycle {
+        &self.accepted_input
+    }
+
+    /// Returns the accepted input's immutable session position.
+    pub const fn acceptance_position(&self) -> SessionInputPosition {
+        self.acceptance_position
+    }
+
+    /// Returns the exact turn the input was accepted to steer.
+    pub const fn source_turn(&self) -> TurnId {
+        self.source_turn
+    }
+}
+
 /// One validated accepted input in an active turn's session tail.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SessionAcceptanceTailEntry {
@@ -618,6 +664,7 @@ pub struct AcceptedInputSchedulingReconstitutionInput {
     snapshots: Vec<ResolvedContextFrontierReconstitutionInput>,
     pinned_targets: Vec<crate::PinnedProviderTargetReconstitutionInput>,
     model_calls: Vec<crate::ModelCallReconstitutionInput>,
+    consumed_steering: Vec<ConsumedSteeringReconstitutionInput>,
     active_acceptance_tail: Option<SessionAcceptanceTailReconstitutionInput>,
 }
 
@@ -637,6 +684,7 @@ impl AcceptedInputSchedulingReconstitutionInput {
             snapshots,
             pinned_targets: Vec::new(),
             model_calls: Vec::new(),
+            consumed_steering: Vec::new(),
             active_acceptance_tail,
         }
     }
@@ -650,6 +698,15 @@ impl AcceptedInputSchedulingReconstitutionInput {
     ) -> Self {
         self.pinned_targets = pinned_targets;
         self.model_calls = model_calls;
+        self
+    }
+
+    /// Supplies every independently stored consumed-steering subject fact.
+    pub fn with_consumed_steering_facts(
+        mut self,
+        consumed_steering: Vec<ConsumedSteeringReconstitutionInput>,
+    ) -> Self {
+        self.consumed_steering = consumed_steering;
         self
     }
 
@@ -681,6 +738,11 @@ impl AcceptedInputSchedulingReconstitutionInput {
     /// Returns every independently stored turn-level target fact.
     pub fn pinned_targets(&self) -> &[crate::PinnedProviderTargetReconstitutionInput] {
         &self.pinned_targets
+    }
+
+    /// Returns every consumed-steering subject fact supplied as complete.
+    pub fn consumed_steering(&self) -> &[ConsumedSteeringReconstitutionInput] {
+        &self.consumed_steering
     }
 
     /// Borrows the claimed complete tail required by an active turn.
@@ -768,6 +830,26 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
     DuplicateSemanticEntryForSubject {
         /// The later duplicate entry.
         entry: SemanticTranscriptEntryId,
+    },
+    /// A consumed-steering subject fact belongs to another session.
+    ConsumedSteeringSessionMismatch {
+        /// The cross-wired accepted input.
+        accepted_input: AcceptedInputId,
+    },
+    /// The same consumed accepted input appeared more than once.
+    DuplicateConsumedSteering {
+        /// The duplicated accepted input.
+        accepted_input: AcceptedInputId,
+    },
+    /// A steering semantic entry has no exact consumed lifecycle/source fact.
+    SteeringSemanticEntryMismatch {
+        /// The affected semantic entry.
+        entry: SemanticTranscriptEntryId,
+    },
+    /// A consumed lifecycle/source fact has no exact semantic entry or call.
+    ConsumedSteeringMismatch {
+        /// The affected accepted input.
+        accepted_input: AcceptedInputId,
     },
     /// A tool-use entry was supplied before its execution decisions authorize
     /// construction and reconstitution.
@@ -1951,6 +2033,7 @@ fn reconstitute_inner(
     let mut semantic_entries = BTreeMap::new();
     let mut origin_by_turn = BTreeMap::new();
     let mut failure_by_turn = BTreeMap::new();
+    let mut steering_by_input = BTreeMap::new();
     let mut assistant_by_call = BTreeMap::<crate::ModelCallId, BTreeSet<_>>::new();
     let mut completion_by_turn = BTreeMap::new();
     for candidate in &input.semantic_entries {
@@ -2004,7 +2087,21 @@ fn reconstitute_inner(
                     );
                 }
             }
-            InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput { .. } => {}
+            InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput {
+                accepted_input,
+                source_turn,
+            } => {
+                if steering_by_input
+                    .insert(*accepted_input, (entry_reference, *source_turn))
+                    .is_some()
+                {
+                    return Err(
+                        AcceptedInputSchedulingReconstitutionFailure::DuplicateSemanticEntryForSubject {
+                            entry: candidate.identity(),
+                        },
+                    );
+                }
+            }
             InitialSemanticTranscriptEntryPayload::TurnFailed { turn } => {
                 let Some(record) = records_by_turn.get(turn) else {
                     return Err(
@@ -2140,6 +2237,229 @@ fn reconstitute_inner(
             return Err(AcceptedInputSchedulingReconstitutionFailure::DuplicateModelCall { call });
         }
     }
+    let model_call_inputs = input
+        .model_calls
+        .iter()
+        .map(|call| (call.id(), call))
+        .collect::<BTreeMap<_, _>>();
+    let mut consumed_inputs = BTreeSet::new();
+    let mut consumed_by_call = BTreeMap::<
+        crate::ModelCallId,
+        Vec<(
+            SessionInputPosition,
+            SemanticTranscriptEntryRef,
+            AcceptedInputId,
+        )>,
+    >::new();
+    for consumed in &input.consumed_steering {
+        let accepted_input = consumed.accepted_input.id();
+        if consumed.session != session {
+            return Err(
+                AcceptedInputSchedulingReconstitutionFailure::ConsumedSteeringSessionMismatch {
+                    accepted_input,
+                },
+            );
+        }
+        if !consumed_inputs.insert(accepted_input) {
+            return Err(
+                AcceptedInputSchedulingReconstitutionFailure::DuplicateConsumedSteering {
+                    accepted_input,
+                },
+            );
+        }
+        let Some((entry, semantic_source_turn)) = steering_by_input.remove(&accepted_input) else {
+            return Err(
+                AcceptedInputSchedulingReconstitutionFailure::ConsumedSteeringMismatch {
+                    accepted_input,
+                },
+            );
+        };
+        let AcceptedInputDisposition::ConsumedAsSteering { call } =
+            consumed.accepted_input.disposition()
+        else {
+            return Err(
+                AcceptedInputSchedulingReconstitutionFailure::ConsumedSteeringMismatch {
+                    accepted_input,
+                },
+            );
+        };
+        let source_record = records_by_turn.get(&consumed.source_turn).copied();
+        let source_record_matches = source_record.is_some_and(|record| {
+            !matches!(record.state, AcceptedInputTurnSchedulingRecordState::Queued)
+        });
+        let active_tail_matches = input.active_acceptance_tail.as_ref().is_some_and(|tail| {
+            tail.entries.iter().any(|candidate| {
+                candidate.session == session
+                    && candidate.accepted_input == consumed.accepted_input
+                    && candidate.position == consumed.acceptance_position
+                    && matches!(
+                        candidate.delivery,
+                        DeliveryRequest::NextSafePoint {
+                            expected_active_turn,
+                        } if expected_active_turn == consumed.source_turn
+                            && expected_active_turn == semantic_source_turn
+                    )
+            })
+        });
+        let source_is_active = source_record.is_some_and(|record| {
+            matches!(
+                record.state,
+                AcceptedInputTurnSchedulingRecordState::Active { .. }
+            )
+        });
+        let model_call_matches = model_call_inputs.get(call).zip(source_record).is_some_and(
+            |(model_call, record)| {
+                let lifecycle_matches = match &record.state {
+                    AcceptedInputTurnSchedulingRecordState::Queued => false,
+                    AcceptedInputTurnSchedulingRecordState::Active { phase, .. } => {
+                        model_call.attempt() == phase.current_attempt
+                            && match (phase.state, model_call.state()) {
+                                (
+                                    StoredActiveTurnPhase::Prepared,
+                                    crate::ModelCallReconstitutionState::Prepared,
+                                )
+                                | (
+                                    StoredActiveTurnPhase::Running,
+                                    crate::ModelCallReconstitutionState::InFlight
+                                    | crate::ModelCallReconstitutionState::CancellationRequested,
+                                ) => true,
+                                (
+                                    StoredActiveTurnPhase::AwaitingModelCallRecovery {
+                                        call, ..
+                                    },
+                                    crate::ModelCallReconstitutionState::Terminal(
+                                        ModelCallDisposition::Ambiguous,
+                                    ),
+                                ) => call == model_call.id(),
+                                _ => false,
+                            }
+                    }
+                    AcceptedInputTurnSchedulingRecordState::TerminalFailed {
+                        terminal_execution: Some(execution),
+                        ..
+                    } => {
+                        model_call.attempt() == execution.ended_attempt
+                            && execution.ended_call == Some(model_call.id())
+                            && matches!(
+                                model_call.state(),
+                                crate::ModelCallReconstitutionState::Terminal(
+                                    ModelCallDisposition::KnownFailed
+                                        | ModelCallDisposition::Cancelled
+                                )
+                            )
+                    }
+                    AcceptedInputTurnSchedulingRecordState::TerminalFailed {
+                        terminal_execution: None,
+                        ..
+                    } => false,
+                    AcceptedInputTurnSchedulingRecordState::TerminalCompleted {
+                        completing_attempt,
+                        completing_call,
+                        ..
+                    } => {
+                        model_call.attempt() == *completing_attempt
+                            && model_call.id() == *completing_call
+                            && model_call.state()
+                                == crate::ModelCallReconstitutionState::Terminal(
+                                    ModelCallDisposition::Completed,
+                                )
+                    }
+                    AcceptedInputTurnSchedulingRecordState::TerminalRefused {
+                        refusing_attempt,
+                        refusing_call,
+                        ..
+                    } => {
+                        model_call.attempt() == *refusing_attempt
+                            && model_call.id() == *refusing_call
+                            && model_call.state()
+                                == crate::ModelCallReconstitutionState::Terminal(
+                                    ModelCallDisposition::Refused,
+                                )
+                    }
+                };
+                model_call.turn() == consumed.source_turn
+                    && semantic_source_turn == consumed.source_turn
+                    && model_call.selection() == *record.origin_configuration.effective().model()
+                    && lifecycle_matches
+            },
+        );
+        if accepted_input_turns.contains_key(&accepted_input)
+            || !source_record_matches
+            || !model_call_matches
+            || (source_is_active && !active_tail_matches)
+        {
+            return Err(
+                AcceptedInputSchedulingReconstitutionFailure::ConsumedSteeringMismatch {
+                    accepted_input,
+                },
+            );
+        }
+        consumed_by_call.entry(*call).or_default().push((
+            consumed.acceptance_position,
+            entry,
+            accepted_input,
+        ));
+    }
+    if let Some((_, (entry, _))) = steering_by_input.first_key_value() {
+        return Err(
+            AcceptedInputSchedulingReconstitutionFailure::SteeringSemanticEntryMismatch {
+                entry: entry.entry(),
+            },
+        );
+    }
+    let mut consumed_model_calls = BTreeSet::new();
+    let mut consumed_snapshots = BTreeSet::new();
+    for (call, mut consumed_entries) in consumed_by_call {
+        consumed_entries.sort_unstable_by_key(|(position, _, _)| *position);
+        let Some((_, _, first_accepted_input)) = consumed_entries.first().copied() else {
+            continue;
+        };
+        if consumed_entries
+            .windows(2)
+            .any(|entries| entries[0].0 == entries[1].0)
+        {
+            return Err(
+                AcceptedInputSchedulingReconstitutionFailure::ConsumedSteeringMismatch {
+                    accepted_input: first_accepted_input,
+                },
+            );
+        }
+        let model_call = model_call_inputs[&call];
+        let record = records_by_turn[&model_call.turn()];
+        let starting_frontier = match record.state {
+            AcceptedInputTurnSchedulingRecordState::Queued => None,
+            AcceptedInputTurnSchedulingRecordState::Active {
+                starting_frontier, ..
+            }
+            | AcceptedInputTurnSchedulingRecordState::TerminalFailed {
+                starting_frontier, ..
+            }
+            | AcceptedInputTurnSchedulingRecordState::TerminalCompleted {
+                starting_frontier, ..
+            }
+            | AcceptedInputTurnSchedulingRecordState::TerminalRefused {
+                starting_frontier, ..
+            } => Some(starting_frontier),
+        };
+        let exact_frontier_matches = starting_frontier
+            .and_then(|frontier| snapshots.get(&frontier))
+            .zip(snapshots.get(&model_call.frontier()))
+            .is_some_and(|(starting, call_snapshot)| {
+                starting
+                    .ordered_entries()
+                    .chain(consumed_entries.iter().map(|(_, entry, _)| *entry))
+                    .eq(call_snapshot.ordered_entries())
+            });
+        if !exact_frontier_matches {
+            return Err(
+                AcceptedInputSchedulingReconstitutionFailure::ConsumedSteeringMismatch {
+                    accepted_input: first_accepted_input,
+                },
+            );
+        }
+        consumed_model_calls.insert(call);
+        consumed_snapshots.insert(model_call.frontier());
+    }
     if let Some(turn) = pinned_targets
         .keys()
         .find(|turn| !referenced_pinned_targets.contains(turn))
@@ -2180,8 +2500,8 @@ fn reconstitute_inner(
     let mut previous_terminal: Option<(TurnId, ResolvedContextFrontierSnapshot)> = None;
     let mut active = None;
     let mut queued_seen = false;
-    let mut referenced_snapshots = BTreeSet::new();
-    let mut referenced_model_calls = BTreeSet::new();
+    let mut referenced_snapshots = consumed_snapshots;
+    let mut referenced_model_calls = consumed_model_calls;
     let mut attempt_owners = BTreeMap::new();
 
     for (index, turn) in total_order.into_iter().enumerate() {
@@ -2255,7 +2575,8 @@ fn reconstitute_inner(
                             || ended_call.attempt() != phase.current_attempt
                             || ended_call.selection()
                                 != *record.origin_configuration.effective().model()
-                            || ended_call.frontier().snapshot() != *starting_frontier
+                            || (ended_call.frontier().snapshot() != *starting_frontier
+                                && !referenced_model_calls.contains(&call))
                             || ended_call.disposition() != ModelCallDisposition::Ambiguous
                         {
                             return Err(
@@ -2316,6 +2637,7 @@ fn reconstitute_inner(
                         },
                     );
                 }
+                let mut terminal_call_frontier = None;
                 let start = validate_start(
                     index,
                     turn,
@@ -2376,7 +2698,8 @@ fn reconstitute_inner(
                             || call.attempt() != attempt
                             || call.selection() != *record.origin_configuration.effective().model()
                             || call.target() != pinned.target()
-                            || call.frontier().snapshot() != *starting_frontier
+                            || (call.frontier().snapshot() != *starting_frontier
+                                && !referenced_model_calls.contains(&call_id))
                             || !matches!(
                                 call.disposition(),
                                 ModelCallDisposition::KnownFailed | ModelCallDisposition::Cancelled
@@ -2388,6 +2711,7 @@ fn reconstitute_inner(
                                 },
                             );
                         }
+                        terminal_call_frontier = Some(call.frontier().snapshot());
                         referenced_model_calls.insert(call_id);
                     }
                 }
@@ -2404,7 +2728,14 @@ fn reconstitute_inner(
                 let failed_entry = failure_by_turn.get(&turn).copied().ok_or(
                     AcceptedInputSchedulingReconstitutionFailure::MissingFailureEntry { turn },
                 )?;
-                let mut expected = start_snapshot_entries(&snapshots, start);
+                let mut expected = terminal_call_frontier.map_or_else(
+                    || start_snapshot_entries(&snapshots, start),
+                    |call_frontier| {
+                        snapshots[&call_frontier]
+                            .ordered_entries()
+                            .collect::<Vec<_>>()
+                    },
+                );
                 expected.push(failed_entry);
                 if terminal.ordered_entries().ne(expected.iter().copied()) {
                     return Err(
@@ -2469,7 +2800,8 @@ fn reconstitute_inner(
                     )
                     || call.selection() != *record.origin_configuration.effective().model()
                     || call.disposition() != ModelCallDisposition::Completed
-                    || call.frontier().snapshot() != *starting_frontier
+                    || (call.frontier().snapshot() != *starting_frontier
+                        && !referenced_model_calls.contains(completing_call))
                 {
                     return Err(
                         AcceptedInputSchedulingReconstitutionFailure::TerminalModelCallMismatch {
@@ -2495,11 +2827,11 @@ fn reconstitute_inner(
                     .get(completing_call)
                     .cloned()
                     .unwrap_or_default();
-                let starting = snapshots.get(starting_frontier).ok_or(
+                let call_frontier = snapshots.get(&call.frontier().snapshot()).ok_or(
                     AcceptedInputSchedulingReconstitutionFailure::StartingSnapshotMissing { turn },
                 )?;
                 if !completed_terminal_matches(
-                    starting,
+                    call_frontier,
                     &terminal,
                     *completing_call,
                     &assistant_entries,
@@ -2568,7 +2900,8 @@ fn reconstitute_inner(
                     )
                     || call.selection() != *record.origin_configuration.effective().model()
                     || call.disposition() != ModelCallDisposition::Refused
-                    || call.frontier().snapshot() != *starting_frontier
+                    || (call.frontier().snapshot() != *starting_frontier
+                        && !referenced_model_calls.contains(refusing_call))
                 {
                     return Err(
                         AcceptedInputSchedulingReconstitutionFailure::TerminalModelCallMismatch {
@@ -2583,7 +2916,7 @@ fn reconstitute_inner(
                 if !referenced_snapshots.insert(*terminal_frontier)
                     || terminal
                         .ordered_entries()
-                        .ne(start_snapshot_entries(&snapshots, start))
+                        .ne(snapshots[&call.frontier().snapshot()].ordered_entries())
                 {
                     return Err(
                         AcceptedInputSchedulingReconstitutionFailure::TerminalFrontierMismatch {
@@ -3759,6 +4092,106 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct ConsumedSteeringReconstitutionFacts {
+        session: Session,
+        turns: Vec<AcceptedInputTurnSchedulingRecord>,
+        semantic_entries: Vec<SemanticTranscriptEntryReconstitutionInput>,
+        snapshots: Vec<ResolvedContextFrontierReconstitutionInput>,
+        acceptance_tail: SessionAcceptanceTailReconstitutionInput,
+        pinned_targets: Vec<crate::PinnedProviderTargetReconstitutionInput>,
+        model_calls: Vec<ModelCallReconstitutionInput>,
+        consumed_steering: Vec<ConsumedSteeringReconstitutionInput>,
+    }
+
+    impl ConsumedSteeringReconstitutionFacts {
+        fn matching(session: &Session, active: OriginFixture, consumed: OriginFixture) -> Self {
+            let origin_entry = ActiveReconstitutionFacts::matching_origin_entry();
+            let steering_entry = semantic_entry(31);
+            let starting_frontier = ActiveReconstitutionFacts::matching_starting_frontier();
+            let call_frontier = frontier(41);
+            let call_id = model_call_id(91);
+            let target = ResolvedProviderTarget::naming(provider_model_identity(51));
+            let consumed_lifecycle = AcceptedInputLifecycle::new(
+                consumed.accepted_input(),
+                AcceptedInputDisposition::ConsumedAsSteering { call: call_id },
+            );
+            let mut acceptance_tail = active.active_tail(session);
+            acceptance_tail.observed_last_position = consumed.position();
+            acceptance_tail
+                .entries
+                .push(SessionAcceptanceTailEntryReconstitutionInput::new(
+                    session.id(),
+                    consumed_lifecycle.clone(),
+                    consumed.position(),
+                    DeliveryRequest::NextSafePoint {
+                        expected_active_turn: active.turn(),
+                    },
+                ));
+            Self {
+                session: session.clone(),
+                turns: vec![active.record(
+                    session,
+                    AcceptedInputTurnSchedulingRecordState::Active {
+                        starting_lineage: AcceptedInputStartingLineage::FirstInSession,
+                        starting_frontier: starting_frontier.id(),
+                        phase: ActiveTurnSchedulingReconstitutionInput::prepared(
+                            active.turn(),
+                            matching_active_attempt(),
+                        ),
+                    },
+                )],
+                semantic_entries: vec![
+                    active.entry(session, origin_entry),
+                    SemanticTranscriptEntryReconstitutionInput::new(
+                        steering_entry.id(),
+                        session.id(),
+                        InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput {
+                            accepted_input: consumed.accepted_input(),
+                            source_turn: active.turn(),
+                        },
+                    ),
+                ],
+                snapshots: vec![
+                    starting_frontier.snapshot(session, &[origin_entry]),
+                    call_frontier.snapshot(session, &[origin_entry, steering_entry]),
+                ],
+                acceptance_tail,
+                pinned_targets: vec![crate::PinnedProviderTargetReconstitutionInput::new(
+                    active.turn(),
+                    target,
+                )],
+                model_calls: vec![ModelCallReconstitutionInput::new(
+                    call_id,
+                    active.turn(),
+                    matching_active_attempt(),
+                    FrozenModelSelection::Direct(direct(1)),
+                    target,
+                    call_frontier.id(),
+                    ModelCallReconstitutionState::Prepared,
+                )],
+                consumed_steering: vec![ConsumedSteeringReconstitutionInput::new(
+                    session.id(),
+                    consumed_lifecycle,
+                    consumed.position(),
+                    active.turn(),
+                )],
+            }
+        }
+
+        fn input(self) -> AcceptedInputSchedulingReconstitutionInput {
+            AcceptedInputSchedulingReconstitutionInput::new(
+                self.session,
+                self.turns,
+                self.semantic_entries,
+                self.snapshots,
+                Some(self.acceptance_tail),
+            )
+            .with_model_call_facts(self.pinned_targets, self.model_calls)
+            .with_consumed_steering_facts(self.consumed_steering)
+        }
+    }
+
     fn active_input(
         session: &Session,
         active: OriginFixture,
@@ -4492,6 +4925,99 @@ mod tests {
         assert_eq!(
             frontier_collision.failure(),
             AcceptedInputTurnFailureFailure::TerminalFrontierIdentityAlreadyExists
+        );
+    }
+
+    /// S02 / S08 / S09 / INV-012 / INV-016 / INV-036: scheduling
+    /// reconstitution admits consumed steering only when its semantic subject,
+    /// accepted lifecycle, source turn, call frontier, and acceptance order
+    /// agree exactly.
+    #[test]
+    fn s02_s08_s09_inv012_inv016_inv036_reconstitution_validates_steering_subjects() {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let consumed = accepted_origin(2);
+        ConsumedSteeringReconstitutionFacts::matching(&session, active, consumed)
+            .input()
+            .reconstitute()
+            .expect("matching consumed steering reconstructs");
+
+        let mut nonexistent =
+            ConsumedSteeringReconstitutionFacts::matching(&session, active, consumed);
+        nonexistent.semantic_entries[1] = SemanticTranscriptEntryReconstitutionInput::new(
+            semantic_entry(31).id(),
+            session.id(),
+            InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput {
+                accepted_input: accepted_input_id(99),
+                source_turn: active.turn(),
+            },
+        );
+        assert_eq!(
+            assert_input_rejects_unchanged(nonexistent.input()),
+            AcceptedInputSchedulingReconstitutionFailure::ConsumedSteeringMismatch {
+                accepted_input: consumed.accepted_input(),
+            }
+        );
+
+        let mut wrong_source =
+            ConsumedSteeringReconstitutionFacts::matching(&session, active, consumed);
+        wrong_source.semantic_entries[1] = SemanticTranscriptEntryReconstitutionInput::new(
+            semantic_entry(31).id(),
+            session.id(),
+            InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput {
+                accepted_input: consumed.accepted_input(),
+                source_turn: turn_id(99),
+            },
+        );
+        assert_eq!(
+            assert_input_rejects_unchanged(wrong_source.input()),
+            AcceptedInputSchedulingReconstitutionFailure::ConsumedSteeringMismatch {
+                accepted_input: consumed.accepted_input(),
+            }
+        );
+
+        let mut missing_lifecycle =
+            ConsumedSteeringReconstitutionFacts::matching(&session, active, consumed);
+        missing_lifecycle.consumed_steering.clear();
+        assert_eq!(
+            assert_input_rejects_unchanged(missing_lifecycle.input()),
+            AcceptedInputSchedulingReconstitutionFailure::SteeringSemanticEntryMismatch {
+                entry: semantic_entry(31).id(),
+            }
+        );
+
+        let mut duplicate_subject =
+            ConsumedSteeringReconstitutionFacts::matching(&session, active, consumed);
+        duplicate_subject
+            .semantic_entries
+            .push(SemanticTranscriptEntryReconstitutionInput::new(
+                semantic_entry(32).id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput {
+                    accepted_input: consumed.accepted_input(),
+                    source_turn: active.turn(),
+                },
+            ));
+        assert_eq!(
+            assert_input_rejects_unchanged(duplicate_subject.input()),
+            AcceptedInputSchedulingReconstitutionFailure::DuplicateSemanticEntryForSubject {
+                entry: semantic_entry(32).id(),
+            }
+        );
+
+        let mut duplicate_lifecycle =
+            ConsumedSteeringReconstitutionFacts::matching(&session, active, consumed);
+        let duplicate = duplicate_lifecycle
+            .consumed_steering
+            .first()
+            .cloned()
+            .expect("the matching fixture contains one consumed subject");
+        duplicate_lifecycle.consumed_steering.push(duplicate);
+        assert_eq!(
+            assert_input_rejects_unchanged(duplicate_lifecycle.input()),
+            AcceptedInputSchedulingReconstitutionFailure::DuplicateConsumedSteering {
+                accepted_input: consumed.accepted_input(),
+            }
         );
     }
 
