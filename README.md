@@ -87,6 +87,40 @@ consumed by the domain crate's tests. Before finishing any change, run the
 repository-wide validation sequence in [AGENTS.md](AGENTS.md) — the canonical
 list of required commands and their setup notes — from the repository root.
 
+### Terminal client
+
+The `signalbox` binary is the supported local terminal surface for the
+[process protocol](docs/spec/process-protocol.md). Point it at the hub socket
+with `--socket` or `SIGNALBOX_SOCKET_PATH`; `signalbox --help` lists the closed
+command surface. For example:
+
+```console
+cargo run -p signalbox-client -- --socket /path/to/signalbox.sock list
+printf '%s' 'hello' |
+  cargo run -p signalbox-client -- --socket /path/to/signalbox.sock \
+    send 00000000-0000-4000-8000-000000000001
+```
+
+The Docker-backed offline terminal-to-model smoke test is explicitly ignored:
+
+```console
+cargo test -p signalbox-client --test end_to_end \
+  terminal_client_completes_an_offline_scripted_conversation \
+  -- --ignored --nocapture
+```
+
+The companion ignored real-Anthropic path makes a live provider request and may
+incur cost. It runs only when all three opt-in values are supplied:
+
+```console
+SIGNALBOX_E2E_CONFIG_FILE=config/hubd.example.toml \
+SIGNALBOX_E2E_ANTHROPIC_API_KEY_FILE=/path/to/anthropic-api-key \
+SIGNALBOX_E2E_SELECTION_ID=10000000-0000-4000-8000-000000000001 \
+  cargo test -p signalbox-client --test end_to_end \
+    terminal_client_completes_the_real_anthropic_path \
+    -- --ignored --nocapture
+```
+
 ### Scripted debug harness
 
 The `signalbox-debug` binary is a local development harness, not the supported

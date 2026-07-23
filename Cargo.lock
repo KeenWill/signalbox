@@ -2362,7 +2362,16 @@ dependencies = [
 name = "signalbox-client"
 version = "0.0.0"
 dependencies = [
+ "signalbox-application",
+ "signalbox-domain",
+ "signalbox-hubd",
+ "signalbox-model-provider-runtime",
+ "signalbox-model-runtime",
+ "signalbox-model-runtime-anthropic",
+ "signalbox-persistence",
  "signalbox-process-protocol",
+ "sqlx",
+ "testcontainers-modules",
  "tokio",
  "uuid",
 ]

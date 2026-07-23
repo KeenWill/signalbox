@@ -22,7 +22,27 @@ tokio = { version = "1.53.0", default-features = false, features = [
 uuid = { version = "1.24.0", default-features = false, features = ["std", "v7"] }
 
 [dev-dependencies]
-tokio = { version = "1.53.0", default-features = false, features = ["time"] }
+signalbox-application = { path = "../../crates/application" }
+signalbox-domain = { path = "../../crates/domain" }
+signalbox-hubd = { path = "../hubd" }
+signalbox-model-provider-runtime = { path = "../../crates/model-provider-runtime" }
+signalbox-model-runtime = { path = "../../crates/model-runtime" }
+signalbox-model-runtime-anthropic = { path = "../../crates/model-runtime-anthropic" }
+signalbox-persistence = { path = "../../crates/persistence" }
+sqlx = { version = "0.9.0", default-features = false, features = [
+    "postgres",
+    "runtime-tokio",
+] }
+testcontainers-modules = { version = "0.15.0", default-features = false, features = [
+    "postgres",
+    "ring",
+] }
+tokio = { version = "1.53.0", default-features = false, features = [
+    "process",
+    "sync",
+    "test-util",
+    "time",
+] }
 
 [lints]
 workspace = true

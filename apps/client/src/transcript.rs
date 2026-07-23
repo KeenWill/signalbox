@@ -29,25 +29,30 @@ impl TranscriptSnapshot {
             .map(|turn| &turn.state)
     }
 
-    pub(crate) fn assistant_text(&self, selected_turn: CanonicalUuid) -> Result<&str, ClientError> {
-        let mut matching = self.entries.iter().filter_map(|entry| match &entry.kind {
-            SnapshotEntryKind::Text {
-                metadata: TranscriptTextEntry::Assistant { turn_id, .. },
-                content,
-            } if *turn_id == selected_turn => Some(content.as_str()),
-            SnapshotEntryKind::Text { .. }
-            | SnapshotEntryKind::Marker(TranscriptEntry::TurnCompleted { .. })
-            | SnapshotEntryKind::Marker(TranscriptEntry::TurnFailed { .. }) => None,
-        });
-        let text = matching.next().ok_or(ClientError::Protocol(
-            "completed turn had no assistant transcript entry",
-        ))?;
-        if matching.next().is_some() {
-            return Err(ClientError::Protocol(
-                "completed turn had multiple assistant transcript entries",
-            ));
+    pub(crate) fn assistant_texts(
+        &self,
+        selected_turn: CanonicalUuid,
+    ) -> Result<Vec<&str>, ClientError> {
+        let matching = self
+            .entries
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                SnapshotEntryKind::Text {
+                    metadata: TranscriptTextEntry::Assistant { turn_id, .. },
+                    content,
+                } if *turn_id == selected_turn => Some(content.as_str()),
+                SnapshotEntryKind::Text { .. }
+                | SnapshotEntryKind::Marker(TranscriptEntry::TurnCompleted { .. })
+                | SnapshotEntryKind::Marker(TranscriptEntry::TurnFailed { .. }) => None,
+            })
+            .collect::<Vec<_>>();
+        if matching.is_empty() {
+            Err(ClientError::Protocol(
+                "completed turn had no assistant transcript entry",
+            ))
+        } else {
+            Ok(matching)
         }
-        Ok(text)
     }
 }
 
@@ -97,7 +102,9 @@ pub(crate) async fn read_snapshot(
 
     let mut turns = Vec::new();
     let mut turn_ids = HashSet::new();
+    let mut prior_acceptance_position = None;
     let mut entries = Vec::new();
+    let mut entry_ids = HashSet::new();
     let mut entries_started = false;
     loop {
         match connection.message().await? {
@@ -106,15 +113,16 @@ pub(crate) async fn read_snapshot(
                 acceptance_position,
                 state,
             } if !entries_started => {
-                let expected_position = u64::try_from(turns.len())
-                    .ok()
-                    .and_then(|count| count.checked_add(1))
-                    .ok_or(ClientError::Protocol("snapshot turn count overflowed"))?;
-                if acceptance_position.value() != expected_position || !turn_ids.insert(turn_id) {
+                let position = acceptance_position.value();
+                if position == 0
+                    || prior_acceptance_position.is_some_and(|prior| prior >= position)
+                    || !turn_ids.insert(turn_id)
+                {
                     return Err(ClientError::Protocol(
                         "snapshot turns were not unique acceptance-order projections",
                     ));
                 }
+                prior_acceptance_position = Some(position);
                 turns.push(TranscriptTurn { turn_id, state });
             }
             ServerMessage::TranscriptEntry {
@@ -125,6 +133,11 @@ pub(crate) async fn read_snapshot(
             } => {
                 entries_started = true;
                 require_entry_index(entry_index.value(), entries.len())?;
+                if !entry_ids.insert((source_session_id, entry_id)) {
+                    return Err(ClientError::Protocol(
+                        "snapshot repeated a source-qualified entry identity",
+                    ));
+                }
                 entries.push(SnapshotEntry {
                     source_session_id,
                     entry_id,
@@ -139,6 +152,11 @@ pub(crate) async fn read_snapshot(
             } => {
                 entries_started = true;
                 require_entry_index(entry_index.value(), entries.len())?;
+                if !entry_ids.insert((source_session_id, entry_id)) {
+                    return Err(ClientError::Protocol(
+                        "snapshot repeated a source-qualified entry identity",
+                    ));
+                }
                 let content = read_content(connection, entry_index.value()).await?;
                 entries.push(SnapshotEntry {
                     source_session_id,

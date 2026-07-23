@@ -181,9 +181,7 @@ async fn create(
             message,
             detail,
         } => Err(ClientError::remote(code, message, detail)),
-        _ => Err(ClientError::Protocol(
-            "create returned an unexpected response",
-        )),
+        _ => Err(ClientError::Protocol("create returned an unexpected response").mutation()),
     }
 }
 
@@ -245,9 +243,7 @@ async fn send(
             detail,
         } => return Err(ClientError::remote(code, message, detail)),
         _ => {
-            return Err(ClientError::Protocol(
-                "submit returned an unexpected response",
-            ));
+            return Err(ClientError::Protocol("submit returned an unexpected response").mutation());
         }
     };
 
@@ -262,7 +258,9 @@ async fn send(
                     "terminal reread did not retain completed turn state",
                 ));
             }
-            output.assistant_text(snapshot.assistant_text(turn_id)?)?;
+            for text in snapshot.assistant_texts(turn_id)? {
+                output.assistant_text(text)?;
+            }
             Ok(())
         }
         TurnTerminal::Failed => Err(ClientError::TurnFailed),
