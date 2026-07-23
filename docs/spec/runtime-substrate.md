@@ -243,7 +243,10 @@ the SSE record limit and whole-exchange timeout must both be positive.
 Construction failure is a configuration defect, not operation evidence.
 
 Provider traffic uses reqwest 0.13 with default features disabled and only its
-rustls and byte-stream features enabled. Both clients force the rustls backend,
+providerless rustls-platform-verifier and byte-stream features enabled. Both
+adapter crates select rustls's ring crypto provider, matching the provider
+selected by the process's SQLx TLS stack, so the unified rustls instance never
+has two implicit provider candidates. Both clients force the rustls backend,
 verify the server certificate and hostname against `rustls-platform-verifier`'s
 platform trust roots, require TLS 1.2 or newer, and carry no custom-root or
 verification-bypass surface. Ambient system and environment proxies are disabled
