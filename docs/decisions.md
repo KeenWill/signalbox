@@ -10,6 +10,22 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-23 — Trust only root or the hub user in socket ancestry
+
+**Context.** A non-writable ancestor owned by a different unprivileged user is
+not stable: its owner can later broaden its mode, rename the next component, and
+substitute an impostor socket hierarchy after startup validation.
+
+**Decision.** Require every resolved socket-parent ancestor to be owned by
+either root or the hub's effective user, in addition to the sticky-directory and
+child-ownership rules. Root remains the operating-system trust boundary.
+
+**Rejected alternatives.** Trusting the mode observed at one instant ignores the
+owner's authority to change it. Requiring the hub user to own system ancestors
+would reject ordinary paths beneath root-owned `/`, `/var`, or `/tmp`.
+
+**Affects.** Local process-socket ancestry validation and its startup tests.
+
 ## 2026-07-23 — Bound the local process-socket backlog at 128
 
 **Context.** The guarded Unix listener must select a finite kernel accept queue.

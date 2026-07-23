@@ -393,8 +393,12 @@ cursor only after consumer acceptance. Consumer retry or exit before the commit
 request leaves the prefix unchanged for redelivery. A lost commit response is
 resolved by the next locked cursor read: a committed advance proceeds, while a
 rolled-back advance redelivers. The injected rolled-back-commit PostgreSQL test
-enforces ordered at-least-once behavior. Hub task ownership, polling, fan-out,
-and client observation semantics are owned by
+enforces ordered at-least-once behavior. Before offering a record, the
+dispatcher proves that its header does not exceed the allocator cursor and that
+failed, completed, and refused records agree with the durable turn, terminal
+frontier, semantic marker where present, and terminal model call where present.
+Exhausted delivery still validates the allocator singleton and cursor. Hub task
+ownership, polling, fan-out, and client observation semantics are owned by
 [process-protocol](process-protocol.md).
 
 ## Open edges
