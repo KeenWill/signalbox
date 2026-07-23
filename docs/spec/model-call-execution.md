@@ -208,9 +208,9 @@ exactly-once claim.
 Classification is an adapter contract consuming the full-request-send boundary
 ([runtime-substrate](runtime-substrate.md)); the hub never reinterprets SDK
 errors by retryability or exception type. The runtime bridge
-(`crates/model-provider-runtime/src/lib.rs`) maps the
-runtime's typed terminal evidence ([runtime-substrate](runtime-substrate.md)
-owns how evidence is derived) to exactly one disposition:
+(`crates/model-provider-runtime/src/lib.rs`) maps the runtime's typed terminal
+evidence ([runtime-substrate](runtime-substrate.md) owns how evidence is
+derived) to exactly one disposition:
 
 | Terminal evidence                                                            | Disposition   |
 | ---------------------------------------------------------------------------- | ------------- |
@@ -246,9 +246,8 @@ persistence commits it atomically with its outbox rows
   those entries. The single implemented writer (`persist_completed`) commits
   call disposition, attempt end, entries, marker, frontier, and turn lifecycle
   in one transaction (the final-response all-or-nothing boundary), so no
-  committed state
-  carries a prefix of the sequence, a completed turn without its marker, or the
-  marker before its content; storage deduplicates the marker
+  committed state carries a prefix of the sequence, a completed turn without its
+  marker, or the marker before its content; storage deduplicates the marker
   (`semantic_transcript_entry_turn_completed_once`), and the deferred
   final-state constraint triggers reject at commit a completed terminal turn
   without exactly one marker. Why: a physically completed call is not a

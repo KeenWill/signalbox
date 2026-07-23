@@ -16,9 +16,11 @@ changing normative semantics in a specification page beyond recording
 implemented behavior, moving a boundary between domain, storage, wire, or
 framework representations, weakening an invariant, introducing a technology that
 constrains several components, or closing a foundation-weight open question — is
-proposed as a specification diff reviewed at the bottom of its implementing
-stack; the record is under review while the pull request is open, and the
-owner's merge is its acceptance.
+proposed, per the owning rule in [AGENTS.md](AGENTS.md), as a specification diff
+reviewed at the bottom of its implementing stack, with a
+[decision log](docs/decisions.md) entry recording the choice; the record is
+under review while the pull request is open, and the owner's merge is its
+acceptance.
 
 ## Contribution rules
 

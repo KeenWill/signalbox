@@ -9,14 +9,15 @@ selection aims at a destination instead of drifting.
 This document is **directional destination only, never authority**. Implemented
 behavior is owned by the [living specification](spec/README.md) under
 `docs/spec/`, together with the [invariant catalog](invariants.md) and the
-[glossary](glossary.md); where this document and those pages disagree about what
-the system does, they win and this document describes only where the system is
-headed. Concepts described here that the spec does not yet describe are
-**targets awaiting decisions, not decisions**: naming a concept here authorizes
-neither its implementation nor a silent closure of an open question. The
-[one-place rule](../AGENTS.md) applies throughout — implemented semantics are
-linked, never restated, and only target-only concepts are owned by this
-document.
+[domain spine](domain-spine.md); where this document and those pages disagree
+about what the system does, they win and this document describes only where the
+system is headed. The [glossary](glossary.md) is a terminology index, not part
+of that normative surface. Concepts described here that the spec does not yet
+describe are **targets awaiting decisions, not decisions**: naming a concept
+here authorizes neither its implementation nor a silent closure of an open
+question. The [one-place rule](../AGENTS.md) applies throughout — implemented
+semantics are linked, never restated, and only target-only concepts are owned by
+this document.
 
 Milestone selection rules for autonomous runs live in
 [goal-mode.md](goal-mode.md); this document owns only the
@@ -407,11 +408,14 @@ reached by proposing that decision, not by implementing around it.
    assistant-content commit, and the idempotent startup scan (INV-034), end to
    end ([model-call-execution](spec/model-call-execution.md); remaining
    refinements are that page's open edges).
-4. **A smoke against a real provider** — landed. The same model-call lifecycle
-   exercised through a real provider adapter, resolved and reported target
-   evidence included ([model-call-execution](spec/model-call-execution.md),
-   [runtime-substrate](spec/runtime-substrate.md)). This was the gate before
-   destination-feature milestones.
+4. **A smoke against a real provider** — landed for the owner-run smoke. The
+   same model-call lifecycle exercised through a real provider adapter, resolved
+   and reported target evidence included
+   ([model-call-execution](spec/model-call-execution.md),
+   [runtime-substrate](spec/runtime-substrate.md)); the production security
+   posture for outbound provider calls remains open per
+   [provider-call-security](open-questions.md#provider-call-security). This was
+   the gate before destination-feature milestones.
 5. **The tool loop with approvals.** ToolRequest and ToolAttempt lifecycles, the
    trusted risk registry, approval consumption, and a first harmless hub-local
    tool. Blocked on the tool-policy and approval decisions, which do not yet

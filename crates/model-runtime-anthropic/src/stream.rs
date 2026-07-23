@@ -993,7 +993,7 @@ mod tests {
         ]);
 
         let TerminalEvidence::BoundaryLoss(loss) = evidence else {
-            panic!("an incomplete exchange must not classify as refusal (ADR-0043 precondition)");
+            panic!("an incomplete exchange must not classify as refusal (classification precondition)");
         };
         assert_eq!(loss.finish_reported, Some(FinishReason::Refusal));
         assert_eq!(

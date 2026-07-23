@@ -143,9 +143,9 @@ deployment-side rules that code cannot enforce are stated in
   the reference to the `ANTHROPIC_API_KEY_FILE` path and reads the file for
   every request preparation; nothing is cached. Why: atomic file replacement
   rotates the key without restarting hubd, and an in-flight call keeps the value
-  it authenticated with. Resolution is reference-scoped: a foreign
-  reference fails typed `Unmapped`; a missing file is `Unavailable`; an
-  unreadable file is `Unreadable` — all reference-only errors.
+  it authenticated with. Resolution is reference-scoped: a foreign reference
+  fails typed `Unmapped`; a missing file is `Unavailable`; an unreadable file is
+  `Unreadable` — all reference-only errors.
 - **No startup preflight.** hubd never reads the key file at boot, so a missing
   or unsynced credential cannot block startup or the recovery scan. Why:
   recovery of acknowledged work must not depend on any provider's credential
@@ -262,11 +262,10 @@ here because the surviving hub-side mechanics depend on them):
   Anthropic-construction variants (and connection and migration errors) collapse
   to a generic `Infrastructure` class plus phase, so startup logs cannot
   distinguish failure causes within the `Configuration` phase.
-- No connect or exchange timeout is configured in hubd composition (the
-  evidence contract assigns the budget to the caller); a hung provider exchange
-  is bounded only by
-  process shutdown — the 30-second grace window, then abandonment to startup
-  recovery.
+- No connect or exchange timeout is configured in hubd composition (the evidence
+  contract assigns the budget to the caller); a hung provider exchange is
+  bounded only by process shutdown — the 30-second grace window, then
+  abandonment to startup recovery.
 - No cancellation channel exists in the hubd composition: the provider bridge
   passes `CancellationSignal::never()` to both runtime preparation and
   execution, so the adapter's cancellation-dependent guarantees (credential-read

@@ -311,9 +311,8 @@ edges.
 - `ProviderTargetEvidenceId`, `ToolRequestId`, and `ToolAttemptId` have assigned
   supply classes but no production minting seam; generators land with their
   owning slices. `ProviderModelIdentity` is now persisted and
-  configuration-supplied; provider-identity normalization remains open ([model
-  fallback and
-  provenance](../open-questions.md#model-fallback-and-provenance)).
+  configuration-supplied; provider-identity normalization remains open
+  ([model fallback and provenance](../open-questions.md#model-fallback-and-provenance)).
 - UUIDv7 timestamp disclosure and namespace scope must be reassessed before
   identities are exposed outside the single-owner boundary or treated as
   capabilities.

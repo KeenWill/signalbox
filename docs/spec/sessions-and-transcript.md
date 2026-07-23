@@ -41,8 +41,8 @@ append-only.
 `CreateSession` carries the durable command identity, the provenance pair, and
 one complete unversioned initial defaults value. Structural equality excludes
 only the command identifier (INV-012); durable-command storage and
-structural-equality doctrine, and identity generation, supply, and encoding,
-are owned by [identity-and-commands](identity-and-commands.md).
+structural-equality doctrine, and identity generation, supply, and encoding, are
+owned by [identity-and-commands](identity-and-commands.md).
 
 Application orchestration (`crates/application/src/create_session.rs`):
 
@@ -91,8 +91,8 @@ not a historical fact.
 Session configuration defaults are model-selection-only in the baseline; the
 selection algebra, configuration freeze at acceptance, and per-turn effective
 configuration are owned by [identity-and-commands](identity-and-commands.md) and
-[configuration-and-credentials](configuration-and-credentials.md).
-Defaults are immutable versions with a positive `u64` ordinal:
+[configuration-and-credentials](configuration-and-credentials.md). Defaults are
+immutable versions with a positive `u64` ordinal:
 
 - session creation establishes version one;
 - each replacement installs the checked successor ordinal as a new immutable row
@@ -322,9 +322,8 @@ no implemented boundary constructs them.
 - Fork creation is typed but unimplemented: `SingleSource` ancestry fails
   preparation (`TranscriptAncestryUnavailable`) until a trusted
   `TranscriptFrontier` producer exists; frontier representation and selectable
-  fork boundaries remain open
-  ([open-questions.md](../open-questions.md), selectable transcript-frontier
-  boundaries).
+  fork boundaries remain open ([open-questions.md](../open-questions.md),
+  selectable transcript-frontier boundaries).
 - Multi-source ancestry and transcript merge remain future decision scope, and
   retention when an ancestry source is destructively deleted is undecided; both
   are recorded in [open-questions.md](../open-questions.md).

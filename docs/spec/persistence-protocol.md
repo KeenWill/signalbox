@@ -234,15 +234,14 @@ Two standing constraints (recorded beside the code):
 
 Reconstitution is domain-owned and fail-closed (implemented for the session,
 command-receipt, scheduling, and model-call execution projections). The adapter
-performs only the boundary step — decode columns,
-check discriminators and ordinals, assemble the complete checked input — and the
-domain performs pure validation and returns one canonical value or a typed
-failure (INV-001, INV-002, INV-006). Concretely: `SessionReconstitutionInput`
-for the current session, `SubmitInputReconstitutionInput` (with turn-origin and
-acceptance-tail inputs) for command receipts,
-`AcceptedInputSchedulingProjection` for the session's complete queue and
-lifecycle state, `ModelCallExecutionReconstitutionInput` for the active turn's
-pinned provider target and complete call history, and
+performs only the boundary step — decode columns, check discriminators and
+ordinals, assemble the complete checked input — and the domain performs pure
+validation and returns one canonical value or a typed failure (INV-001, INV-002,
+INV-006). Concretely: `SessionReconstitutionInput` for the current session,
+`SubmitInputReconstitutionInput` (with turn-origin and acceptance-tail inputs)
+for command receipts, `AcceptedInputSchedulingProjection` for the session's
+complete queue and lifecycle state, `ModelCallExecutionReconstitutionInput` for
+the active turn's pinned provider target and complete call history, and
 `FailedTurnExecutionReconstitutionInput` for a failed terminal turn's exact
 ended attempt and optional `known_failed`/`cancelled` call provenance
 (backfilled and closed by migration `202607220003`). The scheduling load proves

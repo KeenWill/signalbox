@@ -12,9 +12,10 @@ identifiers refer to [scenarios.md](scenarios.md).
 - **Wire identity representation.**
   [identity-and-commands](spec/identity-and-commands.md) closes generation,
   supply, minting authority, and baseline Postgres encoding. Protocol field
-  types, public URL forms, and wire serialization remain open within the
-  accepted client- and process-protocol baselines. Blocks cross-process
-  protocols, not persistence. (S01, S02, S04, S08, S10, S12)
+  types, public URL forms, and wire serialization remain open; the retired
+  protocol designs are unimplemented and carry no current authority, so future
+  client-protocol work is designed fresh as a specification diff. Blocks
+  cross-process protocols, not persistence. (S01, S02, S04, S08, S10, S12)
 - **Semantic transcript-entry extensions and rendering.**
   [sessions-and-transcript](spec/sessions-and-transcript.md) fixes
   origin-accepted-input and failed-turn payloads plus their eligibility and

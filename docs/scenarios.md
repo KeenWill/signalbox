@@ -7,14 +7,14 @@ design. Invariant identifiers link to [the catalog](invariants.md).
 
 The scenarios are frozen design fixtures. New or changed normative behavior
 belongs in the record that owns it (the owning [spec page](spec/README.md) or
-the [decision log](decisions.md));
-a scenario's normative content changes or is added only alongside the decision
-that motivates it, and a decision introducing a new lifecycle edge adds or
-amends its scenario fixture in the same change. Test coverage is recorded
-outside this document: tests name the scenario identifiers they enforce under
-the rules in [AGENTS.md](../AGENTS.md) and [testing-style.md](testing-style.md),
-and the [invariant catalog](invariants.md)'s enforcement column accumulates the
-links to those tests.
+the [decision log](decisions.md)); a scenario's normative content changes or is
+added only alongside the decision that motivates it, and a decision introducing
+a new lifecycle edge adds or amends its scenario fixture in the same change.
+Test coverage is recorded outside this document: tests name the scenario
+identifiers they enforce under the rules in [AGENTS.md](../AGENTS.md) and
+[testing-style.md](testing-style.md), and the
+[invariant catalog](invariants.md)'s enforcement column accumulates the links to
+those tests.
 
 ## S01 — Create a new interactive session
 
@@ -93,10 +93,9 @@ links to those tests.
   work starts.
 - **Durable commands:** Under the accepted input-delivery semantics
   ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)),
-  persist accepted input, origin
-  turn, immutable acceptance position, any typed priority relation, and frozen
-  baseline model-configuration provenance in one transaction before
-  acknowledgement.
+  persist accepted input, origin turn, immutable acceptance position, any typed
+  priority relation, and frozen baseline model-configuration provenance in one
+  transaction before acknowledgement.
 - **State transitions:** Queued turn and order facts remain durable across
   restart; eligibility is recomputed from the total order and slot ownership.
   After every earlier turn becomes terminal, one transaction fixes the exact
@@ -113,9 +112,9 @@ links to those tests.
 - **Remaining questions:** Scheduler sweep tuning and the optional scheduler
   safeguards listed as open edges in
   [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md).
-  Whether an individual provider call or tool attempt crossed its
-  persisted issue boundary is classified by its own evidence; an attempt still
-  in `Prepared` has not crossed the orchestration boundary.
+  Whether an individual provider call or tool attempt crossed its persisted
+  issue boundary is classified by its own evidence; an attempt still in
+  `Prepared` has not crossed the orchestration boundary.
 
 ## S04 — Hub restarts during a provider call
 
@@ -257,13 +256,13 @@ links to those tests.
   new input.
 - **Durable commands:** Under the accepted interrupt-delivery semantics
   ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)),
-  atomically persist the
-  interrupting accepted input, successor configuration provenance, typed
-  priority relation designating its turn as the active turn's immediate
-  successor, and `AppliedInterruptProof` tied to the exact predecessor, plus its
-  transition: end an unsent prepared attempt; directly end running work only
-  when prevention of remaining work and every terminal guard are already proven,
-  otherwise request cancellation; or close the exact durable wait.
+  atomically persist the interrupting accepted input, successor configuration
+  provenance, typed priority relation designating its turn as the active turn's
+  immediate successor, and `AppliedInterruptProof` tied to the exact
+  predecessor, plus its transition: end an unsent prepared attempt; directly end
+  running work only when prevention of remaining work and every terminal guard
+  are already proven, otherwise request cancellation; or close the exact durable
+  wait.
 - **State transitions:** `Prepared` → ended/cancelled with the predecessor
   terminal/cancelled and exact applied-interrupt proof. `Running` → directly
   ended/cancelled only when every guard already holds, otherwise
@@ -567,10 +566,10 @@ links to those tests.
 - **Owning component:** Hub owns relationships and scheduling; each session
   retains independent history.
 - **Failure behavior:** Once the delegation decision defines the feature,
-  restart must restore
-  both child state and parent wait, and child failure must be delivered
-  explicitly rather than disappearing into parent UI state. The current
-  foundation does not permit an implementation to invent those transitions.
+  restart must restore both child state and parent wait, and child failure must
+  be delivered explicitly rather than disappearing into parent UI state. The
+  current foundation does not permit an implementation to invent those
+  transitions.
 - **Required invariants:** INV-003, INV-010, INV-031, INV-034.
 - **Remaining questions:** The delegation decision must define the child-wait
   variant, result representation, cancellation propagation, detached work, and
@@ -597,9 +596,9 @@ links to those tests.
   choose a policy before the delegation decision is accepted.
 - **Required invariants:** INV-010, INV-025, INV-026, INV-029, INV-031, INV-034.
 - **Remaining questions:** The delegation decision remains blocking for
-  propagation, detached-child support, result delivery after parent
-  termination, and the parent/child disposition model; archival coupling
-  remains with the open archive lifecycle decision
+  propagation, detached-child support, result delivery after parent termination,
+  and the parent/child disposition model; archival coupling remains with the
+  open archive lifecycle decision
   ([archival and retention](open-questions.md#archival-and-retention)).
 
 ## S20 — Resolve a curated model alias
@@ -622,14 +621,14 @@ links to those tests.
   attempt and turn; it does not silently choose another model. A reported
   identity different from the exact resolved target follows the accepted full
   mismatch timing rule ([model-call-execution](spec/model-call-execution.md)):
-  known failure while nonterminal; preserved ambiguity plus a fatal
-  cause on any still-live attempt, with turn failure only when no other
-  unacknowledged ambiguity remains and reconciliation otherwise; typed
-  invalidation and stop after completion while the turn is active; unchanged
-  known-failure/cancelled state; audit-only evidence after authority transfer;
-  or non-rewriting evidence after turn terminality, including atomic refusal.
-  Historical provenance does not claim which hidden physical backend executed
-  the call when the provider does not reveal it.
+  known failure while nonterminal; preserved ambiguity plus a fatal cause on any
+  still-live attempt, with turn failure only when no other unacknowledged
+  ambiguity remains and reconciliation otherwise; typed invalidation and stop
+  after completion while the turn is active; unchanged known-failure/cancelled
+  state; audit-only evidence after authority transfer; or non-rewriting evidence
+  after turn terminality, including atomic refusal. Historical provenance does
+  not claim which hidden physical backend executed the call when the provider
+  does not reveal it.
 - **Required invariants:** INV-008, INV-014, INV-017.
 - **Remaining questions:** Alias administration, visibility, and whether a
   future frozen alias policy may include fallback. Acceptance-time definition
@@ -677,9 +676,9 @@ links to those tests.
   knowledge of the hidden physical backend.
 - **Required invariants:** INV-014, INV-015, INV-017, INV-018.
 - **Remaining questions:** Provider identifier normalization and reproducibility
-  claims beyond observable model identity remain open ([model fallback and
-  provenance](open-questions.md#model-fallback-and-provenance)); mismatch
-  failure is decided in
+  claims beyond observable model identity remain open
+  ([model fallback and provenance](open-questions.md#model-fallback-and-provenance));
+  mismatch failure is decided in
   [model-call-execution](spec/model-call-execution.md).
 
 ## S22 — Apply an availability fallback
@@ -701,8 +700,8 @@ links to those tests.
   attempted only through its distinct call; a provider-reported mismatch against
   either call's own exact target follows the accepted timing-sensitive mismatch
   failure rule ([model-call-execution](spec/model-call-execution.md)) and is
-  never an allowed substitution. The scenario does not establish
-  automatic fallback as accepted behavior.
+  never an allowed substitution. The scenario does not establish automatic
+  fallback as accepted behavior.
 - **Required invariants:** INV-014, INV-017, INV-018.
 - **Remaining questions:** Whether fallback ships, qualifying failures,
   configuration, model-change identity, cost limits, and user confirmation.
@@ -748,9 +747,9 @@ links to those tests.
 - **Required invariants:** INV-014, INV-017, INV-018, INV-032.
 - **Remaining questions:** Refusal taxonomy, user-facing remediation, and
   whether any explicit fallback is ever allowed. Provider-identity normalization
-  remains open ([model fallback and
-  provenance](open-questions.md#model-fallback-and-provenance)), while the
-  mismatch disposition is accepted
+  remains open
+  ([model fallback and provenance](open-questions.md#model-fallback-and-provenance)),
+  while the mismatch disposition is accepted
   ([model-call-execution](spec/model-call-execution.md)).
 
 ## S24 — Reconnect a client during active streaming
@@ -806,14 +805,12 @@ links to those tests.
   erasing what happened before.
 - **Durable commands:** No baseline regeneration command is exposed. A future
   regeneration decision must create a new turn with a typed relation to the
-  original, an
-  explicitly frozen effective configuration, an immutable source frontier, and
-  defined queue placement while retaining the original turn, attempts, calls,
-  and output unchanged.
+  original, an explicitly frozen effective configuration, an immutable source
+  frontier, and defined queue placement while retaining the original turn,
+  attempts, calls, and output unchanged.
 - **State transitions:** Reserved for the future regeneration decision. The
-  initial
-  turn-origin enum contains only accepted-input origin and does not encode a
-  half-defined regeneration transition.
+  initial turn-origin enum contains only accepted-input origin and does not
+  encode a half-defined regeneration transition.
 - **Transient updates:** A future client may visually group alternatives, but
   grouping never replaces durable identities.
 - **Owning component:** When introduced, the hub validates the source relation

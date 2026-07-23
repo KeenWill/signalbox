@@ -76,8 +76,7 @@ state, and eventual logical outcome. Deferred design; see
 ## Tool attempt
 
 One physical effort by a hub-local or runner-local executor to perform a tool
-request. Deferred design; see
-[tool safety](open-questions.md#tool-safety).
+request. Deferred design; see [tool safety](open-questions.md#tool-safety).
 
 ## Creation cause
 
@@ -133,8 +132,7 @@ user, container, sandbox, and filesystem scope. Deferred design; see
 
 Hub-owned evaluation that determines whether a specific logical tool request is
 allowed, denied, or requires confirmation, plus any placement or constraint
-decision. Deferred design; see
-[tool safety](open-questions.md#tool-safety).
+decision. Deferred design; see [tool safety](open-questions.md#tool-safety).
 
 ## Approval
 

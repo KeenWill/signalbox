@@ -230,9 +230,9 @@ Tool-attempt storage still does not exist.
 ## Startup scan and recovery
 
 hubd orders startup strictly: embedded migrations, then the startup scan to
-completion, then scheduling. Why: scheduling before the
-scan could dispatch new work into a session whose durable state still shows a
-live-looking prior-process attempt (INV-034).
+completion, then scheduling. Why: scheduling before the scan could dispatch new
+work into a session whose durable state still shows a live-looking prior-process
+attempt (INV-034).
 
 `StartupScanService` reads the finite inventory of sessions with an active turn
 (deterministic order), then runs one independent transaction per session under
@@ -346,9 +346,8 @@ is unimplemented (open edge); `TranscriptFrontier` itself is
 
 ## Evidence-bearing reconstitution
 
-Evidence validation is implemented for the scheduling seam: stored active
-phases are conclusions derived from complete owner facts, never trusted
-discriminators.
+Evidence validation is implemented for the scheduling seam: stored active phases
+are conclusions derived from complete owner facts, never trusted discriminators.
 
 - `AwaitingRecoveryDecision` now reconstitutes from complete model-call owner
   facts (an `ambiguous` terminal call correlated with its ended attempt —
@@ -412,9 +411,9 @@ over the shared pool; no shared locked service instance exists.
   requires complete owner projections before any such phase lands.
 - Direct fatal terminalization has sealed domain derivation values
   (`fatal_mismatch` module) but no aggregate transition or commit path.
-- Dispatch fencing is partially implemented: `model_call` storage,
-  the `AttemptDispatchGate`, and the hubd dispatch path now exist; only
-  tool-attempt storage and tool dispatch remain absent.
+- Dispatch fencing is partially implemented: `model_call` storage, the
+  `AttemptDispatchGate`, and the hubd dispatch path now exist; only tool-attempt
+  storage and tool dispatch remain absent.
 - The eligible terminal-failure path (queued turn fixes its start and fails
   without an attempt for a structurally unexecutable configuration) is
   unimplemented; activation is the only eligibility outcome.
