@@ -1,6 +1,6 @@
 //! Single-hub acquisition, durable generation advance, and fenced pool startup.
 
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, mem};
 
 use signalbox_persistence::{
     hub_fence::{
@@ -19,8 +19,9 @@ use crate::{SingleHubGuard, SingleHubGuardError};
 
 /// One guarded hub database incarnation and its fenced application pool.
 #[derive(Debug)]
+#[must_use = "the fenced pool must be closed before releasing the singleton guard"]
 pub struct FencedHubDatabase {
-    guard: SingleHubGuard,
+    guard: Option<SingleHubGuard>,
     pool: PgPool,
     generation: HubFenceGeneration,
 }
@@ -56,7 +57,7 @@ impl FencedHubDatabase {
             .await
             .map_err(FencedHubDatabaseError::ConnectFencedPool)?;
         Ok(Self {
-            guard,
+            guard: Some(guard),
             pool,
             generation,
         })
@@ -72,10 +73,33 @@ impl FencedHubDatabase {
         self.generation
     }
 
-    /// Separates the lifetime guard from the cheap-clone application pool for
-    /// concurrent runtime composition.
-    pub fn into_parts(self) -> (SingleHubGuard, PgPool, HubFenceGeneration) {
-        (self.guard, self.pool, self.generation)
+    /// Proves that this incarnation's exact guarded session remains usable.
+    pub async fn check_guard(&mut self) -> Result<(), SingleHubGuardError> {
+        let Some(guard) = self.guard.as_mut() else {
+            return Err(SingleHubGuardError::GuardLost(None));
+        };
+        guard.check().await
+    }
+
+    /// Globally closes the fenced pool, waits for every outstanding checkout,
+    /// and only then releases the singleton guard.
+    pub async fn close(mut self) -> Result<(), SingleHubGuardError> {
+        self.pool.close().await;
+        let Some(guard) = self.guard.take() else {
+            return Err(SingleHubGuardError::GuardLost(None));
+        };
+        guard.close().await
+    }
+}
+
+impl Drop for FencedHubDatabase {
+    fn drop(&mut self) {
+        if let Some(guard) = self.guard.take() {
+            // Async pool drain cannot run from Drop. Retaining the guard until
+            // process exit fails closed if explicit shutdown is omitted or
+            // cancelled while raw PgPool clones or checkouts may still exist.
+            mem::forget(guard);
+        }
     }
 }
 

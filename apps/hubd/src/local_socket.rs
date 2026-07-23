@@ -23,6 +23,7 @@ use tokio::net::{UnixListener, UnixStream, unix::SocketAddr as UnixSocketAddr};
 const LISTEN_BACKLOG: i32 = 128;
 const OWNER_ONLY_MODE: u32 = 0o600;
 const PERMISSION_MASK: u32 = 0o7777;
+const GROUP_OR_OTHER_ACCESS: u32 = 0o077;
 const GROUP_OR_OTHER_WRITE: u32 = 0o022;
 const STICKY_BIT: u32 = 0o1000;
 
@@ -190,7 +191,7 @@ fn resolve_socket_path(configured_path: &Path) -> Result<PathBuf, LocalSocketErr
     if metadata.uid() != effective_user {
         return Err(LocalSocketError::ParentOwnerMismatch);
     }
-    if metadata.mode() & GROUP_OR_OTHER_WRITE != 0 {
+    if metadata.mode() & GROUP_OR_OTHER_ACCESS != 0 {
         return Err(LocalSocketError::ParentPermissionsTooBroad);
     }
     validate_ancestor_chain(&resolved_parent, metadata.uid(), effective_user)?;
@@ -346,7 +347,7 @@ pub enum LocalSocketError {
     ParentNotDirectory,
     /// The resolved parent was not owned by the effective user.
     ParentOwnerMismatch,
-    /// The resolved parent allowed group or other writes.
+    /// The resolved parent allowed group or other access.
     ParentPermissionsTooBroad,
     /// An ancestor of the resolved parent could not be inspected.
     ReadAncestorMetadata(io::Error),
@@ -717,7 +718,7 @@ mod tests {
     #[tokio::test]
     async fn broad_parent_permissions_fail_before_path_creation() -> Result<(), Box<dyn Error>> {
         let directory = TestDirectory::create()?;
-        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o720))?;
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o755))?;
         let path = directory.socket_path();
 
         let result = LocalProcessListener::bind(&path);

@@ -10,6 +10,29 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-23 — Bound each single-hub guard ping at one second
+
+**Context.** The recorded guard polling cadence does not bound how long one
+`PgConnection::ping` may remain pending. An unbounded response wait would also
+leave fatal guard-loss detection unbounded during a database stall or network
+partition.
+
+**Decision.** Give each guard-check query a separate one-second response
+deadline. A deadline expiry is fatal guard loss for that hub incarnation, just
+like a database error; the runtime does not retry or reacquire in place. Treat
+one second as a provisional operational threshold independent of the polling
+cadence.
+
+**Rejected alternatives.** No query deadline can stall the supervisor
+indefinitely. Retrying within the incarnation delays guarded startup recovery
+without proving that the same session still owns authority. A longer threshold
+widens the ambiguous-health window; a shorter one increases false fatal exits
+under ordinary transient latency before measurements justify that trade.
+
+**Affects.** The response deadline and failure classification of
+`SingleHubGuard::check`; it does not change the polling cadence or the
+generation-fence protocol.
+
 ## 2026-07-23 — Bound the local process-socket backlog at 128
 
 **Context.** The guarded Unix listener must select a finite kernel accept queue.
