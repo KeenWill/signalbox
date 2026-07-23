@@ -14,7 +14,7 @@ use std::{
 };
 
 use signalbox_application::InProcessEligibilityWorkSource;
-use signalbox_hubd::{LocalProcessListener, ProcessRuntime};
+use signalbox_hubd::{HubModelConfiguration, LocalProcessListener, ProcessRuntime};
 use signalbox_persistence::{
     local_test_connection_options, migrate, scheduler::PostgresEligibilitySweep,
 };
@@ -44,6 +44,20 @@ const DATABASE_NAME: &str = "signalbox_process_runtime";
 const DATABASE_USER: &str = "signalbox";
 const DATABASE_PASSWORD: &str = "signalbox-test-only";
 const OVERSIZED_SUBMITTED_INPUT_BYTES: usize = 1024 * 1024 + 1;
+const MODEL_CONFIGURATION: &str = r#"
+version = 1
+
+[[models]]
+selection_id = "00000000-0000-0000-0000-000000000001"
+target_id = "00000000-0000-0000-0000-000000000003"
+provider = "anthropic"
+provider_model = "fixture-model"
+max_output_tokens = 256
+
+[[aliases]]
+alias_id = "00000000-0000-0000-0000-000000000002"
+selection_id = "00000000-0000-0000-0000-000000000001"
+"#;
 
 async fn postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -152,18 +166,24 @@ async fn s24_process_runtime_serves_snapshot_first_follow_without_a_race()
     let listener = LocalProcessListener::bind(socket_directory.socket())?;
     let sweep = PostgresEligibilitySweep::new(pool.clone());
     let (eligibility_nudge, _work_source) = InProcessEligibilityWorkSource::new(sweep);
-    let runtime = ProcessRuntime::new(listener, pool.clone(), eligibility_nudge);
+    let model_configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
+    let runtime = ProcessRuntime::new(
+        listener,
+        pool.clone(),
+        eligibility_nudge,
+        model_configuration,
+    );
     let (shutdown, shutdown_receiver) = watch::channel(false);
     let runtime_task = tokio::spawn(runtime.run(shutdown_receiver));
 
     let mut commands = Connection::connect(socket_directory.socket()).await?;
-    let selection_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+    let alias_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
     commands
         .request(
             1,
             ClientRequest::CreateSession {
                 command_id: command()?,
-                initial_model_selection: ModelSelection::Direct { selection_id },
+                initial_model_selection: ModelSelection::Alias { alias_id },
             },
         )
         .await?;
@@ -182,12 +202,12 @@ async fn s24_process_runtime_serves_snapshot_first_follow_without_a_race()
         ServerMessage::SessionSummary {
             session_id: listed,
             defaults_version,
-            model_selection: ModelSelection::Direct {
-                selection_id: listed_selection
+            model_selection: ModelSelection::Alias {
+                alias_id: listed_alias
             },
         } if *listed == session_id
             && defaults_version.value() == 1
-            && *listed_selection == selection_id
+            && *listed_alias == alias_id
     ));
     assert!(matches!(
         commands.response().await?.message(),

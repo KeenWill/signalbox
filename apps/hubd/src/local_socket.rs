@@ -208,6 +208,9 @@ fn validate_ancestor_chain(
             break;
         }
         let metadata = fs::metadata(ancestor).map_err(LocalSocketError::ReadAncestorMetadata)?;
+        if !ancestor_owner_is_trusted(metadata.uid(), effective_user) {
+            return Err(LocalSocketError::AncestorOwnerMismatch);
+        }
         let ancestor_is_writable = metadata.mode() & GROUP_OR_OTHER_WRITE != 0;
         let sticky_child_is_protected =
             metadata.mode() & STICKY_BIT != 0 && child_owner == effective_user;
@@ -218,6 +221,10 @@ fn validate_ancestor_chain(
         child_owner = metadata.uid();
     }
     Ok(())
+}
+
+fn ancestor_owner_is_trusted(owner: u32, effective_user: u32) -> bool {
+    owner == 0 || owner == effective_user
 }
 
 fn acquire_path_lock(socket_path: &Path) -> Result<File, LocalSocketError> {
@@ -343,6 +350,8 @@ pub enum LocalSocketError {
     ParentPermissionsTooBroad,
     /// An ancestor of the resolved parent could not be inspected.
     ReadAncestorMetadata(io::Error),
+    /// An ancestor was owned by neither root nor the effective user.
+    AncestorOwnerMismatch,
     /// An ancestor could replace its next component toward the socket.
     AncestorPermissionsTooBroad,
     /// The adjacent sidecar could not be opened without following links.
@@ -420,6 +429,9 @@ impl fmt::Display for LocalSocketError {
             }
             Self::ReadAncestorMetadata(_) => {
                 "the local process socket parent ancestry could not be inspected"
+            }
+            Self::AncestorOwnerMismatch => {
+                "the local process socket parent ancestry has an untrusted owner"
             }
             Self::AncestorPermissionsTooBroad => {
                 "the local process socket parent ancestry is replaceable"
@@ -501,6 +513,7 @@ impl Error for LocalSocketError {
             | Self::ParentNotDirectory
             | Self::ParentOwnerMismatch
             | Self::ParentPermissionsTooBroad
+            | Self::AncestorOwnerMismatch
             | Self::AncestorPermissionsTooBroad
             | Self::InvalidPathLock
             | Self::PathLockBusy
@@ -527,7 +540,7 @@ mod tests {
 
     use tokio::net::UnixStream;
 
-    use super::{LocalProcessListener, LocalSocketError};
+    use super::{LocalProcessListener, LocalSocketError, ancestor_owner_is_trusted};
 
     static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
@@ -750,6 +763,15 @@ mod tests {
 
         listener.cleanup()?;
         Ok(())
+    }
+
+    #[test]
+    fn ancestor_owner_must_be_root_or_the_effective_user() {
+        let effective_user = 41_000;
+
+        assert!(ancestor_owner_is_trusted(0, effective_user));
+        assert!(ancestor_owner_is_trusted(effective_user, effective_user));
+        assert!(!ancestor_owner_is_trusted(41_001, effective_user));
     }
 
     #[tokio::test]

@@ -359,8 +359,27 @@ impl SubmitInputRepository {
         accepted_input: AcceptedInputId,
         turn: Option<TurnId>,
     ) -> Result<SubmitInputHandlingOutcome, SubmitInputRepositoryError> {
+        self.handle_with_alias_resolver(command, accepted_input, turn, |_| None)
+            .await
+    }
+
+    /// Handles one command using the deployment's immutable alias definitions.
+    pub async fn handle_with_alias_resolver(
+        &self,
+        command: SubmitInput,
+        accepted_input: AcceptedInputId,
+        turn: Option<TurnId>,
+        select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+    ) -> Result<SubmitInputHandlingOutcome, SubmitInputRepositoryError> {
         let mut transaction = self.pool.begin().await?;
-        let decision = handle_in_transaction(&mut transaction, command, accepted_input, turn).await;
+        let decision = handle_in_transaction(
+            &mut transaction,
+            command,
+            accepted_input,
+            turn,
+            select_definition,
+        )
+        .await;
 
         match decision {
             Ok(TransactionDecision::Commit(outcome)) => {
@@ -427,6 +446,7 @@ async fn handle_in_transaction(
     command: SubmitInput,
     accepted_input: AcceptedInputId,
     turn: Option<TurnId>,
+    select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
 ) -> Result<TransactionDecision, SubmitInputRepositoryError> {
     let command_id = command.command_id();
     match inspect_registry(connection, command_id).await? {
@@ -473,7 +493,9 @@ async fn handle_in_transaction(
         };
     }
 
-    let prepared = prepare_against_locked_state(connection, command, accepted_input, turn).await?;
+    let prepared =
+        prepare_against_locked_state(connection, command, accepted_input, turn, select_definition)
+            .await?;
     let recorded = prepared.result().clone();
     insert_prepared(connection, prepared).await?;
     Ok(TransactionDecision::Commit(
@@ -565,6 +587,7 @@ async fn prepare_against_locked_state(
     command: SubmitInput,
     accepted_input: AcceptedInputId,
     turn: Option<TurnId>,
+    select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
 ) -> Result<PreparedSubmitInput, SubmitInputRepositoryError> {
     // Lock-mode constraint: this session-row lock must use the no-key-update
     // mode, not PostgreSQL's strongest row-lock mode. Submit orders the session row before the
@@ -627,7 +650,7 @@ async fn prepare_against_locked_state(
     let scheduling = load_scheduling_projection(connection, session.clone()).await?;
     let active_turn_id = scheduling.active_turn().map(|active| active.turn());
     let prepared = if active_turn_id.is_some() {
-        command.prepare_with_active_turn(&scheduling, accepted_input, turn, |_| None)
+        command.prepare_with_active_turn(&scheduling, accepted_input, turn, select_definition)
     } else {
         let previous_position = sqlx::query_scalar::<_, Decimal>(
             "SELECT acceptance_position
@@ -653,7 +676,7 @@ async fn prepare_against_locked_state(
             accepted_input,
             turn,
             previous_position,
-            |_| None,
+            select_definition,
         )
     };
 
