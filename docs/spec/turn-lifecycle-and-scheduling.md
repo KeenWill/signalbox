@@ -62,9 +62,13 @@ At most one turn per session is `active`. Enforcement is layered:
    defective writer: insert-as-`queued` / insert-as-`prepared`, only monotonic
    transitions (`queued`→`active`|`terminal`, `active`→`terminal`;
    `prepared`→`running`|`ended`, `running`→`stop_requested`|`ended`,
-   `stop_requested`→`ended`), terminal-turn and ended-attempt immutability,
-   write-once start fields, no new attempt on a terminal turn, and queued
-   terminalization only without attempt history.
+   `stop_requested`→`ended`), terminal-turn immutability, write-once start
+   fields, no new attempt on a terminal turn, and queued terminalization only
+   without attempt history. Ended attempts have one monotonic proof-enrichment
+   edge: an unstopped `Ambiguous` or `Lost` end can become the corresponding
+   `AfterCancellation` end when a later interrupt closes its exact recovery
+   wait; identity and disposition remain unchanged and no ended attempt can
+   return to a current state.
 
 Why: process memory carries no authority (INV-009, INV-010), so exclusivity must
 hold in durable rows even if every in-process structure is lost. Terminal turns
@@ -323,7 +327,10 @@ delivery outcomes implemented here are:
   transition releases the slot, the same transaction reclassifies every pending
   steering input against the interrupted turn as an ordered queued successor
   origin. Call, attempt, and turn terminalization follow
-  [model-call-execution](model-call-execution.md#terminal-outcomes). A
+  [model-call-execution](model-call-execution.md#terminal-outcomes). A matching
+  interrupt against `AwaitingRecoveryDecision` preserves the already terminal
+  ambiguous call, enriches its ended attempt with the new proof, and
+  terminalizes `ReconciliationRequired` with the wait's exact operation set. A
   next-safe-point request against a stopping turn records
   `SafePointUnavailableWhileStopping`; equal interrupt replay returns the
   original applied result. A distinct later interrupt records

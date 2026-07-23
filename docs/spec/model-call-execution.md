@@ -298,7 +298,11 @@ persistence commits it atomically with its outbox rows
   `AfterCancellation(Ambiguous)` (live) or `AfterCancellation(Lost)` (startup).
   The turn terminalizes with the exact model-call wait set and
   `InterruptRequiresReconciliation` marker, an equal-content terminal frontier,
-  and a typed reconciliation outbox record, releasing the slot.
+  and a typed reconciliation outbox record, releasing the slot. The same result
+  applies when an interrupt is accepted after an unstopped ambiguity already
+  entered `AwaitingRecoveryDecision`: the terminal call remains unchanged, and
+  its ended attempt is monotonically enriched from `WithoutStop(Ambiguous|Lost)`
+  to the same disposition under `AfterCancellation` with the exact new proof.
 
 Completion and refusal races against `StopRequested` end through their typed
 `AfterCancellation` dispositions while retaining their ordinary turn outcomes.
