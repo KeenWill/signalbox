@@ -11,13 +11,14 @@ tag. Durable update storage and the delivered-through cursor are owned by
 
 ## Transport and trust boundary
 
-Version one uses one Unix domain stream socket at the path supplied in
-`SIGNALBOX_SOCKET_PATH`. The hub and terminal client both require that
-deployment value. `signalbox-hubd` binds the socket with owner-only `0600`
-permissions. The configured path must be absolute. The hub canonicalizes its
-existing parent once and uses that resolved parent for the socket lifetime; the
-parent must be a directory owned by the hub's effective user and must not be
-group- or other-writable. Before binding, it handles the final path as follows:
+Version one uses one Unix domain stream socket. The hub requires its path in
+`SIGNALBOX_SOCKET_PATH`; the terminal client uses its `--socket <path>` override
+when present and otherwise requires that environment value. `signalbox-hubd`
+binds the socket with owner-only `0600` permissions. The configured path must be
+absolute. The hub canonicalizes its existing parent once and uses that resolved
+parent for the socket lifetime; the parent must be a directory owned by the
+hub's effective user and must not be group- or other-writable. Before binding,
+it handles the final path as follows:
 
 1. an absent entry is available;
 2. an entry that is not a socket fails startup without modification;
@@ -29,9 +30,13 @@ group- or other-writable. Before binding, it handles the final path as follows:
    without modification.
 
 The bind itself must still create a new socket and never replace a raced entry.
-The listener does not accept requests until its permissions have been set and
-verified as `0600`. Graceful shutdown removes the path only after a final
-`lstat` proves it is still the socket device and inode created by this hub.
+The hub creates an unlistening Unix stream socket, binds it, and proves by
+`fstat`/`lstat` comparison that the path still names that socket's device and
+inode. It then sets and verifies owner-only `0600` permissions and calls
+`listen`; no connection can be queued before that sequence completes. Any
+identity or permission mismatch fails startup and removes no raced entry.
+Graceful shutdown removes the path only after a final `lstat` proves it is still
+the socket device and inode created by this hub.
 
 The transport is local-machine and single-user only. Version one's lack of
 protocol authentication is provisional; it has no authorization exchange or
@@ -56,19 +61,20 @@ later request is read from that connection.
 Every client and server frame has these required top-level members:
 
 - `version`: JSON integer `1`;
-- `request_id`: the canonical decimal string of a nonzero unsigned 64-bit
-  integer, copied unchanged into every response produced for that request;
+- `request_id`: the canonical decimal string of an unsigned 64-bit integer; a
+  client request, success response, or correlated error requires a nonzero value
+  copied unchanged through the exchange;
 - `request` on a client frame or `message` on a server frame: one closed tagged
   object described below.
 
 Unknown top-level members, unknown tagged variants, missing required members,
 and members with the wrong JSON type fail explicitly (INV-033). An unsupported
 `version` produces a version-one `unsupported_version` error naming the
-supported version, then the server closes the connection. A malformed frame
-whose request identity cannot be recovered produces an error with
-`request_id = "0"`, which is reserved for that purpose. Leading zeroes, a plus
-sign, whitespace, and any spelling other than the shortest ASCII decimal form
-are invalid.
+supported version, then the server closes the connection. A server error uses
+`request_id = "0"` only when the incoming frame prevents recovery of a valid
+nonzero identity; zero is never a valid client identity or success-response
+identity. Leading zeroes, a plus sign, whitespace, and any spelling other than
+the shortest ASCII decimal form are invalid.
 
 The server may close a connection after any error. Clients never reinterpret an
 unknown message as a known one.
@@ -135,8 +141,8 @@ indices, counts, and outbox cursors are canonical decimal strings, preserving
 their full unsigned 64-bit range without JSON-number precision loss.
 
 An application rejection is an `error` with `code = "rejected"` and a required
-closed `detail` object. For the version-one treatment, its exact variants are
-`session_not_found { session_id }`,
+`detail` object whose variants are closed. For the version-one treatment, its
+exact variants are `session_not_found { session_id }`,
 `active_turn_present { session_id, active_turn_id }`,
 `defaults_version_mismatch { session_id, expected, current }`,
 `unknown_model_alias { session_id, alias_id }`, and
@@ -220,7 +226,10 @@ connection and retains that connection—and therefore the session-level
 lock—until shutdown. Failure to acquire the fixed database-scoped guard fails
 startup. The two integer keys are the ASCII namespaces `SBX1` and `HUB1`. This
 enforces one hub process—and therefore one dispatcher and one process-local
-fan-out—for a database. For each attempt, the dispatcher:
+fan-out—for a database. Guard-session monitoring and fatal-loss behavior are
+owned by
+[Hub runtime: startup order and shutdown](turn-lifecycle-and-scheduling.md#hub-runtime-startup-order-and-shutdown).
+For each attempt, the dispatcher:
 
 1. starts a PostgreSQL transaction and locks the singleton
    `outbox_delivery_state`;
@@ -278,7 +287,11 @@ remain transient inside the model-runtime boundary and are not added to the
 outbox. The terminal `send` command follows the submitted turn, accepts terminal
 state from the initial snapshot or waits for its durable terminal event, rereads
 the authoritative transcript, and prints the committed assistant text. A client
-disconnect never cancels model work.
+disconnect never cancels model work. After each terminal turn event, `follow`
+uses a separate connection to read and validate a fresh authoritative transcript
+before it resumes printing later followed events. Final durable content
+therefore replaces the earlier presentation without interrupting the follow
+subscription.
 
 ## Terminal client
 
@@ -287,9 +300,13 @@ The `signalbox` binary is the daily version-one surface. It accepts a global
 
 - `create (--model <selection-uuid> | --alias <alias-uuid>) [--command-id <uuid>]`;
 - `list`;
-- `send <session-uuid> <text> [--command-id <uuid> --defaults-version <decimal>]`;
+- `send <session-uuid> [--command-id <uuid> --defaults-version <decimal>]`;
 - `transcript <session-uuid>`;
 - `follow <session-uuid>`.
+
+`send` reads the exact input text from standard input through EOF and never
+accepts conversation content in process arguments. Empty or oversized input
+fails before socket I/O.
 
 When `--command-id` is absent, the client generates a fresh UUIDv7 identity and
 prints it to standard error before any socket I/O. `send` first reads the
@@ -305,7 +322,11 @@ protocol or application errors. After completion, `send` rereads and prints only
 authoritative committed assistant text produced for its exact turn. A failed or
 refused turn produces a typed diagnostic and a nonzero exit without reply text.
 `follow` prints the initial transcript and subsequent typed durable updates
-until interrupted.
+until interrupted. By default every process-derived text field written to a
+terminal preserves line feed but renders C0, DEL, and C1 code points as visible
+`\u{...}` escapes, preventing ESC/OSC execution. `--raw-output` is the explicit
+opt-in that writes those fields unchanged; the same safe-rendering choice covers
+assistant text, typed diagnostics, and durable updates.
 
 The existing `signalbox-debug` binary is unchanged and remains a development
 harness, not a protocol client.

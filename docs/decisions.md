@@ -10,6 +10,25 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-23 — Poll the single-hub guard once per second
+
+**Context.** A PostgreSQL session advisory lock is released when its dedicated
+connection is lost. An otherwise idle guard connection would not promptly tell
+the hub to stop, allowing a second process to acquire the same guard while the
+first continues through a reconnected pool.
+
+**Decision.** While the runtime is active, the hub proves the dedicated guard
+connection usable once per second. Any check or connection failure is a fatal
+runtime condition that stops request admission, dispatch, and scheduling
+together; the process never reacquires the guard in place.
+
+**Rejected alternatives.** Depending on operating-system TCP failure timing
+would leave detection unbounded. Reacquiring in place would skip guarded startup
+recovery and permit overlapping work during the loss window. A shorter interval
+adds unnecessary steady database traffic before measurements justify it.
+
+**Affects.** The hub runtime supervisor and its dedicated PostgreSQL guard task.
+
 ## 2026-07-23 — Local version-one process protocol and terminal client
 
 **Context.** Signalbox has durable sessions, input, model execution, final
