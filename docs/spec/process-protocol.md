@@ -315,10 +315,10 @@ these closed `event` objects:
 | `turn_cancelled`               | `turn_id`, `cancellation_entry_id`, and `terminal_frontier_id`                |
 | `turn_reconciliation_required` | `turn_id`, `model_call_id`, and `terminal_frontier_id`                        |
 
-The model-call `state` object is exactly `prepared`, `in_flight`, or
-`terminal { disposition }`; terminal disposition is one of `completed`,
-`known_failed`, `refused`, `cancelled`, or `ambiguous`. Storage-version columns
-are not exposed as wire-version fields.
+The model-call `state` object is exactly `prepared`, `in_flight`,
+`cancellation_requested`, or `terminal { disposition }`; terminal disposition is
+one of `completed`, `known_failed`, `refused`, `cancelled`, or `ambiguous`.
+Storage-version columns are not exposed as wire-version fields.
 
 ## Follow synchronization
 
