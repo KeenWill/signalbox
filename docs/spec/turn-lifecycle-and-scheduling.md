@@ -394,9 +394,12 @@ connects, acquires the single-hub guard, migrates, completes recovery scan,
 binds the process socket, then concurrently admits protocol requests, dispatches
 the outbox, and schedules eligible work. No request, dispatch cursor advance, or
 scheduler pass occurs before recovery completes. Any phase failure is a failed
-startup with a classified, key-bearing log line and a failure exit code.
-Observability and the operator failure taxonomy are
-[runtime-substrate](runtime-substrate.md) scope.
+startup with a classified, key-bearing log line and a failure exit code. The
+dedicated guard connection is checked once per second while the runtime is
+active. Losing that session is a fatal runtime failure: admission, dispatch, and
+scheduling stop together, and the process exits after the shared grace window
+instead of reconnecting without the database-scoped guard. Observability and the
+operator failure taxonomy are [runtime-substrate](runtime-substrate.md) scope.
 
 On SIGINT/SIGTERM the listener stops accepting requests, follow streams are
 closed, the dispatcher stops starting transactions, and the scheduler stops
