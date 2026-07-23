@@ -1063,7 +1063,7 @@ mod tests {
     }
 
     #[test]
-    fn s24_runtime_stop_causes_preserve_grace_and_fencing_policy() {
+    fn runtime_stop_causes_preserve_grace_and_fencing_policy() {
         assert_eq!(
             completed_runtime_outcome(RuntimeStopCause::Requested, RuntimeDrainOutcome::Complete),
             ShutdownOutcome::Clean

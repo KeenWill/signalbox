@@ -24,6 +24,7 @@ const LISTEN_BACKLOG: i32 = 128;
 const OWNER_ONLY_MODE: u32 = 0o600;
 const PERMISSION_MASK: u32 = 0o7777;
 const GROUP_OR_OTHER_WRITE: u32 = 0o022;
+const STICKY_BIT: u32 = 0o1000;
 
 /// A process listener whose filesystem entry was verified before listening.
 #[derive(Debug)]
@@ -185,13 +186,38 @@ fn resolve_socket_path(configured_path: &Path) -> Result<PathBuf, LocalSocketErr
     if !metadata.is_dir() {
         return Err(LocalSocketError::ParentNotDirectory);
     }
-    if metadata.uid() != geteuid().as_raw() {
+    let effective_user = geteuid().as_raw();
+    if metadata.uid() != effective_user {
         return Err(LocalSocketError::ParentOwnerMismatch);
     }
     if metadata.mode() & GROUP_OR_OTHER_WRITE != 0 {
         return Err(LocalSocketError::ParentPermissionsTooBroad);
     }
+    validate_ancestor_chain(&resolved_parent, metadata.uid(), effective_user)?;
     Ok(resolved_parent.join(file_name))
+}
+
+fn validate_ancestor_chain(
+    resolved_parent: &Path,
+    mut child_owner: u32,
+    effective_user: u32,
+) -> Result<(), LocalSocketError> {
+    let mut child = resolved_parent;
+    while let Some(ancestor) = child.parent() {
+        if ancestor == child {
+            break;
+        }
+        let metadata = fs::metadata(ancestor).map_err(LocalSocketError::ReadAncestorMetadata)?;
+        let ancestor_is_writable = metadata.mode() & GROUP_OR_OTHER_WRITE != 0;
+        let sticky_child_is_protected =
+            metadata.mode() & STICKY_BIT != 0 && child_owner == effective_user;
+        if ancestor_is_writable && !sticky_child_is_protected {
+            return Err(LocalSocketError::AncestorPermissionsTooBroad);
+        }
+        child = ancestor;
+        child_owner = metadata.uid();
+    }
+    Ok(())
 }
 
 fn acquire_path_lock(socket_path: &Path) -> Result<File, LocalSocketError> {
@@ -315,6 +341,10 @@ pub enum LocalSocketError {
     ParentOwnerMismatch,
     /// The resolved parent allowed group or other writes.
     ParentPermissionsTooBroad,
+    /// An ancestor of the resolved parent could not be inspected.
+    ReadAncestorMetadata(io::Error),
+    /// An ancestor could replace its next component toward the socket.
+    AncestorPermissionsTooBroad,
     /// The adjacent sidecar could not be opened without following links.
     OpenPathLock(io::Error),
     /// A newly created sidecar could not be made owner-only.
@@ -388,6 +418,12 @@ impl fmt::Display for LocalSocketError {
             Self::ParentPermissionsTooBroad => {
                 "the local process socket parent permissions are too broad"
             }
+            Self::ReadAncestorMetadata(_) => {
+                "the local process socket parent ancestry could not be inspected"
+            }
+            Self::AncestorPermissionsTooBroad => {
+                "the local process socket parent ancestry is replaceable"
+            }
             Self::OpenPathLock(_) => "the local process socket path lock could not be opened",
             Self::ConfigurePathLock(_) => {
                 "the local process socket path lock could not be configured"
@@ -440,6 +476,7 @@ impl Error for LocalSocketError {
         match self {
             Self::ResolveParent(error)
             | Self::ReadParentMetadata(error)
+            | Self::ReadAncestorMetadata(error)
             | Self::OpenPathLock(error)
             | Self::ConfigurePathLock(error)
             | Self::InspectPathLock(error)
@@ -464,6 +501,7 @@ impl Error for LocalSocketError {
             | Self::ParentNotDirectory
             | Self::ParentOwnerMismatch
             | Self::ParentPermissionsTooBroad
+            | Self::AncestorPermissionsTooBroad
             | Self::InvalidPathLock
             | Self::PathLockBusy
             | Self::ExistingEntryNotSocket
@@ -676,6 +714,41 @@ mod tests {
             Err(LocalSocketError::ParentPermissionsTooBroad)
         ));
         assert!(!path.exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn writable_nonsticky_ancestor_fails_before_path_creation() -> Result<(), Box<dyn Error>>
+    {
+        let directory = TestDirectory::create()?;
+        let parent = directory.path().join("owned-parent");
+        fs::create_dir(&parent)?;
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o700))?;
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o777))?;
+        let path = parent.join("hub.sock");
+
+        let result = LocalProcessListener::bind(&path);
+
+        assert!(matches!(
+            result,
+            Err(LocalSocketError::AncestorPermissionsTooBroad)
+        ));
+        assert!(!path.exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sticky_ancestor_accepts_an_owned_child_component() -> Result<(), Box<dyn Error>> {
+        let directory = TestDirectory::create()?;
+        let parent = directory.path().join("owned-parent");
+        fs::create_dir(&parent)?;
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o700))?;
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o1777))?;
+        let path = parent.join("hub.sock");
+
+        let listener = LocalProcessListener::bind(&path)?;
+
+        listener.cleanup()?;
         Ok(())
     }
 
