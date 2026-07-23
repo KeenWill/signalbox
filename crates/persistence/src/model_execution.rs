@@ -537,6 +537,7 @@ impl PostgresModelCallRepository {
                         session,
                         turn,
                         attempt,
+                        call.into_uuid(),
                         source_frontier,
                     )
                     .await?;
@@ -951,6 +952,7 @@ async fn failed_terminal_closure_matches(
         session,
         turn_id_to_uuid(correlation.turn()),
         correlation.attempt().into_uuid(),
+        observation.call().into_uuid(),
         correlation.frontier().into_uuid(),
     )
     .await
@@ -961,6 +963,7 @@ async fn failed_turn_closure_matches(
     session: SessionId,
     turn: Uuid,
     attempt: Uuid,
+    call: Uuid,
     source_frontier: Uuid,
 ) -> Result<bool, ModelCallRepositoryError> {
     let terminal_frontier = sqlx::query_scalar::<_, Uuid>(
@@ -970,8 +973,8 @@ async fn failed_turn_closure_matches(
             AND turn_id = $2
             AND state_kind = 'terminal'
             AND terminal_disposition_kind = 'failed'
-            AND terminal_attempt_id IS NULL
-            AND terminal_model_call_id IS NULL
+            AND terminal_attempt_id = $3
+            AND terminal_model_call_id = $4
             AND active_phase_kind IS NULL
             AND current_attempt_id IS NULL
             AND recovery_model_call_id IS NULL
@@ -989,6 +992,7 @@ async fn failed_turn_closure_matches(
     .bind(session_id_to_uuid(session))
     .bind(turn)
     .bind(attempt)
+    .bind(call)
     .fetch_optional(&mut *connection)
     .await?;
     let Some(terminal_frontier) = terminal_frontier else {
@@ -1956,8 +1960,8 @@ async fn persist_failed(
         failed.turn(),
         "failed",
         failed.terminal_snapshot().frontier().snapshot(),
-        None,
-        None,
+        Some(failed.attempt().id()),
+        failed.call().map(signalbox_domain::EndedModelCall::id),
     )
     .await?;
     if let Some(call) = failed.call() {

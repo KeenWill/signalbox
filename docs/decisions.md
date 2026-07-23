@@ -9,6 +9,42 @@ that constrains several components — require a full record under
 [decisions/](decisions/README.md) instead. Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-22 — Failed-terminal provenance backfill fails closed
+
+**Context.** Migration `202607220003_failed_terminal_execution.sql` adds exact
+execution provenance to failed terminal turns (`terminal_attempt_id`,
+`terminal_model_call_id`) so recovery paths cannot substitute unrelated
+identities. Historical failed rows predate these columns, terminal
+`turn_lifecycle` rows are immutable under `turn_lifecycle_changes_are_guarded`,
+and a failed turn's stored history could in principle hold ambiguous attempt or
+call records.
+
+**Decision.** The forward migration derives provenance only when it is
+unambiguous: it aborts (`turn_lifecycle_failed_execution_backfill`, SQLSTATE
+23514\) if any failed terminal turn carries more than one attempt or call, an
+attempt that is not `ended`/`without_stop` with disposition
+`known_failure`/`lost`, or a call that is not a terminal
+`known_failed`/`cancelled` correlated to its exact attempt. The immutability
+trigger is disabled for exactly the one guarded backfill UPDATE inside the same
+transaction and re-enabled before the new deferred final-state assertion is
+installed — the first and only sanctioned exception to terminal-row
+immutability. The new assertion closes failed-terminal execution provenance to
+at most one ended attempt with an optional `known_failed` or `cancelled`
+terminal call.
+
+**Rejected alternatives.** Backfill NULLs and let load-time checks reject later:
+rows readable today would become corruption reports at an arbitrary future read.
+Guess among multiple historical records: silent substitution is the exact defect
+this slice removes. Relax the guard permanently for terminal metadata: that
+would erase the immutability guarantee for every future writer.
+
+**Affects.**
+`crates/persistence/migrations/202607220003_failed_terminal_execution.sql`, the
+failed-branch reconstitution in `crates/domain` and its persistence loaders, and
+INV-006/INV-014 enforcement. Future failure flows that produce retries,
+stop-caused ends, or accepted-ambiguity failures must widen the final-state
+assertion in a new migration.
+
 ## 2026-07-22 — M3 pending-steering fail-closed boundary
 
 **Context.** The owner predecided the M3 boundary while the steering and

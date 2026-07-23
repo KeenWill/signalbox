@@ -52,6 +52,9 @@ pub enum AcceptedInputTurnSchedulingRecordState {
         starting_lineage: AcceptedInputStartingLineage,
         /// The stored starting snapshot identity.
         starting_frontier: ContextFrontierId,
+        /// The complete terminal execution provenance, when the failure
+        /// followed a physical attempt.
+        terminal_execution: Option<FailedTurnExecutionReconstitutionInput>,
         /// The complete frontier through the appended failed marker.
         terminal_frontier: ContextFrontierId,
     },
@@ -85,6 +88,71 @@ pub enum AcceptedInputTurnSchedulingRecordState {
         /// The equal-content terminal frontier identifying the turn boundary.
         terminal_frontier: ContextFrontierId,
     },
+}
+
+/// Correlated stored execution provenance for one failed terminal turn.
+///
+/// The optional enclosing value distinguishes a direct failure with no
+/// physical attempt. This shape always names an ended attempt, and can name a
+/// terminal call only together with that attempt, so call-only provenance is
+/// unrepresentable.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FailedTurnExecutionReconstitutionInput {
+    owning_turn: TurnId,
+    ended_attempt: TurnAttemptId,
+    attempt_disposition: UnstoppedAttemptDisposition,
+    ended_call: Option<crate::ModelCallId>,
+}
+
+impl FailedTurnExecutionReconstitutionInput {
+    /// Supplies one ended attempt when no physical call existed.
+    pub const fn attempt_only(
+        owning_turn: TurnId,
+        ended_attempt: TurnAttemptId,
+        attempt_disposition: UnstoppedAttemptDisposition,
+    ) -> Self {
+        Self {
+            owning_turn,
+            ended_attempt,
+            attempt_disposition,
+            ended_call: None,
+        }
+    }
+
+    /// Supplies one ended attempt and its exact terminal physical call.
+    pub const fn with_call(
+        owning_turn: TurnId,
+        ended_attempt: TurnAttemptId,
+        attempt_disposition: UnstoppedAttemptDisposition,
+        ended_call: crate::ModelCallId,
+    ) -> Self {
+        Self {
+            owning_turn,
+            ended_attempt,
+            attempt_disposition,
+            ended_call: Some(ended_call),
+        }
+    }
+
+    /// Returns the stored owning turn.
+    pub const fn owning_turn(&self) -> TurnId {
+        self.owning_turn
+    }
+
+    /// Returns the stored ended attempt.
+    pub const fn ended_attempt(&self) -> TurnAttemptId {
+        self.ended_attempt
+    }
+
+    /// Returns the stored without-stop attempt disposition.
+    pub const fn attempt_disposition(&self) -> UnstoppedAttemptDisposition {
+        self.attempt_disposition
+    }
+
+    /// Returns the terminal physical call when one existed.
+    pub const fn ended_call(&self) -> Option<crate::ModelCallId> {
+        self.ended_call
+    }
 }
 
 /// Stored facts for one active scheduling phase.
@@ -773,6 +841,20 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
         /// The active turn whose attempt is cross-wired.
         turn: TurnId,
         /// The affected attempt.
+        attempt: TurnAttemptId,
+    },
+    /// A failed terminal's ended attempt names a different owning turn.
+    TerminalAttemptOwnershipMismatch {
+        /// The failed turn being reconstructed.
+        turn: TurnId,
+        /// The cross-wired ended attempt.
+        attempt: TurnAttemptId,
+    },
+    /// A failed terminal's ended attempt has an ineligible disposition.
+    TerminalAttemptEndMismatch {
+        /// The failed turn being reconstructed.
+        turn: TurnId,
+        /// The incorrectly ended attempt.
         attempt: TurnAttemptId,
     },
     /// The same attempt identity appeared on multiple active or terminal
@@ -2121,6 +2203,7 @@ fn reconstitute_inner(
             AcceptedInputTurnSchedulingRecordState::TerminalFailed {
                 starting_lineage,
                 starting_frontier,
+                terminal_execution,
                 terminal_frontier,
             } => {
                 if active.is_some() || queued_seen {
@@ -2140,6 +2223,71 @@ fn reconstitute_inner(
                     &snapshots,
                     &mut referenced_snapshots,
                 )?;
+                if let Some(execution) = terminal_execution {
+                    let attempt = execution.ended_attempt;
+                    if execution.owning_turn != turn {
+                        return Err(
+                            AcceptedInputSchedulingReconstitutionFailure::TerminalAttemptOwnershipMismatch {
+                                turn,
+                                attempt,
+                            },
+                        );
+                    }
+                    if !matches!(
+                        execution.attempt_disposition,
+                        UnstoppedAttemptDisposition::KnownFailure
+                            | UnstoppedAttemptDisposition::Lost
+                    ) {
+                        return Err(
+                            AcceptedInputSchedulingReconstitutionFailure::TerminalAttemptEndMismatch {
+                                turn,
+                                attempt,
+                            },
+                        );
+                    }
+                    if attempt_owners.insert(attempt, turn).is_some() {
+                        return Err(
+                            AcceptedInputSchedulingReconstitutionFailure::DuplicateCurrentAttempt {
+                                attempt,
+                            },
+                        );
+                    }
+                    if let Some(call_id) = execution.ended_call {
+                        let Some(ReconstitutedModelCall::Ended(call)) = model_calls.get(&call_id)
+                        else {
+                            return Err(
+                                AcceptedInputSchedulingReconstitutionFailure::TerminalModelCallMissing {
+                                    turn,
+                                    call: call_id,
+                                },
+                            );
+                        };
+                        let Some(pinned) = pinned_targets.get(&turn) else {
+                            return Err(
+                                AcceptedInputSchedulingReconstitutionFailure::PinnedTargetMissing {
+                                    call: call_id,
+                                },
+                            );
+                        };
+                        if call.turn() != turn
+                            || call.attempt() != attempt
+                            || call.selection() != *record.origin_configuration.effective().model()
+                            || call.target() != pinned.target()
+                            || call.frontier().snapshot() != *starting_frontier
+                            || !matches!(
+                                call.disposition(),
+                                ModelCallDisposition::KnownFailed | ModelCallDisposition::Cancelled
+                            )
+                        {
+                            return Err(
+                                AcceptedInputSchedulingReconstitutionFailure::TerminalModelCallMismatch {
+                                    turn,
+                                },
+                            );
+                        }
+                        referenced_model_calls.insert(call_id);
+                    }
+                }
                 let terminal = snapshots.get(terminal_frontier).cloned().ok_or(
                     AcceptedInputSchedulingReconstitutionFailure::TerminalSnapshotMissing { turn },
                 )?;
@@ -3573,6 +3721,7 @@ mod tests {
                     AcceptedInputTurnSchedulingRecordState::TerminalFailed {
                         starting_lineage: AcceptedInputStartingLineage::FirstInSession,
                         starting_frontier: starting_frontier.id(),
+                        terminal_execution: None,
                         terminal_frontier: terminal_frontier.id(),
                     },
                 )],
@@ -3598,6 +3747,21 @@ mod tests {
                 panic!("matching failed-terminal facts retain a terminal scheduling record");
             };
             *terminal_frontier = replacement;
+        }
+
+        /// Replaces only the stored terminal execution provenance while
+        /// retaining every semantic and frontier fact.
+        fn replace_terminal_execution(
+            &mut self,
+            replacement: Option<FailedTurnExecutionReconstitutionInput>,
+        ) {
+            let AcceptedInputTurnSchedulingRecordState::TerminalFailed {
+                terminal_execution, ..
+            } = &mut self.turns[0].state
+            else {
+                panic!("matching failed-terminal facts retain a terminal scheduling record");
+            };
+            *terminal_execution = replacement;
         }
 
         fn input(self) -> AcceptedInputSchedulingReconstitutionInput {
@@ -3672,6 +3836,7 @@ mod tests {
             AcceptedInputTurnSchedulingRecordState::TerminalFailed {
                 starting_lineage: AcceptedInputStartingLineage::FirstInSession,
                 starting_frontier: predecessor_starting_frontier.id(),
+                terminal_execution: None,
                 terminal_frontier: predecessor_terminal_frontier.id(),
             },
         );
@@ -4962,6 +5127,7 @@ mod tests {
             AcceptedInputTurnSchedulingRecordState::TerminalFailed {
                 starting_lineage: AcceptedInputStartingLineage::FirstInSession,
                 starting_frontier: predecessor_starting_frontier.id(),
+                terminal_execution: None,
                 terminal_frontier: predecessor_terminal_frontier.id(),
             },
         );
@@ -5030,6 +5196,7 @@ mod tests {
             AcceptedInputTurnSchedulingRecordState::TerminalFailed {
                 starting_lineage: AcceptedInputStartingLineage::FirstInSession,
                 starting_frontier: predecessor_starting_frontier.id(),
+                terminal_execution: None,
                 terminal_frontier: predecessor_terminal_frontier.id(),
             },
         );
@@ -5121,6 +5288,182 @@ mod tests {
         assert_eq!(
             candidate.turn().configuration_provenance(),
             &TurnConfigurationProvenance::InheritedForReclassifiedSteering(binding)
+        );
+    }
+
+    #[track_caller]
+    fn assert_failed_terminal_call_provenance_is_complete(
+        session: &Session,
+        failed: OriginFixture,
+        attempt: TurnAttemptId,
+        call_disposition: ModelCallDisposition,
+    ) {
+        let origin_entry = FailedTerminalReconstitutionFacts::matching_origin_entry();
+        let starting_frontier = FailedTerminalReconstitutionFacts::matching_starting_frontier();
+        let call_id = model_call_id(50);
+        let mut facts = FailedTerminalReconstitutionFacts::matching(session, failed);
+        facts.replace_terminal_execution(Some(FailedTurnExecutionReconstitutionInput::with_call(
+            failed.turn(),
+            attempt,
+            UnstoppedAttemptDisposition::KnownFailure,
+            call_id,
+        )));
+        let call = ModelCallReconstitutionInput::new(
+            call_id,
+            failed.turn(),
+            attempt,
+            FrozenModelSelection::Direct(direct(1)),
+            ResolvedProviderTarget::naming(provider_model_identity(51)),
+            starting_frontier.id(),
+            ModelCallReconstitutionState::Terminal(call_disposition),
+        );
+        let projection = facts
+            .input()
+            .with_model_call_facts(
+                vec![crate::PinnedProviderTargetReconstitutionInput::new(
+                    failed.turn(),
+                    call.target(),
+                )],
+                vec![call],
+            )
+            .reconstitute()
+            .expect("failed terminal call provenance is fully correlated");
+        assert_eq!(
+            projection.attempt_owners.get(&attempt),
+            Some(&failed.turn())
+        );
+        assert!(
+            projection
+                .semantic_entries
+                .contains_key(&origin_entry.reference(session))
+        );
+    }
+
+    /// S02 / S03 / INV-006: failed-terminal reconstitution preserves all
+    /// three accepted execution shapes: direct failure, attempt-only startup
+    /// loss, and an attempt with an exact KnownFailed or Cancelled call.
+    #[test]
+    fn s02_s03_inv006_failed_terminal_execution_provenance_is_complete() {
+        let session = current_session();
+        let failed = accepted_origin(1);
+        let attempt = turn_attempt_id(60);
+
+        let direct_failure = FailedTerminalReconstitutionFacts::matching(&session, failed)
+            .input()
+            .reconstitute()
+            .expect("a direct static failure has no execution provenance");
+        assert!(direct_failure.attempt_owners.is_empty());
+
+        let mut attempt_only_facts = FailedTerminalReconstitutionFacts::matching(&session, failed);
+        attempt_only_facts.replace_terminal_execution(Some(
+            FailedTurnExecutionReconstitutionInput::attempt_only(
+                failed.turn(),
+                attempt,
+                UnstoppedAttemptDisposition::Lost,
+            ),
+        ));
+        let attempt_only = attempt_only_facts
+            .input()
+            .reconstitute()
+            .expect("startup loss retains its exact ended attempt");
+        assert_eq!(
+            attempt_only.attempt_owners.get(&attempt),
+            Some(&failed.turn())
+        );
+
+        assert_failed_terminal_call_provenance_is_complete(
+            &session,
+            failed,
+            attempt,
+            ModelCallDisposition::KnownFailed,
+        );
+        assert_failed_terminal_call_provenance_is_complete(
+            &session,
+            failed,
+            attempt,
+            ModelCallDisposition::Cancelled,
+        );
+    }
+
+    /// S02 / S03 / INV-006: failed-terminal attempt provenance fails closed
+    /// when either ownership or the allowed terminal end is contradicted.
+    #[test]
+    fn s02_s03_inv006_failed_terminal_attempt_provenance_fails_closed() {
+        let session = current_session();
+        let failed = accepted_origin(1);
+        let attempt = turn_attempt_id(60);
+
+        let mut wrong_owner = FailedTerminalReconstitutionFacts::matching(&session, failed);
+        wrong_owner.replace_terminal_execution(Some(
+            FailedTurnExecutionReconstitutionInput::attempt_only(
+                turn_id(99),
+                attempt,
+                UnstoppedAttemptDisposition::KnownFailure,
+            ),
+        ));
+        assert_eq!(
+            assert_input_rejects_unchanged(wrong_owner.input()),
+            AcceptedInputSchedulingReconstitutionFailure::TerminalAttemptOwnershipMismatch {
+                turn: failed.turn(),
+                attempt,
+            }
+        );
+
+        let mut wrong_end = FailedTerminalReconstitutionFacts::matching(&session, failed);
+        wrong_end.replace_terminal_execution(Some(
+            FailedTurnExecutionReconstitutionInput::attempt_only(
+                failed.turn(),
+                attempt,
+                UnstoppedAttemptDisposition::TurnCompleted,
+            ),
+        ));
+        assert_eq!(
+            assert_input_rejects_unchanged(wrong_end.input()),
+            AcceptedInputSchedulingReconstitutionFailure::TerminalAttemptEndMismatch {
+                turn: failed.turn(),
+                attempt,
+            }
+        );
+    }
+
+    /// S02 / INV-006 / INV-014: a failed terminal call must match the ended
+    /// attempt and the turn's selection, target, starting frontier, and
+    /// KnownFailed-or-Cancelled physical disposition.
+    #[test]
+    fn s02_inv006_inv014_failed_terminal_call_provenance_fails_closed() {
+        let session = current_session();
+        let failed = accepted_origin(1);
+        let attempt = turn_attempt_id(60);
+        let call_id = model_call_id(50);
+        let starting_frontier = FailedTerminalReconstitutionFacts::matching_starting_frontier();
+        let mut facts = FailedTerminalReconstitutionFacts::matching(&session, failed);
+        facts.replace_terminal_execution(Some(FailedTurnExecutionReconstitutionInput::with_call(
+            failed.turn(),
+            attempt,
+            UnstoppedAttemptDisposition::KnownFailure,
+            call_id,
+        )));
+        let mismatched_call = ModelCallReconstitutionInput::new(
+            call_id,
+            failed.turn(),
+            turn_attempt_id(61),
+            FrozenModelSelection::Direct(direct(1)),
+            ResolvedProviderTarget::naming(provider_model_identity(51)),
+            starting_frontier.id(),
+            ModelCallReconstitutionState::Terminal(ModelCallDisposition::KnownFailed),
+        );
+        let input = facts.input().with_model_call_facts(
+            vec![crate::PinnedProviderTargetReconstitutionInput::new(
+                failed.turn(),
+                mismatched_call.target(),
+            )],
+            vec![mismatched_call],
+        );
+        assert_eq!(
+            assert_input_rejects_unchanged(input),
+            AcceptedInputSchedulingReconstitutionFailure::TerminalModelCallMismatch {
+                turn: failed.turn(),
+            }
         );
     }
 
@@ -5696,6 +6039,7 @@ mod tests {
                 AcceptedInputTurnSchedulingRecordState::TerminalFailed {
                     starting_lineage: AcceptedInputStartingLineage::FirstInSession,
                     starting_frontier: starting_frontier.id(),
+                    terminal_execution: None,
                     terminal_frontier: terminal_frontier.id(),
                 },
             )],
@@ -6393,6 +6737,7 @@ mod tests {
                     immediate_predecessor: earlier.turn(),
                 },
                 starting_frontier: frontier(98).id(),
+                terminal_execution: None,
                 terminal_frontier: frontier(99).id(),
             },
         ));

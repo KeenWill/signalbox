@@ -11,13 +11,14 @@ use signalbox_domain::{
     AcceptedInputSchedulingReconstitutionInput, AcceptedInputStartingLineage,
     AcceptedInputTurnSchedulingRecord, AcceptedInputTurnSchedulingRecordState,
     ActiveTurnSchedulingReconstitutionInput, Actor, AssistantText, ContextFrontierId,
-    DeliveryRequest, DirectModelSelection, DurableCommandId, FrozenAliasDefinition,
-    FrozenModelSelection, ModelAlias, ModelCallDisposition, ModelCallId,
-    ModelCallReconstitutionInput, ModelCallReconstitutionState, ModelSelectionOverride,
-    ModelSelectionRequest, NonEmptyUnicodeTextFailure, OriginConfiguration,
-    PerInputConfigurationChoices, PinnedProviderTargetReconstitutionInput, PreparedSubmitInput,
-    ProviderModelIdentity, ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput,
-    ResolvedProviderTarget, SemanticTranscriptEntryId,
+    DeliveryRequest, DirectModelSelection, DurableCommandId,
+    FailedTurnExecutionReconstitutionInput, FrozenAliasDefinition, FrozenModelSelection,
+    ModelAlias, ModelCallDisposition, ModelCallId, ModelCallReconstitutionInput,
+    ModelCallReconstitutionState, ModelSelectionOverride, ModelSelectionRequest,
+    NonEmptyUnicodeTextFailure, OriginConfiguration, PerInputConfigurationChoices,
+    PinnedProviderTargetReconstitutionInput, PreparedSubmitInput, ProviderModelIdentity,
+    ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget,
+    SemanticTranscriptEntryId,
     SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session,
     SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
@@ -1070,12 +1071,74 @@ pub(crate) async fn load_scheduling_projection(
                 required_frontiers.insert(terminal_frontier);
                 let starting_lineage = decode_starting_lineage(lineage_kind, predecessor)?;
                 match terminal_disposition.as_deref() {
-                    Some("failed")
-                        if terminal_attempt.is_none() && terminal_model_call.is_none() =>
-                    {
+                    Some("failed") => {
+                        let terminal_execution = match (terminal_attempt, terminal_model_call) {
+                            (None, None) => None,
+                            (Some(terminal_attempt), terminal_call) => {
+                                let stored_attempt_id =
+                                    TurnAttemptId::from_uuid(required(&row, "turn_attempt_id")?);
+                                let attempt_turn =
+                                    turn_id_from_uuid(required(&row, "attempt_turn_id")?);
+                                let attempt_session =
+                                    session_id_from_uuid(required(&row, "attempt_session_id")?);
+                                let continued_from: Option<Uuid> =
+                                    row.try_get("continued_from_attempt_id")?;
+                                let attempt_state: String = required(&row, "attempt_state_kind")?;
+                                let end_variant: Option<String> = row.try_get("end_variant")?;
+                                let end_disposition: Option<String> =
+                                    row.try_get("end_disposition")?;
+                                if stored_attempt_id.into_uuid() != terminal_attempt
+                                    || attempt_turn != lifecycle_turn
+                                    || attempt_session != lifecycle_session
+                                    || continued_from.is_some()
+                                    || attempt_state != "ended"
+                                    || end_variant.as_deref() != Some("without_stop")
+                                {
+                                    return Err(SubmitInputCorruption::Inconsistent(
+                                        "failed terminal attempt",
+                                    )
+                                    .into());
+                                }
+                                let attempt_disposition = match end_disposition.as_deref() {
+                                    Some("known_failure") => {
+                                        UnstoppedAttemptDisposition::KnownFailure
+                                    }
+                                    Some("lost") => UnstoppedAttemptDisposition::Lost,
+                                    _ => {
+                                        return Err(SubmitInputCorruption::Inconsistent(
+                                            "failed terminal attempt disposition",
+                                        )
+                                        .into());
+                                    }
+                                };
+                                Some(match terminal_call {
+                                    Some(call) => {
+                                        required_model_calls.insert(call);
+                                        FailedTurnExecutionReconstitutionInput::with_call(
+                                            lifecycle_turn,
+                                            stored_attempt_id,
+                                            attempt_disposition,
+                                            ModelCallId::from_uuid(call),
+                                        )
+                                    }
+                                    None => FailedTurnExecutionReconstitutionInput::attempt_only(
+                                        lifecycle_turn,
+                                        stored_attempt_id,
+                                        attempt_disposition,
+                                    ),
+                                })
+                            }
+                            (None, Some(_)) => {
+                                return Err(SubmitInputCorruption::Inconsistent(
+                                    "failed terminal call without attempt",
+                                )
+                                .into());
+                            }
+                        };
                         AcceptedInputTurnSchedulingRecordState::TerminalFailed {
                             starting_lineage,
                             starting_frontier: ContextFrontierId::from_uuid(starting_frontier),
+                            terminal_execution,
                             terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
                         }
                     }
@@ -1169,12 +1232,6 @@ pub(crate) async fn load_scheduling_projection(
                                 .into());
                             }
                         }
-                    }
-                    Some("failed") => {
-                        return Err(SubmitInputCorruption::Inconsistent(
-                            "failed terminal call correlation",
-                        )
-                        .into());
                     }
                     Some(value) => {
                         return Err(SubmitInputCorruption::Unsupported {

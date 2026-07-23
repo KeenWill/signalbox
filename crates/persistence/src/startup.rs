@@ -558,7 +558,9 @@ async fn insert_prepared_failure(
             SET state_kind = 'terminal',
                 terminal_frontier_id = $1,
                 active_phase_kind = NULL,
+                terminal_attempt_id = current_attempt_id,
                 current_attempt_id = NULL,
+                terminal_model_call_id = NULL,
                 terminal_disposition_kind = 'failed'
           WHERE turn_id = $2
             AND session_id = $3
