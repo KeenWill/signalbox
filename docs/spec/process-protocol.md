@@ -357,10 +357,11 @@ authoritative committed assistant text produced for its exact turn. A failed or
 refused turn produces a typed diagnostic and a nonzero exit without reply text.
 `follow` prints the initial transcript and subsequent typed durable updates
 until interrupted. By default every process-derived text field written to a
-terminal preserves line feed but renders C0, DEL, and C1 code points as visible
-`\u{...}` escapes, preventing ESC/OSC execution. `--raw-output` is the explicit
-opt-in that writes those fields unchanged; the same safe-rendering choice covers
-assistant text, typed diagnostics, and durable updates.
+terminal preserves line feed but renders every other C0 code point, DEL, and C1
+code points as visible `\u{...}` escapes, preventing ESC/OSC execution.
+`--raw-output` is the explicit opt-in that writes those fields unchanged; the
+same safe-rendering choice covers assistant text, typed diagnostics, and durable
+updates.
 
 The existing `signalbox-debug` binary is unchanged and remains a development
 harness, not a protocol client.
