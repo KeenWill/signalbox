@@ -416,10 +416,10 @@ impl ImportedMediaSource {
 /// One ordered rich block inside a tool result.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum ImportedToolResultBlock {
-    /// Exact result text.
-    Text(ImportedText),
-    /// Exact source-attested image data.
-    Image(ImportedMediaSource),
+    /// Exact or absent result text.
+    Text(ImportedSourceAttestation<ImportedText>),
+    /// Exact or absent source-attested image data.
+    Image(ImportedSourceAttestation<ImportedMediaSource>),
     /// A source tool reference.
     ToolReference {
         /// Exact or absent tool name.
@@ -444,8 +444,8 @@ pub enum ImportedTranscriptContent {
         /// Exact, explicit-null, or omitted top-level source type.
         source_type: ImportedSourceAttestation<ImportedText>,
     },
-    /// Exact decoded user or assistant text.
-    Text(ImportedText),
+    /// Exact or absent decoded user or assistant text.
+    Text(ImportedSourceAttestation<ImportedText>),
     /// One source tool call.
     ToolCall {
         /// Source call identity.
@@ -1529,7 +1529,7 @@ mod tests {
                 2,
                 1,
                 ImportedSourceAttestation::Attested(ImportedSpeaker::Assistant),
-                ImportedTranscriptContent::Text(text("")),
+                ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(text(""))),
                 metadata(ImportedSourceAttestation::Attested(
                     ImportedSpeaker::Assistant,
                 )),
@@ -1580,7 +1580,7 @@ mod tests {
         assert_eq!(imported.entries().len(), 3);
         assert_eq!(
             imported.entries()[1].content(),
-            &ImportedTranscriptContent::Text(text(""))
+            &ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(text("")))
         );
 
         let frontiers = imported.frontiers().collect::<Vec<_>>();
