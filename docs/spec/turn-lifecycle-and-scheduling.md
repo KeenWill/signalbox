@@ -237,24 +237,31 @@ live-looking prior-process attempt (INV-034).
 `StartupScanService` reads the finite inventory of sessions with an active turn
 (deterministic order), then runs one independent transaction per session under
 the same scheduler-row lock ordering as every other lifecycle writer. Each
-transaction reconstitutes the complete scheduling projection and lets the domain
-prepare the recovery (`prepare_active_turn_lost_failure`):
+transaction reconstitutes the complete scheduling projection and classifies the
+lost tenure by its durable model-call evidence — startup never fabricates a live
+end (INV-034):
 
-- for an evidence-free turn (no model call), the current attempt ends
-  `WithoutStop(Lost)`; a turn holding a `Prepared` model call closes the call
-  `known_failed` while its abandoned attempt still ends `WithoutStop(Lost)`; and
-  an in-flight call is classified `ambiguous` with the attempt ending
-  `WithoutStop(Lost)`, parking the turn in the `awaiting_model_call_recovery`
-  wait instead of terminalizing (a `cancellation_requested` call cannot pass the
-  reconstitution seam) — startup never fabricates a live end (INV-034);
-- one `TurnFailed` semantic entry is appended, and the terminal frontier is
-  derived as the starting frontier plus that marker (entry payloads are
-  [sessions-and-transcript](sessions-and-transcript.md) scope);
-- the turn terminalizes `Failed`, releasing the slot via one guarded attempt-end
-  update and one guarded lifecycle update, each required to match exactly one
-  row; and
-- a `turn_failed` outbox record is appended in the same transaction (outbox
-  mechanics are [persistence-protocol](persistence-protocol.md) scope).
+- an evidence-free turn (no model call) prepares
+  `prepare_active_turn_lost_failure`: the current attempt ends
+  `WithoutStop(Lost)` and the turn fails;
+- a turn holding a `Prepared` model call (`recover_after_restart`) closes the
+  call `known_failed` while its abandoned attempt still ends
+  `WithoutStop(Lost)`, and the turn fails; and
+- a turn holding an in-flight call ends the call `ambiguous` and the attempt
+  `WithoutStop(Lost)`, but the turn does not terminalize: it stays active,
+  parked in the `awaiting_model_call_recovery` phase naming the ambiguous call
+  (`recovery_model_call_id`), with no `TurnFailed` entry, no terminal frontier,
+  no terminal disposition, and no `turn_failed` outbox record (a
+  `cancellation_requested` call cannot pass the reconstitution seam).
+
+In the two failing branches only: one `TurnFailed` semantic entry is appended,
+and the terminal frontier is derived as the starting frontier plus that marker
+(entry payloads are [sessions-and-transcript](sessions-and-transcript.md)
+scope); the turn terminalizes `Failed`, releasing the slot via one guarded
+attempt-end update and one guarded lifecycle update, each required to match
+exactly one row; and a `turn_failed` outbox record is appended in the same
+transaction (outbox mechanics are
+[persistence-protocol](persistence-protocol.md) scope).
 
 Why `Failed`: the evidence-free slice stores no operations, waits, or stop
 causes, so an abandoned tenure has no sufficient completion, refusal, or
@@ -322,15 +329,19 @@ fixed frontier, and provenance must survive that coincidence (ADR-0030).
 
 Construction authority is sealed: public code cannot assemble a
 `ResolvedContextFrontierSnapshot`, `AcceptedInputTurnStart`, or activated turn
-from raw identifiers; only the validated eligibility and recovery transitions
-produce them. Persistence materializes complete snapshot membership
-(`context_frontier` + `context_frontier_member`), inserts only; a deferred
-constraint trigger (`context_frontier_requires_complete_membership`) re-asserts
-complete contiguous membership — exact declared count, positions `1..count` — at
-commit, and reconstitution rejects any stored snapshot whose resolved membership
-disagrees with the complete entry set — one identifier can never resolve
-differently. Transcript-ancestry resolution into a first frontier is
-unimplemented (open edge); `TranscriptFrontier` itself is
+from raw identifiers; the producers are the sealed domain transitions and
+checked seams — eligibility activation, startup recovery, model-call closure
+(completion, refusal, and known failure in
+`crates/domain/src/model_execution.rs` derive terminal snapshots), and the
+fail-closed reconstitution seams that rebuild a stored snapshot only from its
+complete materialized membership. Persistence materializes complete snapshot
+membership (`context_frontier` + `context_frontier_member`), inserts only; a
+deferred constraint trigger (`context_frontier_requires_complete_membership`)
+re-asserts complete contiguous membership — exact declared count, positions
+`1..count` — at commit, and reconstitution rejects any stored snapshot whose
+resolved membership disagrees with the complete entry set — one identifier can
+never resolve differently. Transcript-ancestry resolution into a first frontier
+is unimplemented (open edge); `TranscriptFrontier` itself is
 [sessions-and-transcript](sessions-and-transcript.md) scope.
 
 ## Evidence-bearing reconstitution

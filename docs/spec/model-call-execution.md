@@ -349,6 +349,7 @@ prints the semantic transcript; it is deliberately not the client protocol.
   same-incarnation drains are exercised only by tests.
 - No timeout budget bounds provider work; a hung stream blocks the attempt until
   operator restart.
-- No system prompt is composed or sent: the bridge always leaves `ModelSettings`
-  `system` empty; system-prompt projection from session configuration remains
-  deferred.
+- No system prompt is composed or sent: the bridge always leaves the runtime
+  operation's own `ModelOperation::system` field `None`
+  (`crates/model-runtime/src/operation.rs`; `ModelSettings` carries no such
+  field); system-prompt projection from session configuration remains deferred.

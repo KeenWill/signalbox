@@ -338,8 +338,11 @@ no implemented boundary constructs them.
 - Assistant-text and completed-turn semantic entries are implemented (ADR-0042);
   the tool-use variant is typed but storage-blocked; refusal, cancellation,
   reconciliation, steering, approval, and delegation entry variants remain open.
-- Provider-prompt and client transcript rendering projections over semantic
-  entries are not implemented.
+- The client transcript rendering projection over semantic entries is not
+  implemented. The provider-prompt message projection is:
+  `PreparedModelOperation::render` maps frontier entries to provider-neutral
+  messages ([model-call-execution](model-call-execution.md)); only system-prompt
+  composition remains deferred, as that page's open edge.
 - `ReplaceSessionDefaults` carries no `actor` field although ADR-0039 slated it
   for first-accepted-version adoption; its record family has since committed at
   storage version 1 without one, so under ADR-0034's first-acceptance freeze

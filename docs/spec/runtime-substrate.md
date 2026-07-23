@@ -43,12 +43,13 @@ no durable state, makes no lifecycle decisions, and performs no logging.
 ## The operation
 
 `ModelOperation<C>` carries the correlation value, a non-secret
-`CredentialReference`, the three separate target facts, optional system text,
-typed conversation history (`ConversationMessage` with text, replayed tool
-calls, tool results, and signed or redacted thinking parts), `ModelSettings`
-(required `max_output_tokens`; optional temperature, top-p, stop sequences),
-declared `ToolDefinition`s, a `ToolChoice` (automatic/any/named), an optional
-`StructuredOutputContract`, and a `DeliveryMode` (buffered or streamed).
+`CredentialReference`, the two caller-supplied target facts (`RequestedTarget`,
+`ResolvedTarget`), optional system text, typed conversation history
+(`ConversationMessage` with text, replayed tool calls, tool results, and signed
+or redacted thinking parts), `ModelSettings` (required `max_output_tokens`;
+optional temperature, top-p, stop sequences), declared `ToolDefinition`s, a
+`ToolChoice` (automatic/any/named), an optional `StructuredOutputContract`, and
+a `DeliveryMode` (buffered or streamed).
 
 `ModelOperation::validate` rejects, before any send: duplicate ordinary tool
 names, a named tool choice matching no declared tool, and an ordinary tool
@@ -57,10 +58,13 @@ a returned proposal under that name is unambiguously the contracted value, never
 an ordinary tool call.
 
 Target identity stays three facts (`RequestedTarget`, `ResolvedTarget`,
-`ProviderReportedModel`). Adapters send exactly the resolved target as the
-provider model parameter, never the requested selection, and surface a
-provider-reported identity as soon as observed without fabricating a match or
-mismatch; comparison is the caller's classification work (INV-014).
+`ProviderReportedModel`), but only the first two are operation fields: the
+reported identity cannot exist when the operation is constructed, so it is an
+adapter-produced fact surfaced through the `ProviderModelReported` observation
+and the `reported_model` field of terminal evidence. Adapters send exactly the
+resolved target as the provider model parameter, never the requested selection,
+and surface a provider-reported identity as soon as observed without fabricating
+a match or mismatch; comparison is the caller's classification work (INV-014).
 
 ## Two-stage execution
 
@@ -188,10 +192,12 @@ Guarantees:
 
 `StructuredOutputContract` (name, description, JSON Schema, generated from a
 Rust type via schemars or supplied explicitly) is realized by both adapters as a
-forced tool/function call with parallel tool use disabled, so exactly one
-contract value returns and the provider-independent decode applies unchanged.
-Why: one decode path across adapters beats per-provider native output mechanisms
-that would return content-text values and require schema transformation.
+forced tool/function call with parallel tool use disabled. That is a request
+constraint, not a response guarantee: a nonconforming or malformed response can
+still carry zero or several proposals, and the provider-independent decode below
+is what enforces the exactly-one contract. Why: one decode path across adapters
+beats per-provider native output mechanisms that would return content-text
+values and require schema transformation.
 
 `decode_structured` and `decode_structured_json` are pure functions over
 already-delivered response parts: exactly one proposal under the contract name
