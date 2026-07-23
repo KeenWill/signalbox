@@ -193,6 +193,8 @@ pub enum OutboxCorruption {
     MissingSequenceState,
     /// The delivered cursor exceeded the allocator cursor.
     DeliveryBeyondAllocatedSequence,
+    /// A committed header existed beyond the allocator cursor.
+    EventBeyondAllocatedSequence,
     /// The allocator named a committed sequence whose header was absent.
     MissingCommittedEventHeader,
     /// A stored cursor or sequence was not an unsigned 64-bit integer.
@@ -205,6 +207,8 @@ pub enum OutboxCorruption {
     UnsupportedEventKind,
     /// The header's required typed record was absent.
     MissingTypedRecord,
+    /// A terminal typed record disagreed with authoritative durable state.
+    InvalidTerminalEventCorrelation,
     /// A model-call transition had an inconsistent or unknown state shape.
     InvalidModelCallState,
 }
@@ -218,12 +222,18 @@ impl fmt::Display for OutboxCorruption {
             Self::DeliveryBeyondAllocatedSequence => {
                 "outbox delivery state exceeds the allocated sequence"
             }
+            Self::EventBeyondAllocatedSequence => {
+                "outbox event header exceeds the allocated sequence"
+            }
             Self::MissingCommittedEventHeader => "outbox committed event header is missing",
             Self::InvalidSequence => "outbox sequence is invalid",
             Self::InvalidAcceptancePosition => "outbox input acceptance position is invalid",
             Self::UnsupportedStorageVersion => "outbox storage version is unsupported",
             Self::UnsupportedEventKind => "outbox event kind is unsupported",
             Self::MissingTypedRecord => "outbox typed event record is missing",
+            Self::InvalidTerminalEventCorrelation => {
+                "outbox terminal event correlations are invalid"
+            }
             Self::InvalidModelCallState => "outbox model-call state is invalid",
         })
     }
@@ -307,12 +317,19 @@ impl OutboxDispatcher {
         let delivered = delivered.ok_or(OutboxCorruption::MissingDeliveryState)?;
         let delivered = decode_nonnegative_sequence(delivered)?;
         let Some(next) = delivered.checked_add(1) else {
+            let allocated = load_allocated_sequence(&mut transaction).await?;
+            if allocated < delivered {
+                return Err(OutboxCorruption::DeliveryBeyondAllocatedSequence.into());
+            }
             transaction.rollback().await?;
             return Ok(OutboxDispatchOutcome::Idle);
         };
         let (allocated, event) = load_event(&mut transaction, next).await?;
         if allocated < delivered {
             return Err(OutboxCorruption::DeliveryBeyondAllocatedSequence.into());
+        }
+        if event.is_some() && allocated < next {
+            return Err(OutboxCorruption::EventBeyondAllocatedSequence.into());
         }
         let Some(event) = event else {
             if allocated >= next {
@@ -343,6 +360,17 @@ impl OutboxDispatcher {
         transaction.commit().await?;
         Ok(OutboxDispatchOutcome::Delivered { sequence: next })
     }
+}
+
+async fn load_allocated_sequence(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<u64, OutboxDispatchError> {
+    let allocated: Option<Decimal> =
+        sqlx::query_scalar("SELECT last_sequence FROM outbox_sequence_state WHERE singleton")
+            .fetch_optional(&mut **transaction)
+            .await?;
+    decode_nonnegative_sequence(allocated.ok_or(OutboxCorruption::MissingSequenceState)?)
+        .map_err(Into::into)
 }
 
 async fn load_event(
@@ -439,15 +467,27 @@ async fn load_event(
         }
         TURN_FAILED => {
             let row: Option<(Uuid, Uuid, Uuid)> = sqlx::query_as(
-                "SELECT turn_id, failure_entry_id, terminal_frontier_id
-                   FROM turn_failed_outbox_event
-                  WHERE event_sequence = $1",
+                "SELECT event.turn_id, event.failure_entry_id,
+                        event.terminal_frontier_id
+                   FROM turn_failed_outbox_event AS event
+                   JOIN turn_lifecycle AS turn
+                     ON turn.turn_id = event.turn_id
+                    AND turn.session_id = event.session_id
+                    AND turn.state_kind = 'terminal'
+                    AND turn.terminal_disposition_kind = 'failed'
+                    AND turn.terminal_frontier_id = event.terminal_frontier_id
+                   JOIN semantic_transcript_entry AS failure
+                     ON failure.source_session_id = event.session_id
+                    AND failure.semantic_entry_id = event.failure_entry_id
+                    AND failure.payload_kind = 'turn_failed'
+                    AND failure.failed_turn_id = event.turn_id
+                  WHERE event.event_sequence = $1",
             )
             .bind(Decimal::from(expected_sequence))
             .fetch_optional(&mut **transaction)
             .await?;
             let (turn, failure_entry, terminal_frontier) =
-                row.ok_or(OutboxCorruption::MissingTypedRecord)?;
+                row.ok_or(OutboxCorruption::InvalidTerminalEventCorrelation)?;
             DispatchedOutboxEventKind::TurnFailed {
                 turn: TurnId::from_uuid(turn),
                 failure_entry: SemanticTranscriptEntryId::from_uuid(failure_entry),
@@ -475,16 +515,33 @@ async fn load_event(
         }
         TURN_COMPLETED => {
             let row: Option<(Uuid, Uuid, Uuid, Uuid)> = sqlx::query_as(
-                "SELECT turn_id, model_call_id, completion_entry_id,
-                        terminal_frontier_id
-                   FROM turn_completed_outbox_event
-                  WHERE event_sequence = $1",
+                "SELECT event.turn_id, event.model_call_id,
+                        event.completion_entry_id, event.terminal_frontier_id
+                   FROM turn_completed_outbox_event AS event
+                   JOIN turn_lifecycle AS turn
+                     ON turn.turn_id = event.turn_id
+                    AND turn.session_id = event.session_id
+                    AND turn.state_kind = 'terminal'
+                    AND turn.terminal_disposition_kind = 'completed'
+                    AND turn.terminal_frontier_id = event.terminal_frontier_id
+                   JOIN model_call AS call
+                     ON call.model_call_id = event.model_call_id
+                    AND call.turn_id = event.turn_id
+                    AND call.session_id = event.session_id
+                    AND call.state_kind = 'terminal'
+                    AND call.terminal_disposition_kind = 'completed'
+                   JOIN semantic_transcript_entry AS completion
+                     ON completion.source_session_id = event.session_id
+                    AND completion.semantic_entry_id = event.completion_entry_id
+                    AND completion.payload_kind = 'turn_completed'
+                    AND completion.completed_turn_id = event.turn_id
+                  WHERE event.event_sequence = $1",
             )
             .bind(Decimal::from(expected_sequence))
             .fetch_optional(&mut **transaction)
             .await?;
             let (turn, call, completion_entry, terminal_frontier) =
-                row.ok_or(OutboxCorruption::MissingTypedRecord)?;
+                row.ok_or(OutboxCorruption::InvalidTerminalEventCorrelation)?;
             DispatchedOutboxEventKind::TurnCompleted {
                 turn: TurnId::from_uuid(turn),
                 call: ModelCallId::from_uuid(call),
@@ -494,15 +551,28 @@ async fn load_event(
         }
         TURN_REFUSED => {
             let row: Option<(Uuid, Uuid, Uuid)> = sqlx::query_as(
-                "SELECT turn_id, model_call_id, terminal_frontier_id
-                   FROM turn_refused_outbox_event
-                  WHERE event_sequence = $1",
+                "SELECT event.turn_id, event.model_call_id,
+                        event.terminal_frontier_id
+                   FROM turn_refused_outbox_event AS event
+                   JOIN turn_lifecycle AS turn
+                     ON turn.turn_id = event.turn_id
+                    AND turn.session_id = event.session_id
+                    AND turn.state_kind = 'terminal'
+                    AND turn.terminal_disposition_kind = 'refused'
+                    AND turn.terminal_frontier_id = event.terminal_frontier_id
+                   JOIN model_call AS call
+                     ON call.model_call_id = event.model_call_id
+                    AND call.turn_id = event.turn_id
+                    AND call.session_id = event.session_id
+                    AND call.state_kind = 'terminal'
+                    AND call.terminal_disposition_kind = 'refused'
+                  WHERE event.event_sequence = $1",
             )
             .bind(Decimal::from(expected_sequence))
             .fetch_optional(&mut **transaction)
             .await?;
             let (turn, call, terminal_frontier) =
-                row.ok_or(OutboxCorruption::MissingTypedRecord)?;
+                row.ok_or(OutboxCorruption::InvalidTerminalEventCorrelation)?;
             DispatchedOutboxEventKind::TurnRefused {
                 turn: TurnId::from_uuid(turn),
                 call: ModelCallId::from_uuid(call),
