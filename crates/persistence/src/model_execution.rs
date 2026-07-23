@@ -2166,6 +2166,17 @@ async fn persist_reclassified_pending_steering(
         .await?
         .rows_affected();
         require_single(lifecycle_rows, "reclassified successor lifecycle")?;
+
+        outbox::append(
+            connection,
+            OutboxEvent::InputAccepted {
+                session,
+                accepted_input: successor.accepted_input().id(),
+                turn: successor.turn(),
+                acceptance_position: successor.order().acceptance_position(),
+            },
+        )
+        .await?;
     }
     Ok(())
 }
