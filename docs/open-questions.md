@@ -83,6 +83,12 @@ identifiers refer to [scenarios.md](scenarios.md).
   turn lifecycle defines cancellation authority only through applied interrupts,
   and adding a standalone command requires a future foundation decision with its
   own proof and disposition rules. Later scope. (S07)
+- **Ambiguous provider-call recovery.** A restart-recovered in-flight call parks
+  its turn in the awaiting-recovery wait
+  ([model-call-execution](spec/model-call-execution.md)) with no resolving
+  writer yet. The retired design analysis identified adopting a provider
+  request-status API — with its polling posture and evidence classes — as the
+  resolution path; the full analysis is in git history. Later scope. (S02)
 - **Direct interrupt-only reconciliation from a running attempt.**
   [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md) adds
   direct reconciliation only for fatal mismatch at a closed aggregate boundary;
