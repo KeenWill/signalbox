@@ -251,9 +251,7 @@ verify the server certificate and hostname against `rustls-platform-verifier`'s
 platform trust roots, require TLS 1.2 or newer, and carry no custom-root or
 verification-bypass surface. Ambient system and environment proxies are disabled
 and the adapters expose no proxy configuration. Why: provider credentials and
-content must not silently traverse an operator-unreviewed intermediary; adding a
-controlled proxy or private trust root is a later security decision, not ambient
-configuration.
+content must not silently traverse an operator-unreviewed intermediary.
 
 Transport discipline (both adapters — one send is provably one physical
 request):
@@ -415,3 +413,5 @@ failures after staleness handling.
 - The three-kind consumer allowlist (provider adapters, the
   `model-provider-runtime` bridge, the hub composition root) is a review-time
   contract only; no manifest allowlist check enforces it.
+- [Identity, credentials, and resource governance](../open-questions.md#identity-credentials-and-resource-governance)
+  owns controlled provider-proxy and private-root support.
