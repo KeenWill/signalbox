@@ -43,9 +43,9 @@ reviews:
       - name: "Public-source hygiene"
         mode: warning
         instructions: |-
-          Scope: all text this PR adds on any surface the rule names — code comments, documentation, the PR description, commit messages, and the head branch name. Pass immediately if none.
+          Scope: all text this PR adds on any surface the rule names — code (comments, string literals, identifiers), documentation, all pull-request text (title and description), commit messages, and the head branch name. Pass immediately if none.
           Fail when added text includes or alludes to non-public material of any organization — internal systems, private documents, specifications not publicly documented, or organization-internal vocabulary — whether as content, source, or inspiration. Citing publicly available open-source projects, papers, and blog posts is always acceptable regardless of publisher. References to the owner's own personal private repositories are acceptable only as provenance notes, never as normative sources (mirroring the owning rule).
-          Report each violation by file and category only. Do NOT quote, excerpt, or paraphrase the violating passage: a review comment is itself persistent pull-request text, and echoing the material would republish exactly what the rule exists to keep out.
+          Report each violation by surface and category only — the file path where one exists, otherwise the surface name (pull-request title, description, commit message, branch name). Do NOT quote, excerpt, or paraphrase the violating passage: a review comment is itself persistent pull-request text, and echoing the material would republish exactly what the rule exists to keep out.
 
       # verdict logic for the single-statement-of-record rule owned by AGENTS.md
       - name: "Normative statements live in one place"
