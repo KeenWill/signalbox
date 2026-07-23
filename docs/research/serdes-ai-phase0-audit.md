@@ -1,5 +1,11 @@
 # SerdesAI Phase-0 audit
 
+> Dated research intake (2026-07-21). Record citations (ADR-NNNN) refer to the
+> retired ADR corpus; resolve them through the
+> [ADR mapping](../spec/README.md#adr-mapping). Current requirements live in the
+> [living specification](../spec/README.md), which supersedes any requirement
+> stated here.
+
 - Date: 2026-07-20
 - Status: research intake, proposal-grade input only; where this document and a
   merged ADR disagree, the ADR wins
