@@ -353,12 +353,13 @@ later than the triggering event, it makes presentation eligible only the
 previously undisplayed semantic material attributable to that exact terminal
 event: assistant text from its named turn and model call plus the exact
 completion marker for `turn_completed`, the exact failure marker for
-`turn_failed`, or refusal text from its named turn and model call for
-`turn_refused`. It does not present material introduced by any later cursor.
-Such material remains ordered behind its buffered followed event, or behind a
-new authoritative snapshot after `resync_required`. Final durable content is
-deduplicated by source-qualified semantic-entry identity while transition-only
-events remain visible instead of being suppressed by a newer side snapshot.
+`turn_failed`, and no semantic material for `turn_refused`, whose refusal
+creates no content entry. It does not present material introduced by any later
+cursor. Such material remains ordered behind its buffered followed event, or
+behind a new authoritative snapshot after `resync_required`. Final durable
+content is deduplicated by source-qualified semantic-entry identity while
+transition-only events remain visible instead of being suppressed by a newer
+side snapshot.
 
 ## Terminal client
 
