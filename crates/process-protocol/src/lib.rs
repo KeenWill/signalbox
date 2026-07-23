@@ -1311,6 +1311,11 @@ fn request_id_from_probe(probe: &RawHeaderProbe<'_>, allow_uncorrelated: bool) -
 }
 
 fn recover_request_id(content: &[u8], allow_uncorrelated: bool) -> RequestId {
+    // Recovery is best effort and must not parse an arbitrarily large rejected
+    // line. A complete minimally oversized line can still fit this content cap.
+    if content.len() > MAX_FRAME_BYTES {
+        return RequestId::uncorrelated();
+    }
     deserialize_header_probe(content)
         .map(|probe| request_id_from_probe(&probe, allow_uncorrelated))
         .unwrap_or_else(|_| RequestId::uncorrelated())
@@ -1343,6 +1348,20 @@ mod tests {
     fn line(json: &str) -> Vec<u8> {
         let mut bytes = json.as_bytes().to_vec();
         bytes.push(b'\n');
+        bytes
+    }
+
+    fn padded_oversized_client_frame(request_members: &str, content_len: usize) -> Vec<u8> {
+        let mut bytes = format!(
+            r#"{{"version":1,{request_members},"request":{{"type":"list_sessions","padding":""#
+        )
+        .into_bytes();
+        let suffix = b"\"}}";
+        assert!(content_len >= bytes.len() + suffix.len());
+        bytes.resize(content_len - suffix.len(), b'x');
+        bytes.extend_from_slice(suffix);
+        bytes.push(b'\n');
+        assert_eq!(bytes.len(), content_len + 1);
         bytes
     }
 
@@ -1516,13 +1535,17 @@ mod tests {
     }
 
     #[test]
-    fn inv033_canonical_decimal_and_uuid_spellings_are_required() {
+    fn inv033_canonical_decimal_spellings_are_required() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"01","request":{"type":"list_sessions"}}"#,
         );
         assert_client_malformed(
             r#"{"version":1,"request_id":"+1","request":{"type":"list_sessions"}}"#,
         );
+    }
+
+    #[test]
+    fn inv033_canonical_uuid_spellings_are_required() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"read_transcript","session_id":"00000000-0000-0000-0000-00000000000A"}}"#,
         );
@@ -1734,20 +1757,48 @@ mod tests {
 
     #[test]
     fn inv033_oversized_complete_frame_preserves_recoverable_request_id() {
-        let oversized = format!(
-            r#"{{"version":1,"request_id":"9","request":{{"type":"list_sessions","padding":"{}"}}}}"#,
-            "x".repeat(super::MAX_FRAME_BYTES)
-        );
-        let error = decode_client_line(&line(&oversized))
+        let oversized =
+            padded_oversized_client_frame(r#""request_id":"9""#, super::MAX_FRAME_BYTES);
+        let error = decode_client_line(&oversized)
             .expect_err("a complete frame over the byte cap must be rejected");
 
         assert_eq!(error.kind(), FrameDecodeErrorKind::OversizedFrame);
         assert_eq!(error.request_id().value(), 9);
+    }
 
-        let unparseable = decode_client_line(&vec![b' '; super::MAX_FRAME_BYTES + 1])
-            .expect_err("an unparseable oversized frame must be rejected");
-        assert_eq!(unparseable.kind(), FrameDecodeErrorKind::OversizedFrame);
-        assert_eq!(unparseable.request_id().value(), 0);
+    #[test]
+    fn inv033_oversized_duplicate_request_identity_is_uncorrelated() {
+        let oversized = padded_oversized_client_frame(
+            r#""request_id":"9","request_id":"10""#,
+            super::MAX_FRAME_BYTES,
+        );
+        let error =
+            decode_client_line(&oversized).expect_err("a duplicate request identity must fail");
+
+        assert_eq!(error.kind(), FrameDecodeErrorKind::OversizedFrame);
+        assert_eq!(error.request_id().value(), 0);
+    }
+
+    #[test]
+    fn inv033_oversized_noncanonical_request_identity_is_uncorrelated() {
+        let oversized =
+            padded_oversized_client_frame(r#""request_id":"09""#, super::MAX_FRAME_BYTES);
+        let error =
+            decode_client_line(&oversized).expect_err("a noncanonical request identity must fail");
+
+        assert_eq!(error.kind(), FrameDecodeErrorKind::OversizedFrame);
+        assert_eq!(error.request_id().value(), 0);
+    }
+
+    #[test]
+    fn inv033_request_identity_recovery_stops_at_the_frame_cap() {
+        let far_oversized =
+            padded_oversized_client_frame(r#""request_id":"9""#, super::MAX_FRAME_BYTES * 2);
+        let error = decode_client_line(&far_oversized)
+            .expect_err("a frame beyond the recovery budget must be rejected");
+
+        assert_eq!(error.kind(), FrameDecodeErrorKind::OversizedFrame);
+        assert_eq!(error.request_id().value(), 0);
     }
 
     #[test]
