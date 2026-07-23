@@ -66,9 +66,12 @@ non-running phase, session or snapshot mismatches, frontier entries that do not
 exactly back ordered membership, missing or unreferenced origin content, a call
 whose turn/attempt/frontier/selection/target contradict the checked turn facts,
 more than one call, and any attempt/call state pair outside `(Prepared, none)`,
-`(Prepared, Prepared)`, or `(Running, InFlight)`. Why: acting on a partially
-consistent projection could authorize a second provider effect against stale
-authority, so every invalid shape refuses rather than repairs. Sealed
+`(Prepared, Prepared)`, `(Running, InFlight)`, or the proof-bearing
+`(StopRequested, CancellationRequested)` pair. The stopped pair must reconstruct
+the exact applied-interrupt proof retained by the attempt before it can
+authorize cancellation observation or restart recovery. Why: acting on a
+partially consistent projection could authorize a second provider effect against
+stale authority, so every invalid shape refuses rather than repairs. Sealed
 constructors (compile-fail-tested) prevent forging call records or terminal
 history outside the aggregate (INV-002).
 
@@ -102,6 +105,12 @@ composed roles (prepare, capability, authorize-send, provider,
 commit-observation) plus an id generator and a dispatch gate. No database
 transaction is ever open across credential I/O or provider work.
 
+The two off-transaction provider roles share one call-scoped
+`CancellationSignal`. It resolves when an authoritative reload finds the exact
+call `CancellationRequested` or terminal: direct cancellation of a prepared call
+therefore releases blocked capability preparation, while issued-call
+cancellation reaches provider invocation (INV-037).
+
 1. **Prepare transaction.** Locks the session, reconstitutes the aggregate, and
    either: reports no runnable work; creates and commits the exact `Prepared`
    call with its pinned non-secret credential reference
@@ -124,10 +133,11 @@ transaction is ever open across credential I/O or provider work.
    and cannot inspect, persist, or log it (INV-035;
    [configuration-and-credentials](configuration-and-credentials.md)). Why: a
    nonserializable one-shot value makes credential escape and capability reuse
-   structurally impossible rather than a review convention. A trustworthy
-   ordinary failure here commits the accepted `Prepared -> KnownFailed` closure
-   with attempt and turn failure in a separate guarded transaction; an adapter
-   defect is an operator failure and commits no provider-failure closure.
+   structurally impossible rather than a review convention. Preparation races
+   the shared cancellation signal above. A trustworthy ordinary failure here
+   commits the accepted `Prepared -> KnownFailed` closure with attempt and turn
+   failure in a separate guarded transaction; an adapter defect is an operator
+   failure and commits no provider-failure closure.
 3. **Authorize-send transaction.** After acquiring the process-shared
    per-attempt dispatch gate, a distinct transaction reloads authority and
    commits `Prepared -> InFlight` with the attempt's `Prepared -> Running` and a
@@ -145,8 +155,7 @@ transaction is ever open across credential I/O or provider work.
    is known. It consumes the capability exactly once and returns one
    provider-neutral terminal observation bound to the sealed issued correlation
    (session, turn, attempt, call, target, frontier). Its runtime
-   `CancellationSignal` resolves when the repository observes that exact call's
-   durable `CancellationRequested` state (INV-037).
+   `CancellationSignal` is the shared durable signal defined above.
 5. **Commit-observation transaction.** A fresh transaction reloads and
    revalidates complete authority — it never trusts the pre-send projection —
    checks the observation's correlation against fresh state, and atomically
@@ -161,19 +170,20 @@ observation commit failed.
 ### Identity minting and commit ambiguity
 
 The application owns all candidate identity minting (UUIDv7); persistence uses
-or discards candidates but never mints its own. Call, entry, and frontier
-candidates are minted immediately before each port call. The one exception is
-reclassified successor-turn ids: the service passes an application-owned
-generator closure that the persistence adapter invokes during the transaction,
-once per pending steering input found under the lock (startup recovery does the
-same). Why: how many successors exist is knowable only inside the locked
-transaction, so the count moves into the transaction while minting authority
-stays with the application. A proven hub-minted identity collision
-(unique-violation rollback on the call, entry, frontier, or reclassified-turn
-key) is the only same-invocation transaction retry, with fresh candidates and no
-repeated credential or provider work. Why: a proven unique-violation rollback is
-the one failure that guarantees the transaction had no effect, so retrying it
-cannot duplicate anything.
+or discards candidates but never mints its own. Fixed-count call, entry, and
+frontier candidates are minted immediately before each port call. Inventories
+knowable only under an authoritative lock use application-owned generator
+closures: initial preparation draws one steering semantic-entry candidate and
+one fallback reclassified-successor candidate per pending input, while terminal
+closure and startup recovery draw one reclassified-successor candidate per
+pending input. Persistence invokes those closures inside the transaction but
+never owns minting. Why: the locked pending count moves into the transaction
+without moving identity authority into persistence. A proven hub-minted identity
+collision (unique-violation rollback on the call, entry, frontier, or
+reclassified-turn key) is the only same-invocation transaction retry, with fresh
+candidates and no repeated credential or provider work. Why: a proven
+unique-violation rollback is the one failure that guarantees the transaction had
+no effect, so retrying it cannot duplicate anything.
 
 Commit ambiguity has an explicit detection rule (`commit_failure_is_ambiguous`,
 `crates/persistence/src/model_execution.rs`): a database error with SQLSTATE

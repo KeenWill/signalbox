@@ -314,12 +314,14 @@ delivery outcomes implemented here are:
   applies the predecessor transition (INV-029, INV-037). A prepared attempt ends
   directly `AfterCancellation(Cancelled)` and the turn terminalizes
   `Cancelled { cause }`; a prepared call, when present, closes unsent as
-  `Cancelled`. An issued call changes to `CancellationRequested` while the
-  attempt retains the slot as `StopRequested(CancellationOnly)`. A
-  next-safe-point request against that stopping turn records
-  `SafePointUnavailableWhileStopping`; equal interrupt replay returns the
-  original applied result, while a distinct later interrupt cannot replace the
-  existing proof.
+  `Cancelled`. Before that terminal transition releases the slot, the same
+  transaction reclassifies every pending steering input against the interrupted
+  turn as an ordered queued successor origin. An issued call changes to
+  `CancellationRequested` while the attempt retains the slot as
+  `StopRequested(CancellationOnly)`. A next-safe-point request against that
+  stopping turn records `SafePointUnavailableWhileStopping`; equal interrupt
+  replay returns the original applied result, while a distinct later interrupt
+  cannot replace the existing proof.
 
 ## Context frontier snapshots
 

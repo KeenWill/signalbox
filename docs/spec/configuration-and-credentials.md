@@ -153,11 +153,9 @@ deployment-side rules that code cannot enforce are stated in
 - **Resolution timing.** The adapter resolves the pinned reference during send
   preparation of exactly one physical request — after the durable `Prepared`
   record, before send authorization — and the resulting value is scoped to that
-  request (INV-002 boundary type). The adapter races resolution against its
-  cancellation signal so a blocked read cannot hold a cancelled operation. The
-  execution service derives that signal from the exact call's durable
-  `cancellation_requested` state and passes it through the provider bridge for
-  both preparation and execution.
+  request (INV-002 boundary type). The shared cancellation contract for
+  preparation and execution is owned by
+  [model-call-execution](model-call-execution.md#staged-execution).
 - **Failure behavior.** A failed resolution, or a value that cannot form an HTTP
   header (empty, non-UTF-8, non-header-safe bytes), is a typed known preparation
   failure: the call ends `KnownFailed`, the attempt ends with a known failure,
