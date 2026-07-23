@@ -311,8 +311,9 @@ delivery outcomes implemented here are:
   Why: the accepted interrupt application must atomically construct the applied
   proof, immediate-successor priority, and predecessor transition, and none of
   that authority exists before the `StopRequested` slice — the owner ratified
-  this deferral (decision ledger, 2026-07-19) rather than let a weaker interrupt
-  claim a result.
+  this deferral
+  ([decision ledger, 2026-07-19](../decisions.md#2026-07-19--owner-ratified-matching-interrupt-milestone-deferral))
+  rather than let a weaker interrupt claim a result.
 
 ## Context frontier snapshots
 

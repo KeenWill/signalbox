@@ -40,9 +40,9 @@ append-only.
 
 `CreateSession` carries the durable command identity, the provenance pair, and
 one complete unversioned initial defaults value. Structural equality excludes
-only the command identifier (INV-012); durable-command storage and
-structural-equality doctrine, and identity generation, supply, and encoding, are
-owned by [identity-and-commands](identity-and-commands.md).
+only the command identifier (INV-012). Three topics are owned by
+[identity-and-commands](identity-and-commands.md): durable-command storage, the
+structural-equality doctrine, and identity generation, supply, and encoding.
 
 Application orchestration (`crates/application/src/create_session.rs`):
 

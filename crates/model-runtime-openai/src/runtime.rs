@@ -1177,8 +1177,9 @@ fn redact_observation_fact(fact: ObservationFact, credential: &CredentialValue) 
 /// Credential-sanitizes every provider-controlled or transport-rendered
 /// text in the evidence, per the runtime-substrate spec: a reflected key
 /// value in an error message, raw body, or rendered detail is replaced
-/// before the evidence leaves the adapter boundary. Typed facts are
-/// untouched.
+/// before the evidence leaves the adapter boundary. Non-text typed facts are
+/// untouched; text-bearing typed fields (reported model, message id,
+/// unrecognized tokens, content) are sanitized when they carry the key.
 fn redact_evidence(evidence: TerminalEvidence, api_key: &CredentialValue) -> TerminalEvidence {
     let key_text = std::str::from_utf8(api_key.expose_bytes()).unwrap_or_default();
     let redact = move |text: String| -> String {

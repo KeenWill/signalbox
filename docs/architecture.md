@@ -248,7 +248,8 @@ in the same page; their listed operational refinements remain open.
 - Workflow infrastructure: an extension boundary is preserved, but no broker or
   workflow engine is selected.
 - Provider evolution: provider calls begin in the hub; a later dedicated service
-  requires a recorded decision and must preserve provenance and ownership.
+  requires a recorded decision and must preserve the provenance and ownership
+  rules in [model-call-execution](spec/model-call-execution.md).
 - Model fallback: availability fallback is a scenario to design, not accepted
   automatic behavior.
 - Tool safety: risk taxonomy, confirmation thresholds, judge role, sandbox

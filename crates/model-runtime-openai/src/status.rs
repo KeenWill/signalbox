@@ -4,8 +4,9 @@
 //! exhaustive, mutually exclusive mapping of its provider-native terminal
 //! statuses and payloads. Chat Completions carries the specific condition in
 //! `error.code` or `error.type` while the HTTP status carries the category,
-//! so envelope classification consults a recognized code, then a recognized
-//! type, then the status table. The mapping uses first-match arms, so
+//! so envelope classification treats HTTP 401 as credential rejection
+//! outright, then consults a recognized code, then a recognized type, then the
+//! status table. The mapping uses first-match arms, so
 //! exhaustiveness and mutual exclusivity hold by construction. Unknown
 //! combinations land in [`ProviderErrorKind::Unrecognized`] with the native
 //! material retained on the evidence rather than being guessed at.
