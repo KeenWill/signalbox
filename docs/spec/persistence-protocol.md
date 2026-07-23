@@ -48,8 +48,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — twelve files, `202607180001` through
-`202607220003` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — fourteen files, `202607180001` through
+`202607220005` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -74,7 +74,7 @@ is the durable statement of record, and no state is rebuilt by replaying events
 constraints over current-state rows; an event log would move them back into
 projection code.
 
-Implemented table families (across the twelve migrations):
+Implemented table families (across the fourteen migrations):
 
 - `durable_command` plus typed command records (`create_session_command`,
   `replace_session_defaults_command`, `submit_input_command`);
@@ -122,9 +122,10 @@ Representation rules, all enforced in the schema:
   `active`, taking `FOR UPDATE` on that `turn_lifecycle` row, and
   `turn_terminal_requires_closed_pending_steering` rejects a terminal transition
   while pending steering naming the turn remains
-  (`turn_lifecycle_pending_steering_closed`). Migration `202607220001` adds the
-  closure: a guard trigger (`reject_invalid_accepted_input_change`) replaces
-  plain append-only on `accepted_input` and admits only `pending_steering` →
+  (`turn_lifecycle_pending_steering_closed`). Migration `202607220001` adds
+  reclassification, and migration `202607220004` adds consumption: a guard
+  trigger (`reject_invalid_accepted_input_change`) replaces plain append-only on
+  `accepted_input` and admits only `pending_steering` →
   `reclassified_as_turn_origin`, setting a fresh `origin_turn_id`, or
   `pending_steering` → `consumed_as_steering`, setting the exact
   `consuming_model_call_id`, with every other column unchanged.
@@ -352,7 +353,7 @@ protocol scope). Implemented storage:
   `turn_refused_outbox_event`, and `turn_cancelled_outbox_event` — with a
   deferred trigger requiring exactly one typed record per header. The header and
   typed record tables are append-only (`reject_immutable_record_change`), and
-  all eight outbox tables reject `TRUNCATE`.
+  every outbox table rejects `TRUNCATE`.
 - `outbox_sequence_state`, a mutable singleton row (deletion rejected): a
   `BEFORE INSERT` trigger on the header allocates `last_sequence + 1` by
   updating the singleton, whose row lock is held to transaction end, and a
@@ -391,8 +392,8 @@ unrepresentable.
 - Attempt continuation is deliberately blocked: a `turn_attempt` with a
   predecessor is rejected (`turn_attempt_continuation_unavailable`) until
   durable wait/closure storage exists.
-- Frontier lineage checks in migration `202607180004` assume `none` ancestry and
-  `ordinary` priority only; fork ancestry must replace the ancestry assumption.
+- Frontier lineage checks assume `none` ancestry; fork ancestry must replace
+  that assumption.
 - The designed aggregate-map rows for model calls landed (`model_call`, the
   turn-level target pin, the pinned credential reference); provider evidence,
   authority transfers, fatal cancellation intent, and tool tables are not yet in

@@ -154,10 +154,10 @@ deployment-side rules that code cannot enforce are stated in
   preparation of exactly one physical request — after the durable `Prepared`
   record, before send authorization — and the resulting value is scoped to that
   request (INV-002 boundary type). The adapter races resolution against its
-  cancellation signal so a blocked read cannot hold a cancelled operation; in
-  the composed hubd this race is inert, because the provider bridge passes
-  `CancellationSignal::never()` to both preparation and execution and nothing
-  constructs a firing signal (see Open edges).
+  cancellation signal so a blocked read cannot hold a cancelled operation. The
+  execution service derives that signal from the exact call's durable
+  `cancellation_requested` state and passes it through the provider bridge for
+  both preparation and execution.
 - **Failure behavior.** A failed resolution, or a value that cannot form an HTTP
   header (empty, non-UTF-8, non-header-safe bytes), is a typed known preparation
   failure: the call ends `KnownFailed`, the attempt ends with a known failure,
@@ -289,9 +289,5 @@ here because the surviving hub-side mechanics depend on them):
   contract assigns the budget to the caller); a hung provider exchange is
   bounded only by process shutdown — the 30-second grace window, then
   abandonment to startup recovery.
-- No cancellation channel exists in the hubd composition: the provider bridge
-  passes `CancellationSignal::never()` to both runtime preparation and
-  execution, so the adapter's cancellation-dependent guarantees (credential-read
-  race, cancelled-before-send) are inert capability in the live system.
 - In-memory credential hygiene (zeroization or equivalent) remains an open
   question with no implementation.

@@ -218,16 +218,17 @@ source-turn correlation prevents a valid input from steering different work.
 
 Storage (`semantic_transcript_entry`, migration
 `202607180004_turn_lifecycle_storage.sql`) enforces globally unique entry
-identity, at most one origin or steering entry per accepted input, at most one
-failed marker per turn, and at most one completion or cancellation marker per
-turn (`semantic_transcript_entry_turn_completed_once`, migration `202607220001`,
-which also widened the closed payload-shape checks), same-session references,
-and append-only rows (INV-005). The origin-disposition guard arrived later:
-migration `202607180005_occupied_slot_submit_input.sql` — the migration that
-first admits the `pending_steering` disposition — replaces the entry/turn-state
-trigger so an origin entry additionally requires its input's `origin_of`
-disposition (constraint `semantic_transcript_entry_origin_disposition`); pending
-steering can never appear as a semantic origin.
+identity, at most one origin entry per accepted input, at most one failed marker
+per turn, same-session references, and append-only rows (INV-005). Migration
+`202607220001` adds the unique completion marker, `202607220004` adds the unique
+steering entry, and `202607220005` adds the unique cancellation marker while
+widening the corresponding closed payload shapes. The origin-disposition guard
+arrived later: migration `202607180005_occupied_slot_submit_input.sql` — the
+migration that first admits the `pending_steering` disposition — replaces the
+entry/turn-state trigger so an origin entry additionally requires its input's
+`origin_of` disposition (constraint
+`semantic_transcript_entry_origin_disposition`); pending steering can never
+appear as a semantic origin.
 
 ### When entries come to exist
 
@@ -264,9 +265,10 @@ call's assistant entries plus exactly its completion marker last; a cancelled
 turn's terminal frontier extends the latest call frontier (or starting frontier)
 with exactly its cancellation marker; and a refused turn's terminal frontier is
 a distinct equal-content copy of its latest call frontier. Migration
-`202607220001` first defined the model-call assertion; the steering/stop
-migration widens it. A writer that diverges from the transactional practice
-above is rejected at the commit boundary.
+`202607220001` first defined the model-call assertion; migrations `202607220004`
+and `202607220005` widen it for steering and stop requests. A writer that
+diverges from the transactional practice above is rejected at the commit
+boundary.
 
 `TurnFailed` now has two producers — the model-call known-failure closure and
 startup recovery — each appending the marker after every earlier committed entry
