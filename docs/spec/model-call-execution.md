@@ -1,7 +1,7 @@
 # Model-call execution
 
 This page describes the implemented model-call orchestration chain as it exists
-on `main` after the M3 stack merged (verified at `c0db59c`): rendering a context
+on `main` after the M3 stack merged (verified at `bf39f5f`): rendering a context
 frontier into provider messages, the staged prepare / authorize-send /
 commit-observation effects, assistant content and turn completion, provider
 failure classification into physical dispositions, and the retry prohibition.
@@ -12,10 +12,8 @@ storage protocol and the outbox in
 [persistence-protocol](persistence-protocol.md); the typed model-runtime layer
 and hub runtime in [runtime-substrate](runtime-substrate.md); model
 configuration and credentials in
-[configuration-and-credentials](configuration-and-credentials.md). (The
-companion pages cited here belong to this spec set and have not yet landed in
-the repository; links name their intended homes.) Distilled from ADR-0005,
-ADR-0042, ADR-0043, and ADR-0045; invariant tags cite
+[configuration-and-credentials](configuration-and-credentials.md). Distilled
+from ADR-0005, ADR-0042, ADR-0043, and ADR-0045; invariant tags cite
 [docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
@@ -212,16 +210,14 @@ type. The runtime bridge (`crates/model-provider-runtime/src/lib.rs`) maps the
 runtime's typed terminal evidence ([runtime-substrate](runtime-substrate.md)
 owns how evidence is derived) to exactly one disposition:
 
-| Terminal evidence                       | Disposition   |
-| --------------------------------------- | ------------- |
-| `Completed` (text-only content)         | `Completed`   |
-| `Refused`                               | `Refused`     |
-| `ProviderError` (any kind, incl. rate   | `KnownFailed` |
-| limit, credential rejection, overload)  |               |
-| `ProvenUnsent` (proof of no acceptance) | `KnownFailed` |
-| `CancellationConfirmed`                 | `Cancelled`   |
-| `BoundaryLoss` (loss after possible     | `Ambiguous`   |
-| acceptance, incl. timeouts)             |               |
+| Terminal evidence                                                            | Disposition   |
+| ---------------------------------------------------------------------------- | ------------- |
+| `Completed` (text-only content)                                              | `Completed`   |
+| `Refused`                                                                    | `Refused`     |
+| `ProviderError` (any kind, incl. rate limit, credential rejection, overload) | `KnownFailed` |
+| `ProvenUnsent` (proof of no acceptance)                                      | `KnownFailed` |
+| `CancellationConfirmed`                                                      | `Cancelled`   |
+| `BoundaryLoss` (loss after possible acceptance, incl. timeouts)              | `Ambiguous`   |
 
 The bridge maps `Refused` evidence unconditionally; that such evidence arises
 only from an authenticated complete exchange is the runtime layer's contract

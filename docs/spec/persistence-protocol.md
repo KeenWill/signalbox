@@ -1,7 +1,7 @@
 # Persistence protocol
 
 This page describes the implemented persistence protocol of the Signalbox hub as
-it exists in `crates/persistence` (source and migrations) at commit `c0db59c` on
+it exists in `crates/persistence` (source and migrations) at commit `bf39f5f` on
 `main`. It covers the Postgres representation, migration discipline, durable
 command storage and replay equality, the fail-closed reconstitution boundary,
 the lock protocol, pending-steering durable state, the corruption taxonomy,
@@ -11,10 +11,8 @@ and attempt lifecycle in
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), identity
 kinds and command construction in
 [identity-and-commands](identity-and-commands.md), and runtime wiring in
-[runtime-substrate](runtime-substrate.md); those four companion pages are
-drafted in this same specification wave and are not yet in the repository tree.
-Invariant text is normative in [docs/invariants.md](../invariants.md); this page
-cites rows by tag.
+[runtime-substrate](runtime-substrate.md). Invariant text is normative in
+[docs/invariants.md](../invariants.md); this page cites rows by tag.
 
 ## Stack and boundaries
 
@@ -50,8 +48,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — eleven files, `202607180001` through
-`202607220002` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — twelve files, `202607180001` through
+`202607220003` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
@@ -76,7 +74,7 @@ is the durable statement of record, and no state is rebuilt by replaying events
 constraints over current-state rows; an event log would move them back into
 projection code.
 
-Implemented table families (across the eleven migrations):
+Implemented table families (across the twelve migrations):
 
 - `durable_command` plus typed command records (`create_session_command`,
   `replace_session_defaults_command`, `submit_input_command`);
@@ -149,6 +147,10 @@ application-side compare-and-set in `replace_session_defaults.rs`.
 
 ## Durable command storage and replay equality
 
+The claim protocol, structural replay equality, and conflicting-reuse semantics
+are owned by [identity-and-commands](identity-and-commands.md); this section
+states only their storage representation and adapter mechanics.
+
 One append-only, owner-global `durable_command` registry claims every command
 identifier: `command_id` is the primary key across all kinds and sessions
 (INV-012), with a `CHECK`-closed kind set (`create_session`,
@@ -162,24 +164,21 @@ claimed registry row at commit. Why: typed per-kind records keep replay
 semantics reviewable and constraint-checked, where a universal serialized
 payload would make the serializer a second semantic authority.
 
-The handling protocol, identical across the three implemented commands:
-
-1. Inspect the registry first, before any current-state read.
-2. Unseen identifier: claim it with `INSERT ... ON CONFLICT DO NOTHING`; a
-   concurrent loser rereads the winner. Why: the primary-key claim makes
-   duplicate concurrent submission a database conflict rather than an
-   application race.
-3. First handling prepares the typed result against locked current state and
-   commits the registry row, typed record, and every domain effect in one
-   transaction; acknowledgement follows commit (INV-007). Authoritative
-   rejections also claim the identifier and commit their typed record.
-4. Claimed identifier: reconstruct the recorded typed command from its
-   subordinate record and compare it to the received command by structural
-   domain equality. Equal replay returns the recorded result before any
-   current-state validation; any difference — or a claim by another command kind
-   — is `ConflictingReuse`. Why: equality over reconstructed domain values, not
-   stored bytes, means a storage-version migration or equivalent spelling can
-   never turn an equal command into conflicting reuse.
+Adapter mechanics behind the shared protocol: registry inspection is the first
+durable operation, before any current-state read, and an unseen identifier is
+claimed with `INSERT ... ON CONFLICT DO NOTHING`, so duplicate concurrent
+submission is a database conflict rather than an application race and a
+concurrent loser rereads the winner. First handling commits the registry row,
+typed record, terminal result, and every domain effect in one transaction, with
+acknowledgement only after commit (INV-007); the stateful commands
+(`ReplaceSessionDefaults`, `SubmitInput`) prepare that result against locked
+current state inside the claim transaction, while `CreateSession` — which has no
+current session state to lock — arrives as an already-prepared
+`PreparedCreateSession` value and is inserted after the claim
+(`create_session.rs`). Authoritative rejections claim the identifier and commit
+their typed record exactly as applied results do. Replay resolution —
+reconstruct the recorded command, compare structurally, return the recorded
+result or `ConflictingReuse` — follows the owner page's contract.
 
 `load` operations return `None` only for an unseen identifier; a claimed row
 that cannot be reconstructed is corruption, never an unclaimed identifier.
@@ -240,12 +239,15 @@ failure (INV-001, INV-002, INV-006). Concretely: `SessionReconstitutionInput`
 for the current session, `SubmitInputReconstitutionInput` (with turn-origin and
 acceptance-tail inputs) for command receipts,
 `AcceptedInputSchedulingProjection` for the session's complete queue and
-lifecycle state, and `ModelCallExecutionReconstitutionInput` for the active
-turn's pinned provider target and complete call history. The scheduling load
-proves its own completeness — it counts `queued_input_origin` against
-`turn_lifecycle` and fails on mismatch — rather than trusting whichever rows a
-filter returned. Active-phase and acceptance-tail validation semantics are owned
-by [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md).
+lifecycle state, `ModelCallExecutionReconstitutionInput` for the active turn's
+pinned provider target and complete call history, and
+`FailedTurnExecutionReconstitutionInput` for a failed terminal turn's exact
+ended attempt and optional `known_failed`/`cancelled` call provenance
+(backfilled and closed by migration `202607220003`). The scheduling load proves
+its own completeness — it counts `queued_input_origin` against `turn_lifecycle`
+and fails on mismatch — rather than trusting whichever rows a filter returned.
+Active-phase and acceptance-tail validation semantics are owned by
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md).
 
 Persisted data is never normalized into a nearby valid state; malformed durable
 rows produce typed corruption errors, authorize no effect, and are not repaired
@@ -296,8 +298,12 @@ scan (`StartupScanRepositoryError`), turn activation
 (`StartEligibleTurnRepositoryError`), the eligibility sweep
 (`PostgresEligibilitySweepError`), and the model-call repository
 (`ModelCallRepositoryError`). The classes: `Infrastructure { commit_ambiguous }`
-(the operation did not complete; retryable), `FailClosedCorruption` (committed
-rows cannot construct the accepted domain value; nothing proceeds),
+(with `commit_ambiguous: false`, infrastructure prevented the operation from
+completing before commit and retrying is safe; with `commit_ambiguous: true`,
+the failure struck at the commit boundary and the transaction may or may not
+have won, so the caller must reread durable state instead of assuming either
+outcome — see Commit-ambiguity handling), `FailClosedCorruption` (committed rows
+cannot construct the accepted domain value; nothing proceeds),
 `IdentityCollision` (a fresh hub-minted identity collided with a durable one;
 detected either by the domain seam or by mapping the violated unique constraint
 out of the database error), and `CallerOrHubBug`. The command-handling error

@@ -5,7 +5,10 @@ named in each page's preamble. They are the phase-1 draft of the documentation
 restructure decided 2026-07-22: additive only. The ADR corpus under
 [docs/decisions](../decisions) remains the record of authority until phase 2
 lands (satellite-doc slimming, AGENTS.md and reviewer-config repointing, ADR
-retirement with this mapping as the pointer).
+retirement with this mapping as the pointer). During this deliberately short
+coexistence window the pages are descriptive mirrors, not a second authority:
+where a page and an ADR disagree, the ADR corpus wins and the page carries the
+defect.
 
 Conventions: pages state implemented behavior only; load-bearing design choices
 carry one-sentence "Why:" rationales; invariant references use INV tags resolved

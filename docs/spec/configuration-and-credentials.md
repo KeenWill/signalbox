@@ -1,7 +1,7 @@
 # Configuration and credentials
 
 This page describes the implemented configuration and credential behavior of
-Signalbox, verified against merged `main` at `c0db59c` (hubd configuration
+Signalbox, verified against merged `main` at `bf39f5f` (hubd configuration
 loading in `apps/hubd/src/configuration.rs` and `apps/hubd/src/main.rs`, the
 static TOML catalog, and the provider bridge in `crates/model-provider-runtime`)
 together with the model-runtime crates it composes

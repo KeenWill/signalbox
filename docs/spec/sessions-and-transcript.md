@@ -3,7 +3,7 @@
 This page specifies the implemented behavior of session creation and ancestry,
 session-level configuration defaults and their replacement, the long-lived
 session aggregate, semantic transcript entries, accepted-input user content, and
-actor attribution. It was verified against the working tree at commit `c0db59c`
+actor attribution. It was verified against the working tree at commit `bf39f5f`
 (current `main`): `crates/domain` (`session.rs`, `configuration.rs`,
 `replace_session_defaults.rs`, `semantic_entry.rs`, `turn_eligibility.rs`,
 `user_content.rs`, `actor.rs`, `submit_input.rs`), `crates/application`
@@ -75,17 +75,12 @@ session is the deliberately mutable pointer that defaults replacement later
 moves in place. The same transaction appends a `session_created` update event to
 the outbox ([ADR-0040](../decisions/0040-transactional-outbox.md)).
 
-Command claim and replay are fail-closed in the adapter
-(`crates/persistence/src/create_session.rs`). The owner-global registry is
-inspected first; an identifier already recorded under a different command kind
-resolves as `ConflictingReuse`, and losing the claim race resolves against the
-winner's committed record. Equal replay never trusts a partial row: the adapter
-reconstitutes the complete recorded command — registry inspection, typed-record
-load, then domain reconstitution — and compares it structurally against the
-canonical command, so a corrupt recorded fact surfaces as typed corruption,
-never as a receipt. Equal replay returns the recorded receipt, which may name a
-different session than the freshly minted candidate; the unused candidate is
-simply discarded.
+Command claim, fail-closed replay reconstitution, and conflicting-reuse
+resolution follow the shared durable-command contract owned by
+[identity-and-commands](identity-and-commands.md), implemented for this kind in
+`crates/persistence/src/create_session.rs`. The session-specific consequence:
+equal replay returns the recorded receipt, which may name a different session
+than the freshly minted candidate; the unused candidate is simply discarded.
 
 Why (append-only, one exception): provenance, defaults versions, command
 receipts, and scheduler registration are historical facts; in-place mutation
@@ -304,27 +299,18 @@ resource-governance policy.
 
 ## Actor attribution
 
-`Actor` (`crates/domain/src/actor.rs`) is the closed typed provenance of a
-durable command or attributed transition: `Owner`, `Model { turn }`, `Recovery`,
-or `Tool { request }`. Equality is structural; a carried identity is a validated
-reference that mints nothing and grants no lifecycle authority (INV-001), and
-model agency can never compare equal to owner agency (INV-020). Attribution is
-provenance only — not authentication, authorization, or approval.
+The actor algebra (`Owner`, `Model { turn }`, `Recovery`, `Tool { request }`),
+its participation in structural replay equality, and its closed-discriminator
+storage convention are owned by
+[identity-and-commands](identity-and-commands.md). Attribution is provenance
+only — not authentication, authorization, or approval — and model agency can
+never compare equal to owner agency (INV-020).
 
-In the implemented baseline, `SubmitInput` is the only command payload carrying
-an actor. Its constructor fixes `Actor::Owner`; callers cannot supply an actor,
-so no non-owner agency can claim a command through this boundary. The actor
-participates in structural replay equality — one claimed identifier under a
-different actor is conflicting reuse (INV-012) — and is stored as a closed
-discriminator plus reference columns (`submit_input_command.actor_kind` and its
-shape constraints in migration `202607180003_submit_input.sql`). Domain
-reconstitution compares the stored actor against the canonical command and fails
-closed on mismatch (`StoredActorMismatch`); the persistence adapter performs
-only decode-level spelling checks.
-
-Why (actor inside the comparison payload): attribution outside equality would
-let a claimed identifier be replayed under a different claimed agency, leaving
-the stored actor unverifiable metadata.
+The session-command consequences: `SubmitInput` is the only command payload
+carrying an actor, and its constructor fixes `Actor::Owner`, so no non-owner
+agency can claim a command through this boundary; domain reconstitution compares
+the stored actor against the canonical command and fails closed on mismatch
+(`StoredActorMismatch`).
 
 Why (seeded while constant): `Owner` is currently the only truthful issuer, so
 seeding the field now preserves a truthful backfill; retrofitting after several

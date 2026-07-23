@@ -2,28 +2,37 @@
 
 This page specifies the Layer-1 typed model-runtime boundary as implemented in
 `crates/model-runtime`, `crates/model-runtime-anthropic`, and
-`crates/model-runtime-openai`, verified against `main` at commit `c0db59c`. It
+`crates/model-runtime-openai`, verified against `main` at commit `bf39f5f`. It
 covers the provider-neutral operation, observation, and evidence vocabulary; SSE
 framing; structured-output and tool decode; `ScriptedModel`; the two provider
 adapters; and the in-process credential-access boundary. Layer-2 authorization
-and evidence classification (`model-call-execution`), credential channels,
-delivery, and rotation discipline (`configuration-and-credentials`), and the
-authoritative transcript commit (`sessions-and-transcript`) are delegated to
-companion pages that are planned but not yet written; every such delegation
-below is a forward reference (see Open edges).
+and evidence classification ([model-call-execution](model-call-execution.md)),
+credential channels, delivery, and rotation discipline
+([configuration-and-credentials](configuration-and-credentials.md)), and the
+authoritative transcript commit
+([sessions-and-transcript](sessions-and-transcript.md)) are owned by those
+companion pages.
 
 ## Boundary and crate layout
 
-The runtime layer is three library crates. `signalbox-model-runtime` is the
-shared vocabulary; the Anthropic and OpenAI adapter crates' only workspace
-`[dependencies]` entry is `signalbox-model-runtime` (their dev-dependencies add
-the workspace test helper `signalbox-expect-table`, which is test-only and ships
-in no built artifact). No domain, application, or persistence crate depends on
-any runtime crate, and no runtime type appears in a domain or application
-signature (INV-002, INV-005). The Cargo manifest is the enforcement mechanism:
-an undeclared dependency fails the workspace build. Why: manifest-visible
-boundaries make a boundary violation a reviewable diff instead of a silent
-import.
+The runtime layer is three library crates, hand-rolled per the 2026-07-20
+decision-ledger entry ([docs/decisions.md](../decisions.md)) that closed
+ADR-0047's vendor-versus-hand-roll question: one provider-neutral core crate
+plus separately named provider adapters, with SerdesAI as a design reference
+only. `signalbox-model-runtime` is the shared vocabulary; the Anthropic and
+OpenAI adapter crates' only workspace `[dependencies]` entry is
+`signalbox-model-runtime` (their dev-dependencies add the workspace test helper
+`signalbox-expect-table`, which is test-only and ships in no built artifact).
+`crates/domain`, `crates/application`, and `crates/persistence` declare no
+dependency on any runtime crate, and no runtime type appears in a domain or
+application signature (INV-002, INV-005); the approved runtime consumers are the
+adapter crates, the `crates/model-provider-runtime` bridge — which depends on
+both the application crate and the runtime and maps between them, so the
+dependency arrow points from the bridge into application, never from application
+into the runtime — and the hub composition root (see Open edges). The Cargo
+manifest is the enforcement mechanism: an undeclared dependency fails the
+workspace build. Why: manifest-visible boundaries make a boundary violation a
+reviewable diff instead of a silent import.
 
 Caller identity crosses the boundary as an opaque correlation parameter `C`
 threaded through `ModelOperation<C>`, every `Observation<C>`, and the final
@@ -56,8 +65,8 @@ mismatch; comparison is the caller's classification work (INV-014).
 ## Two-stage execution
 
 `ModelRuntime<C>` has two stages, conforming to the accepted
-provider-interaction boundary whose caller side is planned
-`model-call-execution` scope:
+provider-interaction boundary whose caller side is
+[model-call-execution](model-call-execution.md) scope:
 
 - `prepare(operation, cancellation)` performs all validation, translation,
   serialization, credential access, and request construction with no provider
@@ -87,18 +96,19 @@ stopped.
 ## Observations
 
 Observations are transient progress facts, never canonical transcript history
-(INV-032; the authoritative commit is planned `sessions-and-transcript` scope).
-The facts: `SendCommenced` (the request is about to reach the transport; from
-here the provider may have accepted it), `ExchangeEstablished` (a correlated
-response began: proof the boundary was crossed; it carries `ExchangeFacts` — the
-HTTP status plus the provider request id read from the
-`request-id`/`x-request-id` response headers, the support/audit correlation fact
-that every exchange-bearing terminal- evidence variant also retains),
-`ProviderModelReported`, `TextDelta`/`ThinkingDelta`/`ToolArgumentsDelta`
-(indexed by provider part order), `ToolCallProposed`, `UsageReported` (later
-reports supersede via `TokenUsage::absorb`; reported fields replace, unreported
-fields never erase), and `FinishReported`. Boundary-progress facts exist so the
-caller can durably record how far an attempt provably progressed before a loss.
+(INV-032; the authoritative commit is
+[sessions-and-transcript](sessions-and-transcript.md) scope). The facts:
+`SendCommenced` (the request is about to reach the transport; from here the
+provider may have accepted it), `ExchangeEstablished` (a correlated response
+began: proof the boundary was crossed; it carries `ExchangeFacts` — the HTTP
+status plus the provider request id read from the `request-id`/`x-request-id`
+response headers, the support/audit correlation fact that every exchange-bearing
+terminal- evidence variant also retains), `ProviderModelReported`,
+`TextDelta`/`ThinkingDelta`/`ToolArgumentsDelta` (indexed by provider part
+order), `ToolCallProposed`, `UsageReported` (later reports supersede via
+`TokenUsage::absorb`; reported fields replace, unreported fields never erase),
+and `FinishReported`. Boundary-progress facts exist so the caller can durably
+record how far an attempt provably progressed before a loss.
 
 ## Terminal evidence
 
@@ -116,8 +126,8 @@ strings appear only as retained detail inside already-classified variants:
   kind lives in the core crate, and each adapter owns an exhaustive mapping into
   it) plus retained `NativeErrorFacts` that classification never reads. Retained
   native message text is credential-redacted, not verbatim: Anthropic truncates
-  every native message at 2048 bytes (marked ` … [truncated]`) at the
-  evidence-redaction boundary, and OpenAI captures non-envelope error bodies
+  every native message at 2048 bytes (marked with the `… [truncated]` suffix) at
+  the evidence-redaction boundary, and OpenAI captures non-envelope error bodies
   lossy-UTF-8 at the same 2048-byte bound. Why: audit evidence must be bounded
   and secret-free before it leaves the adapter. Quota exhaustion is distinct
   from rate limiting. Why: a billing condition must never be treated as
@@ -282,8 +292,8 @@ fabricated.
 ## Credential-access boundary
 
 The in-process boundary implements the access-port rules of the credential
-lifecycle record (INV-035); channels, delivery, and rotation policy are planned
-`configuration-and-credentials` scope.
+lifecycle record (INV-035); channels, delivery, and rotation policy are
+[configuration-and-credentials](configuration-and-credentials.md) scope.
 
 - `CredentialReference` is the non-secret durable name; it is safe in errors and
   configuration. `CredentialValue` is the boundary value: no `Display`, no
@@ -322,13 +332,7 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are planned
 - The Layer-1 consumer set is now three kinds — provider adapters, the
   `model-provider-runtime` bridge crate, and the hub composition root; the
   restriction remains a review-time contract with no manifest allowlist check.
-- ADR-0047 deferred vendor-versus-hand-roll to a Phase-0 substrate audit; the
-  landed crates are hand-rolled and no recorded decision closes that question.
 - A Layer-2 consumer now wires `ModelRuntime`: `crates/model-provider-runtime`'s
   `RuntimeModelCallProvider` implements the application's `ModelCallProvider`
   port over any `ModelRuntime<ModelCallId>`, and hubd runs the Anthropic adapter
   through it behind `ModelCallExecutionService`.
-- The companion pages this page delegates to — `model-call-execution`,
-  `sessions-and-transcript`, and `configuration-and-credentials` — do not exist
-  in the repository yet; every delegation is a forward reference to planned
-  scope, not a link to an existing document.

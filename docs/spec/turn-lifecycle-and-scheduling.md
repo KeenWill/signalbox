@@ -2,7 +2,7 @@
 
 This page specifies the implemented behavior of turns, turn attempts,
 eligibility derivation, the scheduler, and startup recovery as verified against
-the working tree at commit `c0db59c` (main). Code homes:
+the working tree at commit `bf39f5f` (main). Code homes:
 `crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
 `context_frontier,queue_order}.rs`, `crates/application/src/{scheduler,`
 `start_eligible_turn,startup_scan,submit_input}.rs`,
@@ -14,8 +14,8 @@ no committed code path appears only under [Open edges](#open-edges). Sibling
 pages named in scope deferrals below (identity-and-commands,
 sessions-and-transcript, persistence-protocol, model-call-execution,
 configuration-and-credentials, runtime-substrate) are companion pages of this
-spec set that are not yet committed to the tree; each deferral names the
-intended home, not an existing document.
+spec set; each deferral names the owning page rather than restating its
+material.
 
 ## Turns, states, and the single active slot
 
@@ -39,9 +39,10 @@ The domain `ActiveTurnPhase` algebra is `Running { current_attempt }`,
 the session's progressing slot (`retains_progressing_slot()` is unconditionally
 true; INV-009). Storage and reconstitution admit the `running` and
 `awaiting_model_call_recovery` phases; `AwaitingRecoveryDecision` is
-reconstituted from an ambiguous terminal model call plus its ended `ambiguous`
-attempt, while `StopRequested` and `AwaitingApproval` still have no storage rows
-or production constructors (see
+reconstituted from an `ambiguous` terminal model call correlated with its ended
+attempt (`ambiguous` from a live loss, `lost` from startup recovery), while
+`StopRequested` and `AwaitingApproval` still have no storage rows or production
+constructors (see
 [Evidence-bearing reconstitution](#evidence-bearing-reconstitution)).
 
 At most one turn per session is `active`. Enforcement is layered:
@@ -240,11 +241,12 @@ transaction reconstitutes the complete scheduling projection and lets the domain
 prepare the recovery (`prepare_active_turn_lost_failure`):
 
 - for an evidence-free turn (no model call), the current attempt ends
-  `WithoutStop(Lost)`; a turn holding a `Prepared` model call ends
-  `WithoutStop(KnownFailure)` with the call closed `known_failed`, and an
-  in-flight or cancellation-requested call ends the attempt `ambiguous` and
-  parks the turn in the `awaiting_model_call_recovery` wait instead of
-  terminalizing — startup never fabricates a live end (INV-034);
+  `WithoutStop(Lost)`; a turn holding a `Prepared` model call closes the call
+  `known_failed` while its abandoned attempt still ends `WithoutStop(Lost)`; and
+  an in-flight call is classified `ambiguous` with the attempt ending
+  `WithoutStop(Lost)`, parking the turn in the `awaiting_model_call_recovery`
+  wait instead of terminalizing (a `cancellation_requested` call cannot pass the
+  reconstitution seam) — startup never fabricates a live end (INV-034);
 - one `TurnFailed` semantic entry is appended, and the terminal frontier is
   derived as the starting frontier plus that marker (entry payloads are
   [sessions-and-transcript](sessions-and-transcript.md) scope);
@@ -338,11 +340,21 @@ active phases are conclusions derived from complete owner facts, never trusted
 discriminators.
 
 - `AwaitingRecoveryDecision` now reconstitutes from complete model-call owner
-  facts (an `ambiguous` terminal call correlated with its ended `ambiguous`
-  attempt); `StopRequested` and `AwaitingApproval` inputs still have no
-  production constructors (compile-fail-tested); a stored proof-shaped payload
-  or bare wait subject cannot become a phase until a complete correlated owner
-  projection exists.
+  facts (an `ambiguous` terminal call correlated with its ended attempt —
+  `ambiguous` from a live loss, `lost` from startup recovery); `StopRequested`
+  and `AwaitingApproval` inputs still have no production constructors
+  (compile-fail-tested); a stored proof-shaped payload or bare wait subject
+  cannot become a phase until a complete correlated owner projection exists.
+- A failed terminal turn that ended through a physical attempt durably names its
+  exact ended attempt and optional terminal call
+  (`turn_lifecycle.terminal_attempt_id`, `terminal_model_call_id`, backfilled
+  and closed by migration `202607220003`). Reconstitution validates that
+  provenance fail-closed through the typed
+  `FailedTurnExecutionReconstitutionInput` — an ended `known_failure` or `lost`
+  attempt, plus a correlated `known_failed`/`cancelled` call when one exists —
+  instead of accepting an evidence-free failure record, and the deferred
+  `assert_failed_terminal_execution_final_state` assertion re-closes the shape
+  at every commit.
 - Every active turn's projection must carry a session-scoped acceptance tail
   anchored at the turn's exact origin and extending gap-free through the
   observed last acceptance position, with unique identities, same- session

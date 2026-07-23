@@ -2,7 +2,7 @@
 
 This page describes the implemented identity, durable-command, and telemetry
 correlation behavior of Signalbox as verified against `main` at commit
-`c0db59c`. The behavior lives in `crates/domain` (identity newtypes, command
+`bf39f5f`. The behavior lives in `crates/domain` (identity newtypes, command
 payloads, actor attribution, replay equality), `crates/application` (identity
 generation, command boundaries), `crates/persistence` (the owner-global command
 registry and typed record families), and `apps/hubd` (telemetry wiring). Storage
@@ -30,7 +30,8 @@ Identities fall into three supply classes:
 
 - **Caller-supplied idempotency identity** — `DurableCommandId` only. Each
   application request constructor accepts the caller-supplied value, and the hub
-  accepts any RFC 9562 UUID without checking its version bits. Why: idempotency
+  accepts any non-sentinel RFC 9562 UUID — the nil and max sentinels are
+  rejected (see below) — without checking its version bits. Why: idempotency
   correctness comes from the owner-global durable claim plus canonical payload
   comparison, never from trusting a caller's clock or version bits (INV-012).
 - **Hub-minted durable-fact identity** — `SessionId`, `AcceptedInputId`,
@@ -95,8 +96,9 @@ default (verified across all migrations). Why: the domain transition needs the
 typed identity before persistence, and keeping the domain generation-free keeps
 it deterministic. A transaction that aborts leaves an unused candidate but no
 durable fact. Recovery reconstitutes committed facts under their stored
-identities; the startup scan's generator mints identities only for the new
-`TurnFailed` semantic entry and terminal frontier facts it records (INV-007). On
+identities; the startup scan's generator mints identities only for the new facts
+it records — the `TurnFailed` semantic entry, the terminal frontier, and a fresh
+successor `TurnId` per pending-steering input it reclassifies (INV-007). On
 equal command replay the recorded receipt is returned, which may name a
 different identity than the fresh candidate generated for that invocation — the
 candidate is discarded.
@@ -154,13 +156,16 @@ byte-blob payload anywhere.
 For `SubmitInput`, a second deferred constraint trigger
 (`submit_input_command_requires_correlated_effect`, migration `202607180003`,
 redefined for occupied-slot pending steering in `202607180005`) enforces effect
-correlation at every transaction boundary: an `applied` row must agree
-field-by-field with exactly one committed `accepted_input` plus
-`queued_input_origin` effect, including the frozen model configuration; a
-`rejected` row must have no accepted-input effect; and an `unknown_model_alias`
-rejection must match real alias evidence in `session_defaults_version`. Why:
-replay returns recorded results as truth, so an applied record without its exact
-committed effect must be unable to commit.
+correlation at every transaction boundary: an `applied` turn-origin row must
+agree field-by-field with exactly one committed `accepted_input` plus
+`queued_input_origin` effect, including the frozen model configuration; an
+applied `next_safe_point` row instead correlates with exactly one
+`pending_steering` accepted input naming the expected active turn, with no
+`queued_input_origin` effect permitted; a `rejected` row must have no
+accepted-input effect; and an `unknown_model_alias` rejection must match real
+alias evidence in `session_defaults_version`. Why: replay returns recorded
+results as truth, so an applied record without its exact committed effect must
+be unable to commit.
 
 All registry and typed-record tables are append-only, enforced by
 `reject_immutable_record_change` triggers. Why: a claimed identifier's recorded
