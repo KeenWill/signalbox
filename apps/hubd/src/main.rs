@@ -28,7 +28,7 @@ use signalbox_domain::{SessionId, TurnId};
 use signalbox_hubd::{
     ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, FatalExecutionSupervisor, FencedHubDatabase,
     FencedHubDatabaseError, FileCredentialAccess, HubModelConfiguration, LocalProcessListener,
-    PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, SingleHubGuard,
+    PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError,
 };
 use signalbox_model_provider_runtime::RuntimeModelCallProvider;
 use signalbox_model_runtime::CredentialReference;
@@ -296,10 +296,10 @@ where
     }
 }
 
-async fn wait_for_guard_loss(guard: &mut SingleHubGuard) {
+async fn wait_for_guard_loss(database: &mut FencedHubDatabase) {
     loop {
         sleep(GUARD_CHECK_INTERVAL).await;
-        if guard.check().await.is_err() {
+        if database.check_guard().await.is_err() {
             return;
         }
     }
@@ -378,7 +378,7 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
     let provider =
         RuntimeModelCallProvider::new(anthropic, model_configuration.runtime_model_catalog());
     let model_targets = model_configuration.target_catalog();
-    let database = FencedHubDatabase::connect_production(configuration.database_url())
+    let mut database = FencedHubDatabase::connect_production(configuration.database_url())
         .await
         .map_err(|error| {
             let phase = match error {
@@ -391,7 +391,7 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
             };
             HubRuntimeError::infrastructure(phase)
         })?;
-    let (mut guard, pool, _generation) = database.into_parts();
+    let pool = database.pool().clone();
 
     let migration_pool = pool.clone();
     let scan_pool = pool.clone();
@@ -437,16 +437,14 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
     )
     .await;
     if let Err(error) = startup {
-        pool.close().await;
-        let _ = guard.close().await;
+        let _ = database.close().await;
         return Err(error);
     }
 
     let listener = match LocalProcessListener::bind(configuration.process_socket_path()) {
         Ok(listener) => listener,
         Err(_) => {
-            pool.close().await;
-            let _ = guard.close().await;
+            let _ = database.close().await;
             return Err(HubRuntimeError::infrastructure(RuntimePhase::SocketBinding));
         }
     };
@@ -500,7 +498,7 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
     tracing::info!(phase = ?RuntimePhase::Scheduling, "hub runtime started");
 
     let outcome = {
-        let guard_loss = wait_for_guard_loss(&mut guard);
+        let guard_loss = wait_for_guard_loss(&mut database);
         pin!(guard_loss);
         let mut cause = select! {
             listener_failed = shutdown_requested() => {
@@ -567,12 +565,9 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
     // immediately and the old fenced sessions must be terminated before
     // returning control to process exit.
     if outcome == ShutdownOutcome::GuardLost {
-        pool.close().await;
-    } else if should_close_pool(&Ok(outcome)) {
-        pool.close().await;
-        if guard.close().await.is_err() {
-            return Ok(ShutdownOutcome::RuntimeFailed);
-        }
+        let _ = database.close().await;
+    } else if should_close_pool(&Ok(outcome)) && database.close().await.is_err() {
+        return Ok(ShutdownOutcome::RuntimeFailed);
     }
     Ok(outcome)
 }
