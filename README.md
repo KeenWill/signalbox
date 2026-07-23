@@ -89,11 +89,10 @@ list of required commands and their setup notes — from the repository root.
 
 ### Scripted debug harness
 
-The `signalbox-debug` binary is a local harness, not the future client protocol
-(still open; see [client scope](docs/open-questions.md#client-scope)). Against a
-disposable local PostgreSQL database it runs migrations, creates one session,
-submits one input, lets the real scheduler execute a deterministic reply, and
-prints the terminal semantic transcript:
+The `signalbox-debug` binary is a local development harness, not the supported
+process client. Against a disposable local PostgreSQL database it runs
+migrations, creates one session, submits one input, lets the real scheduler
+execute a deterministic reply, and prints the terminal semantic transcript:
 
 ```console
 SIGNALBOX_DEBUG_DATABASE_URL=postgres://signalbox:signalbox@localhost/signalbox \
@@ -118,8 +117,10 @@ ANTHROPIC_API_KEY_FILE=/path/to/anthropic-api-key \
 ```
 
 Production `signalbox-hubd` requires `DATABASE_URL`, `SIGNALBOX_CONFIG_FILE`,
-and `ANTHROPIC_API_KEY_FILE`. Model configuration and credential delivery are
-recorded in the [decision log](docs/decisions.md).
+`ANTHROPIC_API_KEY_FILE`, and `SIGNALBOX_SOCKET_PATH`. The process boundary is
+specified in the [process protocol](docs/spec/process-protocol.md); model
+configuration and credential delivery are recorded in the
+[decision log](docs/decisions.md).
 
 ## License
 

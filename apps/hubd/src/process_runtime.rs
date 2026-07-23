@@ -1286,6 +1286,28 @@ impl From<FrameEncodeError> for ProcessConnectionError {
     }
 }
 
+impl fmt::Display for ProcessConnectionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Io(_) => "the local process connection failed",
+            Self::Encode(_) => "the local process connection could not encode a frame",
+            Self::EncodeInvariant => {
+                "the local process connection could not represent an internal value"
+            }
+        })
+    }
+}
+
+impl Error for ProcessConnectionError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::Encode(error) => Some(error),
+            Self::EncodeInvariant => None,
+        }
+    }
+}
+
 /// Fatal local-process runtime failure.
 #[derive(Debug)]
 pub enum ProcessRuntimeError {
@@ -1332,6 +1354,142 @@ impl Error for ProcessRuntimeError {
             Self::Dispatch(error) => Some(error),
             Self::CleanupSocket(error) => Some(error),
             Self::EncodeInvariant | Self::UnexpectedDispatcherRetry => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{error::Error, io};
+
+    use signalbox_process_protocol::{
+        MAX_CONTENT_FRAGMENT_BYTES, ServerMessage, decode_server_line,
+    };
+    use tokio::io::{AsyncReadExt, BufReader, duplex};
+
+    use super::{
+        IncomingLine, MAX_FRAME_BYTES, RequestId, read_frame_line, wire_model_call_state,
+        write_content,
+    };
+    use signalbox_persistence::outbox::{DispatchedModelCallDisposition, DispatchedModelCallState};
+    use signalbox_process_protocol::{ModelCallDisposition, ModelCallState};
+
+    #[tokio::test]
+    async fn inv033_frame_reader_accepts_the_exact_cap_and_rejects_the_next_byte()
+    -> Result<(), Box<dyn Error>> {
+        let mut exact = vec![b'x'; MAX_FRAME_BYTES];
+        let Some(final_byte) = exact.last_mut() else {
+            return Err(io::Error::other("the positive frame cap has no final byte").into());
+        };
+        *final_byte = b'\n';
+        let mut exact_reader = BufReader::new(exact.as_slice());
+        assert!(matches!(
+            read_frame_line(&mut exact_reader).await?,
+            Some(IncomingLine::Complete(line)) if line.len() == MAX_FRAME_BYTES
+        ));
+
+        let mut oversized = vec![b'x'; MAX_FRAME_BYTES + 1];
+        let Some(final_byte) = oversized.last_mut() else {
+            return Err(io::Error::other("the oversized frame has no final byte").into());
+        };
+        *final_byte = b'\n';
+        let mut oversized_reader = BufReader::new(oversized.as_slice());
+        assert!(matches!(
+            read_frame_line(&mut oversized_reader).await?,
+            Some(IncomingLine::Oversized)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn s24_runtime_content_writer_preserves_empty_and_multibyte_text()
+    -> Result<(), Box<dyn Error>> {
+        let request_id = RequestId::try_new(7)?;
+        let text = format!(
+            "{}\u{1f980}tail",
+            "a".repeat(MAX_CONTENT_FRAGMENT_BYTES - 1)
+        );
+        let (mut writer, mut reader) = duplex(MAX_FRAME_BYTES * 2);
+        write_content(&mut writer, request_id, 3, &text).await?;
+        drop(writer);
+        let mut encoded = Vec::new();
+        reader.read_to_end(&mut encoded).await?;
+
+        let mut reconstructed = String::new();
+        let mut expected_fragment = 0_u64;
+        let lines = encoded.split_inclusive(|byte| *byte == b'\n');
+        for line in lines {
+            let frame = decode_server_line(line)?;
+            match frame.message() {
+                ServerMessage::TranscriptContent {
+                    entry_index,
+                    fragment_index,
+                    final_fragment,
+                    content_fragment,
+                } => {
+                    assert_eq!(entry_index.value(), 3);
+                    assert_eq!(fragment_index.value(), expected_fragment);
+                    reconstructed.push_str(content_fragment.as_str());
+                    expected_fragment += 1;
+                    assert_eq!(*final_fragment, expected_fragment == 2);
+                }
+                message => {
+                    return Err(io::Error::other(format!("unexpected message: {message:?}")).into());
+                }
+            }
+        }
+        assert_eq!(expected_fragment, 2);
+        assert_eq!(reconstructed, text);
+
+        let (mut writer, mut reader) = duplex(1_024);
+        write_content(&mut writer, request_id, 0, "").await?;
+        drop(writer);
+        let mut encoded = Vec::new();
+        reader.read_to_end(&mut encoded).await?;
+        let frame = decode_server_line(&encoded)?;
+        assert!(matches!(
+            frame.message(),
+            ServerMessage::TranscriptContent {
+                fragment_index,
+                final_fragment: true,
+                content_fragment,
+                ..
+            } if fragment_index.value() == 0 && content_fragment.as_str().is_empty()
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn s24_every_persistence_terminal_call_disposition_has_a_wire_projection() {
+        let cases = [
+            (
+                DispatchedModelCallDisposition::Completed,
+                ModelCallDisposition::Completed,
+            ),
+            (
+                DispatchedModelCallDisposition::KnownFailed,
+                ModelCallDisposition::KnownFailed,
+            ),
+            (
+                DispatchedModelCallDisposition::Refused,
+                ModelCallDisposition::Refused,
+            ),
+            (
+                DispatchedModelCallDisposition::Cancelled,
+                ModelCallDisposition::Cancelled,
+            ),
+            (
+                DispatchedModelCallDisposition::Ambiguous,
+                ModelCallDisposition::Ambiguous,
+            ),
+        ];
+        for (source, expected) in cases {
+            assert_eq!(
+                wire_model_call_state(DispatchedModelCallState::Terminal(source)),
+                ModelCallState::Terminal {
+                    disposition: expected
+                }
+            );
         }
     }
 }
