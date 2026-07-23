@@ -313,6 +313,10 @@ BEGIN
     IF starting_count IS NULL
        OR checked_count IS NULL
        OR checked_count < starting_count
+       OR (
+            checked_frontier <> starting_frontier
+            AND checked_count = starting_count
+       )
        OR EXISTS (
             SELECT 1
               FROM context_frontier_member AS starting

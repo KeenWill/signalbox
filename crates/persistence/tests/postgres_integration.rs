@@ -44,7 +44,8 @@ use signalbox_persistence::{
     },
     local_test_connection_options, migrate,
     model_execution::{
-        ModelCallRepositoryError, PostgresModelCallRepository, PrepareInitialModelCallOutcome,
+        ModelCallIdentityCollision, ModelCallRepositoryError, PostgresModelCallRepository,
+        PrepareInitialModelCallOutcome,
     },
     replace_session_defaults::{
         ReplaceSessionDefaultsCorruption, ReplaceSessionDefaultsHandlingOutcome,
@@ -1826,6 +1827,51 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
     let terminal_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0x1ee4));
     let assistant_text = AssistantText::try_new(String::from("service assistant reply"))
         .expect("fixture assistant content is admitted");
+    let collision = repository
+        .prepare_initial_call(
+            session,
+            call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1df0)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x1ef0)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0x1ef1)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1de1)),
+                    TurnId::from_uuid(Uuid::from_u128(0x1af0)),
+                )
+            },
+        )
+        .await
+        .expect_err("a steering identity already in the frontier must be retryable");
+    assert!(matches!(
+        collision,
+        ModelCallRepositoryError::IdentityCollision(ModelCallIdentityCollision::SemanticEntry)
+    ));
+    let duplicate_candidate = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1df1));
+    let collision = repository
+        .prepare_initial_call(
+            session,
+            call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1df2)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x1ef2)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0x1ef3)),
+            |_| {
+                (
+                    duplicate_candidate,
+                    TurnId::from_uuid(Uuid::from_u128(0x1af1)),
+                )
+            },
+        )
+        .await
+        .expect_err("duplicate generated steering identities must be retryable");
+    assert!(matches!(
+        collision,
+        ModelCallRepositoryError::IdentityCollision(ModelCallIdentityCollision::SemanticEntry)
+    ));
     let mut service = ModelCallExecutionService::new(
         FixedModelCallExecutionIds::new(
             [call, unused_call],

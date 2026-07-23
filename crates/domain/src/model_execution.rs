@@ -534,13 +534,30 @@ impl ModelCallExecution {
         if call.state() != CurrentModelCallState::Prepared {
             return Err(ModelCallResumeFailure::CallIsNotPrepared);
         }
+        let origin_contents = self
+            .frontier_entries
+            .iter()
+            .filter_map(|entry| match entry.payload() {
+                SemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input }
+                | SemanticTranscriptEntryPayload::SteeringAcceptedInput {
+                    accepted_input, ..
+                } => self
+                    .origin_contents
+                    .get(accepted_input)
+                    .map(|content| (*accepted_input, content.clone())),
+                SemanticTranscriptEntryPayload::TurnFailed { .. }
+                | SemanticTranscriptEntryPayload::AssistantText { .. }
+                | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
+                | SemanticTranscriptEntryPayload::TurnCompleted { .. } => None,
+            })
+            .collect();
         Ok(PreparedModelCallRequest {
             session: self.session,
             turn: self.turn,
             attempt: self.current_attempt.id(),
             call: call.clone(),
             frontier_entries: self.frontier_entries.clone(),
-            origin_contents: self.origin_contents.clone(),
+            origin_contents,
         })
     }
 
@@ -1786,6 +1803,7 @@ fn reconstitute(
                 };
             if owner != session
                 || snapshot != call.frontier()
+                || current.entry_count() == input.starting_snapshot.entry_count()
                 || !input.starting_snapshot.is_semantic_prefix_of(&current)
             {
                 return Err(fail(
@@ -2609,6 +2627,56 @@ mod tests {
         );
     }
 
+    /// S02 / INV-005 / INV-015 / INV-036: a call that names a distinct
+    /// snapshot must consume a nonempty steering suffix.
+    #[test]
+    fn s02_inv005_inv015_inv036_reconstitution_rejects_empty_distinct_call_snapshot() {
+        let execution = prepared_execution();
+        let call = execution
+            .current_call()
+            .expect("prepared execution has one call");
+        let distinct_snapshot = context_frontier_id(25);
+        let input = ModelCallExecutionReconstitutionInput::new(
+            execution.active_turn.clone(),
+            execution.targets.clone(),
+            execution.starting_snapshot.clone(),
+            execution.frontier_entries.to_vec(),
+            execution
+                .origin_contents
+                .iter()
+                .map(|(accepted_input, content)| {
+                    ModelCallOriginContent::from_validated_parts(*accepted_input, content.clone())
+                })
+                .collect(),
+            Some(PinnedProviderTargetReconstitutionInput::new(
+                call.turn(),
+                call.target(),
+            )),
+            vec![ModelCallReconstitutionInput::new(
+                call.id(),
+                call.turn(),
+                call.attempt(),
+                call.selection(),
+                call.target(),
+                distinct_snapshot,
+                ModelCallReconstitutionState::Prepared,
+            )],
+        )
+        .with_call_snapshot(ResolvedContextFrontierReconstitutionInput::new(
+            execution.session(),
+            distinct_snapshot,
+            execution.starting_snapshot.ordered_entries().collect(),
+        ));
+
+        let error = input
+            .reconstitute()
+            .expect_err("a distinct same-content call snapshot consumes no steering");
+        assert_eq!(
+            error.failure(),
+            ModelCallExecutionReconstitutionFailure::CallSnapshotMismatch
+        );
+    }
+
     /// S02 / INV-014: persisted target facts must still match immutable
     /// configured target resolution when an execution is reloaded.
     #[test]
@@ -2923,6 +2991,34 @@ mod tests {
                 .as_str(),
             "hello"
         );
+    }
+
+    /// S02 / INV-005: resuming a prepared call renders only content named by
+    /// that call's immutable frontier, excluding steering accepted later.
+    #[test]
+    fn s02_inv005_prepared_request_excludes_later_pending_steering_content() {
+        let mut execution = prepared_execution_consuming_steering();
+        let later = accepted_input_id(21);
+        execution.active_turn = execution.active_turn.with_pending_steering_for_test(
+            vec![(
+                later,
+                crate::SessionInputPosition::try_from_u64(3)
+                    .expect("the later steering position is positive"),
+            )]
+            .into_boxed_slice(),
+        );
+        execution.origin_contents.insert(
+            later,
+            UserContent::try_text(String::from("later steering"))
+                .expect("the later steering content is valid"),
+        );
+
+        let request = execution
+            .resume_prepared_call()
+            .expect("the committed prepared call remains resumable");
+
+        assert!(request.origin_content(later).is_none());
+        assert_eq!(request.origin_contents.len(), 2);
     }
 
     /// S02 / INV-006 / INV-009: authorization advances the exact attempt and

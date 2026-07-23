@@ -297,19 +297,25 @@ impl PostgresModelCallRepository {
                 };
             }
 
-            let steering_identities = execution
-                .active_turn()
-                .pending_steering()
-                .iter()
-                .map(|pending| {
-                    let accepted_input = pending.accepted_input();
-                    let (entry, turn) = next_steering_identities(accepted_input);
-                    (
-                        entry,
-                        PendingSteeringReclassificationIdentity::new(accepted_input, turn),
-                    )
-                })
-                .collect::<Vec<_>>();
+            let mut reserved_entries = execution
+                .frontier_entries()
+                .map(signalbox_domain::SemanticTranscriptEntry::identity)
+                .collect::<std::collections::BTreeSet<_>>();
+            let mut steering_identities =
+                Vec::with_capacity(execution.active_turn().pending_steering().len());
+            for pending in execution.active_turn().pending_steering() {
+                let accepted_input = pending.accepted_input();
+                let (entry, turn) = next_steering_identities(accepted_input);
+                if !reserved_entries.insert(entry) {
+                    return Err(ModelCallRepositoryError::IdentityCollision(
+                        ModelCallIdentityCollision::SemanticEntry,
+                    ));
+                }
+                steering_identities.push((
+                    entry,
+                    PendingSteeringReclassificationIdentity::new(accepted_input, turn),
+                ));
+            }
             let steering_entries = steering_identities
                 .iter()
                 .map(|(entry, _)| *entry)
