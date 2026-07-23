@@ -341,19 +341,15 @@ repository) map into `OperatorFailureClass` through the
 shared telemetry while the underlying error keeps its diagnostic detail
 internally. The four classes:
 
-- **`Infrastructure { commit_ambiguous }`** — the operation could not complete.
-  The flag marks failures (a connection lost around commit) whose transaction
-  fate is unknown: recovery must re-read durable state rather than assume either
-  outcome.
+- **`Infrastructure { commit_ambiguous }`** — the operation could not complete;
+  the flag marks failures whose transaction fate is unknown (commit-ambiguity
+  handling: [persistence-protocol](persistence-protocol.md)).
 - **`FailClosedCorruption`** — committed rows cannot construct the accepted
-  domain value under [persistence-protocol](persistence-protocol.md)'s
-  fail-closed reconstitution: no effect, no repair.
+  domain value (fail-closed reconstitution:
+  [persistence-protocol](persistence-protocol.md)).
 - **`IdentityCollision`** — a fresh hub-minted candidate identity collided with
-  a durable identity. Stages that can mint replacement candidates retry with
-  fresh ones rather than failing the work; a stage bound to already-durable
-  identity (send authorization) surfaces the collision without retrying the same
-  call ([model-call-execution](model-call-execution.md) owns the per-stage retry
-  rule).
+  a durable identity (per-stage retry rule:
+  [model-call-execution](model-call-execution.md)).
 - **`CallerOrHubBug`** — a request or internal guard that can fail only because
   of a defect, kept distinct from corruption.
 
