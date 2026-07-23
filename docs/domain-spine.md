@@ -1964,9 +1964,10 @@ impl ProviderTargetMismatchInvalidationLog {
 
 ## domain: applied_interrupt
 
-Another deliberately tiny public surface: the submit-input correlation seam that
-produces `AppliedInterruptCommandResult` is module-private, reserved for a later
-transaction-owning adapter.
+Another deliberately tiny public surface: construction of
+`AppliedInterruptCommandResult` remains module-private, while the sealed
+`SubmitInputTurnOriginAppliedResult::applied_interrupt()` projection exposes the
+exact result produced by live preparation or checked reconstitution.
 
 ```rust
 pub struct AppliedInterruptProof { /* private */ }
@@ -1977,8 +1978,8 @@ impl AppliedInterruptProof {
 }
 
 pub struct AppliedInterruptCommandResult { /* private */ }
-// sealed: no public producer yet; module-private correlation of an applied
-// submit-input result constructs it in a later slice
+// sealed construction; SubmitInputTurnOriginAppliedResult::applied_interrupt()
+// is the sole public projection of a checked applied result
 impl AppliedInterruptCommandResult {
     // accessors: proof(), session(), accepted_input(), successor(), successor_order()
 }
