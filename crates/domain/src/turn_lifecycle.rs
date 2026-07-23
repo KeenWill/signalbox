@@ -243,6 +243,18 @@ pub struct ReconciliationMarker {
 }
 
 impl ReconciliationMarker {
+    /// Constructs an interrupt marker after the model-execution aggregate has
+    /// proven the exact issued operation remains ambiguous.
+    pub(crate) fn from_interrupt_ambiguity(
+        ambiguous_operations: NonEmptyIssuedOperationRefs,
+        interrupt: AppliedInterruptProof,
+    ) -> Self {
+        Self {
+            ambiguous_operations,
+            reason: ReconciliationReason::InterruptRequiresReconciliation { interrupt },
+        }
+    }
+
     /// Constructs the fatal marker from the sealed post-evidence binding.
     pub(crate) fn from_fatal_mismatch_candidate(
         candidate: FatalMismatchReconciliationMarkerCandidate,

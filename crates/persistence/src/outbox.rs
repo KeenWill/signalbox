@@ -19,6 +19,7 @@ const MODEL_CALL_TRANSITION: &str = "model_call_transition";
 const TURN_COMPLETED: &str = "turn_completed";
 const TURN_REFUSED: &str = "turn_refused";
 const TURN_CANCELLED: &str = "turn_cancelled";
+const TURN_RECONCILIATION_REQUIRED: &str = "turn_reconciliation_required";
 const STORAGE_VERSION: i16 = 1;
 
 pub(crate) enum OutboxEvent {
@@ -54,6 +55,12 @@ pub(crate) enum OutboxEvent {
         session: SessionId,
         turn: TurnId,
         cancellation_entry: SemanticTranscriptEntryId,
+        terminal_frontier: ContextFrontierId,
+    },
+    TurnReconciliationRequired {
+        session: SessionId,
+        turn: TurnId,
+        call: ModelCallId,
         terminal_frontier: ContextFrontierId,
     },
 }
@@ -122,6 +129,15 @@ pub(crate) async fn append(
                 terminal_frontier,
             )
             .await
+        }
+        OutboxEvent::TurnReconciliationRequired {
+            session,
+            turn,
+            call,
+            terminal_frontier,
+        } => {
+            append_turn_reconciliation_required(connection, session, turn, call, terminal_frontier)
+                .await
         }
     }
 }
@@ -251,6 +267,38 @@ async fn append_turn_cancelled(
     .bind(session_id_to_uuid(session))
     .bind(turn_id_to_uuid(turn))
     .bind(cancellation_entry.into_uuid())
+    .bind(terminal_frontier.into_uuid())
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
+async fn append_turn_reconciliation_required(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    call: ModelCallId,
+    terminal_frontier: ContextFrontierId,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "WITH header AS (
+            INSERT INTO outbox_event
+                (event_kind, storage_version, session_id)
+            VALUES ($1, $2, $3)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO turn_reconciliation_required_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             turn_id, model_call_id, terminal_frontier_id)
+         SELECT event_sequence, event_kind, storage_version, session_id,
+                $4, $5, $6
+           FROM header",
+    )
+    .bind(TURN_RECONCILIATION_REQUIRED)
+    .bind(STORAGE_VERSION)
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .bind(call.into_uuid())
     .bind(terminal_frontier.into_uuid())
     .execute(connection)
     .await?;

@@ -327,6 +327,119 @@ ALTER TABLE queued_input_origin
     ADD CONSTRAINT queued_input_origin_interrupt_edge_once
         UNIQUE (interrupt_predecessor_turn_id);
 
+CREATE FUNCTION accepted_input_turn_queue_predecessor(
+    checked_session uuid,
+    checked_turn uuid
+)
+RETURNS uuid
+LANGUAGE sql
+STABLE
+AS $$
+    WITH RECURSIVE derived_order (
+        turn_id,
+        root_position,
+        interrupt_depth
+    ) AS (
+        SELECT
+            lifecycle.turn_id,
+            lifecycle.acceptance_position,
+            0::bigint
+          FROM turn_lifecycle AS lifecycle
+          JOIN queued_input_origin AS origin
+            ON origin.turn_id = lifecycle.turn_id
+           AND origin.session_id = lifecycle.session_id
+         WHERE lifecycle.session_id = checked_session
+           AND origin.priority_kind = 'ordinary'
+        UNION ALL
+        SELECT
+            successor.turn_id,
+            predecessor.root_position,
+            predecessor.interrupt_depth + 1
+          FROM derived_order AS predecessor
+          JOIN queued_input_origin AS successor
+            ON successor.session_id = checked_session
+           AND successor.priority_kind = 'interrupt_immediately_after'
+           AND successor.interrupt_predecessor_turn_id = predecessor.turn_id
+          JOIN turn_lifecycle AS successor_lifecycle
+            ON successor_lifecycle.turn_id = successor.turn_id
+           AND successor_lifecycle.session_id = successor.session_id
+    ),
+    ranked AS (
+        SELECT
+            turn_id,
+            lag(turn_id) OVER (
+                ORDER BY root_position, interrupt_depth
+            ) AS predecessor_turn
+          FROM derived_order
+    )
+    SELECT predecessor_turn
+      FROM ranked
+     WHERE turn_id = checked_turn;
+$$;
+
+CREATE FUNCTION accepted_input_turn_is_first_nonterminal(
+    checked_session uuid,
+    checked_turn uuid
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+AS $$
+    WITH RECURSIVE derived_order (
+        turn_id,
+        root_position,
+        interrupt_depth
+    ) AS (
+        SELECT
+            lifecycle.turn_id,
+            lifecycle.acceptance_position,
+            0::bigint
+          FROM turn_lifecycle AS lifecycle
+          JOIN queued_input_origin AS origin
+            ON origin.turn_id = lifecycle.turn_id
+           AND origin.session_id = lifecycle.session_id
+         WHERE lifecycle.session_id = checked_session
+           AND origin.priority_kind = 'ordinary'
+        UNION ALL
+        SELECT
+            successor.turn_id,
+            predecessor.root_position,
+            predecessor.interrupt_depth + 1
+          FROM derived_order AS predecessor
+          JOIN queued_input_origin AS successor
+            ON successor.session_id = checked_session
+           AND successor.priority_kind = 'interrupt_immediately_after'
+           AND successor.interrupt_predecessor_turn_id = predecessor.turn_id
+          JOIN turn_lifecycle AS successor_lifecycle
+            ON successor_lifecycle.turn_id = successor.turn_id
+           AND successor_lifecycle.session_id = successor.session_id
+    ),
+    ranked AS (
+        SELECT
+            turn_id,
+            row_number() OVER (
+                ORDER BY root_position, interrupt_depth
+            ) AS queue_rank
+          FROM derived_order
+    ),
+    candidate AS (
+        SELECT queue_rank
+          FROM ranked
+         WHERE turn_id = checked_turn
+    )
+    SELECT EXISTS (SELECT 1 FROM candidate)
+       AND NOT EXISTS (
+            SELECT 1
+              FROM ranked AS earlier
+              JOIN turn_lifecycle AS lifecycle
+                ON lifecycle.turn_id = earlier.turn_id
+               AND lifecycle.session_id = checked_session
+              JOIN candidate
+                ON earlier.queue_rank < candidate.queue_rank
+             WHERE lifecycle.state_kind <> 'terminal'
+       );
+$$;
+
 ALTER TABLE turn_attempt
     ADD COLUMN interrupt_command_id uuid,
     ADD COLUMN interrupt_predecessor_turn_id uuid,
@@ -522,7 +635,8 @@ ALTER TABLE turn_lifecycle
                 'failed',
                 'completed',
                 'refused',
-                'cancelled'
+                'cancelled',
+                'reconciliation_required'
             )
         ),
     ADD CONSTRAINT turn_lifecycle_state_payload_shape
@@ -608,6 +722,19 @@ ALTER TABLE turn_lifecycle
                 AND terminal_disposition_kind = 'cancelled'
                 AND recovery_model_call_id IS NULL
                 AND terminal_attempt_id IS NOT NULL
+            )
+            OR
+            (
+                state_kind = 'terminal'
+                AND start_lineage_kind IS NOT NULL
+                AND starting_frontier_id IS NOT NULL
+                AND terminal_frontier_id IS NOT NULL
+                AND active_phase_kind IS NULL
+                AND current_attempt_id IS NULL
+                AND terminal_disposition_kind = 'reconciliation_required'
+                AND recovery_model_call_id IS NULL
+                AND terminal_attempt_id IS NOT NULL
+                AND terminal_model_call_id IS NOT NULL
             )
         );
 
@@ -751,7 +878,8 @@ ALTER TABLE outbox_event
                 'model_call_transition',
                 'turn_completed',
                 'turn_refused',
-                'turn_cancelled'
+                'turn_cancelled',
+                'turn_reconciliation_required'
             )
         );
 
@@ -812,6 +940,60 @@ BEFORE TRUNCATE ON turn_cancelled_outbox_event
 FOR EACH STATEMENT
 EXECUTE FUNCTION reject_outbox_table_truncate();
 
+CREATE TABLE turn_reconciliation_required_outbox_event (
+    event_sequence numeric(20, 0) PRIMARY KEY,
+    event_kind text NOT NULL,
+    storage_version smallint NOT NULL,
+    session_id uuid NOT NULL,
+    turn_id uuid NOT NULL UNIQUE,
+    model_call_id uuid NOT NULL UNIQUE,
+    terminal_frontier_id uuid NOT NULL UNIQUE,
+
+    CONSTRAINT turn_reconciliation_required_outbox_kind_closed
+        CHECK (event_kind = 'turn_reconciliation_required'),
+    CONSTRAINT turn_reconciliation_required_outbox_version_supported
+        CHECK (storage_version = 1),
+    CONSTRAINT turn_reconciliation_required_outbox_header_fk
+        FOREIGN KEY (event_sequence, event_kind, storage_version, session_id)
+        REFERENCES outbox_event (
+            event_sequence,
+            event_kind,
+            storage_version,
+            session_id
+        )
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT turn_reconciliation_required_outbox_turn_fk
+        FOREIGN KEY (turn_id, session_id)
+        REFERENCES turn_lifecycle (turn_id, session_id)
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT turn_reconciliation_required_outbox_call_fk
+        FOREIGN KEY (model_call_id, turn_id, session_id)
+        REFERENCES model_call (model_call_id, turn_id, session_id)
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED,
+    CONSTRAINT turn_reconciliation_required_outbox_frontier_fk
+        FOREIGN KEY (session_id, terminal_frontier_id)
+        REFERENCES context_frontier (owning_session_id, context_frontier_id)
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED
+);
+
+CREATE TRIGGER turn_reconciliation_required_outbox_event_is_append_only
+BEFORE UPDATE OR DELETE ON turn_reconciliation_required_outbox_event
+FOR EACH ROW
+EXECUTE FUNCTION reject_immutable_record_change();
+
+CREATE TRIGGER turn_reconciliation_required_outbox_event_cannot_be_truncated
+BEFORE TRUNCATE ON turn_reconciliation_required_outbox_event
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_outbox_table_truncate();
+
 CREATE OR REPLACE FUNCTION require_outbox_event_typed_record()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -843,6 +1025,10 @@ BEGIN
         WHEN 'turn_cancelled' THEN
             SELECT count(*) INTO matching_records
               FROM turn_cancelled_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        WHEN 'turn_reconciliation_required' THEN
+            SELECT count(*) INTO matching_records
+              FROM turn_reconciliation_required_outbox_event
              WHERE event_sequence = NEW.event_sequence;
         ELSE
             RAISE EXCEPTION 'unsupported outbox event kind %', NEW.event_kind
@@ -1305,6 +1491,21 @@ BEGIN
                 'cancelled call lacks its exact cancelled turn outcome'
                 USING ERRCODE = '23514';
         END IF;
+    ELSIF checked_state = 'terminal'
+          AND checked_disposition = 'ambiguous'
+          AND attempt_disposition IN ('ambiguous', 'lost')
+    THEN
+        IF turn_state IS DISTINCT FROM 'terminal'
+           OR terminal_disposition IS DISTINCT FROM 'reconciliation_required'
+           OR terminal_attempt IS DISTINCT FROM checked_attempt
+           OR terminal_call IS DISTINCT FROM checked_model_call_id
+           OR attempt_state IS DISTINCT FROM 'ended'
+           OR attempt_variant IS DISTINCT FROM 'after_cancellation'
+        THEN
+            RAISE EXCEPTION
+                'ambiguous stopped call lacks exact reconciliation outcome'
+                USING ERRCODE = '23514';
+        END IF;
     ELSE
         RAISE EXCEPTION 'unsupported stopped model-call state'
             USING ERRCODE = '23514';
@@ -1334,8 +1535,16 @@ BEGIN
                 call.state_kind = 'cancellation_requested'
                 OR (
                     call.state_kind = 'terminal'
-                    AND call.terminal_disposition_kind = 'cancelled'
-                    AND attempt.end_disposition = 'cancelled'
+                    AND (
+                        (
+                            call.terminal_disposition_kind = 'cancelled'
+                            AND attempt.end_disposition = 'cancelled'
+                        )
+                        OR (
+                            call.terminal_disposition_kind = 'ambiguous'
+                            AND attempt.end_disposition IN ('ambiguous', 'lost')
+                        )
+                    )
                 )
            )
     )
@@ -1370,22 +1579,14 @@ DECLARE
            AND acceptance_position < checked_position;
 $old$;
     priority_selection CONSTANT text := $new$
-        IF EXISTS (
-            SELECT 1
-              FROM queued_input_origin
-             WHERE turn_id = checked_turn_id
-               AND session_id = checked_session_id
-               AND priority_kind = 'interrupt_immediately_after'
-               AND interrupt_predecessor_turn_id = checked_predecessor
-        ) THEN
-            expected_predecessor_position := predecessor_position;
-        ELSE
-            SELECT max(acceptance_position)
-              INTO expected_predecessor_position
-              FROM turn_lifecycle
-             WHERE session_id = checked_session_id
-               AND acceptance_position < checked_position;
-        END IF;
+        SELECT acceptance_position
+          INTO expected_predecessor_position
+          FROM turn_lifecycle
+         WHERE session_id = checked_session_id
+           AND turn_id = accepted_input_turn_queue_predecessor(
+                checked_session_id,
+                checked_turn_id
+           );
 $new$;
 BEGIN
     SELECT pg_get_functiondef(
@@ -1676,6 +1877,170 @@ BEGIN
                 USING ERRCODE = '23514';
         END IF;
         PERFORM assert_model_call_final_state(checked_call);
+    END IF;
+END;
+$$;
+
+ALTER FUNCTION assert_turn_lifecycle_final_state(uuid)
+    RENAME TO assert_turn_lifecycle_final_state_without_reconciliation;
+
+CREATE FUNCTION assert_reconciliation_required_turn_final_state(
+    checked_turn_id uuid
+)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    checked_session uuid;
+    checked_attempt uuid;
+    checked_call uuid;
+    checked_terminal_frontier uuid;
+    source_frontier uuid;
+    member_mismatch_count bigint;
+    contradictory_entry_count bigint;
+    outbox_count bigint;
+BEGIN
+    SELECT
+        session_id,
+        terminal_attempt_id,
+        terminal_model_call_id,
+        terminal_frontier_id
+      INTO
+        checked_session,
+        checked_attempt,
+        checked_call,
+        checked_terminal_frontier
+      FROM turn_lifecycle
+     WHERE turn_id = checked_turn_id
+       AND state_kind = 'terminal'
+       AND terminal_disposition_kind = 'reconciliation_required';
+
+    IF NOT FOUND THEN
+        RETURN;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+          FROM turn_attempt
+         WHERE turn_attempt_id = checked_attempt
+           AND turn_id = checked_turn_id
+           AND session_id = checked_session
+           AND state_kind = 'ended'
+           AND end_variant = 'after_cancellation'
+           AND end_disposition IN ('ambiguous', 'lost')
+    ) THEN
+        RAISE EXCEPTION
+            'reconciliation-required turn lacks exact stopped attempt'
+            USING ERRCODE = '23514';
+    END IF;
+    PERFORM assert_interrupt_attempt_proof(checked_attempt);
+
+    SELECT context_frontier_id
+      INTO source_frontier
+      FROM model_call
+     WHERE model_call_id = checked_call
+       AND turn_attempt_id = checked_attempt
+       AND turn_id = checked_turn_id
+       AND session_id = checked_session
+       AND state_kind = 'terminal'
+       AND terminal_disposition_kind = 'ambiguous';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION
+            'reconciliation-required turn lacks exact ambiguous call'
+            USING ERRCODE = '23514';
+    END IF;
+    PERFORM assert_model_call_final_state(checked_call);
+
+    SELECT count(*)
+      INTO member_mismatch_count
+      FROM (
+            (
+                SELECT member_position, source_session_id, semantic_entry_id
+                  FROM context_frontier_member
+                 WHERE owning_session_id = checked_session
+                   AND context_frontier_id = source_frontier
+                EXCEPT
+                SELECT member_position, source_session_id, semantic_entry_id
+                  FROM context_frontier_member
+                 WHERE owning_session_id = checked_session
+                   AND context_frontier_id = checked_terminal_frontier
+            )
+            UNION ALL
+            (
+                SELECT member_position, source_session_id, semantic_entry_id
+                  FROM context_frontier_member
+                 WHERE owning_session_id = checked_session
+                   AND context_frontier_id = checked_terminal_frontier
+                EXCEPT
+                SELECT member_position, source_session_id, semantic_entry_id
+                  FROM context_frontier_member
+                 WHERE owning_session_id = checked_session
+                   AND context_frontier_id = source_frontier
+            )
+      ) AS mismatch;
+
+    SELECT count(*)
+      INTO contradictory_entry_count
+      FROM semantic_transcript_entry
+     WHERE source_session_id = checked_session
+       AND (
+            failed_turn_id = checked_turn_id
+            OR completed_turn_id = checked_turn_id
+            OR cancelled_turn_id = checked_turn_id
+            OR producing_model_call_id = checked_call
+       )
+       AND payload_kind IN (
+            'turn_failed',
+            'turn_completed',
+            'turn_cancelled',
+            'assistant_text'
+       );
+
+    SELECT count(*)
+      INTO outbox_count
+      FROM turn_reconciliation_required_outbox_event
+     WHERE session_id = checked_session
+       AND turn_id = checked_turn_id
+       AND model_call_id = checked_call
+       AND terminal_frontier_id = checked_terminal_frontier;
+
+    IF member_mismatch_count <> 0
+       OR contradictory_entry_count <> 0
+       OR outbox_count <> 1
+    THEN
+        RAISE EXCEPTION
+            'reconciliation-required turn lacks exact frontier or outbox boundary'
+            USING ERRCODE = '23514';
+    END IF;
+END;
+$$;
+
+CREATE FUNCTION assert_turn_lifecycle_final_state(
+    checked_turn_id uuid
+)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    reconciliation_terminal boolean;
+BEGIN
+    SELECT EXISTS (
+        SELECT 1
+          FROM turn_lifecycle
+         WHERE turn_id = checked_turn_id
+           AND state_kind = 'terminal'
+           AND terminal_disposition_kind = 'reconciliation_required'
+    )
+      INTO reconciliation_terminal;
+
+    IF reconciliation_terminal THEN
+        PERFORM assert_reconciliation_required_turn_final_state(
+            checked_turn_id
+        );
+    ELSE
+        PERFORM assert_turn_lifecycle_final_state_without_reconciliation(
+            checked_turn_id
+        );
     END IF;
 END;
 $$;

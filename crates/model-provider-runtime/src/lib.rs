@@ -21,7 +21,7 @@ use signalbox_domain::{
 use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, ConversationMessage, CredentialReference, ModelOperation,
     ModelRuntime, ModelSettings, Observation, ObservationFact, ObservationSink, PreparationOutcome,
-    ProviderReportedModel, RequestedTarget, ResolvedTarget, TerminalEvidence,
+    ProviderReportedModel, RequestedTarget, ResolvedTarget, TerminalEvidence, UnsentCause,
 };
 
 /// One exact provider-model spelling and baseline request limit for a durable
@@ -354,8 +354,11 @@ where
             )),
             PreparationOutcome::Cancelled {
                 correlation: returned,
+            } => {
+                require_correlation(correlation, returned)?;
+                Ok(ModelCallCapabilityPreparation::Cancelled)
             }
-            | PreparationOutcome::Failed {
+            PreparationOutcome::Failed {
                 correlation: returned,
                 ..
             } => {
@@ -480,9 +483,13 @@ fn classify_terminal(
             Ok(ModelCallTerminalObservation::Completed { assistant_text })
         }
         TerminalEvidence::Refused(_) => Ok(ModelCallTerminalObservation::Refused),
-        TerminalEvidence::ProviderError(_) | TerminalEvidence::ProvenUnsent(_) => {
-            Ok(ModelCallTerminalObservation::KnownFailed)
-        }
+        TerminalEvidence::ProviderError(_)
+        | TerminalEvidence::ProvenUnsent(signalbox_model_runtime::ProvenUnsentEvidence {
+            cause: UnsentCause::ConnectFailed(_) | UnsentCause::SendIncompleteProvenUnacceptable(_),
+        }) => Ok(ModelCallTerminalObservation::KnownFailed),
+        TerminalEvidence::ProvenUnsent(signalbox_model_runtime::ProvenUnsentEvidence {
+            cause: UnsentCause::CancelledBeforeSend,
+        }) => Ok(ModelCallTerminalObservation::Cancelled),
         TerminalEvidence::CancellationConfirmed(_) => Ok(ModelCallTerminalObservation::Cancelled),
         TerminalEvidence::BoundaryLoss(_) => Ok(ModelCallTerminalObservation::Ambiguous),
     }
@@ -660,6 +667,17 @@ mod tests {
             )
             .expect("typed non-acceptance evidence is supported"),
             ModelCallTerminalObservation::KnownFailed
+        );
+        assert_eq!(
+            classify_terminal(
+                TerminalEvidence::ProvenUnsent(ProvenUnsentEvidence {
+                    cause: UnsentCause::CancelledBeforeSend,
+                }),
+                &[],
+                "model-exact",
+            )
+            .expect("pre-send cancellation evidence is supported"),
+            ModelCallTerminalObservation::Cancelled
         );
         assert_eq!(
             classify_terminal(

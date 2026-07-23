@@ -30,7 +30,7 @@ use signalbox_domain::{
     ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
     ModelTargetCatalog, ModelTargetDefinition, PendingSteeringReclassificationIdentity,
     PinnedProviderTargetReconstitutionInput, PreparedModelCallRequest, ProviderModelIdentity,
-    ReclassifiedPendingSteeringTurn, RefusedModelCallTurn,
+    ReclassifiedPendingSteeringTurn, ReconciliationRequiredModelCallTurn, RefusedModelCallTurn,
     ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget, SemanticTranscriptEntry,
     SemanticTranscriptEntryPayload, SemanticTranscriptEntryRef, SessionId,
     StopRequestedModelCallTurn, TurnId,
@@ -1212,8 +1212,15 @@ async fn failed_turn_closure_matches(
                    AND turn_id = $2
                    AND turn_attempt_id = $3
                    AND state_kind = 'ended'
-                   AND end_variant = 'without_stop'
                    AND end_disposition = 'known_failure'
+                   AND (
+                        end_variant = 'without_stop'
+                        OR (
+                            end_variant = 'after_cancellation'
+                            AND interrupt_command_id IS NOT NULL
+                            AND interrupt_predecessor_turn_id = $2
+                        )
+                   )
             )",
     )
     .bind(session_id_to_uuid(session))
@@ -1281,8 +1288,15 @@ async fn refused_terminal_closure_matches(
                    AND turn_id = $2
                    AND turn_attempt_id = $3
                    AND state_kind = 'ended'
-                   AND end_variant = 'without_stop'
                    AND end_disposition = 'turn_refused'
+                   AND (
+                        end_variant = 'without_stop'
+                        OR (
+                            end_variant = 'after_cancellation'
+                            AND interrupt_command_id IS NOT NULL
+                            AND interrupt_predecessor_turn_id = $2
+                        )
+                   )
             )",
     )
     .bind(session_id_to_uuid(session))
@@ -1330,30 +1344,66 @@ async fn ambiguous_terminal_closure_matches(
 ) -> Result<bool, ModelCallRepositoryError> {
     let correlation = observation.correlation();
     Ok(sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS (
-            SELECT 1
-              FROM turn_lifecycle
-             WHERE session_id = $1
-               AND turn_id = $2
-               AND state_kind = 'active'
-               AND terminal_disposition_kind IS NULL
-               AND terminal_frontier_id IS NULL
-               AND terminal_attempt_id IS NULL
-               AND terminal_model_call_id IS NULL
-               AND active_phase_kind = 'awaiting_model_call_recovery'
-               AND current_attempt_id = $3
-               AND recovery_model_call_id = $4
-               AND EXISTS (
-                    SELECT 1
-                      FROM turn_attempt
-                     WHERE session_id = $1
-                       AND turn_id = $2
-                       AND turn_attempt_id = $3
-                       AND state_kind = 'ended'
-                       AND end_variant = 'without_stop'
-                       AND end_disposition = 'ambiguous'
-               )
-        )",
+        "SELECT
+            EXISTS (
+                SELECT 1
+                  FROM turn_lifecycle
+                 WHERE session_id = $1
+                   AND turn_id = $2
+                   AND state_kind = 'active'
+                   AND terminal_disposition_kind IS NULL
+                   AND terminal_frontier_id IS NULL
+                   AND terminal_attempt_id IS NULL
+                   AND terminal_model_call_id IS NULL
+                   AND active_phase_kind = 'awaiting_model_call_recovery'
+                   AND current_attempt_id = $3
+                   AND recovery_model_call_id = $4
+                   AND EXISTS (
+                        SELECT 1
+                          FROM turn_attempt
+                         WHERE session_id = $1
+                           AND turn_id = $2
+                           AND turn_attempt_id = $3
+                           AND state_kind = 'ended'
+                           AND end_variant = 'without_stop'
+                           AND end_disposition = 'ambiguous'
+                   )
+            )
+            OR EXISTS (
+                SELECT 1
+                  FROM turn_lifecycle AS lifecycle
+                 WHERE lifecycle.session_id = $1
+                   AND lifecycle.turn_id = $2
+                   AND lifecycle.state_kind = 'terminal'
+                   AND lifecycle.terminal_disposition_kind =
+                       'reconciliation_required'
+                   AND lifecycle.terminal_attempt_id = $3
+                   AND lifecycle.terminal_model_call_id = $4
+                   AND lifecycle.active_phase_kind IS NULL
+                   AND lifecycle.current_attempt_id IS NULL
+                   AND lifecycle.recovery_model_call_id IS NULL
+                   AND EXISTS (
+                        SELECT 1
+                          FROM turn_attempt
+                         WHERE session_id = $1
+                           AND turn_id = $2
+                           AND turn_attempt_id = $3
+                           AND state_kind = 'ended'
+                           AND end_variant = 'after_cancellation'
+                           AND end_disposition = 'ambiguous'
+                           AND interrupt_command_id IS NOT NULL
+                           AND interrupt_predecessor_turn_id = $2
+                   )
+                   AND EXISTS (
+                        SELECT 1
+                          FROM turn_reconciliation_required_outbox_event
+                         WHERE session_id = $1
+                           AND turn_id = $2
+                           AND model_call_id = $4
+                           AND terminal_frontier_id =
+                               lifecycle.terminal_frontier_id
+                   )
+            )",
     )
     .bind(session_id_to_uuid(session))
     .bind(turn_id_to_uuid(correlation.turn()))
@@ -1547,9 +1597,6 @@ fn attach_pending_reclassification_candidates(
     execution: &ModelCallExecution,
     next_turn: &mut impl FnMut(AcceptedInputId) -> TurnId,
 ) -> Result<ModelCallTerminalIdentities, ModelCallRepositoryError> {
-    if matches!(identities, ModelCallTerminalIdentities::Ambiguous) {
-        return Ok(identities);
-    }
     let reclassifications = pending_reclassification_candidates(execution, next_turn)?;
     Ok(match identities {
         ModelCallTerminalIdentities::Completed(identities) => {
@@ -1568,7 +1615,11 @@ fn attach_pending_reclassification_candidates(
         ModelCallTerminalIdentities::Refused(identities) => ModelCallTerminalIdentities::Refused(
             identities.with_pending_steering_reclassifications(reclassifications),
         ),
-        ModelCallTerminalIdentities::Ambiguous => ModelCallTerminalIdentities::Ambiguous,
+        ModelCallTerminalIdentities::Ambiguous(identities) => {
+            ModelCallTerminalIdentities::Ambiguous(
+                identities.with_pending_steering_reclassifications(reclassifications),
+            )
+        }
     })
 }
 
@@ -2278,10 +2329,69 @@ pub(crate) async fn persist_terminal_outcome(
             persist_cancelled(connection, cancelled).await
         }
         ModelCallTerminalOutcome::Refused(refused) => persist_refused(connection, refused).await,
+        ModelCallTerminalOutcome::ReconciliationRequired(reconciliation) => {
+            persist_reconciliation_required(connection, reconciliation).await
+        }
         ModelCallTerminalOutcome::AwaitingRecovery(ambiguous) => {
             persist_ambiguous(connection, ambiguous).await
         }
     }
+}
+
+async fn persist_reconciliation_required(
+    connection: &mut PgConnection,
+    reconciliation: &ReconciliationRequiredModelCallTurn,
+) -> Result<(), ModelCallRepositoryError> {
+    persist_ended_call(
+        connection,
+        reconciliation.session(),
+        reconciliation.turn(),
+        reconciliation.call(),
+    )
+    .await?;
+    persist_ended_attempt(
+        connection,
+        reconciliation.session(),
+        reconciliation.turn(),
+        reconciliation.attempt(),
+    )
+    .await?;
+    insert_snapshot(connection, reconciliation.terminal_snapshot()).await?;
+    persist_reclassified_pending_steering(
+        connection,
+        reconciliation.session(),
+        reconciliation.turn(),
+        reconciliation.reclassified_pending_steering(),
+    )
+    .await?;
+    terminalize_lifecycle(
+        connection,
+        reconciliation.session(),
+        reconciliation.turn(),
+        "reconciliation_required",
+        reconciliation.terminal_snapshot().frontier().snapshot(),
+        Some(reconciliation.attempt().id()),
+        Some(reconciliation.call().id()),
+    )
+    .await?;
+    append_terminal_call_event(
+        connection,
+        reconciliation.session(),
+        reconciliation.turn(),
+        reconciliation.call(),
+    )
+    .await?;
+    outbox::append(
+        connection,
+        OutboxEvent::TurnReconciliationRequired {
+            session: reconciliation.session(),
+            turn: reconciliation.turn(),
+            call: reconciliation.call().id(),
+            terminal_frontier: reconciliation.terminal_snapshot().frontier().snapshot(),
+        },
+    )
+    .await?;
+    Ok(())
 }
 
 async fn persist_cancelled(

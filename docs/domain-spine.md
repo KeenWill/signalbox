@@ -1760,18 +1760,21 @@ pub struct PhysicalCancellationModelCallTurnIdentities { /* private */ }
 // constructor plus with_pending_steering_reclassifications(...)
 pub struct RefusedModelCallTurnIdentities { /* private */ }
 // constructor plus with_pending_steering_reclassifications(...)
+pub struct AmbiguousModelCallTurnIdentities { /* private */ }
+// constructor plus with_pending_steering_reclassifications(...)
 pub enum ModelCallTerminalIdentities {
     Completed(CompletedModelCallIdentities),
     Failed(FailedModelCallTurnIdentities),
     PhysicalCancellation(PhysicalCancellationModelCallTurnIdentities),
     Refused(RefusedModelCallTurnIdentities),
-    Ambiguous,
+    Ambiguous(AmbiguousModelCallTurnIdentities),
 }
 pub enum ModelCallTerminalOutcome {
     Completed(CompletedModelCallTurn),
     Failed(FailedModelCallTurn),
     Cancelled(CancelledModelCallTurn),
     Refused(RefusedModelCallTurn),
+    ReconciliationRequired(ReconciliationRequiredModelCallTurn),
     AwaitingRecovery(AmbiguousModelCallTurn),
 }
 pub enum ModelCallInterruptOutcome {
@@ -1787,6 +1790,9 @@ pub struct StopRequestedModelCallTurn { /* private */ }
 // accessors: session(), turn(), call(), attempt(), interrupt()
 pub struct RefusedModelCallTurn { /* private */ }
 // each terminal turn exposes reclassified_pending_steering()
+pub struct ReconciliationRequiredModelCallTurn { /* private */ }
+// accessors: session(), turn(), call(), attempt(), disposition(),
+// terminal_snapshot(), reclassified_pending_steering()
 pub struct ReclassifiedPendingSteeringTurn { /* private */ }
 // sealed: successful model-call terminalization with exact pending identities
 impl ReclassifiedPendingSteeringTurn {
@@ -2319,6 +2325,7 @@ pub struct RetainedModelCallExecutionState { /* private */ }
 
 pub enum ModelCallCapabilityPreparation<Capability> {
     Ready(Capability),
+    Cancelled,
     KnownFailure,
 }
 
@@ -2816,7 +2823,7 @@ impl<Generator, Transaction, Nudge> SubmitInputService<Generator, Transaction, N
     pub fn into_parts(self) -> (Generator, Transaction, Nudge);
 }
 impl<
-    Generator: SubmitInputIdGenerator,
+    Generator: SubmitInputIdGenerator + Send,
     Transaction: SubmitInputTransaction,
     Nudge: EligibilityNudge,
 > SubmitInputService<Generator, Transaction, Nudge>
@@ -2845,14 +2852,14 @@ impl<
 | domain: turn_eligibility              | 27                   |
 | domain: turn_attempt                  | 13                   |
 | domain: model_call                    | 12                   |
-| domain: model_execution               | 39                   |
+| domain: model_execution               | 41                   |
 | domain: context_frontier              | 6                    |
 | domain: semantic_entry                | 4                    |
 | domain: provider_evidence             | 5                    |
 | domain: applied_interrupt             | 2                    |
 | domain: fatal_mismatch                | 0                    |
 | domain: replace_session_defaults      | 13                   |
-| **signalbox-domain total**            | **209 (+1 free fn)** |
+| **signalbox-domain total**            | **211 (+1 free fn)** |
 | application: create_session           | 8 (incl. 2 traits)   |
 | application: load_session             | 2 (incl. 1 trait)    |
 | application: model_execution          | 28 (incl. 7 traits)  |

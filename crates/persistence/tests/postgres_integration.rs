@@ -1397,7 +1397,11 @@ async fn model_call_noncompleted_rereads_validate_each_durable_closure()
         .apply_terminal_observation(
             ambiguous.session,
             ambiguous_observation.clone(),
-            ModelCallTerminalIdentities::Ambiguous,
+            ModelCallTerminalIdentities::Ambiguous(
+                signalbox_domain::AmbiguousModelCallTurnIdentities::new(
+                    ContextFrontierId::from_uuid(Uuid::from_u128(ambiguous_seed + 20)),
+                ),
+            ),
             |_| panic!("Ambiguous creates no pending-steering successors"),
         )
         .await?;
@@ -1578,10 +1582,179 @@ async fn issued_interrupt_requests_and_confirms_durable_cancellation() -> Result
     Ok(())
 }
 
+/// S04 / S07 / INV-025 / INV-029 / INV-032: ambiguity observed after an
+/// applied interrupt terminalizes as exact proof-bearing reconciliation, and
+/// a retained-observation reread recognizes the committed closure.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn stopped_ambiguity_commits_reconciliation_and_rereads_exactly() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7680;
+    let (fixture, model_repository, authorized) =
+        authorize_checkpointed_model_call(&pool, seed).await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            input_with_delivery(
+                seed + 19,
+                seed + 1,
+                "stop before ambiguous result",
+                DeliveryRequest::Interrupt {
+                    expected_active_turn: fixture.turn,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 20)),
+            Some(TurnId::from_uuid(Uuid::from_u128(seed + 21))),
+        )
+        .await?;
+
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::Ambiguous);
+    let terminal = model_repository
+        .apply_terminal_observation(
+            fixture.session,
+            observation.clone(),
+            ModelCallTerminalIdentities::Ambiguous(
+                signalbox_domain::AmbiguousModelCallTurnIdentities::new(
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 22)),
+                ),
+            ),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+    assert!(matches!(
+        terminal,
+        ModelCallTerminalOutcome::ReconciliationRequired(ref reconciliation)
+            if reconciliation.turn() == fixture.turn
+                && reconciliation.call().id() == fixture.call
+                && matches!(
+                    reconciliation.disposition(),
+                    signalbox_domain::TurnDisposition::ReconciliationRequired { marker }
+                        if marker.ambiguous_operations().contains(
+                            signalbox_domain::IssuedOperationRef::ModelCall(fixture.call)
+                        )
+                )
+    ));
+    assert_eq!(
+        model_repository
+            .reread_terminal_observation(fixture.session, &observation)
+            .await?,
+        RetainedModelCallObservationStatus::AlreadyCommitted
+    );
+    let stored: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*)
+               FROM turn_attempt
+              WHERE turn_attempt_id = $1
+                AND end_variant = 'after_cancellation'
+                AND end_disposition = 'ambiguous'),
+            (SELECT count(*)
+               FROM turn_lifecycle
+              WHERE turn_id = $2
+                AND state_kind = 'terminal'
+                AND terminal_disposition_kind = 'reconciliation_required'),
+            (SELECT count(*)
+               FROM turn_reconciliation_required_outbox_event
+              WHERE turn_id = $2
+                AND model_call_id = $3)",
+    )
+    .bind(fixture.attempt.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(fixture.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(stored, (1, 1, 1));
+
+    let failed_seed = seed + 0x40;
+    let (failed, failed_repository, failed_authorized) =
+        authorize_checkpointed_model_call(&pool, failed_seed).await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            input_with_delivery(
+                failed_seed + 19,
+                failed_seed + 1,
+                "stop before known failure",
+                DeliveryRequest::Interrupt {
+                    expected_active_turn: failed.turn,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(failed_seed + 20)),
+            Some(TurnId::from_uuid(Uuid::from_u128(failed_seed + 21))),
+        )
+        .await?;
+    let failed_observation = failed_authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::KnownFailed);
+    failed_repository
+        .apply_terminal_observation(
+            failed.session,
+            failed_observation.clone(),
+            ModelCallTerminalIdentities::Failed(FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(failed_seed + 22)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(failed_seed + 23)),
+            )),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+    assert_eq!(
+        failed_repository
+            .reread_terminal_observation(failed.session, &failed_observation)
+            .await?,
+        RetainedModelCallObservationStatus::AlreadyCommitted
+    );
+
+    let refused_seed = seed + 0x80;
+    let (refused, refused_repository, refused_authorized) =
+        authorize_checkpointed_model_call(&pool, refused_seed).await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            input_with_delivery(
+                refused_seed + 19,
+                refused_seed + 1,
+                "stop before refusal",
+                DeliveryRequest::Interrupt {
+                    expected_active_turn: refused.turn,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(refused_seed + 20)),
+            Some(TurnId::from_uuid(Uuid::from_u128(refused_seed + 21))),
+        )
+        .await?;
+    let refused_observation = refused_authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::Refused);
+    refused_repository
+        .apply_terminal_observation(
+            refused.session,
+            refused_observation.clone(),
+            ModelCallTerminalIdentities::Refused(
+                signalbox_domain::RefusedModelCallTurnIdentities::new(
+                    ContextFrontierId::from_uuid(Uuid::from_u128(refused_seed + 22)),
+                ),
+            ),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+    assert_eq!(
+        refused_repository
+            .reread_terminal_observation(refused.session, &refused_observation)
+            .await?,
+        RetainedModelCallObservationStatus::AlreadyCommitted
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S03 / S04 / S07 / INV-006 / INV-012 / INV-029: completion and restart can
 /// win after a durable stop request without erasing the applied interrupt.
 /// Terminal reload accepts the completion race, while restart retains an
-/// ambiguous call and rejects a later safe point with the original proof.
+/// ambiguous call in proof-bearing terminal reconciliation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn interrupt_completion_and_restart_races_retain_stop_history() -> Result<(), Box<dyn Error>>
@@ -1702,41 +1875,37 @@ async fn interrupt_completion_and_restart_races_retain_stop_history() -> Result<
         .await?;
     assert!(matches!(
         restart_outcome,
-        ModelCallTerminalOutcome::AwaitingRecovery(ref waiting)
+        ModelCallTerminalOutcome::ReconciliationRequired(ref reconciliation)
             if matches!(
-                waiting.attempt().end(),
+                reconciliation.attempt().end(),
                 signalbox_domain::AttemptEnd::AfterCancellation {
                     disposition: signalbox_domain::CancellationStopDisposition::Lost,
                     ..
                 }
             )
     ));
-    let safe_point = input_with_delivery(
-        restart_seed + 24,
-        restart_seed + 1,
-        "safe point while stopped",
-        DeliveryRequest::NextSafePoint {
-            expected_active_turn: restarted.turn,
-        },
-    );
-    assert!(matches!(
-        SubmitInputRepository::new(pool.clone())
-            .handle(
-                safe_point,
-                AcceptedInputId::from_uuid(Uuid::from_u128(restart_seed + 25)),
-                None,
-            )
-            .await?,
-        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
-            SubmitInputRejectedResult::SafePointUnavailableWhileStopping {
-                active_turn,
-                existing_command,
-                ..
-            }
-        )) if active_turn == restarted.turn
-            && existing_command
-                == DurableCommandId::from_uuid(Uuid::from_u128(restart_seed + 19))
-    ));
+    let restart_terminal_shape: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*)
+               FROM turn_lifecycle
+              WHERE turn_id = $1
+                AND state_kind = 'terminal'
+                AND terminal_disposition_kind = 'reconciliation_required'),
+            (SELECT count(*)
+               FROM model_call
+              WHERE model_call_id = $2
+                AND state_kind = 'terminal'
+                AND terminal_disposition_kind = 'ambiguous'),
+            (SELECT count(*)
+               FROM turn_reconciliation_required_outbox_event
+              WHERE turn_id = $1
+                AND model_call_id = $2)",
+    )
+    .bind(restarted.turn.into_uuid())
+    .bind(restarted.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(restart_terminal_shape, (1, 1, 1));
 
     pool.close().await;
     drop(container);
@@ -9857,6 +10026,40 @@ async fn s03_s07_inv008_inv012_inv029_inv037_prepared_interrupt_is_exact()
     .await?;
     assert_eq!(remaining_queue, ("queued".to_owned(), 1));
 
+    assert!(matches!(
+        PostgresStartupScanRepository::new(pool.clone())
+            .recover(
+                SessionId::from_uuid(Uuid::from_u128(0x841)),
+                signalbox_domain::AcceptedInputTurnFailureIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xd47)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(0xe47)),
+                ),
+                |_| panic!("the interrupt successor has no pending steering"),
+            )
+            .await?,
+        StartupScanSessionOutcome::Recovered { .. }
+    ));
+    let ordinary_successor = activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: Uuid::from_u128(0x841),
+            origin_entry: Uuid::from_u128(0xd48),
+            starting_frontier: Uuid::from_u128(0xe48),
+            initial_attempt: Uuid::from_u128(0xb48),
+        },
+    )
+    .await?;
+    assert_eq!(
+        ordinary_successor.turn(),
+        TurnId::from_uuid(Uuid::from_u128(0xa48))
+    );
+    assert_eq!(
+        ordinary_successor.start().lineage(),
+        AcceptedInputStartingLineage::After {
+            immediate_predecessor: TurnId::from_uuid(Uuid::from_u128(0xa46)),
+        }
+    );
+
     pool.close().await;
     drop(container);
     Ok(())
@@ -11628,6 +11831,11 @@ async fn inv032_outbox_storage_rejects_truncate() -> Result<(), Box<dyn Error>> 
         .await?;
     assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE turn_failed_outbox_event CASCADE")
         .await?;
+    assert_outbox_truncate_rejected(
+        &pool,
+        "TRUNCATE TABLE turn_reconciliation_required_outbox_event CASCADE",
+    )
+    .await?;
 
     pool.close().await;
     drop(container);

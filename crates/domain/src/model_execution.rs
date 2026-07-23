@@ -19,8 +19,8 @@ use crate::{
     CurrentTurnAttempt, CurrentTurnAttemptState, DirectModelSelection, EffectiveConfiguration,
     EndedModelCall, EndedTurnAttempt, FrozenModelSelection, ModelCallDisposition, ModelCallId,
     ModelCallReconstitutionInput, NonEmptyIssuedOperationRefs, OriginConfiguration,
-    PinnedProviderTarget, PinnedProviderTargetReconstitutionInput, ReconstitutedModelCall,
-    ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput,
+    PinnedProviderTarget, PinnedProviderTargetReconstitutionInput, ReconciliationMarker,
+    ReconstitutedModelCall, ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput,
     ResolvedContextFrontierSnapshot, ResolvedProviderTarget, SemanticTranscriptEntry,
     SemanticTranscriptEntryId, SemanticTranscriptEntryPayload, SessionId, SteeringBinding,
     SteeringReclassificationReason, SubmitInputResult, SubmitInputTurnOriginReconstitutionInput,
@@ -732,15 +732,21 @@ impl ModelCallExecution {
         if !lifecycle_valid {
             return Err(ModelCallClosureError::CallStateMismatch);
         }
-        let reclassified_pending_steering =
-            if observation.observation.disposition() == ModelCallDisposition::Ambiguous {
-                Box::new([])
-            } else {
-                reclassify_pending_steering(
-                    &self.active_turn,
-                    identities.pending_steering_reclassifications(),
-                )?
-            };
+        let reclassified_pending_steering = if observation.observation.disposition()
+            == ModelCallDisposition::Ambiguous
+            && !matches!(
+                self.current_attempt.state(),
+                CurrentTurnAttemptState::StopRequested {
+                    causes: TurnAttemptStopCauses::CancellationOnly { .. }
+                }
+            ) {
+            Box::new([])
+        } else {
+            reclassify_pending_steering(
+                &self.active_turn,
+                identities.pending_steering_reclassifications(),
+            )?
+        };
         apply_terminal_observation(
             ModelCallTurnScope {
                 session: self.session,
@@ -888,6 +894,14 @@ impl ModelCallExecution {
                     .end_classified(ModelCallDisposition::Ambiguous)
                     .map_err(|_| ModelCallClosureError::CallStateMismatch)?;
                 let call_id = call.id();
+                let reclassified_pending_steering = reclassify_pending_steering(
+                    &self.active_turn,
+                    &failure_identities.pending_steering_reclassifications,
+                )?;
+                let terminal_snapshot = self
+                    .current_snapshot
+                    .derive_appending_candidate(failure_identities.terminal_frontier, Vec::new())
+                    .map_err(|_| ModelCallClosureError::FrontierDerivationFailed)?;
                 let attempt = self
                     .current_attempt
                     .end_after_cancellation(proof, CancellationStopDisposition::Lost)
@@ -896,13 +910,17 @@ impl ModelCallExecution {
                     crate::IssuedOperationRef::ModelCall(call_id),
                 ])
                 .map_err(|_| ModelCallClosureError::AmbiguityConstructionFailed)?;
-                Ok(ModelCallTerminalOutcome::AwaitingRecovery(
-                    AmbiguousModelCallTurn {
+                let marker =
+                    ReconciliationMarker::from_interrupt_ambiguity(ambiguous_operations, proof);
+                Ok(ModelCallTerminalOutcome::ReconciliationRequired(
+                    ReconciliationRequiredModelCallTurn {
                         session: self.session,
                         turn: self.turn,
                         call,
                         attempt,
-                        ambiguous_operations,
+                        disposition: TurnDisposition::ReconciliationRequired { marker },
+                        terminal_snapshot,
+                        reclassified_pending_steering,
                     },
                 ))
             }
@@ -1467,9 +1485,9 @@ fn apply_terminal_observation(
             }))
         }
         ModelCallTerminalObservation::Ambiguous => {
-            if !matches!(identities, ModelCallTerminalIdentities::Ambiguous) {
+            let ModelCallTerminalIdentities::Ambiguous(identities) = identities else {
                 return Err(ModelCallClosureError::IdentityShapeMismatch);
-            }
+            };
             let call_id = ended_call.id();
             let ended_attempt = match cancellation_proof {
                 Some(proof) => {
@@ -1482,15 +1500,43 @@ fn apply_terminal_observation(
                 crate::IssuedOperationRef::ModelCall(call_id),
             ])
             .map_err(|_| ModelCallClosureError::AmbiguityConstructionFailed)?;
-            Ok(ModelCallTerminalOutcome::AwaitingRecovery(
-                AmbiguousModelCallTurn {
+            if let Some(proof) = cancellation_proof {
+                let source = ResolvedContextFrontierSnapshot::try_from_candidate(
                     session,
-                    turn,
-                    call: ended_call,
-                    attempt: ended_attempt,
-                    ambiguous_operations,
-                },
-            ))
+                    source_frontier.snapshot(),
+                    frontier_entries
+                        .iter()
+                        .map(SemanticTranscriptEntry::reference)
+                        .collect(),
+                )
+                .map_err(|_| ModelCallClosureError::FrontierDerivationFailed)?;
+                let terminal_snapshot = source
+                    .derive_appending_candidate(identities.terminal_frontier, Vec::new())
+                    .map_err(|_| ModelCallClosureError::FrontierDerivationFailed)?;
+                let marker =
+                    ReconciliationMarker::from_interrupt_ambiguity(ambiguous_operations, proof);
+                Ok(ModelCallTerminalOutcome::ReconciliationRequired(
+                    ReconciliationRequiredModelCallTurn {
+                        session,
+                        turn,
+                        call: ended_call,
+                        attempt: ended_attempt,
+                        disposition: TurnDisposition::ReconciliationRequired { marker },
+                        terminal_snapshot,
+                        reclassified_pending_steering,
+                    },
+                ))
+            } else {
+                Ok(ModelCallTerminalOutcome::AwaitingRecovery(
+                    AmbiguousModelCallTurn {
+                        session,
+                        turn,
+                        call: ended_call,
+                        attempt: ended_attempt,
+                        ambiguous_operations,
+                    },
+                ))
+            }
         }
     }
 }
@@ -1728,8 +1774,10 @@ pub enum ModelCallTerminalIdentities {
     PhysicalCancellation(PhysicalCancellationModelCallTurnIdentities),
     /// Refusal terminal-frontier identity.
     Refused(RefusedModelCallTurnIdentities),
-    /// Ambiguity creates no semantic entry or frontier.
-    Ambiguous,
+    /// Ambiguity identities used only when a stop requires terminal
+    /// reconciliation; ordinary ambiguity ignores them while retaining the
+    /// slot.
+    Ambiguous(AmbiguousModelCallTurnIdentities),
 }
 
 /// One terminal or durable-wait result from the observation transaction.
@@ -1743,6 +1791,8 @@ pub enum ModelCallTerminalOutcome {
     Cancelled(CancelledModelCallTurn),
     /// The provider refusal terminalized the turn.
     Refused(RefusedModelCallTurn),
+    /// An applied interrupt and exact ambiguity set require reconciliation.
+    ReconciliationRequired(ReconciliationRequiredModelCallTurn),
     /// Physical ambiguity ended the attempt and retained the slot.
     AwaitingRecovery(AmbiguousModelCallTurn),
 }
@@ -1765,8 +1815,35 @@ impl ModelCallTerminalIdentities {
                 &identities.pending_steering_reclassifications
             }
             Self::Refused(identities) => &identities.pending_steering_reclassifications,
-            Self::Ambiguous => &[],
+            Self::Ambiguous(identities) => &identities.pending_steering_reclassifications,
         }
+    }
+}
+
+/// Fresh identities needed only when ambiguity terminalizes under a stop.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AmbiguousModelCallTurnIdentities {
+    terminal_frontier: ContextFrontierId,
+    pending_steering_reclassifications: Vec<PendingSteeringReclassificationIdentity>,
+}
+
+impl AmbiguousModelCallTurnIdentities {
+    /// Supplies the candidate terminal frontier for proof-bearing
+    /// reconciliation.
+    pub const fn new(terminal_frontier: ContextFrontierId) -> Self {
+        Self {
+            terminal_frontier,
+            pending_steering_reclassifications: Vec::new(),
+        }
+    }
+
+    /// Supplies one fresh successor identity per pending steering input.
+    pub fn with_pending_steering_reclassifications(
+        mut self,
+        identities: Vec<PendingSteeringReclassificationIdentity>,
+    ) -> Self {
+        self.pending_steering_reclassifications = identities;
+        self
     }
 }
 
@@ -2032,6 +2109,49 @@ impl RefusedModelCallTurn {
         &self.attempt
     }
     /// Borrows the refused turn disposition.
+    pub const fn disposition(&self) -> &TurnDisposition {
+        &self.disposition
+    }
+    /// Borrows the terminal frontier.
+    pub const fn terminal_snapshot(&self) -> &ResolvedContextFrontierSnapshot {
+        &self.terminal_snapshot
+    }
+    /// Returns queued turns created from every pending steering input.
+    pub fn reclassified_pending_steering(&self) -> &[ReclassifiedPendingSteeringTurn] {
+        &self.reclassified_pending_steering
+    }
+}
+
+/// One proof-bearing reconciliation-required commit candidate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReconciliationRequiredModelCallTurn {
+    session: SessionId,
+    turn: TurnId,
+    call: EndedModelCall,
+    attempt: EndedTurnAttempt,
+    disposition: TurnDisposition,
+    terminal_snapshot: ResolvedContextFrontierSnapshot,
+    reclassified_pending_steering: Box<[ReclassifiedPendingSteeringTurn]>,
+}
+
+impl ReconciliationRequiredModelCallTurn {
+    /// Returns the owning session.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+    /// Returns the turn whose ambiguity requires reconciliation.
+    pub const fn turn(&self) -> TurnId {
+        self.turn
+    }
+    /// Borrows the exact ambiguous physical call.
+    pub const fn call(&self) -> &EndedModelCall {
+        &self.call
+    }
+    /// Borrows the proof-bearing ended attempt.
+    pub const fn attempt(&self) -> &EndedTurnAttempt {
+        &self.attempt
+    }
+    /// Borrows the exact reconciliation disposition and marker.
     pub const fn disposition(&self) -> &TurnDisposition {
         &self.disposition
     }
@@ -3753,6 +3873,66 @@ mod tests {
         );
     }
 
+    /// S04 / S07 / INV-025 / INV-029: an applied interrupt makes
+    /// unacknowledged call ambiguity terminal reconciliation, preserving the
+    /// exact operation and stop proof while releasing the slot.
+    #[test]
+    fn s04_s07_inv025_inv029_stopped_ambiguity_requires_reconciliation() {
+        let pending = accepted_input_id(40);
+        let execution = with_pending_steering(in_flight_execution(), pending);
+        let source_turn = execution.turn();
+        let (execution, interrupt) = stop_requested_execution(execution);
+        let observation =
+            correlated_observation(&execution, ModelCallTerminalObservation::Ambiguous);
+        let outcome = execution
+            .apply_terminal_observation(
+                observation,
+                ModelCallTerminalIdentities::Ambiguous(
+                    AmbiguousModelCallTurnIdentities::new(context_frontier_id(41))
+                        .with_pending_steering_reclassifications(one_reclassification(
+                            pending,
+                            turn_id(42),
+                        )),
+                ),
+            )
+            .expect("stopped ambiguity is exactly representable");
+        let ModelCallTerminalOutcome::ReconciliationRequired(reconciliation) = outcome else {
+            panic!("stopped ambiguity must release the slot through reconciliation");
+        };
+
+        assert_eq!(
+            reconciliation.attempt().end(),
+            &crate::AttemptEnd::AfterCancellation {
+                cause: interrupt.proof(),
+                disposition: CancellationStopDisposition::Ambiguous,
+            }
+        );
+        let TurnDisposition::ReconciliationRequired { marker } = reconciliation.disposition()
+        else {
+            panic!("the terminal disposition carries its complete marker");
+        };
+        assert_eq!(
+            marker.reason(),
+            &crate::ReconciliationReason::InterruptRequiresReconciliation {
+                interrupt: interrupt.proof(),
+            }
+        );
+        assert_eq!(marker.ambiguous_operations().operation_count(), 1);
+        assert!(
+            marker
+                .ambiguous_operations()
+                .contains(crate::IssuedOperationRef::ModelCall(
+                    reconciliation.call().id()
+                ))
+        );
+        assert_one_reclassified_turn(
+            reconciliation.reclassified_pending_steering(),
+            pending,
+            source_turn,
+            turn_id(42),
+        );
+    }
+
     /// S02 / INV-006 / INV-014 / INV-034: an authoritative reread of a durably
     /// issued call reconstructs the same provider-facing correlation without
     /// authorizing or transitioning it a second time.
@@ -4030,7 +4210,12 @@ mod tests {
         let observation =
             correlated_observation(&execution, ModelCallTerminalObservation::Ambiguous);
         let outcome = execution
-            .apply_terminal_observation(observation, ModelCallTerminalIdentities::Ambiguous)
+            .apply_terminal_observation(
+                observation,
+                ModelCallTerminalIdentities::Ambiguous(AmbiguousModelCallTurnIdentities::new(
+                    context_frontier_id(43),
+                )),
+            )
             .expect("ambiguous evidence is representable");
         let ModelCallTerminalOutcome::AwaitingRecovery(waiting) = outcome else {
             panic!("ambiguous evidence selects recovery wait");

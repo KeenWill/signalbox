@@ -14,9 +14,9 @@ use std::{
 };
 
 use signalbox_domain::{
-    AcceptedInputId, AssistantText, AuthorizedModelCall, CompletedModelCallIdentities,
-    ContextFrontierId, CorrelatedModelCallTerminalObservation, FailedModelCallTurn,
-    FailedModelCallTurnIdentities, ModelCallId, ModelCallTerminalIdentities,
+    AcceptedInputId, AmbiguousModelCallTurnIdentities, AssistantText, AuthorizedModelCall,
+    CompletedModelCallIdentities, ContextFrontierId, CorrelatedModelCallTerminalObservation,
+    FailedModelCallTurn, FailedModelCallTurnIdentities, ModelCallId, ModelCallTerminalIdentities,
     ModelCallTerminalObservation, ModelCallTerminalOutcome,
     PhysicalCancellationModelCallTurnIdentities, PreparedModelCallRequest,
     RefusedModelCallTurnIdentities, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
@@ -410,6 +410,8 @@ enum RetainedModelCallExecutionStateKind {
 pub enum ModelCallCapabilityPreparation<Capability> {
     /// A call-bound one-shot capability is ready to move into provider work.
     Ready(Capability),
+    /// Durable authority changed while the capability was being prepared.
+    Cancelled,
     /// A trustworthy ordinary local failure occurred before send authorization.
     KnownFailure,
 }
@@ -979,6 +981,9 @@ where
             .await
         {
             Ok(ModelCallCapabilityPreparation::Ready(capability)) => capability,
+            Ok(ModelCallCapabilityPreparation::Cancelled) => {
+                return Ok(ModelCallExecutionOutcome::NoWork);
+            }
             Ok(ModelCallCapabilityPreparation::KnownFailure) => {
                 return self.commit_capability_known_failure(session, call).await;
             }
@@ -1191,7 +1196,9 @@ where
             ModelCallTerminalObservation::Refused => ModelCallTerminalIdentities::Refused(
                 RefusedModelCallTurnIdentities::new(self.ids.next_context_frontier_id()),
             ),
-            ModelCallTerminalObservation::Ambiguous => ModelCallTerminalIdentities::Ambiguous,
+            ModelCallTerminalObservation::Ambiguous => ModelCallTerminalIdentities::Ambiguous(
+                AmbiguousModelCallTurnIdentities::new(self.ids.next_context_frontier_id()),
+            ),
         }
     }
 }
@@ -1201,6 +1208,8 @@ where
 pub enum ScriptedModelCallStep {
     /// Capability preparation returns a trustworthy ordinary failure.
     CapabilityKnownFailure,
+    /// Capability preparation observes durable cancellation.
+    CapabilityCancelled,
     /// Capability preparation reports an operator failure.
     CapabilityOperatorFailure,
     /// Capability succeeds but provider interaction reports no observation.
@@ -1315,6 +1324,7 @@ impl ModelCallProvider for ScriptedModelCallProvider {
             &step,
             Some(
                 ScriptedModelCallStep::CapabilityKnownFailure
+                    | ScriptedModelCallStep::CapabilityCancelled
                     | ScriptedModelCallStep::CapabilityOperatorFailure
             )
         ) {
@@ -1324,6 +1334,9 @@ impl ModelCallProvider for ScriptedModelCallProvider {
             match step.ok_or(ScriptedModelCallError::ScriptExhausted)? {
                 ScriptedModelCallStep::CapabilityKnownFailure => {
                     Ok(ModelCallCapabilityPreparation::KnownFailure)
+                }
+                ScriptedModelCallStep::CapabilityCancelled => {
+                    Ok(ModelCallCapabilityPreparation::Cancelled)
                 }
                 ScriptedModelCallStep::CapabilityOperatorFailure => {
                     Err(ScriptedModelCallError::CapabilityOperatorFailure)
@@ -1382,6 +1395,7 @@ impl ModelCallProvider for ScriptedModelCallProvider {
                     Err(ScriptedModelCallError::InteractionOperatorFailure)
                 }
                 ScriptedModelCallStep::CapabilityKnownFailure
+                | ScriptedModelCallStep::CapabilityCancelled
                 | ScriptedModelCallStep::CapabilityOperatorFailure => {
                     Err(ScriptedModelCallError::ScriptExhausted)
                 }
@@ -2297,6 +2311,37 @@ mod tests {
         );
         let (_, prepare, ..) = service.into_parts();
         assert_eq!(prepare.calls, 2);
+    }
+
+    /// INV-037: durable cancellation during capability preparation is
+    /// authoritative no-work, not a local capability failure to terminalize.
+    #[tokio::test]
+    async fn inv037_capability_preparation_cancellation_stops_without_failure_commit() {
+        let (request, _) = prepared_fixture();
+        let session = request.session();
+        let mut service = ModelCallExecutionService::new(
+            FixedIds::baseline(),
+            FakePrepare {
+                outcomes: [Ok(ready(request))].into(),
+                calls: 0,
+            },
+            UnusedFailure,
+            UnusedAuthorization,
+            UnusedObservation,
+            ScriptedModelCallProvider::new([ScriptedModelCallStep::CapabilityCancelled]),
+            InProcessAttemptDispatchGate::default(),
+        );
+
+        assert_eq!(
+            service
+                .execute(session)
+                .await
+                .expect("durable cancellation is authoritative"),
+            ModelCallExecutionOutcome::NoWork
+        );
+        let (_, prepare, _, _, _, provider, ..) = service.into_parts();
+        assert_eq!(prepare.calls, 1);
+        assert_eq!(provider.capability_preparation_count(), 1);
     }
 
     /// docs/spec/model-call-execution.md: a trustworthy capability failure

@@ -453,66 +453,32 @@ async fn insert_prepared_activation(
                  WHERE active.session_id = candidate.session_id
                    AND active.state_kind = 'active'
             )
+            AND accepted_input_turn_is_first_nonterminal(
+                candidate.session_id,
+                candidate.turn_id
+            )
             AND (
                 (
-                    EXISTS (
-                        SELECT 1
-                          FROM queued_input_origin AS queued
-                         WHERE queued.turn_id = candidate.turn_id
-                           AND queued.session_id = candidate.session_id
-                           AND queued.priority_kind = 'ordinary'
-                    )
-                    AND NOT EXISTS (
-                        SELECT 1
-                          FROM turn_lifecycle AS earlier
-                         WHERE earlier.session_id = candidate.session_id
-                           AND earlier.acceptance_position
-                               < candidate.acceptance_position
-                           AND earlier.state_kind <> 'terminal'
-                    )
-                    AND (
-                        (
-                            $1 = 'first_in_session'
-                            AND $2::uuid IS NULL
-                            AND NOT EXISTS (
-                                SELECT 1
-                                  FROM turn_lifecycle AS earlier
-                                 WHERE earlier.session_id = candidate.session_id
-                                   AND earlier.acceptance_position
-                                       < candidate.acceptance_position
-                            )
-                        )
-                        OR
-                        (
-                            $1 = 'after'
-                            AND $2::uuid = (
-                                SELECT earlier.turn_id
-                                  FROM turn_lifecycle AS earlier
-                                 WHERE earlier.session_id = candidate.session_id
-                                   AND earlier.acceptance_position
-                                       < candidate.acceptance_position
-                                 ORDER BY earlier.acceptance_position DESC
-                                 LIMIT 1
-                            )
-                        )
-                    )
+                    $1 = 'first_in_session'
+                    AND $2::uuid IS NULL
+                    AND accepted_input_turn_queue_predecessor(
+                        candidate.session_id,
+                        candidate.turn_id
+                    ) IS NULL
                 )
                 OR
                 (
                     $1 = 'after'
+                    AND $2::uuid = accepted_input_turn_queue_predecessor(
+                        candidate.session_id,
+                        candidate.turn_id
+                    )
                     AND EXISTS (
                         SELECT 1
-                          FROM queued_input_origin AS queued
-                          JOIN turn_lifecycle AS predecessor
-                            ON predecessor.turn_id
-                                = queued.interrupt_predecessor_turn_id
-                           AND predecessor.session_id = queued.session_id
+                          FROM turn_lifecycle AS predecessor
+                         WHERE predecessor.turn_id = $2::uuid
+                           AND predecessor.session_id = candidate.session_id
                            AND predecessor.state_kind = 'terminal'
-                         WHERE queued.turn_id = candidate.turn_id
-                           AND queued.session_id = candidate.session_id
-                           AND queued.priority_kind
-                               = 'interrupt_immediately_after'
-                           AND queued.interrupt_predecessor_turn_id = $2::uuid
                     )
                 )
             )",
