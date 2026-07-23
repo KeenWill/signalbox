@@ -29,17 +29,17 @@ use signalbox_application::{
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputStartingLineage, ActivatedAcceptedInputTurn, ActiveTurnPhase,
     AssistantText, AuthorizedModelCall, CompletedModelCallIdentities, ContextFrontierId,
-    CreateSession, CurrentTurnAttemptState, DeliveryRequest, DurableCommandId,
-    FailedModelCallTurnIdentities, ModelAlias, ModelCallId, ModelCallTerminalIdentities,
-    ModelCallTerminalObservation, ModelCallTerminalOutcome, ModelSelectionOverride,
-    ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition, PerInputConfigurationChoices,
-    PreparedCreateSession, ProviderModelIdentity, RefusedModelCallTurnIdentities,
-    ReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult,
-    ResolvedProviderTarget, SemanticTranscriptEntryId, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-    SessionId, SubmitInput, SubmitInputAppliedResult, SubmitInputReconstitutionFailure,
-    SubmitInputRejectedResult, SubmitInputResult, TranscriptAncestry, TurnAttemptId,
-    TurnConfigurationProvenance, TurnId, UserContent,
+    CreateSession, CurrentTurnAttemptState, DeliveryRequest, DirectModelSelection,
+    DurableCommandId, FailedModelCallTurnIdentities, ModelAlias, ModelCallId,
+    ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
+    ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition,
+    PerInputConfigurationChoices, PreparedCreateSession, ProviderModelIdentity,
+    RefusedModelCallTurnIdentities, ReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult,
+    ReplaceSessionDefaultsResult, ResolvedProviderTarget, SemanticTranscriptEntryId,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
+    SessionCreationProvenance, SessionId, SubmitInput, SubmitInputAppliedResult,
+    SubmitInputReconstitutionFailure, SubmitInputRejectedResult, SubmitInputResult,
+    TranscriptAncestry, TurnAttemptId, TurnConfigurationProvenance, TurnId, UserContent,
 };
 use signalbox_persistence::{
     MIGRATOR,
@@ -53,6 +53,9 @@ use signalbox_persistence::{
     },
     outbox::{
         OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
+    },
+    process_read::{
+        ProcessModelSelection, ProcessReadRepository, ProcessTranscriptEntry, ProcessTurnState,
     },
     replace_session_defaults::{
         ReplaceSessionDefaultsCorruption, ReplaceSessionDefaultsHandlingOutcome,
@@ -10620,6 +10623,131 @@ async fn s24_inv032_outbox_delivery_prefix_is_stable() -> Result<(), Box<dyn Err
     assert_eq!(first_sequence, Decimal::ONE);
     assert_eq!(second_sequence, Decimal::from(2));
     assert_eq!(undelivered_suffix, vec![second_sequence]);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S24: session summaries are one complete repeatable-read projection in
+/// stable session-identity order, including the selected defaults row.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_process_session_summary_sequence_matches_repeatable_projection()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let earlier_session = insert_outbox_session_fixture(&pool, 0xe31).await?;
+    let later_session = Uuid::from_u128(0xe32);
+    let alias = ModelAlias::from_uuid(Uuid::from_u128(0xae32));
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0x4e32, 0xe32, ModelSelectionRequest::Alias(alias)))
+        .await?;
+
+    let summaries = ProcessReadRepository::new(pool.clone())
+        .list_sessions()
+        .await?;
+
+    assert_eq!(summaries.len(), 2);
+    assert_eq!(summaries[0].session().into_uuid(), earlier_session);
+    assert_eq!(summaries[0].defaults_version(), 1);
+    assert_eq!(
+        summaries[0].model_selection(),
+        ProcessModelSelection::Direct(DirectModelSelection::from_uuid(Uuid::from_u128(
+            0xe31 ^ 0x2000
+        )))
+    );
+    assert_eq!(summaries[1].session().into_uuid(), later_session);
+    assert_eq!(summaries[1].defaults_version(), 1);
+    assert_eq!(
+        summaries[1].model_selection(),
+        ProcessModelSelection::Alias(alias)
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S24 / INV-032: the process transcript read observes the global outbox
+/// cursor, ordered turn state, and latest semantic frontier in one
+/// repeatable-read snapshot.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_inv032_process_transcript_is_one_authoritative_snapshot() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = SessionId::from_uuid(Uuid::from_u128(0x8e41));
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0xce41));
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(
+            0x4e41,
+            0x8e41,
+            ModelSelectionRequest::Direct(selection),
+        ))
+        .await?;
+    let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x9e41));
+    let turn = TurnId::from_uuid(Uuid::from_u128(0xae41));
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                0x4e42,
+                0x8e41,
+                "projected user request",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            accepted_input,
+            Some(turn),
+        )
+        .await?;
+    let origin_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde41));
+    let starting_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0xee41));
+    let attempt = TurnAttemptId::from_uuid(Uuid::from_u128(0xbe41));
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: session.into_uuid(),
+            origin_entry: origin_entry.into_uuid(),
+            starting_frontier: starting_frontier.into_uuid(),
+            initial_attempt: attempt.into_uuid(),
+        },
+    )
+    .await?;
+
+    let repository = ProcessReadRepository::new(pool.clone());
+    assert!(
+        repository
+            .read_transcript(SessionId::from_uuid(Uuid::from_u128(0xffff)))
+            .await?
+            .is_none()
+    );
+    let snapshot = repository
+        .read_transcript(session)
+        .await?
+        .expect("the committed session has a transcript projection");
+
+    assert_eq!(snapshot.session(), session);
+    assert_eq!(snapshot.cursor(), 1);
+    assert_eq!(snapshot.turns().len(), 1);
+    assert_eq!(snapshot.turns()[0].turn(), turn);
+    assert_eq!(snapshot.turns()[0].acceptance_position(), 1);
+    assert_eq!(
+        snapshot.turns()[0].state(),
+        ProcessTurnState::ActiveRunning {
+            current_attempt: attempt,
+        }
+    );
+    assert_eq!(
+        snapshot.entries(),
+        [ProcessTranscriptEntry::User {
+            entry_index: 0,
+            source_session: session,
+            entry: origin_entry,
+            accepted_input,
+            turn,
+            content: "projected user request".to_owned(),
+        }]
+    );
 
     pool.close().await;
     drop(container);
