@@ -616,6 +616,7 @@ pub enum TurnState {
         /// Current live attempt.
         current_attempt_id: CanonicalUuid,
         /// Current provider call, or null before one is prepared.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
         current_model_call: Option<CurrentModelCall>,
     },
     /// The turn is parked on an ambiguous model call.
@@ -896,6 +897,16 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "ErrorDetail::is_absent")]
         detail: ErrorDetail,
     },
+}
+
+fn deserialize_required_nullable<'de, DeserializerT, ValueT>(
+    deserializer: DeserializerT,
+) -> Result<Option<ValueT>, DeserializerT::Error>
+where
+    DeserializerT: Deserializer<'de>,
+    ValueT: Deserialize<'de>,
+{
+    Option::<ValueT>::deserialize(deserializer)
 }
 
 /// One validated server frame.
@@ -1474,6 +1485,13 @@ mod tests {
         );
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"session_event","cursor":"1","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"session_created","extra":true}}}"#,
+        );
+    }
+
+    #[test]
+    fn inv033_active_running_requires_current_model_call_member() {
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"active_running","current_attempt_id":"00000000-0000-0000-0000-000000000002"}}}"#,
         );
     }
 

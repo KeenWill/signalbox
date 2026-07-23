@@ -91,3 +91,8 @@ jobs:
           cargo test -p signalbox-hubd
           --test offline_reply
           -- --ignored --test-threads=1
+      - name: Run hubd process-substrate Postgres tests
+        run: >-
+          cargo test -p signalbox-hubd
+          --test process_substrate
+          -- --ignored --test-threads=1
