@@ -320,6 +320,13 @@ impl PostgresModelCallRepository {
                 .iter()
                 .map(|(entry, _)| *entry)
                 .collect::<Vec<_>>();
+            if !steering_entries.is_empty()
+                && steering_frontier == execution.start().frontier().snapshot()
+            {
+                return Err(ModelCallRepositoryError::IdentityCollision(
+                    ModelCallIdentityCollision::TerminalFrontier,
+                ));
+            }
             let steering_snapshot = (!steering_entries.is_empty()).then_some(steering_frontier);
             let prepared = match execution.prepare_initial_call_consuming_steering(
                 call,
@@ -333,17 +340,26 @@ impl PostgresModelCallRepository {
                             "target-unavailable result omitted its resolution proof",
                         ),
                     )?;
+                    let source_turn = error.execution().turn();
+                    let reclassifications = steering_identities
+                        .into_iter()
+                        .map(|(_, reclassification)| reclassification)
+                        .collect::<Vec<_>>();
+                    let mut proposed_turns = BTreeSet::new();
+                    for reclassification in &reclassifications {
+                        record_reclassified_turn_candidate(
+                            source_turn,
+                            reclassification.turn(),
+                            &mut proposed_turns,
+                        )?;
+                    }
                     let failed = error
                         .execution()
                         .clone()
                         .fail_target_resolution(
                             resolution,
-                            failure_identities.with_pending_steering_reclassifications(
-                                steering_identities
-                                    .into_iter()
-                                    .map(|(_, reclassification)| reclassification)
-                                    .collect(),
-                            ),
+                            failure_identities
+                                .with_pending_steering_reclassifications(reclassifications),
                         )
                         .map_err(|_| {
                             ModelCallRepositoryError::InvalidTransition(

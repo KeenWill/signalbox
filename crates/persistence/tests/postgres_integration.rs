@@ -1827,6 +1827,47 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
     let terminal_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0x1ee4));
     let assistant_text = AssistantText::try_new(String::from("service assistant reply"))
         .expect("fixture assistant content is admitted");
+    let mut reused_frontier_entries = [
+        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1df8)),
+        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1df9)),
+    ]
+    .into_iter();
+    let mut reused_frontier_turns = [
+        TurnId::from_uuid(Uuid::from_u128(0x1af8)),
+        TurnId::from_uuid(Uuid::from_u128(0x1af9)),
+    ]
+    .into_iter();
+    let collision = repository
+        .prepare_initial_call(
+            session,
+            call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1dfa)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x1ef8)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0x1ee1)),
+            |_| {
+                (
+                    reused_frontier_entries
+                        .next()
+                        .expect("one entry candidate per pending steering input"),
+                    reused_frontier_turns
+                        .next()
+                        .expect("one turn candidate per pending steering input"),
+                )
+            },
+        )
+        .await
+        .expect_err("a reused steering-frontier identity must be retryable");
+    assert!(
+        matches!(
+            collision,
+            ModelCallRepositoryError::IdentityCollision(
+                ModelCallIdentityCollision::TerminalFrontier
+            )
+        ),
+        "unexpected reused-frontier result: {collision:?}"
+    );
     let collision = repository
         .prepare_initial_call(
             session,
@@ -2590,6 +2631,28 @@ async fn s08_s21_inv006_inv014_inv032_inv036_target_unavailable_reclassifies_ste
     let call_candidate = ModelCallId::from_uuid(Uuid::from_u128(0xcf2));
     let failure_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdf2));
     let terminal_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0xef2));
+    let collision = repository
+        .prepare_initial_call(
+            session,
+            call_candidate,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdf3)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xef3)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0xff1)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xcf4)),
+                    turn,
+                )
+            },
+        )
+        .await
+        .expect_err("a source-turn fallback candidate must be retryable");
+    assert!(matches!(
+        collision,
+        ModelCallRepositoryError::IdentityCollision(ModelCallIdentityCollision::ReclassifiedTurn)
+    ));
     let PrepareInitialModelCallOutcome::TargetUnavailable(failed) = repository
         .prepare_initial_call(
             session,
