@@ -430,8 +430,8 @@ startup with a classified, key-bearing log line and a failure exit code.
 Observability and the operator failure taxonomy are
 [runtime-substrate](runtime-substrate.md) scope.
 
-On SIGINT/SIGTERM the scheduler loop stops admitting new passes and unstopped
-in-flight passes get a bounded 30-second grace window to let their authoritative
+On SIGINT/SIGTERM the scheduler loop stops admitting new passes and every
+in-flight pass gets a bounded 30-second grace window to let its authoritative
 transactions commit or abort. Window expiry abandons the work, warns, and skips
 the unbounded pool drain; a clean exit closes the pool. Why shutdown is polish,
 not correctness: abrupt exit at any point is safe because durable rows plus the
