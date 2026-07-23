@@ -118,10 +118,10 @@ and uuid are already pinned elsewhere in the workspace.
 
 **Decision.** The focused `signalbox-process-protocol` crate directly uses those
 three existing dependencies. Serde derives the closed tagged shapes;
-serde_json's `arbitrary_precision` feature preserves an arbitrary integer
-version long enough to reject it as unsupported before decoding its payload; and
-uuid parses values behind custom lowercase-hyphenated and command-sentinel
-checks. The crate owns framing and wire validation only.
+serde_json's `raw_value` feature preserves the version spelling long enough to
+reject an arbitrary integer as unsupported before decoding its payload; and uuid
+parses values behind custom lowercase-hyphenated and command-sentinel checks.
+The crate owns framing and wire validation only.
 
 **Rejected alternatives.** A handwritten JSON parser would duplicate escaping,
 UTF-8, and number handling. Raw string identifiers would defer canonical checks

@@ -1321,6 +1321,16 @@ fn recover_request_id(content: &[u8], allow_uncorrelated: bool) -> RequestId {
         .unwrap_or_else(|_| RequestId::uncorrelated())
 }
 
+/// Recovers a correlated client request identity from bounded complete frame
+/// content.
+///
+/// This is the server reader's best-effort correlation path when a final
+/// newline is the one byte that takes an otherwise complete JSON object over
+/// the frame limit. Input beyond the content bound is never parsed.
+pub fn recover_bounded_client_request_id(content: &[u8]) -> RequestId {
+    recover_request_id(content, false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1799,6 +1809,19 @@ mod tests {
 
         assert_eq!(error.kind(), FrameDecodeErrorKind::OversizedFrame);
         assert_eq!(error.request_id().value(), 0);
+    }
+
+    #[test]
+    fn inv033_bounded_client_request_identity_recovery_matches_oversized_decode() {
+        let oversized =
+            padded_oversized_client_frame(r#""request_id":"9""#, super::MAX_FRAME_BYTES);
+        let content = &oversized[..oversized.len() - 1];
+
+        assert_eq!(super::recover_bounded_client_request_id(content).value(), 9);
+        assert_eq!(
+            super::recover_bounded_client_request_id(&oversized).value(),
+            0
+        );
     }
 
     #[test]
