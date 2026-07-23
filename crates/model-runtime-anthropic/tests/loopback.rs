@@ -776,22 +776,30 @@ fn base_url_user_information_is_rejected_at_construction() {
 
 #[test]
 fn plain_http_requires_a_literal_loopback_ip_host() {
-    for base_url in [
-        "http://example.com",
-        "http://localhost:8080",
-        "http://192.0.2.1",
-    ] {
-        let mut config = AnthropicConfig::new();
-        config.base_url = base_url.to_string();
+    assert_anthropic_plain_http_rejected("http://example.com");
+    assert_anthropic_plain_http_rejected("http://localhost:8080");
+    assert_anthropic_plain_http_rejected("http://192.0.2.1");
 
-        assert!(
-            matches!(
-                AnthropicRuntime::new(config, FixedKey),
-                Err(AnthropicConstructionError::InvalidBaseUrl { .. })
-            ),
-            "{base_url} must not be admitted without transport security"
-        );
-    }
+    let mut ipv4_loopback = AnthropicConfig::new();
+    ipv4_loopback.base_url = "http://127.0.0.1:1".to_string();
+    assert!(AnthropicRuntime::new(ipv4_loopback, FixedKey).is_ok());
+
+    let mut ipv6_loopback = AnthropicConfig::new();
+    ipv6_loopback.base_url = "http://[::1]:1".to_string();
+    assert!(AnthropicRuntime::new(ipv6_loopback, FixedKey).is_ok());
+}
+
+fn assert_anthropic_plain_http_rejected(base_url: &str) {
+    let mut config = AnthropicConfig::new();
+    config.base_url = base_url.to_string();
+
+    assert!(
+        matches!(
+            AnthropicRuntime::new(config, FixedKey),
+            Err(AnthropicConstructionError::InvalidBaseUrl { .. })
+        ),
+        "{base_url} must not be admitted without transport security"
+    );
 }
 
 #[test]

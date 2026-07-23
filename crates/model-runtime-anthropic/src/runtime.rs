@@ -210,7 +210,11 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
         if base_url.scheme() == "http"
             && !base_url
                 .host_str()
-                .and_then(|host| host.parse::<std::net::IpAddr>().ok())
+                .and_then(|host| {
+                    host.trim_matches(&['[', ']'][..])
+                        .parse::<std::net::IpAddr>()
+                        .ok()
+                })
                 .is_some_and(|address| address.is_loopback())
         {
             return Err(AnthropicConstructionError::InvalidBaseUrl {
