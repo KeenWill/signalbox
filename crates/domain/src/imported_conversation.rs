@@ -1,12 +1,16 @@
-//! Immutable imported-conversation records.
+//! Lossless imported-conversation records.
 //!
 //! The normative specification is `docs/spec/conversation-import.md`.
-//! Imported entries retain source attestations and content while carrying no
-//! native execution authority.
+//! Imported entries retain exact source facts without carrying native execution
+//! authority.
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, error::Error, fmt};
 
-use crate::{ImportedConversationId, ImportedTranscriptEntryId, NonEmptyUnicodeText};
+use sha2::{Digest, Sha256};
+
+use crate::{ImportedConversationId, ImportedTranscriptEntryId};
+
+const SOURCE_DIGEST_DOMAIN: &[u8] = b"signalbox.imported-conversation.source-digest.v1";
 
 /// One source format interpreted by one fixed Signalbox converter version.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -15,7 +19,75 @@ pub enum ImportedConversationFormat {
     ClaudeCodeSessionJsonlV1,
 }
 
-/// What an external source asserted about one metadata field.
+impl ImportedConversationFormat {
+    fn digest_tag(self) -> &'static [u8] {
+        match self {
+            Self::ClaudeCodeSessionJsonlV1 => b"claude-code-session-jsonl-v1",
+        }
+    }
+}
+
+/// SHA-256 of one exact raw source-record byte sequence.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ImportedRawRecordHash([u8; 32]);
+
+impl ImportedRawRecordHash {
+    /// Reconstitutes one stored digest.
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrows the fixed digest bytes.
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Hashes exact source-record bytes.
+    pub fn digest(bytes: &[u8]) -> Self {
+        Self(Sha256::digest(bytes).into())
+    }
+}
+
+/// Domain-separated SHA-256 of a format and ordered raw-record hashes.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ImportedConversationSourceDigest([u8; 32]);
+
+impl ImportedConversationSourceDigest {
+    /// Reconstitutes one stored source digest.
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrows the fixed digest bytes.
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    fn derive(
+        format: ImportedConversationFormat,
+        records: &[ImportedRawSourceRecordReconstitutionInput],
+    ) -> Self {
+        let mut digest = Sha256::new();
+        update_length_framed(&mut digest, SOURCE_DIGEST_DOMAIN);
+        update_length_framed(&mut digest, format.digest_tag());
+        digest.update(
+            u64::try_from(records.len())
+                .unwrap_or(u64::MAX)
+                .to_be_bytes(),
+        );
+        for record in records {
+            update_length_framed(&mut digest, record.stored_hash.as_bytes());
+        }
+        Self(digest.finalize().into())
+    }
+}
+
+fn update_length_framed(digest: &mut Sha256, value: &[u8]) {
+    digest.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+    digest.update(value);
+}
+
+/// What an external source asserted about one field.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum ImportedSourceAttestation<Value> {
     /// The source supplied this exact value.
@@ -26,26 +98,220 @@ pub enum ImportedSourceAttestation<Value> {
     NotAttested,
 }
 
+/// Exact decoded imported text, including empty text and U+0000.
+#[derive(Clone, Eq, Hash, PartialEq)]
+pub struct ImportedText(String);
+
+impl ImportedText {
+    /// Preserves one decoded Unicode scalar sequence without rewriting it.
+    pub fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    /// Borrows the exact decoded text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Returns the exact decoded text.
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl fmt::Debug for ImportedText {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ImportedText")
+            .field("utf8_len", &self.0.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// One checked JSON number spelling in the source-neutral structured algebra.
+#[derive(Clone, Eq, Hash, PartialEq)]
+pub struct ImportedJsonNumber(String);
+
+impl ImportedJsonNumber {
+    /// Checks the complete RFC 8259 JSON number grammar.
+    pub fn try_new(value: String) -> Result<Self, ImportedJsonNumberError> {
+        if is_json_number(&value) {
+            Ok(Self(value))
+        } else {
+            Err(ImportedJsonNumberError { value })
+        }
+    }
+
+    /// Borrows the checked number spelling.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Returns the checked number spelling.
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl fmt::Debug for ImportedJsonNumber {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ImportedJsonNumber")
+            .field("utf8_len", &self.0.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// A rejected imported JSON number retaining its exact spelling.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ImportedJsonNumberError {
+    value: String,
+}
+
+impl ImportedJsonNumberError {
+    /// Borrows the rejected number spelling.
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    /// Returns the rejected number spelling.
+    pub fn into_value(self) -> String {
+        self.value
+    }
+}
+
+impl fmt::Debug for ImportedJsonNumberError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ImportedJsonNumberError")
+            .field("utf8_len", &self.value.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Display for ImportedJsonNumberError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("imported JSON number has invalid syntax")
+    }
+}
+
+impl Error for ImportedJsonNumberError {}
+
+fn is_json_number(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    if bytes.get(index) == Some(&b'-') {
+        index += 1;
+    }
+    match bytes.get(index) {
+        Some(b'0') => index += 1,
+        Some(b'1'..=b'9') => {
+            index += 1;
+            while matches!(bytes.get(index), Some(b'0'..=b'9')) {
+                index += 1;
+            }
+        }
+        _ => return false,
+    }
+    if bytes.get(index) == Some(&b'.') {
+        index += 1;
+        let start = index;
+        while matches!(bytes.get(index), Some(b'0'..=b'9')) {
+            index += 1;
+        }
+        if index == start {
+            return false;
+        }
+    }
+    if matches!(bytes.get(index), Some(b'e' | b'E')) {
+        index += 1;
+        if matches!(bytes.get(index), Some(b'+' | b'-')) {
+            index += 1;
+        }
+        let start = index;
+        while matches!(bytes.get(index), Some(b'0'..=b'9')) {
+            index += 1;
+        }
+        if index == start {
+            return false;
+        }
+    }
+    index == bytes.len()
+}
+
+/// One ordered object member in the source-neutral structured algebra.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ImportedStructuredObjectMember {
+    name: ImportedText,
+    value: ImportedStructuredValue,
+}
+
+impl ImportedStructuredObjectMember {
+    /// Preserves one object member and its physical member position.
+    pub fn new(name: ImportedText, value: ImportedStructuredValue) -> Self {
+        Self { name, value }
+    }
+
+    /// Borrows the exact decoded member name.
+    pub const fn name(&self) -> &ImportedText {
+        &self.name
+    }
+
+    /// Borrows the member value.
+    pub const fn value(&self) -> &ImportedStructuredValue {
+        &self.value
+    }
+}
+
+/// Source-neutral decoded JSON values.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum ImportedStructuredValue {
+    /// JSON null.
+    Null,
+    /// JSON boolean.
+    Boolean(bool),
+    /// Checked JSON number.
+    Number(ImportedJsonNumber),
+    /// Exact decoded JSON string.
+    String(ImportedText),
+    /// Ordered JSON array.
+    Array(Box<[ImportedStructuredValue]>),
+    /// Ordered JSON object members, including repeated names.
+    Object(Box<[ImportedStructuredObjectMember]>),
+}
+
+/// Source-attested conversational speaker.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ImportedSpeaker {
+    /// External user-authored content.
+    User,
+    /// External assistant-authored content.
+    Assistant,
+}
+
 /// Source-envelope attestations retained independently for one imported entry.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ImportedSourceMetadata {
-    record_id: ImportedSourceAttestation<NonEmptyUnicodeText>,
-    parent_record_id: ImportedSourceAttestation<NonEmptyUnicodeText>,
-    source_session_id: ImportedSourceAttestation<NonEmptyUnicodeText>,
-    timestamp: ImportedSourceAttestation<NonEmptyUnicodeText>,
+    record_id: ImportedSourceAttestation<ImportedText>,
+    parent_record_id: ImportedSourceAttestation<ImportedText>,
+    source_session_id: ImportedSourceAttestation<ImportedText>,
+    timestamp: ImportedSourceAttestation<ImportedText>,
     sidechain: ImportedSourceAttestation<bool>,
     metadata: ImportedSourceAttestation<bool>,
+    message_role: ImportedSourceAttestation<ImportedSpeaker>,
 }
 
 impl ImportedSourceMetadata {
     /// Supplies every modeled source attestation without deriving missing data.
+    #[allow(clippy::too_many_arguments)]
     pub const fn new(
-        record_id: ImportedSourceAttestation<NonEmptyUnicodeText>,
-        parent_record_id: ImportedSourceAttestation<NonEmptyUnicodeText>,
-        source_session_id: ImportedSourceAttestation<NonEmptyUnicodeText>,
-        timestamp: ImportedSourceAttestation<NonEmptyUnicodeText>,
+        record_id: ImportedSourceAttestation<ImportedText>,
+        parent_record_id: ImportedSourceAttestation<ImportedText>,
+        source_session_id: ImportedSourceAttestation<ImportedText>,
+        timestamp: ImportedSourceAttestation<ImportedText>,
         sidechain: ImportedSourceAttestation<bool>,
         metadata: ImportedSourceAttestation<bool>,
+        message_role: ImportedSourceAttestation<ImportedSpeaker>,
     ) -> Self {
         Self {
             record_id,
@@ -54,26 +320,27 @@ impl ImportedSourceMetadata {
             timestamp,
             sidechain,
             metadata,
+            message_role,
         }
     }
 
     /// Borrows the source record-identity attestation.
-    pub const fn record_id(&self) -> &ImportedSourceAttestation<NonEmptyUnicodeText> {
+    pub const fn record_id(&self) -> &ImportedSourceAttestation<ImportedText> {
         &self.record_id
     }
 
     /// Borrows the source parent-record attestation.
-    pub const fn parent_record_id(&self) -> &ImportedSourceAttestation<NonEmptyUnicodeText> {
+    pub const fn parent_record_id(&self) -> &ImportedSourceAttestation<ImportedText> {
         &self.parent_record_id
     }
 
     /// Borrows the source session-identity attestation.
-    pub const fn source_session_id(&self) -> &ImportedSourceAttestation<NonEmptyUnicodeText> {
+    pub const fn source_session_id(&self) -> &ImportedSourceAttestation<ImportedText> {
         &self.source_session_id
     }
 
     /// Borrows the source timestamp attestation.
-    pub const fn timestamp(&self) -> &ImportedSourceAttestation<NonEmptyUnicodeText> {
+    pub const fn timestamp(&self) -> &ImportedSourceAttestation<ImportedText> {
         &self.timestamp
     }
 
@@ -86,124 +353,328 @@ impl ImportedSourceMetadata {
     pub const fn metadata(&self) -> &ImportedSourceAttestation<bool> {
         &self.metadata
     }
+
+    /// Borrows the nested message-role attestation.
+    pub const fn message_role(&self) -> &ImportedSourceAttestation<ImportedSpeaker> {
+        &self.message_role
+    }
 }
 
-/// The source-attested conversational speaker.
+/// Why a message record has no source content entry.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum ImportedSpeaker {
-    /// External user-authored message content.
-    User,
-    /// External assistant-authored message content.
-    Assistant,
+pub enum ImportedMessageContentAbsence {
+    /// The source omitted the complete message envelope.
+    MessageNotAttested,
+    /// The source supplied an explicit null message envelope.
+    MessageAttestedAbsent,
+    /// The source omitted content from an object-valued message.
+    ContentNotAttested,
+    /// The source supplied explicit null message content.
+    ContentAttestedAbsent,
+    /// The source supplied an empty content-block array.
+    EmptyBlockArray,
 }
 
-/// Why one source content block has no imported text representation.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum ImportedContentUnavailable {
-    /// The source supplied an empty text block.
-    EmptyText,
-    /// The source supplied an assistant tool-use block.
-    ToolUse,
-    /// The source supplied a user tool-result block.
-    ToolResult,
-    /// The source supplied a thinking block.
-    Thinking,
-    /// The source supplied a redacted-thinking block.
-    RedactedThinking,
-}
-
-/// Exact imported text or a typed statement that text is unavailable.
+/// Source-attested media data used by documents and image results.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub enum ImportedTranscriptContent {
-    /// Exact nonempty source text.
-    Text(NonEmptyUnicodeText),
-    /// A source content class deliberately not represented as text.
-    Unavailable(ImportedContentUnavailable),
+pub struct ImportedMediaSource {
+    kind: ImportedSourceAttestation<ImportedText>,
+    media_type: ImportedSourceAttestation<ImportedText>,
+    data: ImportedSourceAttestation<ImportedText>,
 }
 
-/// Whether and why one imported entry participates in a session seed.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum ImportedSeedDisposition {
-    /// Exact text participates in seed context.
-    Included,
-    /// Exact text is retained but excluded by explicit source flags.
-    ExcludedBySource {
-        /// The source explicitly marked this record as a sidechain.
-        sidechain: bool,
-        /// The source explicitly marked this record as metadata.
-        metadata: bool,
-    },
-    /// Non-text source content is retained as typed absence and cannot render.
-    ExcludedUnavailable {
-        /// The unavailable source content class.
-        reason: ImportedContentUnavailable,
-    },
-}
-
-/// One positive position in physical source record/block order.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct ImportedTranscriptPosition(u64);
-
-impl ImportedTranscriptPosition {
-    /// Reconstitutes a position from a positive ordinal.
-    pub const fn try_from_u64(value: u64) -> Option<Self> {
-        if value == 0 { None } else { Some(Self(value)) }
-    }
-
-    /// Returns the positive ordinal.
-    pub const fn as_u64(self) -> u64 {
-        self.0
-    }
-
-    /// Returns the first imported position.
-    pub const fn first() -> Self {
-        Self(1)
-    }
-
-    /// Returns the next position or `None` after `u64::MAX`.
-    pub const fn checked_next(self) -> Option<Self> {
-        match self.0.checked_add(1) {
-            Some(value) => Some(Self(value)),
-            None => None,
+impl ImportedMediaSource {
+    /// Supplies every media-source attestation.
+    pub const fn new(
+        kind: ImportedSourceAttestation<ImportedText>,
+        media_type: ImportedSourceAttestation<ImportedText>,
+        data: ImportedSourceAttestation<ImportedText>,
+    ) -> Self {
+        Self {
+            kind,
+            media_type,
+            data,
         }
     }
+
+    /// Borrows the source kind attestation.
+    pub const fn kind(&self) -> &ImportedSourceAttestation<ImportedText> {
+        &self.kind
+    }
+
+    /// Borrows the media-type attestation.
+    pub const fn media_type(&self) -> &ImportedSourceAttestation<ImportedText> {
+        &self.media_type
+    }
+
+    /// Borrows the exact media-data attestation.
+    pub const fn data(&self) -> &ImportedSourceAttestation<ImportedText> {
+        &self.data
+    }
 }
 
-/// Raw typed fields for one imported entry at a reconstitution boundary.
+/// One ordered rich block inside a tool result.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum ImportedToolResultBlock {
+    /// Exact result text.
+    Text(ImportedText),
+    /// Exact source-attested image data.
+    Image(ImportedMediaSource),
+    /// A source tool reference.
+    ToolReference {
+        /// Exact or absent tool name.
+        tool_name: ImportedSourceAttestation<ImportedText>,
+    },
+}
+
+/// One present tool-result content value.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum ImportedToolResultValue {
+    /// Exact string-valued result content.
+    Text(ImportedText),
+    /// Exact ordered array-valued result content.
+    Blocks(Box<[ImportedToolResultBlock]>),
+}
+
+/// Maximum-fidelity normalized imported entry content.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum ImportedTranscriptContent {
+    /// One non-message record and its source type.
+    SourceEvent {
+        /// Exact, explicit-null, or omitted top-level source type.
+        source_type: ImportedSourceAttestation<ImportedText>,
+    },
+    /// Exact decoded user or assistant text.
+    Text(ImportedText),
+    /// One source tool call.
+    ToolCall {
+        /// Source call identity.
+        source_call_id: ImportedSourceAttestation<ImportedText>,
+        /// Source tool name.
+        name: ImportedSourceAttestation<ImportedText>,
+        /// Source structured input.
+        input: ImportedSourceAttestation<ImportedStructuredValue>,
+        /// Source caller metadata.
+        caller: ImportedSourceAttestation<ImportedStructuredValue>,
+    },
+    /// One source tool result.
+    ToolResult {
+        /// Source call identity being answered.
+        source_call_id: ImportedSourceAttestation<ImportedText>,
+        /// Source result content.
+        content: ImportedSourceAttestation<ImportedToolResultValue>,
+        /// Source error flag.
+        is_error: ImportedSourceAttestation<bool>,
+    },
+    /// Source-visible thinking plus signature.
+    Thinking {
+        /// Exact source thinking.
+        thinking: ImportedSourceAttestation<ImportedText>,
+        /// Exact source signature.
+        signature: ImportedSourceAttestation<ImportedText>,
+    },
+    /// Source redacted-thinking data.
+    RedactedThinking {
+        /// Exact source redacted data.
+        data: ImportedSourceAttestation<ImportedText>,
+    },
+    /// One source document block.
+    Document {
+        /// Exact source-attested media data.
+        source: ImportedSourceAttestation<ImportedMediaSource>,
+    },
+    /// One precisely classified absent message content.
+    MessageContentAbsent(ImportedMessageContentAbsence),
+}
+
+macro_rules! positive_position {
+    ($(#[$documentation:meta])* $name:ident) => {
+        $(#[$documentation])*
+        #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+        pub struct $name(u64);
+
+        impl $name {
+            /// Reconstitutes a position from a positive ordinal.
+            pub const fn try_from_u64(value: u64) -> Option<Self> {
+                if value == 0 { None } else { Some(Self(value)) }
+            }
+
+            /// Returns the positive ordinal.
+            pub const fn as_u64(self) -> u64 {
+                self.0
+            }
+
+            /// Returns the first position.
+            pub const fn first() -> Self {
+                Self(1)
+            }
+
+            /// Returns the next position or `None` after `u64::MAX`.
+            pub const fn checked_next(self) -> Option<Self> {
+                match self.0.checked_add(1) {
+                    Some(value) => Some(Self(value)),
+                    None => None,
+                }
+            }
+        }
+    };
+}
+
+positive_position!(
+    /// One physical raw source-record position.
+    ImportedRawRecordPosition
+);
+positive_position!(
+    /// One normalized entry position inside a raw source record.
+    ImportedRecordEntryPosition
+);
+positive_position!(
+    /// One normalized imported entry position across the conversation.
+    ImportedTranscriptPosition
+);
+
+/// One converted raw record with exact bytes and complete normalized JSON.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ImportedRawSourceRecord {
+    content_hash: ImportedRawRecordHash,
+    bytes: Box<[u8]>,
+    normalized: ImportedStructuredValue,
+}
+
+impl ImportedRawSourceRecord {
+    /// Hashes and retains one exact converted source record.
+    pub fn from_converted(bytes: Vec<u8>, normalized: ImportedStructuredValue) -> Self {
+        Self {
+            content_hash: ImportedRawRecordHash::digest(&bytes),
+            bytes: bytes.into_boxed_slice(),
+            normalized,
+        }
+    }
+
+    /// Returns the exact-byte content hash.
+    pub const fn content_hash(&self) -> ImportedRawRecordHash {
+        self.content_hash
+    }
+
+    /// Borrows the exact source-record bytes.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Borrows the complete normalized source object.
+    pub const fn normalized(&self) -> &ImportedStructuredValue {
+        &self.normalized
+    }
+}
+
+impl fmt::Debug for ImportedRawSourceRecord {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ImportedRawSourceRecord")
+            .field("content_hash", &self.content_hash)
+            .field("byte_len", &self.bytes.len())
+            .field("normalized", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Stored fields for one raw-record reconstitution boundary.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ImportedRawSourceRecordReconstitutionInput {
+    position: ImportedRawRecordPosition,
+    stored_hash: ImportedRawRecordHash,
+    bytes: Box<[u8]>,
+    normalized: ImportedStructuredValue,
+}
+
+impl ImportedRawSourceRecordReconstitutionInput {
+    /// Supplies one complete stored raw record.
+    pub fn new(
+        position: ImportedRawRecordPosition,
+        stored_hash: ImportedRawRecordHash,
+        bytes: Vec<u8>,
+        normalized: ImportedStructuredValue,
+    ) -> Self {
+        Self {
+            position,
+            stored_hash,
+            bytes: bytes.into_boxed_slice(),
+            normalized,
+        }
+    }
+
+    /// Returns the physical source-record position.
+    pub const fn position(&self) -> ImportedRawRecordPosition {
+        self.position
+    }
+
+    /// Returns the stored raw content hash.
+    pub const fn stored_hash(&self) -> ImportedRawRecordHash {
+        self.stored_hash
+    }
+
+    /// Borrows the exact stored record bytes.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Borrows the complete normalized source object.
+    pub const fn normalized(&self) -> &ImportedStructuredValue {
+        &self.normalized
+    }
+}
+
+impl fmt::Debug for ImportedRawSourceRecordReconstitutionInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ImportedRawSourceRecordReconstitutionInput")
+            .field("position", &self.position)
+            .field("stored_hash", &self.stored_hash)
+            .field("byte_len", &self.bytes.len())
+            .field("normalized", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Complete typed fields for one normalized imported entry.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ImportedTranscriptEntryReconstitutionInput {
+pub struct ImportedTranscriptEntryInput {
     identity: ImportedTranscriptEntryId,
     conversation: ImportedConversationId,
     position: ImportedTranscriptPosition,
-    speaker: ImportedSpeaker,
+    raw_record_position: ImportedRawRecordPosition,
+    record_entry_position: ImportedRecordEntryPosition,
+    source_speaker: ImportedSourceAttestation<ImportedSpeaker>,
     content: ImportedTranscriptContent,
     source: ImportedSourceMetadata,
-    stored_seed_disposition: ImportedSeedDisposition,
 }
 
-impl ImportedTranscriptEntryReconstitutionInput {
-    /// Supplies the complete typed imported-entry projection.
+impl ImportedTranscriptEntryInput {
+    /// Supplies one complete normalized imported entry.
+    #[allow(clippy::too_many_arguments)]
     pub const fn new(
         identity: ImportedTranscriptEntryId,
         conversation: ImportedConversationId,
         position: ImportedTranscriptPosition,
-        speaker: ImportedSpeaker,
+        raw_record_position: ImportedRawRecordPosition,
+        record_entry_position: ImportedRecordEntryPosition,
+        source_speaker: ImportedSourceAttestation<ImportedSpeaker>,
         content: ImportedTranscriptContent,
         source: ImportedSourceMetadata,
-        stored_seed_disposition: ImportedSeedDisposition,
     ) -> Self {
         Self {
             identity,
             conversation,
             position,
-            speaker,
+            raw_record_position,
+            record_entry_position,
+            source_speaker,
             content,
             source,
-            stored_seed_disposition,
         }
     }
 
-    /// Returns the imported entry identity.
+    /// Returns the imported-entry identity.
     pub const fn identity(&self) -> ImportedTranscriptEntryId {
         self.identity
     }
@@ -213,46 +684,52 @@ impl ImportedTranscriptEntryReconstitutionInput {
         self.conversation
     }
 
-    /// Returns the source-order position.
+    /// Returns the global imported position.
     pub const fn position(&self) -> ImportedTranscriptPosition {
         self.position
     }
 
-    /// Returns the source-attested speaker.
-    pub const fn speaker(&self) -> ImportedSpeaker {
-        self.speaker
+    /// Returns the owning raw-record occurrence.
+    pub const fn raw_record_position(&self) -> ImportedRawRecordPosition {
+        self.raw_record_position
     }
 
-    /// Borrows the exact text or typed content absence.
+    /// Returns the position within that raw record.
+    pub const fn record_entry_position(&self) -> ImportedRecordEntryPosition {
+        self.record_entry_position
+    }
+
+    /// Borrows the source-speaker attestation.
+    pub const fn source_speaker(&self) -> &ImportedSourceAttestation<ImportedSpeaker> {
+        &self.source_speaker
+    }
+
+    /// Borrows the maximum-fidelity normalized content.
     pub const fn content(&self) -> &ImportedTranscriptContent {
         &self.content
     }
 
-    /// Borrows the complete source metadata projection.
+    /// Borrows the complete source metadata.
     pub const fn source(&self) -> &ImportedSourceMetadata {
         &self.source
     }
-
-    /// Returns the seed disposition stored with this entry.
-    pub const fn stored_seed_disposition(&self) -> ImportedSeedDisposition {
-        self.stored_seed_disposition
-    }
 }
 
-/// One immutable imported transcript entry.
+/// One immutable normalized imported entry.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImportedTranscriptEntry {
     identity: ImportedTranscriptEntryId,
     conversation: ImportedConversationId,
     position: ImportedTranscriptPosition,
-    speaker: ImportedSpeaker,
+    raw_record_position: ImportedRawRecordPosition,
+    record_entry_position: ImportedRecordEntryPosition,
+    source_speaker: ImportedSourceAttestation<ImportedSpeaker>,
     content: ImportedTranscriptContent,
     source: ImportedSourceMetadata,
-    seed_disposition: ImportedSeedDisposition,
 }
 
 impl ImportedTranscriptEntry {
-    /// Returns the imported entry identity.
+    /// Returns the imported-entry identity.
     pub const fn identity(&self) -> ImportedTranscriptEntryId {
         self.identity
     }
@@ -262,55 +739,95 @@ impl ImportedTranscriptEntry {
         self.conversation
     }
 
-    /// Returns the source-order position.
+    /// Returns the global imported position.
     pub const fn position(&self) -> ImportedTranscriptPosition {
         self.position
     }
 
-    /// Returns the source-attested speaker.
-    pub const fn speaker(&self) -> ImportedSpeaker {
-        self.speaker
+    /// Returns the owning raw-record occurrence.
+    pub const fn raw_record_position(&self) -> ImportedRawRecordPosition {
+        self.raw_record_position
     }
 
-    /// Borrows the exact text or typed content absence.
+    /// Returns the position within that raw record.
+    pub const fn record_entry_position(&self) -> ImportedRecordEntryPosition {
+        self.record_entry_position
+    }
+
+    /// Borrows the source-speaker attestation.
+    pub const fn source_speaker(&self) -> &ImportedSourceAttestation<ImportedSpeaker> {
+        &self.source_speaker
+    }
+
+    /// Borrows the maximum-fidelity normalized content.
     pub const fn content(&self) -> &ImportedTranscriptContent {
         &self.content
     }
 
-    /// Borrows the complete source metadata projection.
+    /// Borrows the complete source metadata.
     pub const fn source(&self) -> &ImportedSourceMetadata {
         &self.source
     }
+}
 
-    /// Returns whether and why the entry participates in seed context.
-    pub const fn seed_disposition(&self) -> ImportedSeedDisposition {
-        self.seed_disposition
+/// One immutable addressable imported entry boundary.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ImportedTranscriptFrontier {
+    conversation: ImportedConversationId,
+    through_entry: ImportedTranscriptEntryId,
+    through_position: ImportedTranscriptPosition,
+}
+
+impl ImportedTranscriptFrontier {
+    /// Returns the immutable imported conversation.
+    pub const fn conversation(self) -> ImportedConversationId {
+        self.conversation
+    }
+
+    /// Returns the inclusive final imported entry.
+    pub const fn through_entry(self) -> ImportedTranscriptEntryId {
+        self.through_entry
+    }
+
+    /// Returns the inclusive final imported position.
+    pub const fn through_position(self) -> ImportedTranscriptPosition {
+        self.through_position
     }
 }
 
-/// Complete typed inputs for one imported-conversation reconstitution.
+/// Complete stored fields for imported-conversation reconstitution.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImportedConversationReconstitutionInput {
     requested_conversation: ImportedConversationId,
     stored_conversation: ImportedConversationId,
     format: ImportedConversationFormat,
+    stored_source_digest: ImportedConversationSourceDigest,
+    declared_raw_record_count: u64,
+    raw_records: Vec<ImportedRawSourceRecordReconstitutionInput>,
     declared_entry_count: u64,
-    entries: Vec<ImportedTranscriptEntryReconstitutionInput>,
+    entries: Vec<ImportedTranscriptEntryInput>,
 }
 
 impl ImportedConversationReconstitutionInput {
-    /// Supplies a complete imported aggregate projection.
+    /// Supplies one complete stored imported-conversation projection.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         requested_conversation: ImportedConversationId,
         stored_conversation: ImportedConversationId,
         format: ImportedConversationFormat,
+        stored_source_digest: ImportedConversationSourceDigest,
+        declared_raw_record_count: u64,
+        raw_records: Vec<ImportedRawSourceRecordReconstitutionInput>,
         declared_entry_count: u64,
-        entries: Vec<ImportedTranscriptEntryReconstitutionInput>,
+        entries: Vec<ImportedTranscriptEntryInput>,
     ) -> Self {
         Self {
             requested_conversation,
             stored_conversation,
             format,
+            stored_source_digest,
+            declared_raw_record_count,
+            raw_records,
             declared_entry_count,
             entries,
         }
@@ -321,7 +838,7 @@ impl ImportedConversationReconstitutionInput {
         self.requested_conversation
     }
 
-    /// Returns the identity stored on the aggregate header.
+    /// Returns the identity stored on the header.
     pub const fn stored_conversation(&self) -> ImportedConversationId {
         self.stored_conversation
     }
@@ -331,13 +848,28 @@ impl ImportedConversationReconstitutionInput {
         self.format
     }
 
-    /// Returns the member count declared by the aggregate header.
+    /// Returns the stored ordered-source digest.
+    pub const fn stored_source_digest(&self) -> ImportedConversationSourceDigest {
+        self.stored_source_digest
+    }
+
+    /// Returns the header's raw-record count.
+    pub const fn declared_raw_record_count(&self) -> u64 {
+        self.declared_raw_record_count
+    }
+
+    /// Borrows every complete stored raw record.
+    pub fn raw_records(&self) -> &[ImportedRawSourceRecordReconstitutionInput] {
+        &self.raw_records
+    }
+
+    /// Returns the header's normalized-entry count.
     pub const fn declared_entry_count(&self) -> u64 {
         self.declared_entry_count
     }
 
-    /// Borrows the complete stored entry projections.
-    pub fn entries(&self) -> &[ImportedTranscriptEntryReconstitutionInput] {
+    /// Borrows every complete stored entry.
+    pub fn entries(&self) -> &[ImportedTranscriptEntryInput] {
         &self.entries
     }
 
@@ -351,76 +883,126 @@ impl ImportedConversationReconstitutionInput {
                 failure,
             });
         }
-
-        let entries = self
-            .entries
-            .into_iter()
-            .map(|entry| ImportedTranscriptEntry {
-                identity: entry.identity,
-                conversation: entry.conversation,
-                position: entry.position,
-                speaker: entry.speaker,
-                content: entry.content,
-                source: entry.source,
-                seed_disposition: entry.stored_seed_disposition,
-            })
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
-        Ok(ImportedConversation {
-            id: self.stored_conversation,
-            format: self.format,
-            entries,
-        })
+        Ok(build_conversation(self))
     }
 }
 
-/// Why complete typed records cannot reconstruct an imported conversation.
+/// Why typed records cannot reconstruct one imported conversation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ImportedConversationReconstitutionFailure {
-    /// The requested identity differs from the stored header.
+    /// Requested and stored conversation identities differ.
     RequestedConversationMismatch,
-    /// An imported conversation contained no transcript entries.
-    EmptyConversation,
-    /// The header count differs from the supplied entry count.
-    DeclaredEntryCountMismatch {
-        /// The durable header count.
+    /// The raw source-record sequence was empty.
+    EmptyRawRecords,
+    /// The normalized entry sequence was empty.
+    EmptyEntries,
+    /// The stored header raw-record count disagrees with supplied records.
+    DeclaredRawRecordCountMismatch {
+        /// Stored header count.
         declared: u64,
-        /// The number of supplied member records.
+        /// Supplied record count.
         actual: usize,
     },
-    /// One member names another imported conversation.
+    /// The stored header entry count disagrees with supplied entries.
+    DeclaredEntryCountMismatch {
+        /// Stored header count.
+        declared: u64,
+        /// Supplied entry count.
+        actual: usize,
+    },
+    /// One raw-record occurrence did not occupy the next position.
+    RawRecordPositionMismatch {
+        /// Required position.
+        expected: ImportedRawRecordPosition,
+        /// Supplied position.
+        actual: ImportedRawRecordPosition,
+    },
+    /// Exact raw bytes disagree with their stored content hash.
+    RawRecordHashMismatch {
+        /// Corrupt raw-record occurrence.
+        position: ImportedRawRecordPosition,
+    },
+    /// A raw JSONL record did not normalize to one object.
+    RawRecordNormalizedValueNotObject {
+        /// Corrupt raw-record occurrence.
+        position: ImportedRawRecordPosition,
+    },
+    /// The header digest disagrees with the format and ordered raw records.
+    SourceDigestMismatch {
+        /// Derived digest.
+        expected: ImportedConversationSourceDigest,
+        /// Stored digest.
+        actual: ImportedConversationSourceDigest,
+    },
+    /// One entry names another imported conversation.
     EntryConversationMismatch {
-        /// The cross-wired entry.
+        /// Cross-wired entry.
         entry: ImportedTranscriptEntryId,
     },
-    /// One member does not occupy the next contiguous source position.
+    /// One entry did not occupy the next global imported position.
     EntryPositionMismatch {
-        /// The mispositioned entry.
+        /// Mispositioned entry.
         entry: ImportedTranscriptEntryId,
-        /// The required contiguous position.
+        /// Required position.
         expected: ImportedTranscriptPosition,
-        /// The supplied position.
+        /// Supplied position.
         actual: ImportedTranscriptPosition,
     },
     /// The same imported-entry identity appeared more than once.
     DuplicateEntry {
-        /// The duplicated entry identity.
+        /// Duplicated identity.
         entry: ImportedTranscriptEntryId,
     },
-    /// A stored seed disposition contradicts content and source flags.
-    SeedDispositionMismatch {
-        /// The contradicted entry.
+    /// One entry skipped or reversed a raw-record occurrence.
+    EntryRawRecordPositionMismatch {
+        /// Mispositioned entry.
         entry: ImportedTranscriptEntryId,
-        /// The disposition derived from immutable source facts.
-        expected: ImportedSeedDisposition,
-        /// The inconsistent stored disposition.
-        actual: ImportedSeedDisposition,
+        /// Required raw-record occurrence.
+        expected: ImportedRawRecordPosition,
+        /// Supplied raw-record occurrence.
+        actual: ImportedRawRecordPosition,
     },
-    /// More entries followed the maximum representable position.
+    /// One entry referenced no raw-record occurrence.
+    EntryRawRecordNotFound {
+        /// Cross-wired entry.
+        entry: ImportedTranscriptEntryId,
+        /// Missing raw-record occurrence.
+        position: ImportedRawRecordPosition,
+    },
+    /// One entry skipped or reversed its within-record position.
+    EntryWithinRecordPositionMismatch {
+        /// Mispositioned entry.
+        entry: ImportedTranscriptEntryId,
+        /// Required within-record position.
+        expected: ImportedRecordEntryPosition,
+        /// Supplied within-record position.
+        actual: ImportedRecordEntryPosition,
+    },
+    /// One raw record had no normalized entry.
+    RawRecordWithoutEntry {
+        /// Unrepresented raw-record occurrence.
+        position: ImportedRawRecordPosition,
+    },
+    /// A source event falsely carried a conversational speaker.
+    SourceEventSpeakerMismatch {
+        /// Invalid source-event entry.
+        entry: ImportedTranscriptEntryId,
+    },
+    /// A message content entry lacked an attested user or assistant speaker.
+    MessageSpeakerUnavailable {
+        /// Invalid message entry.
+        entry: ImportedTranscriptEntryId,
+    },
+    /// Attested nested role contradicted the top-level source speaker.
+    MessageRoleMismatch {
+        /// Contradictory message entry.
+        entry: ImportedTranscriptEntryId,
+    },
+    /// A required position could not advance beyond `u64::MAX`.
     PositionExhausted,
 }
 
-/// A failed imported-conversation reconstitution retaining every input.
+/// A failed reconstitution retaining every typed input.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImportedConversationReconstitutionError {
     input: Box<ImportedConversationReconstitutionInput>,
@@ -428,17 +1010,17 @@ pub struct ImportedConversationReconstitutionError {
 }
 
 impl ImportedConversationReconstitutionError {
-    /// Returns why reconstitution failed.
+    /// Returns the precise reconstitution failure.
     pub const fn failure(&self) -> ImportedConversationReconstitutionFailure {
         self.failure
     }
 
-    /// Borrows the unchanged complete input.
+    /// Borrows every unchanged typed input.
     pub const fn input(&self) -> &ImportedConversationReconstitutionInput {
         &self.input
     }
 
-    /// Returns the unchanged input and precise failure.
+    /// Returns every unchanged input plus the precise failure.
     pub fn into_parts(
         self,
     ) -> (
@@ -449,15 +1031,65 @@ impl ImportedConversationReconstitutionError {
     }
 }
 
-/// One complete immutable imported conversation.
+/// One complete immutable, lossless imported conversation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImportedConversation {
     id: ImportedConversationId,
     format: ImportedConversationFormat,
+    source_digest: ImportedConversationSourceDigest,
+    raw_records: Box<[ImportedRawSourceRecord]>,
     entries: Box<[ImportedTranscriptEntry]>,
 }
 
 impl ImportedConversation {
+    /// Checks and assembles one completely converted aggregate.
+    pub fn from_converted_records(
+        id: ImportedConversationId,
+        format: ImportedConversationFormat,
+        raw_records: Vec<ImportedRawSourceRecord>,
+        entries: Vec<ImportedTranscriptEntryInput>,
+    ) -> Result<Self, ImportedConversationReconstitutionError> {
+        let mut position = ImportedRawRecordPosition::first();
+        let raw_record_count = raw_records.len();
+        let mut reconstitution_records = Vec::with_capacity(raw_records.len());
+        for (index, record) in raw_records.into_iter().enumerate() {
+            reconstitution_records.push(ImportedRawSourceRecordReconstitutionInput {
+                position,
+                stored_hash: record.content_hash,
+                bytes: record.bytes,
+                normalized: record.normalized,
+            });
+            if index + 1 < raw_record_count {
+                let Some(next) = position.checked_next() else {
+                    return Err(conversion_error(
+                        id,
+                        format,
+                        reconstitution_records,
+                        entries,
+                        ImportedConversationReconstitutionFailure::PositionExhausted,
+                    ));
+                };
+                position = next;
+            }
+        }
+        let source_digest =
+            ImportedConversationSourceDigest::derive(format, &reconstitution_records);
+        let declared_raw_record_count =
+            u64::try_from(reconstitution_records.len()).unwrap_or(u64::MAX);
+        let declared_entry_count = u64::try_from(entries.len()).unwrap_or(u64::MAX);
+        ImportedConversationReconstitutionInput::new(
+            id,
+            id,
+            format,
+            source_digest,
+            declared_raw_record_count,
+            reconstitution_records,
+            declared_entry_count,
+            entries,
+        )
+        .reconstitute()
+    }
+
     /// Returns the hub-minted imported-conversation identity.
     pub const fn id(&self) -> ImportedConversationId {
         self.id
@@ -468,16 +1100,82 @@ impl ImportedConversation {
         self.format
     }
 
-    /// Borrows the nonempty entries in exact source order.
+    /// Returns the idempotency digest for exact ordered source content.
+    pub const fn source_digest(&self) -> ImportedConversationSourceDigest {
+        self.source_digest
+    }
+
+    /// Borrows every raw source record in physical order.
+    pub fn raw_records(&self) -> &[ImportedRawSourceRecord] {
+        &self.raw_records
+    }
+
+    /// Borrows every normalized entry in exact imported order.
     pub fn entries(&self) -> &[ImportedTranscriptEntry] {
         &self.entries
     }
 
-    /// Returns the seed-included exact-text entries in source order.
-    pub fn seed_entries(&self) -> impl Iterator<Item = &ImportedTranscriptEntry> {
+    /// Iterates every immutable addressable entry boundary.
+    pub fn frontiers(&self) -> impl Iterator<Item = ImportedTranscriptFrontier> + '_ {
+        self.entries.iter().map(|entry| ImportedTranscriptFrontier {
+            conversation: self.id,
+            through_entry: entry.identity,
+            through_position: entry.position,
+        })
+    }
+
+    /// Resolves one entry identity to its immutable frontier.
+    pub fn frontier_for_entry(
+        &self,
+        entry: ImportedTranscriptEntryId,
+    ) -> Option<ImportedTranscriptFrontier> {
         self.entries
             .iter()
-            .filter(|entry| entry.seed_disposition == ImportedSeedDisposition::Included)
+            .find(|candidate| candidate.identity == entry)
+            .map(|candidate| ImportedTranscriptFrontier {
+                conversation: self.id,
+                through_entry: candidate.identity,
+                through_position: candidate.position,
+            })
+    }
+
+    /// Resolves a frontier to the exact inclusive imported prefix.
+    pub fn prefix(
+        &self,
+        frontier: ImportedTranscriptFrontier,
+    ) -> Option<&[ImportedTranscriptEntry]> {
+        if frontier.conversation != self.id {
+            return None;
+        }
+        let length = usize::try_from(frontier.through_position.as_u64()).ok()?;
+        let entry = self.entries.get(length.checked_sub(1)?)?;
+        if entry.identity != frontier.through_entry {
+            return None;
+        }
+        self.entries.get(..length)
+    }
+}
+
+fn conversion_error(
+    id: ImportedConversationId,
+    format: ImportedConversationFormat,
+    raw_records: Vec<ImportedRawSourceRecordReconstitutionInput>,
+    entries: Vec<ImportedTranscriptEntryInput>,
+    failure: ImportedConversationReconstitutionFailure,
+) -> ImportedConversationReconstitutionError {
+    let stored_source_digest = ImportedConversationSourceDigest::derive(format, &raw_records);
+    ImportedConversationReconstitutionError {
+        input: Box::new(ImportedConversationReconstitutionInput::new(
+            id,
+            id,
+            format,
+            stored_source_digest,
+            u64::try_from(raw_records.len()).unwrap_or(u64::MAX),
+            raw_records,
+            u64::try_from(entries.len()).unwrap_or(u64::MAX),
+            entries,
+        )),
+        failure,
     }
 }
 
@@ -487,8 +1185,72 @@ fn validate_reconstitution(
     if input.requested_conversation != input.stored_conversation {
         return Err(ImportedConversationReconstitutionFailure::RequestedConversationMismatch);
     }
+    validate_raw_records(input)?;
+    validate_entries(input)
+}
+
+fn validate_raw_records(
+    input: &ImportedConversationReconstitutionInput,
+) -> Result<(), ImportedConversationReconstitutionFailure> {
+    if input.raw_records.is_empty() {
+        return Err(ImportedConversationReconstitutionFailure::EmptyRawRecords);
+    }
+    if u64::try_from(input.raw_records.len()).ok() != Some(input.declared_raw_record_count) {
+        return Err(
+            ImportedConversationReconstitutionFailure::DeclaredRawRecordCountMismatch {
+                declared: input.declared_raw_record_count,
+                actual: input.raw_records.len(),
+            },
+        );
+    }
+    let mut expected = ImportedRawRecordPosition::first();
+    for (index, record) in input.raw_records.iter().enumerate() {
+        if record.position != expected {
+            return Err(
+                ImportedConversationReconstitutionFailure::RawRecordPositionMismatch {
+                    expected,
+                    actual: record.position,
+                },
+            );
+        }
+        if ImportedRawRecordHash::digest(&record.bytes) != record.stored_hash {
+            return Err(
+                ImportedConversationReconstitutionFailure::RawRecordHashMismatch {
+                    position: record.position,
+                },
+            );
+        }
+        if !matches!(&record.normalized, ImportedStructuredValue::Object(_)) {
+            return Err(
+                ImportedConversationReconstitutionFailure::RawRecordNormalizedValueNotObject {
+                    position: record.position,
+                },
+            );
+        }
+        if index + 1 < input.raw_records.len() {
+            expected = expected
+                .checked_next()
+                .ok_or(ImportedConversationReconstitutionFailure::PositionExhausted)?;
+        }
+    }
+    let expected_digest =
+        ImportedConversationSourceDigest::derive(input.format, &input.raw_records);
+    if input.stored_source_digest != expected_digest {
+        return Err(
+            ImportedConversationReconstitutionFailure::SourceDigestMismatch {
+                expected: expected_digest,
+                actual: input.stored_source_digest,
+            },
+        );
+    }
+    Ok(())
+}
+
+fn validate_entries(
+    input: &ImportedConversationReconstitutionInput,
+) -> Result<(), ImportedConversationReconstitutionFailure> {
     if input.entries.is_empty() {
-        return Err(ImportedConversationReconstitutionFailure::EmptyConversation);
+        return Err(ImportedConversationReconstitutionFailure::EmptyEntries);
     }
     if u64::try_from(input.entries.len()).ok() != Some(input.declared_entry_count) {
         return Err(
@@ -500,7 +1262,14 @@ fn validate_reconstitution(
     }
 
     let mut expected_position = ImportedTranscriptPosition::first();
+    let mut expected_raw_position = ImportedRawRecordPosition::first();
+    let mut expected_within_position = ImportedRecordEntryPosition::first();
     let mut identities = BTreeSet::new();
+    let last_raw_position = input
+        .raw_records
+        .last()
+        .map(ImportedRawSourceRecordReconstitutionInput::position)
+        .ok_or(ImportedConversationReconstitutionFailure::EmptyRawRecords)?;
     for (index, entry) in input.entries.iter().enumerate() {
         if entry.conversation != input.stored_conversation {
             return Err(
@@ -523,58 +1292,146 @@ fn validate_reconstitution(
                 entry: entry.identity,
             });
         }
-        let expected_seed_disposition = derive_seed_disposition(&entry.content, &entry.source);
-        if entry.stored_seed_disposition != expected_seed_disposition {
+        if entry.raw_record_position > last_raw_position {
             return Err(
-                ImportedConversationReconstitutionFailure::SeedDispositionMismatch {
+                ImportedConversationReconstitutionFailure::EntryRawRecordNotFound {
                     entry: entry.identity,
-                    expected: expected_seed_disposition,
-                    actual: entry.stored_seed_disposition,
+                    position: entry.raw_record_position,
                 },
             );
         }
-        if index + 1 < input.entries.len() {
+
+        if entry.raw_record_position != expected_raw_position {
+            let next_raw = expected_raw_position.checked_next();
+            if next_raw == Some(entry.raw_record_position) {
+                expected_raw_position = entry.raw_record_position;
+                expected_within_position = ImportedRecordEntryPosition::first();
+            } else {
+                return Err(
+                    ImportedConversationReconstitutionFailure::EntryRawRecordPositionMismatch {
+                        entry: entry.identity,
+                        expected: next_raw.unwrap_or(expected_raw_position),
+                        actual: entry.raw_record_position,
+                    },
+                );
+            }
+        }
+        if entry.record_entry_position != expected_within_position {
+            return Err(
+                ImportedConversationReconstitutionFailure::EntryWithinRecordPositionMismatch {
+                    entry: entry.identity,
+                    expected: expected_within_position,
+                    actual: entry.record_entry_position,
+                },
+            );
+        }
+        validate_speaker(entry)?;
+
+        if let Some(next_entry) = input.entries.get(index + 1) {
             expected_position = expected_position
                 .checked_next()
                 .ok_or(ImportedConversationReconstitutionFailure::PositionExhausted)?;
+            if next_entry.raw_record_position == expected_raw_position {
+                expected_within_position = expected_within_position
+                    .checked_next()
+                    .ok_or(ImportedConversationReconstitutionFailure::PositionExhausted)?;
+            }
         }
+    }
+
+    if expected_raw_position != last_raw_position {
+        return Err(
+            ImportedConversationReconstitutionFailure::RawRecordWithoutEntry {
+                position: expected_raw_position
+                    .checked_next()
+                    .ok_or(ImportedConversationReconstitutionFailure::PositionExhausted)?,
+            },
+        );
     }
     Ok(())
 }
 
-fn derive_seed_disposition(
-    content: &ImportedTranscriptContent,
-    source: &ImportedSourceMetadata,
-) -> ImportedSeedDisposition {
-    match content {
-        ImportedTranscriptContent::Unavailable(reason) => {
-            ImportedSeedDisposition::ExcludedUnavailable { reason: *reason }
+fn validate_speaker(
+    entry: &ImportedTranscriptEntryInput,
+) -> Result<(), ImportedConversationReconstitutionFailure> {
+    if matches!(entry.content, ImportedTranscriptContent::SourceEvent { .. }) {
+        if entry.source_speaker != ImportedSourceAttestation::NotAttested {
+            return Err(
+                ImportedConversationReconstitutionFailure::SourceEventSpeakerMismatch {
+                    entry: entry.identity,
+                },
+            );
         }
-        ImportedTranscriptContent::Text(_) => {
-            let sidechain = matches!(source.sidechain, ImportedSourceAttestation::Attested(true));
-            let metadata = matches!(source.metadata, ImportedSourceAttestation::Attested(true));
-            if sidechain || metadata {
-                ImportedSeedDisposition::ExcludedBySource {
-                    sidechain,
-                    metadata,
-                }
-            } else {
-                ImportedSeedDisposition::Included
-            }
-        }
+        return Ok(());
+    }
+
+    let ImportedSourceAttestation::Attested(speaker) = entry.source_speaker else {
+        return Err(
+            ImportedConversationReconstitutionFailure::MessageSpeakerUnavailable {
+                entry: entry.identity,
+            },
+        );
+    };
+    if let ImportedSourceAttestation::Attested(message_role) = entry.source.message_role
+        && message_role != speaker
+    {
+        return Err(
+            ImportedConversationReconstitutionFailure::MessageRoleMismatch {
+                entry: entry.identity,
+            },
+        );
+    }
+    Ok(())
+}
+
+fn build_conversation(input: ImportedConversationReconstitutionInput) -> ImportedConversation {
+    let raw_records = input
+        .raw_records
+        .into_iter()
+        .map(|record| ImportedRawSourceRecord {
+            content_hash: record.stored_hash,
+            bytes: record.bytes,
+            normalized: record.normalized,
+        })
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+    let entries = input
+        .entries
+        .into_iter()
+        .map(|entry| ImportedTranscriptEntry {
+            identity: entry.identity,
+            conversation: entry.conversation,
+            position: entry.position,
+            raw_record_position: entry.raw_record_position,
+            record_entry_position: entry.record_entry_position,
+            source_speaker: entry.source_speaker,
+            content: entry.content,
+            source: entry.source,
+        })
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+    ImportedConversation {
+        id: input.stored_conversation,
+        format: input.format,
+        source_digest: input.stored_source_digest,
+        raw_records,
+        entries,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ImportedContentUnavailable, ImportedConversationFormat,
+        ImportedConversation, ImportedConversationFormat,
         ImportedConversationReconstitutionFailure, ImportedConversationReconstitutionInput,
-        ImportedSeedDisposition, ImportedSourceAttestation, ImportedSourceMetadata,
-        ImportedSpeaker, ImportedTranscriptContent, ImportedTranscriptEntryReconstitutionInput,
-        ImportedTranscriptPosition,
+        ImportedConversationSourceDigest, ImportedJsonNumber, ImportedMessageContentAbsence,
+        ImportedRawRecordHash, ImportedRawRecordPosition, ImportedRawSourceRecord,
+        ImportedRawSourceRecordReconstitutionInput, ImportedRecordEntryPosition,
+        ImportedSourceAttestation, ImportedSourceMetadata, ImportedSpeaker,
+        ImportedStructuredObjectMember, ImportedStructuredValue, ImportedText,
+        ImportedTranscriptContent, ImportedTranscriptEntryInput, ImportedTranscriptPosition,
     };
-    use crate::{ImportedConversationId, ImportedTranscriptEntryId, NonEmptyUnicodeText};
+    use crate::{ImportedConversationId, ImportedTranscriptEntryId};
     use uuid::Uuid;
 
     fn conversation(value: u128) -> ImportedConversationId {
@@ -585,258 +1442,350 @@ mod tests {
         ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(value))
     }
 
-    fn text(value: &str) -> NonEmptyUnicodeText {
-        NonEmptyUnicodeText::try_new(String::from(value)).expect("fixture text is admitted")
+    fn text(value: &str) -> ImportedText {
+        ImportedText::new(String::from(value))
     }
 
-    fn metadata(
-        sidechain: ImportedSourceAttestation<bool>,
-        metadata: ImportedSourceAttestation<bool>,
-    ) -> ImportedSourceMetadata {
-        ImportedSourceMetadata::new(
-            ImportedSourceAttestation::Attested(text("source-record")),
-            ImportedSourceAttestation::AttestedAbsent,
-            ImportedSourceAttestation::NotAttested,
-            ImportedSourceAttestation::Attested(text("2026-07-23T00:00:00Z")),
-            sidechain,
-            metadata,
+    fn object(member: (&str, ImportedStructuredValue)) -> ImportedStructuredValue {
+        ImportedStructuredValue::Object(
+            vec![ImportedStructuredObjectMember::new(
+                text(member.0),
+                member.1,
+            )]
+            .into_boxed_slice(),
         )
     }
 
+    fn metadata(role: ImportedSourceAttestation<ImportedSpeaker>) -> ImportedSourceMetadata {
+        ImportedSourceMetadata::new(
+            ImportedSourceAttestation::Attested(text("record")),
+            ImportedSourceAttestation::AttestedAbsent,
+            ImportedSourceAttestation::Attested(text("session")),
+            ImportedSourceAttestation::Attested(text("timestamp")),
+            ImportedSourceAttestation::Attested(true),
+            ImportedSourceAttestation::NotAttested,
+            role,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn input_entry(
-        identity: ImportedTranscriptEntryId,
+        identity: u128,
         owner: ImportedConversationId,
         position: u64,
+        raw_position: u64,
+        within_position: u64,
+        speaker: ImportedSourceAttestation<ImportedSpeaker>,
         content: ImportedTranscriptContent,
         source: ImportedSourceMetadata,
-        disposition: ImportedSeedDisposition,
-    ) -> ImportedTranscriptEntryReconstitutionInput {
-        ImportedTranscriptEntryReconstitutionInput::new(
-            identity,
+    ) -> ImportedTranscriptEntryInput {
+        ImportedTranscriptEntryInput::new(
+            entry(identity),
             owner,
             ImportedTranscriptPosition::try_from_u64(position)
-                .expect("fixture position is positive"),
-            ImportedSpeaker::User,
+                .expect("fixture global position is positive"),
+            ImportedRawRecordPosition::try_from_u64(raw_position)
+                .expect("fixture raw position is positive"),
+            ImportedRecordEntryPosition::try_from_u64(within_position)
+                .expect("fixture within-record position is positive"),
+            speaker,
             content,
             source,
-            disposition,
         )
     }
 
-    fn valid_input() -> ImportedConversationReconstitutionInput {
+    fn converted() -> ImportedConversation {
         let owner = conversation(1);
-        ImportedConversationReconstitutionInput::new(
-            owner,
+        let raw_records = vec![
+            ImportedRawSourceRecord::from_converted(
+                br#"{"type":"system","content":"before\u0000after"}"#.to_vec(),
+                object(("type", ImportedStructuredValue::String(text("system")))),
+            ),
+            ImportedRawSourceRecord::from_converted(
+                br#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":""},{"type":"tool_use","input":{"n":1}}]}}"#.to_vec(),
+                object((
+                    "type",
+                    ImportedStructuredValue::String(text("assistant")),
+                )),
+            ),
+        ];
+        let entries = vec![
+            input_entry(
+                2,
+                owner,
+                1,
+                1,
+                1,
+                ImportedSourceAttestation::NotAttested,
+                ImportedTranscriptContent::SourceEvent {
+                    source_type: ImportedSourceAttestation::Attested(text("system")),
+                },
+                metadata(ImportedSourceAttestation::NotAttested),
+            ),
+            input_entry(
+                3,
+                owner,
+                2,
+                2,
+                1,
+                ImportedSourceAttestation::Attested(ImportedSpeaker::Assistant),
+                ImportedTranscriptContent::Text(text("")),
+                metadata(ImportedSourceAttestation::Attested(
+                    ImportedSpeaker::Assistant,
+                )),
+            ),
+            input_entry(
+                4,
+                owner,
+                3,
+                2,
+                2,
+                ImportedSourceAttestation::Attested(ImportedSpeaker::Assistant),
+                ImportedTranscriptContent::ToolCall {
+                    source_call_id: ImportedSourceAttestation::NotAttested,
+                    name: ImportedSourceAttestation::AttestedAbsent,
+                    input: ImportedSourceAttestation::Attested(object((
+                        "n",
+                        ImportedStructuredValue::Number(
+                            ImportedJsonNumber::try_new(String::from("1"))
+                                .expect("fixture number is valid"),
+                        ),
+                    ))),
+                    caller: ImportedSourceAttestation::NotAttested,
+                },
+                metadata(ImportedSourceAttestation::Attested(
+                    ImportedSpeaker::Assistant,
+                )),
+            ),
+        ];
+        ImportedConversation::from_converted_records(
             owner,
             ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
-            2,
-            vec![
-                input_entry(
-                    entry(2),
-                    owner,
-                    1,
-                    ImportedTranscriptContent::Text(text("exact user text")),
-                    metadata(
-                        ImportedSourceAttestation::Attested(false),
-                        ImportedSourceAttestation::NotAttested,
-                    ),
-                    ImportedSeedDisposition::Included,
-                ),
-                input_entry(
-                    entry(3),
-                    owner,
-                    2,
-                    ImportedTranscriptContent::Unavailable(ImportedContentUnavailable::ToolResult),
-                    metadata(
-                        ImportedSourceAttestation::NotAttested,
-                        ImportedSourceAttestation::Attested(false),
-                    ),
-                    ImportedSeedDisposition::ExcludedUnavailable {
-                        reason: ImportedContentUnavailable::ToolResult,
-                    },
-                ),
-            ],
+            raw_records,
+            entries,
         )
+        .expect("complete converted fixture is valid")
     }
 
-    /// INV-038: complete source-neutral records reconstruct without acquiring
-    /// native execution identities or authority.
+    /// INV-038: exact raw records, rich normalized entries, and every imported
+    /// entry boundary survive one checked immutable aggregate.
     #[test]
-    fn inv038_reconstitutes_complete_imported_record_in_source_order() {
-        let imported = valid_input()
-            .reconstitute()
-            .expect("complete imported records reconstruct");
-
-        assert_eq!(imported.id(), conversation(1));
+    fn inv038_lossless_aggregate_exposes_every_addressable_prefix() {
+        let imported = converted();
+        assert_eq!(imported.raw_records().len(), 2);
         assert_eq!(
-            imported.format(),
-            ImportedConversationFormat::ClaudeCodeSessionJsonlV1
+            imported.raw_records()[0].bytes(),
+            br#"{"type":"system","content":"before\u0000after"}"#
         );
+        assert_eq!(imported.entries().len(), 3);
+        assert_eq!(
+            imported.entries()[1].content(),
+            &ImportedTranscriptContent::Text(text(""))
+        );
+
+        let frontiers = imported.frontiers().collect::<Vec<_>>();
+        assert_eq!(frontiers.len(), imported.entries().len());
         assert_eq!(
             imported
-                .entries()
+                .prefix(frontiers[1])
+                .expect("aggregate-produced frontier resolves")
                 .iter()
-                .map(|entry| entry.identity())
+                .map(|entry| entry.position().as_u64())
                 .collect::<Vec<_>>(),
-            vec![entry(2), entry(3)]
+            vec![1, 2]
         );
         assert_eq!(
             imported
-                .seed_entries()
-                .map(|entry| entry.identity())
-                .collect::<Vec<_>>(),
-            vec![entry(2)]
+                .frontier_for_entry(imported.entries()[2].identity())
+                .and_then(|frontier| imported.prefix(frontier))
+                .map(<[_]>::len),
+            Some(3)
         );
     }
 
-    /// INV-038: explicit source flags exclude retained text without changing
-    /// its content or collapsing the two independent attestations.
+    /// INV-038: raw bytes and format/order jointly determine stable digests.
     #[test]
-    fn inv038_source_flags_derive_exact_seed_exclusion() {
+    fn inv038_content_hashes_and_source_digest_are_stable_and_ordered() {
+        let imported = converted();
+        let repeated = converted();
+        assert_eq!(imported.source_digest(), repeated.source_digest());
+        assert_eq!(
+            imported.raw_records()[0].content_hash(),
+            ImportedRawRecordHash::digest(imported.raw_records()[0].bytes())
+        );
+
+        let mut reversed = imported.raw_records().to_vec();
+        reversed.reverse();
+        let entries = vec![
+            input_entry(
+                20,
+                conversation(9),
+                1,
+                1,
+                1,
+                ImportedSourceAttestation::NotAttested,
+                ImportedTranscriptContent::SourceEvent {
+                    source_type: ImportedSourceAttestation::NotAttested,
+                },
+                metadata(ImportedSourceAttestation::NotAttested),
+            ),
+            input_entry(
+                21,
+                conversation(9),
+                2,
+                2,
+                1,
+                ImportedSourceAttestation::NotAttested,
+                ImportedTranscriptContent::SourceEvent {
+                    source_type: ImportedSourceAttestation::NotAttested,
+                },
+                metadata(ImportedSourceAttestation::NotAttested),
+            ),
+        ];
+        let reversed = ImportedConversation::from_converted_records(
+            conversation(9),
+            ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
+            reversed,
+            entries,
+        )
+        .expect("reversed source is independently valid");
+        assert_ne!(imported.source_digest(), reversed.source_digest());
+    }
+
+    /// INV-002 / INV-038: raw-hash corruption fails closed while retaining all
+    /// typed storage inputs.
+    #[test]
+    fn inv002_inv038_raw_hash_corruption_retains_complete_input() {
         let owner = conversation(1);
+        let bytes = br#"{"type":"system"}"#.to_vec();
+        let raw_records = vec![ImportedRawSourceRecordReconstitutionInput::new(
+            ImportedRawRecordPosition::first(),
+            ImportedRawRecordHash::digest(b"different"),
+            bytes,
+            object(("type", ImportedStructuredValue::String(text("system")))),
+        )];
+        let digest = ImportedConversationSourceDigest::derive(
+            ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
+            &raw_records,
+        );
+        let entries = vec![input_entry(
+            2,
+            owner,
+            1,
+            1,
+            1,
+            ImportedSourceAttestation::NotAttested,
+            ImportedTranscriptContent::SourceEvent {
+                source_type: ImportedSourceAttestation::Attested(text("system")),
+            },
+            metadata(ImportedSourceAttestation::NotAttested),
+        )];
         let input = ImportedConversationReconstitutionInput::new(
             owner,
             owner,
             ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
+            digest,
             1,
-            vec![input_entry(
-                entry(2),
-                owner,
-                1,
-                ImportedTranscriptContent::Text(text("retained sidechain metadata")),
-                metadata(
-                    ImportedSourceAttestation::Attested(true),
-                    ImportedSourceAttestation::Attested(true),
-                ),
-                ImportedSeedDisposition::ExcludedBySource {
-                    sidechain: true,
-                    metadata: true,
-                },
-            )],
+            raw_records,
+            1,
+            entries,
         );
-
-        let imported = input
-            .reconstitute()
-            .expect("exact source flags form a valid exclusion");
-        assert_eq!(
-            imported.entries()[0].seed_disposition(),
-            ImportedSeedDisposition::ExcludedBySource {
-                sidechain: true,
-                metadata: true,
-            }
-        );
-        assert_eq!(imported.seed_entries().count(), 0);
-    }
-
-    /// INV-038 / INV-002: every aggregate correlation and derived seed
-    /// disposition fails closed while retaining the complete unchanged input.
-    #[test]
-    fn inv038_reconstitution_rejects_incomplete_or_cross_wired_records() {
-        let cases = [
-            (
-                ImportedConversationReconstitutionInput::new(
-                    conversation(9),
-                    conversation(1),
-                    ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
-                    2,
-                    valid_input().entries().to_vec(),
-                ),
-                ImportedConversationReconstitutionFailure::RequestedConversationMismatch,
-            ),
-            (
-                ImportedConversationReconstitutionInput::new(
-                    conversation(1),
-                    conversation(1),
-                    ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
-                    0,
-                    Vec::new(),
-                ),
-                ImportedConversationReconstitutionFailure::EmptyConversation,
-            ),
-            (
-                ImportedConversationReconstitutionInput::new(
-                    conversation(1),
-                    conversation(1),
-                    ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
-                    3,
-                    valid_input().entries().to_vec(),
-                ),
-                ImportedConversationReconstitutionFailure::DeclaredEntryCountMismatch {
-                    declared: 3,
-                    actual: 2,
-                },
-            ),
-        ];
-
-        for (input, expected) in cases {
-            let retained = input.clone();
-            let error = input
-                .reconstitute()
-                .expect_err("invalid aggregate facts must fail closed");
-            assert_eq!(error.failure(), expected);
-            assert_eq!(error.input(), &retained);
-            assert_eq!(error.into_parts(), (retained, expected));
-        }
-
-        let mut wrong_owner = valid_input();
-        wrong_owner.entries[0].conversation = conversation(8);
-        assert_rejects(
-            wrong_owner,
-            ImportedConversationReconstitutionFailure::EntryConversationMismatch {
-                entry: entry(2),
-            },
-        );
-
-        let mut gap = valid_input();
-        gap.entries[1].position =
-            ImportedTranscriptPosition::try_from_u64(3).expect("fixture position is positive");
-        assert_rejects(
-            gap,
-            ImportedConversationReconstitutionFailure::EntryPositionMismatch {
-                entry: entry(3),
-                expected: ImportedTranscriptPosition::try_from_u64(2)
-                    .expect("fixture position is positive"),
-                actual: ImportedTranscriptPosition::try_from_u64(3)
-                    .expect("fixture position is positive"),
-            },
-        );
-
-        let mut duplicate = valid_input();
-        duplicate.entries[1].identity = entry(2);
-        assert_rejects(
-            duplicate,
-            ImportedConversationReconstitutionFailure::DuplicateEntry { entry: entry(2) },
-        );
-
-        let mut mismatched_seed = valid_input();
-        mismatched_seed.entries[0].stored_seed_disposition =
-            ImportedSeedDisposition::ExcludedBySource {
-                sidechain: true,
-                metadata: false,
-            };
-        assert_rejects(
-            mismatched_seed,
-            ImportedConversationReconstitutionFailure::SeedDispositionMismatch {
-                entry: entry(2),
-                expected: ImportedSeedDisposition::Included,
-                actual: ImportedSeedDisposition::ExcludedBySource {
-                    sidechain: true,
-                    metadata: false,
-                },
-            },
-        );
-    }
-
-    #[track_caller]
-    fn assert_rejects(
-        input: ImportedConversationReconstitutionInput,
-        expected: ImportedConversationReconstitutionFailure,
-    ) {
         let retained = input.clone();
         let error = input
             .reconstitute()
-            .expect_err("invalid imported facts must fail closed");
-        assert_eq!(error.failure(), expected);
-        assert_eq!(error.input(), &retained);
+            .expect_err("stored hash mismatch is corruption");
+        assert_eq!(
+            error.failure(),
+            ImportedConversationReconstitutionFailure::RawRecordHashMismatch {
+                position: ImportedRawRecordPosition::first(),
+            }
+        );
+        assert_eq!(error.into_parts().0, retained);
+    }
+
+    #[test]
+    fn entry_mapping_and_speaker_corruption_fail_closed() {
+        let owner = conversation(1);
+        let raw = ImportedRawSourceRecord::from_converted(
+            br#"{"type":"user","message":{"content":[]}}"#.to_vec(),
+            object(("type", ImportedStructuredValue::String(text("user")))),
+        );
+        let source = metadata(ImportedSourceAttestation::Attested(ImportedSpeaker::User));
+        let wrong_speaker = input_entry(
+            2,
+            owner,
+            1,
+            1,
+            1,
+            ImportedSourceAttestation::NotAttested,
+            ImportedTranscriptContent::MessageContentAbsent(
+                ImportedMessageContentAbsence::EmptyBlockArray,
+            ),
+            source,
+        );
+        assert_eq!(
+            ImportedConversation::from_converted_records(
+                owner,
+                ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
+                vec![raw],
+                vec![wrong_speaker],
+            )
+            .expect_err("message content requires an attested source speaker")
+            .failure(),
+            ImportedConversationReconstitutionFailure::MessageSpeakerUnavailable {
+                entry: entry(2),
+            }
+        );
+
+        let imported = converted();
+        let mut entries = imported
+            .entries()
+            .iter()
+            .map(|entry| {
+                ImportedTranscriptEntryInput::new(
+                    entry.identity(),
+                    entry.conversation(),
+                    entry.position(),
+                    entry.raw_record_position(),
+                    entry.record_entry_position(),
+                    entry.source_speaker().clone(),
+                    entry.content().clone(),
+                    entry.source().clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        entries[2].raw_record_position = ImportedRawRecordPosition::first();
+        let raw_records = imported.raw_records().to_vec();
+        assert!(matches!(
+            ImportedConversation::from_converted_records(
+                conversation(1),
+                ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
+                raw_records,
+                entries,
+            )
+            .expect_err("entry cannot reverse to an earlier raw record")
+            .failure(),
+            ImportedConversationReconstitutionFailure::EntryRawRecordPositionMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn imported_json_number_checks_complete_grammar_without_exposing_value_in_debug() {
+        for valid in ["0", "-0", "12", "-12.5", "1e9", "1E-9"] {
+            assert_eq!(
+                ImportedJsonNumber::try_new(String::from(valid))
+                    .expect("fixture is valid")
+                    .as_str(),
+                valid
+            );
+        }
+        for invalid in ["", "01", "-", ".1", "1.", "1e", "+1", "NaN"] {
+            let error =
+                ImportedJsonNumber::try_new(String::from(invalid)).expect_err("fixture is invalid");
+            assert_eq!(error.value(), invalid);
+            if !invalid.is_empty() {
+                assert!(!format!("{error:?}").contains(invalid));
+            }
+        }
     }
 }

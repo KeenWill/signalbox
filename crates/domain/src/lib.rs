@@ -47,11 +47,16 @@ pub use context_frontier::{
 };
 pub use delivery_request::{DeliveryRequest, PerInputConfigurationChoices};
 pub use imported_conversation::{
-    ImportedContentUnavailable, ImportedConversation, ImportedConversationFormat,
-    ImportedConversationReconstitutionError, ImportedConversationReconstitutionFailure,
-    ImportedConversationReconstitutionInput, ImportedSeedDisposition, ImportedSourceAttestation,
-    ImportedSourceMetadata, ImportedSpeaker, ImportedTranscriptContent, ImportedTranscriptEntry,
-    ImportedTranscriptEntryReconstitutionInput, ImportedTranscriptPosition,
+    ImportedConversation, ImportedConversationFormat, ImportedConversationReconstitutionError,
+    ImportedConversationReconstitutionFailure, ImportedConversationReconstitutionInput,
+    ImportedConversationSourceDigest, ImportedJsonNumber, ImportedJsonNumberError,
+    ImportedMediaSource, ImportedMessageContentAbsence, ImportedRawRecordHash,
+    ImportedRawRecordPosition, ImportedRawSourceRecord, ImportedRawSourceRecordReconstitutionInput,
+    ImportedRecordEntryPosition, ImportedSourceAttestation, ImportedSourceMetadata,
+    ImportedSpeaker, ImportedStructuredObjectMember, ImportedStructuredValue, ImportedText,
+    ImportedToolResultBlock, ImportedToolResultValue, ImportedTranscriptContent,
+    ImportedTranscriptEntry, ImportedTranscriptEntryInput, ImportedTranscriptFrontier,
+    ImportedTranscriptPosition,
 };
 pub use model_call::{
     CurrentModelCall, CurrentModelCallState, EndedModelCall, ModelCallDisposition,
