@@ -42,6 +42,9 @@ if [[ -f "$REAL_HUB_ENV_PATH" ]]; then
 fi
 trap restore_real_hub_env_file EXIT
 mkdir -p "$(dirname "$REAL_HUB_ENV_PATH")"
+rm -f "$REAL_HUB_ENV_PATH"
+touch "$REAL_HUB_ENV_PATH"
+chmod 600 "$REAL_HUB_ENV_PATH"
 {
 	printf 'LLM_HUB_NATIVE_REAL_HUB_URL=%s\n' "$LLM_HUB_NATIVE_REAL_HUB_URL"
 	printf 'LLM_HUB_NATIVE_REAL_HUB_API_KEY=%s\n' "$LLM_HUB_NATIVE_REAL_HUB_API_KEY"

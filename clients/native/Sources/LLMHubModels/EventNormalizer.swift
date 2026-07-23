@@ -109,7 +109,7 @@ public struct HubUnknownEventCard: Equatable, Sendable {
 
 public enum HubEventNormalizer {
     public static func normalize(_ records: [HubStoredEvent]) -> [HubTimelineItem] {
-        let recordsByID = Dictionary(uniqueKeysWithValues: records.map { ($0.eventID, $0.event) })
+        let recordsByID = Dictionary(records.map { ($0.eventID, $0.event) }, uniquingKeysWith: { first, _ in first })
         let toolLinkEventIDs = Set(records.compactMap { record -> HubEventID? in
             guard case .toolInvocation(let invocation) = record.event else {
                 return nil

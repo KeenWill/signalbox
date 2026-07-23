@@ -180,7 +180,7 @@ enum MockHubFixtures {
     """
 
     static func appendedUserMessage(text: String) -> String {
-        let escaped = text.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        let escaped = jsonEscaped(text)
         return """
         {
           "event_id": 20,

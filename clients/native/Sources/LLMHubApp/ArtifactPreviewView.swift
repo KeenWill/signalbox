@@ -50,7 +50,6 @@ struct ArtifactPreviewScreen: View {
             }
             .padding()
             .navigationTitle(artifact.previewNavigationTitle)
-            .navigationTitle(artifact.previewNavigationTitle)
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif

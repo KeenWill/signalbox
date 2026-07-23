@@ -257,7 +257,10 @@ final class SessionListViewModel: ObservableObject {
             self.templates = try await templates
             self.runners = try await runners
             let monitorSessions = try await monitor
-            self.statusesBySessionID = Dictionary(uniqueKeysWithValues: monitorSessions.map { ($0.metadata.id, $0.status) })
+            self.statusesBySessionID = Dictionary(
+                monitorSessions.map { ($0.metadata.id, $0.status) },
+                uniquingKeysWith: { first, _ in first }
+            )
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription

@@ -292,7 +292,7 @@ private func assertRealHubRunnerVisible(
 
 private func parseDotEnv(_ contents: String) -> [String: String] {
     Dictionary(
-        uniqueKeysWithValues: contents
+        contents
             .split(whereSeparator: \.isNewline)
             .compactMap { line -> (String, String)? in
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -312,7 +312,8 @@ private func parseDotEnv(_ contents: String) -> [String: String] {
                     rawValue.removeLast()
                 }
                 return (key, rawValue)
-            }
+            },
+        uniquingKeysWith: { first, _ in first }
     )
 }
 

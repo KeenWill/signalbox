@@ -464,7 +464,7 @@ public final class HubClient: HubClientProtocol, Sendable {
 
     private func webSocketURL(path: String) -> URL {
         var components = URLComponents(url: configuration.baseURL, resolvingAgainstBaseURL: false)!
-        components.scheme = configuration.baseURL.scheme == "https" ? "wss" : "ws"
+        components.scheme = configuration.baseURL.scheme?.lowercased() == "https" ? "wss" : "ws"
         components.path = Self.combinedPath(basePath: components.path, endpointPath: path)
         components.queryItems = [URLQueryItem(name: "token", value: configuration.apiKey)]
         return components.url!
