@@ -54,11 +54,13 @@ impl <Identity> {
 }
 ```
 
-The nine identities defined in `lib.rs`:
+The eleven identities defined in `lib.rs`:
 
 ```rust
 pub struct DurableCommandId(/* private */);
 pub struct SessionId(/* private */);
+pub struct ImportedConversationId(/* private */);
+pub struct ImportedTranscriptEntryId(/* private */);
 pub struct AcceptedInputId(/* private */);
 pub struct TurnId(/* private */);
 pub struct TurnAttemptId(/* private */);
@@ -81,6 +83,153 @@ pub enum Actor {
     Model { turn: TurnId },
     Recovery,
     Tool { request: ToolRequestId },
+}
+```
+
+## domain: imported_conversation
+
+```rust
+pub enum ImportedConversationFormat {
+    ClaudeCodeSessionJsonlV1,
+}
+
+pub enum ImportedSourceAttestation<Value> {
+    Attested(Value),
+    AttestedAbsent,
+    NotAttested,
+}
+
+pub struct ImportedSourceMetadata { /* private */ }
+impl ImportedSourceMetadata {
+    pub const fn new(
+        record_id: ImportedSourceAttestation<NonEmptyUnicodeText>,
+        parent_record_id: ImportedSourceAttestation<NonEmptyUnicodeText>,
+        source_session_id: ImportedSourceAttestation<NonEmptyUnicodeText>,
+        timestamp: ImportedSourceAttestation<NonEmptyUnicodeText>,
+        sidechain: ImportedSourceAttestation<bool>,
+        metadata: ImportedSourceAttestation<bool>,
+    ) -> Self;
+    // accessors: record_id(), parent_record_id(), source_session_id(),
+    //   timestamp(), sidechain(), metadata()
+}
+
+pub enum ImportedSpeaker {
+    User,
+    Assistant,
+}
+
+pub enum ImportedContentUnavailable {
+    EmptyText,
+    ToolUse,
+    ToolResult,
+    Thinking,
+    RedactedThinking,
+}
+
+pub enum ImportedTranscriptContent {
+    Text(NonEmptyUnicodeText),
+    Unavailable(ImportedContentUnavailable),
+}
+
+pub enum ImportedSeedDisposition {
+    Included,
+    ExcludedBySource {
+        sidechain: bool,
+        metadata: bool,
+    },
+    ExcludedUnavailable {
+        reason: ImportedContentUnavailable,
+    },
+}
+
+pub struct ImportedTranscriptPosition(/* private */);
+impl ImportedTranscriptPosition {
+    pub const fn try_from_u64(value: u64) -> Option<Self>;
+    pub const fn as_u64(self) -> u64;
+    pub const fn first() -> Self;
+    pub const fn checked_next(self) -> Option<Self>;
+}
+
+pub struct ImportedTranscriptEntryReconstitutionInput { /* private */ }
+impl ImportedTranscriptEntryReconstitutionInput {
+    pub const fn new(
+        identity: ImportedTranscriptEntryId,
+        conversation: ImportedConversationId,
+        position: ImportedTranscriptPosition,
+        speaker: ImportedSpeaker,
+        content: ImportedTranscriptContent,
+        source: ImportedSourceMetadata,
+        stored_seed_disposition: ImportedSeedDisposition,
+    ) -> Self;
+    // accessors: identity(), conversation(), position(), speaker(), content(),
+    //   source(), stored_seed_disposition()
+}
+
+pub struct ImportedTranscriptEntry { /* private */ }
+// sealed: ImportedConversationReconstitutionInput::reconstitute
+impl ImportedTranscriptEntry {
+    // accessors: identity(), conversation(), position(), speaker(), content(),
+    //   source(), seed_disposition()
+}
+
+pub struct ImportedConversationReconstitutionInput { /* private */ }
+impl ImportedConversationReconstitutionInput {
+    pub fn new(
+        requested_conversation: ImportedConversationId,
+        stored_conversation: ImportedConversationId,
+        format: ImportedConversationFormat,
+        declared_entry_count: u64,
+        entries: Vec<ImportedTranscriptEntryReconstitutionInput>,
+    ) -> Self;
+    pub fn reconstitute(self)
+        -> Result<ImportedConversation, ImportedConversationReconstitutionError>;
+    // accessors: requested_conversation(), stored_conversation(), format(),
+    //   declared_entry_count(), entries()
+}
+
+pub enum ImportedConversationReconstitutionFailure {
+    RequestedConversationMismatch,
+    EmptyConversation,
+    DeclaredEntryCountMismatch {
+        declared: u64,
+        actual: usize,
+    },
+    EntryConversationMismatch {
+        entry: ImportedTranscriptEntryId,
+    },
+    EntryPositionMismatch {
+        entry: ImportedTranscriptEntryId,
+        expected: ImportedTranscriptPosition,
+        actual: ImportedTranscriptPosition,
+    },
+    DuplicateEntry {
+        entry: ImportedTranscriptEntryId,
+    },
+    SeedDispositionMismatch {
+        entry: ImportedTranscriptEntryId,
+        expected: ImportedSeedDisposition,
+        actual: ImportedSeedDisposition,
+    },
+    PositionExhausted,
+}
+
+pub struct ImportedConversationReconstitutionError { /* private */ }
+// sealed: Err of ImportedConversationReconstitutionInput::reconstitute
+impl ImportedConversationReconstitutionError {
+    pub fn into_parts(
+        self,
+    ) -> (
+        ImportedConversationReconstitutionInput,
+        ImportedConversationReconstitutionFailure,
+    );
+    // accessors: failure(), input()
+}
+
+pub struct ImportedConversation { /* private */ }
+// sealed: ImportedConversationReconstitutionInput::reconstitute
+impl ImportedConversation {
+    pub fn seed_entries(&self) -> impl Iterator<Item = &ImportedTranscriptEntry>;
+    // accessors: id(), format(), entries()
 }
 ```
 
@@ -2867,8 +3016,9 @@ impl<
 
 | Module                                | Public types         |
 | ------------------------------------- | -------------------- |
-| domain: lib.rs identities             | 9                    |
+| domain: lib.rs identities             | 11                   |
 | domain: actor                         | 1                    |
+| domain: imported_conversation         | 14                   |
 | domain: session                       | 18                   |
 | domain: configuration                 | 19                   |
 | domain: accepted_input                | 5                    |
@@ -2887,7 +3037,7 @@ impl<
 | domain: applied_interrupt             | 2                    |
 | domain: fatal_mismatch                | 0                    |
 | domain: replace_session_defaults      | 13                   |
-| **signalbox-domain total**            | **211 (+1 free fn)** |
+| **signalbox-domain total**            | **227 (+1 free fn)** |
 | application: create_session           | 8 (incl. 2 traits)   |
 | application: load_session             | 2 (incl. 1 trait)    |
 | application: model_execution          | 28 (incl. 7 traits)  |

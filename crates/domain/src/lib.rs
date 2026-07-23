@@ -13,6 +13,7 @@ mod configuration;
 mod context_frontier;
 mod delivery_request;
 mod fatal_mismatch;
+mod imported_conversation;
 mod model_call;
 mod model_execution;
 mod provider_evidence;
@@ -45,6 +46,13 @@ pub use context_frontier::{
     ResolvedContextFrontierSnapshot, SemanticTranscriptEntryId, SemanticTranscriptEntryRef,
 };
 pub use delivery_request::{DeliveryRequest, PerInputConfigurationChoices};
+pub use imported_conversation::{
+    ImportedContentUnavailable, ImportedConversation, ImportedConversationFormat,
+    ImportedConversationReconstitutionError, ImportedConversationReconstitutionFailure,
+    ImportedConversationReconstitutionInput, ImportedSeedDisposition, ImportedSourceAttestation,
+    ImportedSourceMetadata, ImportedSpeaker, ImportedTranscriptContent, ImportedTranscriptEntry,
+    ImportedTranscriptEntryReconstitutionInput, ImportedTranscriptPosition,
+};
 pub use model_call::{
     CurrentModelCall, CurrentModelCallState, EndedModelCall, ModelCallDisposition,
     ModelCallReconstitutionFailure, ModelCallReconstitutionInput, ModelCallReconstitutionState,
@@ -176,6 +184,16 @@ define_identity!(
 );
 
 define_identity!(
+    /// Identifies one immutable externally sourced conversation record.
+    ImportedConversationId
+);
+
+define_identity!(
+    /// Identifies one entry in an imported conversation record.
+    ImportedTranscriptEntryId
+);
+
+define_identity!(
     /// Identifies one user submission durably accepted with a delivery treatment.
     AcceptedInputId
 );
@@ -256,9 +274,9 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::{
-        AcceptedInputId, ContextFrontierId, DurableCommandId, ModelCallId,
-        ProviderTargetEvidenceId, SemanticTranscriptEntryId, SessionId, ToolAttemptId,
-        ToolRequestId, TurnAttemptId, TurnId,
+        AcceptedInputId, ContextFrontierId, DurableCommandId, ImportedConversationId,
+        ImportedTranscriptEntryId, ModelCallId, ProviderTargetEvidenceId,
+        SemanticTranscriptEntryId, SessionId, ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId,
     };
     use uuid::Uuid;
 
@@ -281,6 +299,8 @@ mod tests {
     fn identity_uuid_representation_contract() {
         assert_uuid_contract!(DurableCommandId);
         assert_uuid_contract!(SessionId);
+        assert_uuid_contract!(ImportedConversationId);
+        assert_uuid_contract!(ImportedTranscriptEntryId);
         assert_uuid_contract!(AcceptedInputId);
         assert_uuid_contract!(TurnId);
         assert_uuid_contract!(TurnAttemptId);
