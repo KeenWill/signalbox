@@ -20,7 +20,8 @@ never overriding the sources above.
 messages, pull-request text, branch names — cites only public sources. Never
 include or allude to non-public material — internal systems, documents, or
 vocabulary of any organization — regardless of origin. Citing public open-source
-work is fine regardless of publisher.
+work is fine regardless of publisher. References to the owner's own private
+repositories are permitted as provenance notes, never as normative sources.
 
 **Working autonomously.** Within an assigned task, proceed without asking:
 branch, implement, run the validation sequence (it defines done for any code
