@@ -1122,7 +1122,7 @@ impl From<serde_json::Error> for FrameEncodeError {
 
 /// Decodes and validates one complete client line including its final newline.
 pub fn decode_client_line(line: &[u8]) -> Result<ClientFrame, FrameDecodeError> {
-    let content = checked_line_content(line)?;
+    let content = checked_line_content(line, false)?;
     let header = probe_header(content, "request", false)?;
     let frame: ClientFrame = serde_json::from_slice(content)
         .map_err(|_| FrameDecodeError::malformed(header.request_id))?;
@@ -1134,7 +1134,7 @@ pub fn decode_client_line(line: &[u8]) -> Result<ClientFrame, FrameDecodeError> 
 
 /// Decodes and validates one complete server line including its final newline.
 pub fn decode_server_line(line: &[u8]) -> Result<ServerFrame, FrameDecodeError> {
-    let content = checked_line_content(line)?;
+    let content = checked_line_content(line, true)?;
     let header = probe_header(content, "message", true)?;
     let frame: ServerFrame = serde_json::from_slice(content)
         .map_err(|_| FrameDecodeError::malformed(header.request_id))?;
@@ -1165,7 +1165,7 @@ fn encode_line<T: Serialize>(frame: &T) -> Result<Vec<u8>, FrameEncodeError> {
     Ok(encoded)
 }
 
-fn checked_line_content(line: &[u8]) -> Result<&[u8], FrameDecodeError> {
+fn checked_line_content(line: &[u8], allow_uncorrelated: bool) -> Result<&[u8], FrameDecodeError> {
     if line.len() > MAX_FRAME_BYTES {
         return Err(FrameDecodeError {
             kind: FrameDecodeErrorKind::OversizedFrame,
@@ -1173,10 +1173,16 @@ fn checked_line_content(line: &[u8]) -> Result<&[u8], FrameDecodeError> {
         });
     }
     let Some(content) = line.strip_suffix(b"\n") else {
-        return Err(FrameDecodeError::malformed(RequestId::uncorrelated()));
+        return Err(FrameDecodeError::malformed(recover_request_id(
+            line,
+            allow_uncorrelated,
+        )));
     };
     if content.is_empty() || content.ends_with(b"\r") || content.contains(&b'\n') {
-        return Err(FrameDecodeError::malformed(RequestId::uncorrelated()));
+        return Err(FrameDecodeError::malformed(recover_request_id(
+            content,
+            allow_uncorrelated,
+        )));
     }
     Ok(content)
 }
@@ -1250,23 +1256,9 @@ fn probe_header(
     payload_member: &str,
     allow_uncorrelated: bool,
 ) -> Result<ProbedHeader, FrameDecodeError> {
-    let mut deserializer = serde_json::Deserializer::from_slice(content);
-    let probe = RawHeaderProbe::deserialize(&mut deserializer)
-        .and_then(|probe| {
-            deserializer.end()?;
-            Ok(probe)
-        })
+    let probe = deserialize_header_probe(content)
         .map_err(|_| FrameDecodeError::malformed(RequestId::uncorrelated()))?;
-    let request_id = if probe.duplicate_request_id {
-        RequestId::uncorrelated()
-    } else {
-        probe
-            .request_id
-            .and_then(|value| serde_json::from_str::<String>(value.get()).ok())
-            .and_then(|value| RequestId::try_from(value).ok())
-            .filter(|value| allow_uncorrelated || value.is_correlated())
-            .unwrap_or_else(RequestId::uncorrelated)
-    };
+    let request_id = request_id_from_probe(&probe, allow_uncorrelated);
     if probe.duplicate_member {
         return Err(FrameDecodeError::malformed(request_id));
     }
@@ -1294,6 +1286,33 @@ fn probe_header(
         return Err(FrameDecodeError::malformed(request_id));
     }
     Ok(ProbedHeader { request_id })
+}
+
+fn deserialize_header_probe(content: &[u8]) -> Result<RawHeaderProbe<'_>, serde_json::Error> {
+    let mut deserializer = serde_json::Deserializer::from_slice(content);
+    RawHeaderProbe::deserialize(&mut deserializer).and_then(|probe| {
+        deserializer.end()?;
+        Ok(probe)
+    })
+}
+
+fn request_id_from_probe(probe: &RawHeaderProbe<'_>, allow_uncorrelated: bool) -> RequestId {
+    if probe.duplicate_request_id {
+        RequestId::uncorrelated()
+    } else {
+        probe
+            .request_id
+            .and_then(|value| serde_json::from_str::<String>(value.get()).ok())
+            .and_then(|value| RequestId::try_from(value).ok())
+            .filter(|value| allow_uncorrelated || value.is_correlated())
+            .unwrap_or_else(RequestId::uncorrelated)
+    }
+}
+
+fn recover_request_id(content: &[u8], allow_uncorrelated: bool) -> RequestId {
+    deserialize_header_probe(content)
+        .map(|probe| request_id_from_probe(&probe, allow_uncorrelated))
+        .unwrap_or_else(|_| RequestId::uncorrelated())
 }
 
 #[cfg(test)]
@@ -1691,13 +1710,21 @@ mod tests {
         let frame = ClientFrame::try_new(request(1)?, ClientRequest::ListSessions {})?;
         let encoded = encode_client_line(&frame)?;
         assert_eq!(encoded.last(), Some(&b'\n'));
-        assert!(decode_client_line(&encoded[..encoded.len() - 1]).is_err());
+        let missing_newline = decode_client_line(&encoded[..encoded.len() - 1])
+            .expect_err("missing newline must remain a malformed frame");
+        assert_eq!(missing_newline.kind(), FrameDecodeErrorKind::MalformedFrame);
+        assert_eq!(missing_newline.request_id().value(), 1);
         let mut carriage_return = encoded[..encoded.len() - 1].to_vec();
         carriage_return.extend_from_slice(b"\r\n");
-        assert!(decode_client_line(&carriage_return).is_err());
+        let carriage_return =
+            decode_client_line(&carriage_return).expect_err("CRLF must remain malformed");
+        assert_eq!(carriage_return.kind(), FrameDecodeErrorKind::MalformedFrame);
+        assert_eq!(carriage_return.request_id().value(), 1);
         let mut multiline = encoded.clone();
         multiline.insert(1, b'\n');
-        assert!(decode_client_line(&multiline).is_err());
+        let multiline = decode_client_line(&multiline).expect_err("embedded LF must be malformed");
+        assert_eq!(multiline.kind(), FrameDecodeErrorKind::MalformedFrame);
+        assert_eq!(multiline.request_id().value(), 1);
         assert!(decode_client_line(&vec![b' '; super::MAX_FRAME_BYTES + 1]).is_err());
         Ok(())
     }

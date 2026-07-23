@@ -17,7 +17,12 @@ when present and otherwise requires that environment value. `signalbox-hubd`
 binds the socket with owner-only `0600` permissions. The configured path must be
 absolute. The hub canonicalizes its existing parent once and uses that resolved
 parent for the socket lifetime; the parent must be a directory owned by the
-hub's effective user and must not be group- or other-writable.
+hub's effective user and must not be group- or other-writable. Every resolved
+ancestor up to the filesystem root must also resist same-machine replacement: a
+group- or other-writable ancestor is accepted only when it has the sticky bit
+and the next path component toward the socket is owned by the hub's effective
+user. A non-sticky writable ancestor or a sticky writable ancestor containing a
+component owned by another user fails startup.
 
 Before inspecting the final path, the hub opens or creates the adjacent
 `<socket-path>.lock` as a no-follow regular file owned by the effective user
@@ -260,7 +265,11 @@ row before constructing its fenced pool. That exclusive request waits for all
 prior pooled sessions and prevents the old process from opening another usable
 connection. The first migration creates and initializes the row for a database
 that cannot have a prior fenced hub; later startups fence before running any
-newer migration. Exhaustion or corruption fails startup rather than wrapping.
+newer migration. This fence migration belongs to Signalbox's initial deployment:
+the owner confirms that no deployed database or hub predates it, so there is no
+legacy unfenced writer to drain during the first installation. Importing or
+upgrading a pre-fence database is unsupported. Exhaustion or corruption fails
+startup rather than wrapping.
 
 Together these guards enforce one active hub process—and therefore one
 dispatcher and one process-local fan-out—for a database, while preventing a
@@ -284,7 +293,7 @@ offered again after recovery. A crash after the offer but before commit may
 therefore duplicate that cursor; delivery is at least once and globally ordered
 (INV-032). Consumers deduplicate by cursor.
 
-The process-local fan-out retains 1,024 update events. Having no connected
+The process-local fan-out retains 64 update events. Having no connected
 followers does not block durable cursor advancement: reconnecting clients use a
 fresh authoritative snapshot. A follower that overruns the bounded fan-out
 receives `resync_required` and reconnects for another snapshot.
@@ -328,13 +337,15 @@ remain transient inside the model-runtime boundary and are not added to the
 outbox. The terminal `send` command follows the submitted turn, accepts terminal
 state from the initial snapshot or waits for its durable terminal event, rereads
 the authoritative transcript, and prints the committed assistant text. A client
-disconnect never cancels model work. After each terminal turn event, `follow`
-uses a separate connection to read and validate a fresh authoritative transcript
-before it resumes printing later followed events. It then discards buffered
-events at or below the fresh snapshot cursor and resumes only with events above
-that cursor. Final durable content therefore replaces the earlier presentation
-without interrupting the follow subscription or replaying updates already
-represented by the reread.
+that observes `active_awaiting_model_call_recovery` in the initial snapshot
+exits with a typed nonzero recovery-required diagnostic: version one has no
+writer that can complete that wait. A client disconnect never cancels model
+work. After each terminal turn event, `follow` uses a separate connection to
+read and validate a fresh authoritative transcript before it resumes printing
+later followed events. It then discards buffered events at or below the fresh
+snapshot cursor and resumes only with events above that cursor. Final durable
+content therefore replaces the earlier presentation without interrupting the
+follow subscription or replaying updates already represented by the reread.
 
 ## Terminal client
 
