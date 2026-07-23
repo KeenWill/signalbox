@@ -761,10 +761,10 @@ those tests.
 
 - **User intent:** Resume observing current work without corrupting the
   transcript or relying on every delta having persisted.
-- **Durable commands:** Client subscribes to process-local fan-out before
-  requesting an authoritative repeatable-read snapshot of transcript entries,
-  turn states, and the outbox cursor, then follows matching events above that
-  cursor; no new logical work is created merely by reconnecting.
+- **Durable commands:** The server subscribes to process-local fan-out before
+  reading an authoritative repeatable-read snapshot of transcript entries, turn
+  states, and the outbox cursor, then sends matching events above that cursor;
+  no new logical work is created merely by reconnecting.
 - **State transitions:** Client disconnected → synchronized snapshot → live
   observer; server-side turn remains unchanged.
 - **Transient updates:** Previously seen draft may be replaced. Version one

@@ -230,12 +230,10 @@ questions below remain open.
 
 ## Protocols and persistence
 
-- **Authenticated transports and remote clients.** Version one is the
-  single-user local Unix-socket protocol specified by
-  [process-protocol](spec/process-protocol.md), with no protocol authentication.
-  Any remote transport must first decide client identity, authentication,
-  authorization, revocation, and credential delivery; it is an upgrade path, not
-  a compatible deployment mode for version one. (S01, S24)
+- **Authenticated transports and remote clients.** The local baseline is owned
+  by [process-protocol](spec/process-protocol.md). Remote access still requires
+  decisions for client identity, authentication, authorization, revocation, and
+  credential delivery. (S01, S24)
 - **Browser transport.** Preserve authoritative-snapshot-plus-transient-stream
   semantics; technology open. Blocks the web client. (S02, S24)
 - **Compatibility after exact process-protocol version one.** Version one
@@ -293,11 +291,9 @@ questions below remain open.
 
 ## Client scope
 
-- **Client forms after the terminal baseline.** The
-  [process-protocol](spec/process-protocol.md) selects a thin terminal client as
-  the first daily surface. TUI, web, and Swift clients remain unselected and
-  must preserve the protocol's authoritative-snapshot replacement rule. (S01,
-  S02, S10, S24)
+- **Client forms after the terminal baseline.** The selected baseline is owned
+  by [process-protocol](spec/process-protocol.md). Whether a later daily client
+  is a TUI, web app, or native app remains unselected. (S01, S02, S10, S24)
 - **Apple client code organization.** Defer until the protocol and the first
   native slice are known. (S01, S24)
 - **Web client technology (Rust/Wasm or TypeScript).** No leaning until the
