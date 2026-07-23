@@ -236,15 +236,15 @@ questions below remain open.
   credential delivery. (S01, S24)
 - **Browser transport.** Preserve authoritative-snapshot-plus-transient-stream
   semantics; technology open. Blocks the web client. (S02, S24)
-- **Compatibility after exact process-protocol version one.** Version one
-  rejects every other version and unknown field. A future compatibility window,
-  negotiation scheme, and generated-client policy remain undecided. Blocks a
-  version-two protocol, not version one. (S01, S24)
-- **Transient model-update relay.** Version one carries durable outbox
-  transitions and final transcript content only. Whether provider token deltas
-  cross the process boundary, and the required draft identity, sequencing,
-  replacement, backpressure, and redaction rules, remain undecided. Blocks
-  live-token display, not durable follow. (S02, S24)
+- **Compatibility after exact process-protocol version one.** Version one has
+  its owning [specification](spec/process-protocol.md). A future compatibility
+  window, negotiation scheme, and generated-client policy remain undecided.
+  Blocks a version-two protocol. (S01, S24)
+- **Transient model-update relay.** Whether provider token deltas cross the
+  process boundary, and the required draft identity, sequencing, replacement,
+  backpressure, and redaction rules, remain undecided; the implemented relay is
+  owned by [process-protocol](spec/process-protocol.md). Blocks live-token
+  display. (S02, S24)
 - **Process-protocol operation expansion.** Defaults replacement, delivery
   treatments other than `StartWhenNoActiveTurn`, cancellation, approval, tools,
   and administrative operations need their owning product slices and exact wire
@@ -280,11 +280,9 @@ questions below remain open.
   [decision log](decisions.md#2026-07-20--adversarial-audit-corrective-package)
   owns its accepted scheduling disposition. (S03, S04, S17)
 - **Update-event retention, pruning, and multiple hub processes.** Version one
-  retains every outbox row, advances one durable delivered-through prefix, and
-  enforces one hub process per database so one process-local fan-out observes
-  every dispatch. A pruning watermark, follower retention guarantees, and any
-  later multiple-hub shared-fan-out mechanism remain undecided. Blocks pruning
-  and multi-hub deployment, not the version-one dispatcher. (S24)
+  is owned by [process-protocol](spec/process-protocol.md). A pruning watermark,
+  follower retention guarantees, and any later multiple-hub shared-fan-out
+  mechanism remain undecided. Blocks pruning and multi-hub deployment. (S24)
 - **Swift client type generation.** Leaning: generated boundary types mapped to
   hand-written client domain types. Deferrable until the Swift client. (S01,
   S24)
