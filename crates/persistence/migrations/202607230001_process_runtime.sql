@@ -42,6 +42,11 @@ BEFORE UPDATE OR DELETE ON hub_fence_state
 FOR EACH ROW
 EXECUTE FUNCTION reject_invalid_hub_fence_change();
 
+CREATE TRIGGER hub_fence_state_cannot_be_truncated
+BEFORE TRUNCATE ON hub_fence_state
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_outbox_table_truncate();
+
 ALTER TABLE outbox_event
     DROP CONSTRAINT outbox_event_kind_closed;
 

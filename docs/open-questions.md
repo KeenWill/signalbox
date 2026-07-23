@@ -233,8 +233,9 @@ questions below remain open.
   by [process-protocol](spec/process-protocol.md). Remote access still requires
   decisions for client identity, authentication, authorization, revocation, and
   credential delivery. (S01, S24)
-- **Browser transport.** Preserve authoritative-snapshot-plus-transient-stream
-  semantics; technology open. Blocks the web client. (S02, S24)
+- **Browser transport.** Technology remains open and blocks the web client;
+  snapshot and transient-stream semantics are defined by
+  [process-protocol](spec/process-protocol.md). (S02, S24)
 - **Compatibility after exact process-protocol version one.** Version one has
   its owning [specification](spec/process-protocol.md). A future compatibility
   window, negotiation scheme, and generated-client policy remain undecided.

@@ -11042,6 +11042,39 @@ async fn s24_inv032_dispatcher_reports_a_missing_committed_header() -> Result<()
     Ok(())
 }
 
+/// S24 / INV-032: the dispatcher observes the allocator and candidate header in
+/// one statement snapshot, so an uncommitted allocation is idle rather than
+/// false committed-header corruption.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_inv032_dispatcher_treats_an_uncommitted_allocation_as_idle()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = insert_outbox_session_fixture(&pool, 0xe19).await?;
+    let mut producer = pool.begin().await?;
+    let sequence = append_session_created_test_event(&mut producer, session).await?;
+    let dispatcher = OutboxDispatcher::new(pool.clone());
+
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+            .await?,
+        OutboxDispatchOutcome::Idle
+    );
+    producer.commit().await?;
+    assert_eq!(sequence, Decimal::ONE);
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 1 }
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S24 / INV-032: an event-producing transaction cannot mark its own
 /// uncommitted event delivered and thereby make restart recovery skip it.
 /// Both append-before-delivery and delivery-before-append orderings are covered.
@@ -11154,6 +11187,7 @@ async fn s24_inv032_outbox_delivery_rejects_event_producing_transaction()
 async fn inv032_outbox_storage_rejects_truncate() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
 
+    assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE hub_fence_state CASCADE").await?;
     assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE outbox_sequence_state CASCADE").await?;
     assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE outbox_delivery_state CASCADE").await?;
     assert_outbox_truncate_rejected(&pool, "TRUNCATE TABLE outbox_event CASCADE").await?;

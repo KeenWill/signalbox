@@ -31,6 +31,14 @@ const TURN_COMPLETED: &str = "turn_completed";
 const TURN_REFUSED: &str = "turn_refused";
 const STORAGE_VERSION: i16 = 1;
 
+type OutboxSlotRow = (
+    Decimal,
+    Option<Decimal>,
+    Option<String>,
+    Option<i16>,
+    Option<Uuid>,
+);
+
 /// One committed outbox event offered to the hub's single dispatcher consumer.
 ///
 /// This is a persistence projection, not a domain event or process-protocol
@@ -302,19 +310,11 @@ impl OutboxDispatcher {
             transaction.rollback().await?;
             return Ok(OutboxDispatchOutcome::Idle);
         };
-        let Some(event) = load_event(&mut transaction, next).await? else {
-            let allocated: Option<Decimal> = sqlx::query_scalar(
-                "SELECT last_sequence
-                   FROM outbox_sequence_state
-                  WHERE singleton",
-            )
-            .fetch_optional(&mut *transaction)
-            .await?;
-            let allocated = allocated.ok_or(OutboxCorruption::MissingSequenceState)?;
-            let allocated = decode_nonnegative_sequence(allocated)?;
-            if allocated < delivered {
-                return Err(OutboxCorruption::DeliveryBeyondAllocatedSequence.into());
-            }
+        let (allocated, event) = load_event(&mut transaction, next).await?;
+        if allocated < delivered {
+            return Err(OutboxCorruption::DeliveryBeyondAllocatedSequence.into());
+        }
+        let Some(event) = event else {
             if allocated >= next {
                 return Err(OutboxCorruption::MissingCommittedEventHeader.into());
             }
@@ -348,18 +348,35 @@ impl OutboxDispatcher {
 async fn load_event(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     expected_sequence: u64,
-) -> Result<Option<DispatchedOutboxEvent>, OutboxDispatchError> {
-    let header: Option<(Decimal, String, i16, Uuid)> = sqlx::query_as(
-        "SELECT event_sequence, event_kind, storage_version, session_id
-           FROM outbox_event
-          WHERE event_sequence = $1",
+) -> Result<(u64, Option<DispatchedOutboxEvent>), OutboxDispatchError> {
+    let row: Option<OutboxSlotRow> = sqlx::query_as(
+        "SELECT
+            allocator.last_sequence,
+            event.event_sequence,
+            event.event_kind,
+            event.storage_version,
+            event.session_id
+           FROM outbox_sequence_state AS allocator
+           LEFT JOIN outbox_event AS event
+             ON event.event_sequence = $1
+          WHERE allocator.singleton",
     )
     .bind(Decimal::from(expected_sequence))
     .fetch_optional(&mut **transaction)
     .await?;
-    let Some((stored_sequence, event_kind, storage_version, stored_session)) = header else {
-        return Ok(None);
+    let Some((allocated, stored_sequence, event_kind, storage_version, stored_session)) = row
+    else {
+        return Err(OutboxCorruption::MissingSequenceState.into());
     };
+    let allocated = decode_nonnegative_sequence(allocated)?;
+    let (stored_sequence, event_kind, storage_version, stored_session) =
+        match (stored_sequence, event_kind, storage_version, stored_session) {
+            (None, None, None, None) => return Ok((allocated, None)),
+            (Some(sequence), Some(kind), Some(version), Some(session)) => {
+                (sequence, kind, version, session)
+            }
+            _ => return Err(OutboxCorruption::MissingCommittedEventHeader.into()),
+        };
     if decode_positive_sequence(stored_sequence)? != expected_sequence {
         return Err(OutboxCorruption::InvalidSequence.into());
     }
@@ -495,11 +512,14 @@ async fn load_event(
         _ => return Err(OutboxCorruption::UnsupportedEventKind.into()),
     };
 
-    Ok(Some(DispatchedOutboxEvent {
-        sequence: expected_sequence,
-        session,
-        kind,
-    }))
+    Ok((
+        allocated,
+        Some(DispatchedOutboxEvent {
+            sequence: expected_sequence,
+            session,
+            kind,
+        }),
+    ))
 }
 
 async fn require_typed_record(
