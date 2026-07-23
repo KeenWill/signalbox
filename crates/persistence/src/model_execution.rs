@@ -1583,17 +1583,63 @@ async fn ambiguous_terminal_closure_matches(
                    AND lifecycle.active_phase_kind IS NULL
                    AND lifecycle.current_attempt_id IS NULL
                    AND lifecycle.recovery_model_call_id IS NULL
-                   AND EXISTS (
-                        SELECT 1
-                          FROM turn_attempt
-                         WHERE session_id = $1
-                           AND turn_id = $2
-                           AND turn_attempt_id = $3
-                           AND state_kind = 'ended'
-                           AND end_variant = 'after_cancellation'
-                           AND end_disposition = 'ambiguous'
-                           AND interrupt_command_id IS NOT NULL
-                           AND interrupt_predecessor_turn_id = $2
+                   AND (
+                        EXISTS (
+                            SELECT 1
+                              FROM turn_attempt
+                             WHERE session_id = $1
+                               AND turn_id = $2
+                               AND turn_attempt_id = $3
+                               AND state_kind = 'ended'
+                               AND end_variant = 'after_cancellation'
+                               AND end_disposition = 'ambiguous'
+                               AND interrupt_command_id IS NOT NULL
+                               AND interrupt_predecessor_turn_id = $2
+                        )
+                        OR (
+                            EXISTS (
+                                SELECT 1
+                                  FROM turn_attempt
+                                 WHERE session_id = $1
+                                   AND turn_id = $2
+                                   AND turn_attempt_id = $3
+                                   AND state_kind = 'ended'
+                                   AND end_variant = 'without_stop'
+                                   AND end_disposition = 'ambiguous'
+                                   AND interrupt_command_id IS NULL
+                                   AND interrupt_predecessor_turn_id IS NULL
+                            )
+                            AND EXISTS (
+                                SELECT 1
+                                  FROM submit_input_command AS command
+                                  JOIN accepted_input AS accepted
+                                    ON accepted.accepting_command_id =
+                                        command.command_id
+                                   AND accepted.accepted_input_id =
+                                        command.result_accepted_input_id
+                                   AND accepted.session_id =
+                                        command.result_session_id
+                                   AND accepted.origin_turn_id =
+                                        command.result_turn_id
+                                  JOIN queued_input_origin AS successor
+                                    ON successor.accepted_input_id =
+                                        accepted.accepted_input_id
+                                   AND successor.turn_id =
+                                        accepted.origin_turn_id
+                                   AND successor.session_id =
+                                        accepted.session_id
+                                   AND successor.priority_kind =
+                                        'interrupt_immediately_after'
+                                   AND successor.interrupt_predecessor_turn_id =
+                                        $2
+                                 WHERE command.session_id = $1
+                                   AND command.delivery_kind = 'interrupt'
+                                   AND command.expected_active_turn_id = $2
+                                   AND command.result_kind = 'applied'
+                                   AND command.rejection_kind IS NULL
+                                   AND accepted.disposition_kind = 'origin_of'
+                            )
+                        )
                    )
                    AND EXISTS (
                         SELECT 1

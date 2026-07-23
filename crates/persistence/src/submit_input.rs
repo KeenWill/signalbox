@@ -3299,7 +3299,10 @@ pub(crate) async fn load_turn_origin_graph(
             source.state_kind AS source_state_kind,
             source.terminal_disposition_kind AS source_terminal_disposition_kind,
             source.terminal_model_call_id AS source_terminal_model_call_id,
-            source_attempt.interrupt_command_id AS source_interrupt_command_id
+            COALESCE(
+                source_attempt.interrupt_command_id,
+                source_interrupt.command_id
+            ) AS source_interrupt_command_id
           FROM origin_turn AS current
           JOIN turn_lifecycle AS turn
             ON turn.turn_id = current.turn_id
@@ -3325,6 +3328,36 @@ pub(crate) async fn load_turn_origin_graph(
             ON source_attempt.turn_attempt_id = source.terminal_attempt_id
            AND source_attempt.turn_id = source.turn_id
            AND source_attempt.session_id = source.session_id
+          LEFT JOIN LATERAL (
+                SELECT interrupt.command_id
+                  FROM submit_input_command AS interrupt
+                  JOIN accepted_input AS interrupt_accepted
+                    ON interrupt_accepted.accepting_command_id =
+                        interrupt.command_id
+                   AND interrupt_accepted.accepted_input_id =
+                        interrupt.result_accepted_input_id
+                   AND interrupt_accepted.session_id =
+                        interrupt.result_session_id
+                   AND interrupt_accepted.origin_turn_id =
+                        interrupt.result_turn_id
+                  JOIN queued_input_origin AS interrupt_successor
+                    ON interrupt_successor.accepted_input_id =
+                        interrupt_accepted.accepted_input_id
+                   AND interrupt_successor.turn_id =
+                        interrupt_accepted.origin_turn_id
+                   AND interrupt_successor.session_id =
+                        interrupt_accepted.session_id
+                   AND interrupt_successor.priority_kind =
+                        'interrupt_immediately_after'
+                   AND interrupt_successor.interrupt_predecessor_turn_id =
+                        source.turn_id
+                 WHERE interrupt.session_id = source.session_id
+                   AND interrupt.delivery_kind = 'interrupt'
+                   AND interrupt.expected_active_turn_id = source.turn_id
+                   AND interrupt.result_kind = 'applied'
+                   AND interrupt.rejection_kind IS NULL
+                   AND interrupt_accepted.disposition_kind = 'origin_of'
+          ) AS source_interrupt ON TRUE
          ORDER BY current.session_id, current.turn_id",
     )
     .bind(&source_sessions)
