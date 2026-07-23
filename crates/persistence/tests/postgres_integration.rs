@@ -11943,7 +11943,7 @@ async fn s01_inv012_inv032_scheduling_transitions_dispatch_in_commit_order()
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s01_inv012_inv032_dispatcher_rejects_crosswired_accepted_content()
-    -> Result<(), Box<dyn Error>> {
+-> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(0xe72));
     let turn = TurnId::from_uuid(Uuid::from_u128(0xe73));
