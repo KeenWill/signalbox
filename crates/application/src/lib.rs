@@ -15,9 +15,9 @@ mod startup_scan;
 mod submit_input;
 
 pub use conversation_import::{
-    ImportConversationError, ImportConversationService, ImportedConversationConverter,
-    ImportedConversationIdGenerator, ImportedConversationStore,
-    UuidV7ImportedConversationIdGenerator,
+    ImportConversationError, ImportConversationOutcome, ImportConversationService,
+    ImportedConversationConverter, ImportedConversationIdGenerator, ImportedConversationStore,
+    ImportedConversationStoreOutcome, UuidV7ImportedConversationIdGenerator,
 };
 pub use create_session::{
     CreateSessionError, CreateSessionOutcome, CreateSessionRequest, CreateSessionService,

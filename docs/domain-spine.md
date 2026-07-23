@@ -2479,12 +2479,40 @@ pub trait ImportedConversationConverter {
         NextEntryId: FnMut() -> ImportedTranscriptEntryId;
 }
 
+pub enum ImportedConversationStoreOutcome {
+    Inserted {
+        conversation: ImportedConversationId,
+        source_digest: ImportedConversationSourceDigest,
+    },
+    AlreadyImported {
+        conversation: ImportedConversationId,
+        source_digest: ImportedConversationSourceDigest,
+    },
+}
+impl ImportedConversationStoreOutcome {
+    // accessors: conversation(), source_digest()
+}
+
 pub trait ImportedConversationStore {
     type Error;
-    fn insert(
+    fn resolve_or_insert(
         &mut self,
         conversation: ImportedConversation,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    ) -> impl Future<
+        Output = Result<ImportedConversationStoreOutcome, Self::Error>,
+    > + Send;
+}
+
+pub enum ImportConversationOutcome {
+    Inserted {
+        conversation: ImportedConversationId,
+    },
+    AlreadyImported {
+        conversation: ImportedConversationId,
+    },
+}
+impl ImportConversationOutcome {
+    // accessor: conversation()
 }
 
 pub enum ImportConversationError<ConverterError, StoreError> {
@@ -2496,6 +2524,14 @@ pub enum ImportConversationError<ConverterError, StoreError> {
     ConverterFormatMismatch {
         declared: ImportedConversationFormat,
         converted: ImportedConversationFormat,
+    },
+    StoreSourceDigestMismatch {
+        expected: ImportedConversationSourceDigest,
+        actual: ImportedConversationSourceDigest,
+    },
+    StoreInsertedIdentityMismatch {
+        expected: ImportedConversationId,
+        actual: ImportedConversationId,
     },
     Store(StoreError),
 }
@@ -2518,7 +2554,7 @@ impl<
         &mut self,
         source: &[u8],
     ) -> Result<
-        ImportedConversationId,
+        ImportConversationOutcome,
         ImportConversationError<Converter::Error, Store::Error>,
     >;
 }
@@ -3285,7 +3321,7 @@ impl<
 | domain: fatal_mismatch                | 0                    |
 | domain: replace_session_defaults      | 13                   |
 | **signalbox-domain total**            | **241 (+1 free fn)** |
-| application: conversation_import      | 6 (incl. 3 traits)   |
+| application: conversation_import      | 8 (incl. 3 traits)   |
 | application: create_session           | 8 (incl. 2 traits)   |
 | application: load_session             | 2 (incl. 1 trait)    |
 | application: model_execution          | 28 (incl. 7 traits)  |
@@ -3295,4 +3331,4 @@ impl<
 | application: start_eligible_turn      | 5 (incl. 2 traits)   |
 | application: startup_scan             | 7 (incl. 2 traits)   |
 | application: submit_input             | 7 (incl. 2 traits)   |
-| **signalbox-application total**       | **81**               |
+| **signalbox-application total**       | **83**               |

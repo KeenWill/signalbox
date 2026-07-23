@@ -1,14 +1,14 @@
-//! Source-neutral conversation-import orchestration.
+//! Source-neutral conversation-ingestion orchestration.
 //!
 //! Format adapters implement [`ImportedConversationConverter`]; persistence
 //! adapters implement [`ImportedConversationStore`]. The application supplies
-//! hub identities and commits only one completely converted domain aggregate.
+//! hub identities and performs one complete resolve-or-insert operation.
 
 use std::{error::Error, fmt, future::Future};
 
 use signalbox_domain::{
     ImportedConversation, ImportedConversationFormat, ImportedConversationId,
-    ImportedTranscriptEntryId,
+    ImportedConversationSourceDigest, ImportedTranscriptEntryId,
 };
 
 /// Application effect supplying fresh imported-record identities.
@@ -53,19 +53,84 @@ pub trait ImportedConversationConverter {
         NextEntryId: FnMut() -> ImportedTranscriptEntryId;
 }
 
+/// Checked result of one append-only store resolution.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ImportedConversationStoreOutcome {
+    /// The candidate aggregate became the new durable snapshot.
+    Inserted {
+        /// Newly durable candidate identity.
+        conversation: ImportedConversationId,
+        /// Durable ordered-source digest.
+        source_digest: ImportedConversationSourceDigest,
+    },
+    /// The exact format and ordered source were already durable.
+    AlreadyImported {
+        /// Previously durable aggregate identity.
+        conversation: ImportedConversationId,
+        /// Previously durable ordered-source digest.
+        source_digest: ImportedConversationSourceDigest,
+    },
+}
+
+impl ImportedConversationStoreOutcome {
+    /// Returns the newly or previously durable imported conversation.
+    pub const fn conversation(self) -> ImportedConversationId {
+        match self {
+            Self::Inserted { conversation, .. } | Self::AlreadyImported { conversation, .. } => {
+                conversation
+            }
+        }
+    }
+
+    /// Returns the checked durable source digest.
+    pub const fn source_digest(self) -> ImportedConversationSourceDigest {
+        match self {
+            Self::Inserted { source_digest, .. } | Self::AlreadyImported { source_digest, .. } => {
+                source_digest
+            }
+        }
+    }
+}
+
 /// Atomic append-only store boundary for one complete imported conversation.
 pub trait ImportedConversationStore {
     /// Adapter-specific infrastructure, collision, or integrity failure.
     type Error;
 
-    /// Inserts one complete aggregate exactly once.
-    fn insert(
+    /// Inserts a new snapshot or resolves its exact durable duplicate.
+    fn resolve_or_insert(
         &mut self,
         conversation: ImportedConversation,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    ) -> impl Future<Output = Result<ImportedConversationStoreOutcome, Self::Error>> + Send;
 }
 
-/// Conversation-import orchestration failure.
+/// Successful pure-ingestion outcome.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ImportConversationOutcome {
+    /// A new immutable imported conversation was inserted.
+    Inserted {
+        /// Newly durable candidate identity.
+        conversation: ImportedConversationId,
+    },
+    /// Exact reingestion resolved an existing immutable conversation.
+    AlreadyImported {
+        /// Previously durable aggregate identity.
+        conversation: ImportedConversationId,
+    },
+}
+
+impl ImportConversationOutcome {
+    /// Returns the newly or previously durable imported conversation.
+    pub const fn conversation(self) -> ImportedConversationId {
+        match self {
+            Self::Inserted { conversation } | Self::AlreadyImported { conversation } => {
+                conversation
+            }
+        }
+    }
+}
+
+/// Conversation-ingestion orchestration failure.
 #[derive(Debug, Eq, PartialEq)]
 pub enum ImportConversationError<ConverterError, StoreError> {
     /// The source converter rejected the complete input.
@@ -84,7 +149,21 @@ pub enum ImportConversationError<ConverterError, StoreError> {
         /// The format carried by the converted aggregate.
         converted: ImportedConversationFormat,
     },
-    /// The append-only store could not commit the complete aggregate.
+    /// The store reported a digest other than the converted exact source.
+    StoreSourceDigestMismatch {
+        /// The converted aggregate digest.
+        expected: ImportedConversationSourceDigest,
+        /// The store-reported digest.
+        actual: ImportedConversationSourceDigest,
+    },
+    /// A newly inserted store result named another aggregate identity.
+    StoreInsertedIdentityMismatch {
+        /// Candidate identity carried by the converted aggregate.
+        expected: ImportedConversationId,
+        /// Store-reported inserted identity.
+        actual: ImportedConversationId,
+    },
+    /// The append-only store could not resolve or insert the aggregate.
     Store(StoreError),
 }
 
@@ -111,6 +190,14 @@ where
                 formatter,
                 "conversation converter format mismatch: declared {declared:?}, converted {converted:?}"
             ),
+            Self::StoreSourceDigestMismatch { expected, actual } => write!(
+                formatter,
+                "conversation store source-digest mismatch: expected {expected:?}, actual {actual:?}"
+            ),
+            Self::StoreInsertedIdentityMismatch { expected, actual } => write!(
+                formatter,
+                "conversation store inserted-identity mismatch: expected {expected:?}, actual {actual:?}"
+            ),
             Self::Store(error) => write!(formatter, "conversation import store failed: {error}"),
         }
     }
@@ -123,7 +210,7 @@ where
 {
 }
 
-/// Coordinates one conversion and append-only import.
+/// Coordinates one conversion and idempotent append-only ingestion.
 #[derive(Debug)]
 pub struct ImportConversationService<Generator, Converter, Store> {
     ids: Generator,
@@ -153,29 +240,29 @@ where
     Converter: ImportedConversationConverter,
     Store: ImportedConversationStore,
 {
-    /// Converts one source and commits only its complete checked aggregate.
+    /// Converts once and resolves or inserts one complete checked aggregate.
     ///
-    /// The service calls the converter and store at most once and performs no
-    /// retry. Identity candidates consumed by a failed conversion are simply
-    /// discarded.
+    /// The service performs no retry and no session, command, scheduler, or
+    /// outbox effect. Candidate identities consumed by conversion or exact
+    /// duplicate resolution are simply discarded.
     pub async fn execute(
         &mut self,
         source: &[u8],
-    ) -> Result<ImportedConversationId, ImportConversationError<Converter::Error, Store::Error>>
+    ) -> Result<ImportConversationOutcome, ImportConversationError<Converter::Error, Store::Error>>
     {
         let Self {
             ids,
             converter,
             store,
         } = self;
-        let conversation = ids.next_conversation_id();
+        let candidate = ids.next_conversation_id();
         let declared = converter.format();
         let converted = converter
-            .convert(conversation, source, || ids.next_entry_id())
+            .convert(candidate, source, || ids.next_entry_id())
             .map_err(ImportConversationError::Conversion)?;
-        if converted.id() != conversation {
+        if converted.id() != candidate {
             return Err(ImportConversationError::ConverterIdentityMismatch {
-                supplied: conversation,
+                supplied: candidate,
                 converted: converted.id(),
             });
         }
@@ -185,11 +272,31 @@ where
                 converted: converted.format(),
             });
         }
-        store
-            .insert(converted)
+        let expected_digest = converted.source_digest();
+        let stored = store
+            .resolve_or_insert(converted)
             .await
             .map_err(ImportConversationError::Store)?;
-        Ok(conversation)
+        if stored.source_digest() != expected_digest {
+            return Err(ImportConversationError::StoreSourceDigestMismatch {
+                expected: expected_digest,
+                actual: stored.source_digest(),
+            });
+        }
+        match stored {
+            ImportedConversationStoreOutcome::Inserted { conversation, .. } => {
+                if conversation != candidate {
+                    return Err(ImportConversationError::StoreInsertedIdentityMismatch {
+                        expected: candidate,
+                        actual: conversation,
+                    });
+                }
+                Ok(ImportConversationOutcome::Inserted { conversation })
+            }
+            ImportedConversationStoreOutcome::AlreadyImported { conversation, .. } => {
+                Ok(ImportConversationOutcome::AlreadyImported { conversation })
+            }
+        }
     }
 }
 
@@ -197,23 +304,25 @@ where
 mod tests {
     use std::{
         collections::VecDeque,
+        error::Error,
+        fmt,
         future::{Future, ready},
     };
 
     use signalbox_domain::{
         ImportedConversation, ImportedConversationFormat, ImportedConversationId,
-        ImportedConversationReconstitutionInput, ImportedSeedDisposition,
-        ImportedSourceAttestation, ImportedSourceMetadata, ImportedSpeaker,
-        ImportedTranscriptContent, ImportedTranscriptEntryId,
-        ImportedTranscriptEntryReconstitutionInput, ImportedTranscriptPosition,
-        NonEmptyUnicodeText,
+        ImportedConversationSourceDigest, ImportedRawRecordPosition, ImportedRawSourceRecord,
+        ImportedRecordEntryPosition, ImportedSourceAttestation, ImportedSourceMetadata,
+        ImportedSpeaker, ImportedStructuredObjectMember, ImportedStructuredValue, ImportedText,
+        ImportedTranscriptContent, ImportedTranscriptEntryId, ImportedTranscriptEntryInput,
+        ImportedTranscriptPosition,
     };
     use uuid::{Uuid, Variant, Version};
 
     use super::{
-        ImportConversationError, ImportConversationService, ImportedConversationConverter,
-        ImportedConversationIdGenerator, ImportedConversationStore,
-        UuidV7ImportedConversationIdGenerator,
+        ImportConversationError, ImportConversationOutcome, ImportConversationService,
+        ImportedConversationConverter, ImportedConversationIdGenerator, ImportedConversationStore,
+        ImportedConversationStoreOutcome, UuidV7ImportedConversationIdGenerator,
     };
 
     fn conversation(value: u128) -> ImportedConversationId {
@@ -224,8 +333,30 @@ mod tests {
         ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(value))
     }
 
-    fn text(value: &str) -> NonEmptyUnicodeText {
-        NonEmptyUnicodeText::try_new(String::from(value)).expect("fixture text is admitted")
+    fn text(value: &str) -> ImportedText {
+        ImportedText::new(String::from(value))
+    }
+
+    fn object(source_type: &str) -> ImportedStructuredValue {
+        ImportedStructuredValue::Object(
+            vec![ImportedStructuredObjectMember::new(
+                text("type"),
+                ImportedStructuredValue::String(text(source_type)),
+            )]
+            .into_boxed_slice(),
+        )
+    }
+
+    fn metadata(speaker: ImportedSpeaker) -> ImportedSourceMetadata {
+        ImportedSourceMetadata::new(
+            ImportedSourceAttestation::Attested(text("record")),
+            ImportedSourceAttestation::AttestedAbsent,
+            ImportedSourceAttestation::Attested(text("source-session")),
+            ImportedSourceAttestation::NotAttested,
+            ImportedSourceAttestation::Attested(false),
+            ImportedSourceAttestation::Attested(false),
+            ImportedSourceAttestation::Attested(speaker),
+        )
     }
 
     fn converted(
@@ -233,42 +364,46 @@ mod tests {
         entries: [ImportedTranscriptEntryId; 2],
         format: ImportedConversationFormat,
     ) -> ImportedConversation {
-        let source = ImportedSourceMetadata::new(
-            ImportedSourceAttestation::Attested(text("record")),
-            ImportedSourceAttestation::AttestedAbsent,
-            ImportedSourceAttestation::Attested(text("source-session")),
-            ImportedSourceAttestation::NotAttested,
-            ImportedSourceAttestation::Attested(false),
-            ImportedSourceAttestation::Attested(false),
-        );
-        ImportedConversationReconstitutionInput::new(
-            owner,
+        let raws = vec![
+            ImportedRawSourceRecord::from_converted(
+                br#"{"type":"user","message":{"role":"user","content":"first"}}"#.to_vec(),
+                object("user"),
+            ),
+            ImportedRawSourceRecord::from_converted(
+                br#"{"type":"assistant","message":{"role":"assistant","content":"second"}}"#
+                    .to_vec(),
+                object("assistant"),
+            ),
+        ];
+        ImportedConversation::from_converted_records(
             owner,
             format,
-            2,
+            raws,
             vec![
-                ImportedTranscriptEntryReconstitutionInput::new(
+                ImportedTranscriptEntryInput::new(
                     entries[0],
                     owner,
                     ImportedTranscriptPosition::first(),
-                    ImportedSpeaker::User,
+                    ImportedRawRecordPosition::first(),
+                    ImportedRecordEntryPosition::first(),
+                    ImportedSourceAttestation::Attested(ImportedSpeaker::User),
                     ImportedTranscriptContent::Text(text("first")),
-                    source.clone(),
-                    ImportedSeedDisposition::Included,
+                    metadata(ImportedSpeaker::User),
                 ),
-                ImportedTranscriptEntryReconstitutionInput::new(
+                ImportedTranscriptEntryInput::new(
                     entries[1],
                     owner,
                     ImportedTranscriptPosition::try_from_u64(2)
-                        .expect("fixture position is positive"),
-                    ImportedSpeaker::Assistant,
+                        .expect("fixture imported position is positive"),
+                    ImportedRawRecordPosition::try_from_u64(2)
+                        .expect("fixture raw position is positive"),
+                    ImportedRecordEntryPosition::first(),
+                    ImportedSourceAttestation::Attested(ImportedSpeaker::Assistant),
                     ImportedTranscriptContent::Text(text("second")),
-                    source,
-                    ImportedSeedDisposition::Included,
+                    metadata(ImportedSpeaker::Assistant),
                 ),
             ],
         )
-        .reconstitute()
         .expect("fixture aggregate is complete")
     }
 
@@ -313,18 +448,16 @@ mod tests {
         Rejected,
     }
 
-    impl std::fmt::Display for FakeConversionError {
-        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    impl fmt::Display for FakeConversionError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
             formatter.write_str("rejected")
         }
     }
 
-    impl std::error::Error for FakeConversionError {}
+    impl Error for FakeConversionError {}
 
     #[derive(Debug)]
     struct FakeConverter {
-        declared: ImportedConversationFormat,
-        converted: ImportedConversationFormat,
         returned_owner: Option<ImportedConversationId>,
         reject: bool,
         observed: Vec<(ImportedConversationId, Vec<u8>)>,
@@ -334,7 +467,7 @@ mod tests {
         type Error = FakeConversionError;
 
         fn format(&self) -> ImportedConversationFormat {
-            self.declared
+            ImportedConversationFormat::ClaudeCodeSessionJsonlV1
         }
 
         fn convert<NextEntryId>(
@@ -353,7 +486,7 @@ mod tests {
             Ok(converted(
                 self.returned_owner.unwrap_or(owner),
                 [next_entry_id(), next_entry_id()],
-                self.converted,
+                ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
             ))
         }
     }
@@ -363,39 +496,43 @@ mod tests {
         Unavailable,
     }
 
-    impl std::fmt::Display for FakeStoreError {
-        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    impl fmt::Display for FakeStoreError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
             formatter.write_str("unavailable")
         }
     }
 
-    impl std::error::Error for FakeStoreError {}
+    impl Error for FakeStoreError {}
 
     #[derive(Debug)]
     struct FakeStore {
-        response: Result<(), FakeStoreError>,
+        response: Result<ImportedConversationStoreOutcome, FakeStoreError>,
         observed: Vec<ImportedConversation>,
     }
 
     impl ImportedConversationStore for FakeStore {
         type Error = FakeStoreError;
 
-        fn insert(
+        fn resolve_or_insert(
             &mut self,
             imported: ImportedConversation,
-        ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        ) -> impl Future<Output = Result<ImportedConversationStoreOutcome, Self::Error>> + Send
+        {
             self.observed.push(imported);
             ready(self.response)
         }
     }
 
     fn service(
-        converter: FakeConverter,
-        store_response: Result<(), FakeStoreError>,
+        store_response: Result<ImportedConversationStoreOutcome, FakeStoreError>,
     ) -> ImportConversationService<FakeIds, FakeConverter, FakeStore> {
         ImportConversationService::new(
             FakeIds::new([conversation(1)], [entry(2), entry(3)]),
-            converter,
+            FakeConverter {
+                returned_owner: None,
+                reject: false,
+                observed: Vec::new(),
+            },
             FakeStore {
                 response: store_response,
                 observed: Vec::new(),
@@ -403,28 +540,32 @@ mod tests {
         )
     }
 
-    /// INV-038: one source conversion receives only caller-minted identities
-    /// and exactly one complete aggregate reaches the append-only store.
+    fn candidate_digest() -> ImportedConversationSourceDigest {
+        converted(
+            conversation(1),
+            [entry(2), entry(3)],
+            ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
+        )
+        .source_digest()
+    }
+
+    /// INV-038: first ingestion converts once and commits one complete candidate.
     #[tokio::test]
-    async fn inv038_converts_and_stores_one_complete_aggregate() {
-        let format = ImportedConversationFormat::ClaudeCodeSessionJsonlV1;
-        let mut service = service(
-            FakeConverter {
-                declared: format,
-                converted: format,
-                returned_owner: None,
-                reject: false,
-                observed: Vec::new(),
-            },
-            Ok(()),
+    async fn inv038_first_ingestion_returns_inserted_candidate() {
+        let mut service = service(Ok(ImportedConversationStoreOutcome::Inserted {
+            conversation: conversation(1),
+            source_digest: candidate_digest(),
+        }));
+
+        assert_eq!(
+            service
+                .execute(b"source bytes")
+                .await
+                .expect("complete source inserts"),
+            ImportConversationOutcome::Inserted {
+                conversation: conversation(1),
+            }
         );
-
-        let imported = service
-            .execute(b"source bytes")
-            .await
-            .expect("the complete conversion is stored");
-        assert_eq!(imported, conversation(1));
-
         let (ids, converter, store) = service.into_parts();
         assert_eq!(ids.conversation_calls, 1);
         assert_eq!(ids.entry_calls, 2);
@@ -434,24 +575,39 @@ mod tests {
         );
         assert_eq!(store.observed.len(), 1);
         assert_eq!(store.observed[0].id(), conversation(1));
-        assert_eq!(store.observed[0].format(), format);
     }
 
-    /// A conversion failure consumes no entry identities and performs no store
-    /// call, so partial imported records never become durable.
+    /// INV-038: exact reingestion discards candidates and returns the existing
+    /// immutable imported-conversation identity.
+    #[tokio::test]
+    async fn inv038_exact_reingestion_returns_existing_identity() {
+        let mut service = service(Ok(ImportedConversationStoreOutcome::AlreadyImported {
+            conversation: conversation(99),
+            source_digest: candidate_digest(),
+        }));
+
+        assert_eq!(
+            service
+                .execute(b"same source")
+                .await
+                .expect("exact duplicate resolves"),
+            ImportConversationOutcome::AlreadyImported {
+                conversation: conversation(99),
+            }
+        );
+        let (ids, _, store) = service.into_parts();
+        assert_eq!(ids.conversation_calls, 1);
+        assert_eq!(ids.entry_calls, 2);
+        assert_eq!(store.observed.len(), 1);
+    }
+
     #[tokio::test]
     async fn conversion_failure_never_reaches_store() {
-        let format = ImportedConversationFormat::ClaudeCodeSessionJsonlV1;
-        let mut service = service(
-            FakeConverter {
-                declared: format,
-                converted: format,
-                returned_owner: None,
-                reject: true,
-                observed: Vec::new(),
-            },
-            Ok(()),
-        );
+        let mut service = service(Ok(ImportedConversationStoreOutcome::Inserted {
+            conversation: conversation(1),
+            source_digest: candidate_digest(),
+        }));
+        service.converter.reject = true;
 
         assert_eq!(
             service.execute(b"rejected").await,
@@ -466,20 +622,13 @@ mod tests {
         assert!(store.observed.is_empty());
     }
 
-    /// A converter cannot substitute another hub identity before persistence.
     #[tokio::test]
     async fn converter_identity_mismatch_never_reaches_store() {
-        let format = ImportedConversationFormat::ClaudeCodeSessionJsonlV1;
-        let mut service = service(
-            FakeConverter {
-                declared: format,
-                converted: format,
-                returned_owner: Some(conversation(9)),
-                reject: false,
-                observed: Vec::new(),
-            },
-            Ok(()),
-        );
+        let mut service = service(Ok(ImportedConversationStoreOutcome::Inserted {
+            conversation: conversation(1),
+            source_digest: candidate_digest(),
+        }));
+        service.converter.returned_owner = Some(conversation(9));
 
         assert_eq!(
             service.execute(b"cross-wired").await,
@@ -492,21 +641,38 @@ mod tests {
         assert!(store.observed.is_empty());
     }
 
-    /// A store failure is returned after exactly one complete insert attempt;
-    /// the service does not retry with another identity.
+    #[tokio::test]
+    async fn store_outcome_mismatches_fail_closed() {
+        let expected_digest = candidate_digest();
+        let different_digest = ImportedConversationSourceDigest::from_bytes([9; 32]);
+        let mut wrong_digest = service(Ok(ImportedConversationStoreOutcome::AlreadyImported {
+            conversation: conversation(99),
+            source_digest: different_digest,
+        }));
+        assert_eq!(
+            wrong_digest.execute(b"source").await,
+            Err(ImportConversationError::StoreSourceDigestMismatch {
+                expected: expected_digest,
+                actual: different_digest,
+            })
+        );
+
+        let mut wrong_inserted_id = service(Ok(ImportedConversationStoreOutcome::Inserted {
+            conversation: conversation(99),
+            source_digest: expected_digest,
+        }));
+        assert_eq!(
+            wrong_inserted_id.execute(b"source").await,
+            Err(ImportConversationError::StoreInsertedIdentityMismatch {
+                expected: conversation(1),
+                actual: conversation(99),
+            })
+        );
+    }
+
     #[tokio::test]
     async fn store_failure_is_not_retried() {
-        let format = ImportedConversationFormat::ClaudeCodeSessionJsonlV1;
-        let mut service = service(
-            FakeConverter {
-                declared: format,
-                converted: format,
-                returned_owner: None,
-                reject: false,
-                observed: Vec::new(),
-            },
-            Err(FakeStoreError::Unavailable),
-        );
+        let mut service = service(Err(FakeStoreError::Unavailable));
 
         assert_eq!(
             service.execute(b"complete").await,
