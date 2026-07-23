@@ -48,18 +48,20 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — twelve files, `202607180001` through
-`202607220003` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
+`crates/persistence/migrations/` — thirteen files, `202607180001` through
+`202607230001` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
 applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
 records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
 behavior, relied on but not demonstrated in this repo. `.gitattributes` pins
 migration files to LF so checksums do not vary by platform, and a build script
-re-embeds the set whenever a file changes. The production binary wires the
-required ordering (INV-034): `apps/hubd` (`migrate_scan_then_schedule`) runs
-`migrate` as its first startup phase, then the startup scan, then the scheduler.
-Why: checksummed forward-only files make every schema change a reviewed,
-immutable artifact, so a deployed database's history is never silently edited.
+re-embeds the set whenever a file changes. The production binary holds the
+singleton hub guard and fences the prior pool generation, then runs `migrate` as
+its first schema phase, followed by the startup scan and runtime (INV-034). The
+fence migration's first installation is the sole case without a prior fenced
+pool, because no earlier schema can have admitted one. Why: checksummed
+forward-only files make every schema change a reviewed, immutable artifact, so a
+deployed database's history is never silently edited.
 
 Container-backed integration tests (`postgres-integration` feature, ignored by
 default, failing loudly when Docker is absent) exercise the real constraints,
@@ -74,7 +76,7 @@ is the durable statement of record, and no state is rebuilt by replaying events
 constraints over current-state rows; an event log would move them back into
 projection code.
 
-Implemented table families (across the twelve migrations):
+Implemented table families (across the thirteen migrations):
 
 - `durable_command` plus typed command records (`create_session_command`,
   `replace_session_defaults_command`, `submit_input_command`);
@@ -86,6 +88,8 @@ Implemented table families (across the twelve migrations):
   provider-target pin on `turn_lifecycle`, and its pinned
   `credential_reference`);
 - `semantic_transcript_entry`, `context_frontier`, `context_frontier_member`;
+- the singleton `hub_fence_state`, which supplies the generation used by
+  hub-owned session advisory pool fences;
 - the outbox family (below).
 
 Representation rules, all enforced in the schema:

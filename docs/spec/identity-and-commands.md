@@ -126,9 +126,10 @@ identifying the kind. The hubd startup-failure site logs
 of `Option<SessionId>`/`Option<TurnId>`, which renders `Some(SessionId(..))` or
 `None`, not bare canonical UUID text (`apps/hubd/src/main.rs`).
 
-No wire encoding exists: there is no protocol surface, and commands enter only
-through in-process application services. Wire field types remain reserved (see
-Open edges).
+The local [process protocol](process-protocol.md) maps identity values at its
+wire adapter boundary and admits commands through the same application services;
+domain types acquire no serialization trait. Public URL identity forms remain
+open.
 
 ## Durable command records
 

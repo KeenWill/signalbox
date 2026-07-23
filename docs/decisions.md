@@ -10,6 +10,45 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-23 — Fence database pools across hub incarnations
+
+**Context.** Losing only the dedicated singleton-guard session releases its
+advisory lock while the old process can still have usable pooled sessions. A
+successor that ran recovery immediately could overlap those old writers; a
+monitoring interval or graceful drain cannot close that authority gap.
+
+**Decision.** Add a durable positive hub-fence generation and session advisory
+pool fencing as specified by
+[process-protocol](spec/process-protocol.md#durable-update-dispatch). A
+successor retains the prior generation exclusively before advancing to its own
+shared pool generation. Guard loss cancels rather than gracefully drains the old
+runtime.
+
+**Rejected alternatives.** Polling faster still leaves a gap. Treating row-lock
+serialization as sufficient allows work admitted after the successor's scan.
+Adding a fence check separately to every repository is broader and easier to
+omit than fencing each pool connection before use.
+
+**Affects.** The persistence schema, production pool construction, hub startup
+and fatal shutdown, and the single-hub guarantee.
+
+## 2026-07-23 — Serialize process-socket ownership with a sidecar lock
+
+**Context.** A metadata recheck followed by `unlink` is not an atomic
+compare-and-remove. Two conforming same-user hubs configured with one path could
+both validate a stale inode before one removes the other's newly bound socket.
+
+**Decision.** Hold one verified owner-only advisory lock at `<socket-path>.lock`
+across stale inspection, bind, service, and graceful socket cleanup. The sidecar
+persists so every incarnation coordinates on the same file.
+
+**Rejected alternatives.** Another `lstat` cannot close the final unlink race.
+Never cleaning stale sockets makes ordinary crash recovery manual. Treating
+same-user peers as benign does not satisfy deterministic behavior for two
+misconfigured hub processes.
+
+**Affects.** The local process transport's startup and cleanup protocol.
+
 ## 2026-07-23 — Poll the single-hub guard once per second
 
 **Context.** A PostgreSQL session advisory lock is released when its dedicated
@@ -19,8 +58,9 @@ first continues through a reconnected pool.
 
 **Decision.** While the runtime is active, the hub proves the dedicated guard
 connection usable once per second. Any check or connection failure is a fatal
-runtime condition that stops request admission, dispatch, and scheduling
-together; the process never reacquires the guard in place.
+runtime condition that cancels request admission, dispatch, and scheduling
+together without graceful drain; the process never reacquires the guard in
+place. Pool-incarnation fencing separately prevents successor overlap.
 
 **Rejected alternatives.** Depending on operating-system TCP failure timing
 would leave detection unbounded. Reacquiring in place would skip guarded startup
