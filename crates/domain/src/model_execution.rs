@@ -2801,24 +2801,32 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![first, second]
         );
-        for (consumed, (accepted_input, entry)) in prepared
-            .consumed_steering()
-            .iter()
-            .zip([(first, entry_ids[0]), (second, entry_ids[1])])
-        {
-            assert_eq!(
-                consumed.accepted_input().disposition(),
-                &AcceptedInputDisposition::ConsumedAsSteering { call }
-            );
-            assert_eq!(consumed.semantic_entry().identity(), entry);
-            assert_eq!(
-                consumed.semantic_entry().payload(),
-                &SemanticTranscriptEntryPayload::SteeringAcceptedInput {
-                    accepted_input,
-                    source_turn: turn_id(3),
-                }
-            );
-        }
+        let first_consumed = &prepared.consumed_steering()[0];
+        assert_eq!(
+            first_consumed.accepted_input().disposition(),
+            &AcceptedInputDisposition::ConsumedAsSteering { call }
+        );
+        assert_eq!(first_consumed.semantic_entry().identity(), entry_ids[0]);
+        assert_eq!(
+            first_consumed.semantic_entry().payload(),
+            &SemanticTranscriptEntryPayload::SteeringAcceptedInput {
+                accepted_input: first,
+                source_turn: turn_id(3),
+            }
+        );
+        let second_consumed = &prepared.consumed_steering()[1];
+        assert_eq!(
+            second_consumed.accepted_input().disposition(),
+            &AcceptedInputDisposition::ConsumedAsSteering { call }
+        );
+        assert_eq!(second_consumed.semantic_entry().identity(), entry_ids[1]);
+        assert_eq!(
+            second_consumed.semantic_entry().payload(),
+            &SemanticTranscriptEntryPayload::SteeringAcceptedInput {
+                accepted_input: second,
+                source_turn: turn_id(3),
+            }
+        );
         assert_eq!(
             prepared
                 .steering_snapshot()

@@ -1763,33 +1763,48 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
         AcceptedInputId::from_uuid(Uuid::from_u128(0x19e2)),
         AcceptedInputId::from_uuid(Uuid::from_u128(0x19e3)),
     ];
-    for (index, (accepted_input, content)) in steering_inputs
-        .into_iter()
-        .zip(["first steering", "second steering"])
-        .enumerate()
-    {
-        let result = SubmitInputRepository::new(pool.clone())
-            .handle(
-                SubmitInput::new(
-                    DurableCommandId::from_uuid(Uuid::from_u128(0x14e3 + index as u128)),
-                    session,
-                    UserContent::try_text(content.to_owned())
-                        .expect("fixture steering content is admitted"),
-                    DeliveryRequest::NextSafePoint {
-                        expected_active_turn: turn,
-                    },
-                ),
-                accepted_input,
-                None,
-            )
-            .await?;
-        assert!(matches!(
-            result,
-            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
-                SubmitInputAppliedResult::PendingSteering(_)
-            ))
-        ));
-    }
+    let first_steering = SubmitInputRepository::new(pool.clone())
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0x14e3)),
+                session,
+                UserContent::try_text(String::from("first steering"))
+                    .expect("fixture steering content is admitted"),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: turn,
+                },
+            ),
+            steering_inputs[0],
+            None,
+        )
+        .await?;
+    assert!(matches!(
+        first_steering,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::PendingSteering(_)
+        ))
+    ));
+    let second_steering = SubmitInputRepository::new(pool.clone())
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0x14e4)),
+                session,
+                UserContent::try_text(String::from("second steering"))
+                    .expect("fixture steering content is admitted"),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: turn,
+                },
+            ),
+            steering_inputs[1],
+            None,
+        )
+        .await?;
+    assert!(matches!(
+        second_steering,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::PendingSteering(_)
+        ))
+    ));
 
     let provider_identity = ProviderModelIdentity::from_uuid(Uuid::from_u128(0x1fe1));
     let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
@@ -1873,20 +1888,33 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
         .last_prepared_messages()
         .expect("the scripted provider observed the prepared messages");
     assert_eq!(messages.len(), 3);
-    for (message, (expected_input, expected_text)) in messages.iter().zip([
-        (accepted_input, "service user request"),
-        (steering_inputs[0], "first steering"),
-        (steering_inputs[1], "second steering"),
-    ]) {
-        assert!(matches!(
-            message,
-            ModelConversationMessage::User {
-                accepted_input,
-                content,
-                ..
-            } if *accepted_input == expected_input && content.text().as_str() == expected_text
-        ));
-    }
+    assert!(matches!(
+        &messages[0],
+        ModelConversationMessage::User {
+            accepted_input: message_input,
+            content,
+            ..
+        } if *message_input == accepted_input
+            && content.text().as_str() == "service user request"
+    ));
+    assert!(matches!(
+        &messages[1],
+        ModelConversationMessage::User {
+            accepted_input: message_input,
+            content,
+            ..
+        } if *message_input == steering_inputs[0]
+            && content.text().as_str() == "first steering"
+    ));
+    assert!(matches!(
+        &messages[2],
+        ModelConversationMessage::User {
+            accepted_input: message_input,
+            content,
+            ..
+        } if *message_input == steering_inputs[1]
+            && content.text().as_str() == "second steering"
+    ));
 
     let durable_terminal: (i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
