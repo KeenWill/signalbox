@@ -12,10 +12,7 @@
 //! or predecessor origin facts, including the current lifecycle and queue facts
 //! that make an immutable pending-steering receipt visible as reclassified
 //! origin work. Replaying the pending receipt itself remains independent of its
-//! later mutable disposition. Safe-point stopping replay remains closed until
-//! complete stop evidence can be supplied. This slice does not consume
-//! steering, apply interruption, construct an interrupt proof, transition turn
-//! lifecycle, or perform persistence.
+//! later mutable disposition.
 
 use std::{
     collections::HashSet,
@@ -233,9 +230,9 @@ impl SubmitInput {
     /// `StartWhenNoActiveTurn` records the active slot owner, stale
     /// active-work requests record both expected and actual turns, matching
     /// after-current input creates ordinary queued origin work, and matching
-    /// next-safe-point input creates pending steering. Interrupt application
-    /// remains a nonclaiming preparation failure, and stopping-phase handling
-    /// remains closed until its complete owner projection exists.
+    /// next-safe-point input creates pending steering. A matching interrupt
+    /// prepares a proof-bearing immediate-successor origin; a stopping turn
+    /// returns the treatment-specific recorded rejection.
     pub fn prepare_with_active_turn(
         self,
         scheduling: &AcceptedInputSchedulingProjection,
