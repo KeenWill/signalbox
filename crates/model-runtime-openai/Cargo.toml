@@ -10,8 +10,13 @@ publish.workspace = true
 [dependencies]
 futures-util = { version = "0.3.31", default-features = false, features = ["std"] }
 reqwest = { version = "0.13.4", default-features = false, features = [
-    "rustls",
+    "rustls-no-provider",
     "stream",
+] }
+rustls = { version = "0.23.42", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
 ] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = { version = "1.0.140", features = ["raw_value"] }

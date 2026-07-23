@@ -226,6 +226,9 @@ impl<A: CredentialAccess> OpenAiRuntime<A> {
             })?
             .pop_if_empty()
             .extend(["v1", "chat", "completions"]);
+        // The workspace graph selects only ring; installation may already
+        // have occurred through SQLx in the composed process.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let mut builder = Client::builder()
             .tls_backend_rustls()
             .tls_version_min(reqwest::tls::Version::TLS_1_2)
@@ -2019,6 +2022,7 @@ mod tests {
 
     #[test]
     fn request_build_failure_is_a_preparation_defect() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let builder = reqwest::Client::new()
             .get("http://127.0.0.1/")
             .header("invalid\nheader", "value");
