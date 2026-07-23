@@ -33,7 +33,9 @@ later client-invoked session-creation fact. Both select any addressable imported
 frontier and leave the imported snapshot unchanged. Imported semantic entries
 remain provenance-distinct from native evidence. Initial rendering emits exact
 imported user/assistant text and conservatively omits imported tool, result,
-thinking, and media entries without removing them from the frontier.
+thinking, and media entries without removing them from the frontier. Claude Code
+JSONL version 1 admits at most 128 nested array or object containers, bounding
+its recursive source-neutral JSON decoder.
 
 **Rejected alternatives.** Replaying imports as native turns or copying them
 into native accepted-input/model-call variants would fabricate execution
@@ -44,7 +46,9 @@ leave no checked frontier. Flattening absence, repairing parent chains,
 discarding tool/thinking/media payloads, or rendering them as native tool
 traffic would invent or lose facts. Provider JSON in the domain would make every
 later format a schema-wide concern. Non-cryptographic or unframed hashes would
-provide weaker collision and concatenation boundaries.
+provide weaker collision and concatenation boundaries. Unbounded recursive JSON
+decoding risks stack exhaustion; adding a stack-growth dependency for this
+edge-format parser is unnecessary at the fixed depth.
 
 **Affects.** S28; INV-001/INV-002/INV-003/INV-005/INV-038/INV-039; conversation
 ingestion and idempotency, raw-record storage, imported frontier selection,

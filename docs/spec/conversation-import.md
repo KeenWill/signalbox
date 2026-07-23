@@ -100,12 +100,13 @@ The closed normalized content vocabulary is:
 
 - `SourceEvent`, retaining the source record-type attestation and complete
   normalized record for a non-message record;
-- `Text`, retaining exact user or assistant text;
+- `Text`, retaining attested exact user or assistant text or the field's precise
+  typed absence;
 - `ToolCall`, retaining independently attested source call identity, tool name,
   structured input, and caller metadata;
 - `ToolResult`, retaining independently attested source call identity, error
   flag, and either exact text or an ordered sequence of typed text, image, and
-  tool-reference result blocks;
+  tool-reference result blocks whose own fields also retain attestations;
 - `Thinking`, retaining independently attested exact thinking and signature;
 - `RedactedThinking`, retaining the source's independently attested redacted
   data; and
@@ -183,7 +184,8 @@ file order:
    `document` blocks map to their corresponding normalized variants. Tool-result
    arrays admit ordered `text`, `image`, and `tool_reference` blocks. All
    modeled fields retain their exact decoded or structured values and typed
-   attestations.
+   attestations; a `text` or image-result block whose value is omitted or null
+   remains that block with precise typed absence.
 5. An unknown content shape, content-block type, or tool-result block type fails
    the complete conversion rather than being silently dropped or guessed.
 
@@ -194,10 +196,11 @@ references, document blocks, attachments, and administrative source events. No
 surveyed transcript content or path is copied into the repository.
 
 Malformed JSON, a blank line, invalid UTF-8, unsupported content, an identity
-collision inside the candidate set, a position overflow, or a source with no
-JSON records rejects the complete conversion. U+0000, empty strings, and a
-source containing only non-message records do not: raw and normalized storage
-retain them.
+collision inside the candidate set, a position overflow, JSON deeper than 128
+nested array or object containers, or a source with no JSON records rejects the
+complete conversion. The depth bound applies to every complete source record and
+modeled nested value. U+0000, empty strings, and a source containing only
+non-message records do not: raw and normalized storage retain them.
 
 ## Persistence and reconstitution
 

@@ -108,9 +108,10 @@ projects the exact frontier order into provider-neutral messages:
   input's checked content;
 - `AssistantText` renders as an assistant message retaining its producing-call
   provenance;
-- imported `Text` renders with its imported user or assistant speaker and exact
-  decoded text, retaining the imported-entry reference rather than a native
-  accepted-input or producing-call identity;
+- imported `Text` with an attested value renders with its imported user or
+  assistant speaker and exact decoded text, retaining the imported-entry
+  reference rather than a native accepted-input or producing-call identity; a
+  text block with typed value absence is skipped;
 - imported `SourceEvent`, `MessageContentAbsent`, `ToolCall`, `ToolResult`,
   `Thinking`, `RedactedThinking`, and `Document` entries are skipped by the
   first conservative renderer while remaining in the exact context frontier;

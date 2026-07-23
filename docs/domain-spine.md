@@ -189,15 +189,15 @@ impl ImportedMediaSource {
 }
 
 pub enum ImportedToolResultBlock {
-    Text(ImportedText),
-    Image(ImportedMediaSource),
+    Text(ImportedSourceAttestation<ImportedText>),
+    Image(ImportedSourceAttestation<ImportedMediaSource>),
     ToolReference {
         tool_name: ImportedSourceAttestation<ImportedText>,
     },
 }
 
 pub enum ImportedToolResultValue {
-    Text(ImportedText),
+    Text(ImportedSourceAttestation<ImportedText>),
     Blocks(Box<[ImportedToolResultBlock]>),
 }
 
