@@ -776,9 +776,9 @@ impl CredentialAccess for RotatingKey {
 
 #[tokio::test]
 async fn inv_035_api_key_rotation_is_visible_to_the_next_preparation() {
-    // ADR-0017: the credential is read during send preparation of each
-    // physical request; a rotated value must reach the next request without
-    // reconstructing the runtime.
+    // `docs/spec/configuration-and-credentials.md`: the credential is read
+    // during send preparation of each physical request; a rotated value must
+    // reach the next request without reconstructing the runtime.
     let server = CannedServer::serving(vec![
         http_response("200 OK", &[], b"{}"),
         http_response("200 OK", &[], b"{}"),
@@ -872,8 +872,9 @@ async fn a_401_with_an_unrecognized_error_token_still_classifies_by_status() {
 
 #[tokio::test]
 async fn inv_035_provider_error_text_reflecting_the_key_is_redacted() {
-    // ADR-0017: evidence carries typed classes and rendered detail, never
-    // credential values — even when an endpoint reflects the key.
+    // Per `docs/spec/runtime-substrate.md`, evidence carries typed classes
+    // and rendered detail, never credential values — even when an endpoint
+    // reflects the key.
     let body = br#"{"type":"error","error":{"type":"authentication_error",
                     "message":"invalid x-api-key: key_loop"}}"#;
     let server = CannedServer::serving(vec![http_response(

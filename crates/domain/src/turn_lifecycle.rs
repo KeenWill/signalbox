@@ -1,6 +1,6 @@
 //! Turn-lifecycle phase, ambiguity, reconciliation, and disposition values.
 //!
-//! ADR-0004, ADR-0027, ADR-0030, and ADR-0031 are normative. This module
+//! docs/spec/turn-lifecycle-and-scheduling.md is normative. This module
 //! deliberately stops at value constructibility: authoritative eligibility
 //! and terminal aggregate transitions require complete evidence boundaries
 //! that are not yet implemented. The sealed fatal-mismatch binding can

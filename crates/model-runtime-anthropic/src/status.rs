@@ -1,11 +1,11 @@
-//! Exhaustive native error classification (ADR-0043).
+//! Exhaustive native error classification (`docs/spec/runtime-substrate.md`).
 //!
-//! ADR-0043 requires each real adapter to define an exhaustive, mutually
-//! exclusive mapping of its provider-native terminal statuses and payloads.
-//! Both mappings below are single `match` expressions, so exhaustiveness and
-//! mutual exclusivity hold by construction; an unknown token or status lands
-//! in [`ProviderErrorKind::Unrecognized`] with the native material retained
-//! on the evidence rather than being guessed at.
+//! The runtime-substrate spec requires each real adapter to define an
+//! exhaustive, mutually exclusive mapping of its provider-native terminal
+//! statuses and payloads. Both mappings below are single `match` expressions,
+//! so exhaustiveness and mutual exclusivity hold by construction; an unknown
+//! token or status lands in [`ProviderErrorKind::Unrecognized`] with the
+//! native material retained on the evidence rather than being guessed at.
 
 use signalbox_model_runtime::ProviderErrorKind;
 
@@ -28,7 +28,8 @@ pub(crate) fn classify_error_token(token: &str) -> ProviderErrorKind {
 /// Classifies a definitive error response by HTTP status alone — the
 /// fallback when the error body does not parse as the documented envelope.
 /// The response is still a complete terminal error status, so it stays
-/// definitive known-failure evidence (ADR-0043) with the raw body retained.
+/// definitive known-failure evidence per the runtime-substrate spec, with
+/// the raw body retained.
 pub(crate) fn classify_error_status(status: u16) -> ProviderErrorKind {
     match status {
         400 => ProviderErrorKind::InvalidRequest,
@@ -110,8 +111,9 @@ mod tests {
 
     #[test]
     fn credential_rejection_is_typed_not_string_matched() {
-        // ADR-0017/ADR-0043: provider-side credential rejection must stay
-        // distinguishable without reading rendered messages.
+        // `docs/spec/runtime-substrate.md`: provider-side credential
+        // rejection must stay distinguishable without reading rendered
+        // messages.
         assert_eq!(
             classify_error_token("authentication_error"),
             signalbox_model_runtime::ProviderErrorKind::CredentialRejected

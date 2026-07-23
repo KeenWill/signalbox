@@ -11,12 +11,14 @@ credential channels, delivery, and rotation discipline
 ([configuration-and-credentials](configuration-and-credentials.md)), and the
 authoritative transcript commit
 ([sessions-and-transcript](sessions-and-transcript.md)) are owned by those
-companion pages.
+companion pages. This page also owns the shared
+[operator failure taxonomy](#operator-failure-taxonomy) — defined in
+`crates/application` and consumed by hubd telemetry.
 
 ## Boundary and crate layout
 
 The runtime layer is three library crates, hand-rolled per the 2026-07-20
-[decision-ledger entry](../decisions.md) that closed ADR-0047's
+[decision-ledger entry](../decisions.md) that closed the substrate's
 vendor-versus-hand-roll question: one provider-neutral core crate plus
 separately named provider adapters, with SerdesAI as a design reference only.
 `signalbox-model-runtime` is the shared vocabulary; the Anthropic and OpenAI
@@ -327,6 +329,35 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
   so a secret split across provider chunks can never be emitted piecewise; when
   ordering forces a held prefix out, it is replaced with `[redacted]`. Why: fail
   closed — a possible secret prefix is destroyed rather than delivered.
+
+## Operator failure taxonomy
+
+`crates/application/src/operator_failure.rs` defines the one closed
+operator-facing failure classification shared by application services, the
+persistence adapters, and hubd telemetry: the scheduling and model-call error
+families (startup scan, turn activation, eligibility sweep, model-call
+repository) map into `OperatorFailureClass` through the
+`ClassifyOperatorFailure` trait, exposing a user-content-free classification to
+shared telemetry while the underlying error keeps its diagnostic detail
+internally. The four classes:
+
+- **`Infrastructure { commit_ambiguous }`** — the operation could not complete;
+  the flag marks failures whose transaction fate is unknown (commit-ambiguity
+  handling: [persistence-protocol](persistence-protocol.md)).
+- **`FailClosedCorruption`** — committed rows cannot construct the accepted
+  domain value (fail-closed reconstitution:
+  [persistence-protocol](persistence-protocol.md)).
+- **`IdentityCollision`** — a fresh hub-minted candidate identity collided with
+  a durable identity (per-stage retry rule:
+  [model-call-execution](model-call-execution.md)).
+- **`CallerOrHubBug`** — a request or internal guard that can fail only because
+  of a defect, kept distinct from corruption.
+
+Concurrent staleness is not a class: a guarded write that matches zero rows is
+consumed inside adapters by reload-and-rederive
+([persistence-protocol](persistence-protocol.md)) unless the transaction's own
+premises made a match mandatory, so the taxonomy classifies only genuine
+failures after staleness handling.
 
 ## Open edges
 

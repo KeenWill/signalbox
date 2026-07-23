@@ -90,10 +90,11 @@ pub(crate) fn convert_tool_call(call: &WireResponseToolCall) -> Result<ToolCallP
 ///
 /// A body that is not the documented completion material — unparseable, not
 /// exactly one choice, missing its finish reason, or carrying an
-/// unrecognizable tool call — is boundary-loss evidence (ADR-0043: a success
-/// status without valid completion material is not definitive), with the
-/// facts observed before the defect retained. A non-empty `refusal` payload
-/// or a `content_filter` finish is refusal evidence, never completion.
+/// unrecognizable tool call — is boundary-loss evidence (per
+/// `docs/spec/runtime-substrate.md`, a success status without valid
+/// completion material is not definitive), with the facts observed before
+/// the defect retained. A non-empty `refusal` payload or a `content_filter`
+/// finish is refusal evidence, never completion.
 pub(crate) fn decode_buffered_response<C: Clone>(
     body: &[u8],
     exchange: ExchangeFacts,

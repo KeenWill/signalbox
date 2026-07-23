@@ -1,8 +1,9 @@
 //! Owner-initiated, no-ancestry session-creation orchestration.
 //!
-//! ADR-0033 owns identity supply, ADR-0034 owns durable-command replay, and
-//! ADR-0038 keeps the recorded creation receipt distinct from a separately
-//! loaded current [`signalbox_domain::Session`] snapshot.
+//! docs/spec/identity-and-commands.md owns identity supply and
+//! durable-command replay, and docs/spec/sessions-and-transcript.md keeps
+//! the recorded creation receipt distinct from a separately loaded current
+//! [`signalbox_domain::Session`] snapshot.
 
 use std::{error::Error, fmt, future::Future};
 
@@ -15,10 +16,10 @@ use signalbox_domain::{
 
 /// Why a caller-supplied command identity cannot enter canonical construction.
 ///
-/// ADR-0033 reserves nil and max UUIDs as invalid sentinel-like command
-/// identities. Rejection occurs while constructing a validated application
-/// request, before domain command construction, identity generation, or
-/// durable-command lookup.
+/// docs/spec/identity-and-commands.md reserves nil and max UUIDs as invalid
+/// sentinel-like command identities. Rejection occurs while constructing a
+/// validated application request, before domain command construction,
+/// identity generation, or durable-command lookup.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InvalidDurableCommandId {
     /// The supplied UUID contains all zero bits.

@@ -4,44 +4,38 @@ This is the inventory of unresolved foundational questions. A "leaning" guides
 exploration but is not a decision. Closing a question requires an entry in the
 [decision log](decisions.md) or, at foundation weight, a foundation-level
 accepted record. Accepted decisions are specified in the
-[living specification](spec/README.md) — whose ADR mapping resolves historical
-ADR names — and the decision log; scenario identifiers refer to
-[scenarios.md](scenarios.md).
-
-Some questions carry an ADR number reserved by earlier planning and cited from
-accepted records; those numbers remain reserved for their topics.
+[living specification](spec/README.md) and the decision log; scenario
+identifiers refer to [scenarios.md](scenarios.md).
 
 ## Identity representation
 
-- **Wire identity representation.** ADR-0033
-  ([identity-and-commands](spec/identity-and-commands.md)) closes generation,
+- **Wire identity representation.**
+  [identity-and-commands](spec/identity-and-commands.md) closes generation,
   supply, minting authority, and baseline Postgres encoding. Protocol field
   types, public URL forms, and wire serialization remain open; the retired
-  ADR-0019 and ADR-0021 protocol designs are unimplemented and carry no current
-  authority, so future client-protocol work is designed fresh as a specification
-  diff. Blocks cross-process protocols, not persistence. (S01, S02, S04, S08,
-  S10, S12)
-- **Semantic transcript-entry extensions and rendering.** ADR-0036 fixes
+  protocol designs are unimplemented and carry no current authority, so future
+  client-protocol work is designed fresh as a specification diff. Blocks
+  cross-process protocols, not persistence. (S01, S02, S04, S08, S10, S12)
+- **Semantic transcript-entry extensions and rendering.**
+  [sessions-and-transcript](spec/sessions-and-transcript.md) fixes
   origin-accepted-input and failed-turn payloads plus their eligibility and
-  terminal-failure commit boundaries, and ADR-0042 fixes assistant text, logical
+  terminal-failure commit boundaries, together with assistant text, logical
   tool-use references, completed-turn markers, and their final response commit
-  boundary; both are specified in
-  [sessions-and-transcript](spec/sessions-and-transcript.md). Refusal,
-  cancellation, reconciliation, mismatch, accepted-risk, steering, tool-result,
-  approval, and delegation variants remain open together with rich assistant
-  content and provider/client rendering. The M3 boundary and its reopening
-  obligation are recorded in the
+  boundary. Refusal, cancellation, reconciliation, mismatch, accepted-risk,
+  steering, tool-result, approval, and delegation variants remain open together
+  with rich assistant content and provider/client rendering. The M3 boundary and
+  its reopening obligation are recorded in the
   [pending-steering fail-closed decision](decisions.md#2026-07-22--m3-pending-steering-fail-closed-boundary).
   Blocks only those later semantic-history slices. (S02–S04, S08, S09, S17)
 - **Selectable transcript-frontier boundaries.** Which terminal semantic
-  boundaries a client may select as a `TranscriptFrontier` remains open;
-  ADR-0030 decides only how a validated selection resolves into a new session's
-  context. Blocks fork selection. (S17)
+  boundaries a client may select as a `TranscriptFrontier` remains open; the
+  accepted frontier semantics decide only how a validated selection resolves
+  into a new session's context. Blocks fork selection. (S17)
 
 ## Accepted-input content
 
-- **Content extensions and rendering.** ADR-0037
-  ([sessions-and-transcript](spec/sessions-and-transcript.md)) fixes the initial
+- **Content extensions and rendering.**
+  [sessions-and-transcript](spec/sessions-and-transcript.md) fixes the initial
   text-only `UserContent` value, exact equality, and PostgreSQL mapping. Rich
   content, attachments, other non-text variants, resource governance, and
   provider/client rendering remain open. Blocks those extensions, not the first
@@ -53,14 +47,14 @@ accepted records; those numbers remain reserved for their topics.
   [M3 rendering decision](decisions.md#2026-07-22--render-the-initial-model-frontier-by-semantic-entry-role)
   fixes only the admitted text-entry role mapping and exact frontier order.
   Semantic compaction, selective omission, summarization, rebasing, and
-  context-window policy remain routed to ADR-0030's extension gate and
-  ADR-0036's open-question routing — owned today by
+  context-window policy remain routed through the accepted frontier extension
+  gate and semantic-entry open-question routing — owned today by
   [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md) and
   [sessions-and-transcript](spec/sessions-and-transcript.md) — including their
   foundation-decision requirements. Blocks those extensions, not the admitted
   text-only M3 rendering. (S02, S17)
 
-## Delegation (reserved ADR-0002)
+## Delegation
 
 - **Parent cancellation propagation to active delegated children.** Leaning:
   explicit relationship policy with visible child outcomes. Blocks delegation.
@@ -70,8 +64,9 @@ accepted records; those numbers remain reserved for their topics.
 - **Representation of child results in the parent conversation.** Leaning:
   structured durable reference plus explicit delivered content. Blocks
   delegation. (S18, S19)
-- **Waits on delegated children and the progressing-turn slot.** ADR-0004 defers
-  child waits to the delegation decision. Blocks delegation. (S18, S19)
+- **Waits on delegated children and the progressing-turn slot.** The accepted
+  turn lifecycle defers child waits to the delegation decision. Blocks
+  delegation. (S18, S19)
 - **Multi-source or merged transcript ancestry.** Accepted baseline is none or
   one immutable source frontier with an explicit extension boundary. Deferrable.
   (S17)
@@ -79,22 +74,28 @@ accepted records; those numbers remain reserved for their topics.
 ## Queue management
 
 - **Editing, canceling, reordering, or changing delivery policy of queued
-  input.** Excluded from the accepted ADR-0027 baseline; any addition needs
-  explicit dispositions. Later scope. (S09)
+  input.** Excluded from the accepted input-delivery baseline; any addition
+  needs explicit dispositions. Later scope. (S09)
 
 ## Turn lifecycle
 
-- **Standalone active-turn cancellation.** Not a baseline feature: ADR-0004
-  defines cancellation authority only through applied interrupts, and adding a
-  standalone command requires a future ADR with its own proof and disposition
-  rules. Later scope. (S07)
-- **Direct interrupt-only reconciliation from a running attempt.** ADR-0031
-  ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)) adds
+- **Standalone active-turn cancellation.** Not a baseline feature: the accepted
+  turn lifecycle defines cancellation authority only through applied interrupts,
+  and adding a standalone command requires a future foundation decision with its
+  own proof and disposition rules. Later scope. (S07)
+- **Ambiguous provider-call recovery.** A restart-recovered in-flight call parks
+  its turn in the awaiting-recovery wait
+  ([model-call-execution](spec/model-call-execution.md)) with no resolving
+  writer yet. The retired design analysis identified adopting a provider
+  request-status API — with its polling posture and evidence classes — as the
+  resolution path; the full analysis is in git history. Later scope. (S02)
+- **Direct interrupt-only reconciliation from a running attempt.**
+  [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md) adds
   direct reconciliation only for fatal mismatch at a closed aggregate boundary;
   whether an interrupt-only path may bypass `StopRequested` remains undecided.
   Later scope. (S07)
 
-## Archival and retention (reserved ADR-0028, ADR-0029)
+## Archival and retention
 
 - **Archive eligibility, nonterminal work handling, and restore target.**
   Leaning: preserve identity and history; never silently abandon work. Blocks
@@ -108,22 +109,21 @@ accepted records; those numbers remain reserved for their topics.
 ## Regeneration
 
 - **Regeneration command acceptance, queue placement, source frontier, and
-  relation representation.** The identity rule is accepted by ADR-0004 (always
-  new logical work; never reopen the original); the rest blocks the regeneration
-  feature. (S26)
+  relation representation.** The identity rule is accepted (always new logical
+  work; never reopen the original); the rest blocks the regeneration feature.
+  (S26)
 
 ## Configuration categories
 
 - **Additional effective-configuration categories.** System prompts, prompt
   templates, custom parameters, instructions, tool enablement/configuration,
   placement constraints, per-turn resources, and interpreting-policy selections
-  are unavailable baseline capabilities; a future subsystem ADR must extend the
-  request, session-default, override, and effective-value algebras together
-  (ADR-0027;
-  [configuration-and-credentials](spec/configuration-and-credentials.md)).
+  are unavailable baseline capabilities; a future subsystem decision must extend
+  the request, session-default, override, and effective-value algebras together
+  ([configuration-and-credentials](spec/configuration-and-credentials.md)).
   Blocks those capabilities. (S02, S05, S13–S16)
 
-## Model fallback and provenance (reserved ADR-0006, ADR-0007)
+## Model fallback and provenance
 
 - **Whether version one supports automatic fallback.** Leaning: none until an
   explicit policy is justified. Deferrable for the first provider slice. (S22,
@@ -135,12 +135,13 @@ accepted records; those numbers remain reserved for their topics.
   policy, per-call provenance, and clear UI; no constructible fallback
   configuration exists in the baseline. Blocks fallback. (S20, S22)
 - **Model identifier normalization and detailed provenance representation.** The
-  mismatch disposition itself is accepted by ADR-0005. Blocks the provider
+  mismatch disposition itself is accepted
+  ([model-call-execution](spec/model-call-execution.md)). Blocks the provider
   provenance schema. (S20–S23)
 - **Future known-provider-failure retry.** Version one never automatically
   retries a known or ambiguous provider failure; any later retry command or
-  policy, including backoff and resource limits, is a separate decision left
-  open by ADR-0005. Blocks retry features. (S02, S04, S22)
+  policy, including backoff and resource limits, is a separate decision the
+  accepted no-retry policy leaves open. Blocks retry features. (S02, S04, S22)
 
 ## Provider call security
 
@@ -152,15 +153,14 @@ accepted records; those numbers remain reserved for their topics.
   response bodies and streamed deltas before they reach parsing and storage.
   Blocks the first outbound provider adapter. (S02, S04, S24)
 - **Provider call timeout budgets.** See the authoritative open edge in
-  [model-call-execution](spec/model-call-execution.md) (ADR-0043).
+  [model-call-execution](spec/model-call-execution.md).
 - **Provider-response parsing hardening.** Parsing limits and rejection behavior
   for provider responses under the malicious-model-output threat model. Blocks
   the first outbound provider adapter. (S02, S04, S23)
 
-## Scheduling and runners (reserved ADR-0008)
+## Scheduling and runners
 
-Dispatch fencing and initial scheduler mechanics are decided by accepted
-ADR-0009 and ADR-0010, specified in
+Dispatch fencing and initial scheduler mechanics are decided, specified in
 [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md); the
 questions below remain open.
 
@@ -174,7 +174,7 @@ questions below remain open.
   initially, counting hub-local tools separately. Constrains version one.
   (S13–S16)
 
-## Tool safety (reserved ADR-0011, ADR-0012, ADR-0013, ADR-0014)
+## Tool safety
 
 - **Tool-risk classification.** Needs an argument-aware effect taxonomy with a
   conservative unknown class before tool execution. Blocks tool execution. (S05,
@@ -194,10 +194,10 @@ questions below remain open.
   boundary, likely stricter policy for material effects. Blocks the ambient
   runner. (S13)
 
-## Identity, credentials, and resource governance (reserved ADR-0015 through ADR-0018)
+## Identity, credentials, and resource governance
 
 Provider and integration credential lifecycle (storage, delivery, and rotation)
-is decided by accepted ADR-0017, specified in
+is decided, specified in
 [configuration-and-credentials](spec/configuration-and-credentials.md); the
 questions below remain open.
 
@@ -211,53 +211,65 @@ questions below remain open.
   configurable usage limits at effect boundaries. Blocks public release.
   (S02–S06, S13–S18)
 
-## Actor attribution (ADR-0039 follow-ups)
+## Actor attribution
 
 - **Actor-admissibility follow-ups.** See the authoritative routing and open
-  edges in [identity-and-commands](spec/identity-and-commands.md) (ADR-0039).
+  edges in [identity-and-commands](spec/identity-and-commands.md).
 
-## Protocols and persistence (ADR-0019 through ADR-0023)
+## Telemetry correlation
+
+- **Durable-command telemetry token.** Telemetry deliberately omits
+  caller-supplied `DurableCommandId` values today
+  ([identity-and-commands](spec/identity-and-commands.md)). The retired `dc1`
+  design — a versioned, domain-separated, truncated HMAC-SHA-256 token under a
+  deployment-owned key epoch, so caller-chosen identifiers stay non-enumerable
+  while correlation survives restart and rotation is an explicit epoch change —
+  is unimplemented and carries no current authority; git history holds the full
+  retired record, and recommissioning it is a fresh foundation decision. Blocks
+  per-command telemetry correlation.
+
+## Protocols and persistence
 
 - **Browser transport.** Preserve authoritative-snapshot-plus-transient-stream
   semantics; technology open. Blocks the web client. (S02, S24)
 - **Persistence implementation within the accepted relational baseline.**
-  ADR-0022 ([persistence-protocol](spec/persistence-protocol.md)) closes the
-  broad stable-storage question, ADR-0032 (same page) selects the driver, pool,
-  migration, runtime, and ephemeral-test stack, ADR-0034
-  ([identity-and-commands](spec/identity-and-commands.md)) closes canonical
-  command payload/result storage and equality, ADR-0035
-  ([persistence-protocol](spec/persistence-protocol.md)) fixes the domain-owned
-  complete-projection boundary for reconstructing opaque values, ADR-0038
-  ([sessions-and-transcript](spec/sessions-and-transcript.md)) fixes the
-  complete current-session projection and load-by-identity semantics, ADR-0040
-  ([persistence-protocol](spec/persistence-protocol.md)) closes atomic
-  client-visible update-event append with commit-ordered cursors, and ADR-0041
-  ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)) fixes
+  [persistence-protocol](spec/persistence-protocol.md) closes the broad
+  stable-storage question, selects the driver, pool, migration, runtime, and
+  ephemeral-test stack, fixes the domain-owned complete-projection boundary for
+  reconstructing opaque values, and closes atomic client-visible update-event
+  append with commit-ordered cursors;
+  [identity-and-commands](spec/identity-and-commands.md) closes canonical
+  command payload/result storage and equality;
+  [sessions-and-transcript](spec/sessions-and-transcript.md) fixes the complete
+  current-session projection and load-by-identity semantics; and
+  [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md) fixes
   evidence-bearing active-turn reconstitution with session-scoped acceptance
   tails. Streaming checkpoints, dispatch-generation placement, archival form,
   and exact cancellation-delivery records remain open. The
   [first physical frontier-layout choice](decisions.md#2026-07-17--materialize-complete-membership-for-first-context-frontier-storage)
-  materializes complete ordered membership while preserving ADR-0030's freedom
-  for a later semantics-preserving migration. Those remaining questions block
-  only their corresponding adapter slices; the generic scaffold and first typed
-  command family are not blocked. (S03, S04, S17, S25, S27)
+  materializes complete ordered membership while preserving the accepted
+  frontier semantics' freedom for a later semantics-preserving migration. Those
+  remaining questions block only their corresponding adapter slices; the generic
+  scaffold and first typed command family are not blocked. (S03, S04, S17, S25,
+  S27)
 - **Submit-path scaling: scheduling projection and frontier storage.** The
   [first frontier layout](decisions.md#2026-07-17--materialize-complete-membership-for-first-context-frontier-storage)
   materializes complete membership per snapshot and the submit path loads the
   complete scheduling projection, content included per submission, inside the
   session lock, degrading at hundreds of turns per session. A completeness
-  representation that bounds scheduling reads, plus an ADR-0030-permitted
-  prefix-sharing or delta layout, remains concretely undesigned. The
+  representation that bounds scheduling reads, plus a prefix-sharing or delta
+  layout the accepted frontier semantics permit, remains concretely undesigned.
+  The
   [decision log](decisions.md#2026-07-20--adversarial-audit-corrective-package)
   owns its accepted scheduling disposition. (S03, S04, S17)
 - **Update-event retention, pruning, and multi-process fan-out.** See the
   authoritative open edges in
-  [persistence-protocol](spec/persistence-protocol.md) (ADR-0040).
+  [persistence-protocol](spec/persistence-protocol.md).
 - **Swift client type generation.** Leaning: generated boundary types mapped to
   hand-written client domain types. Deferrable until the Swift client. (S01,
   S24)
 
-## Client scope (reserved ADR-0024, ADR-0025, ADR-0026)
+## Client scope
 
 - **First client and interface form (CLI, TUI, web, or Swift).** Leaning: the
   smallest interface that exercises reconnect, approval, and provenance; a thin
@@ -283,6 +295,8 @@ and ordering.
   delegation did not create require their own foundation decision. Blocks
   session linking and visibility authority. (S18, S19)
 - **Inter-session messaging actor extension.** Session-actor accepted input
-  requires an ADR-0039 algebra extension, explicit `SubmitInput` admissibility,
-  and the reserved ADR-0015 through ADR-0018 decisions. Blocks inter-session
-  messaging. (S18, S19)
+  requires an actor-algebra extension
+  ([identity-and-commands](spec/identity-and-commands.md)), explicit
+  `SubmitInput` admissibility, and the open
+  [identity, credentials, and resource governance](#identity-credentials-and-resource-governance)
+  decisions. Blocks inter-session messaging. (S18, S19)

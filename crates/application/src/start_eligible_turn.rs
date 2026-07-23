@@ -1,8 +1,9 @@
 //! Eligibility-time accepted-input turn activation orchestration.
 //!
-//! ADR-0033 owns hub-minted identity supply, while ADR-0004, ADR-0010,
-//! ADR-0027, ADR-0030, and ADR-0036 keep complete eligibility derivation and
-//! atomic activation behind the authoritative transaction boundary.
+//! docs/spec/identity-and-commands.md owns hub-minted identity supply, while
+//! docs/spec/turn-lifecycle-and-scheduling.md and
+//! docs/spec/sessions-and-transcript.md keep complete eligibility derivation
+//! and atomic activation behind the authoritative transaction boundary.
 
 use std::future::Future;
 

@@ -20,9 +20,9 @@ material.
 ## Turns, states, and the single active slot
 
 A turn is one durable logical request for one conversational outcome from one
-accepted-input origin under one frozen effective configuration (ADR-0004;
-configuration freeze is [identity-and-commands](identity-and-commands.md)
-scope). The implemented slice stores three lifecycle states per turn
+accepted-input origin under one frozen effective configuration (configuration
+freeze is [identity-and-commands](identity-and-commands.md) scope). The
+implemented slice stores three lifecycle states per turn
 (`turn_lifecycle.state_kind`): `queued`, `active`, and `terminal`, with the
 terminal disposition kind closed to `failed`, `completed`, and `refused`
 (migration `202607220001`). The domain `TurnDisposition` algebra carries all
@@ -118,7 +118,7 @@ unique continuation chain; `StopRequested` has no storage.
 Eligibility is a derived predicate, never a durable state. Why: the immutable
 acceptance positions, typed priority relations, and active-slot owner are
 already durable, so a second lifecycle state could only diverge from the facts
-it is derived from (ADR-0004, ADR-0010).
+it is derived from.
 
 The authoritative pass reconstitutes one complete session-scoped scheduling
 projection (`AcceptedInputSchedulingReconstitutionInput::reconstitute`) and
@@ -180,8 +180,8 @@ reconstitution fails with `UnsupportedSessionAncestry` (open edge).
    after full rollback.
 
 The committed origin entry, snapshot, start, active slot, and attempt are one
-transaction (ADR-0030's atomic boundary): no durable state exists in which a
-start references a missing or partial snapshot.
+transaction: no durable state exists in which a start references a missing or
+partial snapshot.
 
 Both authoritative repositories — activation and startup recovery — classify
 commit failures (`commit_failure_is_ambiguous`, tested in each): SQLSTATE
@@ -195,7 +195,7 @@ never marked ambiguous.
 The durable rows are the only queue. Every in-process structure is a latency
 hint that may be lost at any moment. Why: a wake-up is a hint, never authority —
 acting on a false hint changes zero rows, and a lost true hint is recovered by
-the sweep (ADR-0010, INV-007).
+the sweep (INV-007).
 
 - **Nudge (primary).** After a submit-input pass whose recorded result is a turn
   origin (`Recorded(Applied(TurnOrigin))` — including owner-global replay of an
@@ -230,9 +230,9 @@ Tool-attempt storage still does not exist.
 ## Startup scan and recovery
 
 hubd orders startup strictly: embedded migrations, then the startup scan to
-completion, then scheduling (ADR-0044, ADR-0010). Why: scheduling before the
-scan could dispatch new work into a session whose durable state still shows a
-live-looking prior-process attempt (INV-034).
+completion, then scheduling. Why: scheduling before the scan could dispatch new
+work into a session whose durable state still shows a live-looking prior-process
+attempt (INV-034).
 
 `StartupScanService` reads the finite inventory of sessions with an active turn
 (deterministic order), then runs one independent transaction per session under
@@ -266,8 +266,8 @@ transaction (outbox mechanics are
 Why `Failed`: the evidence-free slice stores no operations, waits, or stop
 causes, so an abandoned tenure has no sufficient completion, refusal, or
 confirmed-interrupt evidence, and the version-one no-automatic-retry policy
-(ADR-0005, [model-call-execution](model-call-execution.md)) makes the recovered
-turn fail rather than silently retry.
+([model-call-execution](model-call-execution.md)) makes the recovered turn fail
+rather than silently retry.
 
 Only an evidence-free session (active turn with no model call) whose tail
 contains pending steering defers with the blocking accepted input and fails hub
@@ -308,11 +308,12 @@ delivery outcomes implemented here are:
 - `Interrupt` targeting the active turn is deliberately a nonclaiming
   preparation failure (`InterruptApplicationUnavailable`): no command identity
   is claimed, no rejection is recorded, and the caller receives a typed error.
-  Why: ADR-0027's interrupt application must atomically construct the applied
+  Why: the accepted interrupt application must atomically construct the applied
   proof, immediate-successor priority, and predecessor transition, and none of
   that authority exists before the `StopRequested` slice — the owner ratified
-  this deferral (decision ledger, 2026-07-19) rather than let a weaker interrupt
-  claim a result.
+  this deferral
+  ([decision ledger, 2026-07-19](../decisions.md#2026-07-19--owner-ratified-matching-interrupt-milestone-deferral))
+  rather than let a weaker interrupt claim a result.
 
 ## Context frontier snapshots
 
@@ -325,7 +326,7 @@ sequence. A resolved snapshot is an ordered, duplicate-free sequence of
 prefix-preserving append (`derive_appending_candidate`), so a later snapshot
 retains every earlier entry in order (INV-015). Why identity-not-content: two
 independently created snapshots may contain equal entries without being the same
-fixed frontier, and provenance must survive that coincidence (ADR-0030).
+fixed frontier, and provenance must survive that coincidence.
 
 Construction authority is sealed: public code cannot assemble a
 `ResolvedContextFrontierSnapshot`, `AcceptedInputTurnStart`, or activated turn
@@ -346,9 +347,8 @@ is unimplemented (open edge); `TranscriptFrontier` itself is
 
 ## Evidence-bearing reconstitution
 
-ADR-0041's validation pattern is implemented for the scheduling seam: stored
-active phases are conclusions derived from complete owner facts, never trusted
-discriminators.
+Evidence validation is implemented for the scheduling seam: stored active phases
+are conclusions derived from complete owner facts, never trusted discriminators.
 
 - `AwaitingRecoveryDecision` now reconstitutes from complete model-call owner
   facts (an `ambiguous` terminal call correlated with its ended attempt —
@@ -378,7 +378,8 @@ discriminators.
 Why fail-closed: an omission inside a claimed complete observation is
 indistinguishable from acknowledged work disappearing, so the seam rejects
 rather than repairs, and no effect is authorized from a failed reconstruction
-(ADR-0035 general boundary: [persistence-protocol](persistence-protocol.md)).
+(general reconstitution boundary:
+[persistence-protocol](persistence-protocol.md)).
 
 ## Hub runtime: startup order and shutdown
 
@@ -405,17 +406,17 @@ over the shared pool; no shared locked service instance exists.
 
 - Interrupt application is deferred: `SubmitInput::Interrupt` against the active
   turn is a nonclaiming failure until the `StopRequested` slice adds application
-  and ADR-0027's recorded rejections.
+  and its designed recorded rejections.
 - `StopRequested` and `AwaitingApproval` have no storage or reconstitution
-  (`AwaitingRecoveryDecision` now has both); ADR-0041 requires complete owner
-  projections before any evidence-bearing phase lands.
-- Direct fatal terminalization (ADR-0031) has sealed domain derivation values
+  (`AwaitingRecoveryDecision` now has both); evidence-bearing reconstitution
+  requires complete owner projections before any such phase lands.
+- Direct fatal terminalization has sealed domain derivation values
   (`fatal_mismatch` module) but no aggregate transition or commit path.
-- Dispatch fencing (ADR-0009) is partially implemented: `model_call` storage,
-  the `AttemptDispatchGate`, and the hubd dispatch path now exist; only
-  tool-attempt storage and tool dispatch remain absent.
+- Dispatch fencing is partially implemented: `model_call` storage, the
+  `AttemptDispatchGate`, and the hubd dispatch path now exist; only tool-attempt
+  storage and tool dispatch remain absent.
 - The eligible terminal-failure path (queued turn fixes its start and fails
-  without an attempt for a structurally unexecutable configuration, ADR-0027) is
+  without an attempt for a structurally unexecutable configuration) is
   unimplemented; activation is the only eligibility outcome.
 - Ancestry-derived sessions cannot be scheduled (`UnsupportedSessionAncestry`);
   ancestry-to-first-frontier resolution is unimplemented.
@@ -426,7 +427,7 @@ over the shared pool; no shared locked service instance exists.
   as a known failure; an in-flight call parks the turn as ambiguous in
   `awaiting_model_call_recovery`); stop-cause recovery and wait reconstruction
   for the remaining phases still await their slices.
-- The single-hub advisory singleton guard and per-session scan gating (ADR-0010
+- The single-hub advisory singleton guard and per-session scan gating (designed
   refinements) are not adopted; sweep interval and fairness tuning remain
   operational open questions.
 - LISTEN/NOTIFY remains the documented multi-process extension only; the

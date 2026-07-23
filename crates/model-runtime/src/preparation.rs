@@ -5,8 +5,9 @@ use crate::credential::CredentialAccessError;
 /// The result of preparing one opaque, one-shot provider request capability.
 ///
 /// Preparation performs every locally knowable operation before the caller
-/// authorizes the physical interaction (ADR-0045). Only [`Prepared`](Self::Prepared)
-/// authorizes a later call to [`crate::ModelRuntime::execute`].
+/// authorizes the physical interaction (docs/spec/runtime-substrate.md).
+/// Only [`Prepared`](Self::Prepared) authorizes a later call to
+/// [`crate::ModelRuntime::execute`].
 #[must_use]
 pub enum PreparationOutcome<C, P> {
     /// A complete, authenticated request capability ready for authorization.

@@ -1,9 +1,9 @@
 //! Baseline accepted-input user content.
 //!
-//! The normative specification is `docs/spec/sessions-and-transcript.md`
-//! (originally ADR-0037). The baseline is one exact text variant. Construction
-//! rejects empty text and U+0000 while preserving every other scalar,
-//! whitespace character, and line ending unchanged.
+//! The normative specification is `docs/spec/sessions-and-transcript.md`.
+//! The baseline is one exact text variant. Construction rejects empty text
+//! and U+0000 while preserving every other scalar, whitespace character,
+//! and line ending unchanged.
 
 /// A nonempty decoded Unicode scalar sequence containing no U+0000.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -100,8 +100,8 @@ impl UserContent {
 mod tests {
     use super::{NonEmptyUnicodeText, NonEmptyUnicodeTextFailure, UserContent};
 
-    /// ADR-0037: empty text and U+0000 fail construction while retaining the
-    /// rejected decoded value.
+    /// docs/spec/sessions-and-transcript.md: empty text and U+0000 fail
+    /// construction while retaining the rejected decoded value.
     #[test]
     fn empty_and_null_text_are_rejected_without_rewriting() {
         let empty = String::new();
@@ -142,7 +142,8 @@ mod tests {
         );
     }
 
-    /// ADR-0037: whitespace-only content remains constructible.
+    /// docs/spec/sessions-and-transcript.md: whitespace-only content
+    /// remains constructible.
     #[test]
     fn whitespace_only_text_is_content() {
         assert_eq!(

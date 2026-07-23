@@ -1,9 +1,10 @@
 //! Applied-interrupt command-result correlation and cancellation authority.
 //!
-//! ADR-0001, ADR-0004, and ADR-0027 are the normative specifications. A raw
-//! command identity is not authority: only the correlated applied result of
-//! the exact interrupt command can carry the proof consumed by later turn and
-//! attempt lifecycle transitions.
+//! docs/spec/identity-and-commands.md and
+//! docs/spec/turn-lifecycle-and-scheduling.md are the normative
+//! specifications. A raw command identity is not authority: only the
+//! correlated applied result of the exact interrupt command can carry the
+//! proof consumed by later turn and attempt lifecycle transitions.
 
 use crate::{
     AcceptedInputDisposition, AcceptedInputId, AcceptedInputLifecycle, AcceptedInputQueueOrder,
@@ -14,8 +15,9 @@ use crate::{
 
 /// Purpose-specific authority created by one exact applied interrupt.
 ///
-/// The field shape is the accepted ADR-0004 algebra. Both fields are private,
-/// and no raw constructor or conversion from [`DurableCommandId`] exists:
+/// The field shape is the accepted algebra in
+/// docs/spec/turn-lifecycle-and-scheduling.md. Both fields are private, and
+/// no raw constructor or conversion from [`DurableCommandId`] exists:
 /// INV-001 / INV-029 construction proofs:
 ///
 /// ```compile_fail

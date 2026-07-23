@@ -1,8 +1,8 @@
 //! Shared operator-facing failure classification.
 //!
-//! ADR-0044 owns this closed taxonomy. Adapter-specific errors retain their
-//! diagnostic detail while exposing only this user-content-free classification
-//! to shared runtime telemetry.
+//! docs/spec/runtime-substrate.md owns this closed taxonomy. Adapter-specific
+//! errors retain their diagnostic detail while exposing only this
+//! user-content-free classification to shared runtime telemetry.
 
 /// The closed operator-facing classification for adapter/runtime failures.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

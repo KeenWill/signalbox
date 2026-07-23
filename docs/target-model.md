@@ -389,28 +389,15 @@ this document first:
 
 The near-term arc, in order. Landed steps stay listed so the arc keeps its
 shape; their implemented behavior is owned by the [living spec](spec/README.md).
-Each remaining step should land through the decision-first process in
-[AGENTS.md](../AGENTS.md); a step whose blocking decision does not yet exist is
-reached by proposing that decision, not by implementing around it.
 
-1. **Durable input acceptance** — landed. The complete `SubmitInput` slice:
-   canonical construction, owner-global deduplication, and one atomic acceptance
-   transaction persisting content, delivery treatment, order facts, disposition,
-   and configuration provenance before acknowledgement
-   ([identity-and-commands](spec/identity-and-commands.md),
-   [sessions-and-transcript](spec/sessions-and-transcript.md)).
-2. **Turn creation and the session slot** — landed. Eligibility derivation,
-   origin semantic entry, starting frontier, activation with the initial
-   prepared attempt, and database slot enforcement
+1. **Durable input acceptance** — landed
+   ([sessions-and-transcript](spec/sessions-and-transcript.md),
+   [identity-and-commands](spec/identity-and-commands.md)).
+2. **Turn creation and the session slot** — landed
    ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)).
-3. **A model call against a scripted provider** — landed. Target resolution and
-   pinning, prepared-call creation, an in-repo scripted provider adapter,
-   assistant-content commit, and the idempotent startup scan (INV-034), end to
-   end ([model-call-execution](spec/model-call-execution.md); remaining
-   refinements are that page's open edges).
-4. **A smoke against a real provider** — landed for the owner-run smoke. The
-   same model-call lifecycle exercised through a real provider adapter, resolved
-   and reported target evidence included
+3. **A model call against a scripted provider** — landed
+   ([model-call-execution](spec/model-call-execution.md)).
+4. **A smoke against a real provider** — landed for the owner-run smoke
    ([model-call-execution](spec/model-call-execution.md),
    [runtime-substrate](spec/runtime-substrate.md)); the production security
    posture for outbound provider calls remains open per

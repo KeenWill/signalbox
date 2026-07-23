@@ -1,9 +1,9 @@
 //! PostgreSQL transactions surrounding the first text-only model call.
 //!
-//! ADR-0045's three transaction roles stay explicit here: a durable
-//! `Prepared` checkpoint, a separate send-authorization commit, and a fresh
-//! post-effect observation commit. No method holds a database transaction
-//! across provider work.
+//! The three transaction roles in docs/spec/model-call-execution.md stay
+//! explicit here: a durable `Prepared` checkpoint, a separate
+//! send-authorization commit, and a fresh post-effect observation commit. No
+//! method holds a database transaction across provider work.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -2533,8 +2533,8 @@ mod tests {
         failed_terminal_frontier_matches, record_reclassified_turn_candidate,
     };
 
-    /// ADR-0045: a source-turn successor candidate is a retryable minted-ID
-    /// collision, not a caller transition defect.
+    /// docs/spec/model-call-execution.md: a source-turn successor candidate is
+    /// a retryable minted-ID collision, not a caller transition defect.
     #[test]
     fn generated_successor_source_candidate_is_a_retryable_collision() {
         let source = TurnId::from_uuid(Uuid::from_u128(1));
@@ -2548,8 +2548,8 @@ mod tests {
         ));
     }
 
-    /// ADR-0045: a duplicate successor candidate is a retryable minted-ID
-    /// collision, not a caller transition defect.
+    /// docs/spec/model-call-execution.md: a duplicate successor candidate is a
+    /// retryable minted-ID collision, not a caller transition defect.
     #[test]
     fn generated_successor_duplicate_is_a_retryable_collision() {
         let source = TurnId::from_uuid(Uuid::from_u128(1));
@@ -2648,9 +2648,9 @@ mod tests {
         assert!(commit_failure_is_ambiguous(&statement_completion_unknown));
     }
 
-    /// ADR-0042: a retained completed observation is present only when the
-    /// terminal frontier is the exact source prefix, assistant sequence, and
-    /// final `TurnCompleted` marker.
+    /// docs/spec/model-call-execution.md: a retained completed observation is
+    /// present only when the terminal frontier is the exact source prefix,
+    /// assistant sequence, and final `TurnCompleted` marker.
     #[test]
     fn completed_reread_requires_exact_terminal_frontier_shape() {
         let session = Uuid::from_u128(1);
@@ -2717,9 +2717,9 @@ mod tests {
         ));
     }
 
-    /// ADR-0045: a retained failed observation is present only when its
-    /// terminal frontier is the exact source prefix plus one matching failure
-    /// marker.
+    /// docs/spec/model-call-execution.md: a retained failed observation is
+    /// present only when its terminal frontier is the exact source prefix
+    /// plus one matching failure marker.
     #[test]
     fn failed_reread_requires_exact_terminal_frontier_shape() {
         let session = Uuid::from_u128(1);

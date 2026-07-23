@@ -1,8 +1,8 @@
 //! Typed provenance for durable commands and recorded transitions.
 //!
-//! The normative specification is `docs/spec/identity-and-commands.md`
-//! (originally ADR-0039). This value records agency only; it grants no lifecycle,
-//! authentication, authorization, or approval authority.
+//! The normative specification is `docs/spec/identity-and-commands.md`.
+//! This value records agency only; it grants no lifecycle, authentication,
+//! authorization, or approval authority.
 
 use crate::{ToolRequestId, TurnId};
 

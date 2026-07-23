@@ -3,9 +3,9 @@
 //! The caller supplies conversation history as typed messages; adapters
 //! translate them to the provider's wire shape. Assistant response material
 //! comes back as [`AssistantPart`] values inside terminal evidence, in
-//! provider order. These are Layer-1 values (ADR-0047): the caller maps them
-//! into its own durable representations and never stores them as canonical
-//! records.
+//! provider order. These are Layer-1 values (docs/spec/runtime-substrate.md):
+//! the caller maps them into its own durable representations and never
+//! stores them as canonical records.
 
 use crate::tool::{ToolCallId, ToolCallProposal};
 

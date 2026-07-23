@@ -1,9 +1,10 @@
 //! Atomic-only lifecycle candidate for live fatal mismatch during `Prepared`.
 //!
-//! ADR-0004 permits no `StopRequested` or reconciliation branch from a
-//! prepared attempt. This boundary therefore couples exact completed-call
-//! invalidation facts to one direct known-failure candidate while retaining
-//! every logical dependency the later aggregate must close in the same commit.
+//! docs/spec/turn-lifecycle-and-scheduling.md permits no `StopRequested`
+//! or reconciliation branch from a prepared attempt. This boundary therefore
+//! couples exact completed-call invalidation facts to one direct known-failure
+//! candidate while retaining every logical dependency the later aggregate must
+//! close in the same commit.
 
 use std::collections::BTreeSet;
 

@@ -4,8 +4,8 @@ This document records current high-level boundaries, not an implemented system
 or final API. Accepted names are defined in the [glossary](glossary.md);
 unresolved choices remain in [open questions](open-questions.md). Implemented
 behavior and the accepted decisions behind it are specified in the
-[living specification](spec/README.md), whose ADR mapping resolves historical
-ADR names.
+[living specification](spec/README.md), whose index maps each retired design
+record to its destination page.
 
 ## Component view
 
@@ -61,24 +61,24 @@ ownership modules, not a requirement for network services.
 
 ## Sources of truth
 
-| Subject                                                                                                                  | Authoritative source                                                                                                                                              | Replicas or transient projections                                                                    |
-| ------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| Session content and ancestry                                                                                             | Postgres records governed by hub domain rules                                                                                                                     | Client caches and model-context projections                                                          |
-| Accepted user input, explicit delivery request, durable queue order, eligibility-fixed starting lineage, and disposition | Postgres                                                                                                                                                          | Client optimistic state                                                                              |
-| Logical turn and attempt state                                                                                           | Postgres                                                                                                                                                          | Scheduler memory and client progress views                                                           |
-| Session model-selection defaults                                                                                         | Current immutable version selected by explicit session-level update                                                                                               | Client editing state; affects only subsequently accepted origin input                                |
-| Effective turn configuration and provenance                                                                              | Durable hub record frozen at the boundary accepted by ADR-0027, including the exact session-defaults version or inherited source turn                             | Client display and orchestration memory; never current mutable defaults used as historical intent    |
-| Model alias definition now                                                                                               | Hub configuration; an immutable definition version or value snapshot is copied into accepted effective configuration when an alias is selected                    | Client selector lists                                                                                |
-| Requested, resolved, and provider-reported model provenance                                                              | Per-call durable record containing the requested selection, exact hub-resolved provider/model target, and observable provider identity or mismatch when available | Transcript/audit presentation; no claim about a hidden physical backend the provider does not reveal |
-| Tool request, policy decision, and approval                                                                              | Postgres                                                                                                                                                          | Confirmation UI and executor envelope                                                                |
-| Dispatch generation and current attempt                                                                                  | Postgres                                                                                                                                                          | Live runner connection state                                                                         |
-| Declared runner properties                                                                                               | Runner advertisement; records what the runner declared, not the truth of the property                                                                             | Current connection registry and client display                                                       |
-| Configured runner properties                                                                                             | Trusted deployment configuration; records what the deployment says should be true, not proof of the physical boundary                                             | Registration inputs and operator-facing deployment views                                             |
-| Verified runner properties                                                                                               | Evidence established through an accepted enrollment, attestation, policy, or other verification mechanism; the mechanism remains open                             | Verification cache and client explanation                                                            |
-| Effective runner properties for a dispatch                                                                               | Hub policy applied to available declarations, trusted configuration, and verified evidence; durable snapshot with the attempt                                     | Scheduler memory and client display                                                                  |
-| Final tool result and outcome classification                                                                             | Hub-accepted durable record                                                                                                                                       | Runner delivery buffer and client presentation                                                       |
-| Streaming drafts and progress                                                                                            | Live hub process unless selectively checkpointed                                                                                                                  | Client transient view; never authoritative final content                                             |
-| Provider credentials                                                                                                     | Hub-controlled secret storage; mechanism specified in [configuration-and-credentials](spec/configuration-and-credentials.md)                                      | Never client or runner session state                                                                 |
+| Subject                                                                                                                  | Authoritative source                                                                                                                                                                                                | Replicas or transient projections                                                                    |
+| ------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| Session content and ancestry                                                                                             | Postgres records governed by hub domain rules                                                                                                                                                                       | Client caches and model-context projections                                                          |
+| Accepted user input, explicit delivery request, durable queue order, eligibility-fixed starting lineage, and disposition | Postgres                                                                                                                                                                                                            | Client optimistic state                                                                              |
+| Logical turn and attempt state                                                                                           | Postgres                                                                                                                                                                                                            | Scheduler memory and client progress views                                                           |
+| Session model-selection defaults                                                                                         | Current immutable version selected by explicit session-level update                                                                                                                                                 | Client editing state; affects only subsequently accepted origin input                                |
+| Effective turn configuration and provenance                                                                              | Durable hub record frozen at the accepted input-acceptance boundary ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)), including the exact session-defaults version or inherited source turn | Client display and orchestration memory; never current mutable defaults used as historical intent    |
+| Model alias definition now                                                                                               | Hub configuration; an immutable definition version or value snapshot is copied into accepted effective configuration when an alias is selected                                                                      | Client selector lists                                                                                |
+| Requested, resolved, and provider-reported model provenance                                                              | Per-call durable record containing the requested selection, exact hub-resolved provider/model target, and observable provider identity or mismatch when available                                                   | Transcript/audit presentation; no claim about a hidden physical backend the provider does not reveal |
+| Tool request, policy decision, and approval                                                                              | Postgres                                                                                                                                                                                                            | Confirmation UI and executor envelope                                                                |
+| Dispatch generation and current attempt                                                                                  | Postgres                                                                                                                                                                                                            | Live runner connection state                                                                         |
+| Declared runner properties                                                                                               | Runner advertisement; records what the runner declared, not the truth of the property                                                                                                                               | Current connection registry and client display                                                       |
+| Configured runner properties                                                                                             | Trusted deployment configuration; records what the deployment says should be true, not proof of the physical boundary                                                                                               | Registration inputs and operator-facing deployment views                                             |
+| Verified runner properties                                                                                               | Evidence established through an accepted enrollment, attestation, policy, or other verification mechanism; the mechanism remains open                                                                               | Verification cache and client explanation                                                            |
+| Effective runner properties for a dispatch                                                                               | Hub policy applied to available declarations, trusted configuration, and verified evidence; durable snapshot with the attempt                                                                                       | Scheduler memory and client display                                                                  |
+| Final tool result and outcome classification                                                                             | Hub-accepted durable record                                                                                                                                                                                         | Runner delivery buffer and client presentation                                                       |
+| Streaming drafts and progress                                                                                            | Live hub process unless selectively checkpointed                                                                                                                                                                    | Client transient view; never authoritative final content                                             |
+| Provider credentials                                                                                                     | Hub-controlled secret storage; mechanism specified in [configuration-and-credentials](spec/configuration-and-credentials.md)                                                                                        | Never client or runner session state                                                                 |
 
 Postgres is the canonical durable store in development, testing, and production.
 [persistence-protocol](spec/persistence-protocol.md) fixes the normalized
@@ -134,7 +134,7 @@ semantics. In outline:
 7. Provider deltas may stream transiently. Final assistant content, call
    outcome, and any provider-reported identity or mismatch evidence become
    durable before being treated as authoritative, classified under the fixed
-   precedence defined by ADR-0005.
+   precedence defined in [model-call-execution](spec/model-call-execution.md).
 
 A logical turn need not have one immutable context frontier. A safe point occurs
 only before preparing a later provider call, once every earlier issued physical
@@ -169,12 +169,14 @@ Session creation cause and transcript ancestry are independent immutable facts.
 implementable cause to owner initiation and represents ancestry as none or one
 exact source frontier. Session configuration defaults are a separate versioned
 value: creation establishes the first version, while later updates affect only
-future input acceptance. ADR-0002 must add a delegated-cause variant with an
-exact parent-work identity before delegation creates related sessions; its
-parent-side wait, result, and cancellation transitions likewise remain reserved
-and are not variants in the first implementable turn state machine. Forking
-initializes an owner-created session from a selected transcript frontier without
-claiming that the new session was delegated. Future merging remains open.
+future input acceptance. The open
+[delegation decision](open-questions.md#delegation) must add a delegated-cause
+variant with an exact parent-work identity before delegation creates related
+sessions; its parent-side wait, result, and cancellation transitions likewise
+remain reserved and are not variants in the first implementable turn state
+machine. Forking initializes an owner-created session from a selected transcript
+frontier without claiming that the new session was delegated. Future merging
+remains open.
 
 ## Dependency direction
 
@@ -227,16 +229,17 @@ turn carries its exact wait subject and no attempt. The complete state,
 stop-cause, and terminal-guard algebra, including live closed-boundary fatal
 handling, is normative in
 [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md). Future
-child waits require the delegation decision (reserved ADR-0002) and will retain
-the slot unless it defines explicit branching semantics. Initial scheduler
-mechanics are fixed in the same page; their listed operational refinements
-remain open.
+child waits require the open delegation decision and will retain the slot unless
+it defines explicit branching semantics. Initial scheduler mechanics are fixed
+in the same page; their listed operational refinements remain open.
 
 ## Explicitly open boundaries
 
-- Process-protocol implementation within the accepted ADR-0019 and ADR-0021
-  baselines (unimplemented design; no spec page yet): exact browser transport
-  and Swift generation remain open.
+- Client and process protocol: the retired protocol designs are unimplemented
+  and carry no current authority, so future client-protocol work is designed
+  fresh as a specification diff
+  ([open questions](open-questions.md#protocols-and-persistence)); exact browser
+  transport and Swift generation remain open.
 - Scheduler implementation within the accepted dispatch-fencing and
   scheduler-mechanics baseline
   ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)):
@@ -245,7 +248,8 @@ remain open.
 - Workflow infrastructure: an extension boundary is preserved, but no broker or
   workflow engine is selected.
 - Provider evolution: provider calls begin in the hub; a later dedicated service
-  requires an ADR and must preserve provenance and ownership.
+  requires a recorded decision and must preserve the provenance and ownership
+  rules in [model-call-execution](spec/model-call-execution.md).
 - Model fallback: availability fallback is a scenario to design, not accepted
   automatic behavior.
 - Tool safety: risk taxonomy, confirmation thresholds, judge role, sandbox

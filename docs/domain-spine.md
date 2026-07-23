@@ -35,8 +35,8 @@ Conventions used below:
   on a public type is a public-API change — update the relevant note when it
   matters, and treat source as the complete record.
 - Comments state API shape only — sealed producers, crate-private seams,
-  equality composition. Decided semantics live in the accepted ADRs and are not
-  restated here.
+  equality composition. Decided semantics live in the
+  [living specification](spec/README.md) and are not restated here.
 
 ## domain: lib.rs — identities
 
@@ -121,7 +121,8 @@ impl CreateSession {
         -> Result<PreparedCreateSession, CreateSessionPreparationError>;
     // accessors: command_id(), provenance(), initial_configuration_defaults()
 }
-// Eq/Hash exclude command_id (ADR-0001 comparison payload)
+// Eq/Hash exclude command_id (comparison-payload rule,
+// spec/identity-and-commands.md)
 
 pub struct InitialSession { /* private */ }
 // sealed: carried only by PreparedCreateSession::session and
@@ -132,7 +133,8 @@ impl InitialSession {
 
 pub struct Session { /* private */ }
 // sealed: SessionReconstitutionInput::reconstitute
-// non-Copy: owned snapshot, cloned deliberately (ADR-0038)
+// non-Copy: owned snapshot, cloned deliberately (session aggregate,
+// spec/sessions-and-transcript.md)
 impl Session {
     // accessors: id(), creation_provenance(), current_configuration_defaults()
 }
@@ -304,7 +306,8 @@ impl VersionedSessionConfigurationDefaults {
     // accessors: version(), defaults()
 }
 // reconstitution pairing of an arbitrary version with a defaults value is
-// crate-private (ADR-0035); owning reconstitution seams are the producers
+// crate-private (fail-closed reconstitution, spec/persistence-protocol.md);
+// owning reconstitution seams are the producers
 
 pub enum ModelSelectionOverride {
     UseSessionDefault,
@@ -1747,7 +1750,8 @@ impl ProviderTargetEvidenceLog {
 
 pub struct ProviderTargetMismatchInvalidation { /* private */ }
 // sealed: crate-private ProviderTargetMismatchInvalidationLog admission;
-// unique by invalidated call (ADR-0005)
+// unique by invalidated call (mismatch invalidation,
+// spec/model-call-execution.md)
 impl ProviderTargetMismatchInvalidation {
     // accessors: invalidated_call(), first_mismatch_evidence()
 }
@@ -1808,7 +1812,8 @@ impl ReplaceSessionDefaults {
         -> Result<PreparedReplaceSessionDefaults, ReplaceSessionDefaultsPreparationError>;
     // accessors: command_id(), session(), expected_current_version(), replacement()
 }
-// Eq/Hash exclude command_id (ADR-0034 comparison payload)
+// Eq/Hash exclude command_id (comparison-payload rule,
+// spec/identity-and-commands.md)
 
 pub enum ReplaceSessionDefaultsResult {
     Applied(ReplaceSessionDefaultsAppliedResult),

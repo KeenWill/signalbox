@@ -11,8 +11,7 @@ actor attribution. It was verified against the working tree at commit `bf39f5f`
 `submit_input.rs`), and `crates/persistence` (sources and migrations). Where a
 law is cited as `INV-NNN`, [invariants.md](../invariants.md) is the catalog of
 record; where mechanics owned by another decision are summarized, the owning
-sibling page is linked inline, with historical ADR names resolved by the
-[ADR mapping](README.md#adr-mapping).
+sibling page is linked inline.
 
 ## Session identity and creation provenance
 
@@ -41,10 +40,9 @@ append-only.
 
 `CreateSession` carries the durable command identity, the provenance pair, and
 one complete unversioned initial defaults value. Structural equality excludes
-only the command identifier (INV-012); durable-command storage and
-structural-equality doctrine (originally ADR-0034) and identity generation,
-supply, and encoding (originally ADR-0033) are owned by
-[identity-and-commands](identity-and-commands.md).
+only the command identifier (INV-012). Three topics are owned by
+[identity-and-commands](identity-and-commands.md): durable-command storage, the
+structural-equality doctrine, and identity generation, supply, and encoding.
 
 Application orchestration (`crates/application/src/create_session.rs`):
 
@@ -92,9 +90,10 @@ not a historical fact.
 
 Session configuration defaults are model-selection-only in the baseline; the
 selection algebra, configuration freeze at acceptance, and per-turn effective
-configuration are owned by [identity-and-commands](identity-and-commands.md) and
-[configuration-and-credentials](configuration-and-credentials.md) (ADR-0027).
-Defaults are immutable versions with a positive `u64` ordinal:
+configuration are owned by
+[configuration-and-credentials](configuration-and-credentials.md) and
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md). Defaults are
+immutable versions with a positive `u64` ordinal:
 
 - session creation establishes version one;
 - each replacement installs the checked successor ordinal as a new immutable row
@@ -105,7 +104,7 @@ Defaults are immutable versions with a positive `u64` ordinal:
 An installed version affects only origin input accepted afterward; it never
 rewrites creation provenance or queued, active, or completed work (INV-008).
 Configuration-free steering inherits from its source turn rather than reading
-defaults (ADR-0027).
+defaults.
 
 `ReplaceSessionDefaults` carries exactly command identity, target session,
 expected current version, and the complete replacement; equality excludes only
@@ -255,8 +254,8 @@ and emitting a `turn_failed` update event atomically. A later successor's
 starting frontier retains the failed predecessor's exact terminal prefix,
 including that marker. Turn and attempt lifecycle doctrine is
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), the entry
-commit boundaries are this page's own material (originally ADR-0036), and
-update-event delivery is [persistence-protocol](persistence-protocol.md).
+commit boundaries are this page's own material, and update-event delivery is
+[persistence-protocol](persistence-protocol.md).
 
 ## User content
 
@@ -324,35 +323,36 @@ no implemented boundary constructs them.
 - Fork creation is typed but unimplemented: `SingleSource` ancestry fails
   preparation (`TranscriptAncestryUnavailable`) until a trusted
   `TranscriptFrontier` producer exists; frontier representation and selectable
-  fork boundaries remain open (ADR-0003;
-  [open-questions.md](../open-questions.md), selectable transcript-frontier
-  boundaries).
+  fork boundaries remain open ([open-questions.md](../open-questions.md),
+  selectable transcript-frontier boundaries).
 - Multi-source ancestry and transcript merge remain future decision scope, and
   retention when an ancestry source is destructively deleted is undecided; both
-  are recorded as open questions in ADR-0003.
-- ADR-0027/ADR-0036's static eligible-failure path (terminalize at eligibility
-  without an attempt, committing origin plus failed marker in one transaction)
-  has no implemented producer; startup recovery and the model-call known-failure
+  are recorded in [open-questions.md](../open-questions.md).
+- The static eligible-failure path (terminalize at eligibility without an
+  attempt, committing origin plus failed marker in one transaction) has no
+  implemented producer; startup recovery and the model-call known-failure
   closure are the committed `TurnFailed` sources today.
-- Assistant-text and completed-turn semantic entries are implemented (ADR-0042);
-  the tool-use variant is typed but storage-blocked; refusal, cancellation,
+- Assistant-text and completed-turn semantic entries are implemented; the
+  tool-use variant is typed but storage-blocked; refusal, cancellation,
   reconciliation, steering, approval, and delegation entry variants remain open.
 - The client transcript rendering projection over semantic entries is not
   implemented. The provider-prompt message projection is:
   `PreparedModelOperation::render` maps frontier entries to provider-neutral
   messages ([model-call-execution](model-call-execution.md)); only system-prompt
   composition remains deferred, as that page's open edge.
-- `ReplaceSessionDefaults` carries no `actor` field although ADR-0039 slated it
-  for first-accepted-version adoption; its record family has since committed at
-  storage version 1 without one, so under ADR-0034's first-acceptance freeze
-  later adoption needs a kind-scoped storage version, while the truthful `Owner`
-  backfill ADR-0039 relies on still exists.
+- `ReplaceSessionDefaults` carries no `actor` field although the accepted
+  actor-attribution design slated it for first-accepted-version adoption; its
+  record family has since committed at storage version 1 without one, so under
+  the first-acceptance storage freeze later adoption needs a kind-scoped storage
+  version, while the truthful `Owner` backfill that design relies on still
+  exists.
 - `CreateSession` actor attribution remains implicit pending an explicit owner
-  amendment choice (ADR-0039).
+  amendment choice.
 - `Recovery`, `Model`, and `Tool` actor variants have no constructing boundary;
   per-transition attribution adoption schedules remain open.
-- The 1 MiB content bound is a provisional owner floor; ADR-0037's
-  resource-governance limit question stays open, and non-text content kinds
-  remain unconstructible pending their owning decisions.
+- The 1 MiB content bound is a provisional owner floor; the resource-governance
+  limit question stays open, and non-text content kinds remain unconstructible
+  pending their owning decisions.
 - Session archive and retention lifecycle are absent from the aggregate and
-  reserved (ADR-0028/ADR-0029).
+  remain open ([open-questions.md](../open-questions.md), archival and
+  retention).

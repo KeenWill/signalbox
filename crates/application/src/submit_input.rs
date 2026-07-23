@@ -1,9 +1,10 @@
 //! Durable input-submission orchestration.
 //!
-//! ADR-0033 owns hub-minted identity supply, ADR-0034 owns owner-global
-//! command replay, and ADR-0039 admits only the owner actor at the baseline
-//! command boundary. Authoritative session loading, position allocation,
-//! preparation, and recording remain inside one atomic transaction port.
+//! docs/spec/identity-and-commands.md owns hub-minted identity supply and
+//! owner-global command replay, and admits only the owner actor at the
+//! baseline command boundary. Authoritative session loading, position
+//! allocation, preparation, and recording remain inside one atomic
+//! transaction port.
 
 use std::{error::Error, fmt, future::Future};
 
@@ -46,8 +47,9 @@ impl Error for SubmitInputRequestError {}
 
 /// The complete admitted application request for durable input submission.
 ///
-/// Content is already a checked domain value. Private fields ensure ADR-0033's
-/// nil and max command-identity sentinels cannot enter canonical command
+/// Content is already a checked domain value. Private fields ensure the nil
+/// and max command-identity sentinels reserved by
+/// docs/spec/identity-and-commands.md cannot enter canonical command
 /// construction through this boundary. The owner actor is fixed by the
 /// service rather than accepted as caller input.
 #[derive(Clone, Debug, Eq, PartialEq)]

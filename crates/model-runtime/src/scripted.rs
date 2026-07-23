@@ -1,10 +1,10 @@
 //! A deterministic scripted model for tests.
 //!
-//! ADR-0043 requires scripted provider fixtures to declare their exact
-//! result rather than simulate one: a [`Script`] states the observations to
-//! emit and the terminal evidence to return, and [`ScriptedModel`] prepares
-//! and consumes an opaque script capability through the same [`ModelRuntime`]
-//! surface a real adapter implements.
+//! docs/spec/runtime-substrate.md requires scripted provider fixtures to
+//! declare their exact result rather than simulate one: a [`Script`] states
+//! the observations to emit and the terminal evidence to return, and
+//! [`ScriptedModel`] prepares and consumes an opaque script capability
+//! through the same [`ModelRuntime`] surface a real adapter implements.
 //! Nothing is inferred from timing, and the cancellation signal is ignored —
 //! a script that describes cancellation declares cancellation evidence
 //! explicitly.
@@ -71,7 +71,7 @@ struct ScriptedState<C> {
 ///
 /// Its fields are private and the type deliberately implements neither
 /// `Clone` nor diagnostic formatting, matching the provider capability shape
-/// required by ADR-0045.
+/// required by docs/spec/runtime-substrate.md.
 pub struct ScriptedPrepared<C> {
     correlation: C,
     script: Script,

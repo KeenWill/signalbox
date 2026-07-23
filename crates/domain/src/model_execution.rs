@@ -1,11 +1,13 @@
 //! Initial text-only model-call turn aggregate.
 //!
-//! ADR-0004, ADR-0005, ADR-0030, ADR-0035, ADR-0042, and ADR-0045 are
-//! normative. This purpose-specific aggregate reconstitutes one active
-//! accepted-input turn together with its current initial model call. It owns
-//! target resolution against immutable configured definitions, the separate
-//! prepared and send-authorization transitions, and the atomic terminal
-//! candidates for the first text-only execution slice.
+//! docs/spec/turn-lifecycle-and-scheduling.md,
+//! docs/spec/model-call-execution.md, docs/spec/sessions-and-transcript.md,
+//! and docs/spec/persistence-protocol.md are normative. This purpose-specific
+//! aggregate reconstitutes one active accepted-input turn together with its
+//! current initial model call. It owns target resolution against immutable
+//! configured definitions, the separate prepared and send-authorization
+//! transitions, and the atomic terminal candidates for the first text-only
+//! execution slice.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -493,9 +495,10 @@ impl ModelCallExecution {
 
     /// Applies one provider observation to freshly reloaded issued state.
     ///
-    /// ADR-0045 requires the observation transaction to reconstruct current
-    /// authority after the provider effect rather than retaining the earlier
-    /// authorization projection across that effect.
+    /// docs/spec/model-call-execution.md requires the observation
+    /// transaction to reconstruct current authority after the provider
+    /// effect rather than retaining the earlier authorization projection
+    /// across that effect.
     pub fn apply_terminal_observation(
         self,
         observation: CorrelatedModelCallTerminalObservation,
@@ -609,8 +612,9 @@ impl ModelCallExecution {
         )
     }
 
-    /// Applies ADR-0045's prior-process recovery rule for a committed model
-    /// call after startup has established that no provider task survived.
+    /// Applies the prior-process recovery rule in
+    /// docs/spec/model-call-execution.md for a committed model call after
+    /// startup has established that no provider task survived.
     pub fn recover_after_restart(
         self,
         failure_identities: FailedModelCallTurnIdentities,
@@ -2862,8 +2866,9 @@ mod tests {
     }
 
     /// S02 / S04 / INV-006 / INV-014: cancellation-requested call state lacks
-    /// the proof-bearing stopped-attempt facts required by ADR-0041, so this
-    /// evidence-free execution projection fails closed during reconstitution.
+    /// the proof-bearing stopped-attempt facts required by
+    /// docs/spec/turn-lifecycle-and-scheduling.md, so this evidence-free
+    /// execution projection fails closed during reconstitution.
     #[test]
     fn s02_s04_inv006_inv014_cancellation_requested_reconstitution_fails_closed() {
         let in_flight = in_flight_execution();

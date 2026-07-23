@@ -1,10 +1,11 @@
 //! Immutable identified context-frontier snapshot values.
 //!
-//! ADR-0030 is normative. This module separates cheap frontier identity from
-//! explicit semantic-content comparison, represents source-qualified semantic
-//! transcript-entry references, rejects duplicate references in a resolved
-//! snapshot, and offers only prefix-preserving append derivation from an
-//! already-resolved snapshot.
+//! docs/spec/turn-lifecycle-and-scheduling.md is normative. This module
+//! separates cheap frontier identity from explicit semantic-content
+//! comparison, represents source-qualified semantic transcript-entry
+//! references, rejects duplicate references in a resolved snapshot, and
+//! offers only prefix-preserving append derivation from an already-resolved
+//! snapshot.
 //!
 //! These are pure domain values, not lifecycle or commit authority. The
 //! accepted-input scheduling seam establishes entry existence and

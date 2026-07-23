@@ -1,12 +1,12 @@
 //! The three separate provider-target facts.
 //!
-//! ADR-0005 requires that the requested selection, the hub-resolved exact
-//! pinned target, and the provider-reported model identity remain three
-//! separate facts. These newtypes keep them from being confused in
-//! signatures. The runtime reports a [`ProviderReportedModel`] when one is
-//! observable and fabricates neither a match nor a mismatch when none is;
-//! comparing it against the resolved target is the caller's classification
-//! work, never the runtime's.
+//! docs/spec/runtime-substrate.md requires that the requested selection, the
+//! hub-resolved exact pinned target, and the provider-reported model
+//! identity remain three separate facts. These newtypes keep them from being
+//! confused in signatures. The runtime reports a [`ProviderReportedModel`]
+//! when one is observable and fabricates neither a match nor a mismatch when
+//! none is; comparing it against the resolved target is the caller's
+//! classification work, never the runtime's.
 
 /// The caller's original model selection, before hub resolution.
 ///

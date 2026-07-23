@@ -48,7 +48,8 @@ pub struct AnthropicRuntime<A> {
     sse_record_limit: usize,
 }
 
-/// An opaque, one-shot Anthropic request capability prepared under ADR-0045.
+/// An opaque, one-shot Anthropic request capability prepared per
+/// `docs/spec/runtime-substrate.md`.
 ///
 /// The private fields bind the complete authenticated request, caller
 /// correlation, delivery mode, originating client and stream settings,
@@ -130,23 +131,23 @@ impl std::error::Error for AnthropicConstructionError {}
 impl<A: CredentialAccess> AnthropicRuntime<A> {
     /// Builds the adapter and its HTTP client.
     ///
-    /// # Transport discipline: one send is one physical request (ADR-0005)
+    /// # Transport discipline: one send is one physical request
     ///
-    /// The client is configured so that a single send is provably a single
-    /// request:
+    /// Per `docs/spec/runtime-substrate.md`, the client is configured so
+    /// that a single send is provably a single request:
     ///
     /// - **Redirect following is disabled** ([`Policy::none`]). reqwest's
     ///   default policy follows up to ten redirects and, on a 307 or 308
     ///   response, replays the buffered POST body — a hidden second physical
     ///   provider interaction inside one send, which would corrupt the
-    ///   acceptance-boundary evidence ADR-0043 classification consumes. With
+    ///   acceptance-boundary evidence that classification consumes. With
     ///   redirects disabled, a redirect status surfaces as
     ///   [`LossCause::UnexpectedHttpStatus`] evidence instead.
     /// - **Protocol-level retries are disabled** (`reqwest::retry::never()`).
     ///   reqwest's default retry policy resends requests rejected by
     ///   protocol NACKs; a second physical POST for one authorized
-    ///   operation is exactly what ADR-0005 prohibits, so the never-retry
-    ///   policy is set explicitly.
+    ///   operation is exactly what the one-send discipline prohibits, so
+    ///   the never-retry policy is set explicitly.
     /// - **Idle-connection reuse is disabled** (`pool_max_idle_per_host(0)`).
     ///   The underlying HTTP client can transparently resend a request when
     ///   a *reused* idle connection turns out to be closed before the
@@ -155,8 +156,9 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
     ///   connect failure provably precede any request byte, which is what
     ///   lets [`UnsentCause::ConnectFailed`] claim proven-unsent.
     ///
-    /// ADR-0043 selects no timeout budget: both timeouts default to none and
-    /// are caller-owned configuration.
+    /// No timeout budget is specified — timeout budgets remain an open edge
+    /// in `docs/spec/model-call-execution.md`: both timeouts default to none
+    /// and are caller-owned configuration.
     pub fn new(
         config: AnthropicConfig,
         credentials: A,
@@ -242,12 +244,13 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
                 };
             }
         };
-        // ADR-0017: the pinned reference is resolved during send preparation
-        // of exactly this operation and the value is scoped to this request;
-        // nothing is cached, so a rotated credential is picked up by the
-        // next operation. The typed reference-only error is preserved, and
-        // resolution races the cancellation signal so a blocked credential
-        // read cannot hold a cancelled operation.
+        // `docs/spec/configuration-and-credentials.md`: the pinned reference
+        // is resolved during send preparation of exactly this operation and
+        // the value is scoped to this request; nothing is cached, so a
+        // rotated credential is picked up by the next operation. The typed
+        // reference-only error is preserved, and resolution races the
+        // cancellation signal so a blocked credential read cannot hold a
+        // cancelled operation.
         let resolve = self.credentials.resolve(&operation.credential_reference);
         let api_key = match with_cancellation(cancellation, resolve).await {
             None => return PreparationOutcome::Cancelled { correlation },
@@ -545,12 +548,14 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelRuntime<C> for AnthropicR
             .await;
         redacting_sink.flush();
         // A fully buffered reqwest request does not expose independent proof
-        // that an early response arrived only after the complete upload. ADR-0043
-        // therefore forbids classifying its refusal token as `Refused`.
+        // that an early response arrived only after the complete upload.
+        // `docs/spec/model-call-execution.md` therefore forbids classifying
+        // its refusal token as `Refused`.
         let evidence = without_unproven_refusal(evidence);
-        // ADR-0017: provider-controlled text in the evidence (error messages,
-        // raw bodies, transport detail) is credential-sanitized before it
-        // leaves the adapter boundary, using the exact preparation-time value.
+        // Per the runtime-substrate spec, provider-controlled text in the
+        // evidence (error messages, raw bodies, transport detail) is
+        // credential-sanitized before it leaves the adapter boundary, using
+        // the exact preparation-time value.
         let evidence = redact_evidence(evidence, &credential);
         TerminalReport {
             correlation,
@@ -606,8 +611,8 @@ async fn finish_error(
         });
     }
     // A complete terminal error status whose body is not the documented
-    // envelope is still definitive (ADR-0043); classify by status and
-    // retain the raw body as native material.
+    // envelope is still definitive (per the runtime-substrate spec);
+    // classify by status and retain the raw body as native material.
     TerminalEvidence::ProviderError(ProviderErrorEvidence {
         exchange,
         reported_model: None,
@@ -688,8 +693,8 @@ fn exchange_loss(cause: LossCause, exchange: ExchangeFacts) -> TerminalEvidence 
     })
 }
 
-/// Classifies a send-phase transport failure per ADR-0043's
-/// full-request-send rule.
+/// Classifies a send-phase transport failure per the full-request-send
+/// rule in `docs/spec/model-call-execution.md`.
 ///
 /// Every request uses a fresh connection (see [`AnthropicRuntime::new`]), so
 /// a connect failure provably precedes any request byte and classifies as
@@ -721,8 +726,8 @@ fn transport_facts(error: &reqwest::Error) -> TransportFacts {
 
 /// Classifies a body-phase read failure: a caller-configured deadline keeps
 /// its typed timeout cause; anything else is a lost response body. Either
-/// way the exchange lacks a definitive response (ADR-0043's ambiguous
-/// branch).
+/// way the exchange lacks a definitive response (the ambiguous branch in
+/// `docs/spec/model-call-execution.md`).
 fn classify_body_error(error: &reqwest::Error) -> LossCause {
     if error.is_timeout() {
         LossCause::TimedOut(transport_facts(error))
@@ -762,8 +767,8 @@ fn already_fired(cancellation: &mut CancellationSignal) -> bool {
 ///
 /// The work future is polled first, so provider evidence that is already
 /// available wins a same-poll race against cancellation: a ready definitive
-/// response is never discarded in favor of ambiguous cancellation loss
-/// (ADR-0043's definitive-response precedence).
+/// response is never discarded in favor of ambiguous cancellation loss (the
+/// definitive-response precedence in `docs/spec/model-call-execution.md`).
 async fn with_cancellation<F: Future>(
     cancellation: &mut CancellationSignal,
     work: F,
@@ -1143,9 +1148,10 @@ fn redact_observation_fact(fact: ObservationFact, credential: &str) -> Observati
 }
 
 /// Credential-sanitizes every provider-controlled or transport-rendered
-/// text in the evidence (ADR-0017): a reflected key value in an error
-/// message, raw body, or rendered detail is replaced before the evidence
-/// leaves the adapter boundary. Typed facts are untouched.
+/// text in the evidence, per the runtime-substrate spec: a reflected key
+/// value in an error message, raw body, or rendered detail is replaced
+/// before the evidence leaves the adapter boundary. Typed facts are
+/// untouched.
 fn redact_evidence(evidence: TerminalEvidence, api_key: &CredentialValue) -> TerminalEvidence {
     let key_text = std::str::from_utf8(api_key.expose_bytes()).unwrap_or_default();
     let redact = move |text: String| -> String { redact_text(text, key_text) };

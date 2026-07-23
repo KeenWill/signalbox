@@ -1,12 +1,13 @@
 //! Turn-attempt stop causes, terminal values, and local state transitions.
 //!
-//! ADR-0004 and ADR-0005 are normative. This module models canonical stop
-//! values, cause-specific terminal history, and the attempt-local predecessor
-//! matrix. The turn aggregate's operation, wait, terminal-guard, correlation,
-//! and persistence rules are a separate later slice. A locally ended attempt
-//! therefore does not by itself prove complete aggregate evidence. Creation
-//! and mutation stay crate-private so only that aggregate can expose guarded
-//! lifecycle operations.
+//! docs/spec/turn-lifecycle-and-scheduling.md and
+//! docs/spec/model-call-execution.md are normative. This module models
+//! canonical stop values, cause-specific terminal history, and the
+//! attempt-local predecessor matrix. The turn aggregate's operation, wait,
+//! terminal-guard, correlation, and persistence rules are a separate later
+//! slice. A locally ended attempt therefore does not by itself prove complete
+//! aggregate evidence. Creation and mutation stay crate-private so only that
+//! aggregate can expose guarded lifecycle operations.
 
 use std::collections::BTreeSet;
 
@@ -585,8 +586,9 @@ impl CurrentTurnAttempt {
                     disposition:
                         FatalMismatchStopDisposition::KnownFailure | FatalMismatchStopDisposition::Lost,
                 },
-                // ADR-0004 and ADR-0027 route an applied interrupt from Prepared
-                // through the atomic AfterCancellation edge instead.
+                // docs/spec/turn-lifecycle-and-scheduling.md routes an
+                // applied interrupt from Prepared through the atomic
+                // AfterCancellation edge instead.
             ) => causes.interrupt() == AppliedInterruptState::NoAppliedInterrupt,
             (CurrentTurnAttemptState::Running, _) => true,
             (
@@ -886,7 +888,8 @@ mod tests {
     }
 
     /// S03 / S04 / S07 / INV-006 / INV-029 / INV-034: Prepared accepts exactly
-    /// the restricted unsent and startup terminal branches from ADR-0004.
+    /// the restricted unsent and startup terminal branches from
+    /// docs/spec/turn-lifecycle-and-scheduling.md.
     #[test]
     fn prepared_terminal_matrix_is_complete() {
         let causes_without_interrupt =
@@ -1707,8 +1710,8 @@ mod tests {
         );
     }
 
-    /// ADR-0005 / INV-006: the three accepted fatal-reference kinds remain
-    /// typed and distinct.
+    /// INV-006: the three accepted fatal-reference kinds remain typed and
+    /// distinct.
     #[test]
     fn fatal_failure_reference_kinds_are_distinct() {
         let nonterminal =

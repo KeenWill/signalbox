@@ -5,7 +5,8 @@
 //! and only a `[DONE]` preceded by a reported finish reason yields terminal
 //! success or refusal evidence. A stream that ends any other way is explicit
 //! incomplete-stream or protocol-violation evidence with the partial facts
-//! retained — never silent success (ADR-0043's ambiguous branch).
+//! retained — never silent success (the ambiguous branch of
+//! `docs/spec/model-call-execution.md`).
 //!
 //! Because `stream_options.include_usage` is always requested (see the
 //! request translation), a conforming stream reports usage before `[DONE]`;
@@ -402,7 +403,8 @@ impl StreamDecoder {
             Some(existing) if *existing != model => {
                 // A spliced or corrupted stream reporting a second identity
                 // must not complete or become an ordinary provider failure
-                // under the first identity (ADR-0005 precedence).
+                // under the first identity (the identity-precedence rule in
+                // `docs/spec/runtime-substrate.md`).
                 Some(self.violation("stream chunks report conflicting model identities"))
             }
             Some(_) => None,

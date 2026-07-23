@@ -103,8 +103,9 @@ pub fn turn_id_from_uuid(value: Uuid) -> TurnId {
 /// Why a PostgreSQL `uuid` value is not a valid durable-command identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DurableCommandIdMappingError {
-    /// The value is the nil or max sentinel UUID, which ADR-0033 rejects as an
-    /// invalid command identity before canonical command construction.
+    /// The value is the nil or max sentinel UUID, rejected as an invalid
+    /// command identity before canonical command construction
+    /// (docs/spec/identity-and-commands.md).
     SentinelUuid,
 }
 
@@ -126,8 +127,9 @@ pub fn durable_command_id_to_uuid(value: DurableCommandId) -> Uuid {
 
 /// Decodes a checked durable-command identity from a PostgreSQL `uuid` column.
 ///
-/// Per ADR-0033 the nil and max UUIDs are invalid sentinel-like command
-/// identities and are rejected before a `DurableCommandId` is constructed.
+/// Per docs/spec/identity-and-commands.md, the nil and max UUIDs are invalid
+/// sentinel-like command identities and are rejected before a
+/// `DurableCommandId` is constructed.
 pub fn durable_command_id_from_uuid(
     value: Uuid,
 ) -> Result<DurableCommandId, DurableCommandIdMappingError> {
@@ -256,8 +258,8 @@ mod tests {
         assert_eq!(turn_id_to_uuid(turn), turn_uuid);
     }
 
-    /// INV-002 / ADR-0033: the durable-command boundary rejects the nil and max
-    /// sentinel UUIDs rather than admitting them as command identities.
+    /// INV-002: the durable-command boundary rejects the nil and max sentinel
+    /// UUIDs rather than admitting them as command identities.
     #[test]
     fn inv002_durable_command_mapping_rejects_sentinel_uuids() {
         assert_eq!(

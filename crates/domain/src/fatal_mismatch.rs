@@ -1,10 +1,10 @@
 //! Sealed post-evidence facts for fatal-mismatch closure.
 //!
-//! ADR-0031 is normative. This module consumes one trusted mismatch and a
-//! complete owned-work projection, then derives exact causes, unfinished work,
-//! and blocking ambiguity without caller-selected authority. It binds sealed
-//! attempt/turn candidates, but remaining aggregate guards, steering, and
-//! atomic commit remain later work.
+//! docs/spec/turn-lifecycle-and-scheduling.md is normative. This module
+//! consumes one trusted mismatch and a complete owned-work projection, then
+//! derives exact causes, unfinished work, and blocking ambiguity without
+//! caller-selected authority. It binds sealed attempt/turn candidates, but
+//! remaining aggregate guards, steering, and atomic commit remain later work.
 
 #![cfg_attr(
     not(test),
@@ -26,7 +26,8 @@ use crate::{
     provider_evidence::{AppliedProviderTargetMismatch, ProviderTargetMismatchEffectView},
 };
 
-/// One exact logical dependency whose closure is an ADR-0004 terminal guard.
+/// One exact logical dependency whose closure is a terminal guard required
+/// by docs/spec/turn-lifecycle-and-scheduling.md.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum OwnedLogicalDependencyRef {
     /// One logical tool request owned by the turn.

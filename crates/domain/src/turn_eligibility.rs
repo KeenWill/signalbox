@@ -1,17 +1,18 @@
 //! Complete accepted-input scheduling projection and pure eligibility.
 //!
-//! ADR-0004, ADR-0027, ADR-0030, ADR-0035, ADR-0036, and ADR-0041 are
-//! normative. This purpose-specific projection reconstructs every fact that
-//! can change accepted-input eligibility or slot ownership in the implemented
-//! semantic-entry slice. It supports an ancestry-free session whose durable
-//! total order consists of a terminal prefix, at most one active slot, and a
-//! queued suffix.
+//! docs/spec/turn-lifecycle-and-scheduling.md,
+//! docs/spec/sessions-and-transcript.md, and
+//! docs/spec/persistence-protocol.md are normative. This purpose-specific
+//! projection reconstructs every fact that can change accepted-input
+//! eligibility or slot ownership in the implemented semantic-entry slice. It
+//! supports an ancestry-free session whose durable total order consists of a
+//! terminal prefix, at most one active slot, and a queued suffix.
 //!
 //! Active records carry one exact checked phase and a validated,
 //! session-scoped acceptance tail. This slice admits only evidence-free
-//! prepared and running attempts; ADR-0041 requires later StopRequested and
-//! durable-wait storage to supply complete owning-turn evidence rather than a
-//! preassembled proof or wait subject.
+//! prepared and running attempts; docs/spec/turn-lifecycle-and-scheduling.md
+//! requires later StopRequested and durable-wait storage to supply complete
+//! owning-turn evidence rather than a preassembled proof or wait subject.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -157,12 +158,13 @@ impl FailedTurnExecutionReconstitutionInput {
 
 /// Stored facts for one active scheduling phase.
 ///
-/// ADR-0041 prohibits reconstructing `StopRequested` or a durable wait from a
-/// preassembled proof or bare subject. The prepared and running constructors
-/// need no proof-bearing owner evidence. The model-call recovery constructors
-/// remain inert until complete scheduling reconstitution validates the named
-/// call as this turn's exact terminal-ambiguous operation; neither constructor
-/// can independently produce a canonical wait.
+/// docs/spec/turn-lifecycle-and-scheduling.md prohibits reconstructing
+/// `StopRequested` or a durable wait from a preassembled proof or bare
+/// subject. The prepared and running constructors need no proof-bearing owner
+/// evidence. The model-call recovery constructors remain inert until complete
+/// scheduling reconstitution validates the named call as this turn's exact
+/// terminal-ambiguous operation; neither constructor can independently
+/// produce a canonical wait.
 ///
 /// A bare wait subject is intentionally not a production constructor:
 ///
@@ -4148,8 +4150,8 @@ mod tests {
         );
     }
 
-    /// S03 / INV-009 / ADR-0041: inert prepared facts become a canonical
-    /// attempt only inside the validated owner projection.
+    /// S03 / INV-009: inert prepared facts become a canonical attempt only
+    /// inside the validated owner projection.
     #[test]
     fn active_reconstitution_derives_prepared_attempt_after_validation() {
         let session = current_session();
@@ -4172,7 +4174,7 @@ mod tests {
         ));
     }
 
-    /// S03 / INV-009 / ADR-0041: inert running facts traverse the sealed
+    /// S03 / INV-009: inert running facts traverse the sealed
     /// prepared-to-running transition only inside the validated owner
     /// projection.
     #[test]
@@ -4379,10 +4381,9 @@ mod tests {
         );
     }
 
-    /// S03 / S08 / INV-009 / INV-016 / ADR-0041: an active
-    /// scheduling projection requires the exact session-scoped interval
-    /// anchored at its origin; a missing, cross-session, or cross-wired
-    /// interval fails closed.
+    /// S03 / S08 / INV-009 / INV-016: an active scheduling projection
+    /// requires the exact session-scoped interval anchored at its origin; a
+    /// missing, cross-session, or cross-wired interval fails closed.
     #[test]
     fn active_reconstitution_requires_exact_session_acceptance_tail_identity() {
         let session = current_session();
@@ -4457,10 +4458,9 @@ mod tests {
         ]));
     }
 
-    /// S03 / S08 / INV-016 / ADR-0041: every position
-    /// from the active origin through the observed session tail is present
-    /// exactly once and every pending-steering disposition remains bound to
-    /// that active turn.
+    /// S03 / S08 / INV-016: every position from the active origin through
+    /// the observed session tail is present exactly once and every
+    /// pending-steering disposition remains bound to that active turn.
     #[test]
     fn active_reconstitution_rejects_gapped_or_misbound_acceptance_tail() {
         let session = current_session();
@@ -4609,7 +4609,7 @@ mod tests {
         ]));
     }
 
-    /// S03 / S09 / INV-009 / INV-016 / ADR-0041: a scheduler-gap start remains
+    /// S03 / S09 / INV-009 / INV-016: a scheduler-gap start remains
     /// a valid ordinary origin after an earlier queued turn becomes active.
     #[test]
     fn active_reconstitution_preserves_post_anchor_scheduler_gap_start() {
@@ -4633,7 +4633,7 @@ mod tests {
         .expect("the later origin was accepted during a valid scheduler gap");
     }
 
-    /// S03 / S09 / INV-009 / INV-016 / ADR-0041: an ordinary queued origin
+    /// S03 / S09 / INV-009 / INV-016: an ordinary queued origin
     /// retains the historical active target named at acceptance.
     #[test]
     fn active_reconstitution_preserves_post_anchor_historical_target() {
@@ -4658,7 +4658,7 @@ mod tests {
         .expect("the later origin retains its exact previously active target");
     }
 
-    /// S03 / S09 / INV-009 / INV-016 / ADR-0041: after-current delivery must
+    /// S03 / S09 / INV-009 / INV-016: after-current delivery must
     /// name an earlier nonqueued target in the complete turn inventory.
     #[test]
     fn active_reconstitution_rejects_missing_historical_delivery_target() {
@@ -4689,7 +4689,7 @@ mod tests {
         );
     }
 
-    /// S03 / S07 / INV-009 / INV-016 / ADR-0041: an interrupt delivery must
+    /// S03 / S07 / INV-009 / INV-016: an interrupt delivery must
     /// agree with the origin record's durable interrupt-priority relation.
     #[test]
     fn active_reconstitution_rejects_delivery_priority_mismatch() {
@@ -4719,7 +4719,7 @@ mod tests {
         );
     }
 
-    /// S01 / INV-009 / INV-016 / ADR-0041: origin delivery and queue facts
+    /// S01 / INV-009 / INV-016: origin delivery and queue facts
     /// are validated even when no active turn requires an acceptance tail.
     #[test]
     fn s01_inv009_inv016_queued_reconstitution_rejects_delivery_order_mismatch() {
@@ -4756,7 +4756,7 @@ mod tests {
         );
     }
 
-    /// S01 / INV-008 / INV-009 / INV-016 / ADR-0041: a configured origin's
+    /// S01 / INV-008 / INV-009 / INV-016: a configured origin's
     /// accepted defaults version must equal its frozen provenance version.
     #[test]
     fn s01_inv008_inv009_inv016_queued_origin_rejects_defaults_version_mismatch() {
@@ -4798,7 +4798,7 @@ mod tests {
         );
     }
 
-    /// S01 / INV-008 / INV-009 / INV-016 / ADR-0041: an explicit accepted
+    /// S01 / INV-008 / INV-009 / INV-016: an explicit accepted
     /// model request must equal the request retained by frozen provenance.
     #[test]
     fn s01_inv008_inv009_inv016_queued_origin_rejects_explicit_request_mismatch() {
@@ -4839,7 +4839,7 @@ mod tests {
         );
     }
 
-    /// S03 / INV-008 / INV-016 / ADR-0041: the tail repeats the exact
+    /// S03 / INV-008 / INV-016: the tail repeats the exact
     /// immutable versioned delivery stored for its origin rather than
     /// supplying an independently plausible configuration choice.
     #[test]
@@ -4869,7 +4869,7 @@ mod tests {
         );
     }
 
-    /// S03 / S07 / INV-001 / INV-009 / ADR-0041: an accepted interrupt
+    /// S03 / S07 / INV-001 / INV-009: an accepted interrupt
     /// against the current owner prevents evidence-free phase reconstruction.
     #[test]
     fn active_reconstitution_rejects_interrupt_evidence_for_evidence_free_phase() {
@@ -4910,7 +4910,7 @@ mod tests {
         );
     }
 
-    /// S03 / S08 / INV-009 / INV-016 / ADR-0041: one accepted input cannot
+    /// S03 / S08 / INV-009 / INV-016: one accepted input cannot
     /// be both pending steering and a turn origin in the scheduling inventory.
     #[test]
     fn active_reconstitution_rejects_pending_identity_that_is_also_an_origin() {
@@ -4953,7 +4953,7 @@ mod tests {
         );
     }
 
-    /// S03 / S08 / INV-007 / INV-016 / ADR-0041: a pending tail entry cannot
+    /// S03 / S08 / INV-007 / INV-016: a pending tail entry cannot
     /// replace a different origin that owns the same acceptance position.
     #[test]
     fn active_reconstitution_rejects_pending_position_owned_by_an_origin() {
@@ -4993,7 +4993,7 @@ mod tests {
         );
     }
 
-    /// S03 / INV-016 / ADR-0041: the last represented position must equal
+    /// S03 / INV-016: the last represented position must equal
     /// the authoritative session tail observed by the same read.
     #[test]
     fn active_reconstitution_rejects_incomplete_claimed_acceptance_tail() {
@@ -5014,7 +5014,7 @@ mod tests {
         );
     }
 
-    /// S03 / INV-009 / INV-016 / ADR-0041: the claimed session observation
+    /// S03 / INV-009 / INV-016: the claimed session observation
     /// cannot end before a later origin supplied by the same scheduling read.
     #[test]
     fn s03_inv009_inv016_active_tail_reaches_every_known_origin() {
@@ -6424,7 +6424,7 @@ mod tests {
         );
     }
 
-    /// S03 / S08 / INV-016 / ADR-0041: every tail entry belongs to the
+    /// S03 / S08 / INV-016: every tail entry belongs to the
     /// scheduling session and appears exactly once; a cross-session entry or
     /// a repeated accepted-input identity fails closed.
     #[test]

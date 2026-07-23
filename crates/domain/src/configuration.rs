@@ -1,15 +1,15 @@
 //! Baseline model-selection configuration.
 //!
 //! The normative specification is
-//! `docs/spec/configuration-and-credentials.md` (originally ADR-0027).
-//! The first implementable effective configuration
-//! is deliberately model-selection-only: one frozen direct or alias model
-//! selection, provider-default parameters, and disabled known-provider-failure
-//! retry and model fallback. Custom parameters, instructions, tool
-//! enablement, placement constraints, per-turn resources, and
-//! interpreting-policy selections are unavailable baseline capabilities, not
-//! latent optional fields. The `Scope` section on [`EffectiveConfiguration`]
-//! lists what these pure values deliberately omit.
+//! `docs/spec/configuration-and-credentials.md`. The first implementable
+//! effective configuration is deliberately model-selection-only: one frozen
+//! direct or alias model selection, provider-default parameters, and
+//! disabled known-provider-failure retry and model fallback. Custom
+//! parameters, instructions, tool enablement, placement constraints,
+//! per-turn resources, and interpreting-policy selections are unavailable
+//! baseline capabilities, not latent optional fields. The `Scope` section
+//! on [`EffectiveConfiguration`] lists what these pure values deliberately
+//! omit.
 
 crate::define_identity!(
     /// Names exactly one configured provider/model selection as a canonical
@@ -108,8 +108,8 @@ pub enum ModelFallback {
 /// Equality is structural semantic value equality over the frozen model
 /// selection and the unit policy values; any model-selection difference
 /// requires new logical work. The exact provider/model target is not a
-/// field: ADR-0005 pins it as a separate turn fact before the first model
-/// call is created.
+/// field: docs/spec/model-call-execution.md pins it as a separate turn
+/// fact before the first model call is created.
 ///
 /// # Scope
 ///
@@ -117,7 +117,7 @@ pub enum ModelFallback {
 /// input acceptance transactions, command deduplication, selection of the
 /// current alias definition from mutable state, exact provider/model target
 /// resolution, and storage, wire, deployment-key, and display encodings.
-/// Aggregate transitions and boundary code own those ADR-0027 requirements.
+/// Aggregate transitions and boundary code own those requirements.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct EffectiveConfiguration {
     model: FrozenModelSelection,
@@ -239,7 +239,7 @@ impl VersionedSessionConfigurationDefaults {
     ///
     /// This remains crate-private so external boundaries cannot independently
     /// pair a version with a defaults value without the complete aggregate
-    /// correlation required by ADR-0035.
+    /// correlation required by docs/spec/persistence-protocol.md.
     pub(crate) const fn reconstitute(
         version: SessionConfigurationDefaultsVersion,
         defaults: SessionConfigurationDefaults,

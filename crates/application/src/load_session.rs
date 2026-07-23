@@ -1,9 +1,10 @@
 //! Current-session query orchestration.
 //!
-//! ADR-0038 defines [`Session`] as the complete current domain snapshot and
-//! distinguishes a true missing session from adapter integrity failure. This
-//! application boundary loads by semantic [`SessionId`] and leaves durable
-//! record decoding and checked reconstitution to an adapter.
+//! docs/spec/sessions-and-transcript.md defines [`Session`] as the complete
+//! current domain snapshot and distinguishes a true missing session from
+//! adapter integrity failure. This application boundary loads by semantic
+//! [`SessionId`] and leaves durable record decoding and checked
+//! reconstitution to an adapter.
 
 use std::future::Future;
 
@@ -178,8 +179,9 @@ mod tests {
         assert_eq!(service.into_reader().observed(), [requested]);
     }
 
-    /// S01 / ADR-0038: true session absence remains `None`; the application
-    /// does not fabricate an initial or partial projection.
+    /// S01 / docs/spec/sessions-and-transcript.md: true session absence
+    /// remains `None`; the application does not fabricate an initial or
+    /// partial projection.
     #[test]
     fn s01_true_session_absence_is_preserved() {
         let requested = session_id(1);
