@@ -3,8 +3,8 @@
 This page specifies the implemented behavior of session creation and ancestry,
 session-level configuration defaults and their replacement, the long-lived
 session aggregate, semantic transcript entries, accepted-input user content, and
-actor attribution. It was verified against the working tree at commit `bf39f5f`
-(current `main`): `crates/domain` (`session.rs`, `configuration.rs`,
+actor attribution. It was verified against the implementing stack through PR
+#175 (`agent/stop-requests`): `crates/domain` (`session.rs`, `configuration.rs`,
 `replace_session_defaults.rs`, `semantic_entry.rs`, `turn_eligibility.rs`,
 `user_content.rs`, `actor.rs`, `submit_input.rs`), `crates/application`
 (`create_session.rs`, `load_session.rs`, `replace_session_defaults.rs`,
@@ -187,6 +187,8 @@ and closed:
 
 - `OriginAcceptedInput { accepted_input }` — the exact accepted input whose
   origin turn became eligible;
+- `SteeringAcceptedInput { accepted_input, source_turn }` — accepted
+  next-safe-point input consumed by its exact source turn;
 - `TurnFailed { turn }` — an explicit marker that the turn terminalized as
   failed;
 - `AssistantText { producing_call, value }` — exact assistant text with
@@ -194,7 +196,9 @@ and closed:
 - `AssistantToolUse { producing_call, request }` — typed, but storage rejects it
   (`semantic_transcript_entry_tool_use_unavailable`) until the reserved tool
   decisions land; and
-- `TurnCompleted { turn }` — the explicit final marker for a completed turn.
+- `TurnCompleted { turn }` — the explicit final marker for a completed turn; and
+- `TurnCancelled { turn }` — the explicit final marker for a turn ended by its
+  applied interrupt.
 
 There is no generic text, role, metadata, or "other" payload. Entry identity is
 distinct from accepted-input and turn identity (INV-001); equal content in two
@@ -202,25 +206,29 @@ inputs yields distinct entries. Entry construction is sealed inside the domain
 crate — the checked constructor is `pub(crate)` — and its producers live in two
 modules: `turn_eligibility.rs` (eligibility activation, lost-active-turn failure
 preparation, checked scheduling reconstitution) and `model_execution.rs`
-(terminal completion building the `AssistantText` entries plus `TurnCompleted`
-marker, and known-failure closure building `TurnFailed`).
+(steering consumption, terminal completion building the `AssistantText` entries
+plus `TurnCompleted`, cancellation building `TurnCancelled`, and known-failure
+closure building `TurnFailed`).
 
-`OriginAcceptedInput` references the accepted input's identity; it never copies
-content. Why: two authoritative content copies could diverge and would need an
-unnecessary precedence rule.
+`OriginAcceptedInput` and `SteeringAcceptedInput` reference the accepted input's
+identity; neither copies content. Steering additionally names the exact active
+turn from its immutable delivery binding. Why: two authoritative content copies
+could diverge and would need an unnecessary precedence rule, while the
+source-turn correlation prevents a valid input from steering different work.
 
 Storage (`semantic_transcript_entry`, migration
 `202607180004_turn_lifecycle_storage.sql`) enforces globally unique entry
 identity, at most one origin entry per accepted input, at most one failed marker
-per turn, at most one completion marker per turn
-(`semantic_transcript_entry_turn_completed_once`, migration `202607220001`,
-which also widened the closed payload-shape checks), same-session references,
-and append-only rows (INV-005). The origin-disposition guard arrived later:
-migration `202607180005_occupied_slot_submit_input.sql` — the migration that
-first admits the `pending_steering` disposition — replaces the entry/turn-state
-trigger so an origin entry additionally requires its input's `origin_of`
-disposition (constraint `semantic_transcript_entry_origin_disposition`); pending
-steering can never appear as a semantic origin.
+per turn, same-session references, and append-only rows (INV-005). Migration
+`202607220001` adds the unique completion marker, `202607220004` adds the unique
+steering entry, and `202607220005` adds the unique cancellation marker while
+widening the corresponding closed payload shapes. The origin-disposition guard
+arrived later: migration `202607180005_occupied_slot_submit_input.sql` — the
+migration that first admits the `pending_steering` disposition — replaces the
+entry/turn-state trigger so an origin entry additionally requires its input's
+`origin_of` disposition (constraint
+`semantic_transcript_entry_origin_disposition`); pending steering can never
+appear as a semantic origin.
 
 ### When entries come to exist
 
@@ -235,18 +243,34 @@ Why (entry at eligibility, not acceptance): queue acceptance has not fixed
 lineage or the snapshot that consumes the entry; eligibility fixes both
 atomically.
 
+Pending steering has a separate safe-point boundary (INV-036). Immediately
+before a later call is prepared, the transaction appends one
+`SteeringAcceptedInput` per pending input in ascending acceptance position,
+derives one frontier extending the starting frontier for the admitted initial
+call, changes every input to `ConsumedAsSteering { call }`, and inserts that
+exact `Prepared` call against the extended frontier. All four effects commit or
+roll back together. The entry therefore becomes semantic history only with the
+call that first observes it; the immutable accepted-input row remains the
+content authority.
+
 Entry/turn-state agreement is a durable schema invariant, not only transactional
 practice. Deferred constraint triggers around
 `assert_turn_lifecycle_final_state` (migration `202607180004`) check every
 commit bidirectionally: a queued turn carries zero origin or failure entries; a
 started turn carries exactly one correlated origin entry, and its starting
-frontier ends with exactly that entry; a failed turn's terminal frontier is its
-starting frontier plus exactly its failure marker; a completed turn's terminal
-frontier is its starting frontier plus its producing call's assistant entries
-plus exactly its completion marker last; and a refused turn's terminal frontier
-is a distinct equal-content copy of its starting frontier (migration
-`202607220001` redefines the assertion). A writer that diverges from the
-transactional practice above is rejected at the commit boundary.
+frontier ends with exactly that entry; a failed turn's terminal frontier extends
+its latest call frontier (or starting frontier) by exactly its failure marker; a
+completed turn's terminal frontier extends its producing call's frontier by the
+call's assistant entries plus exactly its completion marker last; a cancelled
+turn's terminal frontier extends the latest call frontier (or starting frontier)
+with exactly its cancellation marker; and a refused turn's terminal frontier is
+a distinct equal-content copy of its latest call frontier. A
+reconciliation-required turn likewise carries a distinct equal-content terminal
+frontier over its exact ambiguous call, correlated ended attempt, and applied
+interrupt proof. Migration `202607220001` first defined the model-call
+assertion; migrations `202607220004` and `202607220005` widen it for steering
+and stop requests. A writer that diverges from the transactional practice above
+is rejected at the commit boundary.
 
 `TurnFailed` now has two producers — the model-call known-failure closure and
 startup recovery — each appending the marker after every earlier committed entry
@@ -273,10 +297,12 @@ policy; search or display projections may normalize without changing accepted
 intent.
 
 The accepted input owns the one immutable authoritative content value; the
-`accepted_input` row admits exactly one guarded update — pending-steering
-reclassification to `reclassified_as_turn_origin`, which changes only the
-disposition and fresh origin turn, never content (migration `202607220001`) —
-and semantic history references it rather than copying it (INV-005, INV-007).
+`accepted_input` row admits exactly two guarded updates from pending steering:
+consumption to `consumed_as_steering`, changing only disposition plus the exact
+consuming call, or reclassification to `reclassified_as_turn_origin`, changing
+only disposition plus the fresh origin turn. Neither changes content, and
+semantic history references that content rather than copying it (INV-005,
+INV-007, INV-036).
 
 ### Bounds
 
@@ -332,9 +358,9 @@ no implemented boundary constructs them.
   attempt, committing origin plus failed marker in one transaction) has no
   implemented producer; startup recovery and the model-call known-failure
   closure are the committed `TurnFailed` sources today.
-- Assistant-text and completed-turn semantic entries are implemented; the
-  tool-use variant is typed but storage-blocked; refusal, cancellation,
-  reconciliation, steering, approval, and delegation entry variants remain open.
+- Assistant-text, completed-turn, steering, and cancelled-turn semantic entries
+  are implemented; the tool-use variant is typed but storage-blocked; refusal,
+  reconciliation, approval, and delegation entry variants remain open.
 - The client transcript rendering projection over semantic entries is not
   implemented. The provider-prompt message projection is:
   `PreparedModelOperation::render` maps frontier entries to provider-neutral

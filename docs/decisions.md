@@ -226,6 +226,56 @@ INV-032/INV-033 enforcement, S01/S02/S24, and
 [open questions](open-questions.md#protocols-and-persistence). Authenticated
 transports and remote clients remain explicitly open upgrade paths.
 
+## 2026-07-23 — Poll durable model-call cancellation every 25 milliseconds
+
+**Context.** Capability preparation and provider invocation need one same-call
+cancellation future that observes stop intent committed by another transaction
+or process. PostgreSQL is the durable authority, while the current adapter has
+no database-notification channel. Polling frequency fixes both cancellation
+latency and steady-state query load.
+
+**Decision.** The PostgreSQL model-call adapter polls the call's durable state
+every 25 milliseconds and resolves the signal when it observes
+`cancellation_requested` or `terminal`. Missed ticks delay from the next
+observation instead of bursting to catch up. This provisional interval bounds
+ordinary observation latency near 25 milliseconds while issuing at most about 40
+state reads per second for each active signal.
+
+**Rejected alternatives.** A process-local notification cannot observe another
+process or survive handoff. PostgreSQL `LISTEN`/`NOTIFY` would add connection
+and reconnection coordination to this slice. A longer interval lowers read load
+but slows stop response; a shorter interval raises load without a demonstrated
+latency requirement.
+
+**Affects.** PostgreSQL model-call authorization, capability-preparation and
+provider-invocation cancellation, and operational database load.
+
+## 2026-07-23 — Atomic steering consumption and proof-bearing stop requests
+
+**Context.** The M3 pending-steering boundary deliberately left safe-point
+consumption and matching interrupt application unimplemented until their
+semantic-history, ordering, atomicity, proof, provider-signal, and restart
+contracts could land together.
+
+**Decision.** Adopt atomic safe-point steering consumption and proof-bearing
+interrupt stop requests as specified by
+[sessions-and-transcript](spec/sessions-and-transcript.md),
+[turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md),
+[model-call-execution](spec/model-call-execution.md), and
+[persistence-protocol](spec/persistence-protocol.md), with the accepted laws
+recorded by INV-036 and INV-037 in [the invariant catalog](invariants.md).
+
+**Rejected alternatives.** Copying steering content into semantic history would
+create a second authority; one-at-a-time or non-atomic consumption could expose
+acknowledged steering without its consuming call. Process-local stop flags,
+unproven command identifiers, and resuming prior-process attempts would lose
+durable causality or violate restart policy.
+
+**Affects.** S07/S08; INV-016/INV-029/INV-034/INV-036/INV-037; the domain and
+application spines; accepted-input, semantic-entry, scheduling, submit,
+model-execution, startup, runtime-bridge, and PostgreSQL implementation and
+tests. No client or `apps/hubd` surface changes.
+
 ## 2026-07-23 — Review-wave amendments: stale-head declines and exhaust-loop escalation
 
 **Context.** The adaptive review-wave rule continues waves while the latest wave
