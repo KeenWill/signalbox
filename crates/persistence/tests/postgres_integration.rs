@@ -12,12 +12,13 @@ use signalbox_application::{
     AuthorizeModelCallOutcome, CommitModelCallObservationTransaction, CreateSessionError,
     CreateSessionOutcome, CreateSessionRequest, CreateSessionService, EligibilityNudge,
     EligibilityNudgeOutcome, EligibilitySweep, InProcessAttemptDispatchGate, LoadSessionService,
-    ModelCallAuthorizationReread, ModelCallCredentialReference, ModelCallExecutionIdGenerator,
-    ModelCallExecutionOutcome, ModelCallExecutionService, ModelConversationMessage,
-    ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest, ReplaceSessionDefaultsService,
-    RetainedCapabilityFailureStatus, RetainedModelCallObservationStatus, ScriptedModelCallProvider,
-    ScriptedModelCallStep, SessionIdGenerator, StartEligibleTurnIdGenerator,
-    StartEligibleTurnOutcome, StartEligibleTurnService, StartupScanIdGenerator, StartupScanService,
+    ModelCallAuthorizationReread, ModelCallCredentialReference, ModelCallExecutionError,
+    ModelCallExecutionIdGenerator, ModelCallExecutionOutcome, ModelCallExecutionService,
+    ModelConversationMessage, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
+    ReplaceSessionDefaultsService, RetainedCapabilityFailureStatus,
+    RetainedModelCallObservationStatus, ScriptedModelCallProvider, ScriptedModelCallStep,
+    SessionIdGenerator, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
+    StartEligibleTurnService, StartupScanIdGenerator, StartupScanService,
     StartupScanSessionOutcome, SubmitInputIdGenerator, SubmitInputOutcome, SubmitInputRequest,
     SubmitInputRequestError, SubmitInputService,
 };
@@ -44,8 +45,8 @@ use signalbox_persistence::{
     },
     local_test_connection_options, migrate,
     model_execution::{
-        ModelCallIdentityCollision, ModelCallRepositoryError, PostgresModelCallRepository,
-        PrepareInitialModelCallOutcome,
+        ModelCallCorruption, ModelCallIdentityCollision, ModelCallRepositoryError,
+        PostgresModelCallRepository, PrepareInitialModelCallOutcome,
     },
     replace_session_defaults::{
         ReplaceSessionDefaultsCorruption, ReplaceSessionDefaultsHandlingOutcome,
@@ -1714,7 +1715,8 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
 
 /// S02 / S08 / INV-005 / INV-014 / INV-015 / INV-036: the scripted application
 /// path consumes multiple steering inputs at preparation, renders them to the
-/// provider in acceptance order, and preserves the staged terminal commits.
+/// provider in acceptance order, rejects noncontiguous stored snapshot
+/// ordinals before resume, and preserves the staged terminal commits.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s02_inv014_inv015_application_service_completes_scripted_reply()
@@ -1816,6 +1818,7 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
     let repository =
         PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
     let call = ModelCallId::from_uuid(Uuid::from_u128(0x1ce2));
+    let corrupt_snapshot_unused_call = ModelCallId::from_uuid(Uuid::from_u128(0x1ce4));
     let unused_call = ModelCallId::from_uuid(Uuid::from_u128(0x1ce3));
     let assistant_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1de4));
     let completion_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1de5));
@@ -1915,11 +1918,12 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
     ));
     let mut service = ModelCallExecutionService::new(
         FixedModelCallExecutionIds::new(
-            [call, unused_call],
+            [call, corrupt_snapshot_unused_call, unused_call],
             [
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1de2)),
                 steering_entries[0],
                 steering_entries[1],
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1daa)),
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x1de3)),
                 assistant_entry,
                 completion_entry,
@@ -1927,6 +1931,8 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
             [
                 ContextFrontierId::from_uuid(Uuid::from_u128(0x1ee5)),
                 steering_frontier,
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x1eaa)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x1eab)),
                 ContextFrontierId::from_uuid(Uuid::from_u128(0x1ee3)),
                 ContextFrontierId::from_uuid(Uuid::from_u128(0x1ee6)),
                 terminal_frontier,
@@ -1952,6 +1958,48 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
         service.execute(session).await?,
         ModelCallExecutionOutcome::Checkpointed(call)
     );
+    sqlx::query("ALTER TABLE context_frontier_member DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE context_frontier_member
+            SET member_position = 4
+          WHERE owning_session_id = $1
+            AND context_frontier_id = $2
+            AND member_position = 3",
+    )
+    .bind(session.into_uuid())
+    .bind(steering_frontier.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE context_frontier_member ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    assert!(matches!(
+        service.execute(session).await,
+        Err(ModelCallExecutionError::Prepare(
+            ModelCallRepositoryError::Corruption(ModelCallCorruption::Inconsistent(
+                "model-call snapshot member positions"
+            ))
+        ))
+    ));
+    sqlx::query("ALTER TABLE context_frontier_member DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE context_frontier_member
+            SET member_position = 3
+          WHERE owning_session_id = $1
+            AND context_frontier_id = $2
+            AND member_position = 4",
+    )
+    .bind(session.into_uuid())
+    .bind(steering_frontier.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE context_frontier_member ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
     let ModelCallExecutionOutcome::ObservationCommitted(outcome) = service.execute(session).await?
     else {
         panic!("the resumed prepared call must commit its scripted observation")

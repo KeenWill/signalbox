@@ -1552,8 +1552,8 @@ async fn load_call_snapshot(
     .fetch_optional(&mut *connection)
     .await?
     .ok_or(ModelCallCorruption::Missing("model-call snapshot"))?;
-    let rows = sqlx::query(
-        "SELECT source_session_id, semantic_entry_id
+    let rows = sqlx::query_as::<_, (Decimal, Uuid, Uuid)>(
+        "SELECT member_position, source_session_id, semantic_entry_id
            FROM context_frontier_member
           WHERE owning_session_id = $1
             AND context_frontier_id = $2
@@ -1570,13 +1570,20 @@ async fn load_call_snapshot(
     }
     let ordered_entries = rows
         .into_iter()
-        .map(|row| {
+        .enumerate()
+        .map(|(index, (position, source_session, semantic_entry))| {
+            let expected_position = u64::try_from(index + 1).map_err(|_| {
+                ModelCallCorruption::Inconsistent("model-call snapshot member positions")
+            })?;
+            if position != Decimal::from(expected_position) {
+                return Err(ModelCallCorruption::Inconsistent(
+                    "model-call snapshot member positions",
+                )
+                .into());
+            }
             Ok(SemanticTranscriptEntryRef::from_source(
-                session_id_from_uuid(required(&row, "source_session_id")?),
-                signalbox_domain::SemanticTranscriptEntryId::from_uuid(required(
-                    &row,
-                    "semantic_entry_id",
-                )?),
+                session_id_from_uuid(source_session),
+                signalbox_domain::SemanticTranscriptEntryId::from_uuid(semantic_entry),
             ))
         })
         .collect::<Result<Vec<_>, ModelCallRepositoryError>>()?;
