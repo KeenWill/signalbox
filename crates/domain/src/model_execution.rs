@@ -19,11 +19,11 @@ use crate::{
     EndedTurnAttempt, FrozenModelSelection, ModelCallDisposition, ModelCallId,
     ModelCallReconstitutionInput, NonEmptyIssuedOperationRefs, OriginConfiguration,
     PinnedProviderTarget, PinnedProviderTargetReconstitutionInput, ReconstitutedModelCall,
-    ReconstitutedSubmitInput, ResolvedContextFrontierSnapshot, ResolvedProviderTarget,
-    SemanticTranscriptEntry, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload, SessionId,
-    SteeringBinding, SteeringReclassificationReason, SubmitInputAppliedResult, SubmitInputResult,
-    SubmitInputTurnOriginReconstitutionInput, TurnAttemptId, TurnDisposition, TurnId,
-    UnstoppedAttemptDisposition, UserContent,
+    ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput,
+    ResolvedContextFrontierSnapshot, ResolvedProviderTarget, SemanticTranscriptEntry,
+    SemanticTranscriptEntryId, SemanticTranscriptEntryPayload, SessionId, SteeringBinding,
+    SteeringReclassificationReason, SubmitInputResult, SubmitInputTurnOriginReconstitutionInput,
+    TurnAttemptId, TurnDisposition, TurnId, UnstoppedAttemptDisposition, UserContent,
 };
 
 /// One immutable configured direct-selection to exact-target definition.
@@ -147,15 +147,13 @@ impl ModelCallOriginContent {
         }
     }
 
-    /// Derives exact origin content from one checked durable input receipt.
+    /// Derives exact user content from one checked applied input receipt.
     pub fn from_recorded_submit(recorded: &ReconstitutedSubmitInput) -> Option<Self> {
-        let SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(origin)) =
-            recorded.result()
-        else {
+        let SubmitInputResult::Applied(applied) = recorded.result() else {
             return None;
         };
-        (origin.session() == recorded.command().session()).then(|| Self {
-            accepted_input: origin.accepted_input(),
+        (applied.session() == recorded.command().session()).then(|| Self {
+            accepted_input: applied.accepted_input(),
             content: recorded.command().content().clone(),
         })
     }
@@ -201,6 +199,7 @@ pub struct ModelCallExecutionReconstitutionInput {
     active_turn: ActivatedAcceptedInputTurn,
     targets: ModelTargetCatalog,
     starting_snapshot: ResolvedContextFrontierSnapshot,
+    call_snapshot: Option<ResolvedContextFrontierReconstitutionInput>,
     frontier_entries: Vec<SemanticTranscriptEntry>,
     origin_contents: Vec<ModelCallOriginContent>,
     pinned_target: Option<PinnedProviderTargetReconstitutionInput>,
@@ -222,11 +221,21 @@ impl ModelCallExecutionReconstitutionInput {
             active_turn,
             targets,
             starting_snapshot,
+            call_snapshot: None,
             frontier_entries,
             origin_contents,
             pinned_target,
             calls,
         }
+    }
+
+    /// Supplies the non-starting snapshot named by a steering-consuming call.
+    pub fn with_call_snapshot(
+        mut self,
+        call_snapshot: ResolvedContextFrontierReconstitutionInput,
+    ) -> Self {
+        self.call_snapshot = Some(call_snapshot);
+        self
     }
 
     /// Reconstructs the canonical live aggregate without effects.
@@ -244,6 +253,12 @@ pub enum ModelCallExecutionReconstitutionFailure {
     StartingSnapshotSessionMismatch,
     /// The supplied snapshot is not the turn's eligibility-fixed start.
     StartingSnapshotMismatch,
+    /// A non-starting call frontier was omitted.
+    CallSnapshotMissing,
+    /// A call snapshot was supplied without a consuming call or steering.
+    CallSnapshotUnexpected,
+    /// The supplied call snapshot is not the call's exact prefix extension.
+    CallSnapshotMismatch,
     /// The supplied frontier entries do not exactly back ordered membership.
     FrontierEntryMismatch,
     /// More than one model call was supplied to the initial-call slice.
@@ -253,8 +268,10 @@ pub enum ModelCallExecutionReconstitutionFailure {
     /// A frontier origin has no exact accepted user content.
     MissingOriginContent,
     /// User content was supplied for an accepted input absent from the
-    /// frontier.
+    /// frontier and pending steering inventory.
     UnreferencedOriginContent,
+    /// Consumed steering does not exactly match the call frontier suffix.
+    ConsumedSteeringMismatch,
     /// A call belongs to a different turn or session frontier.
     CallOwnershipMismatch,
     /// A call records a different frozen selection.
@@ -313,6 +330,7 @@ pub struct ModelCallExecution {
     targets: ModelTargetCatalog,
     current_attempt: CurrentTurnAttempt,
     starting_snapshot: ResolvedContextFrontierSnapshot,
+    current_snapshot: ResolvedContextFrontierSnapshot,
     frontier_entries: Box<[SemanticTranscriptEntry]>,
     origin_contents: BTreeMap<AcceptedInputId, UserContent>,
     current_call: Option<CurrentModelCall>,
@@ -369,6 +387,17 @@ impl ModelCallExecution {
         self,
         call: ModelCallId,
     ) -> Result<PreparedInitialModelCall, ModelCallPreparationError> {
+        self.prepare_initial_call_consuming_steering(call, Vec::new(), None)
+    }
+
+    /// Creates the initial durable call while consuming the complete pending
+    /// steering inventory.
+    pub fn prepare_initial_call_consuming_steering(
+        self,
+        call: ModelCallId,
+        steering_entries: Vec<SemanticTranscriptEntryId>,
+        steering_frontier: Option<ContextFrontierId>,
+    ) -> Result<PreparedInitialModelCall, ModelCallPreparationError> {
         let frozen = *self.configuration.effective().model();
         if self.current_call.is_some() {
             return Err(ModelCallPreparationError::new(
@@ -382,15 +411,17 @@ impl ModelCallExecution {
                 ModelCallPreparationFailure::AttemptIsNotPrepared,
             ));
         }
-        if let Some(accepted_input) = self
-            .active_turn
-            .pending_steering()
-            .first()
-            .map(crate::PendingSteeringInput::accepted_input)
-        {
+        let pending = self.active_turn.pending_steering().to_vec();
+        if pending.len() != steering_entries.len() {
             return Err(ModelCallPreparationError::new(
                 self,
-                ModelCallPreparationFailure::PendingSteering { accepted_input },
+                ModelCallPreparationFailure::SteeringIdentityCountMismatch,
+            ));
+        }
+        if pending.is_empty() != steering_frontier.is_none() {
+            return Err(ModelCallPreparationError::new(
+                self,
+                ModelCallPreparationFailure::SteeringFrontierIdentityMismatch,
             ));
         }
         let resolution = match self.targets.resolve(frozen) {
@@ -400,18 +431,95 @@ impl ModelCallExecution {
             }
         };
         let pinned = PinnedProviderTarget::pinned(self.turn, resolution.target);
+        let mut distinct_entries = self
+            .frontier_entries
+            .iter()
+            .map(SemanticTranscriptEntry::identity)
+            .collect::<BTreeSet<_>>();
+        let mut consumed_steering = Vec::with_capacity(pending.len());
+        let mut semantic_entries = Vec::with_capacity(pending.len());
+        for (pending, entry) in pending.iter().zip(steering_entries) {
+            let AcceptedInputDisposition::PendingSteering { binding } =
+                pending.lifecycle().disposition()
+            else {
+                return Err(ModelCallPreparationError::new(
+                    self,
+                    ModelCallPreparationFailure::SteeringCorrelationMismatch,
+                ));
+            };
+            if binding.source_turn() != self.turn
+                || !distinct_entries.insert(entry)
+                || !self.origin_contents.contains_key(&pending.accepted_input())
+            {
+                return Err(ModelCallPreparationError::new(
+                    self,
+                    ModelCallPreparationFailure::SteeringCorrelationMismatch,
+                ));
+            }
+            let lifecycle = pending
+                .lifecycle()
+                .clone()
+                .consume_as_steering(call)
+                .map_err(|_| {
+                    ModelCallPreparationError::new(
+                        self.clone(),
+                        ModelCallPreparationFailure::SteeringCorrelationMismatch,
+                    )
+                })?;
+            let semantic_entry = SemanticTranscriptEntry::from_validated_parts(
+                entry,
+                self.session,
+                SemanticTranscriptEntryPayload::SteeringAcceptedInput {
+                    accepted_input: pending.accepted_input(),
+                    source_turn: self.turn,
+                },
+            );
+            consumed_steering.push(PreparedSteeringConsumption {
+                accepted_input: lifecycle,
+                semantic_entry: semantic_entry.clone(),
+            });
+            semantic_entries.push(semantic_entry);
+        }
+        let call_snapshot = if semantic_entries.is_empty() {
+            self.current_snapshot.clone()
+        } else {
+            self.current_snapshot
+                .derive_appending_candidate(
+                    match steering_frontier {
+                        Some(frontier) => frontier,
+                        None => {
+                            return Err(ModelCallPreparationError::new(
+                                self,
+                                ModelCallPreparationFailure::SteeringFrontierIdentityMismatch,
+                            ));
+                        }
+                    },
+                    semantic_entries
+                        .iter()
+                        .map(SemanticTranscriptEntry::reference)
+                        .collect(),
+                )
+                .map_err(|_| {
+                    ModelCallPreparationError::new(
+                        self.clone(),
+                        ModelCallPreparationFailure::SteeringFrontierIdentityMismatch,
+                    )
+                })?
+        };
         let prepared = CurrentModelCall::prepared(
             call,
             self.current_attempt.id(),
             frozen,
             pinned,
-            &self.starting_snapshot,
+            &call_snapshot,
         );
         Ok(PreparedInitialModelCall {
             session: self.session,
             turn: self.turn,
             attempt: self.current_attempt.id(),
             call: prepared,
+            consumed_steering: consumed_steering.into_boxed_slice(),
+            steering_snapshot: (!semantic_entries.is_empty()).then_some(call_snapshot),
         })
     }
 
@@ -605,7 +713,7 @@ impl ModelCallExecution {
             },
             self.current_attempt,
             Some(ended_call),
-            self.starting_snapshot,
+            self.current_snapshot,
             identities,
             UnstoppedAttemptDisposition::KnownFailure,
             reclassified_pending_steering,
@@ -638,7 +746,7 @@ impl ModelCallExecution {
                     },
                     self.current_attempt,
                     Some(call),
-                    self.starting_snapshot,
+                    self.current_snapshot,
                     failure_identities,
                     UnstoppedAttemptDisposition::Lost,
                     reclassified_pending_steering,
@@ -673,6 +781,36 @@ impl ModelCallExecution {
             }
         }
     }
+
+    /// Applies evidence-free startup recovery before any model call exists.
+    ///
+    /// Pending steering is reclassified in the same failed-terminal commit, so
+    /// a prior-process prepared attempt cannot remain live solely because no
+    /// model-call checkpoint had yet been created.
+    pub fn recover_evidence_free_after_restart(
+        self,
+        failure_identities: FailedModelCallTurnIdentities,
+    ) -> Result<FailedModelCallTurn, ModelCallClosureError> {
+        if self.current_call.is_some() {
+            return Err(ModelCallClosureError::CallStateMismatch);
+        }
+        let reclassified_pending_steering = reclassify_pending_steering(
+            &self.active_turn,
+            &failure_identities.pending_steering_reclassifications,
+        )?;
+        close_failed_turn(
+            ModelCallTurnScope {
+                session: self.session,
+                turn: self.turn,
+            },
+            self.current_attempt,
+            None,
+            self.starting_snapshot,
+            failure_identities,
+            UnstoppedAttemptDisposition::Lost,
+            reclassified_pending_steering,
+        )
+    }
 }
 
 /// Why a fresh prepared checkpoint could not be derived.
@@ -684,12 +822,12 @@ pub enum ModelCallPreparationFailure {
     CallAlreadyExists,
     /// The current physical attempt is no longer prepared.
     AttemptIsNotPrepared,
-    /// Acknowledged steering must be consumed by a later decision-authorized
-    /// semantic projection before this call may be prepared.
-    PendingSteering {
-        /// The earliest accepted input proving the safe point is not empty.
-        accepted_input: AcceptedInputId,
-    },
+    /// The supplied steering entry count differs from the complete inventory.
+    SteeringIdentityCountMismatch,
+    /// The steering snapshot candidate is missing, unexpected, or invalid.
+    SteeringFrontierIdentityMismatch,
+    /// Pending steering cannot form the exact consumed semantic suffix.
+    SteeringCorrelationMismatch,
 }
 
 /// Failed preparation retaining the unchanged live aggregate.
@@ -743,6 +881,8 @@ pub struct PreparedInitialModelCall {
     turn: TurnId,
     attempt: TurnAttemptId,
     call: CurrentModelCall,
+    consumed_steering: Box<[PreparedSteeringConsumption]>,
+    steering_snapshot: Option<ResolvedContextFrontierSnapshot>,
 }
 
 impl PreparedInitialModelCall {
@@ -764,6 +904,35 @@ impl PreparedInitialModelCall {
     /// Borrows the new durable prepared call.
     pub const fn call(&self) -> &CurrentModelCall {
         &self.call
+    }
+
+    /// Returns every steering consumption in immutable acceptance order.
+    pub fn consumed_steering(&self) -> &[PreparedSteeringConsumption] {
+        &self.consumed_steering
+    }
+
+    /// Borrows the extended call frontier when steering created one.
+    pub const fn steering_snapshot(&self) -> Option<&ResolvedContextFrontierSnapshot> {
+        self.steering_snapshot.as_ref()
+    }
+}
+
+/// One accepted-input disposition and semantic entry prepared atomically.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreparedSteeringConsumption {
+    accepted_input: AcceptedInputLifecycle,
+    semantic_entry: SemanticTranscriptEntry,
+}
+
+impl PreparedSteeringConsumption {
+    /// Borrows the consumed accepted-input lifecycle.
+    pub const fn accepted_input(&self) -> &AcceptedInputLifecycle {
+        &self.accepted_input
+    }
+
+    /// Borrows the semantic entry appended for this consumption.
+    pub const fn semantic_entry(&self) -> &SemanticTranscriptEntry {
+        &self.semantic_entry
     }
 }
 
@@ -1573,11 +1742,65 @@ fn reconstitute(
             ModelCallExecutionReconstitutionFailure::StartingSnapshotMismatch,
         ));
     }
+    if input.calls.len() > 1 {
+        return Err(fail(
+            input,
+            ModelCallExecutionReconstitutionFailure::MultipleCalls,
+        ));
+    }
+    let current_snapshot = match (input.calls.first(), input.call_snapshot.as_ref()) {
+        (None, None) => input.starting_snapshot.clone(),
+        (None, Some(_)) => {
+            return Err(fail(
+                input,
+                ModelCallExecutionReconstitutionFailure::CallSnapshotUnexpected,
+            ));
+        }
+        (Some(call), None) if call.frontier() == input.starting_snapshot.frontier().snapshot() => {
+            input.starting_snapshot.clone()
+        }
+        (Some(_), None) => {
+            return Err(fail(
+                input,
+                ModelCallExecutionReconstitutionFailure::CallSnapshotMissing,
+            ));
+        }
+        (Some(call), Some(stored)) => {
+            if call.frontier() == input.starting_snapshot.frontier().snapshot() {
+                return Err(fail(
+                    input,
+                    ModelCallExecutionReconstitutionFailure::CallSnapshotUnexpected,
+                ));
+            }
+            let (owner, snapshot, members) = stored.clone().into_parts();
+            let current =
+                match ResolvedContextFrontierSnapshot::try_from_candidate(owner, snapshot, members)
+                {
+                    Ok(current) => current,
+                    Err(_) => {
+                        return Err(fail(
+                            input,
+                            ModelCallExecutionReconstitutionFailure::CallSnapshotMismatch,
+                        ));
+                    }
+                };
+            if owner != session
+                || snapshot != call.frontier()
+                || !input.starting_snapshot.is_semantic_prefix_of(&current)
+            {
+                return Err(fail(
+                    input,
+                    ModelCallExecutionReconstitutionFailure::CallSnapshotMismatch,
+                ));
+            }
+            current
+        }
+    };
     if input
         .frontier_entries
         .iter()
         .map(SemanticTranscriptEntry::reference)
-        .ne(input.starting_snapshot.ordered_entries())
+        .ne(current_snapshot.ordered_entries())
     {
         return Err(fail(
             input,
@@ -1598,31 +1821,77 @@ fn reconstitute(
     }
     let mut referenced_origins = BTreeSet::new();
     for entry in &input.frontier_entries {
-        if let SemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input } =
-            entry.payload()
-        {
-            if !origin_contents.contains_key(accepted_input) {
+        let accepted_input = match entry.payload() {
+            SemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input }
+            | SemanticTranscriptEntryPayload::SteeringAcceptedInput { accepted_input, .. } => {
+                Some(*accepted_input)
+            }
+            SemanticTranscriptEntryPayload::TurnFailed { .. }
+            | SemanticTranscriptEntryPayload::AssistantText { .. }
+            | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
+            | SemanticTranscriptEntryPayload::TurnCompleted { .. } => None,
+        };
+        if let Some(accepted_input) = accepted_input {
+            if !origin_contents.contains_key(&accepted_input) {
                 return Err(fail(
                     input,
                     ModelCallExecutionReconstitutionFailure::MissingOriginContent,
                 ));
             }
-            referenced_origins.insert(*accepted_input);
+            referenced_origins.insert(accepted_input);
         }
     }
-    if origin_contents
-        .keys()
-        .any(|accepted_input| !referenced_origins.contains(accepted_input))
+    let pending_inputs = input
+        .active_turn
+        .pending_steering()
+        .iter()
+        .map(crate::PendingSteeringInput::accepted_input)
+        .collect::<BTreeSet<_>>();
+    if pending_inputs
+        .iter()
+        .any(|accepted_input| !origin_contents.contains_key(accepted_input))
     {
+        return Err(fail(
+            input,
+            ModelCallExecutionReconstitutionFailure::MissingOriginContent,
+        ));
+    }
+    if origin_contents.keys().any(|accepted_input| {
+        !referenced_origins.contains(accepted_input) && !pending_inputs.contains(accepted_input)
+    }) {
         return Err(fail(
             input,
             ModelCallExecutionReconstitutionFailure::UnreferencedOriginContent,
         ));
     }
-    if input.calls.len() > 1 {
+    let consumed = input.active_turn.consumed_steering();
+    let consumed_suffix = &input.frontier_entries[input.starting_snapshot.entry_count()..];
+    let consumed_call = input.calls.first().map(ModelCallReconstitutionInput::id);
+    if consumed.len() != consumed_suffix.len()
+        || consumed
+            .iter()
+            .zip(consumed_suffix)
+            .any(|(consumed, entry)| {
+                !matches!(
+                    (consumed.lifecycle().disposition(), entry.payload(), consumed_call),
+                    (
+                        AcceptedInputDisposition::ConsumedAsSteering { call },
+                        SemanticTranscriptEntryPayload::SteeringAcceptedInput {
+                            accepted_input,
+                            source_turn,
+                        },
+                        Some(current_call),
+                    ) if *call == current_call
+                        && *accepted_input == consumed.accepted_input()
+                        && *source_turn == consumed.source_turn()
+                        && *source_turn == turn
+                )
+            })
+        || (!consumed.is_empty() && input.call_snapshot.is_none())
+    {
         return Err(fail(
             input,
-            ModelCallExecutionReconstitutionFailure::MultipleCalls,
+            ModelCallExecutionReconstitutionFailure::ConsumedSteeringMismatch,
         ));
     }
     let pinned_target = match (input.pinned_target, input.calls.first()) {
@@ -1652,7 +1921,7 @@ fn reconstitute(
     let current_call = if let Some(call) = input.calls.first() {
         if call.turn() != turn
             || call.attempt() != current_attempt.id()
-            || call.frontier() != input.starting_snapshot.frontier().snapshot()
+            || call.frontier() != current_snapshot.frontier().snapshot()
         {
             return Err(fail(
                 input,
@@ -1682,7 +1951,7 @@ fn reconstitute(
                 ModelCallExecutionReconstitutionFailure::CallTargetMismatch,
             ));
         }
-        match call.reconstitute(&input.starting_snapshot, pinned) {
+        match call.reconstitute(&current_snapshot, pinned) {
             Ok(ReconstitutedModelCall::Current(call)) => Some(call),
             Ok(ReconstitutedModelCall::Ended(_)) | Err(_) => {
                 return Err(fail(
@@ -1724,6 +1993,7 @@ fn reconstitute(
         targets: input.targets,
         current_attempt,
         starting_snapshot: input.starting_snapshot,
+        current_snapshot,
         frontier_entries: input.frontier_entries.into_boxed_slice(),
         origin_contents,
         current_call,
@@ -1894,9 +2164,9 @@ mod tests {
         AcceptedInputSchedulingReconstitutionInput, AcceptedInputTurnActivationIdentities,
         AcceptedInputTurnSchedulingRecord, AcceptedInputTurnSchedulingRecordState, DeliveryRequest,
         ModelCallReconstitutionState, ModelSelectionOverride, ModelSelectionRequest,
-        PerInputConfigurationChoices, Session, SessionConfigurationDefaults,
-        SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-        SessionReconstitutionInput, TranscriptAncestry,
+        PerInputConfigurationChoices, SemanticTranscriptEntryRef, Session,
+        SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
+        SessionCreationProvenance, SessionReconstitutionInput, TranscriptAncestry,
         test_support::{
             accepted_input_id, context_frontier_id, direct, model_call_id, provider_model_identity,
             semantic_transcript_entry_id, session_id, turn_attempt_id, turn_id,
@@ -2029,6 +2299,78 @@ mod tests {
         )
         .reconstitute()
         .expect("prepared facts reconstruct")
+    }
+
+    fn prepared_execution_consuming_steering() -> ModelCallExecution {
+        let mut initial = active_execution();
+        let accepted_input = accepted_input_id(20);
+        let acceptance_position = crate::SessionInputPosition::try_from_u64(2)
+            .expect("the steering position is positive");
+        initial.active_turn = initial.active_turn.with_pending_steering_for_test(
+            vec![(accepted_input, acceptance_position)].into_boxed_slice(),
+        );
+        initial.origin_contents.insert(
+            accepted_input,
+            UserContent::try_text(String::from("steer")).expect("steering content is valid"),
+        );
+        let active_turn = initial.active_turn.clone();
+        let targets = initial.targets.clone();
+        let starting_snapshot = initial.starting_snapshot.clone();
+        let mut frontier_entries = initial.frontier_entries.to_vec();
+        let origin_contents = initial
+            .origin_contents
+            .iter()
+            .map(|(accepted_input, content)| {
+                ModelCallOriginContent::from_validated_parts(*accepted_input, content.clone())
+            })
+            .collect();
+        let call_id = model_call_id(9);
+        let prepared = initial
+            .prepare_initial_call_consuming_steering(
+                call_id,
+                vec![semantic_transcript_entry_id(22)],
+                Some(context_frontier_id(24)),
+            )
+            .expect("steering may be consumed by a prepared call");
+        frontier_entries.extend(
+            prepared
+                .consumed_steering()
+                .iter()
+                .map(|consumed| consumed.semantic_entry().clone()),
+        );
+        let call = prepared.call();
+        let call_snapshot = prepared
+            .steering_snapshot()
+            .expect("steering creates a call snapshot");
+        ModelCallExecutionReconstitutionInput::new(
+            active_turn.with_consumed_steering_for_test(
+                vec![(accepted_input, acceptance_position, call_id)].into_boxed_slice(),
+            ),
+            targets,
+            starting_snapshot,
+            frontier_entries,
+            origin_contents,
+            Some(PinnedProviderTargetReconstitutionInput::new(
+                call.turn(),
+                call.target(),
+            )),
+            vec![ModelCallReconstitutionInput::new(
+                call.id(),
+                call.turn(),
+                call.attempt(),
+                call.selection(),
+                call.target(),
+                call.frontier().snapshot(),
+                ModelCallReconstitutionState::Prepared,
+            )],
+        )
+        .with_call_snapshot(ResolvedContextFrontierReconstitutionInput::new(
+            session_id(1),
+            call_snapshot.frontier().snapshot(),
+            call_snapshot.ordered_entries().collect(),
+        ))
+        .reconstitute()
+        .expect("a steering-consuming prepared call reconstructs")
     }
 
     fn in_flight_execution() -> ModelCallExecution {
@@ -2383,16 +2725,14 @@ mod tests {
         );
     }
 
-    /// S08 / INV-016: the accepted M3 boundary fails call preparation closed
-    /// rather than omitting pending steering while its semantic projection is
-    /// reserved.
+    /// S08 / INV-036: preparation must supply one fresh semantic identity for
+    /// every pending steering input in the complete active acceptance tail.
     #[test]
-    fn s08_inv016_preparation_requires_an_empty_checked_steering_inventory() {
+    fn s08_inv036_preparation_requires_the_complete_steering_identity_inventory() {
         let mut execution = active_execution();
-        let pending = accepted_input_id(20);
         execution.active_turn = execution.active_turn.with_pending_steering_for_test(
             vec![(
-                pending,
+                accepted_input_id(20),
                 crate::SessionInputPosition::try_from_u64(2)
                     .expect("the test steering position is positive"),
             )]
@@ -2401,13 +2741,98 @@ mod tests {
 
         let error = execution
             .prepare_initial_call(model_call_id(9))
-            .expect_err("pending steering blocks call preparation");
+            .expect_err("the empty identity inventory cannot consume steering");
 
         assert_eq!(
             error.failure(),
-            ModelCallPreparationFailure::PendingSteering {
-                accepted_input: pending,
-            }
+            ModelCallPreparationFailure::SteeringIdentityCountMismatch
+        );
+    }
+
+    /// S08 / INV-005 / INV-036: every pending input is consumed in immutable
+    /// acceptance order into one prefix extension named by the prepared call.
+    #[test]
+    fn s08_inv005_inv036_preparation_consumes_multiple_steering_inputs_in_order() {
+        let mut execution = active_execution();
+        let first = accepted_input_id(20);
+        let second = accepted_input_id(21);
+        execution.active_turn = execution.active_turn.with_pending_steering_for_test(
+            vec![
+                (
+                    first,
+                    crate::SessionInputPosition::try_from_u64(2)
+                        .expect("the first steering position is positive"),
+                ),
+                (
+                    second,
+                    crate::SessionInputPosition::try_from_u64(3)
+                        .expect("the second steering position is positive"),
+                ),
+            ]
+            .into_boxed_slice(),
+        );
+        execution.origin_contents.insert(
+            first,
+            UserContent::try_text(String::from("first steering"))
+                .expect("the first steering content is valid"),
+        );
+        execution.origin_contents.insert(
+            second,
+            UserContent::try_text(String::from("second steering"))
+                .expect("the second steering content is valid"),
+        );
+        let call = model_call_id(9);
+        let entry_ids = [
+            semantic_transcript_entry_id(22),
+            semantic_transcript_entry_id(23),
+        ];
+        let frontier = context_frontier_id(24);
+
+        let prepared = execution
+            .prepare_initial_call_consuming_steering(call, entry_ids.to_vec(), Some(frontier))
+            .expect("the complete ordered steering inventory prepares atomically");
+
+        assert_eq!(prepared.call().frontier().snapshot(), frontier);
+        assert_eq!(
+            prepared
+                .consumed_steering()
+                .iter()
+                .map(|consumed| consumed.accepted_input().id())
+                .collect::<Vec<_>>(),
+            vec![first, second]
+        );
+        for (consumed, (accepted_input, entry)) in prepared
+            .consumed_steering()
+            .iter()
+            .zip([(first, entry_ids[0]), (second, entry_ids[1])])
+        {
+            assert_eq!(
+                consumed.accepted_input().disposition(),
+                &AcceptedInputDisposition::ConsumedAsSteering { call }
+            );
+            assert_eq!(consumed.semantic_entry().identity(), entry);
+            assert_eq!(
+                consumed.semantic_entry().payload(),
+                &SemanticTranscriptEntryPayload::SteeringAcceptedInput {
+                    accepted_input,
+                    source_turn: turn_id(3),
+                }
+            );
+        }
+        assert_eq!(
+            prepared
+                .steering_snapshot()
+                .expect("steering creates an extended frontier")
+                .ordered_entries()
+                .collect::<Vec<_>>(),
+            vec![
+                SemanticTranscriptEntryRef::from_source(
+                    session_id(1),
+                    semantic_transcript_entry_id(5),
+                ),
+                SemanticTranscriptEntryRef::from_source(session_id(1), entry_ids[0]),
+                SemanticTranscriptEntryRef::from_source(session_id(1), entry_ids[1]),
+            ]
         );
     }
 
@@ -2765,6 +3190,37 @@ mod tests {
             pending,
             turn_id(3),
             successor,
+        );
+    }
+
+    /// S08 / INV-005 / INV-036: a known failure after steering consumption
+    /// appends its marker to the call frontier without losing consumed input.
+    #[test]
+    fn s08_inv005_inv036_prepared_failure_extends_steering_call_frontier() {
+        let failure_entry = semantic_transcript_entry_id(30);
+        let failed = prepared_execution_consuming_steering()
+            .fail_prepared_call(FailedModelCallTurnIdentities::new(
+                failure_entry,
+                context_frontier_id(31),
+            ))
+            .expect("known failure extends the exact prepared call frontier");
+
+        assert_eq!(
+            failed
+                .terminal_snapshot()
+                .ordered_entries()
+                .collect::<Vec<_>>(),
+            vec![
+                SemanticTranscriptEntryRef::from_source(
+                    session_id(1),
+                    semantic_transcript_entry_id(5),
+                ),
+                SemanticTranscriptEntryRef::from_source(
+                    session_id(1),
+                    semantic_transcript_entry_id(22),
+                ),
+                SemanticTranscriptEntryRef::from_source(session_id(1), failure_entry),
+            ]
         );
     }
 

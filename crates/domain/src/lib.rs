@@ -62,8 +62,8 @@ pub use model_execution::{
     ModelCallTerminalObservation, ModelCallTerminalOutcome, ModelTargetCatalog,
     ModelTargetCatalogError, ModelTargetDefinition, ModelTargetResolutionError,
     PendingSteeringReclassificationIdentity, PreparedInitialModelCall, PreparedModelCallRequest,
-    ReclassifiedPendingSteeringTurn, RefusedModelCallTurn, RefusedModelCallTurnIdentities,
-    ResolvedModelSelection,
+    PreparedSteeringConsumption, ReclassifiedPendingSteeringTurn, RefusedModelCallTurn,
+    RefusedModelCallTurnIdentities, ResolvedModelSelection,
 };
 pub use provider_evidence::{
     ProviderTargetEvidence, ProviderTargetEvidenceLog, ProviderTargetMismatchInvalidation,
@@ -117,8 +117,8 @@ pub use turn_eligibility::{
     AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities,
     AcceptedInputTurnSchedulingProjection, AcceptedInputTurnSchedulingRecord,
     AcceptedInputTurnSchedulingRecordState, AcceptedInputTurnSchedulingStatus,
-    ActivatedAcceptedInputTurn, ActiveTurnSchedulingReconstitutionInput, FailedAcceptedInputTurn,
-    FailedTurnExecutionReconstitutionInput, PendingSteeringInput,
+    ActivatedAcceptedInputTurn, ActiveTurnSchedulingReconstitutionInput, ConsumedSteeringInput,
+    FailedAcceptedInputTurn, FailedTurnExecutionReconstitutionInput, PendingSteeringInput,
     PreparedAcceptedInputTurnActivation, PreparedAcceptedInputTurnFailure,
     SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
 };

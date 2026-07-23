@@ -402,6 +402,36 @@ pub struct PendingSteeringInput {
     acceptance_position: SessionInputPosition,
 }
 
+/// One consumed steering input proven by the complete active-session tail.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConsumedSteeringInput {
+    accepted_input: AcceptedInputLifecycle,
+    acceptance_position: SessionInputPosition,
+    source_turn: TurnId,
+}
+
+impl ConsumedSteeringInput {
+    /// Returns the accepted input already consumed by a prepared call.
+    pub const fn accepted_input(&self) -> AcceptedInputId {
+        self.accepted_input.id()
+    }
+
+    /// Borrows the exact checked consumed lifecycle.
+    pub const fn lifecycle(&self) -> &AcceptedInputLifecycle {
+        &self.accepted_input
+    }
+
+    /// Returns the immutable session acceptance position.
+    pub const fn acceptance_position(&self) -> SessionInputPosition {
+        self.acceptance_position
+    }
+
+    /// Returns the exact active turn this input was accepted to steer.
+    pub const fn source_turn(&self) -> TurnId {
+        self.source_turn
+    }
+}
+
 impl PendingSteeringInput {
     /// Returns the accepted input awaiting disposition.
     pub const fn accepted_input(&self) -> AcceptedInputId {
@@ -1148,6 +1178,7 @@ impl AcceptedInputTurnSchedulingProjection {
     fn active_turn_execution_with_pending(
         &self,
         pending_steering: Box<[PendingSteeringInput]>,
+        consumed_steering: Box<[ConsumedSteeringInput]>,
     ) -> Option<ActivatedAcceptedInputTurn> {
         let ReconstitutedSchedulingState::Active { start, phase } = &self.state else {
             return None;
@@ -1162,6 +1193,7 @@ impl AcceptedInputTurnSchedulingProjection {
             start: *start,
             phase: phase.clone(),
             pending_steering,
+            consumed_steering,
         })
     }
 
@@ -1256,7 +1288,30 @@ impl AcceptedInputSchedulingProjection {
             })
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        active.active_turn_execution_with_pending(pending_steering)
+        let consumed_steering = tail
+            .entries
+            .iter()
+            .filter_map(|entry| {
+                let AcceptedInputDisposition::ConsumedAsSteering { .. } =
+                    entry.accepted_input.disposition()
+                else {
+                    return None;
+                };
+                let DeliveryRequest::NextSafePoint {
+                    expected_active_turn,
+                } = entry.delivery
+                else {
+                    return None;
+                };
+                Some(ConsumedSteeringInput {
+                    accepted_input: entry.accepted_input.clone(),
+                    acceptance_position: entry.position,
+                    source_turn: expected_active_turn,
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        active.active_turn_execution_with_pending(pending_steering, consumed_steering)
     }
 
     /// Returns the earliest queued work in durable total order.
@@ -1360,6 +1415,7 @@ impl AcceptedInputTurnActivationIdentities {
 ///     start: AcceptedInputTurnStart,
 ///     phase: ActiveTurnPhase,
 ///     pending_steering: Box<[PendingSteeringInput]>,
+///     consumed_steering: Box<[ConsumedSteeringInput]>,
 /// ) {
 ///     let _ = ActivatedAcceptedInputTurn {
 ///         session,
@@ -1371,6 +1427,7 @@ impl AcceptedInputTurnActivationIdentities {
 ///         start,
 ///         phase,
 ///         pending_steering,
+///         consumed_steering,
 ///     };
 /// }
 /// ```
@@ -1385,6 +1442,7 @@ pub struct ActivatedAcceptedInputTurn {
     start: AcceptedInputTurnStart,
     phase: ActiveTurnPhase,
     pending_steering: Box<[PendingSteeringInput]>,
+    consumed_steering: Box<[ConsumedSteeringInput]>,
 }
 
 impl ActivatedAcceptedInputTurn {
@@ -1434,6 +1492,11 @@ impl ActivatedAcceptedInputTurn {
         &self.pending_steering
     }
 
+    /// Returns consumed steering in immutable acceptance order.
+    pub fn consumed_steering(&self) -> &[ConsumedSteeringInput] {
+        &self.consumed_steering
+    }
+
     #[cfg(test)]
     pub(crate) fn with_phase_for_test(&self, phase: ActiveTurnPhase) -> Self {
         Self {
@@ -1446,6 +1509,7 @@ impl ActivatedAcceptedInputTurn {
             start: self.start,
             phase,
             pending_steering: self.pending_steering.clone(),
+            consumed_steering: self.consumed_steering.clone(),
         }
     }
 
@@ -1461,6 +1525,7 @@ impl ActivatedAcceptedInputTurn {
             start,
             phase: self.phase.clone(),
             pending_steering: self.pending_steering.clone(),
+            consumed_steering: self.consumed_steering.clone(),
         }
     }
 
@@ -1495,6 +1560,41 @@ impl ActivatedAcceptedInputTurn {
             start: self.start,
             phase: self.phase.clone(),
             pending_steering,
+            consumed_steering: self.consumed_steering.clone(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_consumed_steering_for_test(
+        &self,
+        consumed_steering: Box<[(AcceptedInputId, SessionInputPosition, crate::ModelCallId)]>,
+    ) -> Self {
+        let consumed_steering = consumed_steering
+            .into_vec()
+            .into_iter()
+            .map(
+                |(accepted_input, acceptance_position, call)| ConsumedSteeringInput {
+                    accepted_input: AcceptedInputLifecycle::new(
+                        accepted_input,
+                        AcceptedInputDisposition::ConsumedAsSteering { call },
+                    ),
+                    acceptance_position,
+                    source_turn: self.turn,
+                },
+            )
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Self {
+            session: self.session,
+            turn: self.turn,
+            accepted_input: self.accepted_input.clone(),
+            order: self.order,
+            configuration: self.configuration.clone(),
+            configuration_provenance: self.configuration_provenance.clone(),
+            start: self.start,
+            phase: self.phase.clone(),
+            pending_steering: Box::new([]),
+            consumed_steering,
         }
     }
 }
@@ -1904,6 +2004,7 @@ fn reconstitute_inner(
                     );
                 }
             }
+            InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput { .. } => {}
             InitialSemanticTranscriptEntryPayload::TurnFailed { turn } => {
                 let Some(record) = records_by_turn.get(turn) else {
                     return Err(
@@ -2691,7 +2792,16 @@ fn reconstitute_active_acceptance_tail(
                             && expected_active_turn == active
                     )
             }
-            AcceptedInputDisposition::ConsumedAsSteering { .. } => false,
+            AcceptedInputDisposition::ConsumedAsSteering { .. } => {
+                !accepted_input_turns.contains_key(&accepted_input)
+                    && !origin_by_position.contains_key(&entry.position)
+                    && matches!(
+                        entry.delivery,
+                        DeliveryRequest::NextSafePoint {
+                            expected_active_turn,
+                        } if expected_active_turn == active
+                    )
+            }
         };
         if !disposition_valid
             || (index == 0 && entry.accepted_input != active_record.accepted_input)
@@ -3248,6 +3358,7 @@ fn prepare_earliest_queued_activation(
             current_attempt: CurrentTurnAttempt::prepared(identities.initial_attempt),
         },
         pending_steering: Box::new([]),
+        consumed_steering: Box::new([]),
     };
 
     Ok(PreparedAcceptedInputTurnActivation {

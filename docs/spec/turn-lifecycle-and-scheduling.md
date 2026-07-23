@@ -453,6 +453,10 @@ over the shared pool; no shared locked service instance exists.
   unimplemented; activation is the only eligibility outcome.
 - Ancestry-derived sessions cannot be scheduled (`UnsupportedSessionAncestry`);
   ancestry-to-first-frontier resolution is unimplemented.
+- Continuation safe points after a call or tool result are not implemented; the
+  current execution slice consumes steering only while preparing its one initial
+  call. Source terminalization and evidence-free startup recovery reclassify any
+  input that remains pending.
 - Startup recovery now classifies model-call evidence (a `Prepared` call closes
   as a known failure; an unstopped in-flight call parks the turn as ambiguous in
   `awaiting_model_call_recovery`); wait reconstruction for remaining phases

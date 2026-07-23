@@ -338,7 +338,8 @@ async fn insert_prepared_activation(
         InitialSemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input } => {
             *accepted_input
         }
-        InitialSemanticTranscriptEntryPayload::TurnFailed { .. }
+        InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
+        | InitialSemanticTranscriptEntryPayload::TurnFailed { .. }
         | InitialSemanticTranscriptEntryPayload::AssistantText { .. }
         | InitialSemanticTranscriptEntryPayload::AssistantToolUse { .. }
         | InitialSemanticTranscriptEntryPayload::TurnCompleted { .. } => {
