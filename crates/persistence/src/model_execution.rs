@@ -993,7 +993,7 @@ impl AuthorizeModelCallTransaction for PostgresModelCallRepository {
     ) -> impl std::future::Future<Output = ()> + Send + 'static {
         let pool = self.pool.clone();
         async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_millis(25));
+            let mut interval = cancellation_poll_interval();
             loop {
                 interval.tick().await;
                 let state = sqlx::query_scalar::<_, String>(
@@ -1016,6 +1016,12 @@ impl AuthorizeModelCallTransaction for PostgresModelCallRepository {
             }
         }
     }
+}
+
+fn cancellation_poll_interval() -> tokio::time::Interval {
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(25));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    interval
 }
 
 impl CommitModelCallObservationTransaction for PostgresModelCallRepository {
@@ -3491,9 +3497,18 @@ mod tests {
 
     use super::{
         ModelCallIdentityCollision, ModelCallRepositoryError, StoredTerminalFrontierMember,
-        commit_failure_is_ambiguous, completed_terminal_frontier_matches,
-        failed_terminal_frontier_matches, record_reclassified_turn_candidate,
+        cancellation_poll_interval, commit_failure_is_ambiguous,
+        completed_terminal_frontier_matches, failed_terminal_frontier_matches,
+        record_reclassified_turn_candidate,
     };
+
+    #[tokio::test]
+    async fn cancellation_polling_delays_missed_ticks() {
+        assert_eq!(
+            cancellation_poll_interval().missed_tick_behavior(),
+            tokio::time::MissedTickBehavior::Delay
+        );
+    }
 
     /// docs/spec/model-call-execution.md: a source-turn successor candidate is
     /// a retryable minted-ID collision, not a caller transition defect.

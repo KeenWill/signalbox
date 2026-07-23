@@ -20,7 +20,8 @@ latency and steady-state query load.
 
 **Decision.** The PostgreSQL model-call adapter polls the call's durable state
 every 25 milliseconds and resolves the signal when it observes
-`cancellation_requested` or `terminal`. This provisional interval bounds
+`cancellation_requested` or `terminal`. Missed ticks delay from the next
+observation instead of bursting to catch up. This provisional interval bounds
 ordinary observation latency near 25 milliseconds while issuing at most about 40
 state reads per second for each active signal.
 
