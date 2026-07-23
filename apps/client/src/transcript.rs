@@ -46,13 +46,7 @@ impl TranscriptSnapshot {
                 | SnapshotEntryKind::Marker(TranscriptEntry::TurnFailed { .. }) => None,
             })
             .collect::<Vec<_>>();
-        if matching.is_empty() {
-            Err(ClientError::Protocol(
-                "completed turn had no assistant transcript entry",
-            ))
-        } else {
-            Ok(matching)
-        }
+        Ok(matching)
     }
 }
 
@@ -247,4 +241,41 @@ fn require_entry_index(index: u64, entry_count: usize) -> Result<(), ClientError
 
 fn usize_matches(value: u64, expected: usize) -> bool {
     usize::try_from(value) == Ok(expected)
+}
+
+#[cfg(test)]
+mod tests {
+    use signalbox_process_protocol::{CanonicalUuid, TranscriptEntry, TurnState};
+    use uuid::Uuid;
+
+    use super::{SnapshotEntry, SnapshotEntryKind, TranscriptSnapshot, TranscriptTurn};
+
+    #[test]
+    fn completed_turn_can_have_no_assistant_text() {
+        let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let terminal_frontier_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let snapshot = TranscriptSnapshot {
+            cursor: 1,
+            turns: vec![TranscriptTurn {
+                turn_id,
+                state: TurnState::Completed {
+                    terminal_frontier_id,
+                    terminal_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+                    terminal_model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(4)),
+                },
+            }],
+            entries: vec![SnapshotEntry {
+                source_session_id: CanonicalUuid::from_uuid(Uuid::from_u128(5)),
+                entry_id: terminal_frontier_id,
+                kind: SnapshotEntryKind::Marker(TranscriptEntry::TurnCompleted { turn_id }),
+            }],
+        };
+
+        assert!(
+            snapshot
+                .assistant_texts(turn_id)
+                .expect("a valid zero-text completion succeeds")
+                .is_empty()
+        );
+    }
 }

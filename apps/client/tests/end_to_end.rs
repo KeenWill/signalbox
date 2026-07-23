@@ -154,10 +154,10 @@ fn required_environment(name: &'static str) -> Result<OsString, Box<dyn Error>> 
     })
 }
 
-/// S01 / S02 / S24 / INV-014 / INV-015 / INV-032 / INV-033: the daily
-/// terminal binary drives the real process server, durable outbox, scheduler,
-/// model-execution bridge, and authoritative reply reread without network
-/// access. A one-step provider proves that hidden physical retry would fail.
+/// S01 / S02 / INV-014 / INV-032: the daily terminal binary drives the real
+/// process server, durable outbox, scheduler, model-execution bridge, and
+/// authoritative reply reread without network access. A one-step provider
+/// proves that hidden physical retry would fail.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn terminal_client_completes_an_offline_scripted_conversation() -> Result<(), Box<dyn Error>>
@@ -293,10 +293,10 @@ async fn terminal_client_completes_an_offline_scripted_conversation() -> Result<
     Ok(())
 }
 
-/// S02 / S24 / INV-014 / INV-032 / INV-035: an explicitly opted-in smoke
-/// test drives the same terminal and process boundary through the production
-/// Anthropic runtime adapter. It requires a reviewed model catalog, a
-/// credential file, and a direct selection identity supplied by the operator.
+/// S02 / INV-014 / INV-032: an explicitly opted-in smoke test drives the same
+/// terminal and process boundary through the production Anthropic runtime
+/// adapter. It requires a reviewed model catalog, a credential file, and a
+/// direct selection identity supplied by the operator.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires PostgreSQL, a local socket, and an explicitly configured real Anthropic call"]
 async fn terminal_client_completes_the_real_anthropic_path() -> Result<(), Box<dyn Error>> {

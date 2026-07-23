@@ -158,6 +158,9 @@ impl<'a> Output<'a> {
     }
 
     fn text(&mut self, text: &str) -> io::Result<()> {
+        if self.raw {
+            return self.stdout.write_all(text.as_bytes());
+        }
         self.stdout.write_all(self.render(text).as_bytes())?;
         if !text.ends_with('\n') {
             self.stdout.write_all(b"\n")?;
@@ -247,7 +250,7 @@ mod tests {
     use signalbox_process_protocol::{CanonicalUuid, TranscriptEntry};
     use uuid::Uuid;
 
-    use super::{control_safe, transcript_entry_identity};
+    use super::{Output, control_safe, transcript_entry_identity};
     use crate::transcript::{SnapshotEntry, SnapshotEntryKind};
 
     #[test]
@@ -257,6 +260,18 @@ mod tests {
             "a\n\\u{9}\\u{1b}\\u{7f}\\u{85}z"
         );
         assert_eq!(control_safe("café\u{1f980}"), "café\u{1f980}");
+    }
+
+    #[test]
+    fn raw_assistant_text_preserves_bytes_without_a_delimiter() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut stderr, true);
+        output
+            .assistant_text("ok")
+            .expect("in-memory output cannot fail");
+        assert_eq!(stdout, b"ok");
+        assert!(stderr.is_empty());
     }
 
     #[test]

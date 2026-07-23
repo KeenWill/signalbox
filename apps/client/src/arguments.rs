@@ -320,8 +320,12 @@ mod tests {
     }
 
     #[test]
-    fn global_options_and_create_selection_are_closed() {
+    fn duplicate_global_options_are_rejected() {
         assert!(parse(["--raw-output", "--raw-output", "list"].map(Into::into)).is_err());
+    }
+
+    #[test]
+    fn create_requires_exactly_one_model_selection() {
         assert!(
             parse(
                 [

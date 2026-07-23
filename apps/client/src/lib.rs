@@ -519,10 +519,22 @@ mod tests {
     use super::{MAX_INPUT_CONTENT_BYTES, read_input, run};
 
     #[test]
-    fn send_input_validation_is_bounded_and_precedes_protocol_work() {
+    fn empty_send_input_is_rejected() {
         assert!(read_input(&mut Cursor::new(Vec::<u8>::new())).is_err());
+    }
+
+    #[test]
+    fn nul_in_send_input_is_rejected() {
         assert!(read_input(&mut Cursor::new(b"before\0after".to_vec())).is_err());
+    }
+
+    #[test]
+    fn oversized_send_input_is_rejected() {
         assert!(read_input(&mut Cursor::new(vec![b'a'; MAX_INPUT_CONTENT_BYTES + 1])).is_err());
+    }
+
+    #[test]
+    fn exact_limit_send_input_is_accepted() {
         let exact = vec![b'a'; MAX_INPUT_CONTENT_BYTES];
         assert_eq!(
             read_input(&mut Cursor::new(exact.clone()))
