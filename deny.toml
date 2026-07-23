@@ -36,10 +36,14 @@ allow = [
   "Apache-2.0",
   "ISC",
   "BSD-3-Clause",
-  # webpki-root-certs, pulled by reqwest's rustls platform verifier.
-  "CDLA-Permissive-2.0",
   "Unicode-3.0",
   "Zlib",
+]
+# The reqwest rustls platform verifier bundles this fallback root data.
+# Pinning the crate version keeps CDLA-Permissive-2.0 unavailable to every
+# other present or future dependency.
+exceptions = [
+  { allow = ["CDLA-Permissive-2.0"], crate = "webpki-root-certs@1.0.9" },
 ]
 
 [sources]
