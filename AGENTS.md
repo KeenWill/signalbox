@@ -8,23 +8,30 @@ The normative surface is the living specification: the subsystem pages under
 (laws, with INV-tagged tests as the enforcement of record), and
 `docs/domain-spine.md` (public API shapes). `docs/decisions.md` is the
 append-only record of recorded choices; `docs/open-questions.md` is the one home
-of deferred design; `docs/scenarios.md` and `docs/testing-style.md` govern
-scenarios and tests; `docs/architecture.md` orients but owns nothing. The
+of deferred design; `docs/scenarios.md` and `docs/agents/testing-style.md`
+govern scenarios and tests; `docs/architecture.md` orients but owns nothing. The
 historical ADR corpus formerly under `docs/decisions/` is retired: its content
 was distilled into `docs/spec/` (mapping in `docs/spec/README.md`), git history
 is its archive, and it is not citable as current authority. When selecting
 milestones, consult the priority order in `docs/target-model.md` — directional,
 never overriding the sources above.
 
+**Public-source hygiene.** Repository content — code, documentation, commit
+messages, pull-request text, branch names — cites only public sources. Never
+include or allude to non-public material — internal systems, documents, or
+vocabulary of any organization — regardless of origin. Citing public open-source
+work is fine regardless of publisher. References to the owner's own private
+repositories are permitted as provenance notes, never as normative sources.
+
 **Working autonomously.** Within an assigned task, proceed without asking:
 branch, implement, run the validation sequence (it defines done for any code
 change), and open and revise pull requests. Stop only at owner gates — merges,
 foundation-weight decisions, large dependencies — and when two rules conflict in
 practice, stop and report the conflict rather than reconciling it silently.
-Autonomous milestone-delivering runs additionally follow `docs/goal-mode.md`.
-Replacing or abandoning an open pull-request stack — closing its pull requests
-in favor of a rewrite — is surfaced to the owner before the replacement lands,
-never decided silently.
+Autonomous milestone-delivering runs additionally follow
+`docs/agents/goal-mode.md`. Replacing or abandoning an open pull-request stack —
+closing its pull requests in favor of a rewrite — is surfaced to the owner
+before the replacement lands, never decided silently.
 
 **Domain spine.** `docs/domain-spine.md` mirrors the public API of the domain
 and application crates as bare declarations and is the owner's primary review
@@ -121,7 +128,9 @@ Tests reference the scenario and invariant identifiers they enforce when the
 connection is meaningful (for example `S12_INV011_rejects_stale_generation`, or
 a doc comment naming the invariant). When a test becomes the enforcement of an
 accepted invariant, link it from the invariant catalog's enforcement column in
-the same change. Test style rules live in `docs/testing-style.md`.
+the same change. Test style rules live in `docs/agents/testing-style.md`; the
+process documents that govern how agents work on the repository are collected
+under `docs/agents/`.
 
 Dependencies are allowed when they provide clearer types or interfaces, replace
 code Signalbox would otherwise need to own, or supply another focused capability

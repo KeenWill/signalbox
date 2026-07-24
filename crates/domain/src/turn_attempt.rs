@@ -1836,7 +1836,7 @@ mod tests {
 
     /// Renders each constructed end's family, disposition, and retained typed
     /// cause, read back from the observed values
-    /// (`docs/testing-style.md`, rule 12).
+    /// (`docs/agents/testing-style.md`, rule 12).
     fn attempt_end_family_table(ends: &[AttemptEnd]) -> String {
         #[derive(Debug)]
         #[allow(

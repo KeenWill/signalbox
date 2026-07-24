@@ -644,7 +644,7 @@ mod tests {
         let invalidation = AppliedProviderTargetMismatch::test_completed_invalidation(call);
 
         // Decisive accepting edges stay as targeted asserts
-        // (`docs/testing-style.md`, rule 10); the snapshot covers the grid.
+        // (`docs/agents/testing-style.md`, rule 10); the snapshot covers the grid.
         assert!(
             projection(
                 running_attempt(),
@@ -713,7 +713,7 @@ mod tests {
     }
 
     /// Renders one row per effect/attempt/current-state combination
-    /// (`docs/testing-style.md`, rule 12). An accepted application is checked
+    /// (`docs/agents/testing-style.md`, rule 12). An accepted application is checked
     /// to retain the failure and no blocking remainder; a rejection is checked
     /// to return the projection and fact unchanged and, for a state mismatch,
     /// to name the exact affected call, effect, and current state.

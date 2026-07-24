@@ -236,11 +236,13 @@ Each non-text frontier member is one `transcript_entry` with `entry_index`,
 `entry` is either `user { accepted_input_id, turn_id }` or
 `assistant { turn_id, model_call_id }`. It is followed by one or more
 `transcript_content` messages carrying the same `entry_index`, a zero-based
-`fragment_index`, `final_fragment`, and `content_fragment`. The content is split
-only at UTF-8 scalar boundaries into fragments of at most 1 MiB of UTF-8; even
-empty content has one final empty fragment. The 1 MiB content bound leaves room
-below the 8 MiB frame limit even when every byte requires worst-case JSON
-escaping.
+`fragment_index`, `final_fragment`, and `content_fragment`. Fragment indices
+start at zero and are contiguous: each fragment index is exactly its predecessor
+plus one. Exactly the last fragment carries `final_fragment = true`; every
+earlier fragment carries `false`. The content is split only at UTF-8 scalar
+boundaries into fragments of at most 1 MiB of UTF-8; even empty content has one
+final empty fragment. The 1 MiB content bound leaves room below the 8 MiB frame
+limit even when every byte requires worst-case JSON escaping.
 
 `entry_index` is zero-based and contiguous in frontier-member order; the first
 entry is zero and each later entry is exactly its predecessor plus one.
