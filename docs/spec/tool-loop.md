@@ -373,6 +373,9 @@ The first compiled tool is `current_time`:
   read wall clock; and
 - success is text containing a compact JSON object with `datetime` as an RFC
   3339 timestamp to whole seconds and `timezone` as the selected canonical name.
+  A recognized zone at an instant whose historical offset contains nonzero
+  seconds closes as a typed execution failure because RFC 3339 cannot represent
+  that offset without changing the instant.
 
 An unknown time zone or wrong argument shape produces `InvalidArguments` error
 evidence. An injected instant outside the supported civil-time range produces

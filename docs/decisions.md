@@ -10,6 +10,26 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-24 — Reject current_time offsets outside RFC 3339
+
+**Context.** IANA history includes offsets with nonzero seconds, while RFC 3339
+represents numeric offsets only to whole minutes. Formatting such a zoned civil
+time with a minute-only offset would identify a different instant from the
+injected clock evidence.
+
+**Decision.** Before formatting `current_time`, require the selected zone's
+offset at the injected instant to be divisible by 60 seconds. Return a typed,
+model-visible known failure when it is not. Continue to use IANA history for
+representable offsets and preserve the compact whole-second RFC 3339 success
+shape.
+
+**Rejected alternatives.** Truncating or rounding the offset corrupts the
+instant. Adding offset seconds is not RFC 3339. Silently switching the timestamp
+to UTC would make the selected zone field misleading.
+
+**Affects.** The hub-local `current_time` executor, its focused tests, and the
+implemented result contract in [tool-loop.md](spec/tool-loop.md).
+
 ## 2026-07-24 — Reuse serde_json for current_time argument and result JSON
 
 **Context.** The hub-local `current_time` tool must inspect normalized object

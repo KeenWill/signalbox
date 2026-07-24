@@ -28,6 +28,8 @@ const CURRENT_TIME_SCHEMA: &str = r#"{
 }"#;
 const INVALID_ARGUMENTS_DETAIL: &str = "expected an object with one optional IANA timezone string";
 const CLOCK_OUT_OF_RANGE_DETAIL: &str = "current time is outside the supported range";
+const OFFSET_NOT_RFC3339_DETAIL: &str =
+    "selected time zone offset cannot be represented as RFC 3339";
 const RFC_3339_SECONDS_FORMAT: &str = "%Y-%m-%dT%H:%M:%S%:z";
 
 /// Injected source of the instant observed by `current_time`.
@@ -101,6 +103,9 @@ impl<Clock> CurrentTimeTool<Clock> {
         let clock_out_of_range_detail =
             ToolExecutionErrorDetail::try_new(String::from(CLOCK_OUT_OF_RANGE_DETAIL))
                 .map_err(|_| CurrentTimeToolConstructionError::ErrorDetail)?;
+        let offset_not_rfc3339_detail =
+            ToolExecutionErrorDetail::try_new(String::from(OFFSET_NOT_RFC3339_DETAIL))
+                .map_err(|_| CurrentTimeToolConstructionError::ErrorDetail)?;
         let definition = ToolDefinition::new(
             name,
             String::from(CURRENT_TIME_DESCRIPTION),
@@ -121,6 +126,7 @@ impl<Clock> CurrentTimeTool<Clock> {
             executor: CurrentTimeExecutor {
                 clock,
                 clock_out_of_range_detail,
+                offset_not_rfc3339_detail,
             },
         })
     }
@@ -152,6 +158,7 @@ impl ToolArgumentValidator for CurrentTimeArgumentValidator {
 pub struct CurrentTimeExecutor<Clock> {
     clock: Clock,
     clock_out_of_range_detail: ToolExecutionErrorDetail,
+    offset_not_rfc3339_detail: ToolExecutionErrorDetail,
 }
 
 /// A checked catalog/executor assumption failed inside `current_time`.
@@ -201,6 +208,7 @@ where
             self.clock.now(),
             invocation.request().arguments(),
             &self.clock_out_of_range_detail,
+            &self.offset_not_rfc3339_detail,
         );
         async move { evidence.map(|evidence| invocation.bind(evidence)) }
     }
@@ -249,6 +257,7 @@ fn current_time_evidence(
     now: SystemTime,
     arguments: &NormalizedToolArguments,
     clock_out_of_range_detail: &ToolExecutionErrorDetail,
+    offset_not_rfc3339_detail: &ToolExecutionErrorDetail,
 ) -> Result<ToolExecutorEvidence, CurrentTimeExecutorError> {
     let resolved = resolve_arguments(arguments)
         .map_err(|_| CurrentTimeExecutorError::ArgumentValidationDrift)?;
@@ -261,6 +270,11 @@ fn current_time_evidence(
         }
     };
     let zoned = timestamp.to_zoned(resolved.time_zone);
+    if zoned.offset().seconds() % 60 != 0 {
+        return Ok(ToolExecutorEvidence::KnownFailed {
+            detail: Some(offset_not_rfc3339_detail.clone()),
+        });
+    }
     let datetime = strtime::format(RFC_3339_SECONDS_FORMAT, &zoned)
         .map_err(|_| CurrentTimeExecutorError::TimestampFormatting)?;
     let result = serde_json::to_string(&serde_json::json!({
@@ -284,6 +298,11 @@ mod tests {
 
     fn clock_failure_detail() -> ToolExecutionErrorDetail {
         ToolExecutionErrorDetail::try_new(String::from(CLOCK_OUT_OF_RANGE_DETAIL))
+            .expect("static fixture detail is valid")
+    }
+
+    fn offset_failure_detail() -> ToolExecutionErrorDetail {
+        ToolExecutionErrorDetail::try_new(String::from(OFFSET_NOT_RFC3339_DETAIL))
             .expect("static fixture detail is valid")
     }
 
@@ -334,12 +353,14 @@ mod tests {
             SystemTime::UNIX_EPOCH,
             &arguments(r#"{"timezone":"UTC"}"#),
             &clock_failure_detail(),
+            &offset_failure_detail(),
         )
         .expect("first injected instant returns evidence");
         let second = current_time_evidence(
             SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1),
             &arguments(r#"{"timezone":"UTC"}"#),
             &clock_failure_detail(),
+            &offset_failure_detail(),
         )
         .expect("second injected instant returns evidence");
 
@@ -367,6 +388,7 @@ mod tests {
             SystemTime::UNIX_EPOCH,
             &arguments(r#"{"timezone":"UTC"}"#),
             &clock_failure_detail(),
+            &offset_failure_detail(),
         )
         .expect("valid UTC execution returns evidence");
 
@@ -386,6 +408,7 @@ mod tests {
             SystemTime::UNIX_EPOCH,
             &arguments(r#"{"timezone":"america/new_york"}"#),
             &clock_failure_detail(),
+            &offset_failure_detail(),
         )
         .expect("valid IANA execution returns evidence");
 
@@ -440,10 +463,33 @@ mod tests {
                 outside_jiff_range,
                 &arguments("{}"),
                 &clock_failure_detail(),
+                &offset_failure_detail(),
             )
             .expect("clock range is represented as executor evidence"),
             ToolExecutorEvidence::KnownFailed {
                 detail: Some(clock_failure_detail()),
+            }
+        );
+    }
+
+    /// S15: a historical sub-minute IANA offset is a typed known failure
+    /// rather than a minute-truncated timestamp for another instant.
+    #[test]
+    fn s15_current_time_rejects_offset_rfc3339_cannot_represent() {
+        let start_of_1900_utc = SystemTime::UNIX_EPOCH
+            .checked_sub(std::time::Duration::from_secs(2_208_988_800))
+            .expect("fixture instant is representable");
+
+        assert_eq!(
+            current_time_evidence(
+                start_of_1900_utc,
+                &arguments(r#"{"timezone":"Europe/Paris"}"#),
+                &clock_failure_detail(),
+                &offset_failure_detail(),
+            )
+            .expect("offset range is represented as executor evidence"),
+            ToolExecutorEvidence::KnownFailed {
+                detail: Some(offset_failure_detail()),
             }
         );
     }
