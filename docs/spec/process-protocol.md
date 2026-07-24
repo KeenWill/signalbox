@@ -194,17 +194,23 @@ the first handling.
 
 The error-code set in version one is:
 
-| Code                  | Meaning                                                                  |
-| --------------------- | ------------------------------------------------------------------------ |
-| `malformed_frame`     | JSON, UTF-8, framing, field, or size validation failed.                  |
-| `unsupported_version` | The frame version is not one.                                            |
-| `invalid_request`     | A boundary value cannot construct the requested application input.       |
-| `not_found`           | The selected session does not exist.                                     |
-| `conflicting_reuse`   | A durable command identity already names different intent.               |
-| `rejected`            | The canonical command was durably rejected by current typed state.       |
-| `resync_required`     | A follow connection fell behind the bounded process-local event fan-out. |
-| `unavailable`         | Infrastructure prevented completion; commit ambiguity is not hidden.     |
-| `internal`            | Fail-closed corruption or a hub defect stopped the request.              |
+| Code                  | Meaning                                                            |
+| --------------------- | ------------------------------------------------------------------ |
+| `malformed_frame`     | JSON, UTF-8, framing, field, or size validation failed.            |
+| `unsupported_version` | The frame version is not one.                                      |
+| `invalid_request`     | A boundary value cannot construct the requested application input. |
+| `not_found`           | The selected session does not exist.                               |
+| `conflicting_reuse`   | A durable command identity already names different intent.         |
+| `rejected`            | The canonical command was durably rejected by current typed state. |
+| `resync_required`     | A follower fell behind the bounded process-local event fan-out.    |
+| `unavailable`         | Infrastructure failed; no requested mutation may have committed.   |
+| `commit_ambiguous`    | Infrastructure obscured whether the requested mutation committed.  |
+| `internal`            | Fail-closed corruption or a hub defect stopped the request.        |
+
+For `create_session` and `submit_input`, a lost commit response maps to
+`commit_ambiguous`; the client retries the exact command identity and payload to
+discover the recorded outcome. A definitely pre-commit infrastructure failure
+maps to `unavailable`.
 
 Errors contain no database URL, socket path, credential path or value, SQL,
 caller content, or provider payload.
@@ -293,6 +299,11 @@ storage record, or a provider prompt. Unknown stored variants fail closed until
 a protocol version maps them.
 
 ## Durable update dispatch
+
+`DATABASE_URL` must name a direct or otherwise session-affine PostgreSQL
+endpoint. Transaction- and statement-pooled proxy modes are unsupported because
+the guard and generation fences below use locks owned by one PostgreSQL server
+session.
 
 Before migration or recovery, `signalbox-hubd` acquires
 `pg_try_advisory_lock(1396856881, 1213547057)` on one dedicated database
