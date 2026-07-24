@@ -18,8 +18,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use signalbox_model_runtime::{
     AssistantPart, BoundaryLossEvidence, CompletionEvidence, ExchangeFacts, FinishReason,
     LossCause, Observation, ObservationFact, ObservationSink, ProviderErrorEvidence,
-    ProviderReportedModel, RefusalEvidence, SseRecord, StreamInterruption, TerminalEvidence,
-    TokenUsage, ToolCallId, ToolCallProposal, ToolName, validate_provider_json_nesting,
+    ProviderJsonNestingValidator, ProviderReportedModel, RefusalEvidence, SseRecord,
+    StreamInterruption, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
+    validate_provider_json_nesting,
 };
 
 use crate::response::{convert_usage, map_finish};
@@ -42,6 +43,7 @@ struct ToolBuilder {
     saw_function_type: bool,
     saw_arguments: bool,
     arguments: String,
+    argument_nesting: ProviderJsonNestingValidator,
 }
 
 /// Incremental decoder for one chat-completion stream.
@@ -292,6 +294,14 @@ impl StreamDecoder {
                         if let Some(fragment) = function.arguments {
                             let builder = self.tool_builders.entry(call_index).or_default();
                             builder.saw_arguments = true;
+                            if let Err(error) = builder
+                                .argument_nesting
+                                .validate_fragment(fragment.as_bytes())
+                            {
+                                return self.violation(format!(
+                                    "tool call at index {call_index} arguments exceed the JSON bound: {error}"
+                                ));
+                            }
                             builder.arguments.push_str(&fragment);
                             if !fragment.is_empty() {
                                 let text_parts = u32::from(!self.content_text.is_empty());
@@ -767,38 +777,48 @@ mod tests {
 
     #[test]
     fn overdeep_fragmented_tool_arguments_are_a_protocol_violation() {
-        let depth = PROVIDER_JSON_NESTING_LIMIT + 1;
-        let opening = "[".repeat(depth);
-        let closing = format!("null{}", "]".repeat(depth));
-        let opening = serde_json::to_string(&opening).expect("fixture JSON string serializes");
-        let closing = serde_json::to_string(&closing).expect("fixture JSON string serializes");
+        let at_limit = "[".repeat(PROVIDER_JSON_NESTING_LIMIT);
+        let at_limit = serde_json::to_string(&at_limit).expect("fixture JSON string serializes");
         let first_arguments = format!(
             "data: {{\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
              \"model\":\"model-exact-1\",\"choices\":[{{\"index\":0,\"delta\":{{\
              \"role\":\"assistant\",\"tool_calls\":[{{\"index\":0,\"id\":\"call_1\",\
              \"type\":\"function\",\"function\":{{\"name\":\"lookup\",\
-             \"arguments\":{opening}}}}}]}}}}]}}\n\n"
+             \"arguments\":{at_limit}}}}}]}}}}]}}\n\n"
         );
-        let second_arguments = format!(
-            "data: {{\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
-             \"choices\":[{{\"index\":0,\"delta\":{{\"tool_calls\":[{{\"index\":0,\
-             \"function\":{{\"arguments\":{closing}}}}}]}}}}]}}\n\n"
-        );
-        let finish = b"data: {\"object\":\"chat.completion.chunk\",\"id\":\"chatcmpl_1\",\
-            \"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n";
-        let (terminal, _) = drive(&[
-            first_arguments.as_bytes(),
-            second_arguments.as_bytes(),
-            finish,
-        ]);
+        let beyond_limit = serde_json::to_string(&serde_json::json!({
+            "object": "chat.completion.chunk",
+            "id": "chatcmpl_1",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": {"arguments": "["}
+                    }]
+                }
+            }]
+        }))
+        .expect("fixture JSON serializes");
+        let beyond_limit = format!("data: {beyond_limit}\n\n");
+        let (terminal, observations) =
+            drive(&[first_arguments.as_bytes(), beyond_limit.as_bytes()]);
 
         let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
-            panic!("overdeep reassembled tool arguments must fail the stream");
+            panic!("overdeep accumulated tool arguments must fail immediately");
         };
         let LossCause::StreamProtocolViolation { detail } = loss.cause else {
             panic!("deep streamed arguments must surface as protocol loss");
         };
-        assert!(detail.contains("127-container nesting limit"));
+        let expected = format!("{PROVIDER_JSON_NESTING_LIMIT}-container nesting limit");
+        assert!(detail.contains(&expected), "{detail}");
+        assert!(!observations.iter().any(|observation| {
+            observation.fact
+                == ObservationFact::ToolArgumentsDelta {
+                    index: 0,
+                    fragment: "[".to_string(),
+                }
+        }));
     }
 
     #[test]
@@ -1025,7 +1045,8 @@ mod tests {
         let LossCause::StreamProtocolViolation { detail } = loss.cause else {
             panic!("deep SSE JSON must surface as a stream protocol violation");
         };
-        assert!(detail.contains("127-container nesting limit"));
+        let expected = format!("{PROVIDER_JSON_NESTING_LIMIT}-container nesting limit");
+        assert!(detail.contains(&expected));
     }
 
     #[test]

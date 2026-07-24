@@ -1142,7 +1142,8 @@ mod tests {
         let LossCause::StreamProtocolViolation { detail } = loss.cause else {
             panic!("deep SSE JSON must surface as a stream protocol violation");
         };
-        assert!(detail.contains("127-container nesting limit"));
+        let expected = format!("{PROVIDER_JSON_NESTING_LIMIT}-container nesting limit");
+        assert!(detail.contains(&expected));
     }
 
     #[test]

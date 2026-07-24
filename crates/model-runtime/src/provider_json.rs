@@ -19,49 +19,80 @@ impl std::fmt::Display for ProviderJsonNestingExceeded {
 
 impl std::error::Error for ProviderJsonNestingExceeded {}
 
+/// Incrementally checks one provider-controlled JSON value across fragments.
+///
+/// String, escape, and container-depth state is retained between calls, so a
+/// caller can reject excessive nesting before forwarding or retaining each
+/// fragment without rescanning the accumulated value.
+#[derive(Debug, Default)]
+pub struct ProviderJsonNestingValidator {
+    depth: usize,
+    in_string: bool,
+    escaped: bool,
+    exceeded: bool,
+}
+
+impl ProviderJsonNestingValidator {
+    /// Starts validation at the beginning of one JSON value.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Checks the next contiguous fragment of the value.
+    ///
+    /// JSON syntax remains the typed decoder's responsibility; this method
+    /// enforces only the container-nesting bound.
+    pub fn validate_fragment(&mut self, bytes: &[u8]) -> Result<(), ProviderJsonNestingExceeded> {
+        if self.exceeded {
+            return Err(ProviderJsonNestingExceeded);
+        }
+        for &byte in bytes {
+            if self.in_string {
+                if self.escaped {
+                    self.escaped = false;
+                } else {
+                    match byte {
+                        b'\\' => self.escaped = true,
+                        b'"' => self.in_string = false,
+                        _ => {}
+                    }
+                }
+                continue;
+            }
+
+            match byte {
+                b'"' => self.in_string = true,
+                b'{' | b'[' => {
+                    self.depth += 1;
+                    if self.depth > PROVIDER_JSON_NESTING_LIMIT {
+                        self.exceeded = true;
+                        return Err(ProviderJsonNestingExceeded);
+                    }
+                }
+                b'}' | b']' if self.depth > 0 => self.depth -= 1,
+                _ => {}
+            }
+        }
+
+        Ok(())
+    }
+}
+
 /// Checks the object/array nesting of provider-controlled JSON bytes.
 ///
 /// The scan does not allocate. Braces and brackets inside JSON strings,
 /// including after escaped quotes and backslashes, do not affect the depth.
 /// JSON syntax remains the typed decoder's responsibility.
 pub fn validate_provider_json_nesting(bytes: &[u8]) -> Result<(), ProviderJsonNestingExceeded> {
-    let mut depth = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-
-    for &byte in bytes {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else {
-                match byte {
-                    b'\\' => escaped = true,
-                    b'"' => in_string = false,
-                    _ => {}
-                }
-            }
-            continue;
-        }
-
-        match byte {
-            b'"' => in_string = true,
-            b'{' | b'[' => {
-                depth += 1;
-                if depth > PROVIDER_JSON_NESTING_LIMIT {
-                    return Err(ProviderJsonNestingExceeded);
-                }
-            }
-            b'}' | b']' if depth > 0 => depth -= 1,
-            _ => {}
-        }
-    }
-
-    Ok(())
+    ProviderJsonNestingValidator::new().validate_fragment(bytes)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PROVIDER_JSON_NESTING_LIMIT, validate_provider_json_nesting};
+    use super::{
+        PROVIDER_JSON_NESTING_LIMIT, ProviderJsonNestingValidator, validate_provider_json_nesting,
+    };
 
     #[test]
     fn accepts_the_exact_provider_json_nesting_limit() {
@@ -81,6 +112,14 @@ mod tests {
         let json = format!("{}0{}", "[".repeat(depth), "]".repeat(depth));
 
         assert!(validate_provider_json_nesting(json.as_bytes()).is_err());
+
+        let mut validator = ProviderJsonNestingValidator::new();
+        assert_eq!(
+            validator.validate_fragment("[".repeat(PROVIDER_JSON_NESTING_LIMIT).as_bytes()),
+            Ok(())
+        );
+        assert!(validator.validate_fragment(b"[").is_err());
+        assert!(validator.validate_fragment(b"]").is_err());
     }
 
     #[test]
@@ -88,5 +127,16 @@ mod tests {
         let json = br#"{"text":"[ { before an escaped quote: \" } ] after it","value":[]}"#;
 
         assert_eq!(validate_provider_json_nesting(json), Ok(()));
+
+        let mut validator = ProviderJsonNestingValidator::new();
+        assert_eq!(
+            validator.validate_fragment(br#"{"text":"escaped quote: \"#),
+            Ok(())
+        );
+        assert_eq!(
+            validator.validate_fragment(br#""[still string]","value":["#),
+            Ok(())
+        );
+        assert_eq!(validator.validate_fragment(b"]}"), Ok(()));
     }
 }

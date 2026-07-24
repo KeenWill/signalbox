@@ -78,7 +78,8 @@ pub use output::{
 };
 pub use preparation::{PreparationDefect, PreparationFailure, PreparationOutcome};
 pub use provider_json::{
-    PROVIDER_JSON_NESTING_LIMIT, ProviderJsonNestingExceeded, validate_provider_json_nesting,
+    PROVIDER_JSON_NESTING_LIMIT, ProviderJsonNestingExceeded, ProviderJsonNestingValidator,
+    validate_provider_json_nesting,
 };
 pub use runtime::{CancellationSignal, ModelRuntime};
 pub use scripted::{Script, ScriptedModel, ScriptedPrepared};
