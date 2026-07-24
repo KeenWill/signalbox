@@ -66,12 +66,13 @@ those tests.
   frontier; resolve and pin the exact model target; only then create a model
   call; finally commit the complete ordered assistant-text and logical
   tool-use-reference sequence with its producing-call provenance and the call
-  outcome. If the aggregate completes, the same transaction ends the attempt and
-  turn and appends the explicit completed-turn marker last.
+  outcome. A tool-using response yields the attempt but retains the same turn;
+  result projection and continuation create later rounds. Only a response with
+  no tools ends the attempt and turn and appends the completed-turn marker last.
 - **State transitions:** Turn queued with derived eligibility → active/running
-  with exactly one current attempt → terminal/completed only after the call is
-  classified and the attempt ends; model call prepared → in flight →
-  terminal/completed.
+  with exactly one current attempt → zero or more tool-yield/wait/continuation
+  rounds → terminal/completed only after a no-tool call is classified and its
+  attempt ends; each model call is prepared → in flight → terminal/completed.
 - **Transient updates:** Provider token deltas and progress are relayed as a
   replaceable draft.
 - **Owning component:** The hub resolves and calls the provider; Postgres owns
@@ -199,20 +200,19 @@ those tests.
 - **Durable commands:** Create and authorize a logical tool request; create a
   tool attempt; dispatch with runner, execution-boundary snapshot, and
   generation; classify the disconnect.
-- **State transitions:** Tool attempt dispatched → known failed when evidence
-  proves no effect occurred, otherwise ambiguous when the effect cannot be
-  established; tool request → retry-eligible only if policy classifies it as
-  safely repeatable.
+- **State transitions:** Prepared or effect-free in-flight tool attempt →
+  terminal/known-failed after crash loss; the abandoned turn attempt ends lost
+  and the turn fails.
 - **Transient updates:** Runner heartbeat, command progress, and partial stdout
   may disappear.
 - **Owning component:** Hub owns policy and recovery; runner owns physical
   execution; scheduler owns dispatch selection.
-- **Failure behavior:** A new physical attempt may be permitted for a proven
-  read-only operation. A late first result is stale and cannot overwrite the
-  current attempt.
+- **Failure behavior:** Version one performs no automatic retry, even for an
+  effect-free operation. A late result is stale and cannot overwrite terminal
+  evidence.
 - **Required invariants:** INV-011, INV-021, INV-024–INV-026, INV-034.
-- **Remaining questions:** Risk/effect taxonomy, evidence needed for
-  harmlessness, output deduplication, and fencing representation.
+- **Remaining questions:** Future explicit retry commands, runner evidence,
+  output deduplication, and remote fencing representation.
 
 ## S06 — Runner disconnects during a potentially irreversible tool
 
@@ -372,11 +372,11 @@ those tests.
 ## S10 — Approve a risky tool
 
 - **User intent:** Permit one clearly presented risky operation.
-- **Durable commands:** Create the exact tool request; record policy result
-  `confirmation_required`; persist owner approval bound to the request,
-  normalized arguments, and material constraints; then create a new turn attempt
-  for the authorized-but-not-yet-dispatched request. Tool-attempt identity is
-  created only at later physical dispatch.
+- **Durable commands:** Create the exact content-authoritative tool request;
+  record fail-closed `confirmation_required`; persist an owner-global approval
+  command bound to that request; then create a new turn attempt for the
+  authorized-but-not-yet-dispatched batch. Tool-attempt identity is created only
+  at later physical dispatch.
 - **State transitions:** Tool request proposed under the running turn's required
   current attempt → every previously issued operation is terminally classified →
   that attempt yields and the turn retains its active slot while awaiting
@@ -393,32 +393,33 @@ those tests.
   a later model call until the request has a durable outcome.
 - **Required invariants:** INV-009, INV-010, INV-012, INV-019, INV-020, INV-024,
   INV-027.
-- **Remaining questions:** Approval expiry, risk classification, scoped standing
-  grants, material constraints, and automated-judge influence.
+- **Remaining questions:** Approval expiry, per-tool session overrides and
+  high-risk guardrails, material constraints, and automated-judge mechanics.
 
 ## S11 — Deny a risky tool
 
 - **User intent:** Prevent the proposed effect while allowing the conversation
   to continue safely.
-- **Durable commands:** Persist denial bound to the exact request and make the
-  denial/result available to orchestration history under the eventual
-  representation.
+- **Durable commands:** Persist denial bound to the exact request. At the
+  continuation or stop boundary append a reference-only denial result entry in
+  proposal order.
 - **State transitions:** Awaiting approval → denial closes the exact wait and
-  atomically creates a new turn attempt with the denial committed to turn
-  history → orchestration continues without a tool attempt and later reaches an
-  ordinary terminal disposition.
+  atomically creates a new turn attempt when the batch is decision-complete →
+  the continuation boundary commits proposal-ordered result history without a
+  tool attempt → orchestration later reaches an ordinary terminal disposition.
 - **Transient updates:** Prompt closes and clients receive status.
 - **Owning component:** Hub owns denial and prevents dispatch; client captures
   the owner's decision.
 - **Failure behavior:** No physical tool attempt is created. The new turn
   attempt exists only to continue conversational orchestration with the denial
   outcome. Duplicate or delayed approval messages cannot reverse the denial
-  without an explicit new decision path.
+  without an explicit new decision path. Deny-and-end records this same denial
+  and composes the existing applied-interrupt stop path; it does not invent a
+  second cancellation authority.
 - **Required invariants:** INV-009, INV-012, INV-019, INV-020, INV-027.
-- **Remaining questions:** Whether future reconsideration creates a new request,
-  and the exact semantic rendering of the committed denial. Baseline
-  continuation in a new turn attempt is decided by the accepted lifecycle design
-  ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)).
+- **Remaining questions:** Whether future reconsideration creates a new request.
+  Baseline continuation in a new turn attempt is decided by
+  [tool-loop](spec/tool-loop.md).
 
 ## S12 — Receive a stale or duplicated runner result
 
@@ -491,7 +492,8 @@ those tests.
 - **User intent:** Use a centrally available integration such as documentation
   lookup.
 - **Durable commands:** Create a logical tool request, evaluate hub policy,
-  create a hub-local attempt, and persist its result/outcome.
+  create and fence a hub-local attempt, and persist its result/outcome once. The
+  initial `current_time` tool defaults to auto approval and is effect-free.
 - **State transitions:** Tool request → authorized/denied → hub-local in flight
   → terminal; turn consumes the durable logical result.
 - **Transient updates:** Search progress or partial presentation that is not
@@ -501,8 +503,8 @@ those tests.
 - **Failure behavior:** Adapter loss is classified with the same known/ambiguous
   distinction; central placement does not imply safe automatic retry.
 - **Required invariants:** INV-019, INV-024–INV-027, INV-035.
-- **Remaining questions:** Credential scoping, hub executor isolation, effect
-  classification, and whether centrally hosted MCP is one adapter type.
+- **Remaining questions:** Credential scoping, hub executor isolation, and
+  whether centrally hosted MCP is one adapter type.
 
 ## S16 — Execute a runner-local tool
 

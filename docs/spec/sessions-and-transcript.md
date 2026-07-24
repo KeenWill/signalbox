@@ -3,15 +3,16 @@
 This page specifies the implemented behavior of session creation and ancestry,
 session-level configuration defaults and their replacement, the long-lived
 session aggregate, semantic transcript entries, accepted-input user content, and
-actor attribution. It was verified against the implementing stack through PR
-#175 (`agent/stop-requests`): `crates/domain` (`session.rs`, `configuration.rs`,
-`replace_session_defaults.rs`, `semantic_entry.rs`, `turn_eligibility.rs`,
-`user_content.rs`, `actor.rs`, `submit_input.rs`), `crates/application`
-(`create_session.rs`, `load_session.rs`, `replace_session_defaults.rs`,
-`submit_input.rs`), and `crates/persistence` (sources and migrations). Where a
-law is cited as `INV-NNN`, [invariants.md](../invariants.md) is the catalog of
-record; where mechanics owned by another decision are summarized, the owning
-sibling page is linked inline.
+actor attribution. It was verified against the implementing stack rooted at PR
+#193 (`agent/tool-loop-spec`): `crates/domain` (`session.rs`,
+`configuration.rs`, `replace_session_defaults.rs`, `semantic_entry.rs`,
+`turn_eligibility.rs`, `user_content.rs`, `actor.rs`, `submit_input.rs`),
+`crates/application` (`create_session.rs`, `load_session.rs`,
+`replace_session_defaults.rs`, `submit_input.rs`), and `crates/persistence`
+(sources and migrations). Where a law is cited as `INV-NNN`,
+[invariants.md](../invariants.md) is the catalog of record; where mechanics
+owned by another decision are summarized, the owning sibling page is linked
+inline.
 
 ## Session identity and creation provenance
 
@@ -88,12 +89,13 @@ not a historical fact.
 
 ## Session defaults and replacement
 
-Session configuration defaults are model-selection-only in the baseline; the
-selection algebra, configuration freeze at acceptance, and per-turn effective
-configuration are owned by
-[configuration-and-credentials](configuration-and-credentials.md) and
-[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md). Defaults are
-immutable versions with a positive `u64` ordinal:
+Session configuration defaults contain the model-selection request and the
+dangerously named tool blanket
+`DangerousToolAutoApproval::{Disabled, ApproveAll}`. The selection algebra and
+model configuration are owned by
+[configuration-and-credentials](configuration-and-credentials.md); blanket
+semantics and per-turn freeze are owned by [tool-loop](tool-loop.md). Defaults
+are immutable versions with a positive `u64` ordinal:
 
 - session creation establishes version one;
 - each replacement installs the checked successor ordinal as a new immutable row
@@ -193,9 +195,14 @@ and closed:
   failed;
 - `AssistantText { producing_call, value }` — exact assistant text with
   outcome-authoritative producing-call provenance;
-- `AssistantToolUse { producing_call, request }` — typed, but storage rejects it
-  (`semantic_transcript_entry_tool_use_unavailable`) until the reserved tool
-  decisions land; and
+- `AssistantToolUse { producing_call, request }` — one logical request from the
+  completed producing call, with name and arguments resolved through the request
+  record;
+- `ToolExecutionResult { attempt }` — executed success or error evidence owned
+  by the referenced attempt;
+- `ToolDenied { request }` — a denial owned by the referenced request and
+  decision;
+- `ToolClosed { request }` — an undecided request closed by turn end;
 - `TurnCompleted { turn }` — the explicit final marker for a completed turn; and
 - `TurnCancelled { turn }` — the explicit final marker for a turn ended by its
   applied interrupt.
@@ -203,12 +210,11 @@ and closed:
 There is no generic text, role, metadata, or "other" payload. Entry identity is
 distinct from accepted-input and turn identity (INV-001); equal content in two
 inputs yields distinct entries. Entry construction is sealed inside the domain
-crate — the checked constructor is `pub(crate)` — and its producers live in two
-modules: `turn_eligibility.rs` (eligibility activation, lost-active-turn failure
-preparation, checked scheduling reconstitution) and `model_execution.rs`
-(steering consumption, terminal completion building the `AssistantText` entries
-plus `TurnCompleted`, cancellation building `TurnCancelled`, and known-failure
-closure building `TurnFailed`).
+crate — checked constructors are `pub(crate)`. `turn_eligibility.rs` produces
+eligibility and recovery history; `model_execution.rs` produces assistant and
+turn-terminal history; and sealed tool transitions produce tool-use/result
+references only through the atomic boundaries owned by
+[tool-loop](tool-loop.md).
 
 `OriginAcceptedInput` and `SteeringAcceptedInput` reference the accepted input's
 identity; neither copies content. Steering additionally names the exact active
@@ -221,14 +227,14 @@ Storage (`semantic_transcript_entry`, migration
 identity, at most one origin entry per accepted input, at most one failed marker
 per turn, same-session references, and append-only rows (INV-005). Migration
 `202607220001` adds the unique completion marker, `202607220004` adds the unique
-steering entry, and `202607220005` adds the unique cancellation marker while
-widening the corresponding closed payload shapes. The origin-disposition guard
-arrived later: migration `202607180005_occupied_slot_submit_input.sql` — the
-migration that first admits the `pending_steering` disposition — replaces the
-entry/turn-state trigger so an origin entry additionally requires its input's
-`origin_of` disposition (constraint
-`semantic_transcript_entry_origin_disposition`); pending steering can never
-appear as a semantic origin.
+steering entry, `202607220005` adds the unique cancellation marker, and the
+tool-loop migration adds request/result references while widening the
+corresponding closed payload shapes. The origin-disposition guard arrived later:
+migration `202607180005_occupied_slot_submit_input.sql` — the migration that
+first admits the `pending_steering` disposition — replaces the entry/turn-state
+trigger so an origin entry additionally requires its input's `origin_of`
+disposition (constraint `semantic_transcript_entry_origin_disposition`); pending
+steering can never appear as a semantic origin.
 
 ### When entries come to exist
 
@@ -244,7 +250,7 @@ lineage or the snapshot that consumes the entry; eligibility fixes both
 atomically.
 
 Pending steering has a separate safe-point boundary (INV-036). Immediately
-before a later call is prepared, the transaction appends one
+before an initial or continuation call is prepared, the transaction appends one
 `SteeringAcceptedInput` per pending input in ascending acceptance position,
 derives one frontier extending the starting frontier for the admitted initial
 call, changes every input to `ConsumedAsSteering { call }`, and inserts that
@@ -252,6 +258,12 @@ exact `Prepared` call against the extended frontier. All four effects commit or
 roll back together. The entry therefore becomes semantic history only with the
 call that first observes it; the immutable accepted-input row remains the
 content authority.
+
+Tool-use entries become history with the producing call's completed observation;
+tool-result entries become history only at the all-resolved continuation or
+terminal-stop boundary. Request, attempt, and decision records remain the single
+content authorities. Exact ordering and closure rules are owned by
+[tool-loop](tool-loop.md).
 
 Entry/turn-state agreement is a durable schema invariant, not only transactional
 practice. Deferred constraint triggers around
@@ -358,9 +370,9 @@ no implemented boundary constructs them.
   attempt, committing origin plus failed marker in one transaction) has no
   implemented producer; startup recovery and the model-call known-failure
   closure are the committed `TurnFailed` sources today.
-- Assistant-text, completed-turn, steering, and cancelled-turn semantic entries
-  are implemented; the tool-use variant is typed but storage-blocked; refusal,
-  reconciliation, approval, and delegation entry variants remain open.
+- Assistant text, tool-use/result references, completed-turn, steering, and
+  cancelled-turn semantic entries are implemented; refusal, reconciliation,
+  approval-event, and delegation entry variants remain open.
 - The client transcript rendering projection over semantic entries is not
   implemented. The provider-prompt message projection is:
   `PreparedModelOperation::render` maps frontier entries to provider-neutral
@@ -368,10 +380,9 @@ no implemented boundary constructs them.
   composition remains deferred, as that page's open edge.
 - `ReplaceSessionDefaults` carries no `actor` field although the accepted
   actor-attribution design slated it for first-accepted-version adoption; its
-  record family has since committed at storage version 1 without one, so under
-  the first-acceptance storage freeze later adoption needs a kind-scoped storage
-  version, while the truthful `Owner` backfill that design relies on still
-  exists.
+  record family has since committed storage versions 1 and 2 without one, so
+  later adoption needs another kind-scoped storage version; the truthful `Owner`
+  backfill that design relies on still exists.
 - `CreateSession` actor attribution remains implicit pending an explicit owner
   amendment choice.
 - `Recovery`, `Model`, and `Tool` actor variants have no constructing boundary;

@@ -2,7 +2,7 @@
 
 This page specifies the implemented behavior of turns, turn attempts,
 eligibility derivation, the scheduler, and startup recovery as verified against
-the implementing stack through PR #175 (`agent/stop-requests`). Code homes:
+the implementing stack rooted at PR #193 (`agent/tool-loop-spec`). Code homes:
 `crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
 `context_frontier,queue_order}.rs`, `crates/application/src/{scheduler,`
 `start_eligible_turn,startup_scan,submit_input}.rs`,
@@ -38,14 +38,14 @@ The domain `ActiveTurnPhase` algebra is `Running { current_attempt }`,
 `AwaitingApproval { request }`, and
 `AwaitingRecoveryDecision { ambiguous_operations }`. Every active phase retains
 the session's progressing slot (`retains_progressing_slot()` is unconditionally
-true; INV-009). Storage and reconstitution admit the `running` and
-`awaiting_model_call_recovery` phases; `AwaitingRecoveryDecision` is
-reconstituted from an `ambiguous` terminal model call correlated with its ended
-attempt (`ambiguous` from a live loss, `lost` from startup recovery).
-`StopRequested` is a stored current-attempt state inside the `running` active
-phase and reconstitutes only from its exact applied-interrupt proof;
-`AwaitingApproval` has no storage row or production constructor (see
-[Evidence-bearing reconstitution](#evidence-bearing-reconstitution)).
+true; INV-009). Storage and reconstitution admit `running`, `awaiting_approval`,
+and `awaiting_model_call_recovery`; `AwaitingRecoveryDecision` is reconstituted
+from an `ambiguous` terminal model call correlated with its ended attempt
+(`ambiguous` from a live loss, `lost` from startup recovery). `StopRequested` is
+a stored current-attempt state inside the `running` active phase and
+reconstitutes only from its exact applied-interrupt proof; `AwaitingApproval`
+reconstitutes only from the exact earliest undecided request of a complete tool
+batch and carries no live turn or tool attempt ([tool-loop](tool-loop.md)).
 
 At most one turn per session is `active`. Enforcement is layered:
 
@@ -114,7 +114,10 @@ predecessor needed to reconstruct `CancellationOnly`; the correlated call is
 durably `cancellation_requested`. `turn_attempt` storage enforces one initial
 attempt per turn (`turn_attempt_one_initial_per_turn`), at most one live attempt
 per turn (`turn_attempt_one_live_per_turn`, `WHERE state_kind <> 'ended'` — the
-durable form of exclusive tenure), and a unique continuation chain.
+durable form of exclusive tenure), and a unique continuation chain. A completed
+tool-using model round ends the current attempt as a tool-round yield; approval
+completion creates the next attempt in that chain, which owns serialized tools
+and the next model call without creating a new logical turn.
 
 ## Eligibility derivation
 
@@ -230,7 +233,8 @@ hubd's `ActivatedTurnPass` hands it to an `ActivatedTurnExecution` —
 activates and then drives the turn's model call. hubd depends on
 `model-runtime`/`model-runtime-anthropic` through the `model-provider-runtime`
 bridge; application and persistence still declare no runtime-crate dependency.
-Tool-attempt storage still does not exist.
+The same execution composition drives approval, tool attempts, and continuation
+through the ports owned by [tool-loop](tool-loop.md).
 
 ## Startup scan and recovery
 
@@ -262,7 +266,12 @@ end (INV-034):
   `cancellation_requested` call ends the call `ambiguous` and the attempt
   `AfterCancellation(Lost)`, then terminalizes `ReconciliationRequired` with the
   call as its exact ambiguity set, an equal-content terminal frontier, and the
-  interrupt reason.
+  interrupt reason;
+- an approval wait remains parked unchanged, with no fabricated decision or live
+  attempt; and
+- a running tool attempt follows its stored effect class: prepared or
+  effect-free work closes known-failed and fails the turn, while in-flight
+  external-effect work closes ambiguous and parks on that exact attempt.
 
 In the two failing branches only: one `TurnFailed` semantic entry is appended.
 The evidence-free branch extends the starting frontier; the prepared-call branch
@@ -441,26 +450,21 @@ over the shared pool; no shared locked service instance exists.
 
 ## Open edges
 
-- `AwaitingApproval` has no storage or reconstitution; evidence-bearing
-  reconstitution requires a complete owner projection before that phase lands.
 - Direct fatal terminalization has sealed domain derivation values
   (`fatal_mismatch` module) but no aggregate transition or commit path.
-- Dispatch fencing is partially implemented: `model_call` storage, the
-  `AttemptDispatchGate`, and the hubd dispatch path now exist; only tool-attempt
-  storage and tool dispatch remain absent.
+- Dispatch fencing covers model calls and tool attempts; runner transport and
+  remote result envelopes remain deferred.
 - The eligible terminal-failure path (queued turn fixes its start and fails
   without an attempt for a structurally unexecutable configuration) is
   unimplemented; activation is the only eligibility outcome.
 - Ancestry-derived sessions cannot be scheduled (`UnsupportedSessionAncestry`);
   ancestry-to-first-frontier resolution is unimplemented.
-- Continuation safe points after a call or tool result are not implemented; the
-  current execution slice consumes steering only while preparing its one initial
-  call. Source terminalization and evidence-free startup recovery reclassify any
-  input that remains pending.
+- Continuation safe points after tool results consume pending steering through
+  the atomic boundary in [tool-loop](tool-loop.md).
 - Startup recovery now classifies model-call evidence (a `Prepared` call closes
   as a known failure; an unstopped in-flight call parks the turn as ambiguous in
-  `awaiting_model_call_recovery`); wait reconstruction for remaining phases
-  still awaits their slices.
+  `awaiting_model_call_recovery`) and tool-loop evidence; delegated-result waits
+  remain deferred with delegation.
 - The single-hub advisory singleton guard and per-session scan gating (designed
   refinements) are not adopted; sweep interval and fairness tuning remain
   operational open questions.

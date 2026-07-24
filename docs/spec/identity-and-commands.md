@@ -2,9 +2,9 @@
 
 This page describes the implemented identity, durable-command, and telemetry
 correlation behavior of Signalbox as verified against the implementing stack
-through PR #175 (`agent/stop-requests`). The behavior lives in `crates/domain`
-(identity newtypes, command payloads, actor attribution, replay equality),
-`crates/application` (identity generation, command boundaries),
+rooted at PR #193 (`agent/tool-loop-spec`). The behavior lives in
+`crates/domain` (identity newtypes, command payloads, actor attribution, replay
+equality), `crates/application` (identity generation, command boundaries),
 `crates/persistence` (the owner-global command registry and typed record
 families), and `apps/hubd` (telemetry wiring). Storage transaction mechanics,
 locking, and the reconstitution seam are owned by
@@ -146,24 +146,24 @@ Open edges).
 All claimed command identifiers live in one owner-global, append-only
 `durable_command` registry (migration `202607180001` and successors): primary
 key `command_id`, a closed `command_kind` discriminator (`create_session`,
-`replace_session_defaults`, `submit_input`), a `storage_version` (currently 1
-for all kinds), and `claimed_at` (`transaction_timestamp()`), which is
-non-semantic operational metadata. No command kind, session, or client has a
-separate command-ID namespace.
+`replace_session_defaults`, `submit_input`, `decide_tool_request`), a
+kind-scoped `storage_version`, and `claimed_at` (`transaction_timestamp()`),
+which is non-semantic operational metadata. No command kind, session, or client
+has a separate command-ID namespace.
 
 Each admitted kind has one purpose-specific typed record family
 (`create_session_command`, `replace_session_defaults_command`,
-`submit_input_command`) keyed one-to-one by `command_id`, storing every
-caller-supplied semantic field, the terminal `applied`/`rejected` result
-discriminator, and the typed result fields, all under `CHECK` constraints and
-foreign keys. Kind and version agreement between the registry row and its typed
-record is enforced by a composite foreign key, and a deferred constraint trigger
-(`durable_command_requires_typed_record`, executing function
-`require_durable_command_typed_record`) requires exactly one typed record per
-claim at every transaction boundary. Why: typed relational records keep each
-command's comparison payload and result reviewable and constraint-checked
-instead of delegating meaning to a serializer; there is no universal JSONB or
-byte-blob payload anywhere.
+`submit_input_command`, `decide_tool_request_command`) keyed one-to-one by
+`command_id`, storing every caller-supplied semantic field, the terminal
+`applied`/`rejected` result discriminator, and the typed result fields, all
+under `CHECK` constraints and foreign keys. Kind and version agreement between
+the registry row and its typed record is enforced by a composite foreign key,
+and a deferred constraint trigger (`durable_command_requires_typed_record`,
+executing function `require_durable_command_typed_record`) requires exactly one
+typed record per claim at every transaction boundary. Why: typed relational
+records keep each command's comparison payload and result reviewable and
+constraint-checked instead of delegating meaning to a serializer; there is no
+universal JSONB or byte-blob payload anywhere.
 
 For `SubmitInput`, a second deferred constraint trigger
 (`submit_input_command_requires_correlated_effect`, migration `202607180003`,
@@ -196,10 +196,13 @@ undecodable claim as unseen would let one identifier acquire a second meaning
 (INV-012). Corruption is a distinct error family from infrastructure failure and
 from recorded domain rejection.
 
-`CreateSession` v1 records applied results only (its one preparation failure is
-an error, not a recorded rejection); `ReplaceSessionDefaults` and `SubmitInput`
-record both applied results and closed, typed rejection discriminators.
-Rejections claim the identifier exactly as applied results do.
+New `CreateSession` and `ReplaceSessionDefaults` records use version 2 for the
+complete defaults value; version 1 reconstitutes with dangerous blanket approval
+disabled. `SubmitInput` stays version 1, and `DecideToolRequest` begins at
+version 1. `CreateSession` records applied results only (its one preparation
+failure is an error, not a recorded rejection); the other three kinds record
+both applied results and closed, typed rejection discriminators. Rejections
+claim the identifier exactly as applied results do.
 
 ## Replay and equality
 
@@ -312,12 +315,12 @@ edges.
   unimplemented design; telemetry currently omits durable-command correlation
   rather than tokenizing it
   ([telemetry correlation](../open-questions.md#telemetry-correlation)).
-- `ReplaceSessionDefaults` v1 payload and storage carry no `actor` field despite
-  the accepted adoption path expecting one from the kind's first accepted
-  version; the truthful `Owner` backfill via a kind-scoped storage version
-  remains available but unexercised.
-- `CreateSession` actor adoption remains an explicit owner choice; v1 leaves its
-  attribution implicit.
+- `ReplaceSessionDefaults` v1/v2 payloads and storage carry no `actor` field
+  despite the accepted adoption path expecting one from the kind's first
+  accepted version; the truthful `Owner` backfill via another kind-scoped
+  storage version remains available but unexercised.
+- `CreateSession` actor adoption remains an explicit owner choice; v1/v2 leave
+  its attribution implicit.
 - No recorded-transition record family has adopted actor attribution;
   startup-scan terminalizations do not yet record a `Recovery` actor.
 - Wire field types and public identity encodings remain reserved for the future
@@ -325,9 +328,9 @@ edges.
   ([identity representation](../open-questions.md#identity-representation)); no
   protocol surface exists and commands enter only through in-process application
   services.
-- `ProviderTargetEvidenceId`, `ToolRequestId`, and `ToolAttemptId` have assigned
-  supply classes but no production minting seam; generators land with their
-  owning slices. `ProviderModelIdentity` is now persisted and
+- `ProviderTargetEvidenceId` has an assigned supply class but no production
+  minting seam. Tool request and attempt UUIDv7 generators are implemented by
+  the application tool-loop service. `ProviderModelIdentity` is persisted and
   configuration-supplied; provider-identity normalization remains open
   ([model fallback and provenance](../open-questions.md#model-fallback-and-provenance)).
 - UUIDv7 timestamp disclosure and namespace scope must be reassessed before

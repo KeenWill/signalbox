@@ -1,19 +1,19 @@
 # Model-call execution
 
 This page describes the implemented model-call orchestration chain as verified
-against the implementing stack through PR #183
-(`agent/provider-call-security-parser`): rendering a context frontier into
-provider messages, the staged prepare / authorize-send / commit-observation
-effects, assistant content and turn completion, provider failure classification
-into physical dispositions, and the retry prohibition. Turn and attempt
-lifecycle law lives in
-[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
-entries and frontiers in [sessions-and-transcript](sessions-and-transcript.md);
-storage protocol and the outbox in
-[persistence-protocol](persistence-protocol.md); the typed model-runtime layer
-and hub runtime in [runtime-substrate](runtime-substrate.md); model
-configuration and credentials in
-[configuration-and-credentials](configuration-and-credentials.md). Invariant
+against the implementing stack rooted at PR #193 (`agent/tool-loop-spec`):
+rendering a context frontier into provider messages, the staged prepare /
+authorize-send / commit-observation effects, assistant content, intra-turn tool
+rounds and final turn completion, provider failure classification into physical
+dispositions, and the retry prohibition. Tool requests, approvals, attempts, and
+continuation are owned by [tool-loop](tool-loop.md). Turn and attempt lifecycle
+law lives in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md);
+semantic entries and frontiers in
+[sessions-and-transcript](sessions-and-transcript.md); storage protocol and the
+outbox in [persistence-protocol](persistence-protocol.md); the typed
+model-runtime layer and hub runtime in
+[runtime-substrate](runtime-substrate.md); model configuration and credentials
+in [configuration-and-credentials](configuration-and-credentials.md). Invariant
 tags cite [docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
@@ -62,19 +62,20 @@ alias or deployment change from being smuggled into a turn as recovery.
 
 `ModelCallExecution` (`crates/domain/src/model_execution.rs`) is the
 purpose-specific aggregate: one active accepted-input turn in its `Running`
-phase plus at most one initial call. Reconstitution is fail-closed: it rejects a
-non-running phase, session or snapshot mismatches, frontier entries that do not
-exactly back ordered membership, missing or unreferenced origin content, a call
-whose turn/attempt/frontier/selection/target contradict the checked turn facts,
-more than one call, and any attempt/call state pair outside `(Prepared, none)`,
-`(Prepared, Prepared)`, `(Running, InFlight)`, or the proof-bearing
-`(StopRequested, CancellationRequested)` pair. The stopped pair must reconstruct
-the exact applied-interrupt proof retained by the attempt before it can
-authorize cancellation observation or restart recovery. Why: acting on a
-partially consistent projection could authorize a second provider effect against
-stale authority, so every invalid shape refuses rather than repairs. Sealed
-constructors (compile-fail-tested) prevent forging call records or terminal
-history outside the aggregate (INV-002).
+phase plus the one call owned by its current turn attempt. Earlier rounds remain
+durable transcript/request/result history. Reconstitution is fail-closed: it
+rejects a non-running phase, session or snapshot mismatches, frontier entries
+that do not exactly back ordered membership, missing or unreferenced origin
+content, a call whose turn/attempt/frontier/selection/target contradict the
+checked turn facts, more than one call, and any attempt/call state pair outside
+`(Prepared, none)`, `(Prepared, Prepared)`, `(Running, InFlight)`, or the
+proof-bearing `(StopRequested, CancellationRequested)` pair. The stopped pair
+must reconstruct the exact applied-interrupt proof retained by the attempt
+before it can authorize cancellation observation or restart recovery. Why:
+acting on a partially consistent projection could authorize a second provider
+effect against stale authority, so every invalid shape refuses rather than
+repairs. Sealed constructors (compile-fail-tested) prevent forging call records
+or terminal history outside the aggregate (INV-002).
 
 Reconstituting a checkpointed `Prepared` call also reloads the call's exact
 stored snapshot, not only the turn's starting snapshot. When steering extended
@@ -110,8 +111,14 @@ projects the exact frontier order into provider-neutral messages:
   provenance;
 - `TurnFailed`, `TurnCompleted`, and `TurnCancelled` markers are skipped — they
   delimit history and carry no model-visible content;
-- `AssistantToolUse` fails closed (operator error) until the reserved tool
-  decisions land.
+- `AssistantToolUse` and its proposal-ordered result entries render as paired
+  assistant tool calls and user tool results after resolving their referenced
+  request, attempt, and decision records through [tool-loop](tool-loop.md).
+
+The model operation also carries the current registry declarations. The runtime
+bridge maps them to provider tool definitions and accepts `ToolCall` completion
+parts only with a matching `ToolUse` finish reason. Provider-native tool types
+remain inside the bridge.
 
 Every message keeps its source-qualified semantic-entry reference. Why:
 inherited entries need not come from a native turn in the current session, so
@@ -262,7 +269,7 @@ derived) to exactly one disposition:
 
 | Terminal evidence                                                            | Disposition   |
 | ---------------------------------------------------------------------------- | ------------- |
-| `Completed` (text-only content)                                              | `Completed`   |
+| `Completed` (supported ordered assistant content)                            | `Completed`   |
 | `Refused`                                                                    | `Refused`     |
 | `ProviderError` (any kind, incl. rate limit, credential rejection, overload) | `KnownFailed` |
 | `ProvenUnsent(CancelledBeforeSend)`                                          | `Cancelled`   |
@@ -273,14 +280,15 @@ derived) to exactly one disposition:
 The bridge maps `Refused` evidence unconditionally; that such evidence arises
 only from an authenticated complete exchange is the runtime layer's contract
 ([runtime-substrate](runtime-substrate.md)), not rechecked here. Empty text
-blocks are dropped without creating invalid entries; thinking,
-redacted-thinking, or tool-call parts fail the adapter stage closed as operator
-errors (the text-only slice cannot represent them). A provider-reported model
-differing from the expected exact spelling — in early observations or terminal
-evidence — also fails the adapter stage closed rather than classifying, because
-provider-target mismatch evidence is not yet representable durably (see Open
-edges). Scripted providers declare their exact terminal observation; nothing is
-inferred from timing or injected I/O errors.
+blocks are dropped without creating invalid entries. Tool-call parts with a
+`ToolUse` finish become the normalized proposals owned by
+[tool-loop](tool-loop.md); thinking or redacted-thinking still fail the adapter
+stage closed because no durable semantic representation exists. A
+provider-reported model differing from the expected exact spelling — in early
+observations or terminal evidence — also fails the adapter stage closed rather
+than classifying, because provider-target mismatch evidence is not yet
+representable durably (see Open edges). Scripted providers declare their exact
+terminal observation; nothing is inferred from timing or injected I/O errors.
 
 ## Terminal outcomes
 
@@ -288,20 +296,16 @@ inferred from timing or injected I/O errors.
 persistence commits it atomically with its outbox rows
 ([persistence-protocol](persistence-protocol.md)):
 
-- **Completed.** The call ends `Completed`; the attempt ends `TurnCompleted`;
-  one `AssistantText` semantic entry per text part is appended in final-response
-  order, each naming the producing call; the `TurnCompleted` marker is appended
-  last; the terminal frontier extends the call's exact source frontier with
-  those entries. The single implemented writer (`persist_completed`) commits
-  call disposition, attempt end, entries, marker, frontier, and turn lifecycle
-  in one transaction (the final-response all-or-nothing boundary), so no
-  committed state carries a prefix of the sequence, a completed turn without its
-  marker, or the marker before its content; storage deduplicates the marker
-  (`semantic_transcript_entry_turn_completed_once`), and the deferred
-  final-state constraint triggers reject at commit a completed terminal turn
-  without exactly one marker. Why: a physically completed call is not a
-  completed turn, so completion is an explicit aggregate fact rather than an
-  inference from call state.
+- **Completed without tools.** The call ends `Completed`; the attempt ends
+  `TurnCompleted`; ordered assistant text is followed by `TurnCompleted`, and
+  the turn terminalizes through the existing final-response all-or-nothing
+  boundary.
+- **Completed with tools.** The call ends `Completed`; ordered assistant text
+  and logical tool-use entries plus their request records commit atomically, the
+  attempt ends as a tool-round yield, and the turn stays active. Approval,
+  execution, result projection, and preparation of the next call follow
+  [tool-loop](tool-loop.md). A physical call completion is therefore never
+  treated alone as proof that the logical turn completed.
 - **KnownFailed.** The call ends `KnownFailed`; an unstopped attempt ends
   `KnownFailure`, and the turn fails with a `TurnFailed` entry and terminal
   frontier. A stop-requested attempt instead ends
@@ -420,14 +424,10 @@ prints the semantic transcript; it is deliberately not the client protocol.
   but no later reconciliation workflow is implemented.
 - Streaming deltas are collected but never delivered as transient drafts, and
   the designed early-observation pause/commit/resume path is unimplemented.
-- The aggregate admits at most one call per turn (with the one-row-per-attempt
-  schema backstop); continuation calls remain unimplemented. Safe-point steering
-  is consumed only before that admitted call; steering accepted after its
-  preparation is reclassified at terminalization.
+- The aggregate admits at most one call per turn attempt; the tool loop creates
+  continuation attempts and calls in the same logical turn.
 - A refused turn commits no refusal-content semantic entry; the variant remains
   an open edge in [sessions-and-transcript](sessions-and-transcript.md).
-- `AssistantToolUse` construction is schema-blocked pending the reserved tool
-  decisions.
 - Same-incarnation retained-evidence reconciliation gets exactly one production
   pass (`reconcile_retained_once`) before fatal escalation; repeated
   same-incarnation drains are exercised only by tests.

@@ -10,6 +10,43 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-23 — Complete tool rounds inside one hub-owned turn
+
+**Context.** The model-runtime vocabulary already carries tool definitions,
+tool-call parts, results, and a tool-use finish reason, while the durable
+transcript reserves `AssistantToolUse` and the active-turn algebra reserves
+`AwaitingApproval`. Storage deliberately blocks both. Shipping the first tool
+requires the request, approval, physical-attempt, result, continuation, and
+restart boundaries to land together; otherwise a provider response could create
+unowned work or a side effect could outlive its evidence.
+
+**Decision.** Adopt the complete hub-owned loop specified by
+[tool-loop](spec/tool-loop.md): tool-using model completions yield within the
+same logical turn; requests and reference-only semantic entries commit
+atomically; approval sources remain explicit; the dangerous session blanket is
+versioned and frozen per turn; execution is serialized behind catalog/executor
+ports and durably fenced; 1 MiB bounds both normalized arguments and admitted
+text results; crash classification follows recorded effect class; and the
+proposal-ordered all-resolved boundary atomically projects results, consumes
+steering, and prepares the next model call. `current_time` is the first
+effect-free auto tool, with an injected clock and IANA conversion supplied by
+the focused `jiff` dependency.
+
+**Rejected alternatives.** Making each round a new turn would fragment one
+conversational outcome and misplace `TurnCompleted`. Process-local approvals or
+results would disappear across restart. Copying request/result content into
+semantic entries would create competing authorities. Concurrent execution now
+would weaken two simple database guards before evidence justified the extra
+state space. Auto-retrying effect-free crash loss would introduce retry policy
+instead of reporting the version-one known failure. Treating blanket, policy, or
+judge decisions as owner approval would violate INV-020.
+
+**Affects.** S02, S05, S06, S07, S10–S12, and S15; INV-004–INV-006,
+INV-008–INV-012, INV-019–INV-021, INV-024–INV-027, INV-029, INV-034, INV-036,
+and INV-037; the tool-loop page and linked sibling specifications;
+session-default command storage versions; domain/application spines;
+model/provider bridge, persistence, hubd composition, and offline proof tests.
+
 ## 2026-07-23 — Owner-curated work backlog under docs/agents
 
 **Context.** With the domain core landed, throughput is bounded by how many

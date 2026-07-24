@@ -20,11 +20,12 @@ identifiers refer to [scenarios.md](scenarios.md).
   [sessions-and-transcript](spec/sessions-and-transcript.md) fixes
   origin-accepted-input and failed-turn payloads plus their eligibility and
   terminal-failure commit boundaries, together with assistant text, logical
-  tool-use references, completed-turn markers, and their final response commit
-  boundary. Refusal, reconciliation, mismatch, accepted-risk, tool-result,
-  approval, and delegation variants remain open together with rich assistant
-  content and provider/client rendering. The steering payload and stop marker
-  are fixed by the
+  tool-use and tool-result references, completed-turn markers, and their commit
+  boundaries. Refusal, reconciliation, mismatch, accepted-risk, approval-event,
+  and delegation variants remain open together with rich assistant content and
+  provider/client rendering. The tool-result content extension is tracked under
+  [Tool safety](#tool-safety). The steering payload and stop marker are fixed by
+  the
   [steering and stop decision](decisions.md#2026-07-23--atomic-steering-consumption-and-proof-bearing-stop-requests).
   Blocks only those later semantic-history slices. (S02–S04, S08, S09, S17)
 - **Selectable transcript-frontier boundaries.** Which terminal semantic
@@ -161,17 +162,24 @@ questions below remain open.
 
 ## Tool safety
 
-- **Tool-risk classification.** Needs an argument-aware effect taxonomy with a
-  conservative unknown class before tool execution. Blocks tool execution. (S05,
-  S06, S10, S11, S15, S16)
-- **Which operations require confirmation.** Leaning: hub risk policy
-  considering arguments, placement, and prior scoped grants. Blocks tool
-  execution. (S10, S11, S13–S16)
-- **LLM-judge influence on approval policy.** Leaning: advisory or bounded
-  policy signal only, never human approval identity. Deferrable. (S10, S11)
-- **Retry policy for side-effecting commands and tools.** Leaning: classify
-  effect and evidence; never auto-retry ambiguous writes. Blocks tool retry.
-  (S05, S06, S12)
+- **Execution-strategy configuration placement.** Version one serializes tool
+  attempts without exposing a knob. Whether a later serial/concurrent choice is
+  a deployment, session-default, per-turn, or executor-selection value remains
+  undecided. Blocks configurable/concurrent execution, not the serial loop.
+- **Model-declared approval expiry.** Pending owner approval currently waits
+  indefinitely. Whether a model may request an expiry, how it is frozen, and
+  what durable resolution expiry creates remain undecided.
+- **LLM-judge approval mechanics.** `JudgeRecommendation` is typed but has no
+  producer or storage. Prompt storage, provenance/session tagging, and the
+  boundary between recommendation and policy remain undecided; a judge can never
+  claim owner agency (INV-020).
+- **Per-tool session overrides and high-risk guardrails.** The accepted policy
+  ladder reserves exact per-tool overrides between the dangerous blanket and
+  registry defaults, but override storage, replacement/equality semantics, and
+  the list of operations the blanket must never bypass remain undecided.
+- **Rich result-content variants.** Attempt content is text-only. Image and
+  file/artifact arms, their resource governance, and provider/client rendering
+  remain undecided.
 - **Initial sandboxing requirements.** Leaning: explicit ambient and restricted
   profiles only to the strength justified by effective evidence. Blocks runner
   release. (S13, S14)

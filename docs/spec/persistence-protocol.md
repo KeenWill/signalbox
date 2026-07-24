@@ -1,15 +1,16 @@
 # Persistence protocol
 
 This page describes the implemented persistence protocol of the Signalbox hub as
-verified against the implementing stack through PR #175 (`agent/stop-requests`).
-It covers the Postgres representation in `crates/persistence` (source and
-migrations), migration discipline, durable command storage and replay equality,
-the fail-closed reconstitution boundary, the lock protocol, pending-steering
-durable state, the corruption taxonomy, commit-ambiguity handling, and the
-transactional outbox. Session aggregate semantics live in
-[sessions-and-transcript](sessions-and-transcript.md), turn and attempt
-lifecycle in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md),
-identity kinds and command construction in
+verified against the implementing stack rooted at PR #193
+(`agent/tool-loop-spec`). It covers the Postgres representation in
+`crates/persistence` (source and migrations), migration discipline, durable
+command storage and replay equality, the fail-closed reconstitution boundary,
+the lock protocol, pending-steering durable state, the corruption taxonomy,
+commit-ambiguity handling, and the transactional outbox. Session aggregate
+semantics live in [sessions-and-transcript](sessions-and-transcript.md), turn
+and attempt lifecycle in
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md), identity
+kinds and command construction in
 [identity-and-commands](identity-and-commands.md), and runtime wiring in
 [runtime-substrate](runtime-substrate.md). Invariant text is normative in
 [docs/invariants.md](../invariants.md); this page cites rows by tag.
@@ -166,15 +167,15 @@ states only their storage representation and adapter mechanics.
 One append-only, owner-global `durable_command` registry claims every command
 identifier: `command_id` is the primary key across all kinds and sessions
 (INV-012), with a `CHECK`-closed kind set (`create_session`,
-`replace_session_defaults`, `submit_input`) and `storage_version` (currently
-`1`). Each kind has one typed subordinate record keyed by `command_id` that
-stores every caller-supplied semantic field in typed, `CHECK`-constrained
-columns, plus the terminal `applied`/`rejected` result and its typed result
-fields; result-shape `CHECK` constraints tie each rejection kind to exactly its
-fields, and deferred reverse constraints require exactly one typed record per
-claimed registry row at commit. Why: typed per-kind records keep replay
-semantics reviewable and constraint-checked, where a universal serialized
-payload would make the serializer a second semantic authority.
+`replace_session_defaults`, `submit_input`, `decide_tool_request`) and a
+kind-scoped `storage_version` set. Each kind has one typed subordinate record
+keyed by `command_id` that stores every caller-supplied semantic field in typed,
+`CHECK`-constrained columns, plus the terminal `applied`/`rejected` result and
+its typed result fields; result-shape `CHECK` constraints tie each rejection
+kind to exactly its fields, and deferred reverse constraints require exactly one
+typed record per claimed registry row at commit. Why: typed per-kind records
+keep replay semantics reviewable and constraint-checked, where a universal
+serialized payload would make the serializer a second semantic authority.
 
 Adapter mechanics behind the shared protocol: registry inspection is the first
 durable operation, before any current-state read, and an unseen identifier is
@@ -215,13 +216,13 @@ Locks per transaction, in acquisition order:
   pending-steering acceptance additionally locks the named active
   `turn_lifecycle` row `FOR UPDATE` at commit time, inside the deferred
   source-turn trigger.
-- **StartEligibleTurn**, **startup recovery**, and the **model-call execution
-  transactions** (prepare, authorize, observation commit, restart recovery — all
-  in `model_execution.rs`, reusing the same inventory statement): the
-  `session_scheduler` row `FOR UPDATE` is the only explicit lock (session
-  existence is checked with a bare `EXISTS`). The session row is locked only
-  `KEY SHARE`, implicitly, by the inserts' foreign keys, and the candidate
-  `turn_lifecycle` row is locked by the guarded `UPDATE` itself.
+- **StartEligibleTurn**, **startup recovery**, **model-call execution**, and
+  **tool-loop transactions** (approval, attempt prepare/authorize/result,
+  continuation — reusing the same inventory statement): the `session_scheduler`
+  row `FOR UPDATE` is the only explicit lock (session existence is checked with
+  a bare `EXISTS`). The session row is locked only `KEY SHARE`, implicitly, by
+  the inserts' foreign keys, and the candidate `turn_lifecycle` row is locked by
+  the guarded `UPDATE` itself.
 - **ReplaceSessionDefaults**: no explicit pre-lock; the compare-and-set `UPDATE`
   on the `session_current_defaults` pointer row is the serialization point, and
   its `session_defaults_version` insert takes `FOR KEY SHARE` on the session row
@@ -278,6 +279,11 @@ rederive) or, where the transaction's own premises made a match mandatory,
 corruption. Why: the dangerous corruption cases are rows that look individually
 valid while their cross-record correlations are not, so authority comes only
 from complete validated projections, never from raw identifiers.
+
+An `awaiting_approval` projection reconstructs the exact earliest undecided
+request and proves that no live turn or tool attempt exists; startup leaves it
+unchanged. Running tool attempts reconstruct their immutable effect class and
+dispatch fence before crash classification.
 
 Startup recovery terminalizes an evidence-free lost active turn as failed and
 atomically reclassifies its pending steering to successor origins. A turn
@@ -412,14 +418,12 @@ unrepresentable.
   activation, and defaults replacement commit no events yet, pending the
   protocol projections that define client visibility.
 - Outbox retention and pruning of delivered rows are undecided.
-- Attempt continuation is deliberately blocked: a `turn_attempt` with a
-  predecessor is rejected (`turn_attempt_continuation_unavailable`) until
-  durable wait/closure storage exists.
+- Attempt continuation is admitted only for the tool-loop yield/approval path;
+  no other producer can construct a predecessor-linked attempt.
 - Frontier lineage checks assume `none` ancestry; fork ancestry must replace
   that assumption.
-- The designed aggregate-map rows for model calls landed (`model_call`, the
-  turn-level target pin, the pinned credential reference); provider evidence,
-  authority transfers, fatal cancellation intent, and tool tables are not yet in
+- The aggregate-map rows for model calls and the tool loop have landed; provider
+  evidence, authority transfers, and fatal cancellation intent are not yet in
   the schema.
 - Command-handling error families implement no `ClassifyOperatorFailure`;
   operator classification covers only startup scan, turn activation, the
