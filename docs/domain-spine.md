@@ -277,7 +277,12 @@ pub enum ModelFallback {
 pub struct EffectiveConfiguration { /* private */ }
 impl EffectiveConfiguration {
     pub const fn baseline(model: FrozenModelSelection) -> Self;
-    // accessors: model(), parameters(), known_provider_failure_retry(), model_fallback()
+    pub const fn with_dangerous_tool_auto_approval(
+        model: FrozenModelSelection,
+        dangerous_tool_auto_approval: DangerousToolAutoApproval,
+    ) -> Self;
+    // accessors: model(), parameters(), known_provider_failure_retry(), model_fallback(),
+    // dangerous_tool_auto_approval()
 }
 
 pub struct SessionConfigurationDefaultsVersion(/* private u64 */);
@@ -291,7 +296,11 @@ impl SessionConfigurationDefaultsVersion {
 pub struct SessionConfigurationDefaults { /* private */ }
 impl SessionConfigurationDefaults {
     pub const fn new(model: ModelSelectionRequest) -> Self;
-    // accessors: model()
+    pub const fn with_dangerous_tool_auto_approval(
+        model: ModelSelectionRequest,
+        dangerous_tool_auto_approval: DangerousToolAutoApproval,
+    ) -> Self;
+    // accessors: model(), dangerous_tool_auto_approval()
 }
 
 pub struct VersionedSessionConfigurationDefaults { /* private */ }
@@ -317,7 +326,7 @@ pub enum ModelSelectionOverride {
 pub struct ConfigurationRequest { /* private */ }
 // sealed: carried inside VersionCheckedConfigurationRequest (derive_request)
 impl ConfigurationRequest {
-    // accessors: model()
+    // accessors: model(), dangerous_tool_auto_approval()
 }
 
 pub struct VersionCheckedConfigurationRequest { /* private */ }
@@ -1064,6 +1073,10 @@ impl ActiveTurnSchedulingReconstitutionInput {
         call: ModelCallId,
         interrupt: AppliedInterruptCommandResult,
     ) -> Self;
+    pub const fn awaiting_approval(
+        owning_turn: TurnId,
+        wait: AwaitingToolApproval,
+    ) -> Self;
     pub const fn awaiting_model_call_recovery(
         owning_turn: TurnId,
         ended_attempt: TurnAttemptId,
@@ -1763,6 +1776,7 @@ pub struct CorrelatedModelCallTerminalObservation { /* private */ }
 
 pub enum ModelCallTerminalObservation {
     Completed { assistant_text: Vec<AssistantText> },
+    CompletedWithTools { response: ToolUsingAssistantResponse },
     KnownFailed,
     Refused,
     Cancelled,
@@ -1775,6 +1789,63 @@ impl PendingSteeringReclassificationIdentity {
 }
 pub struct CompletedModelCallIdentities { /* private */ }
 // constructor plus with_pending_steering_reclassifications(...)
+pub enum ToolResponsePartIdentity {
+    Text {
+        entry: SemanticTranscriptEntryId,
+    },
+    ToolCall {
+        entry: SemanticTranscriptEntryId,
+        request: ToolRequestId,
+        approval: InitialToolApproval,
+    },
+}
+impl ToolResponsePartIdentity {
+    pub const fn text(entry: SemanticTranscriptEntryId) -> Self;
+    pub const fn tool_call(
+        entry: SemanticTranscriptEntryId,
+        request: ToolRequestId,
+        approval: InitialToolApproval,
+    ) -> Self;
+}
+pub struct ToolRoundModelCallIdentities { /* private */ }
+impl ToolRoundModelCallIdentities {
+    pub fn new(
+        response_parts: Vec<ToolResponsePartIdentity>,
+        yielded_frontier: ContextFrontierId,
+        continuation_attempt: Option<TurnAttemptId>,
+    ) -> Self;
+    // accessors: response_parts(), yielded_frontier(), continuation_attempt()
+}
+pub enum StoppedToolResponsePartIdentity {
+    Text {
+        entry: SemanticTranscriptEntryId,
+    },
+    ToolCall {
+        entry: SemanticTranscriptEntryId,
+        request: ToolRequestId,
+        closed_result_entry: SemanticTranscriptEntryId,
+    },
+}
+impl StoppedToolResponsePartIdentity {
+    pub const fn text(entry: SemanticTranscriptEntryId) -> Self;
+    pub const fn tool_call(
+        entry: SemanticTranscriptEntryId,
+        request: ToolRequestId,
+        closed_result_entry: SemanticTranscriptEntryId,
+    ) -> Self;
+}
+pub struct StoppedToolRoundModelCallIdentities { /* private */ }
+impl StoppedToolRoundModelCallIdentities {
+    pub fn new(
+        response_parts: Vec<StoppedToolResponsePartIdentity>,
+        cancellation_entry: SemanticTranscriptEntryId,
+        terminal_frontier: ContextFrontierId,
+    ) -> Self;
+    pub fn with_pending_steering_reclassifications(
+        self,
+        identities: Vec<PendingSteeringReclassificationIdentity>,
+    ) -> Self;
+}
 pub struct FailedModelCallTurnIdentities { /* private */ }
 // constructor plus with_pending_steering_reclassifications(...)
 pub struct CancelledModelCallTurnIdentities { /* private */ }
@@ -1787,6 +1858,8 @@ pub struct AmbiguousModelCallTurnIdentities { /* private */ }
 // constructor plus with_pending_steering_reclassifications(...)
 pub enum ModelCallTerminalIdentities {
     Completed(CompletedModelCallIdentities),
+    ToolRound(ToolRoundModelCallIdentities),
+    StoppedToolRound(StoppedToolRoundModelCallIdentities),
     Failed(FailedModelCallTurnIdentities),
     PhysicalCancellation(PhysicalCancellationModelCallTurnIdentities),
     Refused(RefusedModelCallTurnIdentities),
@@ -1794,6 +1867,8 @@ pub enum ModelCallTerminalIdentities {
 }
 pub enum ModelCallTerminalOutcome {
     Completed(CompletedModelCallTurn),
+    ToolRound(ToolRoundModelCallTurn),
+    CancelledWithToolResponse(CancelledToolRoundModelCallTurn),
     Failed(FailedModelCallTurn),
     Cancelled(CancelledModelCallTurn),
     Refused(RefusedModelCallTurn),
@@ -1806,6 +1881,13 @@ pub enum ModelCallInterruptOutcome {
     ReconciliationRequired(ReconciliationRequiredModelCallTurn),
 }
 pub struct CompletedModelCallTurn { /* private */ }
+pub struct ToolRoundModelCallTurn { /* private */ }
+// accessors: session(), turn(), call(), attempt(), assistant_entries(), requests(),
+// automatic_approvals(), yielded_snapshot(), next_phase()
+pub struct CancelledToolRoundModelCallTurn { /* private */ }
+// accessors: session(), turn(), call(), attempt(), disposition(), assistant_entries(),
+// requests(), closed_result_entries(), cancellation_entry(), terminal_snapshot(),
+// reclassified_pending_steering()
 pub struct FailedModelCallTurn { /* private */ }
 pub struct CancelledModelCallTurn { /* private */ }
 // accessors: session(), turn(), call(), attempt(), disposition(),
@@ -1832,6 +1914,10 @@ pub enum ModelCallClosureError {
     AttemptStateMismatch,
     TargetResolutionMismatch,
     AssistantIdentityCountMismatch,
+    ToolResponseIdentityMismatch,
+    ToolRequestOrdinalOverflow,
+    InitialToolApprovalMismatch,
+    ContinuationAttemptIdentityMismatch,
     PendingSteeringReclassificationMismatch,
     FrontierDerivationFailed,
     AmbiguityConstructionFailed,
@@ -1902,6 +1988,9 @@ pub enum SemanticTranscriptEntryPayload {
     TurnFailed { turn: TurnId },
     AssistantText { producing_call: ModelCallId, value: AssistantText },
     AssistantToolUse { producing_call: ModelCallId, request: ToolRequestId },
+    ToolExecutionResult { attempt: ToolAttemptId },
+    ToolDenied { request: ToolRequestId },
+    ToolClosed { request: ToolRequestId },
     TurnCompleted { turn: TurnId },
     TurnCancelled { turn: TurnId },
 }
@@ -1923,6 +2012,463 @@ impl SemanticTranscriptEntryReconstitutionInput {
     ) -> Self;
     // accessors: identity(), source_session(), payload()
 }
+```
+
+## domain: tool
+
+```rust
+pub struct ToolName(/* private */);
+impl ToolName {
+    pub fn try_new(value: String) -> Result<Self, ToolNameError>;
+    pub fn as_str(&self) -> &str;
+    pub fn into_string(self) -> String;
+}
+pub enum ToolNameFailure {
+    Empty,
+    TooLong { bytes: usize },
+    InvalidCharacter { byte_index: usize, character: char },
+}
+pub struct ToolNameError { /* private */ }
+// accessors: value(), failure(), into_parts()
+
+pub enum ToolArgumentsKind {
+    Json,
+    Undecodable,
+}
+pub struct NormalizedToolArguments { /* private */ }
+impl NormalizedToolArguments {
+    pub fn try_from_provider_text(value: String) -> Result<Self, ToolArgumentsError>;
+    pub fn try_from_stored(
+        kind: ToolArgumentsKind,
+        value: String,
+    ) -> Result<Self, ToolArgumentsError>;
+    // accessors: kind(), as_str(), into_parts()
+}
+pub enum ToolArgumentsFailure {
+    TooLarge { bytes: usize },
+    CanonicalTooLarge { bytes: usize },
+    CanonicalizationFailed,
+    StoredKindMismatch,
+    StoredJsonNotCanonical,
+}
+pub struct ToolArgumentsError { /* private */ }
+// accessors: value(), failure(), into_parts()
+
+pub struct ToolRequestOrdinal(/* private u32 */);
+impl ToolRequestOrdinal {
+    pub fn try_from_usize(value: usize) -> Option<Self>;
+    pub const fn from_u32(value: u32) -> Self;
+    pub const fn as_u32(self) -> u32;
+}
+pub struct ToolCallProposal { /* private */ }
+impl ToolCallProposal {
+    pub const fn new(name: ToolName, arguments: NormalizedToolArguments) -> Self;
+    // accessors: name(), arguments()
+}
+pub enum AssistantResponsePart {
+    Text(AssistantText),
+    ToolCall(ToolCallProposal),
+}
+pub struct ToolUsingAssistantResponse { /* private */ }
+impl ToolUsingAssistantResponse {
+    pub fn try_from_parts(
+        parts: Vec<AssistantResponsePart>,
+    ) -> Result<Self, ToolUsingAssistantResponseError>;
+    // accessors: parts(), tool_count()
+}
+pub struct ToolUsingAssistantResponseError { /* private */ }
+impl ToolUsingAssistantResponseError {
+    pub fn into_parts(self) -> Vec<AssistantResponsePart>;
+}
+
+pub struct ToolRequest { /* private */ }
+// sealed live producer: definitive model-call tool-round transition
+impl ToolRequest {
+    // accessors: id(), session(), turn(), producing_call(), ordinal(), name(), arguments()
+}
+pub struct ToolRequestReconstitutionInput { /* private */ }
+impl ToolRequestReconstitutionInput {
+    pub const fn new(
+        id: ToolRequestId,
+        session: SessionId,
+        turn: TurnId,
+        producing_call: ModelCallId,
+        ordinal: ToolRequestOrdinal,
+        name: ToolName,
+        arguments: NormalizedToolArguments,
+    ) -> Self;
+    pub fn into_request(self) -> ToolRequest;
+}
+
+pub enum DangerousToolAutoApproval {
+    Disabled,
+    ApproveAll,
+}
+pub enum ToolPermissionDefault {
+    Auto,
+    Confirm,
+}
+pub enum ToolEffectClass {
+    EffectFree,
+    ExternalEffect,
+}
+pub enum ToolDecisionSource {
+    OwnerCommand,
+    PolicyAuto,
+    SessionBlanket,
+    SessionOverride,
+    JudgeRecommendation,
+}
+
+pub struct ToolDenialReason(/* private */);
+impl ToolDenialReason {
+    pub fn try_new(value: String) -> Result<Self, ToolDenialReasonError>;
+    pub fn as_str(&self) -> &str;
+    pub fn into_string(self) -> String;
+}
+pub enum ToolDenialReasonFailure {
+    Empty,
+    TooLong { bytes: usize },
+    SurroundingWhitespace,
+    ContainsControl,
+}
+pub struct ToolDenialReasonError { /* private */ }
+// accessors: value(), failure(), into_parts()
+
+pub enum ToolApprovalDecision {
+    Approve,
+    Deny { reason: Option<ToolDenialReason> },
+}
+pub struct ToolApprovalResolution { /* private */ }
+// sealed live producers: owner command, registry auto, or frozen session blanket
+impl ToolApprovalResolution {
+    // accessors: request(), decision(), source(), is_approved()
+}
+pub struct ToolApprovalResolutionReconstitutionInput { /* private */ }
+impl ToolApprovalResolutionReconstitutionInput {
+    pub const fn new(
+        request: ToolRequestId,
+        decision: ToolApprovalDecision,
+        source: ToolDecisionSource,
+    ) -> Self;
+    pub fn reconstitute(
+        self,
+    ) -> Result<ToolApprovalResolution, ToolApprovalResolutionReconstitutionError>;
+}
+pub struct ToolApprovalResolutionReconstitutionError { /* private */ }
+// accessors: input(), into_input()
+pub enum InitialToolApproval {
+    Confirm,
+    PolicyAuto,
+    SessionBlanket,
+}
+
+pub struct DecideToolRequest { /* private */ }
+// canonical equality and hashing exclude command_id
+impl DecideToolRequest {
+    pub const fn new(
+        command_id: DurableCommandId,
+        request: ToolRequestId,
+        decision: ToolApprovalDecision,
+    ) -> Self;
+    pub fn prepare_applied(
+        self,
+        request: &ToolRequest,
+    ) -> Result<PreparedDecideToolRequest, DecideToolRequestPreparationError>;
+    pub const fn prepare_request_not_found(self) -> PreparedDecideToolRequest;
+    pub const fn prepare_already_resolved(self) -> PreparedDecideToolRequest;
+    pub const fn prepare_not_earliest(
+        self,
+        earliest: ToolRequestId,
+    ) -> PreparedDecideToolRequest;
+    // accessors: command_id(), request(), decision()
+}
+pub enum DecideToolRequestResult {
+    Applied(DecideToolRequestAppliedResult),
+    Rejected(DecideToolRequestRejectedResult),
+}
+pub struct DecideToolRequestAppliedResult { /* private */ }
+// accessor: resolution()
+pub enum DecideToolRequestRejectedResult {
+    RequestNotFound { request: ToolRequestId },
+    AlreadyResolved { request: ToolRequestId },
+    NotEarliestUndecided {
+        request: ToolRequestId,
+        earliest: ToolRequestId,
+    },
+}
+pub struct PreparedDecideToolRequest { /* private */ }
+// accessors: command(), result(), into_parts()
+pub struct DecideToolRequestPreparationError { /* private */ }
+// accessors: command(), provided_request(), into_parts()
+
+pub enum ToolResultContent {
+    Text(ToolResultText),
+}
+pub struct ToolResultText(/* private */);
+impl ToolResultText {
+    pub fn try_new(value: String) -> Result<Self, ToolResultTextError>;
+    pub fn as_str(&self) -> &str;
+    pub fn into_string(self) -> String;
+}
+pub enum ToolResultTextFailure {
+    TooLarge { bytes: usize },
+    ContainsNull,
+}
+pub struct ToolResultTextError { /* private */ }
+// accessors: value(), failure(), into_parts()
+pub enum ToolRequestResolution {
+    Executed { attempt: ToolAttemptId },
+    Denied { request: ToolRequestId },
+    ClosedByTurnEnd { request: ToolRequestId },
+}
+```
+
+## domain: tool_attempt
+
+```rust
+pub struct ToolDispatchGeneration(/* private u64 */);
+impl ToolDispatchGeneration {
+    pub const fn try_from_u64(value: u64) -> Option<Self>;
+    pub const fn first() -> Self;
+    pub const fn checked_next(self) -> Option<Self>;
+    pub const fn as_u64(self) -> u64;
+}
+pub struct ApprovedToolRequest { /* private */ }
+impl ApprovedToolRequest {
+    pub fn try_from_resolution(
+        request: ToolRequest,
+        approval: ToolApprovalResolution,
+    ) -> Result<Self, ApprovedToolRequestError>;
+    pub fn prepare_attempt(
+        &self,
+        attempt: ToolAttemptId,
+        issuing_attempt: TurnAttemptId,
+        effect_class: ToolEffectClass,
+    ) -> CurrentToolAttempt;
+    // accessors: request(), approval()
+}
+pub struct ApprovedToolRequestError { /* private */ }
+// accessors: request(), approval(), into_parts()
+
+pub enum ToolExecutionErrorKind {
+    UnknownTool,
+    InvalidArguments,
+    ExecutionFailed,
+    ResultTooLarge,
+    CrashLost,
+}
+pub struct ToolExecutionErrorDetail(/* private */);
+impl ToolExecutionErrorDetail {
+    pub fn try_new(value: String) -> Result<Self, ToolExecutionErrorDetailError>;
+    pub fn as_str(&self) -> &str;
+    pub fn into_string(self) -> String;
+}
+pub enum ToolExecutionErrorDetailFailure {
+    Empty,
+    TooLong { bytes: usize },
+    SurroundingWhitespace,
+    ContainsControl,
+}
+pub struct ToolExecutionErrorDetailError { /* private */ }
+// accessors: value(), failure(), into_parts()
+pub struct ToolExecutionError { /* private */ }
+impl ToolExecutionError {
+    pub const fn new(
+        kind: ToolExecutionErrorKind,
+        detail: Option<ToolExecutionErrorDetail>,
+    ) -> Self;
+    // accessors: kind(), detail()
+}
+
+pub enum CurrentToolAttemptState {
+    Prepared,
+    InFlight,
+}
+pub enum ToolAttemptEnd {
+    Completed { result: ToolResultContent },
+    KnownFailed { error: ToolExecutionError },
+    Ambiguous,
+}
+impl ToolAttemptEnd {
+    pub const fn disposition(&self) -> ToolAttemptDisposition;
+}
+pub enum ToolAttemptDisposition {
+    Completed,
+    KnownFailed,
+    Ambiguous,
+}
+pub enum ToolAttemptObservation {
+    Completed { result: ToolResultContent },
+    KnownFailed { error: ToolExecutionError },
+    Ambiguous,
+}
+
+pub struct ToolAttemptDispatchCorrelation { /* private */ }
+impl ToolAttemptDispatchCorrelation {
+    pub const fn bind(
+        self,
+        observation: ToolAttemptObservation,
+    ) -> CorrelatedToolAttemptObservation;
+    // accessors: session(), turn(), issuing_attempt(), request(), attempt(), generation()
+}
+pub struct CorrelatedToolAttemptObservation { /* private */ }
+// accessors: correlation(), observation()
+pub struct CurrentToolAttempt { /* private */ }
+impl CurrentToolAttempt {
+    pub fn authorize(self) -> Result<AuthorizedToolAttempt, ToolAttemptTransitionError>;
+    pub fn end_preflight_error(
+        self,
+        error: ToolExecutionError,
+    ) -> Result<EndedToolAttempt, ToolAttemptTransitionError>;
+    pub fn apply_terminal_observation(
+        self,
+        observation: CorrelatedToolAttemptObservation,
+    ) -> Result<EndedToolAttempt, ToolAttemptTransitionError>;
+    pub fn classify_crash_loss(self) -> ToolAttemptCrashOutcome;
+    // accessors: attempt(), request(), session(), turn(), issuing_attempt(), effect_class(),
+    // generation(), state()
+}
+pub struct AuthorizedToolAttempt { /* private */ }
+// accessors: attempt(), correlation(), into_parts()
+pub struct EndedToolAttempt { /* private */ }
+// accessors: attempt(), request(), session(), turn(), issuing_attempt(), effect_class(),
+// generation(), end()
+pub enum ToolAttemptCrashOutcome {
+    KnownFailed(EndedToolAttempt),
+    Ambiguous(EndedToolAttempt),
+}
+pub enum ToolAttemptTransitionFailure {
+    InvalidState,
+    CorrelationMismatch,
+    InvalidPreflightError,
+    EffectFreeCannotBeAmbiguous,
+}
+pub struct ToolAttemptTransitionError { /* private */ }
+// accessors: attempt(), failure(), into_parts()
+
+pub enum ToolAttemptReconstitutionState {
+    Prepared,
+    InFlight,
+    Ended(ToolAttemptEnd),
+}
+pub struct ToolAttemptReconstitutionInput { /* private */ }
+impl ToolAttemptReconstitutionInput {
+    pub const fn new(
+        attempt: ToolAttemptId,
+        request: ToolRequestId,
+        session: SessionId,
+        turn: TurnId,
+        issuing_attempt: TurnAttemptId,
+        effect_class: ToolEffectClass,
+        generation: ToolDispatchGeneration,
+        state: ToolAttemptReconstitutionState,
+    ) -> Self;
+    pub fn reconstitute(self) -> ReconstitutedToolAttempt;
+}
+pub enum ReconstitutedToolAttempt {
+    Current(CurrentToolAttempt),
+    Ended(EndedToolAttempt),
+}
+```
+
+## domain: tool_execution
+
+```rust
+pub enum ToolBatchPhaseReconstitutionInput {
+    AwaitingApproval { request: ToolRequestId },
+    Executing { turn_attempt: TurnAttemptId },
+    AwaitingRecovery { attempt: ToolAttemptId },
+}
+pub struct ToolBatchReconstitutionInput { /* private */ }
+impl ToolBatchReconstitutionInput {
+    pub fn new(
+        session: SessionId,
+        turn: TurnId,
+        producing_call: ModelCallId,
+        yielded_snapshot: ResolvedContextFrontierSnapshot,
+        requests: Vec<ToolRequest>,
+        approvals: Vec<ToolApprovalResolution>,
+        attempts: Vec<ReconstitutedToolAttempt>,
+        phase: ToolBatchPhaseReconstitutionInput,
+    ) -> Self;
+    pub fn reconstitute(self) -> Result<ToolBatch, ToolBatchReconstitutionError>;
+}
+pub enum ToolBatchReconstitutionFailure {
+    EmptyRequestBatch,
+    RequestOwnershipMismatch,
+    RequestOrderMismatch,
+    YieldedSnapshotSessionMismatch,
+    ApprovalInventoryMismatch,
+    AttemptInventoryMismatch,
+    AttemptAuthorizationMismatch,
+    MultipleLiveAttempts,
+    AttemptOrderMismatch,
+    ApprovalPhaseMismatch,
+    ExecutionPhaseMismatch,
+    RecoveryPhaseMismatch,
+}
+pub struct ToolBatchReconstitutionError { /* private */ }
+// accessors: input(), failure(), into_parts()
+pub enum ToolBatchPhase {
+    AwaitingApproval { request: ToolRequestId },
+    Executing { turn_attempt: TurnAttemptId },
+    AwaitingRecovery { attempt: ToolAttemptId },
+}
+
+pub struct ToolBatch { /* private */ }
+impl ToolBatch {
+    pub fn awaiting_approval(&self) -> Option<AwaitingToolApproval>;
+    pub fn prepare_owner_decision(
+        self,
+        command: DecideToolRequest,
+        continuation_attempt: Option<TurnAttemptId>,
+    ) -> Result<PreparedToolBatchDecision, ToolBatchDecisionError>;
+    pub fn prepare_next_attempt(
+        &self,
+        attempt: ToolAttemptId,
+        effect_class: ToolEffectClass,
+    ) -> Result<PreparedToolAttempt, ToolBatchExecutionError>;
+    pub fn prepare_result_projection(
+        &self,
+        entry_ids: Vec<SemanticTranscriptEntryId>,
+        continuation_frontier: ContextFrontierId,
+    ) -> Result<PreparedToolResultProjection, ToolResultProjectionError>;
+    // accessors: session(), turn(), producing_call(), yielded_snapshot(), requests(),
+    // approval(), attempt(), phase()
+}
+pub struct AwaitingToolApproval { /* private */ }
+// sealed: ToolBatch::awaiting_approval
+// accessors: session(), turn(), request()
+pub struct PreparedToolBatchDecision { /* private */ }
+// accessors: batch(), prepared_command(), active_phase(), into_parts()
+pub enum ToolBatchDecisionFailure {
+    NoUndecidedRequest,
+    CommandCorrelationMismatch,
+    ContinuationAttemptMismatch,
+}
+pub struct ToolBatchDecisionError { /* private */ }
+// accessors: batch(), command(), failure()
+pub struct PreparedToolAttempt { /* private */ }
+// accessors: attempt(), into_attempt()
+pub enum ToolBatchExecutionFailure {
+    NotExecuting,
+    LiveAttemptPresent,
+    ReadyForContinuation,
+    ApprovalMismatch,
+}
+pub struct ToolBatchExecutionError { /* private */ }
+// accessor: failure()
+pub struct PreparedToolResultProjection { /* private */ }
+// accessors: entries(), snapshot(), into_parts()
+pub enum ToolResultProjectionFailure {
+    BatchNotResolved,
+    TurnLevelFailure,
+    EntryIdentityReuse,
+    FrontierDerivationFailed,
+}
+pub struct ToolResultProjectionError { /* private */ }
+// accessor: failure()
 ```
 
 ## domain: provider_evidence
@@ -2880,14 +3426,17 @@ impl<
 | domain: turn_eligibility              | 27                   |
 | domain: turn_attempt                  | 13                   |
 | domain: model_call                    | 12                   |
-| domain: model_execution               | 41                   |
+| domain: model_execution               | 47                   |
 | domain: context_frontier              | 6                    |
 | domain: semantic_entry                | 4                    |
+| domain: tool                          | 37                   |
+| domain: tool_attempt                  | 23                   |
+| domain: tool_execution                | 16                   |
 | domain: provider_evidence             | 5                    |
 | domain: applied_interrupt             | 2                    |
 | domain: fatal_mismatch                | 0                    |
 | domain: replace_session_defaults      | 13                   |
-| **signalbox-domain total**            | **211 (+1 free fn)** |
+| **signalbox-domain total**            | **293 (+1 free fn)** |
 | application: create_session           | 8 (incl. 2 traits)   |
 | application: load_session             | 2 (incl. 1 trait)    |
 | application: model_execution          | 28 (incl. 7 traits)  |

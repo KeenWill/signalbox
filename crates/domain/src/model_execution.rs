@@ -1,31 +1,33 @@
-//! Initial text-only model-call turn aggregate.
+//! Model-call turn aggregate with intra-turn tool yields.
 //!
 //! docs/spec/turn-lifecycle-and-scheduling.md,
 //! docs/spec/model-call-execution.md, docs/spec/sessions-and-transcript.md,
 //! and docs/spec/persistence-protocol.md are normative. This purpose-specific
 //! aggregate reconstitutes one active accepted-input turn together with its
-//! current initial model call. It owns target resolution against immutable
+//! current model call. It owns target resolution against immutable
 //! configured definitions, the separate prepared and send-authorization
-//! transitions, and the atomic terminal candidates for the first text-only
-//! execution slice.
+//! transitions, atomic terminal candidates, and the response-side transition
+//! that yields a tool-request batch without terminalizing the turn.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     AcceptedInputDisposition, AcceptedInputId, AcceptedInputLifecycle, AcceptedInputQueueOrder,
     AcceptedInputTurnStart, ActivatedAcceptedInputTurn, ActiveTurnPhase,
-    AppliedInterruptCommandResult, AppliedInterruptProof, AssistantText, AttemptEnd,
-    CancellationStopDisposition, ContextFrontierId, CurrentModelCall, CurrentModelCallState,
-    CurrentTurnAttempt, CurrentTurnAttemptState, DirectModelSelection, EffectiveConfiguration,
-    EndedModelCall, EndedTurnAttempt, FrozenModelSelection, ModelCallDisposition, ModelCallId,
+    AppliedInterruptCommandResult, AppliedInterruptProof, AssistantResponsePart, AssistantText,
+    AttemptEnd, CancellationStopDisposition, ContextFrontierId, CurrentModelCall,
+    CurrentModelCallState, CurrentTurnAttempt, CurrentTurnAttemptState, DangerousToolAutoApproval,
+    DirectModelSelection, EffectiveConfiguration, EndedModelCall, EndedTurnAttempt,
+    FrozenModelSelection, InitialToolApproval, ModelCallDisposition, ModelCallId,
     ModelCallReconstitutionInput, NonEmptyIssuedOperationRefs, OriginConfiguration,
     PinnedProviderTarget, PinnedProviderTargetReconstitutionInput, ReconciliationMarker,
     ReconstitutedModelCall, ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput,
     ResolvedContextFrontierSnapshot, ResolvedProviderTarget, SemanticTranscriptEntry,
     SemanticTranscriptEntryId, SemanticTranscriptEntryPayload, SessionId, SteeringBinding,
     SteeringReclassificationReason, SubmitInputResult, SubmitInputTurnOriginReconstitutionInput,
-    TurnAttemptId, TurnAttemptStopCauses, TurnDisposition, TurnId, UnstoppedAttemptDisposition,
-    UserContent,
+    ToolApprovalResolution, ToolRequest, ToolRequestId, ToolRequestOrdinal,
+    ToolUsingAssistantResponse, TurnAttemptId, TurnAttemptStopCauses, TurnDisposition, TurnId,
+    UnstoppedAttemptDisposition, UserContent,
 };
 
 /// One immutable configured direct-selection to exact-target definition.
@@ -550,6 +552,9 @@ impl ModelCallExecution {
                 SemanticTranscriptEntryPayload::TurnFailed { .. }
                 | SemanticTranscriptEntryPayload::AssistantText { .. }
                 | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
+                | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
+                | SemanticTranscriptEntryPayload::ToolDenied { .. }
+                | SemanticTranscriptEntryPayload::ToolClosed { .. }
                 | SemanticTranscriptEntryPayload::TurnCompleted { .. }
                 | SemanticTranscriptEntryPayload::TurnCancelled { .. } => None,
             })
@@ -755,14 +760,17 @@ impl ModelCallExecution {
         if !lifecycle_valid {
             return Err(ModelCallClosureError::CallStateMismatch);
         }
-        let reclassified_pending_steering = if observation.observation.disposition()
-            == ModelCallDisposition::Ambiguous
-            && !matches!(
-                self.current_attempt.state(),
-                CurrentTurnAttemptState::StopRequested {
-                    causes: TurnAttemptStopCauses::CancellationOnly { .. }
-                }
-            ) {
+        let cancellation_requested = matches!(
+            self.current_attempt.state(),
+            CurrentTurnAttemptState::StopRequested {
+                causes: TurnAttemptStopCauses::CancellationOnly { .. }
+            }
+        );
+        let reclassified_pending_steering = if (observation.observation.is_tool_round()
+            && !cancellation_requested)
+            || (observation.observation.disposition() == ModelCallDisposition::Ambiguous
+                && !cancellation_requested)
+        {
             Box::new([])
         } else {
             reclassify_pending_steering(
@@ -770,6 +778,10 @@ impl ModelCallExecution {
                 identities.pending_steering_reclassifications(),
             )?
         };
+        let dangerous_tool_auto_approval = self
+            .configuration
+            .effective()
+            .dangerous_tool_auto_approval();
         apply_terminal_observation(
             ModelCallTurnScope {
                 session: self.session,
@@ -780,7 +792,10 @@ impl ModelCallExecution {
             self.frontier_entries,
             observation.observation,
             identities,
-            reclassified_pending_steering,
+            ModelCallTerminalContext {
+                reclassified_pending_steering,
+                dangerous_tool_auto_approval,
+            },
         )
     }
 
@@ -1328,6 +1343,11 @@ struct ModelCallTurnScope {
     turn: TurnId,
 }
 
+struct ModelCallTerminalContext {
+    reclassified_pending_steering: Box<[ReclassifiedPendingSteeringTurn]>,
+    dangerous_tool_auto_approval: DangerousToolAutoApproval,
+}
+
 fn apply_terminal_observation(
     scope: ModelCallTurnScope,
     attempt: CurrentTurnAttempt,
@@ -1335,9 +1355,13 @@ fn apply_terminal_observation(
     frontier_entries: Box<[SemanticTranscriptEntry]>,
     observation: ModelCallTerminalObservation,
     identities: ModelCallTerminalIdentities,
-    reclassified_pending_steering: Box<[ReclassifiedPendingSteeringTurn]>,
+    context: ModelCallTerminalContext,
 ) -> Result<ModelCallTerminalOutcome, ModelCallClosureError> {
     let ModelCallTurnScope { session, turn } = scope;
+    let ModelCallTerminalContext {
+        reclassified_pending_steering,
+        dangerous_tool_auto_approval,
+    } = context;
     let cancellation_proof = match attempt.state() {
         CurrentTurnAttemptState::StopRequested {
             causes: TurnAttemptStopCauses::CancellationOnly { interrupt },
@@ -1374,6 +1398,43 @@ fn apply_terminal_observation(
                 reclassified_pending_steering,
             )?;
             Ok(ModelCallTerminalOutcome::Completed(completed))
+        }
+        ModelCallTerminalObservation::CompletedWithTools { response } => {
+            if let Some(proof) = cancellation_proof {
+                let ModelCallTerminalIdentities::StoppedToolRound(identities) = identities else {
+                    return Err(ModelCallClosureError::IdentityShapeMismatch);
+                };
+                let ended_attempt = attempt
+                    .end_after_cancellation(proof, CancellationStopDisposition::Cancelled)
+                    .map_err(|_| ModelCallClosureError::AttemptStateMismatch)?;
+                return assemble_stopped_tool_round(
+                    scope,
+                    ended_call,
+                    ended_attempt,
+                    frontier_entries.into_vec(),
+                    response,
+                    proof,
+                    identities,
+                    reclassified_pending_steering,
+                )
+                .map(ModelCallTerminalOutcome::CancelledWithToolResponse);
+            }
+            let ModelCallTerminalIdentities::ToolRound(identities) = identities else {
+                return Err(ModelCallClosureError::IdentityShapeMismatch);
+            };
+            let ended_attempt = attempt
+                .end_without_stop(UnstoppedAttemptDisposition::YieldedToDurableWait)
+                .map_err(|_| ModelCallClosureError::AttemptStateMismatch)?;
+            assemble_tool_round(
+                scope,
+                ended_call,
+                ended_attempt,
+                frontier_entries.into_vec(),
+                response,
+                identities,
+                dangerous_tool_auto_approval,
+            )
+            .map(ModelCallTerminalOutcome::ToolRound)
         }
         ModelCallTerminalObservation::KnownFailed => {
             let ModelCallTerminalIdentities::Failed(identities) = identities else {
@@ -1572,6 +1633,11 @@ pub enum ModelCallTerminalObservation {
         /// Exact assistant text parts in final semantic order.
         assistant_text: Vec<AssistantText>,
     },
+    /// Definitive success whose ordered response contains tool proposals.
+    CompletedWithTools {
+        /// Ordered text and normalized proposals, proven to contain a tool.
+        response: ToolUsingAssistantResponse,
+    },
     /// Evidence establishes a known failure.
     KnownFailed,
     /// The authenticated complete exchange was explicitly refused.
@@ -1586,12 +1652,18 @@ impl ModelCallTerminalObservation {
     /// Returns the exact physical disposition declared by this observation.
     pub const fn disposition(&self) -> ModelCallDisposition {
         match self {
-            Self::Completed { .. } => ModelCallDisposition::Completed,
+            Self::Completed { .. } | Self::CompletedWithTools { .. } => {
+                ModelCallDisposition::Completed
+            }
             Self::KnownFailed => ModelCallDisposition::KnownFailed,
             Self::Refused => ModelCallDisposition::Refused,
             Self::Cancelled => ModelCallDisposition::Cancelled,
             Self::Ambiguous => ModelCallDisposition::Ambiguous,
         }
+    }
+
+    const fn is_tool_round(&self) -> bool {
+        matches!(self, Self::CompletedWithTools { .. })
     }
 }
 
@@ -1648,6 +1720,159 @@ impl CompletedModelCallIdentities {
 
     /// Supplies one fresh successor identity per pending steering input, in
     /// session acceptance order.
+    pub fn with_pending_steering_reclassifications(
+        mut self,
+        identities: Vec<PendingSteeringReclassificationIdentity>,
+    ) -> Self {
+        self.pending_steering_reclassifications = identities;
+        self
+    }
+}
+
+/// Fresh identities and initial policy for one ordered tool-response part.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ToolResponsePartIdentity {
+    /// One semantic assistant-text entry.
+    Text {
+        /// Fresh semantic-entry identity.
+        entry: SemanticTranscriptEntryId,
+    },
+    /// One logical request plus its reference-only semantic entry.
+    ToolCall {
+        /// Fresh semantic-entry identity.
+        entry: SemanticTranscriptEntryId,
+        /// Fresh logical request identity.
+        request: ToolRequestId,
+        /// The explicit initial approval outcome selected by application policy.
+        approval: InitialToolApproval,
+    },
+}
+
+impl ToolResponsePartIdentity {
+    /// Constructs a text-part identity.
+    pub const fn text(entry: SemanticTranscriptEntryId) -> Self {
+        Self::Text { entry }
+    }
+
+    /// Constructs a tool-part identity and explicit initial policy outcome.
+    pub const fn tool_call(
+        entry: SemanticTranscriptEntryId,
+        request: ToolRequestId,
+        approval: InitialToolApproval,
+    ) -> Self {
+        Self::ToolCall {
+            entry,
+            request,
+            approval,
+        }
+    }
+}
+
+/// Fresh identities for one nonterminal tool-using response commit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolRoundModelCallIdentities {
+    response_parts: Vec<ToolResponsePartIdentity>,
+    yielded_frontier: ContextFrontierId,
+    continuation_attempt: Option<TurnAttemptId>,
+}
+
+impl ToolRoundModelCallIdentities {
+    /// Supplies one identity shape per response part, a yielded frontier, and
+    /// a continuation attempt exactly when every request is auto-approved.
+    pub fn new(
+        response_parts: Vec<ToolResponsePartIdentity>,
+        yielded_frontier: ContextFrontierId,
+        continuation_attempt: Option<TurnAttemptId>,
+    ) -> Self {
+        Self {
+            response_parts,
+            yielded_frontier,
+            continuation_attempt,
+        }
+    }
+
+    /// Returns ordered response-part identities.
+    pub fn response_parts(&self) -> &[ToolResponsePartIdentity] {
+        &self.response_parts
+    }
+
+    /// Returns the proposed yielded snapshot identity.
+    pub const fn yielded_frontier(&self) -> ContextFrontierId {
+        self.yielded_frontier
+    }
+
+    /// Returns the proposed continuation attempt, if the batch has no wait.
+    pub const fn continuation_attempt(&self) -> Option<TurnAttemptId> {
+        self.continuation_attempt
+    }
+}
+
+/// Fresh identities for one response part when an applied interrupt closes
+/// newly proposed tools instead of continuing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StoppedToolResponsePartIdentity {
+    /// One semantic assistant-text entry.
+    Text {
+        /// Fresh semantic-entry identity.
+        entry: SemanticTranscriptEntryId,
+    },
+    /// One request, tool-use entry, and turn-closed result entry.
+    ToolCall {
+        /// Fresh assistant tool-use entry identity.
+        entry: SemanticTranscriptEntryId,
+        /// Fresh logical request identity.
+        request: ToolRequestId,
+        /// Fresh reference-only closed-result entry identity.
+        closed_result_entry: SemanticTranscriptEntryId,
+    },
+}
+
+impl StoppedToolResponsePartIdentity {
+    /// Constructs one text identity.
+    pub const fn text(entry: SemanticTranscriptEntryId) -> Self {
+        Self::Text { entry }
+    }
+
+    /// Constructs one closed tool-proposal identity group.
+    pub const fn tool_call(
+        entry: SemanticTranscriptEntryId,
+        request: ToolRequestId,
+        closed_result_entry: SemanticTranscriptEntryId,
+    ) -> Self {
+        Self::ToolCall {
+            entry,
+            request,
+            closed_result_entry,
+        }
+    }
+}
+
+/// Fresh identities for a tool-using response closed by an applied interrupt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoppedToolRoundModelCallIdentities {
+    response_parts: Vec<StoppedToolResponsePartIdentity>,
+    cancellation_entry: SemanticTranscriptEntryId,
+    terminal_frontier: ContextFrontierId,
+    pending_steering_reclassifications: Vec<PendingSteeringReclassificationIdentity>,
+}
+
+impl StoppedToolRoundModelCallIdentities {
+    /// Supplies ordered response identities, the cancellation marker, and
+    /// terminal snapshot.
+    pub fn new(
+        response_parts: Vec<StoppedToolResponsePartIdentity>,
+        cancellation_entry: SemanticTranscriptEntryId,
+        terminal_frontier: ContextFrontierId,
+    ) -> Self {
+        Self {
+            response_parts,
+            cancellation_entry,
+            terminal_frontier,
+            pending_steering_reclassifications: Vec::new(),
+        }
+    }
+
+    /// Supplies one successor identity per pending steering input.
     pub fn with_pending_steering_reclassifications(
         mut self,
         identities: Vec<PendingSteeringReclassificationIdentity>,
@@ -1800,6 +2025,10 @@ impl RefusedModelCallTurnIdentities {
 pub enum ModelCallTerminalIdentities {
     /// Successful assistant-content and completion identities.
     Completed(CompletedModelCallIdentities),
+    /// Assistant content, logical requests, and a nonterminal yielded frontier.
+    ToolRound(ToolRoundModelCallIdentities),
+    /// Tool response content and closed results under an applied interrupt.
+    StoppedToolRound(StoppedToolRoundModelCallIdentities),
     /// Known-failure or cause-free physical-cancellation identities.
     Failed(FailedModelCallTurnIdentities),
     /// Physical-cancellation identities whose semantic meaning is selected
@@ -1818,6 +2047,10 @@ pub enum ModelCallTerminalIdentities {
 pub enum ModelCallTerminalOutcome {
     /// Assistant content and turn completion committed atomically.
     Completed(CompletedModelCallTurn),
+    /// Assistant content and requests committed while the same turn continues.
+    ToolRound(ToolRoundModelCallTurn),
+    /// A tool-using response raced an interrupt and closed without execution.
+    CancelledWithToolResponse(CancelledToolRoundModelCallTurn),
     /// The call and turn failed atomically.
     Failed(FailedModelCallTurn),
     /// The applied interrupt and physical evidence cancelled the turn.
@@ -1845,6 +2078,8 @@ impl ModelCallTerminalIdentities {
     fn pending_steering_reclassifications(&self) -> &[PendingSteeringReclassificationIdentity] {
         match self {
             Self::Completed(identities) => &identities.pending_steering_reclassifications,
+            Self::ToolRound(_) => &[],
+            Self::StoppedToolRound(identities) => &identities.pending_steering_reclassifications,
             Self::Failed(identities) => &identities.pending_steering_reclassifications,
             Self::PhysicalCancellation(identities) => {
                 &identities.pending_steering_reclassifications
@@ -1944,6 +2179,140 @@ pub struct CompletedModelCallTurn {
     completion_entry: SemanticTranscriptEntry,
     terminal_snapshot: ResolvedContextFrontierSnapshot,
     reclassified_pending_steering: Box<[ReclassifiedPendingSteeringTurn]>,
+}
+
+/// One nonterminal commit candidate from a tool-using completed model call.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolRoundModelCallTurn {
+    session: SessionId,
+    turn: TurnId,
+    call: EndedModelCall,
+    attempt: EndedTurnAttempt,
+    assistant_entries: Box<[SemanticTranscriptEntry]>,
+    requests: Box<[ToolRequest]>,
+    automatic_approvals: Box<[ToolApprovalResolution]>,
+    yielded_snapshot: ResolvedContextFrontierSnapshot,
+    next_phase: ActiveTurnPhase,
+}
+
+impl ToolRoundModelCallTurn {
+    /// Returns the owning session.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    /// Returns the continuing logical turn.
+    pub const fn turn(&self) -> TurnId {
+        self.turn
+    }
+
+    /// Borrows the completed producing call.
+    pub const fn call(&self) -> &EndedModelCall {
+        &self.call
+    }
+
+    /// Borrows the yielded producing attempt.
+    pub const fn attempt(&self) -> &EndedTurnAttempt {
+        &self.attempt
+    }
+
+    /// Returns ordered text/tool-use semantic entries.
+    pub fn assistant_entries(&self) -> &[SemanticTranscriptEntry] {
+        &self.assistant_entries
+    }
+
+    /// Returns logical requests in proposal order.
+    pub fn requests(&self) -> &[ToolRequest] {
+        &self.requests
+    }
+
+    /// Returns only automatic decisions, in proposal order among those selected.
+    pub fn automatic_approvals(&self) -> &[ToolApprovalResolution] {
+        &self.automatic_approvals
+    }
+
+    /// Borrows the source-plus-assistant yielded snapshot.
+    pub const fn yielded_snapshot(&self) -> &ResolvedContextFrontierSnapshot {
+        &self.yielded_snapshot
+    }
+
+    /// Borrows the approval wait or prepared continuation attempt.
+    pub const fn next_phase(&self) -> &ActiveTurnPhase {
+        &self.next_phase
+    }
+}
+
+/// One interrupt-cancelled turn whose racing response proposed tools.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CancelledToolRoundModelCallTurn {
+    session: SessionId,
+    turn: TurnId,
+    call: EndedModelCall,
+    attempt: EndedTurnAttempt,
+    disposition: TurnDisposition,
+    assistant_entries: Box<[SemanticTranscriptEntry]>,
+    requests: Box<[ToolRequest]>,
+    closed_result_entries: Box<[SemanticTranscriptEntry]>,
+    cancellation_entry: SemanticTranscriptEntry,
+    terminal_snapshot: ResolvedContextFrontierSnapshot,
+    reclassified_pending_steering: Box<[ReclassifiedPendingSteeringTurn]>,
+}
+
+impl CancelledToolRoundModelCallTurn {
+    /// Returns the owning session.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    /// Returns the cancelled logical turn.
+    pub const fn turn(&self) -> TurnId {
+        self.turn
+    }
+
+    /// Borrows the completed producing call.
+    pub const fn call(&self) -> &EndedModelCall {
+        &self.call
+    }
+
+    /// Borrows the proof-bearing ended attempt.
+    pub const fn attempt(&self) -> &EndedTurnAttempt {
+        &self.attempt
+    }
+
+    /// Borrows the cancelled disposition.
+    pub const fn disposition(&self) -> &TurnDisposition {
+        &self.disposition
+    }
+
+    /// Returns ordered assistant response entries.
+    pub fn assistant_entries(&self) -> &[SemanticTranscriptEntry] {
+        &self.assistant_entries
+    }
+
+    /// Returns proposed logical requests in proposal order.
+    pub fn requests(&self) -> &[ToolRequest] {
+        &self.requests
+    }
+
+    /// Returns proposal-ordered closed-result entries.
+    pub fn closed_result_entries(&self) -> &[SemanticTranscriptEntry] {
+        &self.closed_result_entries
+    }
+
+    /// Borrows the final proof-bearing cancellation marker.
+    pub const fn cancellation_entry(&self) -> &SemanticTranscriptEntry {
+        &self.cancellation_entry
+    }
+
+    /// Borrows the complete terminal snapshot.
+    pub const fn terminal_snapshot(&self) -> &ResolvedContextFrontierSnapshot {
+        &self.terminal_snapshot
+    }
+
+    /// Returns successor turns for pending steering.
+    pub fn reclassified_pending_steering(&self) -> &[ReclassifiedPendingSteeringTurn] {
+        &self.reclassified_pending_steering
+    }
 }
 
 impl CompletedModelCallTurn {
@@ -2265,6 +2634,14 @@ pub enum ModelCallClosureError {
     TargetResolutionMismatch,
     /// Assistant text and entry identity counts differ.
     AssistantIdentityCountMismatch,
+    /// Tool response parts and their identity shapes differ.
+    ToolResponseIdentityMismatch,
+    /// The request ordinal cannot fit the durable zero-based space.
+    ToolRequestOrdinalOverflow,
+    /// Initial approval provenance contradicts the frozen blanket posture.
+    InitialToolApprovalMismatch,
+    /// A continuation attempt was missing, unexpected, or reused the yielded attempt.
+    ContinuationAttemptIdentityMismatch,
     /// Pending steering and proposed successor identities are not exact,
     /// ordered, distinct, and source-turn-safe.
     PendingSteeringReclassificationMismatch,
@@ -2392,6 +2769,9 @@ fn reconstitute(
             SemanticTranscriptEntryPayload::TurnFailed { .. }
             | SemanticTranscriptEntryPayload::AssistantText { .. }
             | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
+            | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
+            | SemanticTranscriptEntryPayload::ToolDenied { .. }
+            | SemanticTranscriptEntryPayload::ToolClosed { .. }
             | SemanticTranscriptEntryPayload::TurnCompleted { .. }
             | SemanticTranscriptEntryPayload::TurnCancelled { .. } => None,
         };
@@ -2613,6 +2993,270 @@ fn reclassify_pending_steering(
         });
     }
     Ok(reclassified.into_boxed_slice())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assemble_tool_round(
+    scope: ModelCallTurnScope,
+    call: EndedModelCall,
+    attempt: EndedTurnAttempt,
+    frontier_entries: Vec<SemanticTranscriptEntry>,
+    response: ToolUsingAssistantResponse,
+    identities: ToolRoundModelCallIdentities,
+    dangerous_tool_auto_approval: DangerousToolAutoApproval,
+) -> Result<ToolRoundModelCallTurn, ModelCallClosureError> {
+    let ModelCallTurnScope { session, turn } = scope;
+    if response.parts().len() != identities.response_parts.len() {
+        return Err(ModelCallClosureError::ToolResponseIdentityMismatch);
+    }
+    let mut used_entries = frontier_entries
+        .iter()
+        .map(SemanticTranscriptEntry::identity)
+        .collect::<BTreeSet<_>>();
+    let mut used_requests = BTreeSet::new();
+    let mut assistant_entries = Vec::with_capacity(response.parts().len());
+    let mut requests = Vec::with_capacity(response.tool_count());
+    let mut automatic_approvals = Vec::with_capacity(response.tool_count());
+    let mut earliest_undecided = None;
+    let mut tool_ordinal = 0usize;
+
+    for (part, identity) in response.parts().iter().zip(identities.response_parts) {
+        let entry = match (part, identity) {
+            (AssistantResponsePart::Text(value), ToolResponsePartIdentity::Text { entry }) => {
+                if !used_entries.insert(entry) {
+                    return Err(ModelCallClosureError::FrontierDerivationFailed);
+                }
+                SemanticTranscriptEntry::from_validated_parts(
+                    entry,
+                    session,
+                    SemanticTranscriptEntryPayload::AssistantText {
+                        producing_call: call.id(),
+                        value: value.clone(),
+                    },
+                )
+            }
+            (
+                AssistantResponsePart::ToolCall(proposal),
+                ToolResponsePartIdentity::ToolCall {
+                    entry,
+                    request,
+                    approval,
+                },
+            ) => {
+                if !used_entries.insert(entry) || !used_requests.insert(request) {
+                    return Err(ModelCallClosureError::FrontierDerivationFailed);
+                }
+                let approval_matches = match dangerous_tool_auto_approval {
+                    DangerousToolAutoApproval::ApproveAll => {
+                        approval == InitialToolApproval::SessionBlanket
+                    }
+                    DangerousToolAutoApproval::Disabled => {
+                        approval != InitialToolApproval::SessionBlanket
+                    }
+                };
+                if !approval_matches {
+                    return Err(ModelCallClosureError::InitialToolApprovalMismatch);
+                }
+                let ordinal = ToolRequestOrdinal::try_from_usize(tool_ordinal)
+                    .ok_or(ModelCallClosureError::ToolRequestOrdinalOverflow)?;
+                tool_ordinal += 1;
+                let request_record = ToolRequest::from_model_proposal(
+                    request,
+                    session,
+                    turn,
+                    call.id(),
+                    ordinal,
+                    proposal.clone(),
+                );
+                match approval.resolution(request) {
+                    Some(resolution) => automatic_approvals.push(resolution),
+                    None => {
+                        earliest_undecided.get_or_insert(request);
+                    }
+                }
+                requests.push(request_record);
+                SemanticTranscriptEntry::from_validated_parts(
+                    entry,
+                    session,
+                    SemanticTranscriptEntryPayload::AssistantToolUse {
+                        producing_call: call.id(),
+                        request,
+                    },
+                )
+            }
+            _ => return Err(ModelCallClosureError::ToolResponseIdentityMismatch),
+        };
+        assistant_entries.push(entry);
+    }
+
+    let next_phase = match (earliest_undecided, identities.continuation_attempt) {
+        (Some(request), None) => ActiveTurnPhase::AwaitingApproval { request },
+        (None, Some(continuation)) if continuation != attempt.id() => ActiveTurnPhase::Running {
+            current_attempt: CurrentTurnAttempt::prepared(continuation),
+        },
+        _ => return Err(ModelCallClosureError::ContinuationAttemptIdentityMismatch),
+    };
+    let source = ResolvedContextFrontierSnapshot::try_from_candidate(
+        session,
+        call.frontier().snapshot(),
+        frontier_entries
+            .iter()
+            .map(SemanticTranscriptEntry::reference)
+            .collect(),
+    )
+    .map_err(|_| ModelCallClosureError::FrontierDerivationFailed)?;
+    let yielded_snapshot = source
+        .derive_appending_candidate(
+            identities.yielded_frontier,
+            assistant_entries
+                .iter()
+                .map(SemanticTranscriptEntry::reference)
+                .collect(),
+        )
+        .map_err(|_| ModelCallClosureError::FrontierDerivationFailed)?;
+
+    Ok(ToolRoundModelCallTurn {
+        session,
+        turn,
+        call,
+        attempt,
+        assistant_entries: assistant_entries.into_boxed_slice(),
+        requests: requests.into_boxed_slice(),
+        automatic_approvals: automatic_approvals.into_boxed_slice(),
+        yielded_snapshot,
+        next_phase,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assemble_stopped_tool_round(
+    scope: ModelCallTurnScope,
+    call: EndedModelCall,
+    attempt: EndedTurnAttempt,
+    frontier_entries: Vec<SemanticTranscriptEntry>,
+    response: ToolUsingAssistantResponse,
+    proof: AppliedInterruptProof,
+    identities: StoppedToolRoundModelCallIdentities,
+    reclassified_pending_steering: Box<[ReclassifiedPendingSteeringTurn]>,
+) -> Result<CancelledToolRoundModelCallTurn, ModelCallClosureError> {
+    let ModelCallTurnScope { session, turn } = scope;
+    if proof.predecessor() != turn || response.parts().len() != identities.response_parts.len() {
+        return Err(ModelCallClosureError::ToolResponseIdentityMismatch);
+    }
+    let mut used_entries = frontier_entries
+        .iter()
+        .map(SemanticTranscriptEntry::identity)
+        .collect::<BTreeSet<_>>();
+    if !used_entries.insert(identities.cancellation_entry) {
+        return Err(ModelCallClosureError::FrontierDerivationFailed);
+    }
+    let mut used_requests = BTreeSet::new();
+    let mut assistant_entries = Vec::with_capacity(response.parts().len());
+    let mut requests = Vec::with_capacity(response.tool_count());
+    let mut closed_result_entries = Vec::with_capacity(response.tool_count());
+    let mut tool_ordinal = 0usize;
+
+    for (part, identity) in response.parts().iter().zip(identities.response_parts) {
+        let entry = match (part, identity) {
+            (
+                AssistantResponsePart::Text(value),
+                StoppedToolResponsePartIdentity::Text { entry },
+            ) => {
+                if !used_entries.insert(entry) {
+                    return Err(ModelCallClosureError::FrontierDerivationFailed);
+                }
+                SemanticTranscriptEntry::from_validated_parts(
+                    entry,
+                    session,
+                    SemanticTranscriptEntryPayload::AssistantText {
+                        producing_call: call.id(),
+                        value: value.clone(),
+                    },
+                )
+            }
+            (
+                AssistantResponsePart::ToolCall(proposal),
+                StoppedToolResponsePartIdentity::ToolCall {
+                    entry,
+                    request,
+                    closed_result_entry,
+                },
+            ) => {
+                if !used_entries.insert(entry)
+                    || !used_entries.insert(closed_result_entry)
+                    || !used_requests.insert(request)
+                {
+                    return Err(ModelCallClosureError::FrontierDerivationFailed);
+                }
+                let ordinal = ToolRequestOrdinal::try_from_usize(tool_ordinal)
+                    .ok_or(ModelCallClosureError::ToolRequestOrdinalOverflow)?;
+                tool_ordinal += 1;
+                requests.push(ToolRequest::from_model_proposal(
+                    request,
+                    session,
+                    turn,
+                    call.id(),
+                    ordinal,
+                    proposal.clone(),
+                ));
+                closed_result_entries.push(SemanticTranscriptEntry::from_validated_parts(
+                    closed_result_entry,
+                    session,
+                    SemanticTranscriptEntryPayload::ToolClosed { request },
+                ));
+                SemanticTranscriptEntry::from_validated_parts(
+                    entry,
+                    session,
+                    SemanticTranscriptEntryPayload::AssistantToolUse {
+                        producing_call: call.id(),
+                        request,
+                    },
+                )
+            }
+            _ => return Err(ModelCallClosureError::ToolResponseIdentityMismatch),
+        };
+        assistant_entries.push(entry);
+    }
+    let cancellation_entry = SemanticTranscriptEntry::from_validated_parts(
+        identities.cancellation_entry,
+        session,
+        SemanticTranscriptEntryPayload::TurnCancelled { turn },
+    );
+    let source = ResolvedContextFrontierSnapshot::try_from_candidate(
+        session,
+        call.frontier().snapshot(),
+        frontier_entries
+            .iter()
+            .map(SemanticTranscriptEntry::reference)
+            .collect(),
+    )
+    .map_err(|_| ModelCallClosureError::FrontierDerivationFailed)?;
+    let appended = assistant_entries
+        .iter()
+        .map(SemanticTranscriptEntry::reference)
+        .chain(
+            closed_result_entries
+                .iter()
+                .map(SemanticTranscriptEntry::reference),
+        )
+        .chain([cancellation_entry.reference()])
+        .collect();
+    let terminal_snapshot = source
+        .derive_appending_candidate(identities.terminal_frontier, appended)
+        .map_err(|_| ModelCallClosureError::FrontierDerivationFailed)?;
+    Ok(CancelledToolRoundModelCallTurn {
+        session,
+        turn,
+        call,
+        attempt,
+        disposition: TurnDisposition::Cancelled { cause: proof },
+        assistant_entries: assistant_entries.into_boxed_slice(),
+        requests: requests.into_boxed_slice(),
+        closed_result_entries: closed_result_entries.into_boxed_slice(),
+        cancellation_entry,
+        terminal_snapshot,
+        reclassified_pending_steering,
+    })
 }
 
 pub(crate) fn apply_interrupt_to_recovery_wait(
@@ -2871,12 +3515,13 @@ mod tests {
         AcceptedInputSchedulingReconstitutionInput, AcceptedInputTurnActivationIdentities,
         AcceptedInputTurnSchedulingRecord, AcceptedInputTurnSchedulingRecordState, DeliveryRequest,
         ModelCallReconstitutionState, ModelSelectionOverride, ModelSelectionRequest,
-        PerInputConfigurationChoices, SemanticTranscriptEntryRef, Session,
+        NormalizedToolArguments, PerInputConfigurationChoices, SemanticTranscriptEntryRef, Session,
         SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
-        SessionCreationProvenance, SessionReconstitutionInput, TranscriptAncestry,
+        SessionCreationProvenance, SessionReconstitutionInput, ToolName, ToolRequestOrdinal,
+        TranscriptAncestry,
         test_support::{
             accepted_input_id, context_frontier_id, direct, model_call_id, provider_model_identity,
-            semantic_transcript_entry_id, session_id, turn_attempt_id, turn_id,
+            semantic_transcript_entry_id, session_id, tool_request_id, turn_attempt_id, turn_id,
         },
     };
 
@@ -3166,6 +3811,14 @@ mod tests {
             },
             observation,
         }
+    }
+
+    fn tool_proposal(name: &str, arguments: &str) -> crate::ToolCallProposal {
+        crate::ToolCallProposal::new(
+            ToolName::try_new(name.to_owned()).expect("test tool names are canonical"),
+            NormalizedToolArguments::try_from_provider_text(arguments.to_owned())
+                .expect("test arguments fit the admission bound"),
+        )
     }
 
     fn with_pending_steering(
@@ -3979,6 +4632,62 @@ mod tests {
         );
     }
 
+    /// S07 / S11 / INV-006 / INV-027 / INV-029: a tool-using response racing
+    /// an applied interrupt records its proposals, closes them without
+    /// attempts, and terminalizes through the original stop proof.
+    #[test]
+    fn s07_s11_inv006_inv027_inv029_tool_response_race_closes_without_execution() {
+        let (execution, interrupt) = stop_requested_execution(in_flight_execution());
+        let request = tool_request_id(40);
+        let expected_turn = execution.turn();
+        let observation = correlated_observation(
+            &execution,
+            ModelCallTerminalObservation::CompletedWithTools {
+                response: ToolUsingAssistantResponse::try_from_parts(vec![
+                    AssistantResponsePart::ToolCall(tool_proposal("risky_tool", "{}")),
+                ])
+                .expect("the response contains one tool proposal"),
+            },
+        );
+        let outcome = execution
+            .apply_terminal_observation(
+                observation,
+                ModelCallTerminalIdentities::StoppedToolRound(
+                    StoppedToolRoundModelCallIdentities::new(
+                        vec![StoppedToolResponsePartIdentity::tool_call(
+                            semantic_transcript_entry_id(41),
+                            request,
+                            semantic_transcript_entry_id(42),
+                        )],
+                        semantic_transcript_entry_id(43),
+                        context_frontier_id(44),
+                    ),
+                ),
+            )
+            .expect("the stop proof closes newly proposed tools");
+        let ModelCallTerminalOutcome::CancelledWithToolResponse(cancelled) = outcome else {
+            panic!("a stopped tool response terminalizes through cancellation");
+        };
+
+        assert_eq!(
+            cancelled.attempt().end(),
+            &AttemptEnd::AfterCancellation {
+                cause: interrupt.proof(),
+                disposition: CancellationStopDisposition::Cancelled,
+            }
+        );
+        assert_eq!(cancelled.requests()[0].id(), request);
+        assert_eq!(
+            cancelled.closed_result_entries()[0].payload(),
+            &SemanticTranscriptEntryPayload::ToolClosed { request }
+        );
+        assert!(matches!(
+            cancelled.cancellation_entry().payload(),
+            SemanticTranscriptEntryPayload::TurnCancelled { turn }
+                if *turn == expected_turn
+        ));
+    }
+
     /// S04 / S07 / INV-025 / INV-029: an applied interrupt makes
     /// unacknowledged call ambiguity terminal reconciliation, preserving the
     /// exact operation and stop proof while releasing the slot.
@@ -4156,6 +4865,158 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    /// S02 / S10 / INV-005 / INV-006 / INV-019: a tool-using completion
+    /// commits ordered request references, yields its attempt, and parks on
+    /// the earliest undecided request without completing the turn.
+    #[test]
+    fn s02_s10_inv005_inv006_inv019_tool_round_yields_and_parks_in_order() {
+        let execution = in_flight_execution();
+        let first_request = tool_request_id(20);
+        let second_request = tool_request_id(21);
+        let observation = correlated_observation(
+            &execution,
+            ModelCallTerminalObservation::CompletedWithTools {
+                response: ToolUsingAssistantResponse::try_from_parts(vec![
+                    AssistantResponsePart::Text(
+                        AssistantText::try_new(String::from("checking"))
+                            .expect("assistant text is nonempty"),
+                    ),
+                    AssistantResponsePart::ToolCall(tool_proposal(
+                        "risky_tool",
+                        r#"{"b":2,"a":1}"#,
+                    )),
+                    AssistantResponsePart::ToolCall(tool_proposal("current_time", "{}")),
+                ])
+                .expect("the response contains tool proposals"),
+            },
+        );
+        let outcome = execution
+            .apply_terminal_observation(
+                observation,
+                ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
+                    vec![
+                        ToolResponsePartIdentity::text(semantic_transcript_entry_id(10)),
+                        ToolResponsePartIdentity::tool_call(
+                            semantic_transcript_entry_id(11),
+                            first_request,
+                            InitialToolApproval::Confirm,
+                        ),
+                        ToolResponsePartIdentity::tool_call(
+                            semantic_transcript_entry_id(12),
+                            second_request,
+                            InitialToolApproval::PolicyAuto,
+                        ),
+                    ],
+                    context_frontier_id(13),
+                    None,
+                )),
+            )
+            .expect("ordered request content and identities produce one tool yield");
+        let ModelCallTerminalOutcome::ToolRound(round) = outcome else {
+            panic!("tool-using completion yields a tool round");
+        };
+
+        assert_eq!(
+            round.attempt().end(),
+            &AttemptEnd::WithoutStop {
+                disposition: UnstoppedAttemptDisposition::YieldedToDurableWait,
+            }
+        );
+        assert!(matches!(
+            round.next_phase(),
+            ActiveTurnPhase::AwaitingApproval { request } if *request == first_request
+        ));
+        assert_eq!(round.requests()[0].id(), first_request);
+        assert_eq!(
+            round.requests()[0].ordinal(),
+            ToolRequestOrdinal::from_u32(0)
+        );
+        assert_eq!(round.requests()[0].arguments().as_str(), r#"{"a":1,"b":2}"#);
+        assert_eq!(round.requests()[1].id(), second_request);
+        assert_eq!(
+            round.requests()[1].ordinal(),
+            ToolRequestOrdinal::from_u32(1)
+        );
+        assert_eq!(round.automatic_approvals().len(), 1);
+        assert_eq!(
+            round.automatic_approvals()[0].source(),
+            crate::ToolDecisionSource::PolicyAuto
+        );
+        assert!(matches!(
+            round.assistant_entries()[1].payload(),
+            SemanticTranscriptEntryPayload::AssistantToolUse {
+                producing_call,
+                request,
+            } if *producing_call == model_call_id(9) && *request == first_request
+        ));
+        assert_eq!(
+            round
+                .yielded_snapshot()
+                .ordered_entries()
+                .collect::<Vec<_>>(),
+            vec![
+                SemanticTranscriptEntryRef::from_source(
+                    session_id(1),
+                    semantic_transcript_entry_id(5),
+                ),
+                SemanticTranscriptEntryRef::from_source(
+                    session_id(1),
+                    semantic_transcript_entry_id(10),
+                ),
+                SemanticTranscriptEntryRef::from_source(
+                    session_id(1),
+                    semantic_transcript_entry_id(11),
+                ),
+                SemanticTranscriptEntryRef::from_source(
+                    session_id(1),
+                    semantic_transcript_entry_id(12),
+                ),
+            ]
+        );
+    }
+
+    /// S02 / S15 / INV-006 / INV-009: an all-auto batch creates one fresh
+    /// prepared continuation attempt while retaining the same logical turn.
+    #[test]
+    fn s02_s15_inv006_inv009_all_auto_tool_round_prepares_continuation() {
+        let execution = in_flight_execution();
+        let request = tool_request_id(20);
+        let continuation = turn_attempt_id(21);
+        let observation = correlated_observation(
+            &execution,
+            ModelCallTerminalObservation::CompletedWithTools {
+                response: ToolUsingAssistantResponse::try_from_parts(vec![
+                    AssistantResponsePart::ToolCall(tool_proposal("current_time", "{}")),
+                ])
+                .expect("the response contains one tool proposal"),
+            },
+        );
+        let outcome = execution
+            .apply_terminal_observation(
+                observation,
+                ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
+                    vec![ToolResponsePartIdentity::tool_call(
+                        semantic_transcript_entry_id(10),
+                        request,
+                        InitialToolApproval::PolicyAuto,
+                    )],
+                    context_frontier_id(11),
+                    Some(continuation),
+                )),
+            )
+            .expect("an all-auto batch has no approval wait");
+        let ModelCallTerminalOutcome::ToolRound(round) = outcome else {
+            panic!("tool-using completion yields a tool round");
+        };
+        let ActiveTurnPhase::Running { current_attempt } = round.next_phase() else {
+            panic!("all-auto policy prepares continuation");
+        };
+
+        assert_eq!(round.turn(), turn_id(3));
+        assert_eq!(current_attempt.id(), continuation);
+        assert_eq!(current_attempt.state(), &CurrentTurnAttemptState::Prepared);
     }
 
     /// S08 / INV-016: a definitive response terminalizes its source only

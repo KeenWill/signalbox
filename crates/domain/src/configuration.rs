@@ -11,6 +11,8 @@
 //! on [`EffectiveConfiguration`] lists what these pure values deliberately
 //! omit.
 
+use crate::DangerousToolAutoApproval;
+
 crate::define_identity!(
     /// Names exactly one configured provider/model selection as a canonical
     /// domain-owned key with immutable semantic meaning.
@@ -124,6 +126,7 @@ pub struct EffectiveConfiguration {
     parameters: ModelParameters,
     known_provider_failure_retry: KnownProviderFailureRetry,
     model_fallback: ModelFallback,
+    dangerous_tool_auto_approval: DangerousToolAutoApproval,
 }
 
 impl EffectiveConfiguration {
@@ -134,6 +137,21 @@ impl EffectiveConfiguration {
             parameters: ModelParameters::ProviderDefaults,
             known_provider_failure_retry: KnownProviderFailureRetry::Disabled,
             model_fallback: ModelFallback::Disabled,
+            dangerous_tool_auto_approval: DangerousToolAutoApproval::Disabled,
+        }
+    }
+
+    /// Constructs the complete value with an explicit dangerous tool posture.
+    pub const fn with_dangerous_tool_auto_approval(
+        model: FrozenModelSelection,
+        dangerous_tool_auto_approval: DangerousToolAutoApproval,
+    ) -> Self {
+        Self {
+            model,
+            parameters: ModelParameters::ProviderDefaults,
+            known_provider_failure_retry: KnownProviderFailureRetry::Disabled,
+            model_fallback: ModelFallback::Disabled,
+            dangerous_tool_auto_approval,
         }
     }
 
@@ -155,6 +173,11 @@ impl EffectiveConfiguration {
     /// Returns the model-fallback choice.
     pub const fn model_fallback(&self) -> ModelFallback {
         self.model_fallback
+    }
+
+    /// Returns the dangerous blanket-auto posture frozen for this turn.
+    pub const fn dangerous_tool_auto_approval(&self) -> DangerousToolAutoApproval {
+        self.dangerous_tool_auto_approval
     }
 }
 
@@ -200,17 +223,37 @@ impl SessionConfigurationDefaultsVersion {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct SessionConfigurationDefaults {
     model: ModelSelectionRequest,
+    dangerous_tool_auto_approval: DangerousToolAutoApproval,
 }
 
 impl SessionConfigurationDefaults {
     /// Creates a complete defaults value from its model-selection request.
     pub const fn new(model: ModelSelectionRequest) -> Self {
-        Self { model }
+        Self {
+            model,
+            dangerous_tool_auto_approval: DangerousToolAutoApproval::Disabled,
+        }
+    }
+
+    /// Creates complete defaults with an explicit dangerous tool posture.
+    pub const fn with_dangerous_tool_auto_approval(
+        model: ModelSelectionRequest,
+        dangerous_tool_auto_approval: DangerousToolAutoApproval,
+    ) -> Self {
+        Self {
+            model,
+            dangerous_tool_auto_approval,
+        }
     }
 
     /// Returns the default model-selection request.
     pub const fn model(&self) -> ModelSelectionRequest {
         self.model
+    }
+
+    /// Returns the dangerous blanket-auto default.
+    pub const fn dangerous_tool_auto_approval(&self) -> DangerousToolAutoApproval {
+        self.dangerous_tool_auto_approval
     }
 }
 
@@ -291,7 +334,10 @@ impl VersionedSessionConfigurationDefaults {
         };
 
         Ok(VersionCheckedConfigurationRequest {
-            request: ConfigurationRequest { model },
+            request: ConfigurationRequest {
+                model,
+                dangerous_tool_auto_approval: self.defaults.dangerous_tool_auto_approval(),
+            },
             session_defaults_version: self.version,
         })
     }
@@ -314,12 +360,18 @@ pub enum ModelSelectionOverride {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ConfigurationRequest {
     model: ModelSelectionRequest,
+    dangerous_tool_auto_approval: DangerousToolAutoApproval,
 }
 
 impl ConfigurationRequest {
     /// Returns the requested model selection.
     pub const fn model(&self) -> ModelSelectionRequest {
         self.model
+    }
+
+    /// Returns the dangerous blanket-auto posture derived with this request.
+    pub const fn dangerous_tool_auto_approval(&self) -> DangerousToolAutoApproval {
+        self.dangerous_tool_auto_approval
     }
 }
 
@@ -407,7 +459,10 @@ impl OriginConfiguration {
         Ok(Self {
             requested,
             session_defaults_version,
-            effective: EffectiveConfiguration::baseline(model),
+            effective: EffectiveConfiguration::with_dangerous_tool_auto_approval(
+                model,
+                requested.dangerous_tool_auto_approval(),
+            ),
         })
     }
 
@@ -465,8 +520,8 @@ mod tests {
         SessionDefaultsVersionMismatch, TurnConfigurationProvenance,
         VersionCheckedConfigurationRequest, VersionedSessionConfigurationDefaults,
     };
-    use crate::SteeringBinding;
     use crate::test_support::{alias, direct, turn_id};
+    use crate::{DangerousToolAutoApproval, SteeringBinding};
     use uuid::Uuid;
 
     #[test]
@@ -871,7 +926,10 @@ mod tests {
     #[test]
     fn configuration_request_exposes_its_model_selection() {
         let model = ModelSelectionRequest::Direct(direct(1));
-        let request = ConfigurationRequest { model };
+        let request = ConfigurationRequest {
+            model,
+            dangerous_tool_auto_approval: DangerousToolAutoApproval::Disabled,
+        };
 
         assert_eq!(request.model(), model);
     }

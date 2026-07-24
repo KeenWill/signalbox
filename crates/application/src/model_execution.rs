@@ -103,7 +103,10 @@ fn render_frontier_messages<'a>(
                 producing_call: *producing_call,
                 content: value.clone(),
             }),
-            SemanticTranscriptEntryPayload::AssistantToolUse { .. } => {
+            SemanticTranscriptEntryPayload::AssistantToolUse { .. }
+            | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
+            | SemanticTranscriptEntryPayload::ToolDenied { .. }
+            | SemanticTranscriptEntryPayload::ToolClosed { .. } => {
                 return Err(ModelFrontierRenderingError::UnsupportedAssistantToolUse {
                     entry: source,
                 });
@@ -1218,6 +1221,15 @@ where
                     self.ids.next_semantic_entry_id(),
                     self.ids.next_context_frontier_id(),
                 ))
+            }
+            ModelCallTerminalObservation::CompletedWithTools { .. } => {
+                ModelCallTerminalIdentities::ToolRound(
+                    signalbox_domain::ToolRoundModelCallIdentities::new(
+                        Vec::new(),
+                        self.ids.next_context_frontier_id(),
+                        None,
+                    ),
+                )
             }
             ModelCallTerminalObservation::KnownFailed => {
                 ModelCallTerminalIdentities::Failed(self.next_failed_identities())

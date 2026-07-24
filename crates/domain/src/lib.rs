@@ -21,6 +21,9 @@ mod replace_session_defaults;
 mod semantic_entry;
 mod session;
 mod submit_input;
+mod tool;
+mod tool_attempt;
+mod tool_execution;
 mod turn_attempt;
 mod turn_eligibility;
 mod turn_lifecycle;
@@ -53,19 +56,22 @@ pub use model_call::{
 };
 pub use model_execution::{
     AmbiguousModelCallTurn, AmbiguousModelCallTurnIdentities, AuthorizedModelCall,
-    CancelledModelCallTurn, CancelledModelCallTurnIdentities, CompletedModelCallIdentities,
-    CompletedModelCallTurn, CorrelatedModelCallTerminalObservation, FailedModelCallTurn,
-    FailedModelCallTurnIdentities, IssuedModelCallCorrelation, ModelCallAuthorizationError,
-    ModelCallAuthorizationFailure, ModelCallClosureError, ModelCallExecution,
-    ModelCallExecutionReconstitutionError, ModelCallExecutionReconstitutionFailure,
-    ModelCallExecutionReconstitutionInput, ModelCallInterruptOutcome, ModelCallOriginContent,
-    ModelCallPreparationError, ModelCallPreparationFailure, ModelCallResumeFailure,
-    ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
-    ModelTargetCatalog, ModelTargetCatalogError, ModelTargetDefinition, ModelTargetResolutionError,
+    CancelledModelCallTurn, CancelledModelCallTurnIdentities, CancelledToolRoundModelCallTurn,
+    CompletedModelCallIdentities, CompletedModelCallTurn, CorrelatedModelCallTerminalObservation,
+    FailedModelCallTurn, FailedModelCallTurnIdentities, IssuedModelCallCorrelation,
+    ModelCallAuthorizationError, ModelCallAuthorizationFailure, ModelCallClosureError,
+    ModelCallExecution, ModelCallExecutionReconstitutionError,
+    ModelCallExecutionReconstitutionFailure, ModelCallExecutionReconstitutionInput,
+    ModelCallInterruptOutcome, ModelCallOriginContent, ModelCallPreparationError,
+    ModelCallPreparationFailure, ModelCallResumeFailure, ModelCallTerminalIdentities,
+    ModelCallTerminalObservation, ModelCallTerminalOutcome, ModelTargetCatalog,
+    ModelTargetCatalogError, ModelTargetDefinition, ModelTargetResolutionError,
     PendingSteeringReclassificationIdentity, PhysicalCancellationModelCallTurnIdentities,
     PreparedInitialModelCall, PreparedModelCallRequest, PreparedSteeringConsumption,
     ReclassifiedPendingSteeringTurn, ReconciliationRequiredModelCallTurn, RefusedModelCallTurn,
     RefusedModelCallTurnIdentities, ResolvedModelSelection, StopRequestedModelCallTurn,
+    StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities, ToolResponsePartIdentity,
+    ToolRoundModelCallIdentities, ToolRoundModelCallTurn,
 };
 pub use provider_evidence::{
     ProviderTargetEvidence, ProviderTargetEvidenceLog, ProviderTargetMismatchInvalidation,
@@ -103,6 +109,38 @@ pub use submit_input::{
     SubmitInputReconstitutionFailure, SubmitInputReconstitutionInput, SubmitInputRejectedResult,
     SubmitInputResult, SubmitInputTerminalSourceReconstitutionInput,
     SubmitInputTurnOriginAppliedResult, SubmitInputTurnOriginReconstitutionInput,
+};
+pub use tool::{
+    AssistantResponsePart, DangerousToolAutoApproval, DecideToolRequest,
+    DecideToolRequestAppliedResult, DecideToolRequestPreparationError,
+    DecideToolRequestRejectedResult, DecideToolRequestResult, InitialToolApproval,
+    NormalizedToolArguments, PreparedDecideToolRequest, ToolApprovalDecision,
+    ToolApprovalResolution, ToolApprovalResolutionReconstitutionError,
+    ToolApprovalResolutionReconstitutionInput, ToolArgumentsError, ToolArgumentsFailure,
+    ToolArgumentsKind, ToolCallProposal, ToolDecisionSource, ToolDenialReason,
+    ToolDenialReasonError, ToolDenialReasonFailure, ToolEffectClass, ToolName, ToolNameError,
+    ToolNameFailure, ToolPermissionDefault, ToolRequest, ToolRequestOrdinal,
+    ToolRequestReconstitutionInput, ToolRequestResolution, ToolResultContent, ToolResultText,
+    ToolResultTextError, ToolResultTextFailure, ToolUsingAssistantResponse,
+    ToolUsingAssistantResponseError,
+};
+pub use tool_attempt::{
+    ApprovedToolRequest, ApprovedToolRequestError, AuthorizedToolAttempt,
+    CorrelatedToolAttemptObservation, CurrentToolAttempt, CurrentToolAttemptState,
+    EndedToolAttempt, ReconstitutedToolAttempt, ToolAttemptCrashOutcome,
+    ToolAttemptDispatchCorrelation, ToolAttemptDisposition, ToolAttemptEnd, ToolAttemptObservation,
+    ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolAttemptTransitionError,
+    ToolAttemptTransitionFailure, ToolDispatchGeneration, ToolExecutionError,
+    ToolExecutionErrorDetail, ToolExecutionErrorDetailError, ToolExecutionErrorDetailFailure,
+    ToolExecutionErrorKind,
+};
+pub use tool_execution::{
+    AwaitingToolApproval, PreparedToolAttempt, PreparedToolBatchDecision,
+    PreparedToolResultProjection, ToolBatch, ToolBatchDecisionError, ToolBatchDecisionFailure,
+    ToolBatchExecutionError, ToolBatchExecutionFailure, ToolBatchPhase,
+    ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionError,
+    ToolBatchReconstitutionFailure, ToolBatchReconstitutionInput, ToolResultProjectionError,
+    ToolResultProjectionFailure,
 };
 pub use turn_attempt::{
     AppliedInterruptState, AttemptEnd, CancellationStopDisposition, CurrentTurnAttempt,

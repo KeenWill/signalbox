@@ -326,7 +326,7 @@ impl CancelledTurnExecutionReconstitutionInput {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ActiveTurnSchedulingReconstitutionInput {
     owning_turn: TurnId,
-    current_attempt: TurnAttemptId,
+    current_attempt: Option<TurnAttemptId>,
     state: StoredActiveTurnPhase,
 }
 
@@ -337,6 +337,9 @@ enum StoredActiveTurnPhase {
     StopRequested {
         call: crate::ModelCallId,
         interrupt: AppliedInterruptCommandResult,
+    },
+    AwaitingApproval {
+        wait: crate::AwaitingToolApproval,
     },
     AwaitingModelCallRecovery {
         call: crate::ModelCallId,
@@ -349,7 +352,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
     pub const fn prepared(owning_turn: TurnId, current_attempt: TurnAttemptId) -> Self {
         Self {
             owning_turn,
-            current_attempt,
+            current_attempt: Some(current_attempt),
             state: StoredActiveTurnPhase::Prepared,
         }
     }
@@ -358,7 +361,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
     pub const fn running(owning_turn: TurnId, current_attempt: TurnAttemptId) -> Self {
         Self {
             owning_turn,
-            current_attempt,
+            current_attempt: Some(current_attempt),
             state: StoredActiveTurnPhase::Running,
         }
     }
@@ -372,8 +375,17 @@ impl ActiveTurnSchedulingReconstitutionInput {
     ) -> Self {
         Self {
             owning_turn,
-            current_attempt,
+            current_attempt: Some(current_attempt),
             state: StoredActiveTurnPhase::StopRequested { call, interrupt },
+        }
+    }
+
+    /// Supplies an evidence-bearing stored approval wait.
+    pub const fn awaiting_approval(owning_turn: TurnId, wait: crate::AwaitingToolApproval) -> Self {
+        Self {
+            owning_turn,
+            current_attempt: None,
+            state: StoredActiveTurnPhase::AwaitingApproval { wait },
         }
     }
 
@@ -386,7 +398,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
     ) -> Self {
         Self {
             owning_turn,
-            current_attempt: ended_attempt,
+            current_attempt: Some(ended_attempt),
             state: StoredActiveTurnPhase::AwaitingModelCallRecovery {
                 call: ambiguous_call,
                 attempt_end: TerminalAttemptEndReconstitutionInput::without_stop(
@@ -405,7 +417,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
     ) -> Self {
         Self {
             owning_turn,
-            current_attempt: ended_attempt,
+            current_attempt: Some(ended_attempt),
             state: StoredActiveTurnPhase::AwaitingModelCallRecovery {
                 call: ambiguous_call,
                 attempt_end: TerminalAttemptEndReconstitutionInput::without_stop(
@@ -424,7 +436,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
     ) -> Self {
         Self {
             owning_turn,
-            current_attempt: ended_attempt,
+            current_attempt: Some(ended_attempt),
             state: StoredActiveTurnPhase::AwaitingModelCallRecovery {
                 call: ambiguous_call,
                 attempt_end: TerminalAttemptEndReconstitutionInput::after_cancellation(
@@ -444,7 +456,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
     ) -> Self {
         Self {
             owning_turn,
-            current_attempt: ended_attempt,
+            current_attempt: Some(ended_attempt),
             state: StoredActiveTurnPhase::AwaitingModelCallRecovery {
                 call: ambiguous_call,
                 attempt_end: TerminalAttemptEndReconstitutionInput::after_cancellation(
@@ -461,7 +473,14 @@ impl ActiveTurnSchedulingReconstitutionInput {
     }
 
     fn canonical_evidence_free_phase(&self) -> Option<ActiveTurnPhase> {
-        let current_attempt = CurrentTurnAttempt::prepared(self.current_attempt);
+        if let StoredActiveTurnPhase::AwaitingApproval { wait } = &self.state {
+            return (self.current_attempt.is_none() && self.owning_turn == wait.turn()).then_some(
+                ActiveTurnPhase::AwaitingApproval {
+                    request: wait.request(),
+                },
+            );
+        }
+        let current_attempt = CurrentTurnAttempt::prepared(self.current_attempt?);
         #[expect(
             clippy::expect_used,
             reason = "temporary ledger site: reconstitution validates the stored attempt transition; typed conversion is commissioned by the 2026-07-20 audit"
@@ -475,7 +494,8 @@ impl ActiveTurnSchedulingReconstitutionInput {
                 .begin_running()
                 .and_then(|attempt| attempt.request_cancellation(interrupt.proof()))
                 .ok()?,
-            StoredActiveTurnPhase::AwaitingModelCallRecovery { .. } => return None,
+            StoredActiveTurnPhase::AwaitingApproval { .. }
+            | StoredActiveTurnPhase::AwaitingModelCallRecovery { .. } => return None,
         };
         Some(ActiveTurnPhase::Running { current_attempt })
     }
@@ -2448,7 +2468,10 @@ fn reconstitute_inner(
                     .or_default()
                     .insert(entry_reference);
             }
-            InitialSemanticTranscriptEntryPayload::AssistantToolUse { .. } => {
+            InitialSemanticTranscriptEntryPayload::AssistantToolUse { .. }
+            | InitialSemanticTranscriptEntryPayload::ToolExecutionResult { .. }
+            | InitialSemanticTranscriptEntryPayload::ToolDenied { .. }
+            | InitialSemanticTranscriptEntryPayload::ToolClosed { .. } => {
                 return Err(
                     AcceptedInputSchedulingReconstitutionFailure::UnsupportedSemanticEntry {
                         entry: candidate.identity(),
@@ -2672,7 +2695,7 @@ fn reconstitute_inner(
                     let lifecycle_matches = match &record.state {
                     AcceptedInputTurnSchedulingRecordState::Queued => false,
                     AcceptedInputTurnSchedulingRecordState::Active { phase, .. } => {
-                        model_call.attempt() == phase.current_attempt
+                        Some(model_call.attempt()) == phase.current_attempt
                             && match (&phase.state, model_call.state()) {
                                 (
                                     StoredActiveTurnPhase::Prepared,
@@ -2686,6 +2709,10 @@ fn reconstitute_inner(
                                     StoredActiveTurnPhase::StopRequested { call, .. },
                                     crate::ModelCallReconstitutionState::CancellationRequested,
                                 ) => *call == model_call.id(),
+                                (
+                                    StoredActiveTurnPhase::AwaitingApproval { .. },
+                                    _,
+                                ) => false,
                                 (
                                     StoredActiveTurnPhase::AwaitingModelCallRecovery {
                                         call, ..
@@ -2920,17 +2947,27 @@ fn reconstitute_inner(
                 }
                 active = Some(turn);
                 if phase.owning_turn != turn {
-                    return Err(
-                        AcceptedInputSchedulingReconstitutionFailure::CurrentAttemptOwnershipMismatch {
-                            turn,
-                            attempt: phase.current_attempt,
-                        },
-                    );
+                    return match phase.current_attempt {
+                        Some(attempt) => Err(
+                            AcceptedInputSchedulingReconstitutionFailure::CurrentAttemptOwnershipMismatch {
+                                turn,
+                                attempt,
+                            },
+                        ),
+                        None => Err(
+                            AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
+                                turn,
+                                accepted_input: record.accepted_input.id(),
+                            },
+                        ),
+                    };
                 }
-                if attempt_owners.insert(phase.current_attempt, turn).is_some() {
+                if let Some(current_attempt) = phase.current_attempt
+                    && attempt_owners.insert(current_attempt, turn).is_some()
+                {
                     return Err(
                         AcceptedInputSchedulingReconstitutionFailure::DuplicateCurrentAttempt {
-                            attempt: phase.current_attempt,
+                            attempt: current_attempt,
                         },
                     );
                 }
@@ -2953,7 +2990,31 @@ fn reconstitute_inner(
                                 accepted_input: record.accepted_input.id(),
                             },
                         )?,
+                    StoredActiveTurnPhase::AwaitingApproval { wait } => {
+                        if wait.session() != session || wait.turn() != turn {
+                            return Err(
+                                AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
+                                    turn,
+                                    accepted_input: record.accepted_input.id(),
+                                },
+                            );
+                        }
+                        phase.canonical_evidence_free_phase().ok_or(
+                            AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
+                                turn,
+                                accepted_input: record.accepted_input.id(),
+                            },
+                        )?
+                    }
                     StoredActiveTurnPhase::StopRequested { call, interrupt } => {
+                        let Some(current_attempt) = phase.current_attempt else {
+                            return Err(
+                                AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
+                                    turn,
+                                    accepted_input: record.accepted_input.id(),
+                                },
+                            );
+                        };
                         let successor = records_by_turn.get(&interrupt.successor());
                         let Some(ReconstitutedModelCall::Current(current_call)) =
                             model_calls.get(call)
@@ -2983,7 +3044,7 @@ fn reconstitute_inner(
                                     || successor.order != interrupt.successor_order()
                             })
                             || current_call.turn() != turn
-                            || current_call.attempt() != phase.current_attempt
+                            || current_call.attempt() != current_attempt
                             || current_call.state()
                                 != crate::CurrentModelCallState::CancellationRequested
                             || current_call.selection()
@@ -3015,6 +3076,13 @@ fn reconstitute_inner(
                         call,
                         attempt_end,
                     } => {
+                        let Some(current_attempt) = phase.current_attempt else {
+                            return Err(
+                                AcceptedInputSchedulingReconstitutionFailure::RecoveryModelCallMismatch {
+                                    turn,
+                                },
+                            );
+                        };
                         let Some(ReconstitutedModelCall::Ended(ended_call)) = model_calls.get(call)
                         else {
                             return Err(
@@ -3033,7 +3101,7 @@ fn reconstitute_inner(
                                 },
                             )?;
                         if ended_call.turn() != turn
-                            || ended_call.attempt() != phase.current_attempt
+                            || ended_call.attempt() != current_attempt
                             || ended_call.selection()
                                 != *record.origin_configuration.effective().model()
                             || (ended_call.frontier().snapshot() != *starting_frontier
@@ -3049,7 +3117,7 @@ fn reconstitute_inner(
                             );
                         }
                         let Ok(running_attempt) =
-                            CurrentTurnAttempt::prepared(phase.current_attempt).begin_running()
+                            CurrentTurnAttempt::prepared(current_attempt).begin_running()
                         else {
                             return Err(
                                 AcceptedInputSchedulingReconstitutionFailure::RecoveryModelCallMismatch {
@@ -3862,7 +3930,9 @@ fn reconstitute_active_acceptance_tail(
             StoredActiveTurnPhase::AwaitingModelCallRecovery { attempt_end, .. } => {
                 attempt_end.interrupt()
             }
-            StoredActiveTurnPhase::Prepared | StoredActiveTurnPhase::Running => None,
+            StoredActiveTurnPhase::Prepared
+            | StoredActiveTurnPhase::Running
+            | StoredActiveTurnPhase::AwaitingApproval { .. } => None,
         },
         AcceptedInputTurnSchedulingRecordState::Queued
         | AcceptedInputTurnSchedulingRecordState::TerminalFailed { .. }

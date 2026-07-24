@@ -10,6 +10,30 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-23 — Reuse serde_json for canonical tool arguments
+
+**Context.** Tool requests need a bounded provider-neutral argument value: valid
+JSON is compact with recursively lexical object keys, while malformed provider
+text remains exact for typed `InvalidArguments` reporting. Hand-written JSON
+parsing or canonical serialization would add security-sensitive format code to
+the domain crate. `serde_json` is already a pinned workspace dependency used at
+provider boundaries.
+
+**Decision.** Add the existing focused `serde_json` dependency to the domain
+crate and use its value parser and compact serializer around an explicit
+`BTreeMap` recursion. Keep serde types private: the public API accepts and
+returns checked strings plus a domain-owned representation tag.
+
+**Rejected alternatives.** Preserve all JSON text verbatim: semantically equal
+requests would lack one normalized representation. Reject malformed text at the
+provider bridge: that would lose the durable request and its model-visible typed
+failure. Write a repository-local JSON parser: larger ownership and audit cost
+without a domain benefit.
+
+**Affects.** `crates/domain/Cargo.toml`, normalized tool-argument construction,
+and its lockfile package dependency list; no storage, wire, or framework type
+crosses into the domain API.
+
 ## 2026-07-23 — Complete tool rounds inside one hub-owned turn
 
 **Context.** The model-runtime vocabulary already carries tool definitions,
