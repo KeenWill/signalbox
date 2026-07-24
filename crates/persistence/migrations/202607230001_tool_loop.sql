@@ -2174,6 +2174,113 @@ BEGIN
 END;
 $$;
 
+-- The pre-tool-loop failed-execution assertion admits at most one turn
+-- attempt and treats every model call on the turn as terminal-failure
+-- provenance. A tool round deliberately yields that attempt and a later
+-- effect-free crash fails from a continuation attempt without a current model
+-- call. Preserve the old assertion for non-tool turns and widen only the
+-- tool-loop terminal shape.
+ALTER FUNCTION assert_failed_terminal_execution_without_cancellation(uuid)
+    RENAME TO assert_failed_terminal_execution_without_tool_loop;
+
+CREATE FUNCTION assert_failed_terminal_execution_without_cancellation(
+    checked_turn_id uuid
+)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    lifecycle turn_lifecycle%ROWTYPE;
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+          FROM tool_round
+         WHERE turn_id = checked_turn_id
+    ) THEN
+        PERFORM assert_failed_terminal_execution_without_tool_loop(
+            checked_turn_id
+        );
+        RETURN;
+    END IF;
+
+    SELECT *
+      INTO lifecycle
+      FROM turn_lifecycle
+     WHERE turn_id = checked_turn_id
+       AND state_kind = 'terminal'
+       AND terminal_disposition_kind = 'failed';
+    IF NOT FOUND THEN
+        RETURN;
+    END IF;
+
+    IF lifecycle.terminal_attempt_id IS NULL
+       OR NOT EXISTS (
+            SELECT 1
+              FROM turn_attempt
+             WHERE turn_attempt_id = lifecycle.terminal_attempt_id
+               AND turn_id = lifecycle.turn_id
+               AND session_id = lifecycle.session_id
+               AND state_kind = 'ended'
+               AND end_variant = 'without_stop'
+               AND end_disposition IN ('known_failure', 'lost')
+       )
+       OR EXISTS (
+            SELECT 1
+              FROM turn_attempt
+             WHERE turn_id = lifecycle.turn_id
+               AND session_id = lifecycle.session_id
+               AND turn_attempt_id <> lifecycle.terminal_attempt_id
+               AND (
+                    state_kind <> 'ended'
+                    OR end_variant <> 'without_stop'
+                    OR end_disposition <> 'yielded_to_durable_wait'
+               )
+       )
+    THEN
+        RAISE EXCEPTION
+            'failed tool-loop turn % lacks its exact linear ended attempt',
+            checked_turn_id
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF lifecycle.terminal_model_call_id IS NOT NULL THEN
+        IF NOT EXISTS (
+            SELECT 1
+              FROM model_call
+             WHERE model_call_id = lifecycle.terminal_model_call_id
+               AND turn_attempt_id = lifecycle.terminal_attempt_id
+               AND turn_id = lifecycle.turn_id
+               AND session_id = lifecycle.session_id
+               AND state_kind = 'terminal'
+               AND terminal_disposition_kind IN ('known_failed', 'cancelled')
+        ) THEN
+            RAISE EXCEPTION
+                'failed tool-loop turn % lacks its exact terminal call',
+                checked_turn_id
+                USING ERRCODE = '23514';
+        END IF;
+        PERFORM assert_model_call_final_state(
+            lifecycle.terminal_model_call_id
+        );
+    ELSIF NOT EXISTS (
+        SELECT 1
+          FROM tool_attempt
+         WHERE issuing_turn_attempt_id = lifecycle.terminal_attempt_id
+           AND turn_id = lifecycle.turn_id
+           AND session_id = lifecycle.session_id
+           AND effect_class = 'effect_free'
+           AND state_kind = 'terminal'
+           AND terminal_disposition_kind = 'known_failed'
+           AND error_kind = 'crash_lost'
+    ) THEN
+        RAISE EXCEPTION
+            'failed tool-loop turn % lacks its exact crash-lost tool attempt',
+            checked_turn_id
+            USING ERRCODE = '23514';
+    END IF;
+END;
+$$;
+
 CREATE FUNCTION assert_turn_lifecycle_final_state(
     checked_turn_id uuid
 )
