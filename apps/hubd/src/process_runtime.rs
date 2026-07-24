@@ -286,8 +286,7 @@ async fn serve_connection(
             }
         };
         drop(frame_buffer_permit);
-        let request_id = frame.request_id();
-        let request = frame.request().clone();
+        let (request_id, request) = frame.into_parts();
         let follows = matches!(request, ClientRequest::FollowSession { .. });
         handle_request(
             &mut writer,
@@ -730,7 +729,7 @@ where
         )
         .await;
     };
-    let Ok(content) = admitted_user_content(&content) else {
+    let Ok(content) = admitted_user_content(content) else {
         return write_error(
             writer,
             request_id,
@@ -852,11 +851,12 @@ where
     }
 }
 
-fn admitted_user_content(content: &InputContent) -> Result<UserContent, ()> {
-    if content.as_str().len() > MAX_SUBMITTED_INPUT_BYTES {
+fn admitted_user_content(content: InputContent) -> Result<UserContent, ()> {
+    let content = content.into_string();
+    if content.len() > MAX_SUBMITTED_INPUT_BYTES {
         return Err(());
     }
-    UserContent::try_text(content.as_str().to_owned()).map_err(|_| ())
+    UserContent::try_text(content).map_err(|_| ())
 }
 
 async fn handle_read_transcript<Writer>(
@@ -2233,16 +2233,14 @@ mod tests {
     #[test]
     fn process_submission_admits_the_exact_content_bound() {
         let exact = InputContent::new("\u{1}".repeat(MAX_SUBMITTED_INPUT_BYTES));
-        assert!(admitted_user_content(&exact).is_ok());
+        assert!(admitted_user_content(exact).is_ok());
     }
 
     #[test]
     fn process_submission_rejects_content_over_the_bound() {
         assert!(
-            admitted_user_content(&InputContent::new(
-                "x".repeat(MAX_SUBMITTED_INPUT_BYTES + 1)
-            ))
-            .is_err()
+            admitted_user_content(InputContent::new("x".repeat(MAX_SUBMITTED_INPUT_BYTES + 1)))
+                .is_err()
         );
     }
 
