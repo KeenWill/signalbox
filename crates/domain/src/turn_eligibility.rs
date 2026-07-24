@@ -349,19 +349,22 @@ pub struct ActiveTurnSchedulingReconstitutionInput {
     owning_turn: TurnId,
     current_attempt: Option<TurnAttemptId>,
     state: StoredActiveTurnPhase,
+    executing_tool_batch: Option<ExecutingToolBatchReconstitutionFacts>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ExecutingToolBatchReconstitutionFacts {
+    session: SessionId,
+    producing_call: crate::ModelCallId,
+    yielded_snapshot: ResolvedContextFrontierSnapshot,
+    batch_attempt: Option<TurnAttemptId>,
+    requests: Box<[ToolRequestId]>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum StoredActiveTurnPhase {
     Prepared,
     Running,
-    RunningToolBatch {
-        session: SessionId,
-        producing_call: crate::ModelCallId,
-        yielded_snapshot: ResolvedContextFrontierSnapshot,
-        batch_attempt: Option<TurnAttemptId>,
-        requests: Box<[ToolRequestId]>,
-    },
     StopRequested {
         call: crate::ModelCallId,
         interrupt: AppliedInterruptCommandResult,
@@ -386,6 +389,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
             owning_turn,
             current_attempt: Some(current_attempt),
             state: StoredActiveTurnPhase::Prepared,
+            executing_tool_batch: None,
         }
     }
 
@@ -395,35 +399,29 @@ impl ActiveTurnSchedulingReconstitutionInput {
             owning_turn,
             current_attempt: Some(current_attempt),
             state: StoredActiveTurnPhase::Running,
+            executing_tool_batch: None,
         }
     }
 
-    /// Supplies a stored running attempt plus independently reconstituted
-    /// evidence for its active tool batch.
-    pub fn running_with_tool_batch(
-        owning_turn: TurnId,
-        current_attempt: TurnAttemptId,
-        batch: &crate::ToolBatch,
-    ) -> Self {
-        Self {
-            owning_turn,
-            current_attempt: Some(current_attempt),
-            state: StoredActiveTurnPhase::RunningToolBatch {
-                session: batch.session(),
-                producing_call: batch.producing_call(),
-                yielded_snapshot: batch.yielded_snapshot().clone(),
-                batch_attempt: match batch.phase() {
-                    crate::ToolBatchPhase::Executing { turn_attempt } => Some(turn_attempt),
-                    crate::ToolBatchPhase::AwaitingApproval { .. }
-                    | crate::ToolBatchPhase::AwaitingRecovery { .. } => None,
-                },
-                requests: batch
-                    .requests()
-                    .iter()
-                    .map(crate::ToolRequest::id)
-                    .collect(),
+    /// Attaches independently reconstituted evidence for an executing tool
+    /// batch without changing the stored turn-attempt state.
+    pub fn with_executing_tool_batch(mut self, batch: &crate::ToolBatch) -> Self {
+        self.executing_tool_batch = Some(ExecutingToolBatchReconstitutionFacts {
+            session: batch.session(),
+            producing_call: batch.producing_call(),
+            yielded_snapshot: batch.yielded_snapshot().clone(),
+            batch_attempt: match batch.phase() {
+                crate::ToolBatchPhase::Executing { turn_attempt } => Some(turn_attempt),
+                crate::ToolBatchPhase::AwaitingApproval { .. }
+                | crate::ToolBatchPhase::AwaitingRecovery { .. } => None,
             },
-        }
+            requests: batch
+                .requests()
+                .iter()
+                .map(crate::ToolRequest::id)
+                .collect(),
+        });
+        self
     }
 
     /// Supplies inert facts for one proof-bearing cancellation request.
@@ -437,6 +435,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
             owning_turn,
             current_attempt: Some(current_attempt),
             state: StoredActiveTurnPhase::StopRequested { call, interrupt },
+            executing_tool_batch: None,
         }
     }
 
@@ -446,6 +445,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
             owning_turn,
             current_attempt: None,
             state: StoredActiveTurnPhase::AwaitingApproval { wait },
+            executing_tool_batch: None,
         }
     }
 
@@ -464,6 +464,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
                     UnstoppedAttemptDisposition::Ambiguous,
                 ),
             },
+            executing_tool_batch: None,
         }
     }
 
@@ -482,6 +483,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
                     UnstoppedAttemptDisposition::Lost,
                 ),
             },
+            executing_tool_batch: None,
         }
     }
 
@@ -502,6 +504,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
                     interrupt,
                 ),
             },
+            executing_tool_batch: None,
         }
     }
 
@@ -522,6 +525,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
                     interrupt,
                 ),
             },
+            executing_tool_batch: None,
         }
     }
 
@@ -541,6 +545,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
                     UnstoppedAttemptDisposition::Ambiguous,
                 ),
             },
+            executing_tool_batch: None,
         }
     }
 
@@ -560,6 +565,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
                     UnstoppedAttemptDisposition::Lost,
                 ),
             },
+            executing_tool_batch: None,
         }
     }
 
@@ -580,6 +586,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
                     interrupt,
                 ),
             },
+            executing_tool_batch: None,
         }
     }
 
@@ -600,6 +607,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
                     interrupt,
                 ),
             },
+            executing_tool_batch: None,
         }
     }
 
@@ -623,11 +631,9 @@ impl ActiveTurnSchedulingReconstitutionInput {
         )]
         let current_attempt = match &self.state {
             StoredActiveTurnPhase::Prepared => current_attempt,
-            StoredActiveTurnPhase::Running | StoredActiveTurnPhase::RunningToolBatch { .. } => {
-                current_attempt
-                    .begin_running()
-                    .expect("a stored running attempt starts from the validated prepared value")
-            }
+            StoredActiveTurnPhase::Running => current_attempt
+                .begin_running()
+                .expect("a stored running attempt starts from the validated prepared value"),
             StoredActiveTurnPhase::StopRequested { interrupt, .. } => current_attempt
                 .begin_running()
                 .and_then(|attempt| attempt.request_cancellation(interrupt.proof()))
@@ -2979,7 +2985,6 @@ fn reconstitute_inner(
                                     StoredActiveTurnPhase::Running,
                                     crate::ModelCallReconstitutionState::InFlight,
                                 ) => true,
-                                (StoredActiveTurnPhase::RunningToolBatch { .. }, _) => false,
                                 (
                                     StoredActiveTurnPhase::StopRequested { call, .. },
                                     crate::ModelCallReconstitutionState::CancellationRequested,
@@ -3336,112 +3341,6 @@ fn reconstitute_inner(
                             },
                         )?
                     }
-                    StoredActiveTurnPhase::RunningToolBatch {
-                        session: batch_session,
-                        producing_call,
-                        yielded_snapshot,
-                        batch_attempt,
-                        requests,
-                    } => {
-                        let yielded_frontier = yielded_snapshot.frontier().snapshot();
-                        let stored_yielded = snapshots.get(&yielded_frontier);
-                        let producing = model_calls.get(producing_call);
-                        let source = producing.and_then(|call| match call {
-                            crate::ReconstitutedModelCall::Ended(call) => {
-                                snapshots.get(&call.frontier().snapshot())
-                            }
-                            crate::ReconstitutedModelCall::Current(_) => None,
-                        });
-                        let mut observed_requests = Vec::new();
-                        let suffix_valid = source.is_some_and(|source| {
-                            source.is_semantic_prefix_of(yielded_snapshot)
-                                && source.entry_count() < yielded_snapshot.entry_count()
-                                && yielded_snapshot
-                                    .ordered_entries()
-                                    .skip(source.entry_count())
-                                    .all(|reference| {
-                                        let Some(entry) = semantic_entries.get(&reference) else {
-                                            return false;
-                                        };
-                                        match entry.payload() {
-                                            SemanticTranscriptEntryPayload::AssistantText {
-                                                producing_call: entry_call,
-                                                ..
-                                            } => *entry_call == *producing_call,
-                                            SemanticTranscriptEntryPayload::AssistantToolUse {
-                                                producing_call: entry_call,
-                                                request,
-                                            } if *entry_call == *producing_call => {
-                                                observed_requests.push(*request);
-                                                true
-                                            }
-                                            SemanticTranscriptEntryPayload::AssistantToolUse {
-                                                ..
-                                            }
-                                            | SemanticTranscriptEntryPayload::Imported { .. }
-                                            | SemanticTranscriptEntryPayload::OriginAcceptedInput {
-                                                ..
-                                            }
-                                            | SemanticTranscriptEntryPayload::SteeringAcceptedInput {
-                                                ..
-                                            }
-                                            | SemanticTranscriptEntryPayload::ToolExecutionResult {
-                                                ..
-                                            }
-                                            | SemanticTranscriptEntryPayload::ToolDenied { .. }
-                                            | SemanticTranscriptEntryPayload::ToolClosed { .. }
-                                            | SemanticTranscriptEntryPayload::TurnCompleted { .. }
-                                            | SemanticTranscriptEntryPayload::TurnFailed { .. }
-                                            | SemanticTranscriptEntryPayload::TurnCancelled { .. } => {
-                                                false
-                                            }
-                                        }
-                                    })
-                        });
-                        let producing_matches = matches!(
-                            producing,
-                            Some(crate::ReconstitutedModelCall::Ended(call))
-                                if call.turn() == turn
-                                    && call.disposition() == ModelCallDisposition::Completed
-                        );
-                        let Some(turn_attempt) = *batch_attempt else {
-                            return Err(
-                                AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
-                                    turn,
-                                    accepted_input: record.accepted_input.id(),
-                                },
-                            );
-                        };
-                        if *batch_session != session
-                            || Some(turn_attempt) != phase.current_attempt
-                            || stored_yielded != Some(yielded_snapshot)
-                            || !producing_matches
-                            || !suffix_valid
-                            || observed_requests.as_slice() != requests.as_ref()
-                        {
-                            return Err(
-                                AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
-                                    turn,
-                                    accepted_input: record.accepted_input.id(),
-                                },
-                            );
-                        }
-                        referenced_model_calls.insert(*producing_call);
-                        referenced_snapshots.insert(yielded_frontier);
-                        active_executing_tool_batch = Some(ActiveExecutingToolBatchCorrelation {
-                            session,
-                            turn,
-                            producing_call: *producing_call,
-                            yielded_frontier,
-                            turn_attempt,
-                        });
-                        phase.canonical_evidence_free_phase().ok_or(
-                            AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
-                                turn,
-                                accepted_input: record.accepted_input.id(),
-                            },
-                        )?
-                    }
                     StoredActiveTurnPhase::AwaitingApproval { wait } => {
                         if wait.session() != session || wait.turn() != turn {
                             return Err(
@@ -3733,6 +3632,103 @@ fn reconstitute_inner(
                         }
                     }
                 };
+                if let Some(tool_batch) = &phase.executing_tool_batch {
+                    let yielded_frontier = tool_batch.yielded_snapshot.frontier().snapshot();
+                    let stored_yielded = snapshots.get(&yielded_frontier);
+                    let producing = model_calls.get(&tool_batch.producing_call);
+                    let source = producing.and_then(|call| match call {
+                        crate::ReconstitutedModelCall::Ended(call) => {
+                            snapshots.get(&call.frontier().snapshot())
+                        }
+                        crate::ReconstitutedModelCall::Current(_) => None,
+                    });
+                    let mut observed_requests = Vec::new();
+                    let suffix_valid =
+                        source.is_some_and(|source| {
+                            source.is_semantic_prefix_of(&tool_batch.yielded_snapshot)
+                                && source.entry_count() < tool_batch.yielded_snapshot.entry_count()
+                                && tool_batch
+                                    .yielded_snapshot
+                                    .ordered_entries()
+                                    .skip(source.entry_count())
+                                    .all(|reference| {
+                                        let Some(entry) = semantic_entries.get(&reference) else {
+                                            return false;
+                                        };
+                                        match entry.payload() {
+                                        SemanticTranscriptEntryPayload::AssistantText {
+                                            producing_call,
+                                            ..
+                                        } => *producing_call == tool_batch.producing_call,
+                                        SemanticTranscriptEntryPayload::AssistantToolUse {
+                                            producing_call,
+                                            request,
+                                        } if *producing_call == tool_batch.producing_call => {
+                                            observed_requests.push(*request);
+                                            true
+                                        }
+                                        SemanticTranscriptEntryPayload::AssistantToolUse { .. }
+                                        | SemanticTranscriptEntryPayload::Imported { .. }
+                                        | SemanticTranscriptEntryPayload::OriginAcceptedInput {
+                                            ..
+                                        }
+                                        | SemanticTranscriptEntryPayload::SteeringAcceptedInput {
+                                            ..
+                                        }
+                                        | SemanticTranscriptEntryPayload::ToolExecutionResult {
+                                            ..
+                                        }
+                                        | SemanticTranscriptEntryPayload::ToolDenied { .. }
+                                        | SemanticTranscriptEntryPayload::ToolClosed { .. }
+                                        | SemanticTranscriptEntryPayload::TurnCompleted { .. }
+                                        | SemanticTranscriptEntryPayload::TurnFailed { .. }
+                                        | SemanticTranscriptEntryPayload::TurnCancelled { .. } => {
+                                            false
+                                        }
+                                    }
+                                    })
+                        });
+                    let producing_matches = matches!(
+                        producing,
+                        Some(crate::ReconstitutedModelCall::Ended(call))
+                            if call.turn() == turn
+                                && call.disposition() == ModelCallDisposition::Completed
+                    );
+                    let Some(turn_attempt) = tool_batch.batch_attempt else {
+                        return Err(
+                            AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
+                                turn,
+                                accepted_input: record.accepted_input.id(),
+                            },
+                        );
+                    };
+                    if !matches!(
+                        phase.state,
+                        StoredActiveTurnPhase::Prepared | StoredActiveTurnPhase::Running
+                    ) || tool_batch.session != session
+                        || Some(turn_attempt) != phase.current_attempt
+                        || stored_yielded != Some(&tool_batch.yielded_snapshot)
+                        || !producing_matches
+                        || !suffix_valid
+                        || observed_requests.as_slice() != tool_batch.requests.as_ref()
+                    {
+                        return Err(
+                            AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
+                                turn,
+                                accepted_input: record.accepted_input.id(),
+                            },
+                        );
+                    }
+                    referenced_model_calls.insert(tool_batch.producing_call);
+                    referenced_snapshots.insert(yielded_frontier);
+                    active_executing_tool_batch = Some(ActiveExecutingToolBatchCorrelation {
+                        session,
+                        turn,
+                        producing_call: tool_batch.producing_call,
+                        yielded_frontier,
+                        turn_attempt,
+                    });
+                }
                 ReconstitutedSchedulingState::Active {
                     start,
                     phase: canonical_phase,
@@ -4587,7 +4583,6 @@ fn reconstitute_active_acceptance_tail(
             }
             StoredActiveTurnPhase::Prepared
             | StoredActiveTurnPhase::Running
-            | StoredActiveTurnPhase::RunningToolBatch { .. }
             | StoredActiveTurnPhase::AwaitingApproval { .. } => None,
         },
         AcceptedInputTurnSchedulingRecordState::Queued
@@ -6826,11 +6821,8 @@ mod tests {
         .expect("the complete approved batch is executing");
         let mut facts = ActiveReconstitutionFacts::matching(&session, active);
         facts.replace_active_phase(
-            ActiveTurnSchedulingReconstitutionInput::running_with_tool_batch(
-                active.turn(),
-                continuation_attempt,
-                &batch,
-            ),
+            ActiveTurnSchedulingReconstitutionInput::prepared(active.turn(), continuation_attempt)
+                .with_executing_tool_batch(&batch),
         );
         facts
             .semantic_entries
@@ -6877,6 +6869,15 @@ mod tests {
                 turn_attempt: continuation_attempt,
             })
         );
+        assert!(matches!(
+            projection
+                .active_turn_execution()
+                .expect("the correlated continuation owns the active slot")
+                .phase(),
+            ActiveTurnPhase::Running { current_attempt }
+                if current_attempt.id() == continuation_attempt
+                    && current_attempt.state() == &CurrentTurnAttemptState::Prepared
+        ));
     }
 
     /// S03 / INV-034: startup recovery consumes the complete active
