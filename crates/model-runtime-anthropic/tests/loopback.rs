@@ -19,8 +19,9 @@ use std::time::Duration;
 use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, CompletionFinish, ConversationMessage, DeliveryMode,
     LossCause, ModelOperation, ModelRuntime, ModelSettings, Observation, ObservationFact,
-    PreparationFailure, PreparationOutcome, ProviderErrorKind, ProviderRequestId, RequestedTarget,
-    ResolvedTarget, StreamInterruption, TerminalEvidence, TerminalReport, UnsentCause,
+    PROVIDER_JSON_NESTING_LIMIT, PreparationFailure, PreparationOutcome, ProviderErrorKind,
+    ProviderRequestId, RequestedTarget, ResolvedTarget, StreamInterruption, TerminalEvidence,
+    TerminalReport, UnsentCause,
 };
 use signalbox_model_runtime::{
     CredentialAccess, CredentialAccessError, CredentialAccessFailure, CredentialReference,
@@ -371,6 +372,51 @@ async fn credential_rejection_is_typed_provider_error_evidence() {
         Some("authentication_error".to_string())
     );
     assert_eq!(error.exchange.http_status, Some(401));
+}
+
+#[tokio::test]
+async fn a_malformed_error_body_falls_back_to_http_status() {
+    assert_anthropic_error_body_falls_back_to_status(b"{not json").await;
+}
+
+#[tokio::test]
+async fn an_overdeep_error_body_falls_back_to_http_status() {
+    let nested = format!(
+        "{}null{}",
+        "[".repeat(PROVIDER_JSON_NESTING_LIMIT + 1),
+        "]".repeat(PROVIDER_JSON_NESTING_LIMIT + 1)
+    );
+    let overdeep = format!(
+        r#"{{"type":"error","error":{{"type":"authentication_error",
+            "message":"contradictory token","future":{nested}}}}}"#
+    );
+
+    assert_anthropic_error_body_falls_back_to_status(overdeep.as_bytes()).await;
+}
+
+async fn assert_anthropic_error_body_falls_back_to_status(body: &[u8]) {
+    let status = 429;
+    let server = CannedServer::serving(vec![http_response(
+        &format!("{status} Too Many Requests"),
+        &[("content-type", "application/json")],
+        body,
+    )])
+    .await;
+    let runtime = runtime_for(&server.base_url);
+
+    let (report, _) = execute(
+        &runtime,
+        operation("call-invalid-error"),
+        CancellationSignal::never(),
+    )
+    .await;
+
+    let TerminalEvidence::ProviderError(error) = report.evidence else {
+        panic!("a complete terminal error status remains definitive");
+    };
+    assert_eq!(error.kind, ProviderErrorKind::RateLimited);
+    assert_eq!(error.native.error_token, None);
+    assert_eq!(error.exchange.http_status, Some(status));
 }
 
 #[tokio::test]
