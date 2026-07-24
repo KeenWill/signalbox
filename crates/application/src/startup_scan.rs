@@ -67,6 +67,12 @@ pub enum StartupScanSessionOutcome {
     RecoveredModelCall(Box<ModelCallTerminalOutcome>),
     /// A live tool attempt received crash/effect-aware restart classification.
     RecoveredToolAttempt(Box<ToolAttemptCrashOutcome>),
+    /// A crash left only ended tool attempts; ordinary tool orchestration can
+    /// resume the durable batch without recovery mutation.
+    ResumableToolBatch {
+        /// Active turn whose result/next-attempt boundary is ready.
+        turn: TurnId,
+    },
     /// Pending steering keeps the source turn active until reclassification.
     DeferredPendingSteering {
         /// The accepted input that visibly blocks terminalization.
@@ -256,6 +262,7 @@ where
                         }
                         break;
                     }
+                    Ok(StartupScanSessionOutcome::ResumableToolBatch { .. }) => break,
                     Ok(StartupScanSessionOutcome::DeferredPendingSteering { .. }) => {
                         pending_steering_sessions.push(session);
                         break;

@@ -4,14 +4,14 @@
 //! catalog policy, mints every durable identity candidate, keeps executor work
 //! outside transactions, and submits only correlated evidence to persistence.
 
-use std::{
-    collections::BTreeMap,
-    error::Error,
-    fmt,
-    future::Future,
-    sync::{Arc, Mutex},
-};
+use std::{collections::BTreeMap, error::Error, fmt, future::Future, sync::Arc};
 
+use crate::{
+    ClassifyOperatorFailure, DecideToolRequestTransaction, InProcessToolDispatchGate,
+    InProcessToolDispatchPermit, OperatorFailureClass, PrepareToolContinuationOutcome,
+    RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationStatus,
+    ToolContinuationIdentities, ToolCrashClosureIdentities, ToolExecutionTransaction,
+};
 #[cfg(test)]
 use signalbox_domain::AcceptedInputId;
 use signalbox_domain::{
@@ -23,14 +23,6 @@ use signalbox_domain::{
     ToolBatch, ToolBatchPhase, ToolEffectClass, ToolExecutionError, ToolExecutionErrorDetail,
     ToolExecutionErrorKind, ToolName, ToolPermissionDefault, ToolRequest, ToolRequestId,
     ToolResultContent, ToolResultText, ToolResultTextFailure, TurnAttemptId, TurnId,
-};
-use tokio::sync::watch;
-
-use crate::{
-    ClassifyOperatorFailure, DecideToolRequestTransaction, InProcessToolDispatchGate,
-    InProcessToolDispatchPermit, OperatorFailureClass, PrepareToolContinuationOutcome,
-    RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationStatus,
-    ToolContinuationIdentities, ToolCrashClosureIdentities, ToolExecutionTransaction,
 };
 
 /// Canonical JSON object used as a model-facing argument schema.
@@ -479,66 +471,21 @@ impl ToolExecutionIdGenerator for UuidV7ToolLoopIdGenerator {
     }
 }
 
-/// Process-local wake coordination between a committed owner decision and the
-/// already-running execution future parked on that exact request.
-#[derive(Clone, Debug, Default)]
-pub struct InProcessToolDecisionWake {
-    decisions: Arc<Mutex<BTreeMap<ToolRequestId, watch::Sender<bool>>>>,
-}
-
-impl InProcessToolDecisionWake {
-    /// Waits until the exact request has a committed decision in this process.
-    pub async fn wait(&self, request: ToolRequestId) {
-        let mut decision = {
-            let mut decisions = self
-                .decisions
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            decisions
-                .entry(request)
-                .or_insert_with(|| watch::channel(false).0)
-                .subscribe()
-        };
-        if !*decision.borrow_and_update() {
-            let _ = decision.changed().await;
-        }
-        self.decisions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&request);
-    }
-
-    /// Wakes the execution future for an exact durably applied decision.
-    fn wake(&self, request: ToolRequestId) {
-        self.decisions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .entry(request)
-            .or_insert_with(|| watch::channel(false).0)
-            .send_replace(true);
-    }
-}
-
 /// Application service for one durable owner approval/denial command.
 pub struct DecideToolRequestService<Ids, Transaction> {
     ids: Ids,
     transaction: Transaction,
-    wake: InProcessToolDecisionWake,
 }
 
 impl<Ids, Transaction> DecideToolRequestService<Ids, Transaction> {
     /// Composes application-owned identities with the authoritative transaction.
-    pub const fn new(ids: Ids, transaction: Transaction, wake: InProcessToolDecisionWake) -> Self {
-        Self {
-            ids,
-            transaction,
-            wake,
-        }
+    pub const fn new(ids: Ids, transaction: Transaction) -> Self {
+        Self { ids, transaction }
     }
 
     /// Returns both owned roles.
-    pub fn into_parts(self) -> (Ids, Transaction, InProcessToolDecisionWake) {
-        (self.ids, self.transaction, self.wake)
+    pub fn into_parts(self) -> (Ids, Transaction) {
+        (self.ids, self.transaction)
     }
 }
 
@@ -565,15 +512,7 @@ where
                 {
                     continue;
                 }
-                result => {
-                    if let Ok(prepared) = &result
-                        && let signalbox_domain::DecideToolRequestResult::Applied(applied) =
-                            prepared.result()
-                    {
-                        self.wake.wake(applied.resolution().request());
-                    }
-                    return result;
-                }
+                result => return result,
             }
         }
     }
@@ -590,6 +529,7 @@ enum RetainedToolExecutionStateKind {
         turn: TurnId,
         attempt: ToolAttemptId,
         request: ToolRequest,
+        definition: ToolDefinition,
         dispatch_permit: InProcessToolDispatchPermit,
     },
     Observation {
@@ -854,6 +794,7 @@ where
                     turn,
                     attempt,
                     request,
+                    definition,
                     dispatch_permit,
                 } => match self
                     .transaction
@@ -866,7 +807,7 @@ where
                     }
                     Ok(ToolAttemptAuthorizationStatus::InFlight(authorized)) => {
                         return self
-                            .execute_authorized(request, authorized, dispatch_permit)
+                            .execute_authorized(request, definition, authorized, dispatch_permit)
                             .await;
                     }
                     Err(error) => {
@@ -876,6 +817,7 @@ where
                                 turn,
                                 attempt,
                                 request,
+                                definition,
                                 dispatch_permit,
                             },
                         });
@@ -1089,9 +1031,7 @@ where
                 ended,
             )));
         }
-        if definition.is_none() {
-            return Err(ToolExecutionServiceError::CatalogDrift);
-        }
+        let definition = definition.ok_or(ToolExecutionServiceError::CatalogDrift)?;
         let dispatch_permit = self.gate.acquire(prepared.turn()).await;
         let Some(revalidated_batch) = self
             .transaction
@@ -1149,6 +1089,7 @@ where
                                 turn: prepared.turn(),
                                 attempt: prepared.attempt(),
                                 request,
+                                definition,
                                 dispatch_permit,
                             },
                         });
@@ -1163,22 +1104,20 @@ where
                 return Err(ToolExecutionServiceError::Authorize(error));
             }
         };
-        self.execute_authorized(request, authorized, dispatch_permit)
+        self.execute_authorized(request, definition, authorized, dispatch_permit)
             .await
     }
 
     async fn execute_authorized(
         &mut self,
         request: ToolRequest,
+        definition: ToolDefinition,
         authorized: AuthorizedToolAttempt,
         dispatch_permit: InProcessToolDispatchPermit,
     ) -> Result<
         ToolExecutionServiceOutcome,
         ToolExecutionServiceError<Transaction::Error, Executor::Error>,
     > {
-        let Some(definition) = self.catalog.definition(request.name()) else {
-            return Err(ToolExecutionServiceError::CatalogDrift);
-        };
         let invocation = ToolExecutionInvocation::try_new(request, definition, &authorized)
             .ok_or(ToolExecutionServiceError::CatalogDrift)?;
         let evidence = self
@@ -1324,7 +1263,10 @@ pub(crate) fn initial_tool_approval(
 mod tests {
     use std::{
         collections::VecDeque,
-        sync::{Arc, Mutex},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     use super::*;
@@ -1678,6 +1620,35 @@ mod tests {
         }
     }
 
+    struct OneShotCatalog {
+        definition: ToolDefinition,
+        definition_reads: Arc<AtomicUsize>,
+    }
+
+    impl ToolCatalog for OneShotCatalog {
+        fn definitions(&self) -> Box<[ToolDefinition]> {
+            vec![self.definition.clone()].into_boxed_slice()
+        }
+
+        fn definition(&self, name: &ToolName) -> Option<ToolDefinition> {
+            (name == self.definition.name()
+                && self.definition_reads.fetch_add(1, Ordering::SeqCst) == 0)
+                .then(|| self.definition.clone())
+        }
+
+        fn validate_arguments(
+            &self,
+            name: &ToolName,
+            _arguments: &NormalizedToolArguments,
+        ) -> Result<(), ToolCatalogValidationFailure> {
+            if name == self.definition.name() {
+                Ok(())
+            } else {
+                Err(ToolCatalogValidationFailure::UnknownTool)
+            }
+        }
+    }
+
     /// INV-020: registry automation records policy provenance, while blanket
     /// automation remains explicitly distinct from owner agency.
     #[test]
@@ -1728,29 +1699,6 @@ mod tests {
         let error = CompiledToolCatalog::try_new([first, second])
             .expect_err("duplicate dispatch names are ambiguous");
         assert_eq!(error.name(), &tool_name("same"));
-    }
-
-    #[tokio::test]
-    async fn applied_decision_wake_is_exact_and_race_free() {
-        let request = ToolRequestId::from_uuid(Uuid::from_u128(90));
-        let wake = InProcessToolDecisionWake::default();
-        let waiter_wake = wake.clone();
-        let waiter = tokio::spawn(async move {
-            waiter_wake.wait(request).await;
-        });
-        tokio::task::yield_now().await;
-        assert!(!waiter.is_finished());
-        wake.wake(request);
-        waiter.await.expect("decision waiter completes");
-
-        let decided_before_wait = ToolRequestId::from_uuid(Uuid::from_u128(91));
-        wake.wake(decided_before_wait);
-        tokio::time::timeout(
-            std::time::Duration::from_millis(10),
-            wake.wait(decided_before_wait),
-        )
-        .await
-        .expect("a committed decision cannot be lost before waiter registration");
     }
 
     #[test]
@@ -1934,6 +1882,59 @@ mod tests {
         let (_, _, _, executor, _, _) = service.into_parts();
         assert_eq!(executor.calls, 0);
         assert!(events.lock().expect("event lock").is_empty());
+    }
+
+    /// INV-011 / INV-024: the definition selected by successful preflight is
+    /// the exact same-incarnation declaration carried across authorization.
+    #[tokio::test]
+    async fn inv011_inv024_authorization_uses_preflight_definition_snapshot() {
+        let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let prepared = match batch.attempt(batch.requests()[0].id()) {
+            Some(signalbox_domain::ReconstitutedToolAttempt::Current(current)) => current.clone(),
+            _ => panic!("fixture has one prepared attempt"),
+        };
+        let transaction = FakeTransaction {
+            batch: batch.clone(),
+            prepared,
+            events: Arc::clone(&events),
+            dispatch_consumed_after_first_load: false,
+            load_count: 0,
+            ambiguous_authorization: false,
+            authorization_committed: false,
+            commit_failures: 0,
+            committed: false,
+        };
+        let definition_reads = Arc::new(AtomicUsize::new(0));
+        let catalog = OneShotCatalog {
+            definition: definition(
+                "known",
+                ToolPermissionDefault::Auto,
+                ToolEffectClass::EffectFree,
+            ),
+            definition_reads: Arc::clone(&definition_reads),
+        };
+        let executor = RecordingExecutor {
+            events: Arc::clone(&events),
+            calls: 0,
+        };
+        let mut service = ToolExecutionService::new(
+            FixedIds::new(),
+            transaction,
+            catalog,
+            executor,
+            InProcessToolDispatchGate::default(),
+        );
+
+        assert!(matches!(
+            service.execute(batch.session(), batch.turn()).await,
+            Ok(ToolExecutionServiceOutcome::ObservationCommitted(_))
+        ));
+        assert_eq!(definition_reads.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *events.lock().expect("event lock"),
+            ["authorize", "execute", "commit"]
+        );
     }
 
     /// INV-011 / INV-024: a lost authorization acknowledgement is reread

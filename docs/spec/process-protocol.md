@@ -392,17 +392,17 @@ receives `resync_required` and reconnects for another snapshot.
 Each `session_event` message carries `cursor`, `session_id`, and exactly one of
 these closed `event` objects:
 
-| Event                          | Additional members                                                            |
-| ------------------------------ | ----------------------------------------------------------------------------- |
-| `session_created`              | none                                                                          |
-| `input_accepted`               | `accepted_input_id`, `turn_id`, `acceptance_position`, and `content`          |
-| `turn_activated`               | `turn_id` and `current_attempt_id`                                            |
-| `model_call_transition`        | `turn_id`, `model_call_id`, and `state`                                       |
-| `turn_completed`               | `turn_id`, `model_call_id`, `completion_entry_id`, and `terminal_frontier_id` |
-| `turn_failed`                  | `turn_id`, `failure_entry_id`, and `terminal_frontier_id`                     |
-| `turn_refused`                 | `turn_id`, `model_call_id`, and `terminal_frontier_id`                        |
-| `turn_cancelled`               | `turn_id`, `cancellation_entry_id`, and `terminal_frontier_id`                |
-| `turn_reconciliation_required` | `turn_id`, `model_call_id`, and `terminal_frontier_id`                        |
+| Event                          | Additional members                                                                         |
+| ------------------------------ | ------------------------------------------------------------------------------------------ |
+| `session_created`              | none                                                                                       |
+| `input_accepted`               | `accepted_input_id`, `turn_id`, `acceptance_position`, and `content`                       |
+| `turn_activated`               | `turn_id` and `current_attempt_id`                                                         |
+| `model_call_transition`        | `turn_id`, `model_call_id`, and `state`                                                    |
+| `turn_completed`               | `turn_id`, `model_call_id`, `completion_entry_id`, and `terminal_frontier_id`              |
+| `turn_failed`                  | `turn_id`, `failure_entry_id`, and `terminal_frontier_id`                                  |
+| `turn_refused`                 | `turn_id`, `model_call_id`, and `terminal_frontier_id`                                     |
+| `turn_cancelled`               | `turn_id`, `cancellation_entry_id`, and `terminal_frontier_id`                             |
+| `turn_reconciliation_required` | `turn_id`, exactly one of `model_call_id` or `tool_attempt_id`, and `terminal_frontier_id` |
 
 The model-call `state` object is exactly `prepared`, `in_flight`,
 `cancellation_requested`, or `terminal { disposition }`; terminal disposition is

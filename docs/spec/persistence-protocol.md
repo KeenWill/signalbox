@@ -229,6 +229,17 @@ Locks per transaction, in acquisition order:
   existence is checked with a bare `EXISTS`). The session row is locked only
   `KEY SHARE`, implicitly, by the inserts' foreign keys, and the candidate
   `turn_lifecycle` row is locked by the guarded `UPDATE` itself.
+- **Tool-loop transactions** (owner decision, attempt prepare, attempt
+  authorization, preflight failure, result commit, crash classification, result
+  projection plus continuation preparation, and their authoritative rereads):
+  the `session_scheduler` row `FOR UPDATE` is the first and only explicit lock.
+  An unseen decision command first claims the owner-global registry; after
+  resolving the request's owning session it takes that scheduler lock before
+  reading or mutating the active tool batch. A replay resolves entirely from the
+  command registry and receipt and takes no lifecycle lock. Guarded
+  `turn_lifecycle`, `turn_attempt`, `tool_attempt`, and model-call updates then
+  serialize under the scheduler lock; their foreign keys may take implicit
+  `KEY SHARE` locks on parent rows.
 - **ReplaceSessionDefaults**: no explicit pre-lock; the compare-and-set `UPDATE`
   on the `session_current_defaults` pointer row is the serialization point, and
   its `session_defaults_version` insert takes `FOR KEY SHARE` on the session row
@@ -283,13 +294,13 @@ the active turn's pinned provider target and complete call history, and
 ended attempt and optional `known_failed`/`cancelled` call provenance
 (backfilled and closed by migration `202607220003`). Cancelled and
 reconciliation-required terminal turns additionally supply their exact
-proof-bearing attempt end, applied-interrupt result, and optional cancelled or
-required ambiguous call through the scheduling input described in
-[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md). The
-scheduling load proves its own completeness — it counts `queued_input_origin`
-against `turn_lifecycle` and fails on mismatch — rather than trusting whichever
-rows a filter returned. Active-phase, terminal-evidence, and acceptance-tail
-validation semantics are owned by
+proof-bearing attempt end, applied-interrupt result, and optional cancelled call
+or required ambiguous model call/tool attempt through the scheduling input
+described in [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md).
+The scheduling load proves its own completeness — it counts
+`queued_input_origin` against `turn_lifecycle` and fails on mismatch — rather
+than trusting whichever rows a filter returned. Active-phase, terminal-evidence,
+and acceptance-tail validation semantics are owned by
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md).
 
 Persisted data is never normalized into a nearby valid state; malformed durable
@@ -450,11 +461,15 @@ terminal attempt; a model-call transition must be reachable from the
 authoritative monotonic call state, with an exact disposition match at terminal;
 and failed, completed, refused, cancelled, and reconciliation-required records
 must agree with the durable turn, terminal frontier, semantic marker where
-present, and terminal model call where present. Historical Prepared and InFlight
-transition records remain dispatchable after their call advances. Exhausted
-delivery still validates the allocator singleton and cursor. Hub task ownership,
-polling, fan-out, and client observation semantics are owned by
-[process-protocol](process-protocol.md).
+present, and terminal model call or tool attempt where present. A
+reconciliation-required event carries exactly one of those two operation
+references. Tool-batch cancellation and known crash-failure records validate
+their terminal marker after the earlier producing model call and ended physical
+attempts rather than requiring an otherwise empty call history. Historical
+Prepared and InFlight transition records remain dispatchable after their call
+advances. Exhausted delivery still validates the allocator singleton and cursor.
+Hub task ownership, polling, fan-out, and client observation semantics are owned
+by [process-protocol](process-protocol.md).
 
 ## Open edges
 

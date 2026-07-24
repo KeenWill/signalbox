@@ -71,8 +71,8 @@ pub use model_execution::{
     ReclassifiedPendingSteeringTurn, ReconciliationRequiredModelCallTurn,
     ReconciliationRequiredToolTurn, RefusedModelCallTurn, RefusedModelCallTurnIdentities,
     ResolvedModelSelection, StopRequestedModelCallTurn, StoppedToolResponsePartIdentity,
-    StoppedToolRoundModelCallIdentities, ToolResponsePartIdentity, ToolRoundModelCallIdentities,
-    ToolRoundModelCallTurn,
+    StoppedToolRoundModelCallIdentities, ToolResponsePartIdentity, ToolResultAttemptCorrelation,
+    ToolRoundModelCallIdentities, ToolRoundModelCallTurn,
 };
 pub use provider_evidence::{
     ProviderTargetEvidence, ProviderTargetEvidenceLog, ProviderTargetMismatchInvalidation,
