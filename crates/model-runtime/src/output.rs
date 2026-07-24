@@ -39,11 +39,16 @@ impl PartialEq for StructuredOutputContract {
 impl StructuredOutputContract {
     /// A contract whose schema is generated from `T`.
     pub fn of_type<T: JsonSchema>(name: impl Into<String>, description: impl Into<String>) -> Self {
+        #[expect(
+            clippy::expect_used,
+            reason = "serde_json::Value has no fallible serialization shape"
+        )]
+        let schema = to_raw_value(&schemars::schema_for!(T).to_value())
+            .expect("generated JSON Schema always serializes");
         Self {
             name: ToolName::new(name),
             description: description.into(),
-            schema: to_raw_value(&schemars::schema_for!(T).to_value())
-                .expect("generated JSON Schema always serializes"),
+            schema,
         }
     }
 }
