@@ -12,6 +12,8 @@ use std::{
     sync::{Arc, Weak},
 };
 
+#[cfg(test)]
+use signalbox_domain::AcceptedInputId;
 use signalbox_domain::{
     AuthorizedToolAttempt, CorrelatedToolAttemptObservation, CurrentToolAttemptState,
     DangerousToolAutoApproval, DecideToolRequest, EndedToolAttempt, FailedModelCallTurn,
@@ -22,8 +24,6 @@ use signalbox_domain::{
     ToolExecutionErrorKind, ToolName, ToolPermissionDefault, ToolRequest, ToolRequestId,
     ToolResultContent, ToolResultText, ToolResultTextFailure, TurnAttemptId, TurnId,
 };
-#[cfg(test)]
-use signalbox_domain::AcceptedInputId;
 
 use crate::{
     ClassifyOperatorFailure, DecideToolRequestTransaction, OperatorFailureClass,
