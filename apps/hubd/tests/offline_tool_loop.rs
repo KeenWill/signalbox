@@ -31,7 +31,8 @@ use signalbox_domain::{
     ToolExecutionErrorDetail, ToolName, ToolPermissionDefault, ToolRequestId, TurnId, UserContent,
 };
 use signalbox_hubd::{
-    ActivatedTurnExecution, PostgresProviderModelExecution, PostgresProviderToolLoopExecution,
+    ActivatedTurnExecution, PostgresContinuationToolLoopRepository, PostgresProviderModelExecution,
+    PostgresProviderToolLoopExecution,
 };
 use signalbox_model_provider_runtime::{
     RuntimeModelCallProvider, RuntimeModelCatalog, RuntimeModelDefinition,
@@ -180,7 +181,7 @@ impl ToolLoopFixture {
             provider,
         )
         .with_tool_loop(
-            PostgresToolLoopRepository::with_model_calls(
+            PostgresContinuationToolLoopRepository::new(
                 self.pool.clone(),
                 self.targets.clone(),
                 self.credential_reference.clone(),
