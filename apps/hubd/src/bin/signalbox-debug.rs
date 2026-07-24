@@ -477,6 +477,7 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
         UuidV7SubmitInputIdGenerator,
         SubmitInputRepository::new(pool.clone()),
         DroppedDebugNudge,
+        signalbox_application::InProcessToolDispatchGate::default(),
     );
     let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
         SubmitInputAppliedResult::TurnOrigin(origin),

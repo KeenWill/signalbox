@@ -12,6 +12,7 @@ mod scheduler;
 mod start_eligible_turn;
 mod startup_scan;
 mod submit_input;
+mod tool_dispatch_gate;
 mod tool_loop;
 mod tool_loop_ports;
 
@@ -57,16 +58,17 @@ pub use submit_input::{
     SubmitInputIdGenerator, SubmitInputOutcome, SubmitInputRequest, SubmitInputRequestError,
     SubmitInputService, SubmitInputTransaction, UuidV7SubmitInputIdGenerator,
 };
+pub use tool_dispatch_gate::{InProcessToolDispatchGate, InProcessToolDispatchPermit};
 pub use tool_loop::{
     CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence, DecideToolRequestService,
-    DuplicateToolDefinition, InProcessToolDispatchGate, InProcessToolDispatchPermit, NoToolCatalog,
-    RetainedToolExecutionState, ToolApprovalIdGenerator, ToolArgumentValidator, ToolCatalog,
-    ToolCatalogValidationFailure, ToolDefinition, ToolExecutionIdGenerator,
-    ToolExecutionInvocation, ToolExecutionService, ToolExecutionServiceError,
-    ToolExecutionServiceOutcome, ToolExecutor, ToolExecutorEvidence, ToolInputSchema,
-    ToolInputSchemaError, ToolInputSchemaFailure, UuidV7ToolLoopIdGenerator,
+    DuplicateToolDefinition, NoToolCatalog, RetainedToolExecutionState, ToolApprovalIdGenerator,
+    ToolArgumentValidator, ToolCatalog, ToolCatalogValidationFailure, ToolDefinition,
+    ToolExecutionIdGenerator, ToolExecutionInvocation, ToolExecutionService,
+    ToolExecutionServiceError, ToolExecutionServiceOutcome, ToolExecutor, ToolExecutorEvidence,
+    ToolInputSchema, ToolInputSchemaError, ToolInputSchemaFailure, UuidV7ToolLoopIdGenerator,
 };
 pub use tool_loop_ports::{
     DecideToolRequestTransaction, PrepareToolContinuationOutcome, ResolvedToolConversationEntry,
-    RetainedToolAttemptObservationStatus, ToolContinuationIdentities, ToolExecutionTransaction,
+    RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationStatus,
+    ToolContinuationIdentities, ToolExecutionTransaction,
 };

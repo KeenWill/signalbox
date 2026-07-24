@@ -940,6 +940,15 @@ fn reconstitute_batch(
             ToolBatchReconstitutionFailure::ApprovalInventoryMismatch,
         ));
     }
+    let expected_issuing_attempt = match input.phase {
+        ToolBatchPhaseReconstitutionInput::Executing { turn_attempt } => Some(turn_attempt),
+        ToolBatchPhaseReconstitutionInput::AwaitingRecovery { attempt } => input
+            .attempts
+            .iter()
+            .find(|candidate| attempt_facts(candidate).0 == attempt)
+            .map(|candidate| attempt_facts(candidate).4),
+        ToolBatchPhaseReconstitutionInput::AwaitingApproval { .. } => None,
+    };
     let mut attempts = BTreeMap::new();
     let mut attempt_ids = BTreeSet::new();
     let mut live_attempt_count = 0usize;
@@ -979,9 +988,7 @@ fn reconstitute_batch(
         if is_live {
             live_attempt_count += 1;
         }
-        if let ToolBatchPhaseReconstitutionInput::Executing { turn_attempt } = input.phase
-            && issuing_attempt != turn_attempt
-        {
+        if expected_issuing_attempt.is_some_and(|expected| issuing_attempt != expected) {
             return Err(fail(
                 input,
                 ToolBatchReconstitutionFailure::AttemptAuthorizationMismatch,
@@ -996,22 +1003,18 @@ fn reconstitute_batch(
     }
     let mut missing_approved_attempt = false;
     let mut terminal_blocker_seen = false;
+    let mut live_attempt_seen = false;
     for request in &requests {
         match approvals.get(&request.id()) {
             Some(approval) if approval.is_approved() => {
                 if let Some(attempt) = attempts.get(&request.id()) {
-                    if missing_approved_attempt {
+                    if missing_approved_attempt || terminal_blocker_seen || live_attempt_seen {
                         return Err(fail(
                             input,
                             ToolBatchReconstitutionFailure::AttemptOrderMismatch,
                         ));
                     }
-                    if terminal_blocker_seen {
-                        return Err(fail(
-                            input,
-                            ToolBatchReconstitutionFailure::AttemptOrderMismatch,
-                        ));
-                    }
+                    live_attempt_seen = matches!(attempt, ReconstitutedToolAttempt::Current(_));
                     terminal_blocker_seen = matches!(
                         attempt,
                         ReconstitutedToolAttempt::Ended(ended)
@@ -1403,6 +1406,119 @@ mod tests {
         )
         .reconstitute()
         .expect_err("effect-free ambiguity is not trusted recovery evidence");
+
+        assert_eq!(
+            error.failure(),
+            ToolBatchReconstitutionFailure::AttemptAuthorizationMismatch
+        );
+    }
+
+    /// S10 / INV-006 / INV-011: a live serialized attempt is the last
+    /// attempt that can exist in proposal order.
+    #[test]
+    fn s10_inv006_inv011_reconstitution_rejects_attempt_after_live_attempt() {
+        let first = request(10, 0);
+        let second = request(11, 1);
+        let current = ToolAttemptReconstitutionInput::new(
+            tool_attempt_id(13),
+            first.id(),
+            session_id(1),
+            turn_id(2),
+            turn_attempt_id(12),
+            ToolEffectClass::EffectFree,
+            ToolDispatchGeneration::first(),
+            ToolAttemptReconstitutionState::Prepared,
+        )
+        .reconstitute();
+        let later = ToolAttemptReconstitutionInput::new(
+            tool_attempt_id(14),
+            second.id(),
+            session_id(1),
+            turn_id(2),
+            turn_attempt_id(12),
+            ToolEffectClass::EffectFree,
+            ToolDispatchGeneration::first(),
+            ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::KnownFailed {
+                error: crate::ToolExecutionError::new(
+                    ToolExecutionErrorKind::ExecutionFailed,
+                    None,
+                ),
+            }),
+        )
+        .reconstitute();
+        let error = ToolBatchReconstitutionInput::new(
+            session_id(1),
+            turn_id(2),
+            model_call_id(3),
+            yielded_snapshot(),
+            vec![first.clone(), second.clone()],
+            vec![
+                approval(first.id(), ToolApprovalDecision::Approve),
+                approval(second.id(), ToolApprovalDecision::Approve),
+            ],
+            vec![current, later],
+            ToolBatchPhaseReconstitutionInput::Executing {
+                turn_attempt: turn_attempt_id(12),
+            },
+        )
+        .reconstitute()
+        .expect_err("serialized execution cannot create work after a live attempt");
+
+        assert_eq!(
+            error.failure(),
+            ToolBatchReconstitutionFailure::AttemptOrderMismatch
+        );
+    }
+
+    /// S06 / INV-004 / INV-006: recovery evidence belongs to one issuing
+    /// continuation tenure throughout the complete batch.
+    #[test]
+    fn s06_inv004_inv006_recovery_rejects_mixed_issuing_attempts() {
+        let first = request(10, 0);
+        let second = request(11, 1);
+        let completed = ToolAttemptReconstitutionInput::new(
+            tool_attempt_id(13),
+            first.id(),
+            session_id(1),
+            turn_id(2),
+            turn_attempt_id(12),
+            ToolEffectClass::EffectFree,
+            ToolDispatchGeneration::first(),
+            ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::Completed {
+                result: ToolResultContent::Text(
+                    ToolResultText::try_new(String::from("ok")).expect("bounded result is valid"),
+                ),
+            }),
+        )
+        .reconstitute();
+        let ambiguous = ToolAttemptReconstitutionInput::new(
+            tool_attempt_id(14),
+            second.id(),
+            session_id(1),
+            turn_id(2),
+            turn_attempt_id(15),
+            ToolEffectClass::ExternalEffect,
+            ToolDispatchGeneration::first(),
+            ToolAttemptReconstitutionState::Ended(ToolAttemptEnd::Ambiguous),
+        )
+        .reconstitute();
+        let error = ToolBatchReconstitutionInput::new(
+            session_id(1),
+            turn_id(2),
+            model_call_id(3),
+            yielded_snapshot(),
+            vec![first.clone(), second.clone()],
+            vec![
+                approval(first.id(), ToolApprovalDecision::Approve),
+                approval(second.id(), ToolApprovalDecision::Approve),
+            ],
+            vec![completed, ambiguous],
+            ToolBatchPhaseReconstitutionInput::AwaitingRecovery {
+                attempt: tool_attempt_id(14),
+            },
+        )
+        .reconstitute()
+        .expect_err("one recovery batch cannot cross continuation tenures");
 
         assert_eq!(
             error.failure(),

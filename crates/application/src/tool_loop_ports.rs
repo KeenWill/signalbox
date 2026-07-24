@@ -7,11 +7,11 @@
 use std::future::Future;
 
 use signalbox_domain::{
-    AcceptedInputId, AuthorizedToolAttempt, CorrelatedToolAttemptObservation, DecideToolRequest,
-    EndedToolAttempt, FailedModelCallTurn, FailedModelCallTurnIdentities, ModelCallId,
-    PreparedDecideToolRequest, SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId,
-    ToolApprovalResolution, ToolAttemptCrashOutcome, ToolAttemptId, ToolBatch, ToolEffectClass,
-    ToolExecutionError, ToolRequest, TurnAttemptId, TurnId,
+    AcceptedInputId, AuthorizedToolAttempt, CorrelatedToolAttemptObservation, CurrentToolAttempt,
+    DecideToolRequest, EndedToolAttempt, FailedModelCallTurn, FailedModelCallTurnIdentities,
+    ModelCallId, PreparedDecideToolRequest, SemanticTranscriptEntryId, SemanticTranscriptEntryRef,
+    SessionId, ToolApprovalResolution, ToolAttemptCrashOutcome, ToolAttemptId, ToolBatch,
+    ToolEffectClass, ToolExecutionError, ToolRequest, TurnAttemptId, TurnId,
 };
 
 use crate::ClassifyOperatorFailure;
@@ -66,6 +66,15 @@ impl ResolvedToolConversationEntry {
             | Self::Closed { source, .. } => *source,
         }
     }
+}
+
+/// Authoritative reread after an ambiguous attempt-authorization commit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ToolAttemptAuthorizationStatus {
+    /// Authorization did not commit; the exact attempt remains prepared.
+    Prepared(CurrentToolAttempt),
+    /// Authorization committed; this exact fence may enter the executor.
+    InFlight(AuthorizedToolAttempt),
 }
 
 /// Transaction consuming one owner decision and advancing the exact wait.
@@ -186,6 +195,14 @@ pub trait ToolExecutionTransaction {
         turn: TurnId,
         attempt: ToolAttemptId,
     ) -> impl Future<Output = Result<AuthorizedToolAttempt, Self::Error>> + Send;
+
+    /// Rereads whether an ambiguously acknowledged authorization committed.
+    fn reread_ambiguous_authorization(
+        &mut self,
+        session: SessionId,
+        turn: TurnId,
+        attempt: ToolAttemptId,
+    ) -> impl Future<Output = Result<ToolAttemptAuthorizationStatus, Self::Error>> + Send;
 
     /// Commits a catalog/decode failure without authorizing an executor effect.
     fn commit_preflight_error(

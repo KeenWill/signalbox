@@ -210,35 +210,27 @@ pub struct SubmitInputService<Generator, Transaction, Nudge> {
     ids: Generator,
     transaction: Transaction,
     nudge: Nudge,
-    tool_dispatch_gate: Option<InProcessToolDispatchGate>,
+    tool_dispatch_gate: InProcessToolDispatchGate,
 }
 
 impl<Generator, Transaction, Nudge> SubmitInputService<Generator, Transaction, Nudge> {
     /// Composes the application identity, transaction, and nudge ports.
-    pub const fn new(ids: Generator, transaction: Transaction, nudge: Nudge) -> Self {
+    pub const fn new(
+        ids: Generator,
+        transaction: Transaction,
+        nudge: Nudge,
+        tool_dispatch_gate: InProcessToolDispatchGate,
+    ) -> Self {
         Self {
             ids,
             transaction,
             nudge,
-            tool_dispatch_gate: None,
+            tool_dispatch_gate,
         }
     }
 
-    /// Shares tool dispatch/interrupt ordering with tool execution.
-    pub fn with_tool_dispatch_gate(mut self, gate: InProcessToolDispatchGate) -> Self {
-        self.tool_dispatch_gate = Some(gate);
-        self
-    }
-
-    /// Returns all three ports, primarily for explicit ownership handoff.
-    pub fn into_parts(
-        self,
-    ) -> (
-        Generator,
-        Transaction,
-        Nudge,
-        Option<InProcessToolDispatchGate>,
-    ) {
+    /// Returns every port, primarily for explicit ownership handoff.
+    pub fn into_parts(self) -> (Generator, Transaction, Nudge, InProcessToolDispatchGate) {
         (
             self.ids,
             self.transaction,
@@ -274,9 +266,9 @@ where
             | DeliveryRequest::AfterCurrentTurn { .. }
             | DeliveryRequest::NextSafePoint { .. } => None,
         };
-        let _tool_dispatch_permit = match (&self.tool_dispatch_gate, interrupt_turn) {
-            (Some(gate), Some(turn)) => Some(gate.acquire(turn).await),
-            (Some(_) | None, None) | (None, Some(_)) => None,
+        let _tool_dispatch_permit = match interrupt_turn {
+            Some(turn) => Some(self.tool_dispatch_gate.acquire(turn).await),
+            None => None,
         };
         let turn = match request.delivery {
             DeliveryRequest::NextSafePoint { .. } => None,
@@ -643,26 +635,13 @@ mod tests {
             FakeIds::expecting_no_calls(),
             FakeTransaction::expecting_no_calls(),
             FakeNudge::default(),
+            InProcessToolDispatchGate::default(),
         );
         let (ids, transaction, nudge, _) = service.into_parts();
         assert_eq!(ids.accepted_input_calls, 0);
         assert_eq!(ids.turn_calls, 0);
         assert!(transaction.observed.is_empty());
         assert!(nudge.observed.into_inner().is_empty());
-    }
-
-    /// Decision log 2026-07-20: exact-bound text remains admissible before
-    /// canonical command construction, including a multi-byte terminal scalar.
-    #[test]
-    fn accepted_input_content_at_the_utf8_byte_bound_is_admitted() {
-        let mut exact = "a".repeat(SubmitInputRequest::MAX_CONTENT_UTF8_BYTES - 2);
-        exact.push('\u{e9}');
-
-        let request =
-            SubmitInputRequest::try_new(command_id(1), session_id(2), content(&exact), delivery(1))
-                .expect("text ending exactly at the UTF-8 byte bound is admitted");
-
-        assert_eq!(request.content().text().as_str().len(), 1_048_576);
     }
 
     /// INV-011 / INV-037: immediate interrupt handling waits on the same
@@ -690,8 +669,8 @@ mod tests {
             FakeIds::new([accepted_input_id(11)], [turn_id(12)]),
             FakeTransaction::returning([Ok(expected.clone())]),
             FakeNudge::default(),
-        )
-        .with_tool_dispatch_gate(gate);
+            gate,
+        );
         let mut handling = Box::pin(service.execute(request));
 
         assert!(
@@ -702,6 +681,20 @@ mod tests {
         );
         drop(permit);
         assert_eq!(handling.await.expect("fake transaction succeeds"), expected);
+    }
+
+    /// Decision log 2026-07-20: exact-bound text remains admissible before
+    /// canonical command construction, including a multi-byte terminal scalar.
+    #[test]
+    fn accepted_input_content_at_the_utf8_byte_bound_is_admitted() {
+        let mut exact = "a".repeat(SubmitInputRequest::MAX_CONTENT_UTF8_BYTES - 2);
+        exact.push('\u{e9}');
+
+        let request =
+            SubmitInputRequest::try_new(command_id(1), session_id(2), content(&exact), delivery(1))
+                .expect("text ending exactly at the UTF-8 byte bound is admitted");
+
+        assert_eq!(request.content().text().as_str().len(), 1_048_576);
     }
 
     /// Decision log 2026-07-20: oversized text is rejected at the application
@@ -765,6 +758,7 @@ mod tests {
             FakeIds::new([accepted_input], [turn]),
             FakeTransaction::returning([Ok(expected.clone())]),
             FakeNudge::default(),
+            InProcessToolDispatchGate::default(),
         );
 
         let actual =
@@ -810,6 +804,7 @@ mod tests {
             FakeIds::new([accepted_input_id(4)], NO_TURN_CANDIDATES),
             FakeTransaction::returning([Ok(expected.clone())]),
             FakeNudge::default(),
+            InProcessToolDispatchGate::default(),
         );
 
         assert_eq!(
@@ -837,6 +832,7 @@ mod tests {
             FakeIds::new([accepted_input_id(8)], [turn_id(9)]),
             FakeTransaction::returning([Ok(expected.clone())]),
             FakeNudge::default(),
+            InProcessToolDispatchGate::default(),
         );
 
         assert_eq!(
@@ -919,6 +915,7 @@ mod tests {
             ),
             FakeTransaction::returning([Ok(expected.clone()), Ok(expected.clone())]),
             FakeNudge::default(),
+            InProcessToolDispatchGate::default(),
         );
 
         let first = run_ready(service.execute(request.clone())).expect("first invocation succeeds");
@@ -952,6 +949,7 @@ mod tests {
             FakeIds::new([accepted_input_id(4)], [turn_id(5)]),
             FakeTransaction::returning([Ok(expected.clone())]),
             FakeNudge::default(),
+            InProcessToolDispatchGate::default(),
         );
 
         let actual = run_ready(service.execute(request)).expect("conflict is terminal");
@@ -971,6 +969,7 @@ mod tests {
             FakeIds::new([accepted_input_id(4)], [turn_id(5)]),
             FakeTransaction::returning([Err(FakeTransactionError::Unavailable)]),
             FakeNudge::default(),
+            InProcessToolDispatchGate::default(),
         );
 
         let error = run_ready(service.execute(request(1)))

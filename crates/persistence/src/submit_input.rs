@@ -441,6 +441,7 @@ impl SubmitInputRepository {
 
     /// Handles one command using hub-minted cancellation/reclassification
     /// candidates and the deployment's immutable alias definitions.
+    #[allow(clippy::too_many_arguments)]
     pub async fn handle_with_candidates_and_alias_resolver<NextTurn, NextToolCancellation>(
         &self,
         command: SubmitInput,
@@ -559,6 +560,7 @@ impl SubmitInputTransaction for SubmitInputRepository {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_in_transaction<NextTurn, NextToolCancellation>(
     connection: &mut PgConnection,
     command: SubmitInput,
@@ -789,12 +791,6 @@ where
                     .ok_or(SubmitInputCorruption::Inconsistent(
                         "ambiguous tool attempt evidence",
                     ))?;
-                let turn_attempt_disposition = load_unstopped_recovery_turn_attempt_disposition(
-                    connection,
-                    interrupt.session(),
-                    wait,
-                )
-                .await?;
                 let source_snapshot = batch.yielded_snapshot().clone();
                 let active_turn = scheduling.active_turn_execution().ok_or(
                     SubmitInputCorruption::Inconsistent(
@@ -811,7 +807,6 @@ where
                         .apply_interrupt_to_tool_recovery(
                             wait,
                             tool_attempt,
-                            turn_attempt_disposition,
                             source_snapshot,
                             interrupt,
                             identities.into_ambiguous(),
@@ -894,40 +889,6 @@ where
     Ok(TransactionDecision::Commit(
         SubmitInputHandlingOutcome::Recorded(recorded),
     ))
-}
-
-async fn load_unstopped_recovery_turn_attempt_disposition(
-    connection: &mut PgConnection,
-    session: SessionId,
-    wait: signalbox_domain::AwaitingToolRecovery,
-) -> Result<UnstoppedAttemptDisposition, SubmitInputRepositoryError> {
-    let row = sqlx::query(
-        "SELECT state_kind, end_variant, end_disposition
-           FROM turn_attempt
-          WHERE turn_attempt_id = $1
-            AND turn_id = $2
-            AND session_id = $3",
-    )
-    .bind(wait.issuing_attempt().into_uuid())
-    .bind(turn_id_to_uuid(wait.turn()))
-    .bind(session_id_to_uuid(session))
-    .fetch_optional(&mut *connection)
-    .await?
-    .ok_or(SubmitInputCorruption::Missing("tool recovery turn attempt"))?;
-    if required::<String>(&row, "state_kind")? != "ended"
-        || required::<String>(&row, "end_variant")? != "without_stop"
-    {
-        return Err(SubmitInputCorruption::Inconsistent("tool recovery turn attempt end").into());
-    }
-    match required::<String>(&row, "end_disposition")?.as_str() {
-        "ambiguous" => Ok(UnstoppedAttemptDisposition::Ambiguous),
-        "lost" => Ok(UnstoppedAttemptDisposition::Lost),
-        value => Err(SubmitInputCorruption::Unsupported {
-            field: "tool recovery turn attempt end_disposition",
-            value: value.to_owned(),
-        }
-        .into()),
-    }
 }
 
 async fn require_recorded(

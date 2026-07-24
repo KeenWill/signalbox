@@ -122,6 +122,7 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
         UuidV7SubmitInputIdGenerator,
         SubmitInputRepository::new(pool.clone()),
         nudge,
+        signalbox_application::InProcessToolDispatchGate::default(),
     );
     let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
         SubmitInputAppliedResult::TurnOrigin(origin),
