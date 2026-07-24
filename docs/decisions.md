@@ -10,6 +10,26 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-24 — Retain checked provider JSON as raw text
+
+**Context.** Guarded deserialization admitted deeply nested tool schemas, but an
+owned `serde_json::Value` still made cloning, provider translation, and final
+drop recursively traverse the decoded tree. Durable schemas and replay arguments
+need syntax and object-shape checks, not random access to a native tree.
+
+**Decision.** After bounded domain admission, retain schemas and replay
+arguments as `serde_json::value::RawValue` through both provider request
+translators and wire serialization. Validate the root object shape from the
+already checked raw token. Typed application decoding remains unchanged.
+
+**Rejected alternatives.** A lower nesting limit would narrow the accepted
+schema contract. Keeping `Value` only until provider translation leaves clone
+and drop paths exposed. A second JSON parser would duplicate a focused,
+already-pinned capability.
+
+**Affects.** `signalbox-model-runtime`, `signalbox-model-provider-runtime`, both
+provider adapters, and their deep-lifetime tests.
+
 ## 2026-07-24 — Guard provider tool-schema decoding against stack depth
 
 **Context.** Application tool schemas are valid, object-shaped, and bounded, but
