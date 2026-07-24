@@ -47,6 +47,7 @@ CREATE TABLE imported_conversation_raw_record (
     imported_conversation_id uuid NOT NULL,
     raw_record_position numeric(20, 0) NOT NULL,
     content_hash bytea NOT NULL,
+    conversion_digest bytea NOT NULL,
     normalized_value_encoding bytea NOT NULL,
     declared_entry_count numeric(20, 0) NOT NULL,
 
@@ -64,6 +65,8 @@ CREATE TABLE imported_conversation_raw_record (
         ),
     CONSTRAINT imported_conversation_raw_record_hash_size
         CHECK (octet_length(content_hash) = 32),
+    CONSTRAINT imported_conversation_raw_record_conversion_digest_size
+        CHECK (octet_length(conversion_digest) = 32),
     CONSTRAINT imported_conversation_raw_record_encoding_nonempty
         CHECK (octet_length(normalized_value_encoding) >= 1),
     CONSTRAINT imported_conversation_raw_record_owner_fk
