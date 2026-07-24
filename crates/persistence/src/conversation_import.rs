@@ -7,10 +7,10 @@ use signalbox_application::{ImportedConversationStore, ImportedConversationStore
 use signalbox_domain::{
     ImportedConversation, ImportedConversationFormat, ImportedConversationId,
     ImportedConversationReconstitutionFailure, ImportedConversationReconstitutionInput,
-    ImportedConversationSourceDigest, ImportedRawRecordHash, ImportedRawRecordPosition,
-    ImportedRawSourceRecordReconstitutionInput, ImportedRecordEntryPosition,
-    ImportedSourceAttestation, ImportedSpeaker, ImportedTranscriptEntryId,
-    ImportedTranscriptEntryInput, ImportedTranscriptPosition,
+    ImportedConversationSourceDigest, ImportedRawRecordConversionDigest, ImportedRawRecordHash,
+    ImportedRawRecordPosition, ImportedRawSourceRecordReconstitutionInput,
+    ImportedRecordEntryPosition, ImportedSourceAttestation, ImportedSpeaker,
+    ImportedTranscriptEntryId, ImportedTranscriptEntryInput, ImportedTranscriptPosition,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -365,6 +365,7 @@ impl EncodedConversation {
             .map(|(raw, declared_entry_count)| {
                 Ok(EncodedRawRecord {
                     content_hash: raw.content_hash(),
+                    conversion_digest: raw.conversion_digest(),
                     bytes: raw.bytes().to_vec(),
                     normalized: encode_structured(raw.normalized())
                         .map_err(|failure| encoding_corruption("normalized value", failure))?,
@@ -400,6 +401,7 @@ impl EncodedConversation {
 
 struct EncodedRawRecord {
     content_hash: ImportedRawRecordHash,
+    conversion_digest: ImportedRawRecordConversionDigest,
     bytes: Vec<u8>,
     normalized: Vec<u8>,
     declared_entry_count: u64,
@@ -485,12 +487,14 @@ async fn insert_raw_occurrences(
         sqlx::query(
             "INSERT INTO imported_conversation_raw_record
                 (imported_conversation_id, raw_record_position, content_hash,
-                 normalized_value_encoding, declared_entry_count)
-             VALUES ($1, $2, $3, $4, $5)",
+                 conversion_digest, normalized_value_encoding,
+                 declared_entry_count)
+             VALUES ($1, $2, $3, $4, $5, $6)",
         )
         .bind(conversation.into_uuid())
         .bind(Decimal::from(ordinal(index)?))
         .bind(hash)
+        .bind(raw.conversion_digest.as_bytes().as_slice())
         .bind(&raw.normalized)
         .bind(Decimal::from(raw.declared_entry_count))
         .execute(&mut *connection)
@@ -619,7 +623,7 @@ async fn decode_complete(
 
     let raw_rows = sqlx::query(
         "SELECT occurrence.raw_record_position, occurrence.content_hash,
-                occurrence.normalized_value_encoding,
+                occurrence.conversion_digest, occurrence.normalized_value_encoding,
                 occurrence.declared_entry_count, blob.raw_bytes
            FROM imported_conversation_raw_record AS occurrence
            LEFT JOIN imported_raw_source_record AS blob
@@ -643,13 +647,22 @@ async fn decode_complete(
             "raw-record hash",
             ImportedRawRecordHash::from_bytes,
         )?;
+        let conversion_digest = digest_from_bytes(
+            row.try_get("conversion_digest")?,
+            "raw-record conversion digest",
+            ImportedRawRecordConversionDigest::from_bytes,
+        )?;
         let bytes: Option<Vec<u8>> = row.try_get("raw_bytes")?;
         let bytes = bytes.ok_or(ImportedConversationCorruption::Missing("raw bytes"))?;
         let normalized_encoding: Vec<u8> = row.try_get("normalized_value_encoding")?;
         let normalized = decode_structured(&normalized_encoding)
             .map_err(|failure| encoding_corruption("normalized value", failure))?;
         raws.push(ImportedRawSourceRecordReconstitutionInput::new(
-            position, hash, bytes, normalized,
+            position,
+            hash,
+            conversion_digest,
+            bytes,
+            normalized,
         ));
         declared_entries_by_raw.insert(position, declared_entry_count);
     }

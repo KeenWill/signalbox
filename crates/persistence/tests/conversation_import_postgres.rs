@@ -398,11 +398,13 @@ async fn inv001_late_entry_identity_constraint_is_typed_collision() -> Result<()
     sqlx::query(
         "INSERT INTO imported_conversation_raw_record
             (imported_conversation_id, raw_record_position, content_hash,
-             normalized_value_encoding, declared_entry_count)
-         VALUES ($1, 1, $2, $3, 1)",
+             conversion_digest, normalized_value_encoding,
+             declared_entry_count)
+         VALUES ($1, 1, $2, $3, $4, 1)",
     )
     .bind(Uuid::from_u128(0xa10))
     .bind(vec![0x11_u8; 32])
+    .bind(vec![0x12_u8; 32])
     .bind(vec![0x13_u8])
     .execute(&mut *transaction)
     .await?;
@@ -540,6 +542,63 @@ async fn inv002_inv038_corrupt_import_fails_typed_load() -> Result<(), Box<dyn E
         error,
         ImportedConversationRepositoryError::Corruption(ImportedConversationCorruption::Domain(
             ImportedConversationReconstitutionFailure::DeclaredEntryCountMismatch { .. }
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-002 / INV-038: normalized storage cannot be replaced independently from
+/// the exact raw record and its conversion authentication.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv002_inv038_corrupt_normalized_record_fails_typed_load() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let winner = ImportedConversationId::from_uuid(Uuid::from_u128(0x520));
+    let donor = ImportedConversationId::from_uuid(Uuid::from_u128(0x530));
+    let repository = ImportedConversationRepository::new(pool.clone());
+    let mut service = ImportConversationService::new(
+        FixedIds::new(&[0x520, 0x530], [0x521, 0x531]),
+        ClaudeCodeJsonlConverter,
+        repository.clone(),
+    );
+    service
+        .execute(br#"{"type":"summary","value":"original"}"#)
+        .await?;
+    service
+        .execute(br#"{"type":"summary","value":"changed"}"#)
+        .await?;
+
+    sqlx::query("ALTER TABLE imported_conversation_raw_record DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE imported_conversation_raw_record AS target
+            SET normalized_value_encoding = donor.normalized_value_encoding
+           FROM imported_conversation_raw_record AS donor
+          WHERE target.imported_conversation_id = $1
+            AND target.raw_record_position = 1
+            AND donor.imported_conversation_id = $2
+            AND donor.raw_record_position = 1",
+    )
+    .bind(winner.into_uuid())
+    .bind(donor.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE imported_conversation_raw_record ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+
+    let error = repository
+        .load(winner)
+        .await
+        .expect_err("normalized record contradicting its raw conversion must not load");
+    assert!(matches!(
+        error,
+        ImportedConversationRepositoryError::Corruption(ImportedConversationCorruption::Domain(
+            ImportedConversationReconstitutionFailure::RawRecordConversionDigestMismatch { .. }
         ))
     ));
 
