@@ -23,7 +23,7 @@ use crate::{
     ClassifyOperatorFailure, DecideToolRequestTransaction, InProcessToolDispatchGate,
     InProcessToolDispatchPermit, OperatorFailureClass, PrepareToolContinuationOutcome,
     RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationStatus,
-    ToolContinuationIdentities, ToolExecutionTransaction,
+    ToolContinuationIdentities, ToolCrashClosureIdentities, ToolExecutionTransaction,
 };
 
 /// Canonical JSON object used as a model-facing argument schema.
@@ -899,9 +899,15 @@ where
                             .await
                     }
                     CurrentToolAttemptState::InFlight => loop {
-                        let identities = FailedModelCallTurnIdentities::new(
-                            self.ids.next_tool_semantic_entry_id(),
+                        let identities = ToolCrashClosureIdentities::new(
+                            (0..batch.requests().len())
+                                .map(|_| self.ids.next_tool_semantic_entry_id())
+                                .collect(),
                             self.ids.next_tool_context_frontier_id(),
+                            FailedModelCallTurnIdentities::new(
+                                self.ids.next_tool_semantic_entry_id(),
+                                self.ids.next_tool_context_frontier_id(),
+                            ),
                         );
                         let ids = &mut self.ids;
                         match self
@@ -1483,7 +1489,7 @@ mod tests {
             _session: SessionId,
             _turn: TurnId,
             _attempt: ToolAttemptId,
-            _failure_identities: FailedModelCallTurnIdentities,
+            _identities: ToolCrashClosureIdentities,
             _next_turn: NextTurn,
         ) -> Result<ToolAttemptCrashOutcome, Self::Error>
         where
