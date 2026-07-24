@@ -900,8 +900,9 @@ those tests.
   projection; the existing scheduler and model path own all native execution
   after the seed boundary.
 - **Failure behavior:** Malformed or unsupported source content rejects the
-  whole conversion. Import, storage, missing-target, replay, rendering, and
-  crash behavior follow the same owning specifications linked above.
+  whole conversion. Import, missing-target, replay, and rendering follow the
+  same owning specifications linked above; transactional storage, crash, and
+  outbox behavior follow [persistence protocol](spec/persistence-protocol.md).
 - **Required invariants:** INV-001, INV-002, INV-003, INV-005, INV-007, INV-009,
   INV-012, INV-014, INV-015, INV-026, INV-032, INV-038, INV-039.
 - **Remaining questions:** Additional source converters, import discovery and
