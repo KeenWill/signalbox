@@ -11,6 +11,7 @@ use signalbox_domain::{
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
+use crate::imported_session::{self, ImportedSessionCorruption, ImportedSessionRepositoryError};
 use crate::mapping::{
     PositiveOrdinalMappingError, defaults_version_from_numeric, session_id_from_uuid,
     session_id_to_uuid,
@@ -42,6 +43,8 @@ pub enum SessionCorruption {
     },
     /// Complete checked values fail domain-owned aggregate correlation.
     Domain(SessionReconstitutionFailure),
+    /// Imported ancestry or its immutable seed projection is corrupt.
+    Imported(ImportedSessionCorruption),
 }
 
 impl fmt::Display for SessionCorruption {
@@ -63,6 +66,7 @@ impl fmt::Display for SessionCorruption {
                     "Session domain reconstitution failed: {failure:?}"
                 )
             }
+            Self::Imported(error) => error.fmt(formatter),
         }
     }
 }
@@ -125,8 +129,11 @@ impl SessionRepository {
     ///
     /// The query is driven by `session` and left-joins the authoritative
     /// current-defaults pointer and exactly the immutable defaults row selected
-    /// by that pointer. It intentionally loads no creation receipt, transcript,
-    /// turn, command history, or unselected defaults version.
+    /// by that pointer. Imported ancestry additionally joins its one-to-one
+    /// seed record and seed-frontier header as a constant-size proof. It
+    /// intentionally loads no imported aggregate, frontier membership,
+    /// semantic entry, creation receipt, turn, command history, or unselected
+    /// defaults version.
     pub async fn load_session(
         &self,
         requested_session: SessionId,
@@ -154,21 +161,36 @@ pub(crate) async fn load_session_from_connection(
     let rows = sqlx::query(
         "SELECT
             s.session_id AS stored_session_id,
-            s.creation_cause,
-            s.ancestry_kind,
+            s.creation_cause AS stored_cause,
+            s.ancestry_kind AS stored_ancestry,
+            s.imported_conversation_id AS stored_conversation_id,
+            s.imported_frontier_entry_id AS stored_frontier_entry_id,
+            s.imported_frontier_position AS stored_frontier_position,
+            s.imported_relationship_kind AS stored_relationship_kind,
             p.session_id AS current_defaults_session_id,
             p.current_version,
             v.session_id AS selected_defaults_session_id,
             v.version AS selected_defaults_version,
             v.model_selection_kind,
             v.direct_model_selection_id,
-            v.model_alias_id
+            v.model_alias_id,
+            seed.session_id AS seed_session_id,
+            seed.seed_context_frontier_id,
+            seed_frontier.owning_session_id AS seed_frontier_session_id,
+            seed_frontier.context_frontier_id AS seed_frontier_id,
+            seed_frontier.member_count AS seed_frontier_member_count
          FROM session AS s
          LEFT JOIN session_current_defaults AS p
            ON p.session_id = s.session_id
          LEFT JOIN session_defaults_version AS v
            ON v.session_id = p.session_id
           AND v.version = p.current_version
+         LEFT JOIN imported_session_seed AS seed
+           ON seed.session_id = s.session_id
+         LEFT JOIN context_frontier AS seed_frontier
+           ON seed_frontier.owning_session_id = seed.session_id
+          AND seed_frontier.context_frontier_id =
+                  seed.seed_context_frontier_id
          WHERE s.session_id = $1",
     )
     .bind(session_id_to_uuid(requested_session))
@@ -192,11 +214,18 @@ fn decode_complete(
     row: PgRow,
     requested_session: SessionId,
 ) -> Result<Session, SessionRepositoryError> {
+    let ancestry: String = required(&row, "stored_ancestry")?;
+    if ancestry == "imported_conversation" {
+        return imported_session::reconstitute_bounded_current(requested_session, row)
+            .map_err(map_imported_error);
+    }
+    if row.try_get::<Option<Uuid>, _>("seed_session_id")?.is_some() {
+        return Err(
+            SessionCorruption::Inconsistent("non-imported session has an imported seed").into(),
+        );
+    }
     let stored_session = session_id_from_uuid(required(&row, "stored_session_id")?);
-    let provenance = decode_provenance(
-        required(&row, "creation_cause")?,
-        required(&row, "ancestry_kind")?,
-    )?;
+    let provenance = decode_provenance(required(&row, "stored_cause")?, ancestry)?;
     let current_defaults_session =
         session_id_from_uuid(required(&row, "current_defaults_session_id")?);
     let current_defaults_version = decode_ordinal(&row, "current_version")?;
@@ -220,6 +249,25 @@ fn decode_complete(
     )
     .reconstitute()
     .map_err(|error| SessionCorruption::Domain(error.failure()).into())
+}
+
+fn map_imported_error(error: ImportedSessionRepositoryError) -> SessionRepositoryError {
+    match error {
+        ImportedSessionRepositoryError::Database(error) => SessionRepositoryError::Database(error),
+        ImportedSessionRepositoryError::Corruption(error) => {
+            SessionRepositoryError::Corruption(SessionCorruption::Imported(error))
+        }
+        ImportedSessionRepositoryError::CommitAmbiguous(_) => {
+            SessionRepositoryError::Corruption(SessionCorruption::Inconsistent(
+                "imported load reported an impossible commit ambiguity",
+            ))
+        }
+        ImportedSessionRepositoryError::Preparation(_) => {
+            SessionRepositoryError::Corruption(SessionCorruption::Inconsistent(
+                "imported load reported an impossible preparation failure",
+            ))
+        }
+    }
 }
 
 fn required<T>(row: &PgRow, field: &'static str) -> Result<T, SessionRepositoryError>
