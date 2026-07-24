@@ -183,6 +183,35 @@ Deferred deliberately: a wrapped CLI de-risks the same wire behavior first; take
 this only if subprocess overhead proves unacceptable, and record the accepted
 cost before starting. Codex source is Apache-2.0 (attribution/patent terms).
 
+## Provider account pools and limit-aware dispatch [blocked-on: provider dispatch mechanism (first subscription-runtime wiring); owner design pass] [size: M-L]
+
+Owns: an account concept and account-aware dispatch/selection policy, account
+cooldown state, and additive evidence enrichment (capturing provider retry-after
+material). Collides-with: hubd composition/dispatch — the same surface as the
+first subscription wiring and the OpenAI composition wiring — and scheduler
+policy surfaces. Generalizes the dispatch concern of the subscription-runtimes
+entry above: spread sessions and calls across multiple provider accounts —
+several API accounts per provider and several subscription accounts (for the
+CLI-wrapped runtimes an account is effectively the subprocess's profile/home).
+The foundation is already in place: the evidence taxonomy distinguishes
+RateLimited from QuotaExhausted (billing, never retry-later) from Overloaded,
+and every model call durably pins its credential reference at Prepared, so
+per-account attribution of past calls already exists in storage. Direction the
+owner set: account affinity is per-session by default — a session sticks to one
+account, preserving provider-side prompt-cache locality; switching accounts or
+even providers *within* a session is considered only in the failure case (rate
+limit, quota exhaustion, overload), where cache locality is already forfeit
+anyway. Open tensions the spec-diff at pickup must resolve, not this entry: (1)
+reaction policy — today any ProviderError, rate limits included, is KnownFailed
+and the turn simply fails; cooldown-and-route-subsequent-work-elsewhere fits the
+no-automatic-retry doctrine, while re-dispatching the failed turn on another
+account is automatic retry in effect and needs an explicit owner decision; (2)
+retry/backoff conditions per error kind (retry-after-honoring cooldowns for
+RateLimited, account-dead for QuotaExhausted, spread for Overloaded); (3) for
+subscription accounts, the terms-of-service texture of multi-account spreading —
+the same bucket as the existing owner ToS-cost gate on the reimplementation
+track.
+
 ## Native client rewire, macOS first [blocked-on: client stack + snapshot import merges] [size: L]
 
 Owns: `clients/native`, possibly additive process-protocol frames.
