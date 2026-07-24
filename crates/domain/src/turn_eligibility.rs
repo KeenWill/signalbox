@@ -1680,6 +1680,7 @@ pub struct AcceptedInputSchedulingProjection {
     snapshots: BTreeMap<ContextFrontierId, ResolvedContextFrontierSnapshot>,
     attempt_owners: BTreeMap<TurnAttemptId, TurnId>,
     active_model_call_recovery: Option<ActiveModelCallRecoveryWait>,
+    active_tool_recovery_attempt: Option<EndedTurnAttempt>,
 }
 
 impl AcceptedInputSchedulingProjection {
@@ -1807,7 +1808,6 @@ impl AcceptedInputSchedulingProjection {
         self,
         wait: crate::AwaitingToolRecovery,
         tool_attempt: crate::EndedToolAttempt,
-        attempt_disposition: UnstoppedAttemptDisposition,
         source_snapshot: ResolvedContextFrontierSnapshot,
         interrupt: AppliedInterruptCommandResult,
         identities: crate::AmbiguousModelCallTurnIdentities,
@@ -1815,11 +1815,14 @@ impl AcceptedInputSchedulingProjection {
         let active_turn = self
             .active_turn_execution()
             .ok_or(crate::ModelCallClosureError::AttemptStateMismatch)?;
+        let attempt = self
+            .active_tool_recovery_attempt
+            .ok_or(crate::ModelCallClosureError::AttemptStateMismatch)?;
         crate::model_execution::apply_interrupt_to_tool_recovery_wait(
             active_turn,
             wait,
             tool_attempt,
-            attempt_disposition,
+            attempt,
             source_snapshot,
             interrupt,
             identities,
@@ -3101,6 +3104,7 @@ fn reconstitute_inner(
     let mut previous_terminal: Option<(TurnId, ResolvedContextFrontierSnapshot)> = None;
     let mut active = None;
     let mut active_model_call_recovery = None;
+    let mut active_tool_recovery_attempt = None;
     let mut queued_seen = false;
     let mut referenced_snapshots = consumed_snapshots;
     let mut attempt_owners = BTreeMap::new();
@@ -3247,14 +3251,15 @@ fn reconstitute_inner(
                                 );
                             }
                         };
-                        if canonical_end.is_err() {
+                        let Ok(canonical_end) = canonical_end else {
                             return Err(
                                 AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
                                     turn,
                                     accepted_input: record.accepted_input.id(),
                                 },
                             );
-                        }
+                        };
+                        active_tool_recovery_attempt = Some(canonical_end);
                         ActiveTurnPhase::AwaitingRecoveryDecision {
                             ambiguous_operations: NonEmptyIssuedOperationRefs::singleton(
                                 crate::IssuedOperationRef::ToolAttempt(wait.attempt()),
@@ -4240,6 +4245,7 @@ fn reconstitute_inner(
         snapshots,
         attempt_owners,
         active_model_call_recovery,
+        active_tool_recovery_attempt,
     })
 }
 
@@ -4499,6 +4505,7 @@ fn scheduling_record_is_terminal(record: &AcceptedInputTurnSchedulingRecord) -> 
             | AcceptedInputTurnSchedulingRecordState::TerminalRefused { .. }
             | AcceptedInputTurnSchedulingRecordState::TerminalCancelled { .. }
             | AcceptedInputTurnSchedulingRecordState::TerminalReconciliationRequired { .. }
+            | AcceptedInputTurnSchedulingRecordState::TerminalToolReconciliationRequired { .. }
     )
 }
 
@@ -9032,24 +9039,99 @@ mod tests {
                 ..
             } if *turn == active.turn()
         ));
+        let successor = accepted_origin(2);
+        let successor_order = AcceptedInputQueueOrder::interrupt_immediately_after(
+            successor.position(),
+            active.turn(),
+        );
+        let interrupt = AppliedInterruptCommandResult::from_correlated_submit(
+            command_id(90),
+            session.id(),
+            active.turn(),
+            successor.accepted_input(),
+            successor.turn(),
+            successor_order,
+        )
+        .expect("the fixture interrupt is exactly correlated");
+        let terminal_tool_reconciliation = active.record(
+            &session,
+            AcceptedInputTurnSchedulingRecordState::TerminalToolReconciliationRequired {
+                starting_lineage: AcceptedInputStartingLineage::FirstInSession,
+                starting_frontier: starting_frontier.id(),
+                reconciling_attempt: issuing_attempt,
+                reconciling_attempt_end: TerminalAttemptEndReconstitutionInput::after_cancellation(
+                    CancellationStopDisposition::Lost,
+                    interrupt,
+                ),
+                ambiguous_tool: wait,
+                interrupt,
+                terminal_frontier: starting_frontier.id(),
+            },
+        );
+        assert!(
+            scheduling_record_is_terminal(&terminal_tool_reconciliation),
+            "tool reconciliation is terminal historical proof"
+        );
         let active_record = active.record(
             &session,
             AcceptedInputTurnSchedulingRecordState::Active {
                 starting_lineage: AcceptedInputStartingLineage::FirstInSession,
                 starting_frontier: starting_frontier.id(),
-                phase: ActiveTurnSchedulingReconstitutionInput::awaiting_tool_recovery(
+                phase:
+                    ActiveTurnSchedulingReconstitutionInput::awaiting_tool_recovery_after_cancellation_restart(
                     active.turn(),
                     issuing_attempt,
                     wait,
+                    interrupt,
                 ),
             },
         );
+        let successor_delivery = DeliveryRequest::Interrupt {
+            expected_active_turn: active.turn(),
+            configuration: PerInputConfigurationChoices::new(
+                SessionConfigurationDefaultsVersion::first(),
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+        };
+        let successor_record = successor.record_with(
+            &session,
+            OriginRecordFacts {
+                order: successor_order,
+                delivery: successor_delivery,
+                state: AcceptedInputTurnSchedulingRecordState::Queued,
+            },
+        );
+        let acceptance_tail = SessionAcceptanceTailReconstitutionInput::new(
+            session.id(),
+            active.accepted_input(),
+            successor.position(),
+            vec![
+                SessionAcceptanceTailEntryReconstitutionInput::new(
+                    session.id(),
+                    AcceptedInputLifecycle::new(
+                        active.accepted_input(),
+                        AcceptedInputDisposition::OriginOf(active.turn()),
+                    ),
+                    active.position(),
+                    default_origin_delivery(),
+                ),
+                SessionAcceptanceTailEntryReconstitutionInput::new(
+                    session.id(),
+                    AcceptedInputLifecycle::new(
+                        successor.accepted_input(),
+                        AcceptedInputDisposition::OriginOf(successor.turn()),
+                    ),
+                    successor.position(),
+                    successor_delivery,
+                ),
+            ],
+        );
         let projection = AcceptedInputSchedulingReconstitutionInput::new(
             session.clone(),
-            vec![active_record],
+            vec![active_record, successor_record],
             vec![active.entry(&session, origin_entry)],
             vec![starting_frontier.snapshot(&session, &[origin_entry])],
-            Some(active.active_tail(&session)),
+            Some(acceptance_tail),
         )
         .reconstitute()
         .expect("the opaque tool wait and ended turn attempt are correlated");
@@ -9067,20 +9149,6 @@ mod tests {
             )
         ));
 
-        let successor = accepted_origin(2);
-        let successor_order = AcceptedInputQueueOrder::interrupt_immediately_after(
-            successor.position(),
-            active.turn(),
-        );
-        let interrupt = AppliedInterruptCommandResult::from_correlated_submit(
-            command_id(90),
-            session.id(),
-            active.turn(),
-            successor.accepted_input(),
-            successor.turn(),
-            successor_order,
-        )
-        .expect("the fixture interrupt is exactly correlated");
         let ended_tool = batch
             .requests()
             .iter()
@@ -9099,13 +9167,19 @@ mod tests {
             .apply_interrupt_to_tool_recovery(
                 wait,
                 ended_tool,
-                UnstoppedAttemptDisposition::Ambiguous,
                 batch.yielded_snapshot().clone(),
                 interrupt,
                 crate::AmbiguousModelCallTurnIdentities::new(frontier(41).id()),
             )
             .expect("the interrupt retains exact tool ambiguity");
         assert_eq!(reconciled.tool_attempt().attempt(), tool_attempt_id(80));
+        assert_eq!(
+            reconciled.attempt().end(),
+            &AttemptEnd::AfterCancellation {
+                cause: interrupt.proof(),
+                disposition: CancellationStopDisposition::Lost,
+            }
+        );
         assert_eq!(
             reconciled
                 .terminal_snapshot()

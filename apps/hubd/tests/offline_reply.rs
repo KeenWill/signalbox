@@ -9,10 +9,10 @@ use std::{error::Error, process::Command, time::Duration};
 use signalbox_application::{
     ClassifyOperatorFailure, CorrelatedToolExecutorEvidence, CreateSessionOutcome,
     CreateSessionRequest, CreateSessionService, InProcessAttemptDispatchGate,
-    InProcessEligibilityWorkSource, InProcessToolDispatchGate, ModelCallCredentialReference,
-    NoToolCatalog, OperatorFailureClass, SchedulerLoop, SchedulerLoopExit,
-    StartEligibleTurnService, SubmitInputOutcome, SubmitInputRequest, SubmitInputService,
-    ToolExecutionInvocation, ToolExecutor, UuidV7SessionIdGenerator,
+    InProcessEligibilityWorkSource, InProcessToolDecisionWake, InProcessToolDispatchGate,
+    ModelCallCredentialReference, NoToolCatalog, OperatorFailureClass, SchedulerLoop,
+    SchedulerLoopExit, StartEligibleTurnService, SubmitInputOutcome, SubmitInputRequest,
+    SubmitInputService, ToolExecutionInvocation, ToolExecutor, UuidV7SessionIdGenerator,
     UuidV7StartEligibleTurnIdGenerator, UuidV7SubmitInputIdGenerator,
 };
 use signalbox_domain::{
@@ -22,10 +22,7 @@ use signalbox_domain::{
     SessionConfigurationDefaultsVersion, SessionId, SubmitInputAppliedResult, SubmitInputResult,
     TurnId, UserContent,
 };
-use signalbox_hubd::{
-    ActivatedTurnPass, FatalExecutionSupervisor, PostgresContinuationToolLoopRepository,
-    PostgresProviderModelExecution,
-};
+use signalbox_hubd::{ActivatedTurnPass, FatalExecutionSupervisor, PostgresProviderModelExecution};
 use signalbox_model_provider_runtime::{
     RuntimeModelCallProvider, RuntimeModelCatalog, RuntimeModelDefinition,
 };
@@ -160,8 +157,8 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
         UuidV7SubmitInputIdGenerator,
         SubmitInputRepository::new(pool.clone()),
         nudge,
-    )
-    .with_tool_dispatch_gate(tool_dispatch_gate.clone());
+        tool_dispatch_gate.clone(),
+    );
     let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
         SubmitInputAppliedResult::TurnOrigin(origin),
     )) = submit
@@ -219,11 +216,7 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
             provider,
         )
         .with_tool_loop(
-            PostgresContinuationToolLoopRepository::new(
-                pool.clone(),
-                targets,
-                credential_reference,
-            ),
+            InProcessToolDecisionWake::default(),
             tool_dispatch_gate,
             NoToolCatalog,
             UnexpectedToolExecutor,

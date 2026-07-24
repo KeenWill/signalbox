@@ -1382,7 +1382,6 @@ impl AcceptedInputSchedulingProjection {
         self,
         wait: AwaitingToolRecovery,
         tool_attempt: EndedToolAttempt,
-        attempt_disposition: UnstoppedAttemptDisposition,
         source_snapshot: ResolvedContextFrontierSnapshot,
         interrupt: AppliedInterruptCommandResult,
         identities: AmbiguousModelCallTurnIdentities,
@@ -3297,10 +3296,20 @@ pub trait ToolExecutionIdGenerator {
 pub struct UuidV7ToolLoopIdGenerator;
 // Copy + Default; impl ToolApprovalIdGenerator + ToolExecutionIdGenerator
 
+pub struct InProcessToolDecisionWake { /* private */ }
+// Clone + Default
+impl InProcessToolDecisionWake {
+    pub async fn wait(&self, request: ToolRequestId);
+}
+
 pub struct DecideToolRequestService<Ids, Transaction> { /* private */ }
 impl<Ids, Transaction> DecideToolRequestService<Ids, Transaction> {
-    pub const fn new(ids: Ids, transaction: Transaction) -> Self;
-    pub fn into_parts(self) -> (Ids, Transaction);
+    pub const fn new(
+        ids: Ids,
+        transaction: Transaction,
+        wake: InProcessToolDecisionWake,
+    ) -> Self;
+    pub fn into_parts(self) -> (Ids, Transaction, InProcessToolDecisionWake);
 }
 impl<Ids: ToolApprovalIdGenerator + Send, Transaction: DecideToolRequestTransaction>
     DecideToolRequestService<Ids, Transaction>
@@ -3312,17 +3321,6 @@ impl<Ids: ToolApprovalIdGenerator + Send, Transaction: DecideToolRequestTransact
 }
 
 pub struct RetainedToolExecutionState { /* private */ }
-
-pub struct InProcessToolDispatchGate { /* private */ }
-// Clone + Default
-impl InProcessToolDispatchGate {
-    pub fn acquire(
-        &self,
-        turn: TurnId,
-    ) -> impl Future<Output = InProcessToolDispatchPermit> + Send;
-}
-
-pub struct InProcessToolDispatchPermit { /* private */ }
 
 pub enum ToolExecutionServiceOutcome {
     NoWork,
@@ -3341,6 +3339,11 @@ pub enum ToolExecutionServiceError<TransactionError, ExecutorError> {
     Load(TransactionError),
     Prepare(TransactionError),
     Authorize(TransactionError),
+    AuthorizationReread {
+        authorization_error: TransactionError,
+        reread_error: TransactionError,
+    },
+    AuthorizationReconciliation(TransactionError),
     PreflightCommit(TransactionError),
     Executor(ExecutorError),
     ObservationCommit(TransactionError),
@@ -3360,16 +3363,16 @@ impl<Ids, Transaction, Catalog, Executor>
         transaction: Transaction,
         catalog: Catalog,
         executor: Executor,
+        gate: InProcessToolDispatchGate,
     ) -> Self;
     pub const fn from_parts(
         ids: Ids,
         transaction: Transaction,
         catalog: Catalog,
         executor: Executor,
-        gate: Option<InProcessToolDispatchGate>,
+        gate: InProcessToolDispatchGate,
         retained_state: Option<RetainedToolExecutionState>,
     ) -> Self;
-    pub fn with_dispatch_gate(self, gate: InProcessToolDispatchGate) -> Self;
     pub fn into_parts(
         self,
     ) -> (
@@ -3377,7 +3380,7 @@ impl<Ids, Transaction, Catalog, Executor>
         Transaction,
         Catalog,
         Executor,
-        Option<InProcessToolDispatchGate>,
+        InProcessToolDispatchGate,
         Option<RetainedToolExecutionState>,
     );
     pub const fn retained_state(&self) -> Option<&RetainedToolExecutionState>;
@@ -3737,15 +3740,19 @@ pub trait SubmitInputTransaction {
 
 pub struct SubmitInputService<Generator, Transaction, Nudge> { /* private */ }
 impl<Generator, Transaction, Nudge> SubmitInputService<Generator, Transaction, Nudge> {
-    pub const fn new(ids: Generator, transaction: Transaction, nudge: Nudge) -> Self;
-    pub fn with_tool_dispatch_gate(self, gate: InProcessToolDispatchGate) -> Self;
+    pub const fn new(
+        ids: Generator,
+        transaction: Transaction,
+        nudge: Nudge,
+        tool_dispatch_gate: InProcessToolDispatchGate,
+    ) -> Self;
     pub fn into_parts(
         self,
     ) -> (
         Generator,
         Transaction,
         Nudge,
-        Option<InProcessToolDispatchGate>,
+        InProcessToolDispatchGate,
     );
 }
 impl<
@@ -3759,6 +3766,20 @@ impl<
         request: SubmitInputRequest,
     ) -> Result<SubmitInputOutcome, Transaction::Error>;
 }
+```
+
+## application: tool_dispatch_gate
+
+```rust
+pub struct InProcessToolDispatchGate { /* private */ }
+impl InProcessToolDispatchGate {
+    pub fn acquire(
+        &self,
+        turn: TurnId,
+    ) -> impl Future<Output = InProcessToolDispatchPermit> + Send;
+}
+
+pub struct InProcessToolDispatchPermit { /* private */ }
 ```
 
 ## application: tool_loop_ports
@@ -3823,6 +3844,11 @@ pub enum RetainedToolAttemptObservationStatus {
     AlreadyCommitted,
 }
 
+pub enum ToolAttemptAuthorizationStatus {
+    Prepared(CurrentToolAttempt),
+    InFlight(AuthorizedToolAttempt),
+}
+
 pub trait ToolExecutionTransaction {
     type Error: ClassifyOperatorFailure;
     fn load_active_batch(
@@ -3843,6 +3869,12 @@ pub trait ToolExecutionTransaction {
         turn: TurnId,
         attempt: ToolAttemptId,
     ) -> impl Future<Output = Result<AuthorizedToolAttempt, Self::Error>> + Send;
+    fn reread_ambiguous_authorization(
+        &mut self,
+        session: SessionId,
+        turn: TurnId,
+        attempt: ToolAttemptId,
+    ) -> impl Future<Output = Result<ToolAttemptAuthorizationStatus, Self::Error>> + Send;
     fn commit_preflight_error(
         &mut self,
         session: SessionId,
@@ -3912,12 +3944,13 @@ pub trait ToolExecutionTransaction {
 | application: create_session           | 8 (incl. 2 traits)   |
 | application: load_session             | 2 (incl. 1 trait)    |
 | application: model_execution          | 30 (incl. 7 traits)  |
-| application: tool_loop                | 25 (incl. 5 traits)  |
+| application: tool_loop                | 24 (incl. 5 traits)  |
 | application: operator_failure         | 2 (incl. 1 trait)    |
 | application: replace_session_defaults | 4 (incl. 1 trait)    |
 | application: scheduler                | 12 (incl. 4 traits)  |
 | application: start_eligible_turn      | 5 (incl. 2 traits)   |
 | application: startup_scan             | 7 (incl. 2 traits)   |
 | application: submit_input             | 7 (incl. 2 traits)   |
-| application: tool_loop_ports          | 6 (incl. 2 traits)   |
-| **signalbox-application total**       | **108**              |
+| application: tool_dispatch_gate       | 2                    |
+| application: tool_loop_ports          | 7 (incl. 2 traits)   |
+| **signalbox-application total**       | **110**              |
