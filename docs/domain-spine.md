@@ -54,11 +54,13 @@ impl <Identity> {
 }
 ```
 
-The nine identities defined in `lib.rs`:
+The eleven identities defined in `lib.rs`:
 
 ```rust
 pub struct DurableCommandId(/* private */);
 pub struct SessionId(/* private */);
+pub struct ImportedConversationId(/* private */);
+pub struct ImportedTranscriptEntryId(/* private */);
 pub struct AcceptedInputId(/* private */);
 pub struct TurnId(/* private */);
 pub struct TurnAttemptId(/* private */);
@@ -81,6 +83,372 @@ pub enum Actor {
     Model { turn: TurnId },
     Recovery,
     Tool { request: ToolRequestId },
+}
+```
+
+## domain: imported_conversation
+
+```rust
+pub enum ImportedConversationFormat {
+    ClaudeCodeSessionJsonlV1,
+}
+
+pub struct ImportedRawRecordHash(/* private [u8; 32] */);
+impl ImportedRawRecordHash {
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self;
+    pub const fn as_bytes(&self) -> &[u8; 32];
+    pub fn digest(bytes: &[u8]) -> Self;
+}
+
+pub struct ImportedRawRecordConversionDigest(/* private [u8; 32] */);
+impl ImportedRawRecordConversionDigest {
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self;
+    pub const fn as_bytes(&self) -> &[u8; 32];
+}
+
+pub struct ImportedConversationSourceDigest(/* private [u8; 32] */);
+impl ImportedConversationSourceDigest {
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self;
+    pub const fn as_bytes(&self) -> &[u8; 32];
+}
+
+pub enum ImportedSourceAttestation<Value> {
+    Attested(Value),
+    AttestedAbsent,
+    NotAttested,
+}
+
+pub struct ImportedText(/* private String */);
+impl ImportedText {
+    pub fn new(value: String) -> Self;
+    pub fn as_str(&self) -> &str;
+    pub fn into_string(self) -> String;
+}
+// Debug is content-redacted.
+
+pub struct ImportedJsonNumber(/* private String */);
+impl ImportedJsonNumber {
+    pub fn try_new(value: String) -> Result<Self, ImportedJsonNumberError>;
+    pub fn as_str(&self) -> &str;
+    pub fn into_string(self) -> String;
+}
+// Debug is content-redacted.
+
+pub struct ImportedJsonNumberError { /* private */ }
+impl ImportedJsonNumberError {
+    pub fn value(&self) -> &str;
+    pub fn into_value(self) -> String;
+}
+// Debug is content-redacted; implements Error.
+
+pub struct ImportedStructuredObjectMember { /* private */ }
+impl ImportedStructuredObjectMember {
+    pub fn new(name: ImportedText, value: ImportedStructuredValue) -> Self;
+    // accessors: name(), value()
+}
+
+pub enum ImportedStructuredValue {
+    Null,
+    Boolean(bool),
+    Number(ImportedJsonNumber),
+    String(ImportedText),
+    Array(Box<[ImportedStructuredValue]>),
+    Object(Box<[ImportedStructuredObjectMember]>),
+}
+
+pub enum ImportedSpeaker {
+    User,
+    Assistant,
+}
+
+pub struct ImportedSourceMetadata { /* private */ }
+impl ImportedSourceMetadata {
+    pub const fn new(
+        record_id: ImportedSourceAttestation<ImportedText>,
+        parent_record_id: ImportedSourceAttestation<ImportedText>,
+        source_session_id: ImportedSourceAttestation<ImportedText>,
+        timestamp: ImportedSourceAttestation<ImportedText>,
+        sidechain: ImportedSourceAttestation<bool>,
+        metadata: ImportedSourceAttestation<bool>,
+        message_role: ImportedSourceAttestation<ImportedSpeaker>,
+    ) -> Self;
+    // accessors: record_id(), parent_record_id(), source_session_id(),
+    //   timestamp(), sidechain(), metadata(), message_role()
+}
+
+pub enum ImportedMessageContentAbsence {
+    MessageNotAttested,
+    MessageAttestedAbsent,
+    ContentNotAttested,
+    ContentAttestedAbsent,
+    EmptyBlockArray,
+}
+
+pub struct ImportedMediaSource { /* private */ }
+impl ImportedMediaSource {
+    pub const fn new(
+        kind: ImportedSourceAttestation<ImportedText>,
+        media_type: ImportedSourceAttestation<ImportedText>,
+        data: ImportedSourceAttestation<ImportedText>,
+    ) -> Self;
+    // accessors: kind(), media_type(), data()
+}
+
+pub enum ImportedToolResultBlock {
+    Text(ImportedSourceAttestation<ImportedText>),
+    Image(ImportedSourceAttestation<ImportedMediaSource>),
+    ToolReference {
+        tool_name: ImportedSourceAttestation<ImportedText>,
+    },
+}
+
+pub enum ImportedToolResultValue {
+    Text(ImportedText),
+    Blocks(Box<[ImportedToolResultBlock]>),
+}
+
+pub enum ImportedTranscriptContent {
+    SourceEvent {
+        source_type: ImportedSourceAttestation<ImportedText>,
+    },
+    SourceMessageBlock {
+        source_type: ImportedSourceAttestation<ImportedText>,
+    },
+    Text(ImportedSourceAttestation<ImportedText>),
+    ToolCall {
+        source_call_id: ImportedSourceAttestation<ImportedText>,
+        name: ImportedSourceAttestation<ImportedText>,
+        input: ImportedSourceAttestation<ImportedStructuredValue>,
+        caller: ImportedSourceAttestation<ImportedStructuredValue>,
+    },
+    ToolResult {
+        source_call_id: ImportedSourceAttestation<ImportedText>,
+        content: ImportedSourceAttestation<ImportedToolResultValue>,
+        is_error: ImportedSourceAttestation<bool>,
+    },
+    Thinking {
+        thinking: ImportedSourceAttestation<ImportedText>,
+        signature: ImportedSourceAttestation<ImportedText>,
+    },
+    RedactedThinking {
+        data: ImportedSourceAttestation<ImportedText>,
+    },
+    Document {
+        source: ImportedSourceAttestation<ImportedMediaSource>,
+    },
+    MessageContentAbsent(ImportedMessageContentAbsence),
+}
+
+pub struct ImportedRawRecordPosition(/* private positive u64 */);
+pub struct ImportedRecordEntryPosition(/* private positive u64 */);
+pub struct ImportedTranscriptPosition(/* private */);
+// Each position type has this common API:
+impl <Position> {
+    pub const fn try_from_u64(value: u64) -> Option<Self>;
+    pub const fn as_u64(self) -> u64;
+    pub const fn first() -> Self;
+    pub const fn checked_next(self) -> Option<Self>;
+}
+
+pub struct ImportedRawSourceRecord { /* private */ }
+impl ImportedRawSourceRecord {
+    pub fn from_converted(
+        bytes: Vec<u8>,
+        normalized: ImportedStructuredValue,
+    ) -> Self;
+    // accessors: content_hash(), conversion_digest(), bytes(), normalized()
+}
+// Debug redacts bytes and normalized content.
+
+pub struct ImportedRawSourceRecordReconstitutionInput { /* private */ }
+impl ImportedRawSourceRecordReconstitutionInput {
+    pub fn new(
+        position: ImportedRawRecordPosition,
+        stored_hash: ImportedRawRecordHash,
+        stored_conversion_digest: ImportedRawRecordConversionDigest,
+        bytes: Vec<u8>,
+        normalized: ImportedStructuredValue,
+    ) -> Self;
+    // accessors: position(), stored_hash(), stored_conversion_digest(), bytes(),
+    //   normalized()
+}
+// Debug redacts bytes and normalized content.
+
+pub struct ImportedTranscriptEntryInput { /* private */ }
+impl ImportedTranscriptEntryInput {
+    pub const fn new(
+        identity: ImportedTranscriptEntryId,
+        conversation: ImportedConversationId,
+        position: ImportedTranscriptPosition,
+        raw_record_position: ImportedRawRecordPosition,
+        record_entry_position: ImportedRecordEntryPosition,
+        source_speaker: ImportedSourceAttestation<ImportedSpeaker>,
+        content: ImportedTranscriptContent,
+        source: ImportedSourceMetadata,
+    ) -> Self;
+    // accessors: identity(), conversation(), position(), raw_record_position(),
+    //   record_entry_position(), source_speaker(), content(), source()
+}
+
+pub struct ImportedTranscriptEntry { /* private */ }
+// sealed: ImportedConversation::from_converted_records or
+// ImportedConversationReconstitutionInput::reconstitute
+impl ImportedTranscriptEntry {
+    // accessors: identity(), conversation(), position(), raw_record_position(),
+    //   record_entry_position(), source_speaker(), content(), source()
+}
+
+pub struct ImportedTranscriptFrontier { /* private */ }
+// sealed: ImportedConversation frontier methods
+// Copy; equality is the exact imported-conversation boundary.
+impl ImportedTranscriptFrontier {
+    // accessors: conversation(), through_entry(), through_position()
+}
+
+pub struct ImportedConversationReconstitutionInput { /* private */ }
+impl ImportedConversationReconstitutionInput {
+    pub fn new(
+        requested_conversation: ImportedConversationId,
+        stored_conversation: ImportedConversationId,
+        format: ImportedConversationFormat,
+        stored_source_digest: ImportedConversationSourceDigest,
+        declared_raw_record_count: u64,
+        raw_records: Vec<ImportedRawSourceRecordReconstitutionInput>,
+        declared_entry_count: u64,
+        entries: Vec<ImportedTranscriptEntryInput>,
+    ) -> Self;
+    pub fn reconstitute(self)
+        -> Result<ImportedConversation, ImportedConversationReconstitutionError>;
+    // accessors: requested_conversation(), stored_conversation(), format(),
+    //   stored_source_digest(), declared_raw_record_count(), raw_records(),
+    //   declared_entry_count(), entries()
+}
+
+pub enum ImportedConversationReconstitutionFailure {
+    RequestedConversationMismatch,
+    EmptyRawRecords,
+    EmptyEntries,
+    DeclaredRawRecordCountMismatch {
+        declared: u64,
+        actual: usize,
+    },
+    DeclaredEntryCountMismatch {
+        declared: u64,
+        actual: usize,
+    },
+    RawRecordPositionMismatch {
+        expected: ImportedRawRecordPosition,
+        actual: ImportedRawRecordPosition,
+    },
+    RawRecordHashMismatch {
+        position: ImportedRawRecordPosition,
+    },
+    EmptyRawRecord {
+        position: ImportedRawRecordPosition,
+    },
+    RawRecordHashCollision {
+        position: ImportedRawRecordPosition,
+    },
+    RawRecordConversionDigestMismatch {
+        position: ImportedRawRecordPosition,
+    },
+    RawRecordNormalizedValueNotObject {
+        position: ImportedRawRecordPosition,
+    },
+    RawRecordStructuredValueDepthExceeded {
+        position: ImportedRawRecordPosition,
+    },
+    RawRecordProjectionInvalid {
+        position: ImportedRawRecordPosition,
+    },
+    SourceDigestMismatch {
+        expected: ImportedConversationSourceDigest,
+        actual: ImportedConversationSourceDigest,
+    },
+    EntryConversationMismatch {
+        entry: ImportedTranscriptEntryId,
+    },
+    EntryPositionMismatch {
+        entry: ImportedTranscriptEntryId,
+        expected: ImportedTranscriptPosition,
+        actual: ImportedTranscriptPosition,
+    },
+    DuplicateEntry {
+        entry: ImportedTranscriptEntryId,
+    },
+    EntryRawRecordPositionMismatch {
+        entry: ImportedTranscriptEntryId,
+        expected: ImportedRawRecordPosition,
+        actual: ImportedRawRecordPosition,
+    },
+    EntryRawRecordNotFound {
+        entry: ImportedTranscriptEntryId,
+        position: ImportedRawRecordPosition,
+    },
+    EntryWithinRecordPositionMismatch {
+        entry: ImportedTranscriptEntryId,
+        expected: ImportedRecordEntryPosition,
+        actual: ImportedRecordEntryPosition,
+    },
+    RawRecordWithoutEntry {
+        position: ImportedRawRecordPosition,
+    },
+    SourceEventSpeakerMismatch {
+        entry: ImportedTranscriptEntryId,
+    },
+    SourceRecordTypeMismatch {
+        entry: ImportedTranscriptEntryId,
+    },
+    MessageSpeakerUnavailable {
+        entry: ImportedTranscriptEntryId,
+    },
+    MessageRoleMismatch {
+        entry: ImportedTranscriptEntryId,
+    },
+    EntryProjectionMismatch {
+        entry: ImportedTranscriptEntryId,
+    },
+    RawRecordEntryProjectionMismatch {
+        position: ImportedRawRecordPosition,
+    },
+    EntryStructuredValueDepthExceeded {
+        entry: ImportedTranscriptEntryId,
+    },
+    PositionExhausted,
+}
+
+pub struct ImportedConversationReconstitutionError { /* private */ }
+// sealed: Err of ImportedConversation::from_converted_records or
+// ImportedConversationReconstitutionInput::reconstitute
+impl ImportedConversationReconstitutionError {
+    pub fn into_parts(
+        self,
+    ) -> (
+        ImportedConversationReconstitutionInput,
+        ImportedConversationReconstitutionFailure,
+    );
+    // accessors: failure(), input()
+}
+
+pub struct ImportedConversation { /* private */ }
+// sealed: from_converted_records or checked reconstitution
+impl ImportedConversation {
+    pub fn from_converted_records(
+        id: ImportedConversationId,
+        format: ImportedConversationFormat,
+        raw_records: Vec<ImportedRawSourceRecord>,
+        entries: Vec<ImportedTranscriptEntryInput>,
+    ) -> Result<Self, ImportedConversationReconstitutionError>;
+    pub fn frontiers(&self) -> impl Iterator<Item = ImportedTranscriptFrontier> + '_;
+    pub fn frontier_for_entry(
+        &self,
+        entry: ImportedTranscriptEntryId,
+    ) -> Option<ImportedTranscriptFrontier>;
+    pub fn prefix(
+        &self,
+        frontier: ImportedTranscriptFrontier,
+    ) -> Option<&[ImportedTranscriptEntry]>;
+    // accessors: id(), format(), source_digest(), raw_records(), entries()
 }
 ```
 
@@ -2867,8 +3235,9 @@ impl<
 
 | Module                                | Public types         |
 | ------------------------------------- | -------------------- |
-| domain: lib.rs identities             | 9                    |
+| domain: lib.rs identities             | 11                   |
 | domain: actor                         | 1                    |
+| domain: imported_conversation         | 29                   |
 | domain: session                       | 18                   |
 | domain: configuration                 | 19                   |
 | domain: accepted_input                | 5                    |
@@ -2887,7 +3256,7 @@ impl<
 | domain: applied_interrupt             | 2                    |
 | domain: fatal_mismatch                | 0                    |
 | domain: replace_session_defaults      | 13                   |
-| **signalbox-domain total**            | **211 (+1 free fn)** |
+| **signalbox-domain total**            | **242 (+1 free fn)** |
 | application: create_session           | 8 (incl. 2 traits)   |
 | application: load_session             | 2 (incl. 1 trait)    |
 | application: model_execution          | 28 (incl. 7 traits)  |
