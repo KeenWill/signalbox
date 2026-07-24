@@ -453,8 +453,9 @@ async fn an_overdeep_error_body_falls_back_to_http_status() {
 }
 
 async fn assert_openai_error_body_falls_back_to_status(body: &[u8]) {
+    let status = 503;
     let server = CannedServer::serving(vec![http_response(
-        "503 Service Unavailable",
+        &format!("{status} Service Unavailable"),
         &[("content-type", "application/json")],
         body,
     )])
@@ -473,7 +474,7 @@ async fn assert_openai_error_body_falls_back_to_status(body: &[u8]) {
     };
     assert_eq!(error.kind, ProviderErrorKind::Overloaded);
     assert_eq!(error.native.error_code, None);
-    assert_eq!(error.exchange.http_status, Some(503));
+    assert_eq!(error.exchange.http_status, Some(status));
 }
 
 #[tokio::test]

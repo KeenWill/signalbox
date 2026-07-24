@@ -395,8 +395,9 @@ async fn an_overdeep_error_body_falls_back_to_http_status() {
 }
 
 async fn assert_anthropic_error_body_falls_back_to_status(body: &[u8]) {
+    let status = 429;
     let server = CannedServer::serving(vec![http_response(
-        "429 Too Many Requests",
+        &format!("{status} Too Many Requests"),
         &[("content-type", "application/json")],
         body,
     )])
@@ -415,7 +416,7 @@ async fn assert_anthropic_error_body_falls_back_to_status(body: &[u8]) {
     };
     assert_eq!(error.kind, ProviderErrorKind::RateLimited);
     assert_eq!(error.native.error_token, None);
-    assert_eq!(error.exchange.http_status, Some(429));
+    assert_eq!(error.exchange.http_status, Some(status));
 }
 
 #[tokio::test]
