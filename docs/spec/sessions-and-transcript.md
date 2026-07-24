@@ -105,11 +105,13 @@ not a historical fact.
 ### Create from an imported frontier
 
 `CreateSessionFromImportedFrontier` is a distinct durable command family
-carrying command identity, one addressable `ImportedTranscriptFrontier` (which
-owns its `ImportedConversationId`), one `ImportedSessionRelationship` (`Resume`
-or `Fork`), and complete unversioned initial defaults. Its structural replay
-equality excludes only command identity. Separating the family preserves storage
-version 1 and the no-ancestry contract of `CreateSession`.
+carrying command identity, one addressable `ImportedTranscriptFrontier`, one
+`ImportedSessionRelationship` (`Resume` or `Fork`), and complete unversioned
+initial defaults. The frontier itself names its `ImportedConversationId` and
+inclusive entry boundary; the command accepts no second independently supplied
+conversation identity. Its structural replay equality excludes only command
+identity. Separating the family preserves storage version 1 and the no-ancestry
+contract of `CreateSession`.
 
 The relationship records the client's creation-time intent: `Resume` declares a
 new Signalbox continuation from the selected imported point; `Fork` declares a
@@ -133,8 +135,8 @@ owner-global claim protocol in
 [identity-and-commands](identity-and-commands.md). A claimed identifier resolves
 to its recorded equal replay or conflicting reuse before any imported-target
 lookup. Only for an unclaimed identifier does the transaction load the complete
-imported conversation, resolve exactly positions `1..=N` for the selected
-boundary, and either:
+imported conversation named by `frontier.conversation()`, resolve exactly
+positions `1..=N` through that frontier's inclusive boundary, and either:
 
 - returns `ImportedConversationNotFound` or `ImportedFrontierNotFound` without
   claiming the command identity; or
@@ -142,15 +144,17 @@ boundary, and either:
   lost claim race re-inspected against the winner by the shared protocol.
 
 An equal replay returns the recorded created session and ignores unused fresh
-identity candidates. A changed frontier (including its owning conversation),
-relationship, or defaults under an already claimed command identity is
-conflicting reuse. Cross-kind reuse follows the owner-global durable-command
-contract in [identity-and-commands](identity-and-commands.md).
+identity candidates. Changed frontier, relationship, or defaults under an
+already claimed command identity is conflicting reuse; selecting another
+conversation necessarily changes the frontier. Cross-kind reuse follows the
+owner-global durable-command contract in
+[identity-and-commands](identity-and-commands.md).
 
 The committing transaction atomically inserts:
 
 - the owner-initiated session whose immutable ancestry names the imported
-  conversation, selected imported frontier, and relationship;
+  conversation and boundary derived from the selected frontier, plus the
+  relationship;
 - defaults version one, its current pointer, scheduler registration, typed
   command record, registry claim, and the ordinary `session_created` outbox
   event;
