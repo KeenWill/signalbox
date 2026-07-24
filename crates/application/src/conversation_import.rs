@@ -361,24 +361,42 @@ mod tests {
         ImportedText::new(String::from(value))
     }
 
-    fn object(source_type: &str) -> ImportedStructuredValue {
+    fn message_record(source_type: &str, content: &str) -> ImportedStructuredValue {
         ImportedStructuredValue::Object(
-            vec![ImportedStructuredObjectMember::new(
-                text("type"),
-                ImportedStructuredValue::String(text(source_type)),
-            )]
+            vec![
+                ImportedStructuredObjectMember::new(
+                    text("type"),
+                    ImportedStructuredValue::String(text(source_type)),
+                ),
+                ImportedStructuredObjectMember::new(
+                    text("message"),
+                    ImportedStructuredValue::Object(
+                        vec![
+                            ImportedStructuredObjectMember::new(
+                                text("role"),
+                                ImportedStructuredValue::String(text(source_type)),
+                            ),
+                            ImportedStructuredObjectMember::new(
+                                text("content"),
+                                ImportedStructuredValue::String(text(content)),
+                            ),
+                        ]
+                        .into_boxed_slice(),
+                    ),
+                ),
+            ]
             .into_boxed_slice(),
         )
     }
 
     fn metadata(speaker: ImportedSpeaker) -> ImportedSourceMetadata {
         ImportedSourceMetadata::new(
-            ImportedSourceAttestation::Attested(text("record")),
-            ImportedSourceAttestation::AttestedAbsent,
-            ImportedSourceAttestation::Attested(text("source-session")),
             ImportedSourceAttestation::NotAttested,
-            ImportedSourceAttestation::Attested(false),
-            ImportedSourceAttestation::Attested(false),
+            ImportedSourceAttestation::NotAttested,
+            ImportedSourceAttestation::NotAttested,
+            ImportedSourceAttestation::NotAttested,
+            ImportedSourceAttestation::NotAttested,
+            ImportedSourceAttestation::NotAttested,
             ImportedSourceAttestation::Attested(speaker),
         )
     }
@@ -391,12 +409,12 @@ mod tests {
         let raws = vec![
             ImportedRawSourceRecord::from_converted(
                 br#"{"type":"user","message":{"role":"user","content":"first"}}"#.to_vec(),
-                object("user"),
+                message_record("user", "first"),
             ),
             ImportedRawSourceRecord::from_converted(
                 br#"{"type":"assistant","message":{"role":"assistant","content":"second"}}"#
                     .to_vec(),
-                object("assistant"),
+                message_record("assistant", "second"),
             ),
         ];
         ImportedConversation::from_converted_records(
