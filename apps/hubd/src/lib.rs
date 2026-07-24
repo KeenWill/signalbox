@@ -689,6 +689,7 @@ where
                         }
                         ToolExecutionServiceOutcome::AwaitingApproval(request) => {
                             tool_decision_wake.wait(request).await;
+                            continue;
                         }
                         ToolExecutionServiceOutcome::AwaitingRecovery(_)
                         | ToolExecutionServiceOutcome::ContinuationTargetUnavailable(_) => {
