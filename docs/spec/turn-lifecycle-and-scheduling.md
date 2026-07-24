@@ -37,9 +37,12 @@ The domain `ActiveTurnPhase` algebra is `Running { current_attempt }`,
 `AwaitingApproval { request }`, and
 `AwaitingRecoveryDecision { ambiguous_operations }`. Every active phase retains
 the session's progressing slot (`retains_progressing_slot()` is unconditionally
-true; INV-009). Storage and reconstitution admit `running`, `awaiting_approval`,
-and `awaiting_model_call_recovery`; `AwaitingRecoveryDecision` is reconstituted
-from an `ambiguous` terminal model call correlated with its ended attempt
+true; INV-009). Storage and reconstitution admit `running`,
+`awaiting_tool_approval`, `awaiting_model_call_recovery`, and
+`awaiting_tool_recovery`; the domain `AwaitingApproval` phase maps to the exact
+stored `awaiting_tool_approval` discriminator. `AwaitingRecoveryDecision` is
+reconstituted from either an `ambiguous` terminal model call or an ambiguous
+external-effect tool attempt correlated with its exact ended attempt
 (`ambiguous` from a live loss, `lost` from startup recovery). `StopRequested` is
 a stored current-attempt state inside the `running` active phase and
 reconstitutes only from its exact applied-interrupt proof; `AwaitingApproval`
