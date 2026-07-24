@@ -15,6 +15,8 @@ use sha2::{Digest, Sha256};
 use crate::{ImportedConversationId, ImportedTranscriptEntryId};
 
 const SOURCE_DIGEST_DOMAIN: &[u8] = b"signalbox.imported-conversation.source-digest.v1";
+const RAW_RECORD_CONVERSION_DIGEST_DOMAIN: &[u8] =
+    b"signalbox.imported-conversation.raw-record-conversion.v1";
 const MAX_STRUCTURED_CONTAINER_DEPTH: usize = 128;
 
 /// One source format interpreted by one fixed Signalbox converter version.
@@ -50,6 +52,30 @@ impl ImportedRawRecordHash {
     /// Hashes exact source-record bytes.
     pub fn digest(bytes: &[u8]) -> Self {
         Self(Sha256::digest(bytes).into())
+    }
+}
+
+/// SHA-256 authentication of one exact raw hash and normalized source record.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ImportedRawRecordConversionDigest([u8; 32]);
+
+impl ImportedRawRecordConversionDigest {
+    /// Reconstitutes one stored conversion digest.
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Borrows the fixed digest bytes.
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    fn derive(raw_hash: ImportedRawRecordHash, normalized: &ImportedStructuredValue) -> Self {
+        let mut digest = Sha256::new();
+        update_length_framed(&mut digest, RAW_RECORD_CONVERSION_DIGEST_DOMAIN);
+        update_length_framed(&mut digest, raw_hash.as_bytes());
+        update_structured_digest(&mut digest, normalized);
+        Self(digest.finalize().into())
     }
 }
 
@@ -283,6 +309,45 @@ pub enum ImportedStructuredValue {
     Array(Box<[ImportedStructuredValue]>),
     /// Ordered JSON object members, including repeated names.
     Object(Box<[ImportedStructuredObjectMember]>),
+}
+
+fn update_structured_digest(digest: &mut Sha256, value: &ImportedStructuredValue) {
+    match value {
+        ImportedStructuredValue::Null => digest.update([0]),
+        ImportedStructuredValue::Boolean(false) => digest.update([1]),
+        ImportedStructuredValue::Boolean(true) => digest.update([2]),
+        ImportedStructuredValue::Number(value) => {
+            digest.update([3]);
+            update_length_framed(digest, value.as_str().as_bytes());
+        }
+        ImportedStructuredValue::String(value) => {
+            digest.update([4]);
+            update_length_framed(digest, value.as_str().as_bytes());
+        }
+        ImportedStructuredValue::Array(values) => {
+            digest.update([5]);
+            digest.update(
+                u64::try_from(values.len())
+                    .unwrap_or(u64::MAX)
+                    .to_be_bytes(),
+            );
+            for value in values {
+                update_structured_digest(digest, value);
+            }
+        }
+        ImportedStructuredValue::Object(members) => {
+            digest.update([6]);
+            digest.update(
+                u64::try_from(members.len())
+                    .unwrap_or(u64::MAX)
+                    .to_be_bytes(),
+            );
+            for member in members {
+                update_length_framed(digest, member.name().as_str().as_bytes());
+                update_structured_digest(digest, member.value());
+            }
+        }
+    }
 }
 
 /// Source-attested conversational speaker.
@@ -547,6 +612,7 @@ positive_position!(
 #[derive(Clone, Eq, PartialEq)]
 pub struct ImportedRawSourceRecord {
     content_hash: ImportedRawRecordHash,
+    conversion_digest: ImportedRawRecordConversionDigest,
     bytes: Box<[u8]>,
     normalized: ImportedStructuredValue,
 }
@@ -554,8 +620,10 @@ pub struct ImportedRawSourceRecord {
 impl ImportedRawSourceRecord {
     /// Hashes and retains one exact converted source record.
     pub fn from_converted(bytes: Vec<u8>, normalized: ImportedStructuredValue) -> Self {
+        let content_hash = ImportedRawRecordHash::digest(&bytes);
         Self {
-            content_hash: ImportedRawRecordHash::digest(&bytes),
+            content_hash,
+            conversion_digest: ImportedRawRecordConversionDigest::derive(content_hash, &normalized),
             bytes: bytes.into_boxed_slice(),
             normalized,
         }
@@ -564,6 +632,11 @@ impl ImportedRawSourceRecord {
     /// Returns the exact-byte content hash.
     pub const fn content_hash(&self) -> ImportedRawRecordHash {
         self.content_hash
+    }
+
+    /// Returns the raw-to-normalized conversion digest.
+    pub const fn conversion_digest(&self) -> ImportedRawRecordConversionDigest {
+        self.conversion_digest
     }
 
     /// Borrows the exact source-record bytes.
@@ -582,6 +655,7 @@ impl fmt::Debug for ImportedRawSourceRecord {
         formatter
             .debug_struct("ImportedRawSourceRecord")
             .field("content_hash", &self.content_hash)
+            .field("conversion_digest", &self.conversion_digest)
             .field("byte_len", &self.bytes.len())
             .field("normalized", &"<redacted>")
             .finish()
@@ -593,6 +667,7 @@ impl fmt::Debug for ImportedRawSourceRecord {
 pub struct ImportedRawSourceRecordReconstitutionInput {
     position: ImportedRawRecordPosition,
     stored_hash: ImportedRawRecordHash,
+    stored_conversion_digest: ImportedRawRecordConversionDigest,
     bytes: Box<[u8]>,
     normalized: ImportedStructuredValue,
 }
@@ -602,12 +677,14 @@ impl ImportedRawSourceRecordReconstitutionInput {
     pub fn new(
         position: ImportedRawRecordPosition,
         stored_hash: ImportedRawRecordHash,
+        stored_conversion_digest: ImportedRawRecordConversionDigest,
         bytes: Vec<u8>,
         normalized: ImportedStructuredValue,
     ) -> Self {
         Self {
             position,
             stored_hash,
+            stored_conversion_digest,
             bytes: bytes.into_boxed_slice(),
             normalized,
         }
@@ -621,6 +698,11 @@ impl ImportedRawSourceRecordReconstitutionInput {
     /// Returns the stored raw content hash.
     pub const fn stored_hash(&self) -> ImportedRawRecordHash {
         self.stored_hash
+    }
+
+    /// Returns the stored raw-to-normalized conversion digest.
+    pub const fn stored_conversion_digest(&self) -> ImportedRawRecordConversionDigest {
+        self.stored_conversion_digest
     }
 
     /// Borrows the exact stored record bytes.
@@ -640,6 +722,7 @@ impl fmt::Debug for ImportedRawSourceRecordReconstitutionInput {
             .debug_struct("ImportedRawSourceRecordReconstitutionInput")
             .field("position", &self.position)
             .field("stored_hash", &self.stored_hash)
+            .field("stored_conversion_digest", &self.stored_conversion_digest)
             .field("byte_len", &self.bytes.len())
             .field("normalized", &"<redacted>")
             .finish()
@@ -942,6 +1025,11 @@ pub enum ImportedConversationReconstitutionFailure {
         /// Later conflicting raw-record occurrence.
         position: ImportedRawRecordPosition,
     },
+    /// A normalized source record disagreed with its stored conversion digest.
+    RawRecordConversionDigestMismatch {
+        /// Corrupt raw-record occurrence.
+        position: ImportedRawRecordPosition,
+    },
     /// A raw JSONL record did not normalize to one object.
     RawRecordNormalizedValueNotObject {
         /// Corrupt raw-record occurrence.
@@ -1106,6 +1194,7 @@ impl ImportedConversation {
             reconstitution_records.push(ImportedRawSourceRecordReconstitutionInput {
                 position,
                 stored_hash: record.content_hash,
+                stored_conversion_digest: record.conversion_digest,
                 bytes: record.bytes,
                 normalized: record.normalized,
             });
@@ -1281,6 +1370,15 @@ fn validate_raw_records(
         {
             return Err(
                 ImportedConversationReconstitutionFailure::RawRecordHashCollision {
+                    position: record.position,
+                },
+            );
+        }
+        if record.stored_conversion_digest
+            != ImportedRawRecordConversionDigest::derive(record.stored_hash, &record.normalized)
+        {
+            return Err(
+                ImportedConversationReconstitutionFailure::RawRecordConversionDigestMismatch {
                     position: record.position,
                 },
             );
@@ -1977,6 +2075,7 @@ fn build_conversation(input: ImportedConversationReconstitutionInput) -> Importe
         .into_iter()
         .map(|record| ImportedRawSourceRecord {
             content_hash: record.stored_hash,
+            conversion_digest: record.stored_conversion_digest,
             bytes: record.bytes,
             normalized: record.normalized,
         })
@@ -2012,10 +2111,10 @@ mod tests {
         ImportedConversation, ImportedConversationFormat,
         ImportedConversationReconstitutionFailure, ImportedConversationReconstitutionInput,
         ImportedConversationSourceDigest, ImportedJsonNumber, ImportedMessageContentAbsence,
-        ImportedRawRecordHash, ImportedRawRecordPosition, ImportedRawSourceRecord,
-        ImportedRawSourceRecordReconstitutionInput, ImportedRecordEntryPosition,
-        ImportedSourceAttestation, ImportedSourceMetadata, ImportedSpeaker,
-        ImportedStructuredObjectMember, ImportedStructuredValue, ImportedText,
+        ImportedRawRecordConversionDigest, ImportedRawRecordHash, ImportedRawRecordPosition,
+        ImportedRawSourceRecord, ImportedRawSourceRecordReconstitutionInput,
+        ImportedRecordEntryPosition, ImportedSourceAttestation, ImportedSourceMetadata,
+        ImportedSpeaker, ImportedStructuredObjectMember, ImportedStructuredValue, ImportedText,
         ImportedTranscriptContent, ImportedTranscriptEntryInput, ImportedTranscriptPosition,
     };
     use crate::{ImportedConversationId, ImportedTranscriptEntryId};
@@ -2354,6 +2453,7 @@ mod tests {
                     )
                     .expect("fixture position is positive"),
                     record.content_hash(),
+                    record.conversion_digest(),
                     record.bytes().to_vec(),
                     record.normalized().clone(),
                 )
@@ -2366,6 +2466,104 @@ mod tests {
         );
     }
 
+    #[test]
+    fn inv038_raw_and_conversion_digests_match_the_public_vector() {
+        let raw = ImportedRawSourceRecord::from_converted(
+            b"{}".to_vec(),
+            ImportedStructuredValue::Object(Vec::new().into_boxed_slice()),
+        );
+        assert_eq!(
+            raw.content_hash().as_bytes(),
+            &[
+                68, 19, 111, 163, 85, 179, 103, 138, 17, 70, 173, 22, 247, 232, 100, 158, 148, 251,
+                79, 194, 31, 231, 126, 131, 16, 192, 96, 246, 28, 170, 255, 138,
+            ]
+        );
+        assert_eq!(
+            raw.conversion_digest().as_bytes(),
+            &[
+                61, 6, 248, 52, 193, 194, 253, 219, 191, 69, 71, 22, 218, 48, 154, 243, 147, 209,
+                85, 48, 135, 13, 150, 159, 78, 115, 180, 150, 10, 233, 7, 147,
+            ]
+        );
+        let records = vec![ImportedRawSourceRecordReconstitutionInput::new(
+            ImportedRawRecordPosition::first(),
+            raw.content_hash(),
+            raw.conversion_digest(),
+            raw.bytes().to_vec(),
+            raw.normalized().clone(),
+        )];
+        assert_eq!(
+            ImportedConversationSourceDigest::derive(
+                ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
+                &records,
+            )
+            .as_bytes(),
+            &[
+                184, 54, 163, 251, 0, 70, 92, 44, 126, 192, 28, 242, 196, 178, 201, 136, 69, 203,
+                201, 205, 175, 40, 137, 43, 145, 12, 226, 37, 210, 7, 154, 92,
+            ]
+        );
+    }
+
+    #[test]
+    fn inv038_coordinated_normalized_and_entry_corruption_fails_closed() {
+        let owner = conversation(1);
+        let normalized_message = |value: &str| {
+            object_with_members(vec![
+                ("type", ImportedStructuredValue::String(text("user"))),
+                (
+                    "message",
+                    object(("content", ImportedStructuredValue::String(text(value)))),
+                ),
+            ])
+        };
+        let converted_raw = ImportedRawSourceRecord::from_converted(
+            br#"{"type":"user","message":{"content":"original"}}"#.to_vec(),
+            normalized_message("original"),
+        );
+        let raw_records = vec![ImportedRawSourceRecordReconstitutionInput::new(
+            ImportedRawRecordPosition::first(),
+            converted_raw.content_hash(),
+            converted_raw.conversion_digest(),
+            converted_raw.bytes().to_vec(),
+            normalized_message("changed"),
+        )];
+        let digest = ImportedConversationSourceDigest::derive(
+            ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
+            &raw_records,
+        );
+        let entries = vec![
+            EntryFixture::new(
+                2,
+                owner,
+                ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(text(
+                    "changed",
+                ))),
+            )
+            .source_speaker(ImportedSpeaker::User)
+            .build(),
+        ];
+        let error = ImportedConversationReconstitutionInput::new(
+            owner,
+            owner,
+            ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
+            digest,
+            1,
+            raw_records,
+            1,
+            entries,
+        )
+        .reconstitute()
+        .expect_err("coordinated normalized and entry corruption must fail");
+        assert_eq!(
+            error.failure(),
+            ImportedConversationReconstitutionFailure::RawRecordConversionDigestMismatch {
+                position: ImportedRawRecordPosition::first(),
+            }
+        );
+    }
+
     /// INV-002 / INV-038: raw-hash corruption fails closed while retaining all
     /// typed storage inputs.
     #[test]
@@ -2375,6 +2573,7 @@ mod tests {
         let raw_records = vec![ImportedRawSourceRecordReconstitutionInput::new(
             ImportedRawRecordPosition::first(),
             ImportedRawRecordHash::digest(b"different"),
+            ImportedRawRecordConversionDigest::from_bytes([0; 32]),
             bytes,
             object(("type", ImportedStructuredValue::String(text("system")))),
         )];
