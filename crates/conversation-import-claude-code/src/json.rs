@@ -242,22 +242,50 @@ mod tests {
     use super::{JsonFailure, parse_record};
 
     #[test]
-    fn preserves_object_order_duplicates_and_number_spelling() {
-        let parsed = parse_record(br#"{"same":1e+09,"same":-0.25,"text":"\u0000"}"#)
-            .expect("synthetic JSON is valid");
-        let ImportedStructuredValue::Object(members) = parsed else {
+    fn s28_inv038_preserves_object_member_order() {
+        let parsed = parse_record(br#"{"first":0,"second":1}"#).expect("synthetic JSON is valid");
+        let ImportedStructuredValue::Object(members) = &parsed else {
             panic!("synthetic root should be an object");
         };
-        assert_eq!(members.len(), 3);
+        assert_eq!(members[0].name().as_str(), "first");
+        assert_eq!(members[1].name().as_str(), "second");
+    }
+
+    #[test]
+    fn s28_inv038_preserves_duplicate_object_members() {
+        let parsed = parse_record(br#"{"same":0,"same":1}"#).expect("synthetic JSON is valid");
+        let ImportedStructuredValue::Object(members) = &parsed else {
+            panic!("synthetic root should be an object");
+        };
+
+        assert_eq!(members.len(), 2);
         assert_eq!(members[0].name().as_str(), "same");
         assert_eq!(members[1].name().as_str(), "same");
-        let ImportedStructuredValue::Number(first) = members[0].value() else {
-            panic!("first synthetic duplicate should be a number");
+    }
+
+    #[test]
+    fn s28_inv038_preserves_json_number_spelling() {
+        let parsed = parse_record(br#"{"number":1e+09}"#).expect("synthetic JSON is valid");
+        let ImportedStructuredValue::Object(members) = &parsed else {
+            panic!("synthetic root should be an object");
         };
-        assert_eq!(first.as_str(), "1e+09");
-        let ImportedStructuredValue::String(value) = members[2].value() else {
+        let ImportedStructuredValue::Number(number) = members[0].value() else {
+            panic!("synthetic number should be a number");
+        };
+
+        assert_eq!(number.as_str(), "1e+09");
+    }
+
+    #[test]
+    fn s28_inv038_decodes_json_unicode_escapes() {
+        let parsed = parse_record(br#"{"text":"\u0000"}"#).expect("synthetic JSON is valid");
+        let ImportedStructuredValue::Object(members) = &parsed else {
+            panic!("synthetic root should be an object");
+        };
+        let ImportedStructuredValue::String(value) = members[0].value() else {
             panic!("synthetic text should be a string");
         };
+
         assert_eq!(value, &ImportedText::new(String::from("\0")));
     }
 

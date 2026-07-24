@@ -81,8 +81,8 @@ Implemented table families (across the forward-only migrations):
 - `durable_command` plus typed command records (`create_session_command`,
   `create_session_from_imported_frontier_command`,
   `replace_session_defaults_command`, `submit_input_command`);
-- `session`, `session_defaults_version`, `session_current_defaults`,
-  `session_scheduler`;
+- `session`, `imported_session_seed`, `session_defaults_version`,
+  `session_current_defaults`, `session_scheduler`;
 - `imported_raw_source_record`, `imported_conversation`,
   `imported_conversation_raw_record`, and `imported_transcript_entry`, whose
   exact append-only representation, idempotency, and completeness rules are
@@ -155,7 +155,8 @@ Representation rules, all enforced in the schema:
   `submit_input_command` terminal result correlates with exactly its committed
   effects, each imported-conversation and context-frontier header has complete
   contiguous ordered membership, each imported-frontier session names its exact
-  aggregate, boundary, relationship, and seed frontier, and
+  aggregate, boundary, and relationship and has exactly one immutable
+  `imported_session_seed` naming its exact seed frontier, and
   turn/attempt/semantic-entry writes re-assert the complete turn final state
   (origin entry, frontier prefix relationships, live-attempt cardinality,
   failure-entry correlation).
@@ -226,6 +227,12 @@ because it fires outside the inventory's view.
 
 Locks per transaction, in acquisition order:
 
+- **CreateSessionFromImportedFrontier**: no explicit row lock. Registry claim
+  insertion and the command/session uniqueness constraints serialize competing
+  command identities. The selected imported aggregate is immutable and
+  append-only, so complete loading and prefix resolution need no mutable-state
+  lock; semantic-entry candidates are requested only after that checked prefix
+  fixes their cardinality.
 - **SubmitInput** (`prepare_against_locked_state`): session row
   `FOR NO KEY UPDATE`, then `session_scheduler` row `FOR UPDATE`, then
   `session_current_defaults` row `FOR UPDATE`; only then does it read the

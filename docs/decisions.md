@@ -59,6 +59,31 @@ task Signalbox can express directly.
 **Affects.** The Claude Code version 1 converter implementation and its
 synthetic structure-preservation and depth-bound tests.
 
+## 2026-07-24 — Separate imported ancestry from its materialized seed frontier
+
+**Context.** Imported ancestry identifies the external record and boundary that
+supplied initial semantic context. Session creation also mints one local
+`ContextFrontierId` for the materialized imported prefix. Scheduling must
+recover that exact identity, because equal frontier content does not imply
+frontier identity.
+
+**Decision.** Keep `TranscriptAncestry::ImportedConversation` limited to the
+imported conversation, inclusive entry boundary, and resume/fork relationship.
+Record the generated frontier in a separate immutable, one-to-one
+`ImportedSessionSeed` owned by the created session. The creation transaction
+stores both facts atomically. Reconstitution checks the seed against the
+session's imported ancestry and exact imported-prefix membership; scheduling
+uses the stored identity and never remints an equal-content frontier.
+
+**Rejected alternatives.** Embedding the local frontier identity in ancestry
+would mix source provenance with Signalbox's materialization artifact. Deriving
+or reminting a frontier from equal membership would lose identity. A generalized
+session-seed abstraction would speculate beyond the imported-session slice.
+
+**Affects.** S28; INV-003/INV-015/INV-039; imported session creation,
+reconstitution, first-turn scheduling, domain/application spines, and
+append-only PostgreSQL representation.
+
 ## 2026-07-24 — Authenticate each imported raw-record conversion
 
 **Context.** Exact raw bytes are durable authority, but the stored normalized

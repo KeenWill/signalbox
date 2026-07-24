@@ -39,6 +39,17 @@ append-only. Imported conversations are immutable, so later imports or native
 session activity likewise cannot change an imported ancestry boundary (INV-038,
 INV-039).
 
+Imported ancestry deliberately contains no local `ContextFrontierId`: ancestry
+records the selected external source, while a materialized context frontier is a
+Signalbox-owned session artifact. Every imported-seeded session therefore owns
+exactly one separate immutable `ImportedSessionSeed`, pairing its `SessionId`
+with the exact generated seed `ContextFrontierId`. Sessions with `None` or
+`SingleSource` ancestry cannot own this record. Checked construction and
+reconstitution require the record's session to carry matching imported ancestry
+and require its frontier to contain exactly that imported prefix in order.
+Equal-content frontier reminting never satisfies the identity link (INV-015,
+INV-039).
+
 ## Session creation
 
 `CreateSession` carries the durable command identity, the provenance pair, and
@@ -114,9 +125,11 @@ entry boundary of any imported conversation.
 The application uses `UuidV7CreateSessionFromImportedFrontierIdGenerator` for
 the session, imported-provenance semantic entries, and seed context frontier. It
 supplies the fixed session and frontier candidates and an application-owned
-semantic-entry generator closure to one atomic transaction port; the closure is
-invoked under the repository lock only after the selected prefix determines its
-cardinality. The transaction first follows the owner-global claim protocol in
+semantic-entry generator closure to one atomic transaction port. Imported
+aggregates are immutable, so the repository takes no explicit imported-record
+row lock; after resolving the complete selected prefix, it invokes the closure
+exactly once per prefix member in order. The transaction first follows the
+owner-global claim protocol in
 [identity-and-commands](identity-and-commands.md). A claimed identifier resolves
 to its recorded equal replay or conflicting reuse before any imported-target
 lookup. Only for an unclaimed identifier does the transaction load the complete
@@ -144,7 +157,8 @@ The committing transaction atomically inserts:
 - one imported-provenance semantic entry for every normalized imported entry in
   the exact prefix, including non-text content; and
 - one immutable seed context frontier containing exactly those semantic entries
-  in imported position order.
+  in imported position order, plus the one-to-one `ImportedSessionSeed` linking
+  the session to that exact frontier identity.
 
 No imported tool, call, attempt, or turn lifecycle event is emitted. The
 imported aggregate remains the content authority: each semantic seed entry
@@ -155,6 +169,14 @@ native tool identity (INV-038).
 Why (one transaction): a visible seeded session must never name a missing
 imported aggregate, nonmember boundary, partial semantic projection, or
 incomplete initial frontier.
+
+Checked session reconstitution requires imported ancestry and its
+`ImportedSessionSeed` together, validates that the linked frontier is owned by
+the same session, and compares its complete ordered members with the selected
+imported prefix. A missing, duplicate, cross-session, mismatched-boundary, or
+equal-content-but-different-identity seed is typed corruption. First-turn
+scheduling reads this stored identity; it never reconstructs authority by
+minting another frontier.
 
 ## Session defaults and replacement
 

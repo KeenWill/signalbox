@@ -311,40 +311,91 @@ pub enum ImportedStructuredValue {
     Object(Box<[ImportedStructuredObjectMember]>),
 }
 
-fn update_structured_digest(digest: &mut Sha256, value: &ImportedStructuredValue) {
-    match value {
-        ImportedStructuredValue::Null => digest.update([0]),
-        ImportedStructuredValue::Boolean(false) => digest.update([1]),
-        ImportedStructuredValue::Boolean(true) => digest.update([2]),
-        ImportedStructuredValue::Number(value) => {
-            digest.update([3]);
-            update_length_framed(digest, value.as_str().as_bytes());
-        }
-        ImportedStructuredValue::String(value) => {
-            digest.update([4]);
-            update_length_framed(digest, value.as_str().as_bytes());
-        }
-        ImportedStructuredValue::Array(values) => {
-            digest.update([5]);
-            digest.update(
-                u64::try_from(values.len())
-                    .unwrap_or(u64::MAX)
-                    .to_be_bytes(),
-            );
-            for value in values {
-                update_structured_digest(digest, value);
+impl Drop for ImportedStructuredValue {
+    fn drop(&mut self) {
+        let mut pending = Vec::new();
+        take_structured_children(self, &mut pending);
+        while let Some(mut value) = pending.pop() {
+            if matches!(
+                &value,
+                ImportedStructuredValue::Array(_) | ImportedStructuredValue::Object(_)
+            ) {
+                take_structured_children(&mut value, &mut pending);
+                // The container now owns only the empty boxed slice installed by
+                // `take_structured_children`; forgetting it prevents re-entering
+                // this destructor once per nesting level.
+                std::mem::forget(value);
             }
         }
+    }
+}
+
+fn take_structured_children(
+    value: &mut ImportedStructuredValue,
+    pending: &mut Vec<ImportedStructuredValue>,
+) {
+    match value {
+        ImportedStructuredValue::Array(values) => {
+            pending.extend(std::mem::take(values).into_vec());
+        }
         ImportedStructuredValue::Object(members) => {
-            digest.update([6]);
-            digest.update(
-                u64::try_from(members.len())
-                    .unwrap_or(u64::MAX)
-                    .to_be_bytes(),
+            pending.extend(
+                std::mem::take(members)
+                    .into_vec()
+                    .into_iter()
+                    .map(|member| member.value),
             );
-            for member in members {
-                update_length_framed(digest, member.name().as_str().as_bytes());
-                update_structured_digest(digest, member.value());
+        }
+        ImportedStructuredValue::Null
+        | ImportedStructuredValue::Boolean(_)
+        | ImportedStructuredValue::Number(_)
+        | ImportedStructuredValue::String(_) => {}
+    }
+}
+
+fn update_structured_digest(digest: &mut Sha256, value: &ImportedStructuredValue) {
+    enum Part<'a> {
+        Value(&'a ImportedStructuredValue),
+        ObjectMemberName(&'a ImportedText),
+    }
+
+    let mut pending = vec![Part::Value(value)];
+    while let Some(part) = pending.pop() {
+        match part {
+            Part::Value(ImportedStructuredValue::Null) => digest.update([0]),
+            Part::Value(ImportedStructuredValue::Boolean(false)) => digest.update([1]),
+            Part::Value(ImportedStructuredValue::Boolean(true)) => digest.update([2]),
+            Part::Value(ImportedStructuredValue::Number(value)) => {
+                digest.update([3]);
+                update_length_framed(digest, value.as_str().as_bytes());
+            }
+            Part::Value(ImportedStructuredValue::String(value)) => {
+                digest.update([4]);
+                update_length_framed(digest, value.as_str().as_bytes());
+            }
+            Part::Value(ImportedStructuredValue::Array(values)) => {
+                digest.update([5]);
+                digest.update(
+                    u64::try_from(values.len())
+                        .unwrap_or(u64::MAX)
+                        .to_be_bytes(),
+                );
+                pending.extend(values.iter().rev().map(Part::Value));
+            }
+            Part::Value(ImportedStructuredValue::Object(members)) => {
+                digest.update([6]);
+                digest.update(
+                    u64::try_from(members.len())
+                        .unwrap_or(u64::MAX)
+                        .to_be_bytes(),
+                );
+                for member in members.iter().rev() {
+                    pending.push(Part::Value(member.value()));
+                    pending.push(Part::ObjectMemberName(member.name()));
+                }
+            }
+            Part::ObjectMemberName(name) => {
+                update_length_framed(digest, name.as_str().as_bytes());
             }
         }
     }
@@ -2982,7 +3033,46 @@ mod tests {
         .expect_err("excessive stored depth must fail before digest traversal");
 
         let failure = error.failure();
-        std::mem::forget(error);
+        drop(error);
+        assert_eq!(
+            failure,
+            ImportedConversationReconstitutionFailure::RawRecordStructuredValueDepthExceeded {
+                position: ImportedRawRecordPosition::first(),
+            }
+        );
+    }
+
+    /// S28 / INV-002 / INV-038: conversion digesting and rejection remain
+    /// stack-safe for excessive caller-supplied structured depth.
+    #[test]
+    fn s28_inv002_inv038_converted_raw_depth_fails_closed_and_drops_safely() {
+        let owner = conversation(1);
+        let raw = ImportedRawSourceRecord::from_converted(
+            br#"{"type":"system","nested":[]}"#.to_vec(),
+            object_with_members(vec![
+                ("type", ImportedStructuredValue::String(text("system"))),
+                ("nested", nested_array(32_768)),
+            ]),
+        );
+        let source_event = EntryFixture::new(
+            2,
+            owner,
+            ImportedTranscriptContent::SourceEvent {
+                source_type: ImportedSourceAttestation::Attested(text("system")),
+            },
+        )
+        .build();
+
+        let error = ImportedConversation::from_converted_records(
+            owner,
+            ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
+            vec![raw],
+            vec![source_event],
+        )
+        .expect_err("excessive converted depth must fail without recursive digesting");
+
+        let failure = error.failure();
+        drop(error);
         assert_eq!(
             failure,
             ImportedConversationReconstitutionFailure::RawRecordStructuredValueDepthExceeded {
