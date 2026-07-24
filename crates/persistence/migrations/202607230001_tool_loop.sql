@@ -425,14 +425,25 @@ BEGIN
             ) || '}'
               INTO canonical
               FROM (
-                    SELECT DISTINCT ON (member_key)
+                    SELECT
                         member_key,
                         member_value
-                      FROM json_each(checked_value) WITH ORDINALITY
-                           AS member(member_key, member_value, member_position)
-                     ORDER BY
-                        member_key COLLATE "C",
-                        member_position DESC
+                      FROM (
+                            SELECT
+                                member_key,
+                                member_value,
+                                row_number() OVER (
+                                    PARTITION BY member_key COLLATE "C"
+                                    ORDER BY member_position DESC
+                                ) AS duplicate_rank
+                              FROM json_each(checked_value) WITH ORDINALITY
+                                   AS member(
+                                       member_key,
+                                       member_value,
+                                       member_position
+                                   )
+                      ) AS ranked_member
+                     WHERE duplicate_rank = 1
               ) AS last_member;
         WHEN 'array' THEN
             SELECT '[' || COALESCE(
