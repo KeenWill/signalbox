@@ -31,12 +31,25 @@ Why: treating external history as native execution would fabricate the evidence
 chain required by the native lifecycle invariants.
 
 Ingestion is idempotent and future-use-neutral. The source-content digest is
-SHA-256 over a domain-separated, length-framed sequence containing the format
-version and each raw record's exact content hash in physical order. Reingesting
-the same format and exact raw record sequence returns the existing imported
-conversation identity; caller-supplied candidate identities from that attempt
-are discarded. A changed raw sequence is a new immutable snapshot with a new
-identity. Common raw records are still deduplicated by content hash.
+SHA-256 over this exact preimage:
+
+1. the ASCII domain tag `signalbox.imported-conversation.source-digest.v1`,
+   prefixed by its unsigned 64-bit big-endian byte length;
+2. the ASCII format tag `claude-code-session-jsonl-v1`, prefixed by the same
+   length encoding;
+3. the raw-record count as an unsigned 64-bit big-endian integer; and
+4. for each raw record in physical order, its 32-byte SHA-256 content hash
+   prefixed by the unsigned 64-bit big-endian value 32.
+
+The one-record synthetic vector whose exact raw bytes are hexadecimal `7b7d` has
+raw hash `44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a` and
+source-content digest
+`b836a3fb00465c2c7ec01cf2c4b2c98845cbc9cdaf28892b910ce225d2079a5c`.
+
+Reingesting the same format and exact raw record sequence returns the existing
+imported conversation identity; caller-supplied candidate identities from that
+attempt are discarded. A changed raw sequence is a new immutable snapshot with a
+new identity. Common raw records are still deduplicated by content hash.
 
 The digest is not a source session identifier or filename key. No source path,
 wall-clock import time, adoption choice, target session, or future-use policy
@@ -71,6 +84,26 @@ a typed `SourceMessageBlock`, so its boundary and type remain explicit while the
 complete normalized owning record retains every block field. The normalized
 sequence and every entry's raw-record reference make each conversion decision
 traceable back to exact source bytes.
+
+Each occurrence additionally stores an `ImportedRawRecordConversionDigest` that
+authenticates its exact raw hash and complete normalized structured value
+without moving JSON parsing out of the edge converter. Reconstitution derives
+the digest again and fails typed corruption before trusting a mismatched
+normalized record or its entry projection.
+
+The conversion digest is SHA-256 over a preimage beginning with the
+length-framed ASCII domain tag
+`signalbox.imported-conversation.raw-record-conversion.v1`, then the
+length-framed 32-byte raw hash, then one recursively encoded structured value.
+Lengths and collection counts are unsigned 64-bit big-endian integers. The value
+tags are `00` null, `01` false, `02` true, `03` number, `04` string, `05` array,
+and `06` object. Number spellings and string UTF-8 bytes follow their tag with a
+byte length. Arrays follow their tag with an element count and the encoded
+elements. Objects follow their tag with a member count and, in exact order for
+every member including duplicates, the name's length-framed UTF-8 bytes and
+encoded value. For the source-content vector above normalized as an empty
+object, the conversion digest is
+`3d06f834c1c2fddbbf454716da309af393d15530870d969f4e73b4960ae90793`.
 
 ## Source attestations and normalized content
 
@@ -239,6 +272,8 @@ One transaction resolves or inserts a complete aggregate:
   reconstitutes the winner, returning `AlreadyImported` only after the same
   byte-for-byte match, and raw-blob insert conflicts likewise reload and verify
   the winning bytes before reuse; and
+- every raw occurrence stores and rechecks its conversion digest before its
+  normalized value is accepted; and
 - deferred constraints require exact declared counts, contiguous positions,
   globally distinct imported-entry identities, valid raw-record references, and
   agreement between every member's owner and header.
