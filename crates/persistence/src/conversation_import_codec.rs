@@ -1008,8 +1008,8 @@ mod tests {
     fn inv002_corrupt_collection_count_fails_after_incremental_decoding() {
         let encoded = [
             1, 0, 4, // version one, structured payload, array
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // claimed u64::MAX items
-            3,    // first item: string
+            0, 0, 0, 0, 0, 0, 0, 10, // ten claimed items, ten payload bytes
+            3,  // first item: string
             0, 0, 0, 0, 0, 0, 0, 1, // one-byte string
             b'x',
         ];
