@@ -607,6 +607,12 @@ where
             )
             .await?;
         }
+        Some(ModelCallInterruptOutcome::ToolReconciliationRequired(_)) => {
+            return Err(SubmitInputCorruption::Inconsistent(
+                "tool reconciliation outcome requires tool storage",
+            )
+            .into());
+        }
         None => {}
     }
     Ok(TransactionDecision::Commit(
