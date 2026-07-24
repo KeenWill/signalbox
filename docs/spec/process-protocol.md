@@ -124,11 +124,13 @@ a `malformed_frame`. Within that bound, repeating a decoded member name in any
 JSON object is a `malformed_frame`, including when two different JSON string
 spellings decode to the same name. A version other than one or two produces an
 `unsupported_version` error naming the supported versions, then the server
-closes the connection. Every response uses the request's admitted version. A
-server error uses `request_id = "0"` only when the incoming frame prevents
-recovery of a valid nonzero identity; zero is never a valid client identity or
-success-response identity. Leading zeroes, a plus sign, whitespace, and any
-spelling other than the shortest ASCII decimal form are invalid.
+closes the connection. Every response uses the request's admitted version; when
+no version can be admitted, the server error uses version one as the
+pre-admission fallback. A server error uses `request_id = "0"` only when the
+incoming frame prevents recovery of a valid nonzero identity; zero is never a
+valid client identity or success-response identity. Leading zeroes, a plus sign,
+whitespace, and any spelling other than the shortest ASCII decimal form are
+invalid.
 
 The server may close a connection after any error. Clients never reinterpret an
 unknown message as a known one.

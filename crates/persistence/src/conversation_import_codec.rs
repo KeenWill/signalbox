@@ -1006,16 +1006,13 @@ mod tests {
 
     #[test]
     fn inv002_corrupt_collection_count_fails_after_incremental_decoding() {
-        let value = ImportedStructuredValue::Array(
-            vec![ImportedStructuredValue::String(ImportedText::new(
-                "x".repeat(4_096),
-            ))]
-            .into_boxed_slice(),
-        );
-        let mut encoded = encode_structured(&value).expect("fixture must encode");
-        let claimed_count =
-            u64::try_from(encoded.len() - 11).expect("fixture encoded length fits u64");
-        encoded[3..11].copy_from_slice(&claimed_count.to_be_bytes());
+        let encoded = [
+            1, 0, 4, // version one, structured payload, array
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // claimed u64::MAX items
+            3,    // first item: string
+            0, 0, 0, 0, 0, 0, 0, 1, // one-byte string
+            b'x',
+        ];
 
         assert_eq!(
             decode_structured(&encoded),
