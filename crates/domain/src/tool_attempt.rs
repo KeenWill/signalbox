@@ -441,7 +441,7 @@ impl CurrentToolAttempt {
     }
 
     /// Authorizes exactly one executor dispatch from `Prepared`.
-    pub fn authorize(self) -> Result<AuthorizedToolAttempt, ToolAttemptTransitionError> {
+    pub(crate) fn authorize(self) -> Result<AuthorizedToolAttempt, ToolAttemptTransitionError> {
         if self.state != CurrentToolAttemptState::Prepared {
             return Err(ToolAttemptTransitionError {
                 attempt: self,
@@ -460,7 +460,9 @@ impl CurrentToolAttempt {
 
     /// Reconstitutes exact dispatch authority after an ambiguous commit
     /// acknowledgement only from the durable in-flight stage.
-    pub fn resume_in_flight(self) -> Result<AuthorizedToolAttempt, ToolAttemptTransitionError> {
+    pub(crate) fn resume_in_flight(
+        self,
+    ) -> Result<AuthorizedToolAttempt, ToolAttemptTransitionError> {
         if self.state != CurrentToolAttemptState::InFlight {
             return Err(ToolAttemptTransitionError {
                 attempt: self,

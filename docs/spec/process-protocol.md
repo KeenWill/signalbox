@@ -325,11 +325,12 @@ Each `transcript_turn` has `turn_id` and one closed `state` object:
 
 Each non-text native frontier member is one `transcript_entry` with
 `entry_index`, `source_session_id`, `entry_id`, and one closed `entry` object:
-`assistant_tool_use { turn_id, model_call_id, tool_request_id }`,
-`tool_execution_result { tool_request_id, tool_attempt_id }`,
-`tool_denied { tool_request_id }`, `tool_closed { tool_request_id }`,
-`turn_completed { turn_id }`, `turn_failed { turn_id }`, or
-`turn_cancelled { turn_id }`. A native text member begins with
+`assistant_tool_use { turn_id, model_call_id, tool_request_id, tool_name, arguments }`,
+`tool_execution_result { tool_request_id, tool_attempt_id, content }`,
+`tool_denied { tool_request_id, content }`,
+`tool_closed { tool_request_id, content }`, `turn_completed { turn_id }`,
+`turn_failed { turn_id }`, or `turn_cancelled { turn_id }`. A native text member
+begins with
 `transcript_text_entry { entry_index, source_session_id, entry_id, entry }`. Its
 `entry` is either `user { accepted_input_id, turn_id }` or
 `assistant { turn_id, model_call_id }`. It is followed by one or more
@@ -341,6 +342,14 @@ earlier fragment carries `false`. The content is split only at UTF-8 scalar
 boundaries into fragments of at most 1 MiB of UTF-8; even empty content has one
 final empty fragment. The 1 MiB content bound leaves room below the 8 MiB frame
 limit even when every byte requires worst-case JSON escaping.
+
+The process projection resolves the domain's reference-only tool entries before
+crossing the wire. Tool use carries the exact checked name and exact
+normalized-or-scrubbed-undecodable arguments. Execution, denial, and closure
+carry the same provider-neutral success text or compact typed failure JSON
+defined by [tool-loop](tool-loop.md#provider-bridge-and-current_time). A client
+therefore never needs private storage access to reconstruct tool-bearing
+conversation history.
 
 The following imported-entry variants exist only in protocol version two. An
 imported semantic entry always identifies its source with
@@ -511,7 +520,9 @@ event's named turn and model call plus the exact completion marker for
 `turn_completed`; the exact failure marker and any immediately preceding
 terminal tool-result suffix for `turn_failed`; the exact cancellation marker and
 any immediately preceding terminal tool-result suffix for `turn_cancelled`; and
-no semantic material for `turn_refused`, `turn_reconciliation_required`, or
+the exact terminal tool-result suffix for a tool-attempt
+`turn_reconciliation_required`. It presents no semantic material for
+`turn_refused`, model-call `turn_reconciliation_required`, or
 `recovery_required`. It does not present material introduced by any later
 cursor. Such material remains ordered behind its buffered followed event, or
 behind a new authoritative snapshot after `resync_required`. Final durable

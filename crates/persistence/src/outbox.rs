@@ -843,6 +843,31 @@ async fn load_event(
                                         + round.request_count
                                     AND NOT EXISTS (
                                         SELECT 1
+                                          FROM context_frontier_member
+                                               AS boundary_member
+                                          LEFT JOIN context_frontier_member
+                                                    AS result_prefix
+                                            ON result_prefix.owning_session_id =
+                                               event.session_id
+                                           AND result_prefix.context_frontier_id =
+                                               event.frontier_id
+                                           AND result_prefix.member_position =
+                                               boundary_member.member_position
+                                           AND result_prefix.source_session_id =
+                                               boundary_member.source_session_id
+                                           AND result_prefix.semantic_entry_id =
+                                               boundary_member.semantic_entry_id
+                                         WHERE
+                                            boundary_member.owning_session_id =
+                                            event.session_id
+                                           AND
+                                            boundary_member.context_frontier_id =
+                                            round.boundary_frontier_id
+                                           AND
+                                            result_prefix.semantic_entry_id IS NULL
+                                    )
+                                    AND NOT EXISTS (
+                                        SELECT 1
                                           FROM tool_request AS request
                                           LEFT JOIN semantic_transcript_entry
                                                     AS result
