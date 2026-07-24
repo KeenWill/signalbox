@@ -3829,23 +3829,7 @@ fn reconstitute_inner(
                     AcceptedInputSchedulingReconstitutionFailure::TerminalSnapshotMissing { turn },
                 )?;
                 if !referenced_snapshots.insert(*terminal_frontier)
-                    || !source.is_semantic_prefix_of(&terminal)
-                    || terminal.entry_count() == source.entry_count()
-                    || terminal
-                        .ordered_entries()
-                        .skip(source.entry_count())
-                        .any(|entry| {
-                            !matches!(
-                                semantic_entries
-                                    .get(&entry)
-                                    .map(SemanticTranscriptEntry::payload),
-                                Some(
-                                    SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
-                                        | SemanticTranscriptEntryPayload::ToolDenied { .. }
-                                        | SemanticTranscriptEntryPayload::ToolClosed { .. }
-                                )
-                            )
-                        })
+                    || terminal.ordered_entries().ne(source.ordered_entries())
                 {
                     return Err(
                         AcceptedInputSchedulingReconstitutionFailure::TerminalFrontierMismatch {
@@ -4191,7 +4175,23 @@ fn reconstitute_inner(
                     AcceptedInputSchedulingReconstitutionFailure::TerminalSnapshotMissing { turn },
                 )?;
                 if !referenced_snapshots.insert(*terminal_frontier)
-                    || terminal.ordered_entries().ne(source.ordered_entries())
+                    || !source.is_semantic_prefix_of(&terminal)
+                    || terminal.entry_count() == source.entry_count()
+                    || terminal
+                        .ordered_entries()
+                        .skip(source.entry_count())
+                        .any(|entry| {
+                            !matches!(
+                                semantic_entries
+                                    .get(&entry)
+                                    .map(SemanticTranscriptEntry::payload),
+                                Some(
+                                    SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
+                                        | SemanticTranscriptEntryPayload::ToolDenied { .. }
+                                        | SemanticTranscriptEntryPayload::ToolClosed { .. }
+                                )
+                            )
+                        })
                 {
                     return Err(
                         AcceptedInputSchedulingReconstitutionFailure::TerminalFrontierMismatch {
