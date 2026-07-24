@@ -29,7 +29,7 @@ fn validate_opt_in_real_transcripts() -> Result<(), RealTranscriptValidationFail
         return Ok(());
     }
     let Some(paths) = env::var_os("SIGNALBOX_REAL_CLAUDE_TRANSCRIPTS") else {
-        return Ok(());
+        return Err(RealTranscriptValidationFailure::NoInputs);
     };
     let roots = env::split_paths(&paths).collect::<Vec<_>>();
     if roots.is_empty() {
