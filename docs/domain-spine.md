@@ -462,11 +462,20 @@ pub struct TranscriptFrontier { /* private */ }
 // sealed: no public producer in this slice; the later semantic-history slice
 // supplies the trusted frontier producer. Copy; equality is exact-boundary.
 
+pub enum ImportedSessionRelationship {
+    Resume,
+    Fork,
+}
+
 pub enum TranscriptAncestry {
     None,
     SingleSource {
         source_session: SessionId,
         source_frontier: TranscriptFrontier,
+    },
+    ImportedConversation {
+        source_frontier: ImportedTranscriptFrontier,
+        relationship: ImportedSessionRelationship,
     },
 }
 
@@ -490,6 +499,29 @@ impl CreateSession {
 }
 // Eq/Hash exclude command_id (comparison-payload rule,
 // spec/identity-and-commands.md)
+
+pub struct CreateSessionFromImportedFrontier { /* private */ }
+impl CreateSessionFromImportedFrontier {
+    pub const fn new(
+        command_id: DurableCommandId,
+        imported_conversation: ImportedConversationId,
+        imported_frontier: ImportedTranscriptFrontier,
+        relationship: ImportedSessionRelationship,
+        initial_configuration_defaults: SessionConfigurationDefaults,
+    ) -> Self;
+    pub const fn establish_initial_defaults(&self) -> VersionedSessionConfigurationDefaults;
+    // accessors: command_id(), imported_conversation(), imported_frontier(),
+    //   relationship(), initial_configuration_defaults()
+}
+// Eq/Hash exclude command_id (comparison-payload rule,
+// spec/identity-and-commands.md)
+
+pub struct ImportedSessionSeed { /* private */ }
+// sealed: the imported semantic-entry projection supplies checked construction
+// and reconstitution in the implementing child slice
+impl ImportedSessionSeed {
+    // accessors: session(), seed_frontier()
+}
 
 pub struct InitialSession { /* private */ }
 // sealed: carried only by PreparedCreateSession::session and
@@ -529,6 +561,7 @@ pub enum SessionReconstitutionFailure {
     CurrentDefaultsSessionMismatch,
     DefaultsSessionMismatch,
     CurrentDefaultsVersionMismatch,
+    ImportedSessionSeedUnavailable,
 }
 
 pub struct SessionReconstitutionError { /* private */ }
@@ -3343,7 +3376,7 @@ impl<
 | domain: lib.rs identities             | 11                   |
 | domain: actor                         | 1                    |
 | domain: imported_conversation         | 29                   |
-| domain: session                       | 18                   |
+| domain: session                       | 21                   |
 | domain: configuration                 | 19                   |
 | domain: accepted_input                | 5                    |
 | domain: delivery_request              | 2                    |
@@ -3361,7 +3394,7 @@ impl<
 | domain: applied_interrupt             | 2                    |
 | domain: fatal_mismatch                | 0                    |
 | domain: replace_session_defaults      | 13                   |
-| **signalbox-domain total**            | **242 (+1 free fn)** |
+| **signalbox-domain total**            | **245 (+1 free fn)** |
 | application: conversation_import      | 8 (incl. 3 traits)   |
 | application: create_session           | 8 (incl. 2 traits)   |
 | application: load_session             | 2 (incl. 1 trait)    |

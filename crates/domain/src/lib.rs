@@ -102,12 +102,14 @@ pub use semantic_entry::{
     SemanticTranscriptEntryReconstitutionInput,
 };
 pub use session::{
-    CreateSession, CreateSessionAppliedResult, CreateSessionPreparationError,
-    CreateSessionPreparationFailure, CreateSessionReconstitutionError,
-    CreateSessionReconstitutionFailure, CreateSessionReconstitutionInput, InitialSession,
-    PreparedCreateSession, ReconstitutedSessionCreation, Session, SessionCreationCause,
-    SessionCreationProvenance, SessionReconstitutionError, SessionReconstitutionFailure,
-    SessionReconstitutionInput, TranscriptAncestry, TranscriptFrontier,
+    CreateSession, CreateSessionAppliedResult, CreateSessionFromImportedFrontier,
+    CreateSessionPreparationError, CreateSessionPreparationFailure,
+    CreateSessionReconstitutionError, CreateSessionReconstitutionFailure,
+    CreateSessionReconstitutionInput, ImportedSessionRelationship, ImportedSessionSeed,
+    InitialSession, PreparedCreateSession, ReconstitutedSessionCreation, Session,
+    SessionCreationCause, SessionCreationProvenance, SessionReconstitutionError,
+    SessionReconstitutionFailure, SessionReconstitutionInput, TranscriptAncestry,
+    TranscriptFrontier,
 };
 pub use submit_input::{
     PreparedSubmitInput, ReconstitutedSubmitInput, SubmitInput, SubmitInputAppliedResult,
@@ -259,6 +261,8 @@ pub(crate) mod test_support {
         turn_id -> crate::TurnId,
         turn_attempt_id -> crate::TurnAttemptId,
         session_id -> crate::SessionId,
+        imported_conversation_id -> crate::ImportedConversationId,
+        imported_transcript_entry_id -> crate::ImportedTranscriptEntryId,
         accepted_input_id -> crate::AcceptedInputId,
         model_call_id -> crate::ModelCallId,
         provider_target_evidence_id -> crate::ProviderTargetEvidenceId,
