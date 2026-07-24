@@ -621,6 +621,7 @@ $$;
 CREATE TABLE imported_session_seed (
     session_id uuid PRIMARY KEY,
     seed_context_frontier_id uuid NOT NULL UNIQUE,
+    creation_transaction_id xid8 NOT NULL,
 
     CONSTRAINT imported_session_seed_frontier_fk
         FOREIGN KEY (session_id, seed_context_frontier_id)
@@ -632,6 +633,25 @@ CREATE TABLE imported_session_seed (
         ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED
 );
+
+CREATE FUNCTION stamp_imported_session_seed_transaction()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    -- pg_current_xact_id() deliberately returns the top-level transaction ID
+    -- even when this INSERT runs inside a savepoint. Persisting it avoids
+    -- confusing the tuple's subtransaction xmin with a previously committed
+    -- seed while the rest of the prefix is assembled.
+    NEW.creation_transaction_id := pg_current_xact_id();
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER imported_session_seed_records_creation_transaction
+BEFORE INSERT ON imported_session_seed
+FOR EACH ROW
+EXECUTE FUNCTION stamp_imported_session_seed_transaction();
 
 CREATE TRIGGER imported_session_seed_is_append_only
 BEFORE UPDATE OR DELETE ON imported_session_seed
@@ -903,7 +923,7 @@ BEGIN
         SELECT 1
           FROM imported_session_seed AS seed
          WHERE seed.session_id = NEW.source_session_id
-           AND seed.xmin <> pg_current_xact_id()::xid
+           AND seed.creation_transaction_id <> pg_current_xact_id()
     ) THEN
         RAISE EXCEPTION
             'imported session % semantic seed prefix is already sealed',
