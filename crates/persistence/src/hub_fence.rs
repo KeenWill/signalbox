@@ -35,14 +35,69 @@ pub async fn initialize_hub_fence(pool: &PgPool) -> Result<(), MigrateError> {
     MIGRATOR.run_to(HUB_FENCE_MIGRATION_VERSION, pool).await
 }
 
+/// A newly advanced fence bound to the exact live session that retained its
+/// prior-generation lock.
+///
+/// Pool construction requires this non-cloneable capability. A copied
+/// [`HubFenceGeneration`] is therefore observational only and cannot create
+/// database work after the guarded session has been released.
+#[derive(Debug)]
+#[must_use = "the advanced fence must construct its pool while its session remains live"]
+pub struct AdvancedHubFence<'guard> {
+    connection: &'guard mut PgConnection,
+    generation: HubFenceGeneration,
+}
+
+impl AdvancedHubFence<'_> {
+    /// Returns the exact positive generation for observation and diagnostics.
+    pub const fn generation(&self) -> HubFenceGeneration {
+        self.generation
+    }
+
+    /// Opens a pool whose every physical session retains this generation's
+    /// shared lock before SQLx can make that session available.
+    pub async fn connect_pool(&mut self, options: PgConnectOptions) -> Result<PgPool, sqlx::Error> {
+        self.connection.ping().await?;
+        let generation = self.generation;
+        let key = advisory_key(generation.get());
+        PgPoolOptions::new()
+            .after_connect(move |connection, _metadata| {
+                Box::pin(async move {
+                    sqlx::query("SELECT pg_advisory_lock_shared($1)")
+                        .bind(key)
+                        .execute(&mut *connection)
+                        .await?;
+                    let stored: Option<Decimal> = sqlx::query_scalar(
+                        "SELECT generation FROM hub_fence_state WHERE singleton",
+                    )
+                    .fetch_optional(&mut *connection)
+                    .await?;
+                    let current = decode_generation(stored.ok_or_else(|| {
+                        sqlx::Error::Protocol(HubFenceCorruption::MissingState.to_string())
+                    })?)
+                    .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+                    if current != generation {
+                        return Err(sqlx::Error::Protocol(
+                            HubFenceCorruption::GenerationMismatch.to_string(),
+                        ));
+                    }
+                    Ok(())
+                })
+            })
+            .connect_with(options)
+            .await
+    }
+}
+
 /// Waits out every pooled session from the prior generation, then advances the
 /// durable singleton exactly once.
 ///
 /// The exclusive prior-generation advisory lock remains held by `connection`
-/// for that session's lifetime.
+/// and by the returned pool-construction capability for that session's
+/// lifetime.
 pub async fn advance_hub_fence(
     connection: &mut PgConnection,
-) -> Result<HubFenceGeneration, HubFenceError> {
+) -> Result<AdvancedHubFence<'_>, HubFenceError> {
     let mut transaction = connection.begin().await?;
     let stored: Option<Decimal> = sqlx::query_scalar(lock_inventory::HUB_FENCE_GENERATION)
         .fetch_optional(&mut *transaction)
@@ -98,41 +153,10 @@ pub async fn advance_hub_fence(
             .await?;
         return Err(error.into());
     }
-    Ok(HubFenceGeneration(next))
-}
-
-/// Opens a pool whose every physical session retains the shared lock for
-/// `generation` before SQLx can make that session available.
-pub async fn connect_fenced_pool(
-    options: PgConnectOptions,
-    generation: HubFenceGeneration,
-) -> Result<PgPool, sqlx::Error> {
-    let key = advisory_key(generation.get());
-    PgPoolOptions::new()
-        .after_connect(move |connection, _metadata| {
-            Box::pin(async move {
-                sqlx::query("SELECT pg_advisory_lock_shared($1)")
-                    .bind(key)
-                    .execute(&mut *connection)
-                    .await?;
-                let stored: Option<Decimal> =
-                    sqlx::query_scalar("SELECT generation FROM hub_fence_state WHERE singleton")
-                        .fetch_optional(&mut *connection)
-                        .await?;
-                let current = decode_generation(stored.ok_or_else(|| {
-                    sqlx::Error::Protocol(HubFenceCorruption::MissingState.to_string())
-                })?)
-                .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
-                if current != generation {
-                    return Err(sqlx::Error::Protocol(
-                        HubFenceCorruption::GenerationMismatch.to_string(),
-                    ));
-                }
-                Ok(())
-            })
-        })
-        .connect_with(options)
-        .await
+    Ok(AdvancedHubFence {
+        connection,
+        generation: HubFenceGeneration(next),
+    })
 }
 
 fn decode_generation(stored: Decimal) -> Result<HubFenceGeneration, HubFenceCorruption> {

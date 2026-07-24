@@ -7,7 +7,7 @@
 use std::error::Error;
 
 use signalbox_hubd::{FencedHubDatabase, SingleHubGuard, SingleHubGuardError};
-use signalbox_persistence::{hub_fence::connect_fenced_pool, local_test_connection_options};
+use signalbox_persistence::local_test_connection_options;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use testcontainers_modules::{
     postgres::Postgres,
@@ -225,39 +225,29 @@ async fn successor_waits_for_every_prior_fenced_pool_session() -> Result<(), Box
     Ok(())
 }
 
-/// A pool connection for an older generation cannot become usable after an
-/// intermediate successor advanced the durable fence and exited.
+/// A retained generation is observational only: after close, the public
+/// construction boundary can create database work only by acquiring a new
+/// singleton guard and advancing the fence.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn stale_generation_cannot_reconnect_after_successor_exit() -> Result<(), Box<dyn Error>> {
+async fn retired_generation_cannot_bypass_guarded_pool_construction() -> Result<(), Box<dyn Error>>
+{
     let (container, control_pool, database_url) = postgres().await?;
     let options = local_test_connection_options(&database_url)?;
     let first = FencedHubDatabase::connect_with(options.clone()).await?;
-    let stale_generation = first.generation();
-    assert_eq!(stale_generation.get(), 2);
+    let retired_generation = first.generation();
+    assert_eq!(retired_generation.get(), 2);
     first.close().await?;
 
     let successor = FencedHubDatabase::connect_with(options.clone()).await?;
     let current_generation = successor.generation();
     assert_eq!(current_generation.get(), 3);
     successor.close().await?;
+    assert!(current_generation > retired_generation);
 
-    assert!(
-        tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            connect_fenced_pool(options.clone(), stale_generation),
-        )
-        .await
-        .is_err(),
-        "the stale generation must be rejected on every connection attempt"
-    );
-
-    let current_pool = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        connect_fenced_pool(options, current_generation),
-    )
-    .await??;
-    current_pool.close().await;
+    let replacement = FencedHubDatabase::connect_with(options).await?;
+    assert_eq!(replacement.generation().get(), 4);
+    replacement.close().await?;
     control_pool.close().await;
     drop(container);
     Ok(())

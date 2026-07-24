@@ -3,10 +3,7 @@
 use std::{error::Error, fmt, mem};
 
 use signalbox_persistence::{
-    hub_fence::{
-        HubFenceError, HubFenceGeneration, advance_hub_fence, connect_fenced_pool,
-        initialize_hub_fence,
-    },
+    hub_fence::{HubFenceError, HubFenceGeneration, advance_hub_fence, initialize_hub_fence},
     production_connection_options,
 };
 use sqlx::{
@@ -49,13 +46,16 @@ impl FencedHubDatabase {
         initialize_hub_fence(&bootstrap)
             .await
             .map_err(FencedHubDatabaseError::InitializeFence)?;
-        let generation = advance_hub_fence(guard.connection_mut())
+        let mut advanced_fence = advance_hub_fence(guard.connection_mut())
             .await
             .map_err(FencedHubDatabaseError::AdvanceFence)?;
         bootstrap.close().await;
-        let pool = connect_fenced_pool(options, generation)
+        let pool = advanced_fence
+            .connect_pool(options)
             .await
             .map_err(FencedHubDatabaseError::ConnectFencedPool)?;
+        let generation = advanced_fence.generation();
+        drop(advanced_fence);
         Ok(Self {
             guard: Some(guard),
             pool,

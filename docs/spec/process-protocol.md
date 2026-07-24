@@ -49,16 +49,18 @@ lifetime path lock, the hub handles the final path as follows:
 
 The path lock makes the final revalidation and removal indivisible with respect
 to another conforming hub. The bind itself must still create a new socket and
-never replace another entry. The hub creates an unlistening Unix stream socket,
-binds it, verifies that the socket's local address is the resolved path, and
-captures the new path entry's socket type, effective-user ownership, device, and
-inode with `lstat`. It then sets owner-only `0600` permissions and verifies with
-a second `lstat` that the same socket entry remains, retains that ownership, and
-has exactly that mode before calling `listen`; no connection can be queued
-before that sequence completes. Any address, identity, ownership, or permission
-mismatch fails startup and removes no raced entry. Graceful shutdown removes the
-path only after a final `lstat` proves it is still the socket device and inode
-captured by this hub, then releases the path lock.
+never replace another entry. The hub creates an unlistening Unix stream socket
+and binds it under a serialized, restored process creation mask so the path
+entry is born with exact owner-only `0600` permissions; it performs no later
+pathname-following permission change. It then verifies that the socket's local
+address is the resolved path, captures the new path entry's socket type,
+effective-user ownership, device, inode, and mode with `lstat`, and verifies
+with a second `lstat` that the same socket entry remains before calling
+`listen`; no connection can be queued before that sequence completes. Any
+address, identity, ownership, or permission mismatch fails startup and removes
+no raced entry. Graceful shutdown removes the path only after a final `lstat`
+proves it is still the socket device and inode captured by this hub, then
+releases the path lock.
 
 The transport is local-machine and single-user only. Version one's lack of
 protocol authentication is provisional; it has no authorization exchange or
@@ -257,11 +259,13 @@ Each non-text frontier member is one `transcript_entry` with `entry_index`,
 `entry` is either `user { accepted_input_id, turn_id }` or
 `assistant { turn_id, model_call_id }`. It is followed by one or more
 `transcript_content` messages carrying the same `entry_index`, a zero-based
-`fragment_index`, `final_fragment`, and `content_fragment`. The content is split
-only at UTF-8 scalar boundaries into fragments of at most 1 MiB of UTF-8; even
-empty content has one final empty fragment. The 1 MiB content bound leaves room
-below the 8 MiB frame limit even when every byte requires worst-case JSON
-escaping.
+`fragment_index`, `final_fragment`, and `content_fragment`. Fragment indices
+start at zero and are contiguous: each fragment index is exactly its predecessor
+plus one. Exactly the last fragment carries `final_fragment = true`; every
+earlier fragment carries `false`. The content is split only at UTF-8 scalar
+boundaries into fragments of at most 1 MiB of UTF-8; even empty content has one
+final empty fragment. The 1 MiB content bound leaves room below the 8 MiB frame
+limit even when every byte requires worst-case JSON escaping.
 
 `entry_index` is zero-based and contiguous in frontier-member order; the first
 entry is zero and each later entry is exactly its predecessor plus one.
@@ -295,13 +299,16 @@ transactionally advances the row before constructing its fenced pool. That
 exclusive request waits for all prior pooled sessions and prevents the old
 process from opening another usable connection: an older generation that tries
 again after a failed intermediate successor can acquire only its old shared
-lock, then fails the current-generation check. The first migration creates and
-initializes the row for a database that cannot have a prior fenced hub; later
-startups fence before running any newer migration. This fence migration belongs
-to Signalbox's initial deployment: the owner confirms that no deployed database
-or hub predates it, so there is no legacy unfenced writer to drain during the
-first installation. Importing or upgrading a pre-fence database is unsupported.
-Exhaustion or corruption fails startup rather than wrapping.
+lock, then fails the current-generation check. Pool construction requires a
+non-cloneable capability borrowing the still-live fence session; the copyable
+generation value is observational and cannot construct work after guard release.
+The first migration creates and initializes the row for a database that cannot
+have a prior fenced hub; later startups fence before running any newer
+migration. This fence migration belongs to Signalbox's initial deployment: the
+owner confirms that no deployed database or hub predates it, so there is no
+legacy unfenced writer to drain during the first installation. Importing or
+upgrading a pre-fence database is unsupported. Exhaustion or corruption fails
+startup rather than wrapping.
 
 Together these guards enforce one active hub process—and therefore one
 dispatcher and one process-local fan-out—for a database, while preventing a

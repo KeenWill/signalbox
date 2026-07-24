@@ -434,14 +434,14 @@ direction of that trade.
 The [real-provider smoke milestone](../target-model.md#priority-order) requires
 one provider adapter, not both audited adapters or the later tool loop. After
 the provider-identity normalization/provenance decision reserved by ADR-0007 and
-the outbound TLS, response-size, and parsing-hardening questions in
-[Provider call security](../open-questions.md#provider-call-security) are
-resolved, the remaining implementation minimum is one provider adapter;
-`signalbox-model-runtime` already supplies the provider-neutral core, shared SSE
-framing, structured-output schema generation, and tool decoding selected by the
-recorded hand-roll decision. `provider-anthropic` is the illustrative first
-adapter below because its stream integrity is the stronger audited design.
-OpenAI remains later audit coverage, not part of that smoke gate.
+the outbound TLS, response-size, and parsing-hardening posture in
+[runtime-substrate](../spec/runtime-substrate.md) are resolved, the remaining
+implementation minimum is one provider adapter; `signalbox-model-runtime`
+already supplies the provider-neutral core, shared SSE framing,
+structured-output schema generation, and tool decoding selected by the recorded
+hand-roll decision. `provider-anthropic` is the illustrative first adapter below
+because its stream integrity is the stronger audited design. OpenAI remains
+later audit coverage, not part of that smoke gate.
 
 | Module                    | Milestone scope  | Content                                                                                                                                                                                                                                   | Design reference                                                                                                                                                                                |
 | ------------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
