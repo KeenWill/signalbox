@@ -875,20 +875,16 @@ those tests.
   new resume-style or fork-style session without pretending Signalbox executed
   the imported work.
 - **Durable commands:** Pure ingestion converts one explicitly selected Claude
-  Code JSONL source into an idempotent immutable imported conversation and
-  byte-preserves and normalizes every raw record. At any later time,
-  `CreateSessionFromImportedFrontier` names that aggregate, one addressable
-  entry boundary, the resume/fork relationship, and complete initial defaults.
-  Ordinary native input then uses the existing command path.
-- **State transitions:** First ingestion commits the complete raw and normalized
-  aggregate; exact reingestion returns its identity and commits no duplicate.
-  Neither path changes a session, turn, or outbox. Later session creation
-  atomically commits the new session, selected imported ancestry, the complete
-  normalized prefix as imported-provenance semantic entries, exact seed
-  frontier, defaults, scheduler registration, command receipt, and ordinary
-  `session_created` event. The first native input queues, activates, extends
-  that prefix with its native origin entry, executes one scripted model call,
-  and terminalizes through the unchanged native lifecycle.
+  Code JSONL source through [conversation import](spec/conversation-import.md).
+  At any later time, session creation selects an imported frontier under
+  [sessions and transcript](spec/sessions-and-transcript.md); ordinary native
+  input then uses the existing command path.
+- **State transitions:** Ingestion, later session creation, imported seed
+  projection, and first native execution follow their owning specifications in
+  [conversation import](spec/conversation-import.md),
+  [sessions and transcript](spec/sessions-and-transcript.md),
+  [turn lifecycle](spec/turn-lifecycle-and-scheduling.md), and
+  [model-call execution](spec/model-call-execution.md).
 - **Transient updates:** None are required for import. Scripted-model deltas, if
   any, follow the ordinary transient/final-content boundary.
 - **Owning component:** The Claude Code edge converter owns JSONL quirks; the
@@ -897,15 +893,8 @@ those tests.
   projection; the existing scheduler and model path own all native execution
   after the seed boundary.
 - **Failure behavior:** Malformed or unsupported source content rejects the
-  whole conversion without a partial aggregate. Missing source fields remain
-  typed absence; source events plus supported text, tool, result, thinking, and
-  media content are never dropped. Unknown or corrupt imported storage fails
-  closed. A missing conversation or nonmember frontier creates no session and
-  claims no session command. Replay returns the recorded session only for the
-  same import, frontier, mode, and defaults. Initial model rendering emits exact
-  imported text but omits imported source events, absence, tool/thinking/media
-  content without removing it from the frontier. A crash reveals either no new
-  aggregate/session or its complete commit shape.
+  whole conversion. Import, storage, missing-target, replay, rendering, and
+  crash behavior follow the same owning specifications linked above.
 - **Required invariants:** INV-001, INV-002, INV-003, INV-005, INV-007, INV-009,
   INV-012, INV-014, INV-015, INV-026, INV-032, INV-038, INV-039.
 - **Remaining questions:** Additional source converters, import discovery and

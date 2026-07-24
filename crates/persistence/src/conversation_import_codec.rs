@@ -518,8 +518,11 @@ impl<'bytes> Decoder<'bytes> {
             4 => {
                 enter_container(depth)?;
                 let length = self.collection_length()?;
-                let mut values = Vec::with_capacity(length);
+                let mut values = Vec::new();
                 for _ in 0..length {
+                    values
+                        .try_reserve(1)
+                        .map_err(|_| ImportedConversationEncodingFailure::LengthOutOfRange)?;
                     values.push(self.structured(depth + 1)?);
                 }
                 Ok(ImportedStructuredValue::Array(values.into_boxed_slice()))
@@ -527,8 +530,11 @@ impl<'bytes> Decoder<'bytes> {
             5 => {
                 enter_container(depth)?;
                 let length = self.collection_length()?;
-                let mut members = Vec::with_capacity(length);
+                let mut members = Vec::new();
                 for _ in 0..length {
+                    members
+                        .try_reserve(1)
+                        .map_err(|_| ImportedConversationEncodingFailure::LengthOutOfRange)?;
                     members.push(ImportedStructuredObjectMember::new(
                         self.text()?,
                         self.structured(depth + 1)?,
@@ -550,8 +556,11 @@ impl<'bytes> Decoder<'bytes> {
             0 => self.text().map(ImportedToolResultValue::Text),
             1 => {
                 let length = self.collection_length()?;
-                let mut blocks = Vec::with_capacity(length);
+                let mut blocks = Vec::new();
                 for _ in 0..length {
+                    blocks
+                        .try_reserve(1)
+                        .map_err(|_| ImportedConversationEncodingFailure::LengthOutOfRange)?;
                     blocks.push(self.tool_result_block()?);
                 }
                 Ok(ImportedToolResultValue::Blocks(blocks.into_boxed_slice()))
@@ -821,6 +830,25 @@ mod tests {
         assert_eq!(
             decode_structured(&encoded),
             Err(ImportedConversationEncodingFailure::TrailingBytes)
+        );
+    }
+
+    #[test]
+    fn inv002_corrupt_collection_count_fails_after_incremental_decoding() {
+        let value = ImportedStructuredValue::Array(
+            vec![ImportedStructuredValue::String(ImportedText::new(
+                "x".repeat(4_096),
+            ))]
+            .into_boxed_slice(),
+        );
+        let mut encoded = encode_structured(&value).expect("fixture must encode");
+        let claimed_count =
+            u64::try_from(encoded.len() - 11).expect("fixture encoded length fits u64");
+        encoded[3..11].copy_from_slice(&claimed_count.to_be_bytes());
+
+        assert_eq!(
+            decode_structured(&encoded),
+            Err(ImportedConversationEncodingFailure::UnexpectedEnd)
         );
     }
 }

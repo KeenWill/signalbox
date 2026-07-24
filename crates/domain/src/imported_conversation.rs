@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 use crate::{ImportedConversationId, ImportedTranscriptEntryId};
 
 const SOURCE_DIGEST_DOMAIN: &[u8] = b"signalbox.imported-conversation.source-digest.v1";
+const MAX_STRUCTURED_CONTAINER_DEPTH: usize = 128;
 
 /// One source format interpreted by one fixed Signalbox converter version.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -946,6 +947,16 @@ pub enum ImportedConversationReconstitutionFailure {
         /// Corrupt raw-record occurrence.
         position: ImportedRawRecordPosition,
     },
+    /// A normalized raw record exceeded the format's container-depth bound.
+    RawRecordStructuredValueDepthExceeded {
+        /// Corrupt raw-record occurrence.
+        position: ImportedRawRecordPosition,
+    },
+    /// A normalized raw record cannot produce the stored format's entry projection.
+    RawRecordProjectionInvalid {
+        /// Corrupt raw-record occurrence.
+        position: ImportedRawRecordPosition,
+    },
     /// The header digest disagrees with the format and ordered raw records.
     SourceDigestMismatch {
         /// Derived digest.
@@ -1020,6 +1031,21 @@ pub enum ImportedConversationReconstitutionFailure {
     /// Attested nested role contradicted the top-level source speaker.
     MessageRoleMismatch {
         /// Contradictory message entry.
+        entry: ImportedTranscriptEntryId,
+    },
+    /// An entry's modeled fields disagreed with its complete normalized record.
+    EntryProjectionMismatch {
+        /// Entry contradicted by its owning normalized record.
+        entry: ImportedTranscriptEntryId,
+    },
+    /// A raw record's stored entry count disagreed with its normalized projection.
+    RawRecordEntryProjectionMismatch {
+        /// Raw-record occurrence with an incomplete or excessive entry projection.
+        position: ImportedRawRecordPosition,
+    },
+    /// An entry-carried structured value exceeded the format's depth bound.
+    EntryStructuredValueDepthExceeded {
+        /// Entry carrying the excessive value.
         entry: ImportedTranscriptEntryId,
     },
     /// A required position could not advance beyond `u64::MAX`.
@@ -1266,6 +1292,13 @@ fn validate_raw_records(
                 },
             );
         }
+        if !structured_value_within_depth(&record.normalized) {
+            return Err(
+                ImportedConversationReconstitutionFailure::RawRecordStructuredValueDepthExceeded {
+                    position: record.position,
+                },
+            );
+        }
         if index + 1 < input.raw_records.len() {
             expected = expected
                 .checked_next()
@@ -1304,6 +1337,18 @@ fn validate_entries(
     let mut expected_raw_position = ImportedRawRecordPosition::first();
     let mut expected_within_position = ImportedRecordEntryPosition::first();
     let mut identities = BTreeSet::new();
+    let expected_entries = input
+        .raw_records
+        .iter()
+        .map(|record| {
+            projected_entries(input.format, record.normalized()).map_err(|()| {
+                ImportedConversationReconstitutionFailure::RawRecordProjectionInvalid {
+                    position: record.position,
+                }
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut actual_entries_by_raw = vec![0_usize; input.raw_records.len()];
     let last_raw_position = input
         .raw_records
         .last()
@@ -1372,6 +1417,35 @@ fn validate_entries(
             );
         }
         validate_speaker(input, entry)?;
+        validate_entry_depth(entry)?;
+        let raw_index = usize::try_from(entry.raw_record_position.as_u64() - 1)
+            .map_err(|_| ImportedConversationReconstitutionFailure::PositionExhausted)?;
+        let within_index = usize::try_from(entry.record_entry_position.as_u64() - 1)
+            .map_err(|_| ImportedConversationReconstitutionFailure::PositionExhausted)?;
+        let expected_entry = expected_entries
+            .get(raw_index)
+            .and_then(|entries| entries.get(within_index))
+            .ok_or(
+                ImportedConversationReconstitutionFailure::EntryProjectionMismatch {
+                    entry: entry.identity,
+                },
+            )?;
+        if expected_entry.source_speaker != entry.source_speaker
+            || expected_entry.content != entry.content
+            || expected_entry.source != entry.source
+        {
+            return Err(
+                ImportedConversationReconstitutionFailure::EntryProjectionMismatch {
+                    entry: entry.identity,
+                },
+            );
+        }
+        let actual_count = actual_entries_by_raw
+            .get_mut(raw_index)
+            .ok_or(ImportedConversationReconstitutionFailure::PositionExhausted)?;
+        *actual_count = actual_count
+            .checked_add(1)
+            .ok_or(ImportedConversationReconstitutionFailure::PositionExhausted)?;
 
         if let Some(next_entry) = input.entries.get(index + 1) {
             expected_position = expected_position
@@ -1393,6 +1467,25 @@ fn validate_entries(
                     .ok_or(ImportedConversationReconstitutionFailure::PositionExhausted)?,
             },
         );
+    }
+    for (index, (expected, actual)) in expected_entries
+        .iter()
+        .zip(actual_entries_by_raw)
+        .enumerate()
+    {
+        if expected.len() != actual {
+            return Err(
+                ImportedConversationReconstitutionFailure::RawRecordEntryProjectionMismatch {
+                    position: ImportedRawRecordPosition::try_from_u64(
+                        u64::try_from(index)
+                            .ok()
+                            .and_then(|value| value.checked_add(1))
+                            .ok_or(ImportedConversationReconstitutionFailure::PositionExhausted)?,
+                    )
+                    .ok_or(ImportedConversationReconstitutionFailure::PositionExhausted)?,
+                },
+            );
+        }
     }
     Ok(())
 }
@@ -1507,6 +1600,374 @@ fn normalized_record_speaker(
     }
 }
 
+fn structured_value_within_depth(value: &ImportedStructuredValue) -> bool {
+    let mut pending = vec![(value, 0_usize)];
+    while let Some((value, depth)) = pending.pop() {
+        match value {
+            ImportedStructuredValue::Array(values) => {
+                let Some(depth) = depth.checked_add(1) else {
+                    return false;
+                };
+                if depth > MAX_STRUCTURED_CONTAINER_DEPTH {
+                    return false;
+                }
+                pending.extend(values.iter().map(|value| (value, depth)));
+            }
+            ImportedStructuredValue::Object(members) => {
+                let Some(depth) = depth.checked_add(1) else {
+                    return false;
+                };
+                if depth > MAX_STRUCTURED_CONTAINER_DEPTH {
+                    return false;
+                }
+                pending.extend(members.iter().map(|member| (member.value(), depth)));
+            }
+            ImportedStructuredValue::Null
+            | ImportedStructuredValue::Boolean(_)
+            | ImportedStructuredValue::Number(_)
+            | ImportedStructuredValue::String(_) => {}
+        }
+    }
+    true
+}
+
+fn validate_entry_depth(
+    entry: &ImportedTranscriptEntryInput,
+) -> Result<(), ImportedConversationReconstitutionFailure> {
+    let within_bound = match &entry.content {
+        ImportedTranscriptContent::ToolCall { input, caller, .. } => {
+            structured_attestation_within_depth(input)
+                && structured_attestation_within_depth(caller)
+        }
+        ImportedTranscriptContent::SourceEvent { .. }
+        | ImportedTranscriptContent::SourceMessageBlock { .. }
+        | ImportedTranscriptContent::Text(_)
+        | ImportedTranscriptContent::ToolResult { .. }
+        | ImportedTranscriptContent::Thinking { .. }
+        | ImportedTranscriptContent::RedactedThinking { .. }
+        | ImportedTranscriptContent::Document { .. }
+        | ImportedTranscriptContent::MessageContentAbsent(_) => true,
+    };
+    if within_bound {
+        Ok(())
+    } else {
+        Err(
+            ImportedConversationReconstitutionFailure::EntryStructuredValueDepthExceeded {
+                entry: entry.identity,
+            },
+        )
+    }
+}
+
+fn structured_attestation_within_depth(
+    value: &ImportedSourceAttestation<ImportedStructuredValue>,
+) -> bool {
+    match value {
+        ImportedSourceAttestation::Attested(value) => structured_value_within_depth(value),
+        ImportedSourceAttestation::AttestedAbsent | ImportedSourceAttestation::NotAttested => true,
+    }
+}
+
+#[derive(Eq, PartialEq)]
+struct ProjectedEntry {
+    source_speaker: ImportedSourceAttestation<ImportedSpeaker>,
+    content: ImportedTranscriptContent,
+    source: ImportedSourceMetadata,
+}
+
+fn projected_entries(
+    format: ImportedConversationFormat,
+    normalized: &ImportedStructuredValue,
+) -> Result<Vec<ProjectedEntry>, ()> {
+    match format {
+        ImportedConversationFormat::ClaudeCodeSessionJsonlV1 => {
+            project_claude_code_record(normalized)
+        }
+    }
+}
+
+fn project_claude_code_record(
+    normalized: &ImportedStructuredValue,
+) -> Result<Vec<ProjectedEntry>, ()> {
+    let ImportedStructuredValue::Object(record) = normalized else {
+        return Err(());
+    };
+    let source_type = projected_text_attestation(record, "type")?;
+    let speaker = match &source_type {
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "user" => {
+            Some(ImportedSpeaker::User)
+        }
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "assistant" => {
+            Some(ImportedSpeaker::Assistant)
+        }
+        ImportedSourceAttestation::Attested(_)
+        | ImportedSourceAttestation::AttestedAbsent
+        | ImportedSourceAttestation::NotAttested => None,
+    };
+    let Some(speaker) = speaker else {
+        return Ok(vec![ProjectedEntry {
+            source_speaker: ImportedSourceAttestation::NotAttested,
+            content: ImportedTranscriptContent::SourceEvent { source_type },
+            source: projected_source_metadata(record, ImportedSourceAttestation::NotAttested)?,
+        }]);
+    };
+
+    let message = unique_structured_field(record, "message")?;
+    let (content, message_role) = match message {
+        None => (
+            vec![ImportedTranscriptContent::MessageContentAbsent(
+                ImportedMessageContentAbsence::MessageNotAttested,
+            )],
+            ImportedSourceAttestation::NotAttested,
+        ),
+        Some(ImportedStructuredValue::Null) => (
+            vec![ImportedTranscriptContent::MessageContentAbsent(
+                ImportedMessageContentAbsence::MessageAttestedAbsent,
+            )],
+            ImportedSourceAttestation::NotAttested,
+        ),
+        Some(ImportedStructuredValue::Object(message)) => {
+            let role = projected_message_role(message)?;
+            if let ImportedSourceAttestation::Attested(role) = role
+                && role != speaker
+            {
+                return Err(());
+            }
+            (projected_message_content(message)?, role)
+        }
+        Some(_) => return Err(()),
+    };
+    let source = projected_source_metadata(record, message_role)?;
+    Ok(content
+        .into_iter()
+        .map(|content| ProjectedEntry {
+            source_speaker: ImportedSourceAttestation::Attested(speaker),
+            content,
+            source: source.clone(),
+        })
+        .collect())
+}
+
+fn projected_message_role(
+    message: &[ImportedStructuredObjectMember],
+) -> Result<ImportedSourceAttestation<ImportedSpeaker>, ()> {
+    match unique_structured_field(message, "role")? {
+        None => Ok(ImportedSourceAttestation::NotAttested),
+        Some(ImportedStructuredValue::Null) => Ok(ImportedSourceAttestation::AttestedAbsent),
+        Some(ImportedStructuredValue::String(value)) if value.as_str() == "user" => {
+            Ok(ImportedSourceAttestation::Attested(ImportedSpeaker::User))
+        }
+        Some(ImportedStructuredValue::String(value)) if value.as_str() == "assistant" => Ok(
+            ImportedSourceAttestation::Attested(ImportedSpeaker::Assistant),
+        ),
+        Some(_) => Err(()),
+    }
+}
+
+fn projected_message_content(
+    message: &[ImportedStructuredObjectMember],
+) -> Result<Vec<ImportedTranscriptContent>, ()> {
+    match unique_structured_field(message, "content")? {
+        None => Ok(vec![ImportedTranscriptContent::MessageContentAbsent(
+            ImportedMessageContentAbsence::ContentNotAttested,
+        )]),
+        Some(ImportedStructuredValue::Null) => {
+            Ok(vec![ImportedTranscriptContent::MessageContentAbsent(
+                ImportedMessageContentAbsence::ContentAttestedAbsent,
+            )])
+        }
+        Some(ImportedStructuredValue::String(value)) => Ok(vec![ImportedTranscriptContent::Text(
+            ImportedSourceAttestation::Attested(value.clone()),
+        )]),
+        Some(ImportedStructuredValue::Array(blocks)) if blocks.is_empty() => {
+            Ok(vec![ImportedTranscriptContent::MessageContentAbsent(
+                ImportedMessageContentAbsence::EmptyBlockArray,
+            )])
+        }
+        Some(ImportedStructuredValue::Array(blocks)) => blocks
+            .iter()
+            .map(projected_content_block)
+            .collect::<Result<Vec<_>, _>>(),
+        Some(_) => Err(()),
+    }
+}
+
+fn projected_content_block(
+    value: &ImportedStructuredValue,
+) -> Result<ImportedTranscriptContent, ()> {
+    let ImportedStructuredValue::Object(members) = value else {
+        return Err(());
+    };
+    match projected_required_type(members)? {
+        "text" => Ok(ImportedTranscriptContent::Text(projected_text_attestation(
+            members, "text",
+        )?)),
+        "tool_use" => Ok(ImportedTranscriptContent::ToolCall {
+            source_call_id: projected_text_attestation(members, "id")?,
+            name: projected_text_attestation(members, "name")?,
+            input: projected_structured_attestation(members, "input")?,
+            caller: projected_structured_attestation(members, "caller")?,
+        }),
+        "tool_result" => projected_tool_result(members),
+        "thinking" => Ok(ImportedTranscriptContent::Thinking {
+            thinking: projected_text_attestation(members, "thinking")?,
+            signature: projected_text_attestation(members, "signature")?,
+        }),
+        "redacted_thinking" => Ok(ImportedTranscriptContent::RedactedThinking {
+            data: projected_text_attestation(members, "data")?,
+        }),
+        "document" => Ok(ImportedTranscriptContent::Document {
+            source: projected_media_source_attestation(members, "source")?,
+        }),
+        "fallback" => Ok(ImportedTranscriptContent::SourceMessageBlock {
+            source_type: projected_text_attestation(members, "type")?,
+        }),
+        _ => Err(()),
+    }
+}
+
+fn projected_tool_result(
+    members: &[ImportedStructuredObjectMember],
+) -> Result<ImportedTranscriptContent, ()> {
+    let content = match unique_structured_field(members, "content")? {
+        None => ImportedSourceAttestation::NotAttested,
+        Some(ImportedStructuredValue::Null) => ImportedSourceAttestation::AttestedAbsent,
+        Some(ImportedStructuredValue::String(value)) => {
+            ImportedSourceAttestation::Attested(ImportedToolResultValue::Text(value.clone()))
+        }
+        Some(ImportedStructuredValue::Array(blocks)) => {
+            let blocks = blocks
+                .iter()
+                .map(projected_tool_result_block)
+                .collect::<Result<Vec<_>, _>>()?;
+            ImportedSourceAttestation::Attested(ImportedToolResultValue::Blocks(
+                blocks.into_boxed_slice(),
+            ))
+        }
+        Some(_) => return Err(()),
+    };
+    Ok(ImportedTranscriptContent::ToolResult {
+        source_call_id: projected_text_attestation(members, "tool_use_id")?,
+        content,
+        is_error: projected_bool_attestation(members, "is_error")?,
+    })
+}
+
+fn projected_tool_result_block(
+    value: &ImportedStructuredValue,
+) -> Result<ImportedToolResultBlock, ()> {
+    let ImportedStructuredValue::Object(members) = value else {
+        return Err(());
+    };
+    match projected_required_type(members)? {
+        "text" => Ok(ImportedToolResultBlock::Text(projected_text_attestation(
+            members, "text",
+        )?)),
+        "image" => Ok(ImportedToolResultBlock::Image(
+            projected_media_source_attestation(members, "source")?,
+        )),
+        "tool_reference" => Ok(ImportedToolResultBlock::ToolReference {
+            tool_name: projected_text_attestation(members, "tool_name")?,
+        }),
+        _ => Err(()),
+    }
+}
+
+fn projected_required_type(members: &[ImportedStructuredObjectMember]) -> Result<&str, ()> {
+    match unique_structured_field(members, "type")? {
+        Some(ImportedStructuredValue::String(value)) => Ok(value.as_str()),
+        None | Some(_) => Err(()),
+    }
+}
+
+fn projected_source_metadata(
+    record: &[ImportedStructuredObjectMember],
+    message_role: ImportedSourceAttestation<ImportedSpeaker>,
+) -> Result<ImportedSourceMetadata, ()> {
+    Ok(ImportedSourceMetadata::new(
+        projected_text_attestation(record, "uuid")?,
+        projected_text_attestation(record, "parentUuid")?,
+        projected_text_attestation(record, "sessionId")?,
+        projected_text_attestation(record, "timestamp")?,
+        projected_bool_attestation(record, "isSidechain")?,
+        projected_bool_attestation(record, "isMeta")?,
+        message_role,
+    ))
+}
+
+fn projected_text_attestation(
+    members: &[ImportedStructuredObjectMember],
+    name: &str,
+) -> Result<ImportedSourceAttestation<ImportedText>, ()> {
+    match unique_structured_field(members, name)? {
+        None => Ok(ImportedSourceAttestation::NotAttested),
+        Some(ImportedStructuredValue::Null) => Ok(ImportedSourceAttestation::AttestedAbsent),
+        Some(ImportedStructuredValue::String(value)) => {
+            Ok(ImportedSourceAttestation::Attested(value.clone()))
+        }
+        Some(_) => Err(()),
+    }
+}
+
+fn projected_bool_attestation(
+    members: &[ImportedStructuredObjectMember],
+    name: &str,
+) -> Result<ImportedSourceAttestation<bool>, ()> {
+    match unique_structured_field(members, name)? {
+        None => Ok(ImportedSourceAttestation::NotAttested),
+        Some(ImportedStructuredValue::Null) => Ok(ImportedSourceAttestation::AttestedAbsent),
+        Some(ImportedStructuredValue::Boolean(value)) => {
+            Ok(ImportedSourceAttestation::Attested(*value))
+        }
+        Some(_) => Err(()),
+    }
+}
+
+fn projected_structured_attestation(
+    members: &[ImportedStructuredObjectMember],
+    name: &str,
+) -> Result<ImportedSourceAttestation<ImportedStructuredValue>, ()> {
+    match unique_structured_field(members, name)? {
+        None => Ok(ImportedSourceAttestation::NotAttested),
+        Some(ImportedStructuredValue::Null) => Ok(ImportedSourceAttestation::AttestedAbsent),
+        Some(value) => Ok(ImportedSourceAttestation::Attested(value.clone())),
+    }
+}
+
+fn projected_media_source_attestation(
+    members: &[ImportedStructuredObjectMember],
+    name: &str,
+) -> Result<ImportedSourceAttestation<ImportedMediaSource>, ()> {
+    match unique_structured_field(members, name)? {
+        None => Ok(ImportedSourceAttestation::NotAttested),
+        Some(ImportedStructuredValue::Null) => Ok(ImportedSourceAttestation::AttestedAbsent),
+        Some(ImportedStructuredValue::Object(source)) => Ok(ImportedSourceAttestation::Attested(
+            ImportedMediaSource::new(
+                projected_text_attestation(source, "type")?,
+                projected_text_attestation(source, "media_type")?,
+                projected_text_attestation(source, "data")?,
+            ),
+        )),
+        Some(_) => Err(()),
+    }
+}
+
+fn unique_structured_field<'members>(
+    members: &'members [ImportedStructuredObjectMember],
+    name: &str,
+) -> Result<Option<&'members ImportedStructuredValue>, ()> {
+    let mut found = None;
+    for member in members {
+        if member.name().as_str() == name {
+            if found.is_some() {
+                return Err(());
+            }
+            found = Some(member.value());
+        }
+    }
+    Ok(found)
+}
+
 fn build_conversation(input: ImportedConversationReconstitutionInput) -> ImportedConversation {
     let raw_records = input
         .raw_records
@@ -1570,29 +2031,49 @@ mod tests {
     }
 
     fn object(member: (&str, ImportedStructuredValue)) -> ImportedStructuredValue {
+        object_with_members(vec![member])
+    }
+
+    fn object_with_members(
+        members: Vec<(&str, ImportedStructuredValue)>,
+    ) -> ImportedStructuredValue {
         ImportedStructuredValue::Object(
-            vec![ImportedStructuredObjectMember::new(
-                text(member.0),
-                member.1,
-            )]
-            .into_boxed_slice(),
+            members
+                .into_iter()
+                .map(|(name, value)| ImportedStructuredObjectMember::new(text(name), value))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
         )
+    }
+
+    fn message_record(speaker: &str, content: ImportedStructuredValue) -> ImportedStructuredValue {
+        object_with_members(vec![
+            ("type", ImportedStructuredValue::String(text(speaker))),
+            ("message", object(("content", content))),
+        ])
+    }
+
+    fn nested_array(container_count: usize) -> ImportedStructuredValue {
+        let mut value = ImportedStructuredValue::Null;
+        for _ in 0..container_count {
+            value = ImportedStructuredValue::Array(vec![value].into_boxed_slice());
+        }
+        value
     }
 
     fn metadata(role: ImportedSourceAttestation<ImportedSpeaker>) -> ImportedSourceMetadata {
         ImportedSourceMetadata::new(
-            ImportedSourceAttestation::Attested(text("record")),
-            ImportedSourceAttestation::AttestedAbsent,
-            ImportedSourceAttestation::Attested(text("session")),
-            ImportedSourceAttestation::Attested(text("timestamp")),
-            ImportedSourceAttestation::Attested(true),
+            ImportedSourceAttestation::NotAttested,
+            ImportedSourceAttestation::NotAttested,
+            ImportedSourceAttestation::NotAttested,
+            ImportedSourceAttestation::NotAttested,
+            ImportedSourceAttestation::NotAttested,
             ImportedSourceAttestation::NotAttested,
             role,
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn input_entry(
+    struct EntryFixture {
         identity: u128,
         owner: ImportedConversationId,
         position: u64,
@@ -1601,20 +2082,72 @@ mod tests {
         speaker: ImportedSourceAttestation<ImportedSpeaker>,
         content: ImportedTranscriptContent,
         source: ImportedSourceMetadata,
-    ) -> ImportedTranscriptEntryInput {
-        ImportedTranscriptEntryInput::new(
-            entry(identity),
-            owner,
-            ImportedTranscriptPosition::try_from_u64(position)
-                .expect("fixture global position is positive"),
-            ImportedRawRecordPosition::try_from_u64(raw_position)
-                .expect("fixture raw position is positive"),
-            ImportedRecordEntryPosition::try_from_u64(within_position)
-                .expect("fixture within-record position is positive"),
-            speaker,
-            content,
-            source,
-        )
+    }
+
+    impl EntryFixture {
+        fn new(
+            identity: u128,
+            owner: ImportedConversationId,
+            content: ImportedTranscriptContent,
+        ) -> Self {
+            Self {
+                identity,
+                owner,
+                position: 1,
+                raw_position: 1,
+                within_position: 1,
+                speaker: ImportedSourceAttestation::NotAttested,
+                content,
+                source: metadata(ImportedSourceAttestation::NotAttested),
+            }
+        }
+
+        fn position(mut self, position: u64) -> Self {
+            self.position = position;
+            self
+        }
+
+        fn raw_position(mut self, raw_position: u64) -> Self {
+            self.raw_position = raw_position;
+            self
+        }
+
+        fn within_position(mut self, within_position: u64) -> Self {
+            self.within_position = within_position;
+            self
+        }
+
+        fn speaker(mut self, speaker: ImportedSpeaker) -> Self {
+            self.speaker = ImportedSourceAttestation::Attested(speaker);
+            self.source = metadata(ImportedSourceAttestation::Attested(speaker));
+            self
+        }
+
+        fn source_speaker(mut self, speaker: ImportedSpeaker) -> Self {
+            self.speaker = ImportedSourceAttestation::Attested(speaker);
+            self
+        }
+
+        fn source(mut self, source: ImportedSourceMetadata) -> Self {
+            self.source = source;
+            self
+        }
+
+        fn build(self) -> ImportedTranscriptEntryInput {
+            ImportedTranscriptEntryInput::new(
+                entry(self.identity),
+                self.owner,
+                ImportedTranscriptPosition::try_from_u64(self.position)
+                    .expect("fixture global position is positive"),
+                ImportedRawRecordPosition::try_from_u64(self.raw_position)
+                    .expect("fixture raw position is positive"),
+                ImportedRecordEntryPosition::try_from_u64(self.within_position)
+                    .expect("fixture within-record position is positive"),
+                self.speaker,
+                self.content,
+                self.source,
+            )
+        }
     }
 
     fn converted() -> ImportedConversation {
@@ -1626,47 +2159,83 @@ mod tests {
             ),
             ImportedRawSourceRecord::from_converted(
                 br#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":""},{"type":"tool_use","input":{"n":1}}]}}"#.to_vec(),
-                object((
-                    "type",
-                    ImportedStructuredValue::String(text("assistant")),
-                )),
+                object_with_members(vec![
+                    (
+                        "type",
+                        ImportedStructuredValue::String(text("assistant")),
+                    ),
+                    (
+                        "message",
+                        object_with_members(vec![
+                            (
+                                "role",
+                                ImportedStructuredValue::String(text("assistant")),
+                            ),
+                            (
+                                "content",
+                                ImportedStructuredValue::Array(
+                                    vec![
+                                        object_with_members(vec![
+                                            (
+                                                "type",
+                                                ImportedStructuredValue::String(text("text")),
+                                            ),
+                                            (
+                                                "text",
+                                                ImportedStructuredValue::String(text("")),
+                                            ),
+                                        ]),
+                                        object_with_members(vec![
+                                            (
+                                                "type",
+                                                ImportedStructuredValue::String(text("tool_use")),
+                                            ),
+                                            (
+                                                "input",
+                                                object((
+                                                    "n",
+                                                    ImportedStructuredValue::Number(
+                                                        ImportedJsonNumber::try_new(String::from(
+                                                            "1",
+                                                        ))
+                                                        .expect("fixture number is valid"),
+                                                    ),
+                                                )),
+                                            ),
+                                        ]),
+                                    ]
+                                    .into_boxed_slice(),
+                                ),
+                            ),
+                        ]),
+                    ),
+                ]),
             ),
         ];
         let entries = vec![
-            input_entry(
+            EntryFixture::new(
                 2,
                 owner,
-                1,
-                1,
-                1,
-                ImportedSourceAttestation::NotAttested,
                 ImportedTranscriptContent::SourceEvent {
                     source_type: ImportedSourceAttestation::Attested(text("system")),
                 },
-                metadata(ImportedSourceAttestation::NotAttested),
-            ),
-            input_entry(
+            )
+            .build(),
+            EntryFixture::new(
                 3,
                 owner,
-                2,
-                2,
-                1,
-                ImportedSourceAttestation::Attested(ImportedSpeaker::Assistant),
                 ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(text(""))),
-                metadata(ImportedSourceAttestation::Attested(
-                    ImportedSpeaker::Assistant,
-                )),
-            ),
-            input_entry(
+            )
+            .position(2)
+            .raw_position(2)
+            .speaker(ImportedSpeaker::Assistant)
+            .build(),
+            EntryFixture::new(
                 4,
                 owner,
-                3,
-                2,
-                2,
-                ImportedSourceAttestation::Attested(ImportedSpeaker::Assistant),
                 ImportedTranscriptContent::ToolCall {
                     source_call_id: ImportedSourceAttestation::NotAttested,
-                    name: ImportedSourceAttestation::AttestedAbsent,
+                    name: ImportedSourceAttestation::NotAttested,
                     input: ImportedSourceAttestation::Attested(object((
                         "n",
                         ImportedStructuredValue::Number(
@@ -1676,10 +2245,12 @@ mod tests {
                     ))),
                     caller: ImportedSourceAttestation::NotAttested,
                 },
-                metadata(ImportedSourceAttestation::Attested(
-                    ImportedSpeaker::Assistant,
-                )),
-            ),
+            )
+            .position(3)
+            .raw_position(2)
+            .within_position(2)
+            .speaker(ImportedSpeaker::Assistant)
+            .build(),
         ];
         ImportedConversation::from_converted_records(
             owner,
@@ -1737,44 +2308,34 @@ mod tests {
             ImportedRawRecordHash::digest(imported.raw_records()[0].bytes())
         );
 
-        let mut reversed = imported.raw_records().to_vec();
-        reversed.reverse();
-        let entries = vec![
-            input_entry(
-                20,
-                conversation(9),
-                1,
-                1,
-                1,
-                ImportedSourceAttestation::Attested(ImportedSpeaker::Assistant),
-                ImportedTranscriptContent::MessageContentAbsent(
-                    ImportedMessageContentAbsence::ContentNotAttested,
-                ),
-                metadata(ImportedSourceAttestation::Attested(
-                    ImportedSpeaker::Assistant,
-                )),
-            ),
-            input_entry(
-                21,
-                conversation(9),
-                2,
-                2,
-                1,
-                ImportedSourceAttestation::NotAttested,
-                ImportedTranscriptContent::SourceEvent {
-                    source_type: ImportedSourceAttestation::Attested(text("system")),
-                },
-                metadata(ImportedSourceAttestation::NotAttested),
-            ),
-        ];
-        let reversed = ImportedConversation::from_converted_records(
-            conversation(9),
-            ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
-            reversed,
-            entries,
-        )
-        .expect("reversed source is independently valid");
-        assert_ne!(imported.source_digest(), reversed.source_digest());
+        let mut records = imported
+            .raw_records()
+            .iter()
+            .enumerate()
+            .map(|(index, record)| {
+                ImportedRawSourceRecordReconstitutionInput::new(
+                    ImportedRawRecordPosition::try_from_u64(
+                        u64::try_from(index)
+                            .expect("fixture position fits u64")
+                            .checked_add(1)
+                            .expect("fixture position is positive"),
+                    )
+                    .expect("fixture position is positive"),
+                    record.content_hash(),
+                    record.bytes().to_vec(),
+                    record.normalized().clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            imported.source_digest(),
+            ImportedConversationSourceDigest::derive(imported.format(), &records)
+        );
+        records.reverse();
+        assert_ne!(
+            imported.source_digest(),
+            ImportedConversationSourceDigest::derive(imported.format(), &records)
+        );
     }
 
     /// INV-002 / INV-038: raw-hash corruption fails closed while retaining all
@@ -1793,18 +2354,16 @@ mod tests {
             ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
             &raw_records,
         );
-        let entries = vec![input_entry(
-            2,
-            owner,
-            1,
-            1,
-            1,
-            ImportedSourceAttestation::NotAttested,
-            ImportedTranscriptContent::SourceEvent {
-                source_type: ImportedSourceAttestation::Attested(text("system")),
-            },
-            metadata(ImportedSourceAttestation::NotAttested),
-        )];
+        let entries = vec![
+            EntryFixture::new(
+                2,
+                owner,
+                ImportedTranscriptContent::SourceEvent {
+                    source_type: ImportedSourceAttestation::Attested(text("system")),
+                },
+            )
+            .build(),
+        ];
         let input = ImportedConversationReconstitutionInput::new(
             owner,
             owner,
@@ -1836,18 +2395,15 @@ mod tests {
             object(("type", ImportedStructuredValue::String(text("user")))),
         );
         let source = metadata(ImportedSourceAttestation::Attested(ImportedSpeaker::User));
-        let wrong_speaker = input_entry(
+        let wrong_speaker = EntryFixture::new(
             2,
             owner,
-            1,
-            1,
-            1,
-            ImportedSourceAttestation::NotAttested,
             ImportedTranscriptContent::MessageContentAbsent(
                 ImportedMessageContentAbsence::EmptyBlockArray,
             ),
-            source,
-        );
+        )
+        .source(source)
+        .build();
         assert_eq!(
             ImportedConversation::from_converted_records(
                 owner,
@@ -1910,18 +2466,15 @@ mod tests {
                 object(("type", ImportedStructuredValue::String(text("summary")))),
             ),
         ];
-        let only_second_record = input_entry(
+        let only_second_record = EntryFixture::new(
             2,
             owner,
-            1,
-            2,
-            1,
-            ImportedSourceAttestation::NotAttested,
             ImportedTranscriptContent::SourceEvent {
                 source_type: ImportedSourceAttestation::Attested(text("summary")),
             },
-            metadata(ImportedSourceAttestation::NotAttested),
-        );
+        )
+        .raw_position(2)
+        .build();
 
         assert_eq!(
             ImportedConversation::from_converted_records(
@@ -1945,18 +2498,14 @@ mod tests {
             br#"{"type":"user"}"#.to_vec(),
             object(("type", ImportedStructuredValue::String(text("user")))),
         );
-        let source_event = input_entry(
+        let source_event = EntryFixture::new(
             2,
             owner,
-            1,
-            1,
-            1,
-            ImportedSourceAttestation::NotAttested,
             ImportedTranscriptContent::SourceEvent {
                 source_type: ImportedSourceAttestation::Attested(text("user")),
             },
-            metadata(ImportedSourceAttestation::NotAttested),
-        );
+        )
+        .build();
 
         assert_eq!(
             ImportedConversation::from_converted_records(
@@ -1978,20 +2527,15 @@ mod tests {
             br#"{"type":"user","message":{"role":"assistant"}}"#.to_vec(),
             object(("type", ImportedStructuredValue::String(text("user")))),
         );
-        let contradictory_message = input_entry(
+        let contradictory_message = EntryFixture::new(
             2,
             owner,
-            1,
-            1,
-            1,
-            ImportedSourceAttestation::Attested(ImportedSpeaker::Assistant),
             ImportedTranscriptContent::MessageContentAbsent(
                 ImportedMessageContentAbsence::ContentNotAttested,
             ),
-            metadata(ImportedSourceAttestation::Attested(
-                ImportedSpeaker::Assistant,
-            )),
-        );
+        )
+        .speaker(ImportedSpeaker::Assistant)
+        .build();
 
         assert_eq!(
             ImportedConversation::from_converted_records(
@@ -2013,18 +2557,14 @@ mod tests {
             Vec::new(),
             object(("type", ImportedStructuredValue::String(text("system")))),
         );
-        let source_event = input_entry(
+        let source_event = EntryFixture::new(
             2,
             owner,
-            1,
-            1,
-            1,
-            ImportedSourceAttestation::NotAttested,
             ImportedTranscriptContent::SourceEvent {
                 source_type: ImportedSourceAttestation::Attested(text("system")),
             },
-            metadata(ImportedSourceAttestation::NotAttested),
-        );
+        )
+        .build();
 
         assert_eq!(
             ImportedConversation::from_converted_records(
@@ -2037,6 +2577,190 @@ mod tests {
             .failure(),
             ImportedConversationReconstitutionFailure::EmptyRawRecord {
                 position: ImportedRawRecordPosition::first(),
+            }
+        );
+    }
+
+    #[test]
+    fn inv038_entry_content_must_match_the_complete_normalized_record() {
+        let owner = conversation(1);
+        let raw = ImportedRawSourceRecord::from_converted(
+            br#"{"type":"user","message":{"content":"original"}}"#.to_vec(),
+            message_record("user", ImportedStructuredValue::String(text("original"))),
+        );
+        let changed = EntryFixture::new(
+            2,
+            owner,
+            ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(text("changed"))),
+        )
+        .source_speaker(ImportedSpeaker::User)
+        .build();
+
+        assert_eq!(
+            ImportedConversation::from_converted_records(
+                owner,
+                ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
+                vec![raw],
+                vec![changed],
+            )
+            .expect_err("stored entry content cannot diverge from its normalized record")
+            .failure(),
+            ImportedConversationReconstitutionFailure::EntryProjectionMismatch { entry: entry(2) }
+        );
+    }
+
+    #[test]
+    fn inv038_entry_metadata_must_match_the_complete_normalized_record() {
+        let owner = conversation(1);
+        let raw = ImportedRawSourceRecord::from_converted(
+            br#"{"type":"system","uuid":"record"}"#.to_vec(),
+            object_with_members(vec![
+                ("type", ImportedStructuredValue::String(text("system"))),
+                ("uuid", ImportedStructuredValue::String(text("record"))),
+            ]),
+        );
+        let missing_metadata = EntryFixture::new(
+            2,
+            owner,
+            ImportedTranscriptContent::SourceEvent {
+                source_type: ImportedSourceAttestation::Attested(text("system")),
+            },
+        )
+        .build();
+
+        assert_eq!(
+            ImportedConversation::from_converted_records(
+                owner,
+                ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
+                vec![raw],
+                vec![missing_metadata],
+            )
+            .expect_err("stored source metadata cannot diverge from its normalized record")
+            .failure(),
+            ImportedConversationReconstitutionFailure::EntryProjectionMismatch { entry: entry(2) }
+        );
+    }
+
+    #[test]
+    fn inv038_raw_record_entry_count_must_match_its_normalized_projection() {
+        let owner = conversation(1);
+        let raw = ImportedRawSourceRecord::from_converted(
+            br#"{"type":"assistant","message":{"content":[{"type":"text","text":"one"},{"type":"text","text":"two"}]}}"#.to_vec(),
+            message_record(
+                "assistant",
+                ImportedStructuredValue::Array(
+                    vec![
+                        object_with_members(vec![
+                            ("type", ImportedStructuredValue::String(text("text"))),
+                            ("text", ImportedStructuredValue::String(text("one"))),
+                        ]),
+                        object_with_members(vec![
+                            ("type", ImportedStructuredValue::String(text("text"))),
+                            ("text", ImportedStructuredValue::String(text("two"))),
+                        ]),
+                    ]
+                    .into_boxed_slice(),
+                ),
+            ),
+        );
+        let incomplete = EntryFixture::new(
+            2,
+            owner,
+            ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(text("one"))),
+        )
+        .source_speaker(ImportedSpeaker::Assistant)
+        .build();
+
+        assert_eq!(
+            ImportedConversation::from_converted_records(
+                owner,
+                ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
+                vec![raw],
+                vec![incomplete],
+            )
+            .expect_err("every normalized block must have one stored entry")
+            .failure(),
+            ImportedConversationReconstitutionFailure::RawRecordEntryProjectionMismatch {
+                position: ImportedRawRecordPosition::first(),
+            }
+        );
+    }
+
+    #[test]
+    fn inv038_complete_normalized_record_rejects_129_containers() {
+        let owner = conversation(1);
+        let raw = ImportedRawSourceRecord::from_converted(
+            br#"{"type":"system","nested":[]}"#.to_vec(),
+            object_with_members(vec![
+                ("type", ImportedStructuredValue::String(text("system"))),
+                ("nested", nested_array(128)),
+            ]),
+        );
+        let source_event = EntryFixture::new(
+            2,
+            owner,
+            ImportedTranscriptContent::SourceEvent {
+                source_type: ImportedSourceAttestation::Attested(text("system")),
+            },
+        )
+        .build();
+
+        assert_eq!(
+            ImportedConversation::from_converted_records(
+                owner,
+                ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
+                vec![raw],
+                vec![source_event],
+            )
+            .expect_err("top-level object plus 128 nested arrays exceeds the bound")
+            .failure(),
+            ImportedConversationReconstitutionFailure::RawRecordStructuredValueDepthExceeded {
+                position: ImportedRawRecordPosition::first(),
+            }
+        );
+    }
+
+    #[test]
+    fn inv038_entry_carried_structured_value_rejects_129_containers() {
+        let owner = conversation(1);
+        let raw = ImportedRawSourceRecord::from_converted(
+            br#"{"type":"assistant","message":{"content":[{"type":"tool_use","input":null}]}}"#
+                .to_vec(),
+            message_record(
+                "assistant",
+                ImportedStructuredValue::Array(
+                    vec![object_with_members(vec![
+                        ("type", ImportedStructuredValue::String(text("tool_use"))),
+                        ("input", ImportedStructuredValue::Null),
+                    ])]
+                    .into_boxed_slice(),
+                ),
+            ),
+        );
+        let excessive = EntryFixture::new(
+            2,
+            owner,
+            ImportedTranscriptContent::ToolCall {
+                source_call_id: ImportedSourceAttestation::NotAttested,
+                name: ImportedSourceAttestation::NotAttested,
+                input: ImportedSourceAttestation::Attested(nested_array(129)),
+                caller: ImportedSourceAttestation::NotAttested,
+            },
+        )
+        .source_speaker(ImportedSpeaker::Assistant)
+        .build();
+
+        assert_eq!(
+            ImportedConversation::from_converted_records(
+                owner,
+                ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
+                vec![raw],
+                vec![excessive],
+            )
+            .expect_err("entry-carried structured values obey the same depth bound")
+            .failure(),
+            ImportedConversationReconstitutionFailure::EntryStructuredValueDepthExceeded {
+                entry: entry(2),
             }
         );
     }
