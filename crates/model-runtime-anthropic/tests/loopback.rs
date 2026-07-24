@@ -835,6 +835,7 @@ fn plain_http_requires_a_literal_loopback_ip_host() {
     assert!(AnthropicRuntime::new(ipv6_loopback, FixedKey).is_ok());
 }
 
+#[track_caller]
 fn assert_anthropic_plain_http_rejected(base_url: &str) {
     let mut config = AnthropicConfig::new();
     config.base_url = base_url.to_string();

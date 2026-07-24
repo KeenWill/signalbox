@@ -864,6 +864,7 @@ fn plain_http_requires_a_literal_loopback_ip_host() {
     assert!(OpenAiRuntime::new(ipv6_loopback, FixedKey).is_ok());
 }
 
+#[track_caller]
 fn assert_openai_plain_http_rejected(base_url: &str) {
     let mut config = OpenAiConfig::new();
     config.base_url = base_url.to_string();
