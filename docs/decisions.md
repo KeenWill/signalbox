@@ -10,6 +10,31 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-23 — Bound process snapshot construction resources
+
+**Context.** A valid deployment has no aggregate session-count or
+transcript-size limit. Materializing every session summary per list request made
+request heap grow with the catalog, while allowing snapshot spooling to occupy
+every application-pool connection could stall mutations, scheduling, and outbox
+delivery.
+
+**Decision.** Spool session lists from a repeatable-read cursor that owns one
+decoded row at a time, then commit before writing the completed temporary file
+to the client. Share one snapshot-reader semaphore across list, transcript, and
+follow snapshot construction, sized to leave two configured application-pool
+connections outside snapshot work. The production pool's baseline ten
+connections therefore admits at most eight concurrent snapshot readers.
+
+**Rejected alternatives.** Complete summary vectors retain catalog-sized heap.
+Writing rows directly to a slow client holds the transaction and pool slot.
+Separate uncoordinated limits can still exhaust the shared pool; reserving only
+one connection leaves scheduling, dispatch, and mutations contending for the
+same last slot.
+
+**Affects.** Process session-list and transcript snapshot construction,
+temporary disk use, process-runtime connection services, and application-pool
+capacity.
+
 ## 2026-07-23 — Expose ambiguous commits as a stable process error
 
 **Context.** A lost PostgreSQL commit response can leave `create_session` or

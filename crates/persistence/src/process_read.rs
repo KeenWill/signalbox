@@ -1,8 +1,8 @@
 //! Read-only PostgreSQL projections for the local process protocol.
 //!
 //! These values are persistence-owned snapshots, not process-protocol frames or
-//! domain aggregates. Both public reads use one read-only repeatable-read
-//! transaction so the hub can map a complete, stable projection explicitly.
+//! domain aggregates. Reads use one read-only repeatable-read transaction so
+//! the hub can map a complete, stable projection explicitly.
 
 use std::{error::Error, fmt};
 
@@ -48,6 +48,86 @@ impl ProcessSessionSummary {
     /// Returns the current model-selection request.
     pub const fn model_selection(&self) -> ProcessModelSelection {
         self.model_selection
+    }
+}
+
+/// One repeatable-read session-summary cursor that owns at most one decoded row.
+///
+/// Call [`Self::next_summary`] until it returns `None`. That terminal call
+/// commits the read-only transaction and makes [`Self::summary_count`]
+/// available. Dropping a reader early rolls its transaction back.
+#[derive(Debug)]
+pub struct ProcessSessionSummaryReader {
+    transaction: Option<Transaction<'static, Postgres>>,
+    next_session_after: Option<Uuid>,
+    summary_count: u64,
+    committed_summary_count: Option<u64>,
+}
+
+impl ProcessSessionSummaryReader {
+    /// Returns the committed count only after [`Self::next_summary`] returned
+    /// `None`.
+    pub const fn summary_count(&self) -> Option<u64> {
+        self.committed_summary_count
+    }
+
+    /// Yields one summary in session-identity order without retaining prior
+    /// decoded rows.
+    pub async fn next_summary(
+        &mut self,
+    ) -> Result<Option<ProcessSessionSummary>, ProcessReadError> {
+        if self.committed_summary_count.is_some() {
+            return Ok(None);
+        }
+
+        let next_session_after = self.next_session_after;
+        let transaction = self.transaction_mut()?;
+        let row = sqlx::query(
+            "SELECT
+                session_row.session_id,
+                current_defaults.current_version,
+                selected_defaults.model_selection_kind,
+                selected_defaults.direct_model_selection_id,
+                selected_defaults.model_alias_id
+               FROM session AS session_row
+               LEFT JOIN session_current_defaults AS current_defaults
+                 ON current_defaults.session_id = session_row.session_id
+               LEFT JOIN session_defaults_version AS selected_defaults
+                 ON selected_defaults.session_id = current_defaults.session_id
+                AND selected_defaults.version = current_defaults.current_version
+              WHERE ($1::uuid IS NULL OR session_row.session_id > $1)
+              ORDER BY session_row.session_id
+              LIMIT 1",
+        )
+        .bind(next_session_after)
+        .fetch_optional(&mut **transaction)
+        .await?;
+
+        if let Some(row) = row {
+            let summary = decode_session_summary(&row)?;
+            self.next_session_after = Some(session_id_to_uuid(summary.session()));
+            self.summary_count =
+                self.summary_count
+                    .checked_add(1)
+                    .ok_or(ProcessReadCorruption::InvalidOrdinal(
+                        "session summary count",
+                    ))?;
+            return Ok(Some(summary));
+        }
+
+        let transaction = self
+            .transaction
+            .take()
+            .ok_or(ProcessReadCorruption::Missing("process read transaction"))?;
+        transaction.commit().await?;
+        self.committed_summary_count = Some(self.summary_count);
+        Ok(None)
+    }
+
+    fn transaction_mut(&mut self) -> Result<&mut Transaction<'static, Postgres>, ProcessReadError> {
+        self.transaction
+            .as_mut()
+            .ok_or_else(|| ProcessReadCorruption::Missing("process read transaction").into())
     }
 }
 
@@ -568,36 +648,35 @@ impl ProcessReadRepository {
         Self { pool }
     }
 
-    /// Reads every current session summary in session-identity order.
+    /// Collects every current session summary in session-identity order.
+    ///
+    /// Production process serving uses [`Self::open_session_summaries`] to
+    /// avoid retaining the complete catalog in request memory.
     pub async fn list_sessions(&self) -> Result<Vec<ProcessSessionSummary>, ProcessReadError> {
+        let mut reader = self.open_session_summaries().await?;
+        let mut summaries = Vec::new();
+        while let Some(summary) = reader.next_summary().await? {
+            summaries.push(summary);
+        }
+        Ok(summaries)
+    }
+
+    /// Opens one repeatable-read session-summary cursor.
+    ///
+    /// The cursor yields at most one decoded summary at a time.
+    pub async fn open_session_summaries(
+        &self,
+    ) -> Result<ProcessSessionSummaryReader, ProcessReadError> {
         let mut transaction = self.pool.begin().await?;
         sqlx::query(REPEATABLE_READ_ONLY)
             .execute(&mut *transaction)
             .await?;
-        let rows = sqlx::query(
-            "SELECT
-                session.session_id,
-                current_defaults.current_version,
-                selected_defaults.model_selection_kind,
-                selected_defaults.direct_model_selection_id,
-                selected_defaults.model_alias_id
-               FROM session
-               LEFT JOIN session_current_defaults AS current_defaults
-                 ON current_defaults.session_id = session.session_id
-               LEFT JOIN session_defaults_version AS selected_defaults
-                 ON selected_defaults.session_id = current_defaults.session_id
-                AND selected_defaults.version = current_defaults.current_version
-              ORDER BY session.session_id",
-        )
-        .fetch_all(&mut *transaction)
-        .await?;
-
-        let mut summaries = Vec::with_capacity(rows.len());
-        for row in rows {
-            summaries.push(decode_session_summary(&row)?);
-        }
-        transaction.commit().await?;
-        Ok(summaries)
+        Ok(ProcessSessionSummaryReader {
+            transaction: Some(transaction),
+            next_session_after: None,
+            summary_count: 0,
+            committed_summary_count: None,
+        })
     }
 
     /// Reads one complete transcript snapshot, or `None` only when the session

@@ -12817,23 +12817,29 @@ async fn s24_process_session_summary_sequence_matches_repeatable_projection()
         .handle(prepared(0x4e32, 0xe32, ModelSelectionRequest::Alias(alias)))
         .await?;
 
-    let summaries = ProcessReadRepository::new(pool.clone())
-        .list_sessions()
+    let mut summaries = ProcessReadRepository::new(pool.clone())
+        .open_session_summaries()
         .await?;
+    let earlier = summaries
+        .next_summary()
+        .await?
+        .ok_or("the earlier session summary is present")?;
+    let later = summaries
+        .next_summary()
+        .await?
+        .ok_or("the later session summary is present")?;
+    assert!(summaries.next_summary().await?.is_none());
 
-    assert_eq!(summaries.len(), 2);
-    assert_eq!(summaries[0].session().into_uuid(), earlier_session);
-    assert_eq!(summaries[0].defaults_version(), 1);
+    assert_eq!(summaries.summary_count(), Some(2));
+    assert_eq!(earlier.session().into_uuid(), earlier_session);
+    assert_eq!(earlier.defaults_version(), 1);
     assert_eq!(
-        summaries[0].model_selection(),
+        earlier.model_selection(),
         ProcessModelSelection::Direct(earlier_selection)
     );
-    assert_eq!(summaries[1].session().into_uuid(), later_session);
-    assert_eq!(summaries[1].defaults_version(), 1);
-    assert_eq!(
-        summaries[1].model_selection(),
-        ProcessModelSelection::Alias(alias)
-    );
+    assert_eq!(later.session().into_uuid(), later_session);
+    assert_eq!(later.defaults_version(), 1);
+    assert_eq!(later.model_selection(), ProcessModelSelection::Alias(alias));
 
     pool.close().await;
     drop(container);

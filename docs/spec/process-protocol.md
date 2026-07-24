@@ -176,11 +176,14 @@ A session summary contains `session_id`, `defaults_version`, and
 `model_selection`. A successful `list_sessions` response is `sessions_start`,
 one `session_summary` per result in session-identity order, then
 `sessions_end { session_count }`. The summaries are read in one read-only
-repeatable-read transaction, and the sequence becomes authoritative only after
-the end message and count validate. This avoids an aggregate frame-size limit.
-Identifiers are canonical UUID strings. Request identities, ordinal versions,
-indices, counts, and outbox cursors are canonical decimal strings, preserving
-their full unsigned 64-bit range without JSON-number precision loss.
+repeatable-read transaction and spooled from one decoded row at a time before
+client output. A slow client therefore retains temporary disk rather than the
+complete session catalog in request heap or an open database transaction. The
+sequence becomes authoritative only after the end message and count validate.
+This avoids an aggregate frame-size limit. Identifiers are canonical UUID
+strings. Request identities, ordinal versions, indices, counts, and outbox
+cursors are canonical decimal strings, preserving their full unsigned 64-bit
+range without JSON-number precision loss.
 
 An application rejection is an `error` with `code = "rejected"` and a required
 `detail` object whose variants are closed. For the version-one treatment, its
@@ -247,6 +250,11 @@ PostgreSQL snapshot nor transcript-sized heap state. Per request, heap retention
 is bounded by one decoded row, one protocol frame, and fixed I/O buffers;
 temporary disk usage follows the complete encoded transcript size. Projection or
 spool failure exposes no partial snapshot sequence.
+
+Session-list, transcript-read, and follow-snapshot construction share bounded
+admission that reserves application-pool capacity for non-snapshot work. The
+exact reservation is owned by the
+[snapshot-resource decision](../decisions.md#2026-07-23--bound-process-snapshot-construction-resources).
 
 Each `transcript_turn` has `turn_id` and one closed `state` object:
 
