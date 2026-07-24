@@ -2460,10 +2460,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-conversation-import-claude-code"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
+ "signalbox-application",
+ "signalbox-domain",
+ "uuid",
+]
+
+[[package]]
 name = "signalbox-domain"
 version = "0.0.0"
 dependencies = [
  "expect-test",
+ "sha2 0.10.9",
  "signalbox-expect-table",
  "uuid",
 ]
@@ -2555,6 +2566,7 @@ version = "0.0.0"
 dependencies = [
  "rust_decimal",
  "signalbox-application",
+ "signalbox-conversation-import-claude-code",
  "signalbox-domain",
  "sqlx",
  "testcontainers-modules",

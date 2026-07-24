@@ -192,7 +192,10 @@ impl CreateSessionRepository {
                 transaction.rollback().await?;
                 return Ok(outcome);
             }
-            Some(CommandKind::ReplaceSessionDefaults) => {
+            Some(
+                CommandKind::CreateSessionFromImportedFrontier
+                | CommandKind::ReplaceSessionDefaults,
+            ) => {
                 transaction.rollback().await?;
                 return Ok(CreateSessionHandlingOutcome::ConflictingReuse { command_id });
             }
@@ -227,9 +230,10 @@ impl CreateSessionRepository {
                         ))?;
                     existing_outcome(&prepared, &recorded)
                 }
-                Some(CommandKind::ReplaceSessionDefaults) => {
-                    CreateSessionHandlingOutcome::ConflictingReuse { command_id }
-                }
+                Some(
+                    CommandKind::CreateSessionFromImportedFrontier
+                    | CommandKind::ReplaceSessionDefaults,
+                ) => CreateSessionHandlingOutcome::ConflictingReuse { command_id },
                 Some(CommandKind::SubmitInput) => {
                     CreateSessionHandlingOutcome::ConflictingReuse { command_id }
                 }
@@ -267,9 +271,10 @@ impl CreateSessionRepository {
             Some(CommandKind::CreateSession) => {
                 load_from_connection(&mut connection, command_id).await
             }
-            Some(CommandKind::ReplaceSessionDefaults) => {
-                Err(CreateSessionRepositoryError::DifferentCommandKind { command_id })
-            }
+            Some(
+                CommandKind::CreateSessionFromImportedFrontier
+                | CommandKind::ReplaceSessionDefaults,
+            ) => Err(CreateSessionRepositoryError::DifferentCommandKind { command_id }),
             Some(CommandKind::SubmitInput) => {
                 Err(CreateSessionRepositoryError::DifferentCommandKind { command_id })
             }

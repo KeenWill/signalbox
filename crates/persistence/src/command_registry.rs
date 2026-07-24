@@ -6,6 +6,8 @@ use sqlx::{PgConnection, Row};
 use crate::mapping::durable_command_id_to_uuid;
 
 pub(crate) const CREATE_SESSION_KIND: &str = "create_session";
+pub(crate) const CREATE_SESSION_FROM_IMPORTED_FRONTIER_KIND: &str =
+    "create_session_from_imported_frontier";
 pub(crate) const REPLACE_SESSION_DEFAULTS_KIND: &str = "replace_session_defaults";
 pub(crate) const SUBMIT_INPUT_KIND: &str = "submit_input";
 const STORAGE_VERSION: i16 = 1;
@@ -13,6 +15,7 @@ const STORAGE_VERSION: i16 = 1;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CommandKind {
     CreateSession,
+    CreateSessionFromImportedFrontier,
     ReplaceSessionDefaults,
     SubmitInput,
 }
@@ -40,11 +43,16 @@ pub(crate) async fn inspect(
             command.command_kind,
             command.storage_version,
             create_command.command_id IS NOT NULL AS has_create_session,
+            imported_create_command.command_id IS NOT NULL
+                AS has_create_session_from_imported_frontier,
             defaults_command.command_id IS NOT NULL AS has_replace_session_defaults,
             input_command.command_id IS NOT NULL AS has_submit_input
          FROM durable_command AS command
          LEFT JOIN create_session_command AS create_command
            ON create_command.command_id = command.command_id
+         LEFT JOIN create_session_from_imported_frontier_command
+                AS imported_create_command
+           ON imported_create_command.command_id = command.command_id
          LEFT JOIN replace_session_defaults_command AS defaults_command
            ON defaults_command.command_id = command.command_id
          LEFT JOIN submit_input_command AS input_command
@@ -71,6 +79,9 @@ pub(crate) async fn inspect(
             .map_err(RegistryInspectionError::Database)?;
         let kind = match spelling.as_str() {
             CREATE_SESSION_KIND => CommandKind::CreateSession,
+            CREATE_SESSION_FROM_IMPORTED_FRONTIER_KIND => {
+                CommandKind::CreateSessionFromImportedFrontier
+            }
             REPLACE_SESSION_DEFAULTS_KIND => CommandKind::ReplaceSessionDefaults,
             SUBMIT_INPUT_KIND => CommandKind::SubmitInput,
             _ => {
@@ -82,6 +93,9 @@ pub(crate) async fn inspect(
         let has_create: bool = row
             .try_get("has_create_session")
             .map_err(RegistryInspectionError::Database)?;
+        let has_imported_create: bool = row
+            .try_get("has_create_session_from_imported_frontier")
+            .map_err(RegistryInspectionError::Database)?;
         let has_defaults: bool = row
             .try_get("has_replace_session_defaults")
             .map_err(RegistryInspectionError::Database)?;
@@ -89,13 +103,21 @@ pub(crate) async fn inspect(
             .try_get("has_submit_input")
             .map_err(RegistryInspectionError::Database)?;
 
-        match (kind, has_create, has_defaults, has_input) {
-            (CommandKind::CreateSession, true, false, false)
-            | (CommandKind::ReplaceSessionDefaults, false, true, false)
-            | (CommandKind::SubmitInput, false, false, true) => Ok(kind),
-            (CommandKind::CreateSession, false, false, false)
-            | (CommandKind::ReplaceSessionDefaults, false, false, false)
-            | (CommandKind::SubmitInput, false, false, false) => Err(
+        match (
+            kind,
+            has_create,
+            has_imported_create,
+            has_defaults,
+            has_input,
+        ) {
+            (CommandKind::CreateSession, true, false, false, false)
+            | (CommandKind::CreateSessionFromImportedFrontier, false, true, false, false)
+            | (CommandKind::ReplaceSessionDefaults, false, false, true, false)
+            | (CommandKind::SubmitInput, false, false, false, true) => Ok(kind),
+            (CommandKind::CreateSession, false, false, false, false)
+            | (CommandKind::CreateSessionFromImportedFrontier, false, false, false, false)
+            | (CommandKind::ReplaceSessionDefaults, false, false, false, false)
+            | (CommandKind::SubmitInput, false, false, false, false) => Err(
                 RegistryInspectionError::Corruption(RegistryCorruption::MissingTypedRecord(kind)),
             ),
             _ => Err(RegistryInspectionError::Corruption(
