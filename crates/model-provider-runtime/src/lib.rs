@@ -24,6 +24,23 @@ use signalbox_model_runtime::{
     ProviderReportedModel, RequestedTarget, ResolvedTarget, TerminalEvidence, UnsentCause,
 };
 
+fn render_conversation_message(message: &ModelConversationMessage) -> ConversationMessage {
+    match message {
+        ModelConversationMessage::User { content, .. } => {
+            ConversationMessage::user_text(content.text().as_str())
+        }
+        ModelConversationMessage::Assistant { content, .. } => {
+            ConversationMessage::assistant_text(content.as_str())
+        }
+        ModelConversationMessage::ImportedUser { content, .. } => {
+            ConversationMessage::user_text(content.as_str())
+        }
+        ModelConversationMessage::ImportedAssistant { content, .. } => {
+            ConversationMessage::assistant_text(content.as_str())
+        }
+    }
+}
+
 /// One exact provider-model spelling and baseline request limit for a durable
 /// domain target.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -322,14 +339,7 @@ where
         let messages = operation
             .messages()
             .iter()
-            .map(|message| match message {
-                ModelConversationMessage::User { content, .. } => {
-                    ConversationMessage::user_text(content.text().as_str())
-                }
-                ModelConversationMessage::Assistant { content, .. } => {
-                    ConversationMessage::assistant_text(content.as_str())
-                }
-            })
+            .map(render_conversation_message)
             .collect();
         let runtime_operation = ModelOperation::new(
             correlation,
@@ -513,19 +523,23 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
-    use signalbox_domain::{ModelCallId, ModelCallTerminalObservation, ProviderModelIdentity};
+    use signalbox_application::ModelConversationMessage;
+    use signalbox_domain::{
+        ImportedText, ImportedTranscriptEntryId, ModelCallId, ModelCallTerminalObservation,
+        ProviderModelIdentity, SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId,
+    };
     use signalbox_model_runtime::{
         AssistantPart, BoundaryLossEvidence, CancellationConfirmedEvidence, CompletionEvidence,
-        CompletionFinish, ExchangeFacts, LossCause, NativeErrorFacts, Observation, ObservationFact,
-        ObservationSink, ProvenUnsentEvidence, ProviderErrorEvidence, ProviderErrorKind,
-        ProviderReportedModel, RefusalEvidence, TerminalEvidence, TokenUsage, TransportFacts,
-        UnsentCause,
+        CompletionFinish, ConversationMessage, ExchangeFacts, LossCause, NativeErrorFacts,
+        Observation, ObservationFact, ObservationSink, ProvenUnsentEvidence, ProviderErrorEvidence,
+        ProviderErrorKind, ProviderReportedModel, RefusalEvidence, TerminalEvidence, TokenUsage,
+        TransportFacts, UnsentCause,
     };
     use uuid::Uuid;
 
     use super::{
         AcceptanceObservations, RuntimeModelCatalog, RuntimeModelCatalogError,
-        RuntimeModelDefinition, classify_terminal,
+        RuntimeModelDefinition, classify_terminal, render_conversation_message,
     };
     use signalbox_domain::ResolvedProviderTarget;
 
@@ -535,6 +549,37 @@ mod tests {
 
     fn target(value: u128) -> ResolvedProviderTarget {
         ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(value)))
+    }
+
+    /// S28 / INV-038 / INV-039: the outward runtime bridge consumes imported
+    /// messages under their rendered role and exact text without consulting or
+    /// manufacturing native execution provenance.
+    #[test]
+    fn s28_inv038_inv039_imported_messages_map_to_provider_neutral_text_roles() {
+        let source = SemanticTranscriptEntryRef::from_source(
+            SessionId::from_uuid(Uuid::from_u128(2)),
+            SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(3)),
+        );
+        let imported_entry = ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(4));
+        let user_text = ImportedText::new(String::from(" \tuser\0text\r\n"));
+        let assistant_text = ImportedText::new(String::new());
+
+        assert_eq!(
+            render_conversation_message(&ModelConversationMessage::ImportedUser {
+                source,
+                imported_entry,
+                content: user_text.clone(),
+            }),
+            ConversationMessage::user_text(user_text.as_str())
+        );
+        assert_eq!(
+            render_conversation_message(&ModelConversationMessage::ImportedAssistant {
+                source,
+                imported_entry,
+                content: assistant_text.clone(),
+            }),
+            ConversationMessage::assistant_text(assistant_text.as_str())
+        );
     }
 
     fn completion(model: &str, content: Vec<AssistantPart>) -> TerminalEvidence {
