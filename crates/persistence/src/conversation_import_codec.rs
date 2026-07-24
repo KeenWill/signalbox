@@ -46,6 +46,10 @@ pub(crate) fn encode_content(
             push(&mut bytes, 0);
             encode_attestation(&mut bytes, source_type, encode_text)?;
         }
+        ImportedTranscriptContent::SourceMessageBlock { source_type } => {
+            push(&mut bytes, 8);
+            encode_attestation(&mut bytes, source_type, encode_text)?;
+        }
         ImportedTranscriptContent::Text(value) => {
             push(&mut bytes, 1);
             encode_attestation(&mut bytes, value, encode_text)?;
@@ -152,6 +156,9 @@ pub(crate) fn decode_content(
                 });
             }
         }),
+        8 => ImportedTranscriptContent::SourceMessageBlock {
+            source_type: decoder.attestation(Decoder::text)?,
+        },
         value => {
             return Err(ImportedConversationEncodingFailure::UnsupportedTag {
                 kind: "imported transcript content",
@@ -647,6 +654,9 @@ mod tests {
         );
         assert_content_round_trips(ImportedTranscriptContent::SourceEvent {
             source_type: attested_text("summary"),
+        });
+        assert_content_round_trips(ImportedTranscriptContent::SourceMessageBlock {
+            source_type: attested_text("fallback"),
         });
         assert_content_round_trips(ImportedTranscriptContent::Text(
             ImportedSourceAttestation::AttestedAbsent,
