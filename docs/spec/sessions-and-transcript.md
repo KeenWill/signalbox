@@ -114,12 +114,17 @@ entry boundary of any imported conversation.
 
 The application supplies fresh candidates for the session, imported-provenance
 semantic entries, and seed context frontier, then calls one atomic transaction
-port. The transaction loads the complete imported conversation, resolves exactly
-positions `1..=N` for the selected boundary, and either:
+port. The transaction first follows the owner-global claim protocol in
+[identity-and-commands](identity-and-commands.md). A claimed identifier resolves
+to its recorded equal replay or conflicting reuse before any imported-target
+lookup. Only for an unclaimed identifier does the transaction load the complete
+imported conversation, resolve exactly positions `1..=N` for the selected
+boundary, and either:
 
 - returns `ImportedConversationNotFound` or `ImportedFrontierNotFound` without
   claiming the command identity; or
-- handles command claim/replay and creates the complete session seed.
+- atomically claims the command and creates the complete session seed, with a
+  lost claim race re-inspected against the winner by the shared protocol.
 
 An equal replay returns the recorded created session and ignores unused fresh
 identity candidates. Changed conversation, frontier, relationship, or defaults
@@ -258,11 +263,12 @@ and closed:
   outcome-authoritative producing-call provenance;
 - `AssistantToolUse { producing_call, request }` — typed, but storage rejects it
   (`semantic_transcript_entry_tool_use_unavailable`) until the reserved tool
-  decisions land; and
+  decisions land;
 - `Imported { imported_entry, source_speaker, content }` — one exact normalized
   imported content value and its speaker attestation, including source event,
-  message-content absence, text, tool, result, thinking, redacted thinking, or
-  document data, carrying imported rather than native execution provenance;
+  source-defined message block, message-content absence, text, tool, result,
+  thinking, redacted thinking, or document data, carrying imported rather than
+  native execution provenance;
 - `TurnCompleted { turn }` — the explicit final marker for a completed turn; and
 - `TurnCancelled { turn }` — the explicit final marker for a turn ended by its
   applied interrupt.
