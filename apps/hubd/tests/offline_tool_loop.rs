@@ -346,6 +346,7 @@ enum ExecutorMode {
 struct RecordingExecutor {
     mode: ExecutorMode,
     events: Arc<Mutex<Vec<String>>>,
+    arguments: Arc<Mutex<Vec<String>>>,
 }
 
 impl RecordingExecutor {
@@ -353,6 +354,7 @@ impl RecordingExecutor {
         Self {
             mode: ExecutorMode::Complete,
             events: Arc::new(Mutex::new(Vec::new())),
+            arguments: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -360,6 +362,7 @@ impl RecordingExecutor {
         Self {
             mode: ExecutorMode::LoseProcess,
             events: Arc::new(Mutex::new(Vec::new())),
+            arguments: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -367,6 +370,13 @@ impl RecordingExecutor {
         self.events
             .lock()
             .expect("fixture event lock is available")
+            .clone()
+    }
+
+    fn arguments(&self) -> Vec<String> {
+        self.arguments
+            .lock()
+            .expect("fixture argument lock is available")
             .clone()
     }
 }
@@ -401,6 +411,10 @@ impl ToolExecutor for RecordingExecutor {
             .lock()
             .expect("fixture event lock is available")
             .push(invocation.request().name().as_str().to_owned());
+        self.arguments
+            .lock()
+            .expect("fixture argument lock is available")
+            .push(invocation.request().arguments().as_str().to_owned());
         let name = invocation.request().name().as_str().to_owned();
         match self.mode {
             ExecutorMode::Complete => Ok(invocation.bind(ToolExecutorEvidence::CompletedText(
@@ -411,7 +425,7 @@ impl ToolExecutor for RecordingExecutor {
     }
 }
 
-/// S10 / S11 / INV-004 / INV-005 / INV-011 / INV-019 / INV-021 / INV-024:
+/// S10 / S11 / INV-004 / INV-005 / INV-019 / INV-021 / INV-024:
 /// one offline scripted turn parks for an owner decision, executes exactly
 /// once after approval, commits a reference-only result at the continuation
 /// boundary, and completes only after the second model round.
@@ -468,6 +482,10 @@ async fn s10_s11_tool_loop_parks_approves_executes_continues_and_completes()
         .await?;
 
     assert_eq!(executor.events(), vec![String::from("confirmed")]);
+    assert_eq!(
+        executor.arguments(),
+        vec![String::from(r#"{"value":"one"}"#)]
+    );
     assert_eq!(
         fixture.transcript_kinds().await?,
         vec![
@@ -604,11 +622,12 @@ async fn s10_inv020_inv027_inv029_inv037_denial_composes_with_interrupt_to_end_t
         nudge,
     )
     .with_tool_dispatch_gate(fixture.tool_dispatch_gate.clone());
+    let interrupt_command = DurableCommandId::from_uuid(Uuid::from_u128(0x3311));
     let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
-        SubmitInputAppliedResult::TurnOrigin(_),
+        SubmitInputAppliedResult::TurnOrigin(origin),
     )) = submit
         .execute(SubmitInputRequest::try_new(
-            DurableCommandId::from_uuid(Uuid::from_u128(0x3311)),
+            interrupt_command,
             fixture.session,
             UserContent::try_text(String::from("stop after denying"))
                 .expect("fixture interrupt content is admitted"),
@@ -621,6 +640,14 @@ async fn s10_inv020_inv027_inv029_inv037_denial_composes_with_interrupt_to_end_t
     else {
         panic!("the exact active turn must accept its interrupt")
     };
+    let applied_interrupt = origin
+        .applied_interrupt()
+        .expect("the interrupt origin must retain its proof");
+    assert_eq!(origin.turn(), applied_interrupt.successor());
+    assert_eq!(origin.accepted_input(), applied_interrupt.accepted_input());
+    assert_eq!(origin.queue_order(), applied_interrupt.successor_order());
+    assert_eq!(applied_interrupt.proof().command(), interrupt_command);
+    assert_eq!(applied_interrupt.proof().predecessor(), fixture.turn);
 
     assert!(executor.events().is_empty());
     let terminal_shape: (String, i64, i64, i64) = sqlx::query_as(
@@ -847,12 +874,12 @@ async fn s10_inv020_inv021_blanket_posture_runs_confirm_tool_unattended()
     Ok(())
 }
 
-/// S10 / INV-005 / INV-011 / INV-024: losing a dispatched effect-free attempt
+/// S10 / INV-005 / INV-024: losing a dispatched effect-free attempt
 /// never retries it; a fresh process classifies it `known_failed` with
 /// `crash_lost` evidence and fails the turn honestly.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_inv005_inv011_inv024_effect_free_crash_is_known_failed_without_retry()
+async fn s10_inv005_inv024_effect_free_crash_is_known_failed_without_retry()
 -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled, 0x3700).await?;
     let tool_catalog = catalog([tool(
@@ -909,12 +936,12 @@ async fn s10_inv005_inv011_inv024_effect_free_crash_is_known_failed_without_retr
     Ok(())
 }
 
-/// S10 / INV-005 / INV-011 / INV-024: losing a dispatched external-effect
+/// S10 / INV-005 / INV-024: losing a dispatched external-effect
 /// attempt never retries it; a fresh process classifies exact ambiguity and
 /// parks the turn for owner recovery.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_inv005_inv011_inv024_external_effect_crash_parks_ambiguous_without_retry()
+async fn s10_inv005_inv024_external_effect_crash_parks_ambiguous_without_retry()
 -> Result<(), Box<dyn Error>> {
     let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled, 0x3800).await?;
     let tool_catalog = catalog([tool(
