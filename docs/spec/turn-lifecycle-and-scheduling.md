@@ -211,14 +211,15 @@ the sweep (INV-007).
   new), `SubmitInputService` hands the session to the in-process nudge port. The
   buffer is bounded (1024); a full buffer or closed source drops only the hint,
   visibly, and never changes the command result.
-- **Sweep (backstop).** `PostgresEligibilitySweep` finds sessions with a queued
-  turn and no active turn — the storage shape of the eligibility precondition;
-  the `turn_lifecycle_queued_by_session` partial index is created for exactly
-  this query shape, though planner adoption is not pinned by any test — paged 16
-  sessions per query with a fixed per-cycle bound; continuation pages run
-  immediately. The baseline interval is one second; missed ticks are delayed,
-  not burst. A failed sweep is logged with its operator classification and
-  retried at the next interval.
+- **Sweep (backstop).** `PostgresEligibilitySweep` finds sessions with either a
+  queued turn and no active turn — the storage shape of the activation
+  precondition — or an active tool round in the running phase. The
+  `turn_lifecycle_queued_by_session` partial index is created for the queued
+  query shape, though planner adoption is not pinned by any test. Results are
+  paged 16 sessions per query with a fixed per-cycle bound; continuation pages
+  run immediately. The baseline interval is one second; missed ticks are
+  delayed, not burst. A failed sweep is logged with its operator classification
+  and retried at the next interval.
 - **Loop.** `SchedulerLoop::run_until` spawns at most 16 concurrent per-session
   passes, deduplicates hints for a session already in flight (recording one
   rerun), and keeps an in-progress sweep read alive across pass completions. A
@@ -226,7 +227,11 @@ the sweep (INV-007).
   nothing is lost because the rows are the queue.
 
 The initial sweep runs as soon as the work source is first polled, seeding the
-scheduler after startup recovery. Activation returns the activated turn
+scheduler after startup recovery. Each authoritative pass first asks its
+execution composition to reconcile any active running tool round for the hinted
+session, then runs ordinary queued-turn activation. A parked approval returns
+from the pass immediately and therefore retains no scheduler worker capacity.
+Activation returns the activated turn
 (`StartEligibleTurnOutcome::Activated(Box<ActivatedAcceptedInputTurn>)`), and
 hubd's `ActivatedTurnPass` hands it to an `ActivatedTurnExecution` —
 `ModelCallExecutionService` over the `ModelCallProvider` port — so each pass
