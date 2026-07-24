@@ -13,10 +13,10 @@ use std::{
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
     CreateSessionOutcome, CreateSessionRequest, CreateSessionService, DecideToolRequestService,
-    InProcessAttemptDispatchGate, InProcessEligibilityWorkSource, ModelCallCredentialReference,
-    OperatorFailureClass, StartEligibleTurnOutcome, StartEligibleTurnService, StartupScanService,
-    SubmitInputOutcome, SubmitInputRequest, SubmitInputService, ToolDefinition,
-    ToolExecutionInvocation, ToolExecutionService, ToolExecutionServiceOutcome, ToolExecutor,
+    InProcessAttemptDispatchGate, InProcessEligibilityWorkSource, InProcessToolDispatchGate,
+    ModelCallCredentialReference, OperatorFailureClass, StartEligibleTurnOutcome,
+    StartEligibleTurnService, StartupScanService, SubmitInputOutcome, SubmitInputRequest,
+    SubmitInputService, ToolDefinition, ToolExecutionInvocation, ToolExecutor,
     ToolExecutorEvidence, ToolInputSchema, UuidV7SessionIdGenerator,
     UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator, UuidV7SubmitInputIdGenerator,
     UuidV7ToolLoopIdGenerator,
@@ -67,6 +67,7 @@ struct ToolLoopFixture {
     targets: ModelTargetCatalog,
     runtime_models: RuntimeModelCatalog,
     credential_reference: ModelCallCredentialReference,
+    tool_dispatch_gate: InProcessToolDispatchGate,
 }
 
 impl ToolLoopFixture {
@@ -94,11 +95,13 @@ impl ToolLoopFixture {
 
         let sweep = PostgresEligibilitySweep::new(pool.clone());
         let (nudge, _work_source) = InProcessEligibilityWorkSource::new(sweep);
+        let tool_dispatch_gate = InProcessToolDispatchGate::default();
         let mut submit = SubmitInputService::new(
             UuidV7SubmitInputIdGenerator,
             SubmitInputRepository::new(pool.clone()),
             nudge,
-        );
+        )
+        .with_tool_dispatch_gate(tool_dispatch_gate.clone());
         let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
             SubmitInputAppliedResult::TurnOrigin(origin),
         )) = submit
@@ -149,6 +152,7 @@ impl ToolLoopFixture {
             targets,
             runtime_models,
             credential_reference: ModelCallCredentialReference::new("scripted-tool-loop-test"),
+            tool_dispatch_gate,
         })
     }
 
@@ -181,6 +185,7 @@ impl ToolLoopFixture {
                 self.targets.clone(),
                 self.credential_reference.clone(),
             ),
+            self.tool_dispatch_gate.clone(),
             catalog,
             executor,
         )
@@ -579,7 +584,7 @@ async fn s10_inv020_inv027_inv029_inv037_denial_composes_with_interrupt_to_end_t
     let executor = RecordingExecutor::completing();
     let execution = fixture.execution(
         [tool_use_script(&[("confirmed", "{}")])],
-        tool_catalog.clone(),
+        tool_catalog,
         executor.clone(),
     );
 
@@ -591,28 +596,14 @@ async fn s10_inv020_inv027_inv029_inv037_denial_composes_with_interrupt_to_end_t
         .decide(request, ToolApprovalDecision::Deny { reason: None }, 0x3310)
         .await?;
 
-    let mut tools = ToolExecutionService::new(
-        UuidV7ToolLoopIdGenerator,
-        PostgresToolLoopRepository::with_model_calls(
-            fixture.pool.clone(),
-            fixture.targets.clone(),
-            fixture.credential_reference.clone(),
-        ),
-        tool_catalog,
-        executor.clone(),
-    );
-    assert!(matches!(
-        tools.execute(fixture.session, fixture.turn).await?,
-        ToolExecutionServiceOutcome::ContinuationCheckpointed(_)
-    ));
-
     let sweep = PostgresEligibilitySweep::new(fixture.pool.clone());
     let (nudge, _work_source) = InProcessEligibilityWorkSource::new(sweep);
     let mut submit = SubmitInputService::new(
         UuidV7SubmitInputIdGenerator,
         SubmitInputRepository::new(fixture.pool.clone()),
         nudge,
-    );
+    )
+    .with_tool_dispatch_gate(fixture.tool_dispatch_gate.clone());
     let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
         SubmitInputAppliedResult::TurnOrigin(_),
     )) = submit
