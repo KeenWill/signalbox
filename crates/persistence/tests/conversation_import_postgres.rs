@@ -142,6 +142,7 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String
 struct ImportedSeedFacts {
     conversation: Uuid,
     imported_prefix: [Uuid; 2],
+    post_frontier_entry: Uuid,
     session: Uuid,
     semantic_prefix: [Uuid; 2],
     seed_frontier: Uuid,
@@ -156,6 +157,7 @@ async fn insert_imported_resume_seed_scaffolding(
             Uuid::from_u128(0x2000_0000_0000_4000_8000_0000_0000_0039),
             Uuid::from_u128(0x2000_0000_0000_4000_8000_0000_0000_0040),
         ],
+        post_frontier_entry: Uuid::from_u128(0x2000_0000_0000_4000_8000_0000_0000_0041),
         session: Uuid::from_u128(0x4000_0000_0000_4000_8000_0000_0000_0039),
         semantic_prefix: [
             Uuid::from_u128(0x6000_0000_0000_4000_8000_0000_0000_0039),
@@ -173,7 +175,7 @@ async fn insert_imported_resume_seed_scaffolding(
          VALUES
             ('10000000-0000-4000-8000-000000000039', 1,
              'claude_code_session_jsonl', 1,
-             decode(repeat('22', 32), 'hex'), 1, 2);
+             decode(repeat('22', 32), 'hex'), 1, 3);
          INSERT INTO imported_conversation_raw_record
             (imported_conversation_id, raw_record_position, content_hash,
              conversion_digest, normalized_value_encoding,
@@ -181,7 +183,7 @@ async fn insert_imported_resume_seed_scaffolding(
          VALUES
             ('10000000-0000-4000-8000-000000000039', 1,
              decode(repeat('11', 32), 'hex'),
-             decode(repeat('33', 32), 'hex'), decode('01', 'hex'), 2);
+             decode(repeat('33', 32), 'hex'), decode('01', 'hex'), 3);
          INSERT INTO imported_transcript_entry
             (imported_conversation_id, imported_entry_position,
              imported_transcript_entry_id, raw_record_position,
@@ -193,7 +195,10 @@ async fn insert_imported_resume_seed_scaffolding(
              'attested_user', decode('01', 'hex'), decode('01', 'hex')),
             ('10000000-0000-4000-8000-000000000039', 2,
              '20000000-0000-4000-8000-000000000040', 1, 2,
-             'attested_assistant', decode('02', 'hex'), decode('02', 'hex'));
+             'attested_assistant', decode('02', 'hex'), decode('02', 'hex')),
+            ('10000000-0000-4000-8000-000000000039', 3,
+             '20000000-0000-4000-8000-000000000041', 1, 3,
+             'attested_user', decode('03', 'hex'), decode('03', 'hex'));
          INSERT INTO durable_command
             (command_id, command_kind, storage_version, claimed_at)
          VALUES
@@ -358,6 +363,55 @@ async fn inv039_seed_link_can_precede_semantic_prefix() -> Result<(), Box<dyn Er
     .fetch_one(&pool)
     .await?;
     assert_eq!(stored, (1, 2, 2));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-039: once the complete same-transaction seed check is discharged,
+/// another imported semantic row cannot extend the selected prefix.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv039_immediate_seed_check_seals_same_transaction_prefix() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let mut transaction = pool.begin().await?;
+    let seed = insert_imported_resume_seed_scaffolding(&mut transaction).await?;
+    insert_imported_semantic_prefix(&mut transaction, seed).await?;
+    insert_exact_seed_members(&mut transaction, seed).await?;
+    sqlx::query(
+        "INSERT INTO imported_session_seed
+            (session_id, seed_context_frontier_id)
+         VALUES ($1, $2)",
+    )
+    .bind(seed.session)
+    .bind(seed.seed_frontier)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+        .execute(&mut *transaction)
+        .await?;
+
+    let error = sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             imported_conversation_id, imported_transcript_entry_id)
+         VALUES ($1, $2, 'imported_entry', $3, $4)",
+    )
+    .bind(seed.session)
+    .bind(Uuid::from_u128(0x6000_0000_0000_4000_8000_0000_0000_0041))
+    .bind(seed.conversation)
+    .bind(seed.post_frontier_entry)
+    .execute(&mut *transaction)
+    .await
+    .expect_err("a discharged seed check must seal the selected prefix");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(sqlx::error::DatabaseError::constraint),
+        Some("imported_semantic_entry_requires_selected_prefix")
+    );
+    transaction.rollback().await?;
 
     pool.close().await;
     drop(container);
