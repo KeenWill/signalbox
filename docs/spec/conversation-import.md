@@ -357,12 +357,16 @@ One transaction resolves or inserts a complete aggregate:
   entry; a concurrent header-insert loser re-inspects and completely
   reconstitutes the winner, returning `AlreadyImported` only after the same
   conversion-equivalence check, and raw-blob insert conflicts likewise reload
-  and verify the winning bytes before reuse; and
+  and verify the winning bytes before reuse; writers acquire both shared raw
+  hashes and globally unique imported-entry identities in their respective
+  sorted key order while storing physical positions explicitly; and
 - every raw occurrence stores and rechecks its conversion digest before its
   normalized value is accepted; and
 - deferred constraints require exact declared counts, contiguous positions,
   globally distinct imported-entry identities, valid raw-record references, and
-  agreement between every member's owner and header.
+  agreement between every member's owner and header. Checked loading also
+  compares every raw occurrence's declared entry count with its reconstructed
+  normalized members.
 
 No partial aggregate can commit (INV-038).
 `ImportedConversationRepository::load` returns `None` only when the requested

@@ -2566,6 +2566,7 @@ version = "0.0.0"
 dependencies = [
  "rust_decimal",
  "signalbox-application",
+ "signalbox-conversation-import-claude-code",
  "signalbox-domain",
  "sqlx",
  "testcontainers-modules",
