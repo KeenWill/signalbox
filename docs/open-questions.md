@@ -9,13 +9,12 @@ identifiers refer to [scenarios.md](scenarios.md).
 
 ## Identity representation
 
-- **Wire identity representation.**
+- **Public URL identity representation.**
   [identity-and-commands](spec/identity-and-commands.md) closes generation,
-  supply, minting authority, and baseline Postgres encoding. Protocol field
-  types, public URL forms, and wire serialization remain open; the retired
-  protocol designs are unimplemented and carry no current authority, so future
-  client-protocol work is designed fresh as a specification diff. Blocks
-  cross-process protocols, not persistence. (S01, S02, S04, S08, S10, S12)
+  supply, minting authority, and baseline PostgreSQL encoding; the local
+  [process protocol](spec/process-protocol.md) closes its version-one wire
+  fields. Browser and other public URL forms remain open. (S01, S02, S04, S08,
+  S10, S12, S24)
 - **Semantic transcript-entry extensions and rendering.**
   [sessions-and-transcript](spec/sessions-and-transcript.md) fixes
   origin-accepted-input and failed-turn payloads plus their eligibility and
@@ -158,6 +157,11 @@ questions below remain open.
 - **Multiple runners in one turn.** Leaning: at most one selected runner
   initially, counting hub-local tools separately. Constrains version one.
   (S13–S16)
+- **Runner result protocol.** The exact runner wire envelope must bind each
+  result to its tool attempt and authorized dispatch generation or equivalent
+  fence. Duplicate/stale acknowledgements, compatibility, subscriber
+  observation, and retention of rejected evidence remain undecided. Blocks
+  runner result delivery. (S05, S06, S12–S16)
 
 ## Tool safety
 
@@ -224,8 +228,27 @@ questions below remain open.
 
 ## Protocols and persistence
 
-- **Browser transport.** Preserve authoritative-snapshot-plus-transient-stream
-  semantics; technology open. Blocks the web client. (S02, S24)
+- **Authenticated transports and remote clients.** The local baseline is owned
+  by [process-protocol](spec/process-protocol.md). Remote access still requires
+  decisions for client identity, authentication, authorization, revocation, and
+  credential delivery. (S01, S24)
+- **Browser transport.** Technology remains open and blocks the web client;
+  snapshot and durable-update semantics are defined by
+  [process-protocol](spec/process-protocol.md), while transient model-update
+  streaming remains open below. (S02, S24)
+- **Compatibility after exact process-protocol version one.** Version one has
+  its owning [specification](spec/process-protocol.md). A future compatibility
+  window, negotiation scheme, and generated-client policy remain undecided.
+  Blocks a version-two protocol. (S01, S24)
+- **Transient model-update relay.** Whether provider token deltas cross the
+  process boundary, and the required draft identity, sequencing, replacement,
+  backpressure, and redaction rules, remain undecided. The implemented durable
+  transition relay is owned by [process-protocol](spec/process-protocol.md).
+  Blocks live-token display. (S02, S24)
+- **Process-protocol operation expansion.** Defaults replacement, delivery
+  treatments other than `StartWhenNoActiveTurn`, cancellation, approval, tools,
+  and administrative operations need their owning product slices and exact wire
+  projections. Blocks only those operations. (S01–S10)
 - **Persistence implementation within the accepted relational baseline.**
   [persistence-protocol](spec/persistence-protocol.md) closes the broad
   stable-storage question, selects the driver, pool, migration, runtime, and
@@ -256,19 +279,19 @@ questions below remain open.
   The
   [decision log](decisions.md#2026-07-20--adversarial-audit-corrective-package)
   owns its accepted scheduling disposition. (S03, S04, S17)
-- **Update-event retention, pruning, and multi-process fan-out.** See the
-  authoritative open edges in
-  [persistence-protocol](spec/persistence-protocol.md).
+- **Update-event retention, pruning, and multiple hub processes.** Version one
+  is owned by [process-protocol](spec/process-protocol.md). A pruning watermark,
+  follower retention guarantees, and any later multiple-hub shared-fan-out
+  mechanism remain undecided. Blocks pruning and multi-hub deployment. (S24)
 - **Swift client type generation.** Leaning: generated boundary types mapped to
   hand-written client domain types. Deferrable until the Swift client. (S01,
   S24)
 
 ## Client scope
 
-- **First client and interface form (CLI, TUI, web, or Swift).** Leaning: the
-  smallest interface that exercises reconnect, approval, and provenance; a thin
-  terminal client is plausible but not accepted. Deferrable until the hub slice
-  is framed. (S01, S02, S10, S24)
+- **Client forms after the terminal baseline.** The selected baseline is owned
+  by [process-protocol](spec/process-protocol.md). Whether a later daily client
+  is a TUI, web app, or native app remains unselected. (S01, S02, S10, S24)
 - **Apple client code organization.** Defer until the protocol and the first
   native slice are known. (S01, S24)
 - **Web client technology (Rust/Wasm or TypeScript).** No leaning until the

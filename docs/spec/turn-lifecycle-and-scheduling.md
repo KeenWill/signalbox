@@ -234,10 +234,12 @@ Tool-attempt storage still does not exist.
 
 ## Startup scan and recovery
 
-hubd orders startup strictly: embedded migrations, then the startup scan to
-completion, then scheduling. Why: scheduling before the scan could dispatch new
-work into a session whose durable state still shows a live-looking prior-process
-attempt (INV-034).
+After configuration and database connection, hubd acquires the dedicated
+single-hub advisory guard specified by [process-protocol](process-protocol.md),
+then orders startup strictly: embedded migrations, the startup scan to
+completion, process-socket bind, and only then request admission, outbox
+dispatch, and scheduling. Why: any lifecycle writer or client read before the
+scan could observe or alter a live-looking prior-process attempt (INV-034).
 
 `StartupScanService` reads the finite inventory of sessions with an active turn
 (deterministic order), then runs one independent transaction per session under
@@ -292,10 +294,10 @@ candidates; infrastructure and fail-closed corruption stop startup visibly. The
 scan is idempotent — a rerun inventories only work still active, and a stale
 observation rolls back as `NoActiveTurn`. There is no process-incarnation column
 and no lease: under the single-hub deployment contract, every nonterminal
-attempt observed at startup is a prior-process abandonment (INV-010). That
-contract is an operational assumption with no code enforcement — the advisory
-singleton guard is an unadopted open edge, and a second concurrent hub would
-violate the premise undetected.
+attempt observed at startup is a prior-process abandonment (INV-010). The
+advisory guard is acquired before this scan and held on its dedicated connection
+for the complete process lifetime, so a second hub cannot run the premise
+concurrently.
 
 ## Occupied-slot input handling
 
@@ -420,24 +422,44 @@ rather than repairs, and no effect is authorized from a failed reconstruction
 
 ## Hub runtime: startup order and shutdown
 
-hubd is the composition root. It reads `DATABASE_URL`, `SIGNALBOX_CONFIG_FILE`
-(the model-configuration TOML naming provider targets, selections, and aliases),
-and `ANTHROPIC_API_KEY_FILE` from the process environment (explicitly
-provisional; delivery-channel decision is
-[configuration-and-credentials](configuration-and-credentials.md) scope),
-connects, then runs migrate → scan → schedule; any phase failure is a failed
-startup with a classified, key-bearing log line and a failure exit code.
+hubd is the composition root. It reads exactly `DATABASE_URL`,
+`SIGNALBOX_CONFIG_FILE` (the model-configuration TOML naming provider targets,
+selections, and aliases), `ANTHROPIC_API_KEY_FILE`, and `SIGNALBOX_SOCKET_PATH`
+from the process environment (the provisional configuration channels are
+[configuration-and-credentials](configuration-and-credentials.md) scope). It
+connects, acquires the single-hub guard, fences the prior pool incarnation,
+migrates, completes recovery scan, binds the process socket, then concurrently
+admits protocol requests, dispatches the outbox, and schedules eligible work. On
+a database without the fence migration, the guarded first migration creates the
+fence row before the hub initializes its first fenced pool. No request, dispatch
+cursor advance, or scheduler pass occurs before recovery completes. Any phase
+failure is a failed startup with a classified, key-bearing log line and a
+failure exit code.
+
+The dedicated guard connection is checked once per second while the runtime is
+active. Losing that session is a fatal fencing event: admission, dispatch, and
+scheduling are cancelled without the graceful-shutdown window, all pooled
+connections are terminated, and the process exits instead of reconnecting or
+reacquiring in place. A successor can acquire the singleton guard immediately
+but cannot pass the exclusive prior-generation fence until those old pooled
+sessions are gone, so its migration and recovery never overlap them.
 Observability and the operator failure taxonomy are
 [runtime-substrate](runtime-substrate.md) scope.
 
-On SIGINT/SIGTERM the scheduler loop stops admitting new passes and every
-in-flight pass gets a bounded 30-second grace window to let its authoritative
-transactions commit or abort. Window expiry abandons the work, warns, and skips
-the unbounded pool drain; a clean exit closes the pool. Why shutdown is polish,
-not correctness: abrupt exit at any point is safe because durable rows plus the
-startup scan recover whatever a window abandoned (INV-034), so the grace window
-buys only latency. Repositories and services are cheap per-invocation clones
-over the shared pool; no shared locked service instance exists.
+On SIGINT/SIGTERM the listener stops accepting requests, follow streams are
+closed, the dispatcher stops starting transactions, and the scheduler stops
+admitting passes. Finite request handlers, the current dispatcher transaction,
+and in-flight scheduler passes share the bounded 30-second grace window to let
+authoritative transactions commit or abort. A clean exit closes the fenced pool,
+removes only this hub's revalidated socket, and releases the advisory locks by
+closing its dedicated guard connection. Window expiry abandons remaining tasks,
+warns, and skips the unbounded pool drain; process exit releases its sessions.
+Why signal-driven shutdown is polish, not correctness: abrupt exit at any point
+is safe because durable rows plus the next guarded startup scan recover work and
+the durable outbox cursor redelivers an uncommitted offer (INV-032, INV-034), so
+the grace window buys only latency. Repositories and services are cheap
+per-invocation clones over the shared pool; no shared locked service instance
+exists.
 
 ## Open edges
 
@@ -461,8 +483,8 @@ over the shared pool; no shared locked service instance exists.
   as a known failure; an unstopped in-flight call parks the turn as ambiguous in
   `awaiting_model_call_recovery`); wait reconstruction for remaining phases
   still awaits their slices.
-- The single-hub advisory singleton guard and per-session scan gating (designed
-  refinements) are not adopted; sweep interval and fairness tuning remain
-  operational open questions.
+- Per-session scan gating, sweep interval, and fairness tuning remain
+  operational open questions; the process-wide advisory singleton guard is
+  specified by [process-protocol](process-protocol.md).
 - LISTEN/NOTIFY remains the documented multi-process extension only; the
   baseline is single-process nudge plus sweep.

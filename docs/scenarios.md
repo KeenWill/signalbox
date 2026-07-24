@@ -44,16 +44,18 @@ those tests.
   current-state validation; a command rejected after construction cannot later
   become valid under the same identifier. Corrected domain intent then needs a
   new identifier, and reuse of a claimed identifier for another command kind,
-  session, or payload is rejected rather than creating a duplicate.
+  session, or payload is rejected rather than creating a duplicate. The terminal
+  client prints a generated command identity before I/O and accepts it again; an
+  ambiguous submit is retried with that identity and the same caller-observed
+  defaults version rather than silently becoming new work.
 - **Required invariants:** INV-001, INV-003, INV-007, INV-008, INV-012.
-- **Remaining questions:** First client and process-protocol implementation.
-  Protocol semantics and compatibility remain future client- and
-  process-protocol work; the owner-global idempotency scope, the typed
-  relational command representation, and actor attribution in the canonical
-  command payload with its replay equality are decided in
-  [identity-and-commands](spec/identity-and-commands.md); the baseline
-  accepted-input content value, the long-lived session aggregate, and the
-  current-pointer load boundary are decided in
+- **Remaining questions:** Authenticated remote and browser clients remain
+  [open](open-questions.md#protocols-and-persistence); the owner-global
+  idempotency scope, the typed relational command representation, and actor
+  attribution in the canonical command payload with its replay equality are
+  decided in [identity-and-commands](spec/identity-and-commands.md); the
+  baseline accepted-input content value, the long-lived session aggregate, and
+  the current-pointer load boundary are decided in
   [sessions-and-transcript](spec/sessions-and-transcript.md).
 
 ## S02 — Stream a centrally called provider response
@@ -72,8 +74,11 @@ those tests.
   with exactly one current attempt → terminal/completed only after the call is
   classified and the attempt ends; model call prepared → in flight →
   terminal/completed.
-- **Transient updates:** Provider token deltas and progress are relayed as a
-  replaceable draft.
+- **Transient updates:** Client presentation follows the durable-update and
+  authoritative-replacement contract in
+  [process-protocol](spec/process-protocol.md#follow-synchronization).
+  Provider-token relay remains
+  [open](open-questions.md#protocols-and-persistence).
 - **Owning component:** The hub resolves and calls the provider; Postgres owns
   durable provenance and final content; clients render drafts.
 - **Failure behavior:** A client disconnect does not cancel the call.
@@ -84,8 +89,8 @@ those tests.
   already committed to turn history.
 - **Required invariants:** INV-005, INV-008, INV-014, INV-015, INV-032, INV-035.
 - **Remaining questions:** Whether a future known-failure retry command is
-  introduced, streaming checkpoints, browser transport, rich assistant content,
-  and provider/client rendering.
+  introduced, streaming checkpoints, transient provider-delta relay, browser
+  transport, rich assistant content, and provider/client rendering.
 
 ## S03 — Hub restarts after accepting queued work
 
@@ -437,11 +442,10 @@ those tests.
   result, cancellation, or reconciliation state.
 - **Required invariants:** INV-011, INV-012, INV-021.
 - **Remaining questions:** Fence representation, retention of rejected evidence,
-  and result acknowledgement protocol. The compatibility window and subscriber
-  observation semantics remain
-  [open](open-questions.md#protocols-and-persistence): the retired protocol
-  designs carry no current authority, and future protocol work is designed fresh
-  as a specification diff; the committing-side update mechanism is decided in
+  result acknowledgement, compatibility, and subscriber observation remain
+  [open](open-questions.md#scheduling-and-runners): the retired protocol designs
+  carry no current authority, and future protocol work is designed fresh as a
+  specification diff; the committing-side update mechanism is decided in
   [persistence-protocol](spec/persistence-protocol.md).
 
 ## S13 — Use an ambient-user runner
@@ -758,26 +762,29 @@ those tests.
 
 - **User intent:** Resume observing current work without corrupting the
   transcript or relying on every delta having persisted.
-- **Durable commands:** Client requests an authoritative snapshot/version and
-  subscribes from a compatible live point; no new logical work is created merely
-  by reconnecting.
+- **Durable commands:** The server subscribes to process-local fan-out before
+  reading an authoritative repeatable-read snapshot of transcript entries, turn
+  states, and the outbox cursor, then sends matching events above that cursor;
+  no new logical work is created merely by reconnecting
+  ([follow synchronization](spec/process-protocol.md#follow-synchronization)).
 - **State transitions:** Client disconnected → synchronized snapshot → live
   observer; server-side turn remains unchanged.
-- **Transient updates:** Previously seen draft may be replaced; new deltas
-  continue with draft identity/version.
+- **Transient updates:** Previously seen draft may be replaced. Version one
+  resumes durable progress events; future provider-delta relay must add draft
+  identity and sequencing without making deltas authoritative.
 - **Owning component:** Hub reconstructs durable truth and streams; client
   reconciles presentation.
-- **Failure behavior:** Gaps cause another snapshot, not guessed tokens. If the
-  call finished while disconnected, the final durable content replaces the
-  draft.
+- **Failure behavior:** A bounded-fan-out overrun causes an explicit
+  `resync_required` and another snapshot, not guessed updates. If the call
+  finished or refused while disconnected, terminal turn state in the snapshot
+  prevents a waiter from depending on an already-covered event. Large
+  transcripts arrive as validated bounded frames; a partial sequence is never
+  authoritative. Final durable content replaces any draft
+  ([process protocol](spec/process-protocol.md#transcript-snapshots)).
 - **Required invariants:** INV-005, INV-012, INV-032, INV-033.
-- **Remaining questions:** Concrete snapshot/event schemas, delta sequencing,
-  checkpointing, and browser transport. Protocol semantics and the compatibility
-  window remain [open](open-questions.md#protocols-and-persistence) — the
-  retired protocol designs carry no current authority; update-event derivation
-  and cursor delivery from committed state are decided in
-  [persistence-protocol](spec/persistence-protocol.md), whose retention window
-  remains open.
+- **Remaining questions:** Transient updates, retention, later compatibility,
+  and browser transport remain
+  [open](open-questions.md#protocols-and-persistence).
 
 ## S25 — Archive and restore a session
 
