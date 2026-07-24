@@ -147,7 +147,7 @@ struct ImportedSeedFacts {
     seed_frontier: Uuid,
 }
 
-async fn insert_imported_resume_seed_base(
+async fn insert_imported_resume_seed_scaffolding(
     transaction: &mut Transaction<'_, sqlx::Postgres>,
 ) -> Result<ImportedSeedFacts, sqlx::Error> {
     let facts = ImportedSeedFacts {
@@ -234,18 +234,6 @@ async fn insert_imported_resume_seed_base(
              'owner_initiated', 'imported_conversation', 1,
              'direct', '50000000-0000-4000-8000-000000000039', NULL,
              'applied', '40000000-0000-4000-8000-000000000039');
-         INSERT INTO semantic_transcript_entry
-            (source_session_id, semantic_entry_id, payload_kind,
-             imported_conversation_id, imported_transcript_entry_id)
-         VALUES
-            ('40000000-0000-4000-8000-000000000039',
-             '60000000-0000-4000-8000-000000000039', 'imported_entry',
-             '10000000-0000-4000-8000-000000000039',
-             '20000000-0000-4000-8000-000000000039'),
-            ('40000000-0000-4000-8000-000000000039',
-             '60000000-0000-4000-8000-000000000040', 'imported_entry',
-             '10000000-0000-4000-8000-000000000039',
-             '20000000-0000-4000-8000-000000000040');
          INSERT INTO context_frontier
             (owning_session_id, context_frontier_id, member_count)
          VALUES
@@ -255,6 +243,29 @@ async fn insert_imported_resume_seed_base(
     .execute(&mut **transaction)
     .await?;
     Ok(facts)
+}
+
+async fn insert_imported_semantic_prefix(
+    transaction: &mut Transaction<'_, sqlx::Postgres>,
+    facts: ImportedSeedFacts,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             imported_conversation_id, imported_transcript_entry_id)
+         VALUES
+            ($1, $2, 'imported_entry', $3, $4),
+            ($1, $5, 'imported_entry', $3, $6)",
+    )
+    .bind(facts.session)
+    .bind(facts.semantic_prefix[0])
+    .bind(facts.conversation)
+    .bind(facts.imported_prefix[0])
+    .bind(facts.semantic_prefix[1])
+    .bind(facts.imported_prefix[1])
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
 }
 
 async fn insert_exact_seed_members(
@@ -285,7 +296,8 @@ async fn insert_exact_seed_members(
 async fn inv039_exact_imported_session_seed_commits() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let mut transaction = pool.begin().await?;
-    let seed = insert_imported_resume_seed_base(&mut transaction).await?;
+    let seed = insert_imported_resume_seed_scaffolding(&mut transaction).await?;
+    insert_imported_semantic_prefix(&mut transaction, seed).await?;
     insert_exact_seed_members(&mut transaction, seed).await?;
     sqlx::query(
         "INSERT INTO imported_session_seed
@@ -315,6 +327,43 @@ async fn inv039_exact_imported_session_seed_commits() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
+/// INV-039: the complete seed can be assembled in any in-transaction order;
+/// inserting its one-to-one link before the semantic prefix remains valid.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv039_seed_link_can_precede_semantic_prefix() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let mut transaction = pool.begin().await?;
+    let seed = insert_imported_resume_seed_scaffolding(&mut transaction).await?;
+    sqlx::query(
+        "INSERT INTO imported_session_seed
+            (session_id, seed_context_frontier_id)
+         VALUES ($1, $2)",
+    )
+    .bind(seed.session)
+    .bind(seed.seed_frontier)
+    .execute(&mut *transaction)
+    .await?;
+    insert_imported_semantic_prefix(&mut transaction, seed).await?;
+    insert_exact_seed_members(&mut transaction, seed).await?;
+    transaction.commit().await?;
+
+    let stored: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM imported_session_seed),
+            (SELECT count(*) FROM semantic_transcript_entry
+              WHERE payload_kind = 'imported_entry'),
+            (SELECT count(*) FROM context_frontier_member)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(stored, (1, 2, 2));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// INV-039: imported ancestry cannot commit without the separate one-to-one
 /// seed record, even when the materialized frontier content is exact.
 #[tokio::test]
@@ -322,7 +371,8 @@ async fn inv039_exact_imported_session_seed_commits() -> Result<(), Box<dyn Erro
 async fn inv039_imported_ancestry_without_seed_is_rejected() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let mut transaction = pool.begin().await?;
-    let seed = insert_imported_resume_seed_base(&mut transaction).await?;
+    let seed = insert_imported_resume_seed_scaffolding(&mut transaction).await?;
+    insert_imported_semantic_prefix(&mut transaction, seed).await?;
     insert_exact_seed_members(&mut transaction, seed).await?;
     let error = transaction
         .commit()
@@ -347,7 +397,8 @@ async fn inv039_imported_ancestry_without_seed_is_rejected() -> Result<(), Box<d
 async fn inv039_reordered_imported_seed_members_are_rejected() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let mut transaction = pool.begin().await?;
-    let seed = insert_imported_resume_seed_base(&mut transaction).await?;
+    let seed = insert_imported_resume_seed_scaffolding(&mut transaction).await?;
+    insert_imported_semantic_prefix(&mut transaction, seed).await?;
     sqlx::query(
         "INSERT INTO context_frontier_member
             (owning_session_id, context_frontier_id, member_position,
@@ -499,7 +550,8 @@ async fn inv039_seed_frontier_member_truncate_is_rejected() -> Result<(), Box<dy
 async fn inv039_committed_seed_rejects_late_prefix_inserts() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let mut transaction = pool.begin().await?;
-    let seed = insert_imported_resume_seed_base(&mut transaction).await?;
+    let seed = insert_imported_resume_seed_scaffolding(&mut transaction).await?;
+    insert_imported_semantic_prefix(&mut transaction, seed).await?;
     insert_exact_seed_members(&mut transaction, seed).await?;
     sqlx::query(
         "INSERT INTO imported_session_seed
