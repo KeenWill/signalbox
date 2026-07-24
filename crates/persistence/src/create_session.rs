@@ -91,8 +91,10 @@ impl Error for CreateSessionCorruption {}
 /// A database failure or a fail-closed durable-shape failure.
 #[derive(Debug)]
 pub enum CreateSessionRepositoryError {
-    /// PostgreSQL could not complete the requested operation.
+    /// PostgreSQL failed before any commit could have succeeded.
     Database(sqlx::Error),
+    /// PostgreSQL obscured whether the requested commit succeeded.
+    CommitAmbiguous(sqlx::Error),
     /// A purpose-specific load named a valid command of another admitted kind.
     DifferentCommandKind {
         /// The owner-global identifier that names another kind.
@@ -106,6 +108,12 @@ impl fmt::Display for CreateSessionRepositoryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Database(error) => write!(formatter, "CreateSession database failure: {error}"),
+            Self::CommitAmbiguous(error) => {
+                write!(
+                    formatter,
+                    "CreateSession commit outcome is ambiguous: {error}"
+                )
+            }
             Self::DifferentCommandKind { command_id } => {
                 write!(
                     formatter,
@@ -120,7 +128,7 @@ impl fmt::Display for CreateSessionRepositoryError {
 impl Error for CreateSessionRepositoryError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Database(error) => Some(error),
+            Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
             Self::DifferentCommandKind { .. } => None,
             Self::Corruption(error) => Some(error),
         }
@@ -136,6 +144,16 @@ impl From<sqlx::Error> for CreateSessionRepositoryError {
 impl From<CreateSessionCorruption> for CreateSessionRepositoryError {
     fn from(error: CreateSessionCorruption) -> Self {
         Self::Corruption(error)
+    }
+}
+
+impl CreateSessionRepositoryError {
+    fn from_commit_failure(error: sqlx::Error) -> Self {
+        if crate::commit_failure_is_ambiguous(&error) {
+            Self::CommitAmbiguous(error)
+        } else {
+            Self::Database(error)
+        }
     }
 }
 
@@ -231,7 +249,10 @@ impl CreateSessionRepository {
         }
 
         let result = prepared.applied_result();
-        transaction.commit().await?;
+        transaction
+            .commit()
+            .await
+            .map_err(CreateSessionRepositoryError::from_commit_failure)?;
         Ok(CreateSessionHandlingOutcome::Applied(result))
     }
 
@@ -623,5 +644,24 @@ fn map_registry_error(error: RegistryInspectionError) -> CreateSessionRepository
         RegistryInspectionError::Corruption(RegistryCorruption::ConflictingTypedRecords) => {
             CreateSessionCorruption::Inconsistent("typed command family").into()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use super::CreateSessionRepositoryError;
+
+    #[test]
+    fn lost_commit_response_is_typed_as_ambiguous() {
+        let error = CreateSessionRepositoryError::from_commit_failure(sqlx::Error::Io(
+            io::Error::new(io::ErrorKind::ConnectionReset, "commit response was lost"),
+        ));
+
+        assert!(matches!(
+            error,
+            CreateSessionRepositoryError::CommitAmbiguous(_)
+        ));
     }
 }
