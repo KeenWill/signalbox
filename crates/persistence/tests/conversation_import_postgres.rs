@@ -148,10 +148,8 @@ struct ImportedSeedFacts {
     seed_frontier: Uuid,
 }
 
-async fn insert_imported_resume_seed_scaffolding(
-    transaction: &mut Transaction<'_, sqlx::Postgres>,
-) -> Result<ImportedSeedFacts, sqlx::Error> {
-    let facts = ImportedSeedFacts {
+fn imported_seed_facts() -> ImportedSeedFacts {
+    ImportedSeedFacts {
         conversation: Uuid::from_u128(0x1000_0000_0000_4000_8000_0000_0000_0039),
         imported_prefix: [
             Uuid::from_u128(0x2000_0000_0000_4000_8000_0000_0000_0039),
@@ -164,7 +162,13 @@ async fn insert_imported_resume_seed_scaffolding(
             Uuid::from_u128(0x6000_0000_0000_4000_8000_0000_0000_0040),
         ],
         seed_frontier: Uuid::from_u128(0x7000_0000_0000_4000_8000_0000_0000_0039),
-    };
+    }
+}
+
+async fn insert_imported_source_scaffolding(
+    transaction: &mut Transaction<'_, sqlx::Postgres>,
+) -> Result<ImportedSeedFacts, sqlx::Error> {
+    let facts = imported_seed_facts();
     sqlx::raw_sql(
         "INSERT INTO imported_raw_source_record (content_hash, raw_bytes)
          VALUES (decode(repeat('11', 32), 'hex'), decode('01', 'hex'));
@@ -198,8 +202,18 @@ async fn insert_imported_resume_seed_scaffolding(
              'attested_assistant', decode('02', 'hex'), decode('02', 'hex')),
             ('10000000-0000-4000-8000-000000000039', 3,
              '20000000-0000-4000-8000-000000000041', 1, 3,
-             'attested_user', decode('03', 'hex'), decode('03', 'hex'));
-         INSERT INTO durable_command
+             'attested_user', decode('03', 'hex'), decode('03', 'hex'));",
+    )
+    .execute(&mut **transaction)
+    .await?;
+    Ok(facts)
+}
+
+async fn insert_imported_session_scaffolding(
+    transaction: &mut Transaction<'_, sqlx::Postgres>,
+) -> Result<(), sqlx::Error> {
+    sqlx::raw_sql(
+        "INSERT INTO durable_command
             (command_id, command_kind, storage_version, claimed_at)
          VALUES
             ('30000000-0000-4000-8000-000000000039',
@@ -247,6 +261,14 @@ async fn insert_imported_resume_seed_scaffolding(
     )
     .execute(&mut **transaction)
     .await?;
+    Ok(())
+}
+
+async fn insert_imported_resume_seed_scaffolding(
+    transaction: &mut Transaction<'_, sqlx::Postgres>,
+) -> Result<ImportedSeedFacts, sqlx::Error> {
+    let facts = insert_imported_source_scaffolding(transaction).await?;
+    insert_imported_session_scaffolding(transaction).await?;
     Ok(facts)
 }
 
@@ -294,11 +316,11 @@ async fn insert_exact_seed_members(
     Ok(())
 }
 
-/// INV-039: one applied imported-frontier command can commit only with its
+/// S28 / INV-039: one applied imported-frontier command can commit only with its
 /// exact ancestry, imported semantic prefix, and one-to-one seed frontier.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv039_exact_imported_session_seed_commits() -> Result<(), Box<dyn Error>> {
+async fn s28_inv039_exact_imported_session_seed_commits() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let mut transaction = pool.begin().await?;
     let seed = insert_imported_resume_seed_scaffolding(&mut transaction).await?;
@@ -332,11 +354,11 @@ async fn inv039_exact_imported_session_seed_commits() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
-/// INV-039: the complete seed can be assembled in any in-transaction order;
+/// S28 / INV-039: the complete seed can be assembled in any in-transaction order;
 /// inserting its one-to-one link before the semantic prefix remains valid.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv039_seed_link_can_precede_semantic_prefix() -> Result<(), Box<dyn Error>> {
+async fn s28_inv039_seed_link_can_precede_semantic_prefix() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let mut transaction = pool.begin().await?;
     let seed = insert_imported_resume_seed_scaffolding(&mut transaction).await?;
@@ -369,11 +391,50 @@ async fn inv039_seed_link_can_precede_semantic_prefix() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// INV-039: once the complete same-transaction seed check is discharged,
+/// S28 / INV-039: the one-to-one seed link can precede its imported session;
+/// the deferred ancestry check validates the final cross-table facts.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s28_inv039_seed_link_can_precede_imported_session() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let mut transaction = pool.begin().await?;
+    let seed = insert_imported_source_scaffolding(&mut transaction).await?;
+    sqlx::query(
+        "INSERT INTO imported_session_seed
+            (session_id, seed_context_frontier_id)
+         VALUES ($1, $2)",
+    )
+    .bind(seed.session)
+    .bind(seed.seed_frontier)
+    .execute(&mut *transaction)
+    .await?;
+    insert_imported_session_scaffolding(&mut transaction).await?;
+    insert_imported_semantic_prefix(&mut transaction, seed).await?;
+    insert_exact_seed_members(&mut transaction, seed).await?;
+    transaction.commit().await?;
+
+    let stored: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM imported_session_seed),
+            (SELECT count(*) FROM semantic_transcript_entry
+              WHERE payload_kind = 'imported_entry'),
+            (SELECT count(*) FROM context_frontier_member)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(stored, (1, 2, 2));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S28 / INV-039: once the complete same-transaction seed check is discharged,
 /// another imported semantic row cannot extend the selected prefix.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv039_immediate_seed_check_seals_same_transaction_prefix() -> Result<(), Box<dyn Error>> {
+async fn s28_inv039_immediate_seed_check_seals_same_transaction_prefix()
+-> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let mut transaction = pool.begin().await?;
     let seed = insert_imported_resume_seed_scaffolding(&mut transaction).await?;
@@ -418,11 +479,11 @@ async fn inv039_immediate_seed_check_seals_same_transaction_prefix() -> Result<(
     Ok(())
 }
 
-/// INV-039: imported ancestry cannot commit without the separate one-to-one
+/// S28 / INV-039: imported ancestry cannot commit without the separate one-to-one
 /// seed record, even when the materialized frontier content is exact.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv039_imported_ancestry_without_seed_is_rejected() -> Result<(), Box<dyn Error>> {
+async fn s28_inv039_imported_ancestry_without_seed_is_rejected() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let mut transaction = pool.begin().await?;
     let seed = insert_imported_resume_seed_scaffolding(&mut transaction).await?;
@@ -444,11 +505,11 @@ async fn inv039_imported_ancestry_without_seed_is_rejected() -> Result<(), Box<d
     Ok(())
 }
 
-/// INV-039: equal imported members in the wrong order are not the selected
+/// S28 / INV-039: equal imported members in the wrong order are not the selected
 /// imported prefix.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv039_reordered_imported_seed_members_are_rejected() -> Result<(), Box<dyn Error>> {
+async fn s28_inv039_reordered_imported_seed_members_are_rejected() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let mut transaction = pool.begin().await?;
     let seed = insert_imported_resume_seed_scaffolding(&mut transaction).await?;
@@ -492,11 +553,11 @@ async fn inv039_reordered_imported_seed_members_are_rejected() -> Result<(), Box
     Ok(())
 }
 
-/// INV-039: an imported semantic payload cannot fabricate any native
+/// S28 / INV-039: an imported semantic payload cannot fabricate any native
 /// accepted-input, turn, call, or tool evidence.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv039_imported_semantic_entry_rejects_native_payload_columns()
+async fn s28_inv039_imported_semantic_entry_rejects_native_payload_columns()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let error = sqlx::query(
@@ -525,11 +586,11 @@ async fn inv039_imported_semantic_entry_rejects_native_payload_columns()
     Ok(())
 }
 
-/// INV-039: the new durable command discriminator still requires its complete
+/// S28 / INV-039: the new durable command discriminator still requires its complete
 /// typed record at the transaction boundary.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv039_imported_creation_registry_claim_requires_typed_record()
+async fn s28_inv039_imported_creation_registry_claim_requires_typed_record()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let mut transaction = pool.begin().await?;
@@ -557,11 +618,12 @@ async fn inv039_imported_creation_registry_claim_requires_typed_record()
     Ok(())
 }
 
-/// INV-039: replacing the native-only reverse creation FK does not make the
+/// S28 / INV-039: replacing the native-only reverse creation FK does not make the
 /// preexisting native command table truncatable.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv039_native_creation_command_truncate_remains_rejected() -> Result<(), Box<dyn Error>> {
+async fn s28_inv039_native_creation_command_truncate_remains_rejected() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, _database_url) = migrated_postgres().await?;
     let error = sqlx::query("TRUNCATE TABLE create_session_command")
         .execute(&pool)
@@ -577,11 +639,11 @@ async fn inv039_native_creation_command_truncate_remains_rejected() -> Result<()
     Ok(())
 }
 
-/// INV-039: row-level immutability cannot be bypassed by truncating the table
+/// S28 / INV-039: row-level immutability cannot be bypassed by truncating the table
 /// that carries exact seed-frontier membership.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv039_seed_frontier_member_truncate_is_rejected() -> Result<(), Box<dyn Error>> {
+async fn s28_inv039_seed_frontier_member_truncate_is_rejected() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let error = sqlx::query("TRUNCATE TABLE context_frontier_member")
         .execute(&pool)
@@ -597,11 +659,11 @@ async fn inv039_seed_frontier_member_truncate_is_rejected() -> Result<(), Box<dy
     Ok(())
 }
 
-/// INV-039: seed construction is ordered once per session; after the seed link
+/// S28 / INV-039: seed construction is ordered once per session; after the seed link
 /// exists, its imported semantic prefix cannot grow.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv039_committed_seed_rejects_late_prefix_inserts() -> Result<(), Box<dyn Error>> {
+async fn s28_inv039_committed_seed_rejects_late_prefix_inserts() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let mut transaction = pool.begin().await?;
     let seed = insert_imported_resume_seed_scaffolding(&mut transaction).await?;
