@@ -847,13 +847,15 @@ those tests.
 - **User intent:** Preserve an independently ambiguous effect exactly while
   allowing a fully closed fatal mismatch to release the session slot without a
   ceremonial stopping phase.
-- **Durable commands:** A running attempt owns provider call X and tool attempt
-  Y. Y is already physically `Ambiguous`, while X is the last unclassified
-  issued operation. One serialized transition records trusted target-mismatch
-  evidence for X, classifies X `KnownFailed`, adds its exact failure to the
-  complete fatal causes F, records any required best-effort cancellation intent,
-  closes or makes non-dispatchable every logical dependency, and reclassifies
-  pending steering.
+- **Durable commands:** This is a domain-algebra fixture for a future aggregate
+  that can own independently issued operations; the implemented serialized tool
+  executor cannot produce a live provider call X and tool attempt Y together.
+  Given such a running attempt, Y is already physically `Ambiguous`, while X is
+  the last unclassified issued operation. One serialized transition records
+  trusted target-mismatch evidence for X, classifies X `KnownFailed`, adds its
+  exact failure to the complete fatal causes F, records any required best-effort
+  cancellation intent, closes or makes non-dispatchable every logical
+  dependency, and reclassifies pending steering.
 - **State transitions:** With every terminal guard now satisfied and the exact
   unacknowledged ambiguity set U equal to `{Y}`, the same transaction ends the
   attempt `AfterFatalMismatch(Ambiguous)` and terminalizes the turn
@@ -878,8 +880,9 @@ those tests.
   effects or rewrite the terminal turn.
 - **Required invariants:** INV-006, INV-009, INV-014, INV-025, INV-026, INV-034.
 - **Remaining questions:** Provider-target identity evidence and trust, exact
-  cancellation delivery and acknowledgement mechanics, and whether direct
-  interrupt-only reconciliation is ever added.
+  cancellation delivery and acknowledgement mechanics, the execution strategy
+  that could produce independently issued provider and tool operations, and
+  whether direct interrupt-only reconciliation is ever added.
 
 ## Coverage note
 

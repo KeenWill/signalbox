@@ -30,6 +30,52 @@ focused capability.
 **Affects.** Domain tool-argument normalization and its dependency graph only;
 stored argument kinds, canonical encoding, and byte limits do not change.
 
+## 2026-07-24 — Bound automatic tool rounds within one turn
+
+**Context.** A model can repeatedly request another tool after receiving the
+prior batch's results. The all-resolved continuation barrier bounds each batch
+but, without a turn-wide limit, a provider-controlled sequence can retain the
+session slot and consume resources indefinitely.
+
+**Decision.** Admit at most 32 tool-using provider rounds in one turn. After the
+thirty-second batch resolves, prepare the ordinary continuation checkpoint but
+close it as a known failure before provider preparation or send. Count distinct
+producing calls for the turn, not requests, so a multi-request batch consumes
+one round and inherited history from earlier turns consumes none.
+
+**Rejected alternatives.** An elapsed-time limit makes durable replay depend on
+wall-clock timing. Counting requests penalizes bounded parallel proposals
+instead of repeated model continuation. An unbounded loop leaves availability
+under provider control. A configurable first version adds policy surface without
+evidence for another value.
+
+**Affects.** Tool-loop continuation, model-call execution, the current turn's
+failure boundary, and application/offline proofs.
+
+## 2026-07-24 — Close terminal tool batches in the semantic frontier
+
+**Context.** A provider conversation containing `AssistantToolUse` remains
+structurally incomplete until every request has a corresponding logical result.
+Terminalizing an ambiguous tool-recovery wait on an equal-content frontier
+preserved the physical uncertainty but left an unpaired tool request that a
+later turn could not render back to a provider.
+
+**Decision.** A proof-bearing interrupt of a tool-recovery wait retains the
+exact ambiguous physical attempt in the reconciliation marker while extending
+the frontier with exactly one proposal-ordered reference-only result per
+request. Completed and known-failed attempts use `ToolExecutionResult`, denials
+use `ToolDenied`, and the ambiguous request plus any request without an ordinary
+result use `ToolClosed`. The result entries make the logical conversation
+closed; they neither reinterpret nor resolve the physical ambiguity.
+
+**Rejected alternatives.** Keeping an equal-content frontier strands an
+unrenderable dependency. Rendering a synthetic execution failure would erase
+uncertainty. Omitting the terminal frontier from later context would make
+recovery-specific history policy implicit in provider adapters.
+
+**Affects.** S06/S07, INV-005/INV-006/INV-025/INV-029/INV-037, tool recovery,
+terminal transcript projection, persistence assertions, and provider rendering.
+
 ## 2026-07-24 — Bound and sanitize persisted tool-error detail
 
 **Context.** Executor failures may carry useful diagnostic detail into durable
