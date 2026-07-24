@@ -64,6 +64,31 @@ snapshot incomplete.
 dispatch, terminal-client decoding, imported transcript reads, follow snapshots,
 and compatibility tests.
 
+## 2026-07-24 — Version the imported-value storage encoding
+
+**Context.** PostgreSQL must retain the complete source-neutral structured,
+content, and attestation algebra without introducing provider JSON as a domain
+or durable contract. The loader must reject unknown, partial, contradictory, or
+trailing storage data before domain reconstitution.
+
+**Decision.** Store nested imported values in `bytea` using an adapter-owned
+version-1 encoding: one version byte, closed variant tags, big-endian
+length-framed UTF-8 and collection values, and the same 128-container bound as
+Claude Code conversion. Raw source bytes remain separate authority. The adapter
+decodes every field into domain values and rejects unsupported versions/tags,
+invalid UTF-8 or numbers, impossible lengths, excessive depth, early endings,
+and trailing bytes.
+
+**Rejected alternatives.** `jsonb` would erase lexical source distinctions and
+repeat-member structure. Treating reconstructed provider JSON as a domain value
+would move an edge representation inward. A general serialization dependency
+would expose a library-derived wire shape as an accidental durable contract.
+Fully relational decomposition would multiply schema surface without adding a
+stronger checked boundary.
+
+**Affects.** The imported raw-occurrence and transcript-entry encoding columns,
+Postgres repository, corruption vocabulary, and codec round-trip tests.
+
 ## 2026-07-24 — Preserve JSON structure with an edge-owned bounded decoder
 
 **Context.** The Claude Code converter must retain ordered and repeated object

@@ -4,6 +4,11 @@
 //! domain crate.
 
 mod command_registry;
+#[allow(
+    dead_code,
+    reason = "the immediately stacked imported-conversation repository consumes this checked storage codec"
+)]
+mod conversation_import_codec;
 mod lock_inventory;
 
 pub mod create_session;

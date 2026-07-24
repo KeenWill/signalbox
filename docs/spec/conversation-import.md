@@ -338,6 +338,10 @@ The Postgres representation uses append-only `imported_raw_source_record` blobs,
 and `imported_transcript_entry` members. Imported text and opaque media data use
 UTF-8 `bytea`; complete structured records and nested values use a checked
 adapter encoding of the domain algebra, never provider JSON as a domain type.
+Every encoded top-level value carries a fixed format version and payload-kind
+discriminator; a decoder rejects a value from another column kind rather than
+reinterpreting it. Encoded collection counts bound parsing but never directly
+drive capacity allocation: collections grow fallibly after each decoded element.
 
 One transaction resolves or inserts a complete aggregate:
 
