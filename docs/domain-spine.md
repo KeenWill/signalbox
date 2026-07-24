@@ -1720,6 +1720,10 @@ impl ModelCallExecutionReconstitutionInput {
         self,
         call_snapshot: ResolvedContextFrontierReconstitutionInput,
     ) -> Self;
+    pub fn with_continuation_snapshot(
+        self,
+        continuation_snapshot: ResolvedContextFrontierReconstitutionInput,
+    ) -> Self;
     pub fn reconstitute(self) -> Result<ModelCallExecution, ModelCallExecutionReconstitutionError>;
 }
 pub enum ModelCallExecutionReconstitutionFailure {
@@ -1727,6 +1731,8 @@ pub enum ModelCallExecutionReconstitutionFailure {
     StartingSnapshotSessionMismatch,
     StartingSnapshotMismatch,
     CallSnapshotMissing,
+    ContinuationSnapshotUnexpected,
+    ContinuationSnapshotMismatch,
     CallSnapshotUnexpected,
     CallSnapshotMismatch,
     FrontierEntryMismatch,

@@ -203,6 +203,7 @@ pub struct ModelCallExecutionReconstitutionInput {
     active_turn: ActivatedAcceptedInputTurn,
     targets: ModelTargetCatalog,
     starting_snapshot: ResolvedContextFrontierSnapshot,
+    continuation_snapshot: Option<ResolvedContextFrontierReconstitutionInput>,
     call_snapshot: Option<ResolvedContextFrontierReconstitutionInput>,
     frontier_entries: Vec<SemanticTranscriptEntry>,
     origin_contents: Vec<ModelCallOriginContent>,
@@ -225,6 +226,7 @@ impl ModelCallExecutionReconstitutionInput {
             active_turn,
             targets,
             starting_snapshot,
+            continuation_snapshot: None,
             call_snapshot: None,
             frontier_entries,
             origin_contents,
@@ -239,6 +241,21 @@ impl ModelCallExecutionReconstitutionInput {
         call_snapshot: ResolvedContextFrontierReconstitutionInput,
     ) -> Self {
         self.call_snapshot = Some(call_snapshot);
+        self
+    }
+
+    /// Supplies the all-resolved tool-result frontier that precedes a fresh
+    /// continuation call.
+    ///
+    /// The owning persistence aggregate remains responsible for proving the
+    /// tool-batch/result correlation. This seam validates complete snapshot
+    /// shape, turn ownership, and preservation of the eligibility-fixed
+    /// starting prefix.
+    pub fn with_continuation_snapshot(
+        mut self,
+        continuation_snapshot: ResolvedContextFrontierReconstitutionInput,
+    ) -> Self {
+        self.continuation_snapshot = Some(continuation_snapshot);
         self
     }
 
@@ -259,6 +276,10 @@ pub enum ModelCallExecutionReconstitutionFailure {
     StartingSnapshotMismatch,
     /// A non-starting call frontier was omitted.
     CallSnapshotMissing,
+    /// A continuation snapshot was supplied outside a fresh continuation.
+    ContinuationSnapshotUnexpected,
+    /// A continuation snapshot is malformed or does not preserve the start.
+    ContinuationSnapshotMismatch,
     /// A call snapshot was supplied without a consuming call or steering.
     CallSnapshotUnexpected,
     /// The supplied call snapshot is not the call's exact prefix extension.
@@ -337,6 +358,7 @@ pub struct ModelCallExecution {
     current_snapshot: ResolvedContextFrontierSnapshot,
     frontier_entries: Box<[SemanticTranscriptEntry]>,
     origin_contents: BTreeMap<AcceptedInputId, UserContent>,
+    pinned_target: Option<PinnedProviderTarget>,
     current_call: Option<CurrentModelCall>,
 }
 
@@ -428,13 +450,17 @@ impl ModelCallExecution {
                 ModelCallPreparationFailure::SteeringFrontierIdentityMismatch,
             ));
         }
-        let resolution = match self.targets.resolve(frozen) {
-            Ok(resolution) => resolution,
-            Err(error) => {
-                return Err(ModelCallPreparationError::target_unavailable(self, error));
-            }
+        let pinned = if let Some(pinned) = self.pinned_target {
+            pinned
+        } else {
+            let resolution = match self.targets.resolve(frozen) {
+                Ok(resolution) => resolution,
+                Err(error) => {
+                    return Err(ModelCallPreparationError::target_unavailable(self, error));
+                }
+            };
+            PinnedProviderTarget::pinned(self.turn, resolution.target)
         };
-        let pinned = PinnedProviderTarget::pinned(self.turn, resolution.target);
         let mut distinct_entries = self
             .frontier_entries
             .iter()
@@ -2687,42 +2713,68 @@ fn reconstitute(
             ModelCallExecutionReconstitutionFailure::MultipleCalls,
         ));
     }
-    let current_snapshot = match (input.calls.first(), input.call_snapshot.as_ref()) {
-        (None, None) => input.starting_snapshot.clone(),
-        (None, Some(_)) => {
+    let current_snapshot = match (
+        input.calls.first(),
+        input.call_snapshot.as_ref(),
+        input.continuation_snapshot.as_ref(),
+    ) {
+        (None, None, None) => input.starting_snapshot.clone(),
+        (None, Some(_), _) => {
             return Err(fail(
                 input,
                 ModelCallExecutionReconstitutionFailure::CallSnapshotUnexpected,
             ));
         }
-        (Some(call), None) if call.frontier() == input.starting_snapshot.frontier().snapshot() => {
+        (None, None, Some(stored)) => {
+            let Some(current) = stored.clone().reconstitute() else {
+                return Err(fail(
+                    input,
+                    ModelCallExecutionReconstitutionFailure::ContinuationSnapshotMismatch,
+                ));
+            };
+            if current.frontier().owning_session() != session
+                || current.frontier() == input.starting_snapshot.frontier()
+                || !input.starting_snapshot.is_semantic_prefix_of(&current)
+            {
+                return Err(fail(
+                    input,
+                    ModelCallExecutionReconstitutionFailure::ContinuationSnapshotMismatch,
+                ));
+            }
+            current
+        }
+        (Some(_), _, Some(_)) => {
+            return Err(fail(
+                input,
+                ModelCallExecutionReconstitutionFailure::ContinuationSnapshotUnexpected,
+            ));
+        }
+        (Some(call), None, None)
+            if call.frontier() == input.starting_snapshot.frontier().snapshot() =>
+        {
             input.starting_snapshot.clone()
         }
-        (Some(_), None) => {
+        (Some(_), None, None) => {
             return Err(fail(
                 input,
                 ModelCallExecutionReconstitutionFailure::CallSnapshotMissing,
             ));
         }
-        (Some(call), Some(stored)) => {
+        (Some(call), Some(stored), None) => {
             if call.frontier() == input.starting_snapshot.frontier().snapshot() {
                 return Err(fail(
                     input,
                     ModelCallExecutionReconstitutionFailure::CallSnapshotUnexpected,
                 ));
             }
-            let (owner, snapshot, members) = stored.clone().into_parts();
-            let current =
-                match ResolvedContextFrontierSnapshot::try_from_candidate(owner, snapshot, members)
-                {
-                    Ok(current) => current,
-                    Err(_) => {
-                        return Err(fail(
-                            input,
-                            ModelCallExecutionReconstitutionFailure::CallSnapshotMismatch,
-                        ));
-                    }
-                };
+            let owner = stored.owning_session();
+            let snapshot = stored.snapshot();
+            let Some(current) = stored.clone().reconstitute() else {
+                return Err(fail(
+                    input,
+                    ModelCallExecutionReconstitutionFailure::CallSnapshotMismatch,
+                ));
+            };
             if owner != session
                 || snapshot != call.frontier()
                 || current.entry_count() == input.starting_snapshot.entry_count()
@@ -2809,50 +2861,59 @@ fn reconstitute(
         ));
     }
     let consumed = input.active_turn.consumed_steering();
-    let consumed_suffix = &input.frontier_entries[input.starting_snapshot.entry_count()..];
-    let consumed_call = input.calls.first().map(ModelCallReconstitutionInput::id);
-    if consumed.len() != consumed_suffix.len()
+    let consumed_entries = input
+        .frontier_entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.payload(),
+                SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
+            )
+        })
+        .collect::<Vec<_>>();
+    if consumed.len() != consumed_entries.len()
         || consumed
             .iter()
-            .zip(consumed_suffix)
+            .zip(consumed_entries)
             .any(|(consumed, entry)| {
                 !matches!(
-                    (consumed.lifecycle().disposition(), entry.payload(), consumed_call),
+                    (consumed.lifecycle().disposition(), entry.payload()),
                     (
-                        AcceptedInputDisposition::ConsumedAsSteering { call },
+                        AcceptedInputDisposition::ConsumedAsSteering { .. },
                         SemanticTranscriptEntryPayload::SteeringAcceptedInput {
                             accepted_input,
                             source_turn,
                         },
-                        Some(current_call),
-                    ) if *call == current_call
-                        && *accepted_input == consumed.accepted_input()
+                    ) if *accepted_input == consumed.accepted_input()
                         && *source_turn == consumed.source_turn()
                         && *source_turn == turn
                 )
             })
-        || (!consumed.is_empty() && input.call_snapshot.is_none())
     {
         return Err(fail(
             input,
             ModelCallExecutionReconstitutionFailure::ConsumedSteeringMismatch,
         ));
     }
-    let pinned_target = match (input.pinned_target, input.calls.first()) {
-        (None, None) => None,
-        (None, Some(_)) => {
+    let pinned_target = match (
+        input.pinned_target,
+        input.calls.first(),
+        input.continuation_snapshot.as_ref(),
+    ) {
+        (None, None, None) => None,
+        (None, None, Some(_)) | (None, Some(_), _) => {
             return Err(fail(
                 input,
                 ModelCallExecutionReconstitutionFailure::PinnedTargetMissing,
             ));
         }
-        (Some(_), None) => {
+        (Some(_), None, None) => {
             return Err(fail(
                 input,
                 ModelCallExecutionReconstitutionFailure::PinnedTargetUnexpected,
             ));
         }
-        (Some(stored), Some(_)) => {
+        (Some(stored), Some(_), None) | (Some(stored), None, Some(_)) => {
             let Some(pinned) = stored.reconstitute_for_turn(turn) else {
                 return Err(fail(
                     input,
@@ -2860,6 +2921,12 @@ fn reconstitute(
                 ));
             };
             Some(pinned)
+        }
+        (Some(_), Some(_), Some(_)) => {
+            return Err(fail(
+                input,
+                ModelCallExecutionReconstitutionFailure::ContinuationSnapshotUnexpected,
+            ));
         }
     };
     let current_call = if let Some(call) = input.calls.first() {
@@ -2946,6 +3013,7 @@ fn reconstitute(
         current_snapshot,
         frontier_entries: input.frontier_entries.into_boxed_slice(),
         origin_contents,
+        pinned_target,
         current_call,
     })
 }
@@ -4011,6 +4079,80 @@ mod tests {
             error.failure(),
             ModelCallExecutionReconstitutionFailure::StartingSnapshotMismatch
         );
+    }
+
+    /// S02 / S11 / INV-005 / INV-014 / INV-015 / INV-036: a fresh
+    /// continuation attempt starts from the complete resolved tool frontier
+    /// and retains the turn-level provider pin before its next call exists.
+    #[test]
+    fn s02_s11_inv005_inv014_inv015_inv036_continuation_reconstitutes_exact_frontier_and_pin() {
+        let initial = active_execution();
+        let request = tool_request_id(30);
+        let assistant_tool_use = SemanticTranscriptEntry::from_validated_parts(
+            semantic_transcript_entry_id(31),
+            initial.session,
+            SemanticTranscriptEntryPayload::AssistantToolUse {
+                producing_call: model_call_id(32),
+                request,
+            },
+        );
+        let denied = SemanticTranscriptEntry::from_validated_parts(
+            semantic_transcript_entry_id(33),
+            initial.session,
+            SemanticTranscriptEntryPayload::ToolDenied { request },
+        );
+        let continuation = initial
+            .starting_snapshot
+            .derive_appending_candidate(
+                context_frontier_id(34),
+                vec![assistant_tool_use.reference(), denied.reference()],
+            )
+            .expect("tool entries preserve the starting prefix");
+        let pinned = PinnedProviderTargetReconstitutionInput::new(
+            initial.turn,
+            ResolvedProviderTarget::naming(provider_model_identity(8)),
+        );
+        let input = ModelCallExecutionReconstitutionInput::new(
+            initial
+                .active_turn
+                .with_phase_for_test(ActiveTurnPhase::Running {
+                    current_attempt: CurrentTurnAttempt::prepared(turn_attempt_id(35)),
+                }),
+            initial.targets,
+            initial.starting_snapshot,
+            vec![
+                initial.frontier_entries[0].clone(),
+                assistant_tool_use,
+                denied,
+            ],
+            initial
+                .origin_contents
+                .into_iter()
+                .map(|(accepted_input, content)| {
+                    ModelCallOriginContent::from_validated_parts(accepted_input, content)
+                })
+                .collect(),
+            Some(pinned),
+            Vec::new(),
+        )
+        .with_continuation_snapshot(ResolvedContextFrontierReconstitutionInput::new(
+            continuation.frontier().owning_session(),
+            continuation.frontier().snapshot(),
+            continuation.ordered_entries().collect(),
+        ));
+        let resumed = input
+            .reconstitute()
+            .expect("the complete continuation facts reconstruct");
+        let prepared = resumed
+            .prepare_initial_call(model_call_id(36))
+            .expect("the continuation attempt prepares its next call");
+
+        assert_eq!(prepared.call().frontier(), continuation.frontier());
+        assert_eq!(
+            prepared.call().target(),
+            ResolvedProviderTarget::naming(provider_model_identity(8))
+        );
+        assert!(prepared.steering_snapshot().is_none());
     }
 
     /// S02 / INV-005 / INV-015 / INV-036: a call that names a distinct
