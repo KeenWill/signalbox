@@ -13308,6 +13308,76 @@ async fn s24_inv032_dispatcher_rejects_a_header_beyond_the_allocator() -> Result
     Ok(())
 }
 
+/// S24 / INV-032: a restored header above both the allocator and the exact next
+/// slot is corruption rather than an idle outbox.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_inv032_dispatcher_rejects_a_noncontiguous_header_beyond_the_allocator()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let first_session = insert_outbox_session_fixture(&pool, 0xe1b).await?;
+    let second_session = insert_outbox_session_fixture(&pool, 0xe1c).await?;
+    let mut first_producer = pool.begin().await?;
+    append_session_created_test_event(&mut first_producer, first_session).await?;
+    first_producer.commit().await?;
+    let mut second_producer = pool.begin().await?;
+    append_session_created_test_event(&mut second_producer, second_session).await?;
+    second_producer.commit().await?;
+
+    sqlx::query("ALTER TABLE session_created_outbox_event DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE outbox_event DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "ALTER TABLE outbox_sequence_state
+         DISABLE TRIGGER outbox_sequence_requires_event",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query("DELETE FROM session_created_outbox_event WHERE event_sequence = 1")
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM outbox_event WHERE event_sequence = 1")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE outbox_sequence_state
+            SET last_sequence = 0,
+                last_allocation_xid = NULL
+          WHERE singleton",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE session_created_outbox_event ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query("ALTER TABLE outbox_event ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "ALTER TABLE outbox_sequence_state
+         ENABLE TRIGGER outbox_sequence_requires_event",
+    )
+    .execute(&pool)
+    .await?;
+
+    let dispatcher = OutboxDispatcher::new(pool.clone());
+    assert!(matches!(
+        dispatcher
+            .dispatch_next(|_| panic!("an unallocated header must not be offered"))
+            .await,
+        Err(OutboxDispatchError::Corruption(
+            OutboxCorruption::EventBeyondAllocatedSequence
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S24 / INV-032: exhausted delivery still validates the allocator singleton
 /// rather than silently polling forever on missing durable state.
 #[tokio::test]
@@ -14238,6 +14308,64 @@ async fn s01_inv032_terminal_model_call_dispatch_requires_exact_disposition()
     .fetch_one(&pool)
     .await?;
     assert_eq!(authoritative, ("terminal".into(), Some("ambiguous".into())));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S01 / INV-032: a stored nonterminal model-call transition cannot be ahead
+/// of the authoritative monotonic call state.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s01_inv032_model_call_dispatch_rejects_an_unreached_transition()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = checkpoint_restart_model_call(&pool, 0xe98, false).await?;
+    let dispatcher = OutboxDispatcher::new(pool.clone());
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 1 }
+    );
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 2 }
+    );
+    assert_eq!(
+        dispatcher
+            .dispatch_next(|_| OutboxDeliveryDecision::Delivered)
+            .await?,
+        OutboxDispatchOutcome::Delivered { sequence: 3 }
+    );
+
+    sqlx::query("ALTER TABLE model_call_transition_outbox_event DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE model_call_transition_outbox_event
+            SET call_state_kind = 'in_flight'
+          WHERE model_call_id = $1
+            AND call_state_kind = 'prepared'",
+    )
+    .bind(fixture.call.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE model_call_transition_outbox_event ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+
+    assert!(matches!(
+        dispatcher
+            .dispatch_next(|_| panic!("an unreached transition must not be offered"))
+            .await,
+        Err(OutboxDispatchError::Corruption(
+            OutboxCorruption::InvalidModelCallState
+        ))
+    ));
 
     pool.close().await;
     drop(container);

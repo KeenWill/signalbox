@@ -7,17 +7,16 @@ use std::{
     io,
     os::unix::{
         ffi::OsStrExt,
-        fs::{FileTypeExt, MetadataExt},
+        fs::{FileTypeExt, MetadataExt, PermissionsExt},
     },
     path::{Path, PathBuf},
-    sync::Mutex,
 };
 
 use rustix::{
     fs::{FlockOperation, Mode, OFlags, fchmod, fcntl_getfl, fcntl_setfl, flock, open},
     io::{FdFlags, fcntl_setfd},
     net::{AddressFamily, SocketAddrUnix, SocketType, bind, connect, getsockname, listen, socket},
-    process::{geteuid, umask},
+    process::geteuid,
 };
 use tokio::net::{UnixListener, UnixStream, unix::SocketAddr as UnixSocketAddr};
 
@@ -27,22 +26,6 @@ const OWNER_PRIVATE_DIRECTORY_MODE: u32 = 0o700;
 const PERMISSION_MASK: u32 = 0o7777;
 const GROUP_OR_OTHER_WRITE: u32 = 0o022;
 const STICKY_BIT: u32 = 0o1000;
-
-static SOCKET_CREATION_MASK: Mutex<()> = Mutex::new(());
-
-struct SocketCreationMask(Mode);
-
-impl SocketCreationMask {
-    fn owner_only() -> Self {
-        Self(umask(Mode::XUSR | Mode::RWXG | Mode::RWXO))
-    }
-}
-
-impl Drop for SocketCreationMask {
-    fn drop(&mut self) {
-        umask(self.0);
-    }
-}
 
 /// A process listener whose filesystem entry was verified before listening.
 #[derive(Debug)]
@@ -69,28 +52,19 @@ impl LocalProcessListener {
             .map_err(|error| LocalSocketError::ConfigureSocket(rustix_error(error)))?;
         let address = SocketAddrUnix::new(&path)
             .map_err(|error| LocalSocketError::CreateAddress(rustix_error(error)))?;
-        {
-            // Unix bind does not accept a mode. Create the entry as 0600 so no
-            // later pathname-following chmod can touch a raced replacement.
-            let _socket_creation_lock = SOCKET_CREATION_MASK
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let _creation_mask = SocketCreationMask::owner_only();
-            bind(&socket, &address).map_err(|error| LocalSocketError::Bind(rustix_error(error)))?;
-        }
+        bind(&socket, &address).map_err(|error| LocalSocketError::Bind(rustix_error(error)))?;
 
         let first_metadata =
             fs::symlink_metadata(&path).map_err(LocalSocketError::ReadBoundIdentity)?;
         let identity = SocketIdentity::capture(&first_metadata, effective_user)
             .ok_or(LocalSocketError::BoundIdentityMismatch)?;
-        if first_metadata.mode() & PERMISSION_MASK != OWNER_ONLY_MODE {
-            return Err(LocalSocketError::BoundIdentityMismatch);
-        }
         let cleanup = FailedBindCleanup::new(&path, identity);
-        let identity_pin = SocketIdentityPin::create(&path, effective_user)?;
-        if identity_pin.identity() != identity {
-            return Err(LocalSocketError::BoundIdentityMismatch);
-        }
+        let identity_pin = SocketIdentityPin::create(&path, identity, effective_user)?;
+        fs::set_permissions(
+            identity_pin.path(),
+            fs::Permissions::from_mode(OWNER_ONLY_MODE),
+        )
+        .map_err(LocalSocketError::ConfigureSocketPermissions)?;
 
         let local_address = getsockname(&socket)
             .map_err(|error| LocalSocketError::ReadLocalAddress(rustix_error(error)))?;
@@ -102,8 +76,13 @@ impl LocalProcessListener {
 
         let second_metadata =
             fs::symlink_metadata(&path).map_err(LocalSocketError::VerifyBoundIdentity)?;
+        let pinned_metadata = identity_pin
+            .metadata()
+            .map_err(LocalSocketError::ReadPinnedIdentity)?;
         if !identity.matches(&second_metadata, effective_user)
             || second_metadata.mode() & PERMISSION_MASK != OWNER_ONLY_MODE
+            || !identity.matches(&pinned_metadata, effective_user)
+            || pinned_metadata.mode() & PERMISSION_MASK != OWNER_ONLY_MODE
         {
             return Err(LocalSocketError::BoundIdentityMismatch);
         }
@@ -178,31 +157,30 @@ struct SocketIdentityPin {
 }
 
 impl SocketIdentityPin {
-    fn create(path: &Path, effective_user: u32) -> Result<Self, LocalSocketError> {
+    fn create(
+        path: &Path,
+        expected_identity: SocketIdentity,
+        effective_user: u32,
+    ) -> Result<Self, LocalSocketError> {
         let pin_path = identity_pin_path(path);
         fs::hard_link(path, &pin_path).map_err(LocalSocketError::PinSocketIdentity)?;
         let metadata = match fs::symlink_metadata(&pin_path) {
             Ok(metadata) => metadata,
-            Err(error) => {
-                let _ = fs::remove_file(&pin_path);
-                return Err(LocalSocketError::ReadPinnedIdentity(error));
-            }
+            Err(error) => return Err(LocalSocketError::ReadPinnedIdentity(error)),
         };
-        let Some(identity) = SocketIdentity::capture(&metadata, effective_user) else {
-            let _ = fs::remove_file(&pin_path);
+        if !expected_identity.matches(&metadata, effective_user) {
             return Err(LocalSocketError::PinnedIdentityMismatch);
-        };
+        }
         Ok(Self {
             path: pin_path,
-            identity,
+            identity: expected_identity,
         })
     }
 
-    const fn identity(&self) -> SocketIdentity {
-        self.identity
+    fn path(&self) -> &Path {
+        &self.path
     }
 
-    #[cfg(test)]
     fn metadata(&self) -> io::Result<fs::Metadata> {
         fs::symlink_metadata(&self.path)
     }
@@ -210,7 +188,7 @@ impl SocketIdentityPin {
 
 impl Drop for SocketIdentityPin {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        remove_if_identity_matches(&self.path, self.identity, geteuid().as_raw());
     }
 }
 
@@ -230,10 +208,32 @@ fn clear_stale_identity_pin(
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(LocalSocketError::ReadPinnedIdentity(error)),
     };
-    if !metadata.file_type().is_socket() || metadata.uid() != effective_user {
+    let Some(identity) = SocketIdentity::capture(&metadata, effective_user) else {
+        return Err(LocalSocketError::PinnedIdentityMismatch);
+    };
+    let public_metadata = match fs::symlink_metadata(socket_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(LocalSocketError::PinnedIdentityMismatch);
+        }
+        Err(error) => return Err(LocalSocketError::ReadExistingEntry(error)),
+    };
+    if !identity.matches(&public_metadata, effective_user) {
+        return Err(LocalSocketError::PinnedIdentityMismatch);
+    }
+    let revalidated_pin =
+        fs::symlink_metadata(&pin_path).map_err(LocalSocketError::ReadPinnedIdentity)?;
+    if !identity.matches(&revalidated_pin, effective_user) {
         return Err(LocalSocketError::PinnedIdentityMismatch);
     }
     fs::remove_file(pin_path).map_err(LocalSocketError::RemoveIdentityPin)
+}
+
+fn remove_if_identity_matches(path: &Path, identity: SocketIdentity, effective_user: u32) {
+    if fs::symlink_metadata(path).is_ok_and(|metadata| identity.matches(&metadata, effective_user))
+    {
+        let _ = fs::remove_file(path);
+    }
 }
 
 struct FailedBindCleanup {
@@ -261,12 +261,7 @@ impl Drop for FailedBindCleanup {
         if !self.armed {
             return;
         }
-        let effective_user = geteuid().as_raw();
-        if fs::symlink_metadata(&self.path)
-            .is_ok_and(|metadata| self.identity.matches(&metadata, effective_user))
-        {
-            let _ = fs::remove_file(&self.path);
-        }
+        remove_if_identity_matches(&self.path, self.identity, geteuid().as_raw());
     }
 }
 
@@ -413,8 +408,9 @@ fn prepare_final_entry(path: &Path) -> Result<(), LocalSocketError> {
     if first_metadata.uid() != effective_user {
         return Err(LocalSocketError::ExistingSocketOwnerMismatch);
     }
-    let identity_pin = SocketIdentityPin::create(path, effective_user)?;
-    let identity = identity_pin.identity();
+    let identity = SocketIdentity::capture(&first_metadata, effective_user)
+        .ok_or(LocalSocketError::ExistingSocketOwnerMismatch)?;
+    let _identity_pin = SocketIdentityPin::create(path, identity, effective_user)?;
 
     let probe = socket(AddressFamily::UNIX, SocketType::STREAM, None)
         .map_err(|error| LocalSocketError::ProbeExistingSocket(rustix_error(error)))?;
@@ -514,6 +510,8 @@ pub enum LocalSocketError {
     CreateAddress(io::Error),
     /// The unlistening socket could not be bound.
     Bind(io::Error),
+    /// The retained unlistening socket could not be made owner-only.
+    ConfigureSocketPermissions(io::Error),
     /// The bound descriptor's local address could not be read.
     ReadLocalAddress(io::Error),
     /// The bound descriptor did not name the resolved path.
@@ -594,6 +592,9 @@ impl fmt::Display for LocalSocketError {
             Self::ConfigureSocket(_) => "the local process socket could not be configured",
             Self::CreateAddress(_) => "the local process socket address is invalid",
             Self::Bind(_) => "the local process socket could not be bound",
+            Self::ConfigureSocketPermissions(_) => {
+                "the local process socket permissions could not be configured"
+            }
             Self::ReadLocalAddress(_) => {
                 "the bound local process socket address could not be verified"
             }
@@ -633,6 +634,7 @@ impl Error for LocalSocketError {
             | Self::ConfigureSocket(error)
             | Self::CreateAddress(error)
             | Self::Bind(error)
+            | Self::ConfigureSocketPermissions(error)
             | Self::ReadLocalAddress(error)
             | Self::ReadBoundIdentity(error)
             | Self::VerifyBoundIdentity(error)
@@ -726,6 +728,7 @@ mod tests {
         assert!(identity_metadata.file_type().is_socket());
         assert_eq!(identity_metadata.dev(), metadata.dev());
         assert_eq!(identity_metadata.ino(), metadata.ino());
+        assert_eq!(identity_metadata.mode() & 0o7777, 0o600);
         assert_eq!(listener.path(), path);
         let lock_metadata = fs::symlink_metadata(directory.lock_path())?;
         assert!(lock_metadata.is_file());
@@ -803,6 +806,28 @@ mod tests {
         assert!(!path.exists());
         assert!(fs::symlink_metadata(directory.identity_path())?.is_file());
         drop(pin);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unpaired_live_socket_at_identity_path_is_preserved() -> Result<(), Box<dyn Error>> {
+        let directory = TestDirectory::create()?;
+        let path = directory.socket_path();
+        let identity_path = directory.identity_path();
+        let live = std::os::unix::net::UnixListener::bind(&identity_path)?;
+        let inode = fs::symlink_metadata(&identity_path)?.ino();
+
+        let result = LocalProcessListener::bind(&path);
+
+        assert!(matches!(
+            result,
+            Err(LocalSocketError::PinnedIdentityMismatch)
+        ));
+        assert!(!path.exists());
+        assert_eq!(fs::symlink_metadata(&identity_path)?.ino(), inode);
+        let client = std::os::unix::net::UnixStream::connect(&identity_path)?;
+        drop(client);
+        drop(live);
         Ok(())
     }
 
