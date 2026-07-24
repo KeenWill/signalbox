@@ -92,6 +92,32 @@ pub struct AppliedInterruptCommandResult {
 }
 
 impl AppliedInterruptCommandResult {
+    pub(crate) fn from_correlated_submit(
+        command: DurableCommandId,
+        session: SessionId,
+        predecessor: TurnId,
+        accepted_input: AcceptedInputId,
+        successor: TurnId,
+        successor_order: AcceptedInputQueueOrder,
+    ) -> Option<Self> {
+        if successor == predecessor
+            || successor_order.priority()
+                != (AcceptedInputQueuePriority::InterruptImmediatelyAfter { predecessor })
+        {
+            return None;
+        }
+        Some(Self {
+            proof: AppliedInterruptProof {
+                command,
+                predecessor,
+            },
+            session,
+            accepted_input,
+            successor,
+            successor_order,
+        })
+    }
+
     /// Returns the cancellation authority supplied by this exact applied
     /// result.
     pub const fn proof(&self) -> AppliedInterruptProof {

@@ -29,6 +29,8 @@ const TURN_FAILED: &str = "turn_failed";
 const MODEL_CALL_TRANSITION: &str = "model_call_transition";
 const TURN_COMPLETED: &str = "turn_completed";
 const TURN_REFUSED: &str = "turn_refused";
+const TURN_CANCELLED: &str = "turn_cancelled";
+const TURN_RECONCILIATION_REQUIRED: &str = "turn_reconciliation_required";
 const STORAGE_VERSION: i16 = 1;
 
 type OutboxSlotRow = (
@@ -128,6 +130,24 @@ pub enum DispatchedOutboxEventKind {
         /// Exact terminal frontier.
         terminal_frontier: ContextFrontierId,
     },
+    /// An interrupt-cancelled turn committed its semantic marker.
+    TurnCancelled {
+        /// Cancelled turn.
+        turn: TurnId,
+        /// Exact semantic cancellation marker.
+        cancellation_entry: SemanticTranscriptEntryId,
+        /// Exact terminal frontier.
+        terminal_frontier: ContextFrontierId,
+    },
+    /// A stopped turn terminalized for explicit reconciliation.
+    TurnReconciliationRequired {
+        /// Turn requiring reconciliation.
+        turn: TurnId,
+        /// Exact ambiguous model call.
+        call: ModelCallId,
+        /// Exact terminal frontier.
+        terminal_frontier: ContextFrontierId,
+    },
 }
 
 /// Durable model-call state carried by one dispatched transition.
@@ -137,6 +157,8 @@ pub enum DispatchedModelCallState {
     Prepared,
     /// Exact call entered InFlight.
     InFlight,
+    /// Exact issued call received durable cancellation intent.
+    CancellationRequested,
     /// Exact call reached a terminal disposition.
     Terminal(DispatchedModelCallDisposition),
 }
@@ -634,6 +656,67 @@ async fn load_event(
                 terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
             }
         }
+        TURN_CANCELLED => {
+            let row: Option<(Uuid, Uuid, Uuid)> = sqlx::query_as(
+                "SELECT event.turn_id, event.cancellation_entry_id,
+                        event.terminal_frontier_id
+                   FROM turn_cancelled_outbox_event AS event
+                   JOIN turn_lifecycle AS turn
+                     ON turn.turn_id = event.turn_id
+                    AND turn.session_id = event.session_id
+                    AND turn.state_kind = 'terminal'
+                    AND turn.terminal_disposition_kind = 'cancelled'
+                    AND turn.terminal_frontier_id = event.terminal_frontier_id
+                   JOIN semantic_transcript_entry AS cancellation
+                     ON cancellation.source_session_id = event.session_id
+                    AND cancellation.semantic_entry_id = event.cancellation_entry_id
+                    AND cancellation.payload_kind = 'turn_cancelled'
+                    AND cancellation.cancelled_turn_id = event.turn_id
+                  WHERE event.event_sequence = $1",
+            )
+            .bind(Decimal::from(expected_sequence))
+            .fetch_optional(&mut **transaction)
+            .await?;
+            let (turn, cancellation_entry, terminal_frontier) =
+                row.ok_or(OutboxCorruption::InvalidTerminalEventCorrelation)?;
+            DispatchedOutboxEventKind::TurnCancelled {
+                turn: TurnId::from_uuid(turn),
+                cancellation_entry: SemanticTranscriptEntryId::from_uuid(cancellation_entry),
+                terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
+            }
+        }
+        TURN_RECONCILIATION_REQUIRED => {
+            let row: Option<(Uuid, Uuid, Uuid)> = sqlx::query_as(
+                "SELECT event.turn_id, event.model_call_id,
+                        event.terminal_frontier_id
+                   FROM turn_reconciliation_required_outbox_event AS event
+                   JOIN turn_lifecycle AS turn
+                     ON turn.turn_id = event.turn_id
+                    AND turn.session_id = event.session_id
+                    AND turn.state_kind = 'terminal'
+                    AND turn.terminal_disposition_kind = 'reconciliation_required'
+                    AND turn.terminal_frontier_id = event.terminal_frontier_id
+                    AND turn.terminal_model_call_id = event.model_call_id
+                   JOIN model_call AS call
+                     ON call.model_call_id = event.model_call_id
+                    AND call.turn_id = event.turn_id
+                    AND call.session_id = event.session_id
+                    AND call.turn_attempt_id = turn.terminal_attempt_id
+                    AND call.state_kind = 'terminal'
+                    AND call.terminal_disposition_kind = 'ambiguous'
+                  WHERE event.event_sequence = $1",
+            )
+            .bind(Decimal::from(expected_sequence))
+            .fetch_optional(&mut **transaction)
+            .await?;
+            let (turn, call, terminal_frontier) =
+                row.ok_or(OutboxCorruption::InvalidTerminalEventCorrelation)?;
+            DispatchedOutboxEventKind::TurnReconciliationRequired {
+                turn: TurnId::from_uuid(turn),
+                call: ModelCallId::from_uuid(call),
+                terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
+            }
+        }
         _ => return Err(OutboxCorruption::UnsupportedEventKind.into()),
     };
 
@@ -686,6 +769,7 @@ fn decode_model_call_state(
     match (state_kind, terminal_disposition) {
         ("prepared", None) => Ok(DispatchedModelCallState::Prepared),
         ("in_flight", None) => Ok(DispatchedModelCallState::InFlight),
+        ("cancellation_requested", None) => Ok(DispatchedModelCallState::CancellationRequested),
         ("terminal", Some("completed")) => Ok(DispatchedModelCallState::Terminal(
             DispatchedModelCallDisposition::Completed,
         )),
@@ -745,11 +829,24 @@ pub(crate) enum OutboxEvent {
         call: ModelCallId,
         terminal_frontier: ContextFrontierId,
     },
+    TurnCancelled {
+        session: SessionId,
+        turn: TurnId,
+        cancellation_entry: SemanticTranscriptEntryId,
+        terminal_frontier: ContextFrontierId,
+    },
+    TurnReconciliationRequired {
+        session: SessionId,
+        turn: TurnId,
+        call: ModelCallId,
+        terminal_frontier: ContextFrontierId,
+    },
 }
 
 pub(crate) enum ModelCallOutboxState {
     Prepared,
     InFlight,
+    CancellationRequested,
     Terminal(ModelCallDisposition),
 }
 
@@ -816,6 +913,30 @@ pub(crate) async fn append(
             call,
             terminal_frontier,
         } => append_turn_refused(connection, session, turn, call, terminal_frontier).await,
+        OutboxEvent::TurnCancelled {
+            session,
+            turn,
+            cancellation_entry,
+            terminal_frontier,
+        } => {
+            append_turn_cancelled(
+                connection,
+                session,
+                turn,
+                cancellation_entry,
+                terminal_frontier,
+            )
+            .await
+        }
+        OutboxEvent::TurnReconciliationRequired {
+            session,
+            turn,
+            call,
+            terminal_frontier,
+        } => {
+            append_turn_reconciliation_required(connection, session, turn, call, terminal_frontier)
+                .await
+        }
     }
 }
 
@@ -949,6 +1070,7 @@ async fn append_model_call_transition(
     let (state_kind, terminal_disposition) = match state {
         ModelCallOutboxState::Prepared => ("prepared", None),
         ModelCallOutboxState::InFlight => ("in_flight", None),
+        ModelCallOutboxState::CancellationRequested => ("cancellation_requested", None),
         ModelCallOutboxState::Terminal(disposition) => {
             ("terminal", Some(encode_model_call_disposition(disposition)))
         }
@@ -974,6 +1096,70 @@ async fn append_model_call_transition(
     .bind(turn_id_to_uuid(turn))
     .bind(state_kind)
     .bind(terminal_disposition)
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
+async fn append_turn_cancelled(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    cancellation_entry: SemanticTranscriptEntryId,
+    terminal_frontier: ContextFrontierId,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "WITH header AS (
+            INSERT INTO outbox_event
+                (event_kind, storage_version, session_id)
+            VALUES ($1, $2, $3)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO turn_cancelled_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             turn_id, cancellation_entry_id, terminal_frontier_id)
+         SELECT event_sequence, event_kind, storage_version, session_id,
+                $4, $5, $6
+           FROM header",
+    )
+    .bind(TURN_CANCELLED)
+    .bind(STORAGE_VERSION)
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .bind(cancellation_entry.into_uuid())
+    .bind(terminal_frontier.into_uuid())
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
+async fn append_turn_reconciliation_required(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    call: ModelCallId,
+    terminal_frontier: ContextFrontierId,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "WITH header AS (
+            INSERT INTO outbox_event
+                (event_kind, storage_version, session_id)
+            VALUES ($1, $2, $3)
+            RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO turn_reconciliation_required_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             turn_id, model_call_id, terminal_frontier_id)
+         SELECT event_sequence, event_kind, storage_version, session_id,
+                $4, $5, $6
+           FROM header",
+    )
+    .bind(TURN_RECONCILIATION_REQUIRED)
+    .bind(STORAGE_VERSION)
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .bind(call.into_uuid())
+    .bind(terminal_frontier.into_uuid())
     .execute(connection)
     .await?;
     Ok(())

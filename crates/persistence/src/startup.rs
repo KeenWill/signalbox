@@ -381,7 +381,10 @@ where
             identities.failure_entry(),
             identities.terminal_frontier(),
         );
-        if call_state == CurrentModelCallState::Prepared {
+        if matches!(
+            call_state,
+            CurrentModelCallState::Prepared | CurrentModelCallState::CancellationRequested
+        ) {
             let mut proposed_turns = BTreeSet::new();
             let mut reclassifications = Vec::new();
             for pending in model_execution.active_turn().pending_steering() {
@@ -407,7 +410,9 @@ where
             })?;
         if !matches!(
             outcome,
-            ModelCallTerminalOutcome::Failed(_) | ModelCallTerminalOutcome::AwaitingRecovery(_)
+            ModelCallTerminalOutcome::Failed(_)
+                | ModelCallTerminalOutcome::AwaitingRecovery(_)
+                | ModelCallTerminalOutcome::ReconciliationRequired(_)
         ) {
             return Err(StartupScanCorruption::Inconsistent("model-call restart outcome").into());
         }
@@ -419,9 +424,38 @@ where
         ));
     }
 
-    if let Some(accepted_input) = pending_steering {
-        return Ok(TransactionDecision::Rollback(
-            StartupScanSessionOutcome::DeferredPendingSteering { accepted_input },
+    if pending_steering.is_some() {
+        let mut proposed_turns = BTreeSet::new();
+        let mut reclassifications = Vec::new();
+        for pending in model_execution.active_turn().pending_steering() {
+            let accepted_input = pending.accepted_input();
+            let proposed_turn = next_reclassified_turn(accepted_input);
+            record_reclassified_turn_candidate(
+                model_execution.turn(),
+                proposed_turn,
+                &mut proposed_turns,
+            )?;
+            reclassifications.push(PendingSteeringReclassificationIdentity::new(
+                accepted_input,
+                proposed_turn,
+            ));
+        }
+        let failure_identities = FailedModelCallTurnIdentities::new(
+            identities.failure_entry(),
+            identities.terminal_frontier(),
+        )
+        .with_pending_steering_reclassifications(reclassifications);
+        let failed = model_execution
+            .recover_evidence_free_after_restart(failure_identities)
+            .map_err(|_| {
+                StartupScanCorruption::Inconsistent("evidence-free restart classification")
+            })?;
+        let outcome = ModelCallTerminalOutcome::Failed(failed);
+        persist_terminal_outcome(connection, &outcome)
+            .await
+            .map_err(map_model_call_error)?;
+        return Ok(TransactionDecision::Commit(
+            StartupScanSessionOutcome::RecoveredModelCall(Box::new(outcome)),
         ));
     }
 
@@ -615,7 +649,7 @@ fn map_scheduling_error(error: SubmitInputRepositoryError) -> StartupScanReposit
         SubmitInputRepositoryError::AcceptedInputIdentityCollision { .. } => {
             StartupScanCorruption::Inconsistent("origin accepted-input identity").into()
         }
-        SubmitInputRepositoryError::InterruptApplicationUnavailable { .. } => {
+        SubmitInputRepositoryError::ModelExecution(_) => {
             StartupScanCorruption::Inconsistent("origin command application").into()
         }
     }

@@ -60,7 +60,9 @@ ALTER TABLE outbox_event
                 'turn_failed',
                 'model_call_transition',
                 'turn_completed',
-                'turn_refused'
+                'turn_refused',
+                'turn_cancelled',
+                'turn_reconciliation_required'
             )
         );
 
@@ -172,6 +174,14 @@ BEGIN
         WHEN 'turn_refused' THEN
             SELECT count(*) INTO matching_records
               FROM turn_refused_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        WHEN 'turn_cancelled' THEN
+            SELECT count(*) INTO matching_records
+              FROM turn_cancelled_outbox_event
+             WHERE event_sequence = NEW.event_sequence;
+        WHEN 'turn_reconciliation_required' THEN
+            SELECT count(*) INTO matching_records
+              FROM turn_reconciliation_required_outbox_event
              WHERE event_sequence = NEW.event_sequence;
         ELSE
             RAISE EXCEPTION 'unsupported outbox event kind %', NEW.event_kind
