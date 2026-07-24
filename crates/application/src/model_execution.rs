@@ -1283,10 +1283,11 @@ where
         let call = prepared.call().id();
         let attempt = prepared.attempt();
         let prepared_request = (*prepared).clone();
+        let advertised_tools = self.catalog.definitions();
         let operation = PreparedModelOperation::render(
             *prepared,
             credential_reference,
-            self.catalog.definitions(),
+            advertised_tools.clone(),
             &tool_entries,
         )
         .map_err(ModelCallExecutionError::Render)?;
@@ -1391,8 +1392,11 @@ where
             .await;
         let observation = observation.map_err(ModelCallExecutionError::Provider)?;
 
-        let tool_approvals =
-            self.tool_approvals(observation.observation(), dangerous_tool_auto_approval);
+        let tool_approvals = self.tool_approvals(
+            observation.observation(),
+            dangerous_tool_auto_approval,
+            &advertised_tools,
+        );
         self.commit_terminal_observation(session, observation, tool_approvals)
             .await
     }
@@ -1596,6 +1600,7 @@ where
         &self,
         observation: &ModelCallTerminalObservation,
         posture: DangerousToolAutoApproval,
+        advertised_tools: &[ToolDefinition],
     ) -> Box<[InitialToolApproval]> {
         let ModelCallTerminalObservation::CompletedWithTools { response } = observation else {
             return Box::new([]);
@@ -1606,8 +1611,10 @@ where
             .filter_map(|part| match part {
                 AssistantResponsePart::Text(_) => None,
                 AssistantResponsePart::ToolCall(proposal) => {
-                    let definition = self.catalog.definition(proposal.name());
-                    Some(initial_tool_approval(posture, definition.as_ref()))
+                    let definition = advertised_tools
+                        .iter()
+                        .find(|definition| definition.name() == proposal.name());
+                    Some(initial_tool_approval(posture, definition))
                 }
             })
             .collect()
@@ -2540,8 +2547,9 @@ mod tests {
     }
 
     /// S10 / INV-001 / INV-020: one identity is minted per ordered response
-    /// part/request, mixed auto/confirm policy parks without a continuation
-    /// attempt, while the adapter still receives a stopped race closure.
+    /// part/request, approval stays pinned to the advertised catalog snapshot,
+    /// mixed auto/confirm policy parks without a continuation attempt, and the
+    /// adapter still receives a stopped race closure.
     #[test]
     fn s10_inv001_inv020_tool_response_candidates_preserve_order_and_policy() {
         let schema =
@@ -2574,7 +2582,13 @@ mod tests {
         )
         .with_tool_catalog(catalog);
         let observation = tool_response();
-        let approvals = service.tool_approvals(&observation, DangerousToolAutoApproval::Disabled);
+        let advertised_tools = service.catalog.definitions();
+        service.catalog = Arc::new(NoToolCatalog);
+        let approvals = service.tool_approvals(
+            &observation,
+            DangerousToolAutoApproval::Disabled,
+            &advertised_tools,
+        );
         assert_eq!(
             approvals.as_ref(),
             [

@@ -1005,6 +1005,15 @@ pub enum AcceptedInputTurnSchedulingRecordState {
         interrupt: AppliedInterruptCommandResult,
         terminal_frontier: ContextFrontierId,
     },
+    TerminalToolReconciliationRequired {
+        starting_lineage: AcceptedInputStartingLineage,
+        starting_frontier: ContextFrontierId,
+        reconciling_attempt: TurnAttemptId,
+        reconciling_attempt_end: TerminalAttemptEndReconstitutionInput,
+        ambiguous_tool: AwaitingToolRecovery,
+        interrupt: AppliedInterruptCommandResult,
+        terminal_frontier: ContextFrontierId,
+    },
 }
 
 pub struct FailedTurnExecutionReconstitutionInput { /* private */ }
@@ -1369,6 +1378,15 @@ impl AcceptedInputSchedulingProjection {
         interrupt: AppliedInterruptCommandResult,
         identities: AmbiguousModelCallTurnIdentities,
     ) -> Result<ReconciliationRequiredModelCallTurn, ModelCallClosureError>;
+    pub fn apply_interrupt_to_tool_recovery(
+        self,
+        wait: AwaitingToolRecovery,
+        tool_attempt: EndedToolAttempt,
+        attempt_disposition: UnstoppedAttemptDisposition,
+        source_snapshot: ResolvedContextFrontierSnapshot,
+        interrupt: AppliedInterruptCommandResult,
+        identities: AmbiguousModelCallTurnIdentities,
+    ) -> Result<ReconciliationRequiredToolTurn, ModelCallClosureError>;
     pub fn earliest_queued_turn(&self)
         -> Option<&AcceptedInputTurnSchedulingProjection>;
     pub fn prepare_earliest_queued_activation(
@@ -1768,6 +1786,12 @@ impl ModelCallExecution {
         interrupt: AppliedInterruptCommandResult,
         identities: CancelledModelCallTurnIdentities,
     ) -> Result<ModelCallInterruptOutcome, ModelCallClosureError>;
+    pub fn apply_interrupt_to_tool_batch(
+        self,
+        interrupt: AppliedInterruptCommandResult,
+        result_projection: PreparedToolResultProjection,
+        identities: CancelledModelCallTurnIdentities,
+    ) -> Result<CancelledModelCallTurn, ModelCallClosureError>;
     pub fn recover_after_restart(
         self,
         failure_identities: FailedModelCallTurnIdentities,
@@ -1906,6 +1930,7 @@ pub enum ModelCallInterruptOutcome {
     Cancelled(CancelledModelCallTurn),
     CancellationRequested(StopRequestedModelCallTurn),
     ReconciliationRequired(ReconciliationRequiredModelCallTurn),
+    ToolReconciliationRequired(ReconciliationRequiredToolTurn),
 }
 pub struct CompletedModelCallTurn { /* private */ }
 pub struct ToolRoundModelCallTurn { /* private */ }
@@ -1918,7 +1943,8 @@ pub struct CancelledToolRoundModelCallTurn { /* private */ }
 pub struct FailedModelCallTurn { /* private */ }
 pub struct CancelledModelCallTurn { /* private */ }
 // accessors: session(), turn(), call(), attempt(), disposition(),
-// cancellation_entry(), terminal_snapshot(), reclassified_pending_steering()
+// tool_result_entries(), cancellation_entry(), terminal_snapshot(),
+// reclassified_pending_steering()
 pub struct StopRequestedModelCallTurn { /* private */ }
 // accessors: session(), turn(), call(), attempt(), interrupt(), observation_correlation()
 pub struct RefusedModelCallTurn { /* private */ }
@@ -1927,7 +1953,7 @@ pub struct ReconciliationRequiredModelCallTurn { /* private */ }
 // accessors: session(), turn(), call(), attempt(), disposition(),
 // terminal_snapshot(), reclassified_pending_steering()
 pub struct ReconciliationRequiredToolTurn { /* private */ }
-// accessors: session(), turn(), attempt(), tool_attempt(), disposition(),
+// accessors: session(), turn(), tool_attempt(), attempt(), disposition(),
 // terminal_snapshot(), reclassified_pending_steering()
 pub struct ReclassifiedPendingSteeringTurn { /* private */ }
 // sealed: successful model-call terminalization with exact pending identities
@@ -2468,6 +2494,11 @@ impl ToolBatch {
         entry_ids: Vec<SemanticTranscriptEntryId>,
         continuation_frontier: ContextFrontierId,
     ) -> Result<PreparedToolResultProjection, ToolResultProjectionError>;
+    pub fn prepare_cancellation_projection(
+        &self,
+        entry_ids: Vec<SemanticTranscriptEntryId>,
+        result_frontier: ContextFrontierId,
+    ) -> Result<PreparedToolResultProjection, ToolResultProjectionError>;
     // accessors: session(), turn(), producing_call(), yielded_snapshot(), requests(),
     // approval(), attempt(), phase()
 }
@@ -2476,7 +2507,8 @@ pub struct AwaitingToolApproval { /* private */ }
 // accessors: session(), turn(), request()
 pub struct AwaitingToolRecovery { /* private */ }
 // sealed: ToolBatch::awaiting_recovery
-// accessors: session(), turn(), issuing_attempt(), attempt()
+// accessors: session(), turn(), producing_call(), yielded_frontier(),
+// issuing_attempt(), attempt()
 pub struct PreparedToolBatchDecision { /* private */ }
 // accessors: batch(), prepared_command(), active_phase(), into_parts()
 pub enum ToolBatchDecisionFailure {
@@ -3220,30 +3252,6 @@ pub enum ToolCatalogValidationFailure {
     },
 }
 
-pub enum ResolvedToolConversationEntry {
-    AssistantToolUse {
-        source: SemanticTranscriptEntryRef,
-        request: ToolRequest,
-    },
-    ExecutionResult {
-        source: SemanticTranscriptEntryRef,
-        request: ToolRequest,
-        attempt: EndedToolAttempt,
-    },
-    Denied {
-        source: SemanticTranscriptEntryRef,
-        request: ToolRequest,
-        approval: ToolApprovalResolution,
-    },
-    Closed {
-        source: SemanticTranscriptEntryRef,
-        request: ToolRequest,
-    },
-}
-impl ResolvedToolConversationEntry {
-    pub const fn source(&self) -> SemanticTranscriptEntryRef;
-}
-
 pub struct ToolExecutionInvocation { /* private */ }
 // sealed: ToolExecutionService constructs only from checked request,
 // declaration, and AuthorizedToolAttempt correlations.
@@ -3289,17 +3297,6 @@ pub trait ToolExecutionIdGenerator {
 pub struct UuidV7ToolLoopIdGenerator;
 // Copy + Default; impl ToolApprovalIdGenerator + ToolExecutionIdGenerator
 
-pub trait DecideToolRequestTransaction {
-    type Error: ClassifyOperatorFailure;
-    fn decide<NextAttempt>(
-        &mut self,
-        command: DecideToolRequest,
-        next_attempt: NextAttempt,
-    ) -> impl Future<Output = Result<PreparedDecideToolRequest, Self::Error>> + Send
-    where
-        NextAttempt: FnMut() -> TurnAttemptId + Send;
-}
-
 pub struct DecideToolRequestService<Ids, Transaction> { /* private */ }
 impl<Ids, Transaction> DecideToolRequestService<Ids, Transaction> {
     pub const fn new(ids: Ids, transaction: Transaction) -> Self;
@@ -3314,78 +3311,18 @@ impl<Ids: ToolApprovalIdGenerator + Send, Transaction: DecideToolRequestTransact
     ) -> Result<PreparedDecideToolRequest, Transaction::Error>;
 }
 
-pub struct ToolContinuationIdentities { /* private */ }
-impl ToolContinuationIdentities {
-    pub fn new(
-        result_entries: Vec<SemanticTranscriptEntryId>,
-        result_frontier: ContextFrontierId,
-        call: ModelCallId,
-        target_failure: FailedModelCallTurnIdentities,
-        steering_frontier: ContextFrontierId,
-    ) -> Self;
-    // accessors: result_entries(), result_frontier(), call(), target_failure(),
-    // steering_frontier()
+pub struct RetainedToolExecutionState { /* private */ }
+
+pub struct InProcessToolDispatchGate { /* private */ }
+// Clone + Default
+impl InProcessToolDispatchGate {
+    pub fn acquire(
+        &self,
+        turn: TurnId,
+    ) -> impl Future<Output = InProcessToolDispatchPermit> + Send;
 }
 
-pub enum PrepareToolContinuationOutcome {
-    NoWork,
-    Checkpointed(ModelCallId),
-    TargetUnavailable(Box<FailedModelCallTurn>),
-}
-
-pub trait ToolExecutionTransaction {
-    type Error: ClassifyOperatorFailure;
-    fn load_active_batch(
-        &mut self,
-        session: SessionId,
-        turn: TurnId,
-    ) -> impl Future<Output = Result<Option<ToolBatch>, Self::Error>> + Send;
-    fn prepare_next_attempt(
-        &mut self,
-        session: SessionId,
-        turn: TurnId,
-        attempt: ToolAttemptId,
-        effect_class: ToolEffectClass,
-    ) -> impl Future<Output = Result<CurrentToolAttempt, Self::Error>> + Send;
-    fn authorize_attempt(
-        &mut self,
-        session: SessionId,
-        turn: TurnId,
-        attempt: ToolAttemptId,
-    ) -> impl Future<Output = Result<AuthorizedToolAttempt, Self::Error>> + Send;
-    fn commit_preflight_error(
-        &mut self,
-        session: SessionId,
-        turn: TurnId,
-        attempt: ToolAttemptId,
-        error: ToolExecutionError,
-    ) -> impl Future<Output = Result<EndedToolAttempt, Self::Error>> + Send;
-    fn commit_observation(
-        &mut self,
-        observation: CorrelatedToolAttemptObservation,
-    ) -> impl Future<Output = Result<EndedToolAttempt, Self::Error>> + Send;
-    fn classify_crash_loss<NextTurn>(
-        &mut self,
-        session: SessionId,
-        turn: TurnId,
-        attempt: ToolAttemptId,
-        failure_identities: FailedModelCallTurnIdentities,
-        next_turn: NextTurn,
-    ) -> impl Future<Output = Result<ToolAttemptCrashOutcome, Self::Error>> + Send
-    where
-        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send;
-    fn prepare_continuation<NextSteering>(
-        &mut self,
-        session: SessionId,
-        turn: TurnId,
-        producing_call: ModelCallId,
-        identities: ToolContinuationIdentities,
-        next_steering: NextSteering,
-    ) -> impl Future<Output = Result<PrepareToolContinuationOutcome, Self::Error>> + Send
-    where
-        NextSteering:
-            FnMut(AcceptedInputId) -> (SemanticTranscriptEntryId, TurnId) + Send;
-}
+pub struct InProcessToolDispatchPermit { /* private */ }
 
 pub enum ToolExecutionServiceOutcome {
     NoWork,
@@ -3394,6 +3331,7 @@ pub enum ToolExecutionServiceOutcome {
     AttemptCheckpointed(ToolAttemptId),
     PreflightFailed(Box<EndedToolAttempt>),
     ObservationCommitted(Box<EndedToolAttempt>),
+    ObservationAlreadyCommitted(ToolAttemptId),
     CrashClassified(Box<ToolAttemptCrashOutcome>),
     ContinuationCheckpointed(ModelCallId),
     ContinuationTargetUnavailable(Box<FailedModelCallTurn>),
@@ -3406,6 +3344,7 @@ pub enum ToolExecutionServiceError<TransactionError, ExecutorError> {
     PreflightCommit(TransactionError),
     Executor(ExecutorError),
     ObservationCommit(TransactionError),
+    ObservationReconciliation(TransactionError),
     CrashClassification(TransactionError),
     Continuation(TransactionError),
     CatalogDrift,
@@ -3422,7 +3361,26 @@ impl<Ids, Transaction, Catalog, Executor>
         catalog: Catalog,
         executor: Executor,
     ) -> Self;
-    pub fn into_parts(self) -> (Ids, Transaction, Catalog, Executor);
+    pub const fn from_parts(
+        ids: Ids,
+        transaction: Transaction,
+        catalog: Catalog,
+        executor: Executor,
+        gate: Option<InProcessToolDispatchGate>,
+        retained_state: Option<RetainedToolExecutionState>,
+    ) -> Self;
+    pub fn with_dispatch_gate(self, gate: InProcessToolDispatchGate) -> Self;
+    pub fn into_parts(
+        self,
+    ) -> (
+        Ids,
+        Transaction,
+        Catalog,
+        Executor,
+        Option<InProcessToolDispatchGate>,
+        Option<RetainedToolExecutionState>,
+    );
+    pub const fn retained_state(&self) -> Option<&RetainedToolExecutionState>;
 }
 impl<
         Ids: ToolExecutionIdGenerator + Send,
@@ -3771,16 +3729,24 @@ pub trait SubmitInputTransaction {
     ) -> impl Future<Output = Result<SubmitInputOutcome, Self::Error>> + Send
     where
         NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
-        NextToolCancellation: FnMut(
-                &[ToolRequestId],
-            ) -> (Vec<SemanticTranscriptEntryId>, ContextFrontierId)
-            + Send;
+        NextToolCancellation:
+            FnMut(&[ToolRequestId])
+                -> (Vec<SemanticTranscriptEntryId>, ContextFrontierId)
+                + Send;
 }
 
 pub struct SubmitInputService<Generator, Transaction, Nudge> { /* private */ }
 impl<Generator, Transaction, Nudge> SubmitInputService<Generator, Transaction, Nudge> {
     pub const fn new(ids: Generator, transaction: Transaction, nudge: Nudge) -> Self;
-    pub fn into_parts(self) -> (Generator, Transaction, Nudge);
+    pub fn with_tool_dispatch_gate(self, gate: InProcessToolDispatchGate) -> Self;
+    pub fn into_parts(
+        self,
+    ) -> (
+        Generator,
+        Transaction,
+        Nudge,
+        Option<InProcessToolDispatchGate>,
+    );
 }
 impl<
     Generator: SubmitInputIdGenerator + Send,
@@ -3946,7 +3912,7 @@ pub trait ToolExecutionTransaction {
 | application: create_session           | 8 (incl. 2 traits)   |
 | application: load_session             | 2 (incl. 1 trait)    |
 | application: model_execution          | 30 (incl. 7 traits)  |
-| application: tool_loop                | 21 (incl. 5 traits)  |
+| application: tool_loop                | 25 (incl. 5 traits)  |
 | application: operator_failure         | 2 (incl. 1 trait)    |
 | application: replace_session_defaults | 4 (incl. 1 trait)    |
 | application: scheduler                | 12 (incl. 4 traits)  |
@@ -3954,4 +3920,4 @@ pub trait ToolExecutionTransaction {
 | application: startup_scan             | 7 (incl. 2 traits)   |
 | application: submit_input             | 7 (incl. 2 traits)   |
 | application: tool_loop_ports          | 6 (incl. 2 traits)   |
-| **signalbox-application total**       | **104**              |
+| **signalbox-application total**       | **108**              |

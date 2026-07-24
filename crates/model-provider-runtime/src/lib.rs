@@ -17,9 +17,9 @@ use signalbox_application::{
 use signalbox_domain::{
     AssistantResponsePart, AssistantText, AuthorizedModelCall, ContextFrontierId,
     FrozenModelSelection, ModelCallId, ModelCallTerminalObservation, NormalizedToolArguments,
-    ResolvedProviderTarget, SessionId, ToolCallProposal as DomainToolCallProposal,
-    ToolExecutionErrorKind, ToolName as DomainToolName, ToolResultContent,
-    ToolUsingAssistantResponse, TurnAttemptId, TurnId,
+    ResolvedProviderTarget, SessionId, ToolArgumentsKind,
+    ToolCallProposal as DomainToolCallProposal, ToolExecutionErrorKind, ToolName as DomainToolName,
+    ToolResultContent, ToolUsingAssistantResponse, TurnAttemptId, TurnId,
 };
 use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, CompletionFinish, ConversationMessage, ConversationRole,
@@ -330,39 +330,7 @@ where
             target: call.target(),
             frontier: call.frontier().snapshot(),
         };
-        let messages = operation
-            .messages()
-            .iter()
-            .map(|message| match message {
-                ModelConversationMessage::User { content, .. } => {
-                    ConversationMessage::user_text(content.text().as_str())
-                }
-                ModelConversationMessage::Assistant { content, .. } => {
-                    ConversationMessage::assistant_text(content.as_str())
-                }
-                ModelConversationMessage::AssistantToolUse { request, .. } => ConversationMessage {
-                    role: ConversationRole::Assistant,
-                    parts: vec![MessagePart::ToolCall(ToolCallProposal {
-                        id: ToolCallId::new(request.id().into_uuid().to_string()),
-                        name: RuntimeToolName::new(request.name().as_str()),
-                        arguments_json: request.arguments().as_str().to_owned(),
-                    })],
-                },
-                ModelConversationMessage::ToolResult {
-                    request, content, ..
-                } => {
-                    let (content, is_error) = render_tool_result(content);
-                    ConversationMessage {
-                        role: ConversationRole::User,
-                        parts: vec![MessagePart::ToolResult(ToolResultRecord {
-                            tool_call_id: ToolCallId::new(request.into_uuid().to_string()),
-                            content,
-                            is_error,
-                        })],
-                    }
-                }
-            })
-            .collect();
+        let messages = render_runtime_messages(operation.messages());
         let tools = operation
             .tools()
             .iter()
@@ -462,6 +430,108 @@ where
         Ok(authorized
             .observation_correlation()
             .bind_terminal_observation(observation))
+    }
+}
+
+fn render_runtime_messages(messages: &[ModelConversationMessage]) -> Vec<ConversationMessage> {
+    let mut rendered = Vec::new();
+    let mut assistant_call = None;
+    let mut collecting_tool_results = false;
+    for message in messages {
+        match message {
+            ModelConversationMessage::User { content, .. } => {
+                rendered.push(ConversationMessage::user_text(content.text().as_str()));
+                assistant_call = None;
+                collecting_tool_results = false;
+            }
+            ModelConversationMessage::Assistant {
+                producing_call,
+                content,
+                ..
+            } => {
+                if assistant_call == Some(*producing_call) {
+                    if let Some(message) = rendered.last_mut() {
+                        message
+                            .parts
+                            .push(MessagePart::Text(content.as_str().to_owned()));
+                    } else {
+                        rendered.push(ConversationMessage::assistant_text(content.as_str()));
+                    }
+                } else {
+                    rendered.push(ConversationMessage::assistant_text(content.as_str()));
+                    assistant_call = Some(*producing_call);
+                }
+                collecting_tool_results = false;
+            }
+            ModelConversationMessage::AssistantToolUse {
+                producing_call,
+                request,
+                ..
+            } => {
+                let part = MessagePart::ToolCall(ToolCallProposal {
+                    id: ToolCallId::new(request.id().into_uuid().to_string()),
+                    name: RuntimeToolName::new(request.name().as_str()),
+                    arguments_json: replay_safe_arguments(request),
+                });
+                if assistant_call == Some(*producing_call) {
+                    if let Some(message) = rendered.last_mut() {
+                        message.parts.push(part);
+                    } else {
+                        rendered.push(ConversationMessage {
+                            role: ConversationRole::Assistant,
+                            parts: vec![part],
+                        });
+                    }
+                } else {
+                    rendered.push(ConversationMessage {
+                        role: ConversationRole::Assistant,
+                        parts: vec![part],
+                    });
+                    assistant_call = Some(*producing_call);
+                }
+                collecting_tool_results = false;
+            }
+            ModelConversationMessage::ToolResult {
+                request, content, ..
+            } => {
+                let (content, is_error) = render_tool_result(content);
+                let part = MessagePart::ToolResult(ToolResultRecord {
+                    tool_call_id: ToolCallId::new(request.into_uuid().to_string()),
+                    content,
+                    is_error,
+                });
+                if collecting_tool_results {
+                    if let Some(message) = rendered.last_mut() {
+                        message.parts.push(part);
+                    } else {
+                        rendered.push(ConversationMessage {
+                            role: ConversationRole::User,
+                            parts: vec![part],
+                        });
+                    }
+                } else {
+                    rendered.push(ConversationMessage {
+                        role: ConversationRole::User,
+                        parts: vec![part],
+                    });
+                }
+                assistant_call = None;
+                collecting_tool_results = true;
+            }
+        }
+    }
+    rendered
+}
+
+fn replay_safe_arguments(request: &signalbox_domain::ToolRequest) -> String {
+    match request.arguments().kind() {
+        ToolArgumentsKind::Json => request.arguments().as_str().to_owned(),
+        ToolArgumentsKind::Undecodable => {
+            // Exact malformed bytes remain authoritative on the durable
+            // request. Provider history needs an object-shaped placeholder so
+            // the paired InvalidArguments result can be delivered.
+            String::from(r#"{"signalbox_invalid_arguments":true}"#)
+        }
     }
 }
 
@@ -642,7 +712,12 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
-    use signalbox_domain::{ModelCallId, ModelCallTerminalObservation, ProviderModelIdentity};
+    use signalbox_domain::{
+        AssistantText, ModelCallId, ModelCallTerminalObservation, NormalizedToolArguments,
+        ProviderModelIdentity, SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId,
+        ToolExecutionError, ToolExecutionErrorKind, ToolRequest, ToolRequestId, ToolRequestOrdinal,
+        ToolRequestReconstitutionInput, TurnId,
+    };
     use signalbox_model_runtime::{
         AssistantPart, BoundaryLossEvidence, CancellationConfirmedEvidence, CompletionEvidence,
         CompletionFinish, ExchangeFacts, LossCause, NativeErrorFacts, Observation, ObservationFact,
@@ -654,7 +729,7 @@ mod tests {
 
     use super::{
         AcceptanceObservations, RuntimeModelCatalog, RuntimeModelCatalogError,
-        RuntimeModelDefinition, classify_terminal,
+        RuntimeModelDefinition, classify_terminal, render_runtime_messages,
     };
     use signalbox_domain::ResolvedProviderTarget;
 
@@ -664,6 +739,28 @@ mod tests {
 
     fn target(value: u128) -> ResolvedProviderTarget {
         ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(value)))
+    }
+
+    fn source(value: u128) -> SemanticTranscriptEntryRef {
+        SemanticTranscriptEntryRef::from_source(
+            SessionId::from_uuid(Uuid::from_u128(10)),
+            SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(value)),
+        )
+    }
+
+    fn request(value: u128, arguments: &str) -> ToolRequest {
+        ToolRequestReconstitutionInput::new(
+            ToolRequestId::from_uuid(Uuid::from_u128(value)),
+            SessionId::from_uuid(Uuid::from_u128(10)),
+            TurnId::from_uuid(Uuid::from_u128(11)),
+            call(),
+            ToolRequestOrdinal::from_u32(u32::try_from(value - 20).expect("fixture ordinal")),
+            signalbox_domain::ToolName::try_new(String::from("current_time"))
+                .expect("fixture name"),
+            NormalizedToolArguments::try_from_provider_text(arguments.to_owned())
+                .expect("fixture arguments"),
+        )
+        .into_request()
     }
 
     fn completion(model: &str, content: Vec<AssistantPart>) -> TerminalEvidence {
@@ -693,6 +790,72 @@ mod tests {
             ],
             usage: TokenUsage::unreported(),
         })
+    }
+
+    /// S10 / INV-002 / INV-005: one provider response and its ordered result
+    /// batch remain grouped, while malformed arguments use replay-safe JSON
+    /// without replacing their exact durable request evidence.
+    #[test]
+    fn s10_inv002_inv005_tool_history_is_grouped_and_replay_safe() {
+        let first = request(20, "{}");
+        let malformed = request(21, "{\"timezone\":");
+        let messages = [
+            signalbox_application::ModelConversationMessage::Assistant {
+                source: source(30),
+                producing_call: call(),
+                content: AssistantText::try_new(String::from("before")).expect("fixture text"),
+            },
+            signalbox_application::ModelConversationMessage::AssistantToolUse {
+                source: source(31),
+                producing_call: call(),
+                request: first.clone(),
+            },
+            signalbox_application::ModelConversationMessage::AssistantToolUse {
+                source: source(32),
+                producing_call: call(),
+                request: malformed.clone(),
+            },
+            signalbox_application::ModelConversationMessage::Assistant {
+                source: source(33),
+                producing_call: call(),
+                content: AssistantText::try_new(String::from("after")).expect("fixture text"),
+            },
+            signalbox_application::ModelConversationMessage::ToolResult {
+                source: source(34),
+                request: first.id(),
+                content: signalbox_application::ModelToolResultContent::ExecutionError(
+                    ToolExecutionError::new(ToolExecutionErrorKind::ExecutionFailed, None),
+                ),
+            },
+            signalbox_application::ModelConversationMessage::ToolResult {
+                source: source(35),
+                request: malformed.id(),
+                content: signalbox_application::ModelToolResultContent::ExecutionError(
+                    ToolExecutionError::new(ToolExecutionErrorKind::InvalidArguments, None),
+                ),
+            },
+        ];
+
+        let rendered = render_runtime_messages(&messages);
+        assert_eq!(rendered.len(), 2);
+        assert_eq!(
+            rendered[0].role,
+            signalbox_model_runtime::ConversationRole::Assistant
+        );
+        assert_eq!(rendered[0].parts.len(), 4);
+        let signalbox_model_runtime::MessagePart::ToolCall(replayed) = &rendered[0].parts[2] else {
+            panic!("second proposal remains in the assistant group");
+        };
+        assert_eq!(
+            replayed.arguments_json,
+            r#"{"signalbox_invalid_arguments":true}"#
+        );
+        assert_eq!(malformed.arguments().as_str(), "{\"timezone\":");
+        assert_eq!(
+            rendered[1].role,
+            signalbox_model_runtime::ConversationRole::User
+        );
+        assert_eq!(rendered[1].parts.len(), 2);
     }
 
     /// INV-026: the application-owned dispatch permit is released exactly

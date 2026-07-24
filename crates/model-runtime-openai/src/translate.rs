@@ -331,17 +331,6 @@ fn wire_messages(
     for part in &message.parts {
         match part {
             MessagePart::Text(text) => {
-                if !pending_tool_calls.is_empty() {
-                    // One wire message orders content before tool_calls, and
-                    // a split would separate the tool-call message from the
-                    // tool result that must follow it; the ordering is not
-                    // representable on this wire.
-                    return Err(PreparationFailure::UnsupportedOperation {
-                        detail: "the Chat Completions wire contract cannot represent \
-                                 assistant text after a tool call in one message"
-                            .to_string(),
-                    });
-                }
                 match &mut pending_text {
                     Some(pending) => pending.push_str(text),
                     None => pending_text = Some(text.clone()),
@@ -386,19 +375,6 @@ fn wire_messages(
                     return Err(PreparationFailure::UnsupportedOperation {
                         detail: "the Chat Completions wire contract permits tool results only \
                                  in user history"
-                            .to_string(),
-                    });
-                }
-                if result.is_error {
-                    // The tool message has no native failure flag; encoding
-                    // one would alter the caller's payload, and dropping the
-                    // fact would misstate the conversation. The caller
-                    // states the failure in the result content explicitly
-                    // for this provider.
-                    return Err(PreparationFailure::UnsupportedOperation {
-                        detail: "the Chat Completions wire contract cannot mark a replayed \
-                                 tool result as failed; state the failure in the result \
-                                 content"
                             .to_string(),
                     });
                 }
@@ -886,24 +862,33 @@ mod tests {
     }
 
     #[test]
-    fn failed_tool_result_replay_is_rejected_not_silently_flattened() {
+    fn failed_tool_result_replay_uses_explicit_error_content() {
         let mut operation = operation("call-8");
-        operation.messages = vec![ConversationMessage {
-            role: ConversationRole::User,
-            parts: vec![MessagePart::ToolResult(ToolResultRecord {
-                tool_call_id: ToolCallId::new("call_a1"),
-                content: "disk full".to_string(),
-                is_error: true,
-            })],
-        }];
+        operation.messages = vec![
+            ConversationMessage {
+                role: ConversationRole::Assistant,
+                parts: vec![MessagePart::ToolCall(ToolCallProposal {
+                    id: ToolCallId::new("call_a1"),
+                    name: ToolName::new("lookup"),
+                    arguments_json: "{}".to_string(),
+                })],
+            },
+            ConversationMessage {
+                role: ConversationRole::User,
+                parts: vec![MessagePart::ToolResult(ToolResultRecord {
+                    tool_call_id: ToolCallId::new("call_a1"),
+                    content: r#"{"error":{"kind":"execution_failed"}}"#.to_string(),
+                    is_error: true,
+                })],
+            },
+        ];
 
-        let failure = build_request(&operation)
-            .expect_err("a failed-tool fact this wire contract cannot carry must not vanish");
-
-        assert!(matches!(
-            failure,
-            PreparationFailure::UnsupportedOperation { .. }
-        ));
+        let request = build_request(&operation)
+            .expect("explicit error content is valid Chat Completions tool history");
+        assert_eq!(
+            request.messages[1].content.as_deref(),
+            Some(r#"{"error":{"kind":"execution_failed"}}"#)
+        );
     }
 
     #[test]
@@ -927,27 +912,44 @@ mod tests {
     }
 
     #[test]
-    fn text_after_a_tool_call_is_rejected_as_unrepresentable() {
+    fn text_after_a_tool_call_stays_in_the_same_assistant_message() {
         let mut operation = operation("call-9");
-        operation.messages = vec![ConversationMessage {
-            role: ConversationRole::Assistant,
-            parts: vec![
-                MessagePart::ToolCall(ToolCallProposal {
-                    id: ToolCallId::new("call_a1"),
-                    name: ToolName::new("lookup"),
-                    arguments_json: "{}".to_string(),
-                }),
-                MessagePart::Text("after the call".to_string()),
-            ],
-        }];
+        operation.messages = vec![
+            ConversationMessage {
+                role: ConversationRole::Assistant,
+                parts: vec![
+                    MessagePart::ToolCall(ToolCallProposal {
+                        id: ToolCallId::new("call_a1"),
+                        name: ToolName::new("lookup"),
+                        arguments_json: "{}".to_string(),
+                    }),
+                    MessagePart::Text("after the call".to_string()),
+                ],
+            },
+            ConversationMessage {
+                role: ConversationRole::User,
+                parts: vec![MessagePart::ToolResult(ToolResultRecord {
+                    tool_call_id: ToolCallId::new("call_a1"),
+                    content: "done".to_string(),
+                    is_error: false,
+                })],
+            },
+        ];
 
-        let failure = build_request(&operation)
-            .expect_err("splitting would separate the tool call from its required result");
-
-        assert!(matches!(
-            failure,
-            PreparationFailure::UnsupportedOperation { .. }
-        ));
+        let request =
+            build_request(&operation).expect("one grouped assistant message remains replayable");
+        assert_eq!(
+            request.messages[0].content.as_deref(),
+            Some("after the call")
+        );
+        assert_eq!(
+            request.messages[0]
+                .tool_calls
+                .as_ref()
+                .expect("tool call remains attached")
+                .len(),
+            1
+        );
     }
 
     #[test]

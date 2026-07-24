@@ -4,7 +4,13 @@
 //! catalog policy, mints every durable identity candidate, keeps executor work
 //! outside transactions, and submits only correlated evidence to persistence.
 
-use std::{collections::BTreeMap, error::Error, fmt, future::Future, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    error::Error,
+    fmt,
+    future::Future,
+    sync::{Arc, Weak},
+};
 
 use signalbox_domain::{
     AcceptedInputId, AuthorizedToolAttempt, CorrelatedToolAttemptObservation,
@@ -20,9 +26,10 @@ use signalbox_domain::{
 
 use crate::{
     ClassifyOperatorFailure, DecideToolRequestTransaction, OperatorFailureClass,
-    PrepareToolContinuationOutcome, ResolvedToolConversationEntry, ToolContinuationIdentities,
-    ToolExecutionTransaction,
+    PrepareToolContinuationOutcome, ResolvedToolConversationEntry,
+    RetainedToolAttemptObservationStatus, ToolContinuationIdentities, ToolExecutionTransaction,
 };
+use tokio::sync::{Mutex, OwnedMutexGuard};
 
 /// Canonical JSON object used as a model-facing argument schema.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -517,6 +524,57 @@ where
     }
 }
 
+/// Cloneable turn-keyed gate shared by tool dispatch and immediate interrupts.
+#[derive(Clone, Debug, Default)]
+pub struct InProcessToolDispatchGate {
+    turns: Arc<Mutex<HashMap<TurnId, Weak<Mutex<()>>>>>,
+}
+
+/// Opaque exclusive permit from [`InProcessToolDispatchGate`].
+pub struct InProcessToolDispatchPermit {
+    _guard: OwnedMutexGuard<()>,
+}
+
+impl InProcessToolDispatchGate {
+    /// Acquires exclusive dispatch/stop ordering for one logical turn.
+    pub fn acquire(
+        &self,
+        turn: TurnId,
+    ) -> impl Future<Output = InProcessToolDispatchPermit> + Send {
+        let turns = Arc::clone(&self.turns);
+        async move {
+            let turn_gate = {
+                let mut known = turns.lock().await;
+                known.retain(|_, gate| gate.strong_count() > 0);
+                known.get(&turn).and_then(Weak::upgrade).unwrap_or_else(|| {
+                    let gate = Arc::new(Mutex::new(()));
+                    known.insert(turn, Arc::downgrade(&gate));
+                    gate
+                })
+            };
+            InProcessToolDispatchPermit {
+                _guard: turn_gate.lock_owned().await,
+            }
+        }
+    }
+}
+
+/// Opaque same-incarnation executor evidence retained across a failed commit.
+pub struct RetainedToolExecutionState {
+    observation: CorrelatedToolAttemptObservation,
+    dispatch_permit: Option<InProcessToolDispatchPermit>,
+}
+
+impl fmt::Debug for RetainedToolExecutionState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RetainedToolExecutionState")
+            .field("observation", &self.observation)
+            .field("holds_dispatch_permit", &self.dispatch_permit.is_some())
+            .finish()
+    }
+}
+
 /// One completed stage of serialized tool execution.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ToolExecutionServiceOutcome {
@@ -532,6 +590,8 @@ pub enum ToolExecutionServiceOutcome {
     PreflightFailed(Box<EndedToolAttempt>),
     /// One executor observation committed durably.
     ObservationCommitted(Box<EndedToolAttempt>),
+    /// The retained executor observation was already represented durably.
+    ObservationAlreadyCommitted(ToolAttemptId),
     /// A prior-process live attempt was classified without retry.
     CrashClassified(Box<ToolAttemptCrashOutcome>),
     /// The all-resolved continuation call committed atomically.
@@ -555,6 +615,8 @@ pub enum ToolExecutionServiceError<TransactionError, ExecutorError> {
     Executor(ExecutorError),
     /// Executor evidence could not commit.
     ObservationCommit(TransactionError),
+    /// Retained executor evidence could not be reconciled with durable state.
+    ObservationReconciliation(TransactionError),
     /// Crash classification failed.
     CrashClassification(TransactionError),
     /// Atomic continuation preparation failed.
@@ -582,6 +644,9 @@ where
             Self::Executor(error) => write!(formatter, "tool executor failed: {error}"),
             Self::ObservationCommit(error) => {
                 write!(formatter, "tool observation commit failed: {error}")
+            }
+            Self::ObservationReconciliation(error) => {
+                write!(formatter, "tool observation reconciliation failed: {error}")
             }
             Self::CrashClassification(error) => {
                 write!(formatter, "tool crash classification failed: {error}")
@@ -615,6 +680,7 @@ where
             | Self::Authorize(error)
             | Self::PreflightCommit(error)
             | Self::ObservationCommit(error)
+            | Self::ObservationReconciliation(error)
             | Self::CrashClassification(error)
             | Self::Continuation(error) => error.operator_failure_class(),
             Self::Executor(error) => error.operator_failure_class(),
@@ -629,6 +695,8 @@ pub struct ToolExecutionService<Ids, Transaction, Catalog, Executor> {
     transaction: Transaction,
     catalog: Catalog,
     executor: Executor,
+    gate: Option<InProcessToolDispatchGate>,
+    retained_state: Option<RetainedToolExecutionState>,
 }
 
 impl<Ids, Transaction, Catalog, Executor>
@@ -646,12 +714,60 @@ impl<Ids, Transaction, Catalog, Executor>
             transaction,
             catalog,
             executor,
+            gate: None,
+            retained_state: None,
+        }
+    }
+
+    /// Shares dispatch/interrupt ordering with the input-command service.
+    pub fn with_dispatch_gate(mut self, gate: InProcessToolDispatchGate) -> Self {
+        self.gate = Some(gate);
+        self
+    }
+
+    /// Reconstitutes an explicitly decomposed service without losing evidence.
+    pub const fn from_parts(
+        ids: Ids,
+        transaction: Transaction,
+        catalog: Catalog,
+        executor: Executor,
+        gate: Option<InProcessToolDispatchGate>,
+        retained_state: Option<RetainedToolExecutionState>,
+    ) -> Self {
+        Self {
+            ids,
+            transaction,
+            catalog,
+            executor,
+            gate,
+            retained_state,
         }
     }
 
     /// Returns every owned role for explicit composition.
-    pub fn into_parts(self) -> (Ids, Transaction, Catalog, Executor) {
-        (self.ids, self.transaction, self.catalog, self.executor)
+    pub fn into_parts(
+        self,
+    ) -> (
+        Ids,
+        Transaction,
+        Catalog,
+        Executor,
+        Option<InProcessToolDispatchGate>,
+        Option<RetainedToolExecutionState>,
+    ) {
+        (
+            self.ids,
+            self.transaction,
+            self.catalog,
+            self.executor,
+            self.gate,
+            self.retained_state,
+        )
+    }
+
+    /// Borrows same-incarnation executor evidence awaiting reconciliation.
+    pub const fn retained_state(&self) -> Option<&RetainedToolExecutionState> {
+        self.retained_state.as_ref()
     }
 }
 
@@ -672,6 +788,32 @@ where
         ToolExecutionServiceOutcome,
         ToolExecutionServiceError<Transaction::Error, Executor::Error>,
     > {
+        if let Some(retained) = self.retained_state.take() {
+            let RetainedToolExecutionState {
+                observation,
+                dispatch_permit,
+            } = retained;
+            let attempt = observation.correlation().attempt();
+            match self.transaction.reread_observation(&observation).await {
+                Ok(RetainedToolAttemptObservationStatus::Pending) => {
+                    return self
+                        .commit_executor_observation(observation, dispatch_permit)
+                        .await;
+                }
+                Ok(RetainedToolAttemptObservationStatus::AlreadyCommitted) => {
+                    return Ok(ToolExecutionServiceOutcome::ObservationAlreadyCommitted(
+                        attempt,
+                    ));
+                }
+                Err(error) => {
+                    self.retained_state = Some(RetainedToolExecutionState {
+                        observation,
+                        dispatch_permit,
+                    });
+                    return Err(ToolExecutionServiceError::ObservationReconciliation(error));
+                }
+            }
+        }
         let Some(batch) = self
             .transaction
             .load_active_batch(session, turn)
@@ -843,6 +985,10 @@ where
         let Some(definition) = definition else {
             return Err(ToolExecutionServiceError::CatalogDrift);
         };
+        let dispatch_permit = match &self.gate {
+            Some(gate) => Some(gate.acquire(prepared.turn()).await),
+            None => None,
+        };
         let authorized = self
             .transaction
             .authorize_attempt(prepared.session(), prepared.turn(), prepared.attempt())
@@ -856,14 +1002,34 @@ where
             .await
             .map_err(ToolExecutionServiceError::Executor)?;
         let observation = admit_executor_evidence(evidence);
-        let ended = self
-            .transaction
-            .commit_observation(observation)
+        self.commit_executor_observation(observation, dispatch_permit)
             .await
-            .map_err(ToolExecutionServiceError::ObservationCommit)?;
-        Ok(ToolExecutionServiceOutcome::ObservationCommitted(Box::new(
-            ended,
-        )))
+    }
+
+    async fn commit_executor_observation(
+        &mut self,
+        observation: CorrelatedToolAttemptObservation,
+        dispatch_permit: Option<InProcessToolDispatchPermit>,
+    ) -> Result<
+        ToolExecutionServiceOutcome,
+        ToolExecutionServiceError<Transaction::Error, Executor::Error>,
+    > {
+        match self
+            .transaction
+            .commit_observation(observation.clone())
+            .await
+        {
+            Ok(ended) => Ok(ToolExecutionServiceOutcome::ObservationCommitted(Box::new(
+                ended,
+            ))),
+            Err(error) => {
+                self.retained_state = Some(RetainedToolExecutionState {
+                    observation,
+                    dispatch_permit,
+                });
+                Err(ToolExecutionServiceError::ObservationCommit(error))
+            }
+        }
     }
 
     async fn prepare_continuation(
@@ -1088,6 +1254,8 @@ mod tests {
         batch: ToolBatch,
         prepared: signalbox_domain::CurrentToolAttempt,
         events: Arc<Mutex<Vec<&'static str>>>,
+        commit_failures: usize,
+        committed: bool,
     }
 
     impl ToolExecutionTransaction for FakeTransaction {
@@ -1140,12 +1308,29 @@ mod tests {
             observation: CorrelatedToolAttemptObservation,
         ) -> Result<EndedToolAttempt, Self::Error> {
             self.events.lock().expect("event lock").push("commit");
+            if self.commit_failures > 0 {
+                self.commit_failures -= 1;
+                return Err(FakeError);
+            }
             let authorized = self.prepared.clone().authorize().map_err(|_| FakeError)?;
-            authorized
+            let ended = authorized
                 .into_parts()
                 .0
                 .apply_terminal_observation(observation)
-                .map_err(|_| FakeError)
+                .map_err(|_| FakeError)?;
+            self.committed = true;
+            Ok(ended)
+        }
+
+        async fn reread_observation(
+            &mut self,
+            _observation: &CorrelatedToolAttemptObservation,
+        ) -> Result<RetainedToolAttemptObservationStatus, Self::Error> {
+            Ok(if self.committed {
+                RetainedToolAttemptObservationStatus::AlreadyCommitted
+            } else {
+                RetainedToolAttemptObservationStatus::Pending
+            })
         }
 
         async fn classify_crash_loss<NextTurn>(
@@ -1336,6 +1521,8 @@ mod tests {
             },
             batch: batch.clone(),
             events: Arc::clone(&events),
+            commit_failures: 0,
+            committed: false,
         };
         let executor = RecordingExecutor {
             events: Arc::clone(&events),
@@ -1357,7 +1544,7 @@ mod tests {
             signalbox_domain::ToolAttemptEnd::KnownFailed { error }
                 if error.kind() == ToolExecutionErrorKind::UnknownTool
         ));
-        let (_, _, _, executor) = service.into_parts();
+        let (_, _, _, executor, _, _) = service.into_parts();
         assert_eq!(executor.calls, 0);
         assert_eq!(*events.lock().expect("event lock"), ["preflight"]);
     }
@@ -1376,6 +1563,8 @@ mod tests {
             batch: batch.clone(),
             prepared,
             events: Arc::clone(&events),
+            commit_failures: 0,
+            committed: false,
         };
         let catalog = CompiledToolCatalog::try_new([CompiledTool::new(
             definition(
@@ -1410,6 +1599,78 @@ mod tests {
         assert_eq!(
             *events.lock().expect("event lock"),
             ["authorize", "execute", "commit"]
+        );
+    }
+
+    /// INV-011 / INV-024: a failed result commit retains exact executor
+    /// evidence and retries only that commit after an authoritative reread.
+    #[tokio::test]
+    async fn inv011_inv024_failed_commit_does_not_repeat_executor_work() {
+        let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let prepared = match batch.attempt(batch.requests()[0].id()) {
+            Some(signalbox_domain::ReconstitutedToolAttempt::Current(current)) => current.clone(),
+            _ => panic!("fixture has one prepared attempt"),
+        };
+        let transaction = FakeTransaction {
+            batch: batch.clone(),
+            prepared,
+            events: Arc::clone(&events),
+            commit_failures: 1,
+            committed: false,
+        };
+        let catalog = CompiledToolCatalog::try_new([CompiledTool::new(
+            definition(
+                "known",
+                ToolPermissionDefault::Auto,
+                ToolEffectClass::EffectFree,
+            ),
+            |_: &NormalizedToolArguments| Ok(()),
+        )])
+        .expect("one declaration is unambiguous");
+        let executor = RecordingExecutor {
+            events: Arc::clone(&events),
+            calls: 0,
+        };
+        let gate = InProcessToolDispatchGate::default();
+        let mut service =
+            ToolExecutionService::new(FixedIds::new(), transaction, catalog, executor)
+                .with_dispatch_gate(gate.clone());
+
+        assert!(matches!(
+            service.execute(batch.session(), batch.turn()).await,
+            Err(ToolExecutionServiceError::ObservationCommit(FakeError))
+        ));
+        assert!(service.retained_state().is_some());
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(10),
+                gate.acquire(batch.turn())
+            )
+            .await
+            .is_err(),
+            "retained executor evidence must keep interrupts behind its dispatch permit"
+        );
+        assert!(matches!(
+            service
+                .execute(batch.session(), batch.turn())
+                .await
+                .expect("retained observation recommits"),
+            ToolExecutionServiceOutcome::ObservationCommitted(_)
+        ));
+        let _released = tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            gate.acquire(batch.turn()),
+        )
+        .await
+        .expect("committed evidence releases the dispatch permit");
+
+        let (_, _, _, executor, _, retained) = service.into_parts();
+        assert_eq!(executor.calls, 1);
+        assert!(retained.is_none());
+        assert_eq!(
+            *events.lock().expect("event lock"),
+            ["authorize", "execute", "commit", "commit"]
         );
     }
 }
