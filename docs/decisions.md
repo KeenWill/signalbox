@@ -46,11 +46,12 @@ version-one client cannot decode.
 
 **Decision.** Preserve version one's wire vocabulary and add version two with
 the conservative imported transcript-entry variants. The hub admits both
-versions and responds in the request version. A version-one submit, transcript,
-or follow request selecting imported ancestry returns a version-one
-`unsupported_version` error naming version two before mutation or snapshot
-construction; native sessions remain available through both versions. See
-[process-protocol](spec/process-protocol.md).
+versions and responds in the request version. When a frame cannot admit its
+declared version, its server error uses version one as the pre-admission
+fallback. A version-one submit, transcript, or follow request selecting imported
+ancestry returns a version-one `unsupported_version` error naming version two
+before mutation or snapshot construction; native sessions remain available
+through both versions. See [process-protocol](spec/process-protocol.md).
 
 **Rejected alternatives.** Extending version one's closed enums would break old
 clients after they accept the frame version. Dropping version-one support would
