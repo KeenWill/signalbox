@@ -3,8 +3,9 @@
 This page specifies the implemented behavior of session creation and ancestry,
 session-level configuration defaults and their replacement, the long-lived
 session aggregate, semantic transcript entries, accepted-input user content, and
-actor attribution. It was verified against the implementing stack rooted at PR
-#193 (`agent/tool-loop-spec`): `crates/domain` (`session.rs`,
+actor attribution. The implementing stack is rooted at:
+
+PR `#193` (`agent/tool-loop-spec`): `crates/domain` (`session.rs`,
 `configuration.rs`, `replace_session_defaults.rs`, `semantic_entry.rs`,
 `turn_eligibility.rs`, `user_content.rs`, `actor.rs`, `submit_input.rs`),
 `crates/application` (`create_session.rs`, `load_session.rs`,

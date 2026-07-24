@@ -40,11 +40,13 @@ tool's argument type, becomes a typed execution error later.
 
 The same transaction that classifies the producing call `Completed` appends one
 `AssistantText` or `AssistantToolUse { producing_call, request }` semantic entry
-per response part, preserving response order, and inserts every request record.
-The request row is the sole content authority: the semantic entry contains only
-the call/request references and never copies the name or arguments (INV-005).
-Request identity, call ownership, and ordinal are unique within the producing
-call, so equal proposals remain distinct logical requests.
+per supported nonempty response part, preserving response order, and inserts
+every request record. Empty text blocks are omitted at the provider boundary and
+create no semantic entry; tool proposals are never omitted. The request row is
+the sole content authority: the semantic entry contains only the call/request
+references and never copies the name or arguments (INV-005). Request identity,
+call ownership, and ordinal are unique within the producing call, so equal
+proposals remain distinct logical requests.
 
 All requests produced by one call are one batch. Approval decisions are resolved
 in proposal order, and the turn parks on the earliest undecided request.
@@ -113,17 +115,21 @@ path; the interrupt remains the proof-bearing authority for ending the turn
 earlier approval-order obligations); once decision progression opens the
 executing phase, it submits the interrupt. An interrupt alone against an
 approval wait is not a denial and does not bypass the decision command. A
-terminal stop materializes the denial result before its terminal marker.
+terminal stop materializes the denial result before its terminal marker. This is
+two independently durable commands, not one atomic deny-and-end command; after
+decision progression opens execution, the ordinary dispatch-gate race between
+remaining tool work and the interrupt applies.
 
 ## Registry and effect metadata
 
 The application `ToolCatalog` port supplies immutable `ToolDefinition` values:
 name, model-facing description, argument JSON Schema, permission default (`Auto`
-or `Confirm`), and effect class (`EffectFree` or `ExternalEffect`). hubd wires a
-compiled catalog, but catalog lookup and iteration are ports rather than a
-static global. Later database, MCP, or runner-enrollment sources can compose
-declarations behind that port without changing request, approval, execution, or
-model-operation types.
+or `Confirm`), and effect class (`EffectFree` or `ExternalEffect`). hubd wires
+the only implemented catalog as one process-lifetime immutable compiled value.
+Catalog lookup and iteration are ports rather than a static global, but runtime
+rebinding and deployment compatibility for outstanding requests are not
+implemented; they require the durable definition-revision decision recorded
+under Open edges.
 
 Each provider operation carries one exact definition snapshot. Initial approval
 for proposals returned by that operation is derived from that same advertised
@@ -224,7 +230,10 @@ closed additive algebra whose implemented content arm is `Text`; a text value
 may be empty, must exclude U+0000, and is admitted only through a 1 MiB UTF-8
 bound. A result larger than the bound is replaced by the typed `ResultTooLarge`
 error; oversized bytes are never persisted. Error evidence is a closed kind plus
-an optional bounded sanitized detail and is stored once on the attempt row.
+an optional detail and is stored once on the attempt row. A present detail is
+1–4,096 UTF-8 bytes, contains no control character, and has no leading or
+trailing POSIX whitespace; it is otherwise retained exactly. Domain construction
+and the database constraint enforce the same admission rule.
 
 Semantic tool-result entries contain references only:
 
@@ -261,8 +270,11 @@ its assistant text and `TurnCompleted` marker terminalize the turn.
 If an applied stop terminalizes before continuation, the same materialization
 algorithm appends results for executed and denied requests, closes every request
 that did not complete ordinary execution as `ToolClosed` in proposal order, then
-appends the proof-bearing terminal marker. A request can therefore never remain
-an open logical dependency behind a terminal turn (INV-006).
+appends the proof-bearing terminal marker. A prepared or effect-free crash loss
+that fails the turn uses that same proposal-ordered materialization before
+`TurnFailed`; its crash-lost request and every other request without an ordinary
+result become `ToolClosed`. A request can therefore never remain an open logical
+dependency behind a terminal turn (INV-006).
 
 ## Approval waits and restart
 
@@ -276,8 +288,9 @@ Startup scanning leaves an approval wait unchanged. It never fabricates an
 approval or denial, advances to a later request, expires the wait, or creates an
 attempt. Pending approval has no timeout and may wait indefinitely (INV-010).
 Running phases use the staged tool-attempt crash classification above; parked
-external-effect ambiguity follows the existing recovery-decision lifecycle and
-is never automatically retried.
+external-effect ambiguity is never automatically retried. Version one permits
+only proof-bearing interruption to terminalize that wait as reconciliation
+required; resolving evidence and accepted-risk continuation remain open.
 
 ## Provider bridge and `current_time`
 
@@ -348,6 +361,10 @@ version-1 records reconstitute with `DangerousToolAutoApproval::Disabled`.
 - Per-tool session overrides and high-risk guardrails are recorded in
   [Tool safety](../open-questions.md#tool-safety).
 - Rich result-content variants are recorded in
+  [Tool safety](../open-questions.md#tool-safety).
+- Durable tool-definition revisioning and safe deployment across outstanding
+  requests are recorded in [Tool safety](../open-questions.md#tool-safety).
+- Tool-attempt retry and ambiguous-wait resolution are recorded in
   [Tool safety](../open-questions.md#tool-safety).
 - Runner placement, authentication, and protocol are recorded under
   [Scheduling and runners](../open-questions.md#scheduling-and-runners) and

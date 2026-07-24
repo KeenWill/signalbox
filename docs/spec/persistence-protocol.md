@@ -79,7 +79,8 @@ projection code.
 Implemented table families (across the fifteen migrations):
 
 - `durable_command` plus typed command records (`create_session_command`,
-  `replace_session_defaults_command`, `submit_input_command`);
+  `replace_session_defaults_command`, `submit_input_command`,
+  `decide_tool_request_command`);
 - `session`, `session_defaults_version`, `session_current_defaults`,
   `session_scheduler`;
 - `accepted_input`, `queued_input_origin`, `turn_lifecycle`, `turn_attempt`;
@@ -88,6 +89,7 @@ Implemented table families (across the fifteen migrations):
   provider-target pin on `turn_lifecycle`, and its pinned
   `credential_reference`);
 - `semantic_transcript_entry`, `context_frontier`, `context_frontier_member`;
+- `tool_round`, `tool_request`, `tool_approval_decision`, and `tool_attempt`;
 - the singleton `hub_fence_state`, which supplies the generation used by
   hub-owned session advisory pool fences;
 - the outbox family (below).
@@ -98,8 +100,9 @@ Representation rules, all enforced in the schema:
   variant payload columns constrained present exactly when the discriminator
   requires them (for example `turn_lifecycle_state_payload_shape`). The
   implemented sets are exactly the admitted slices: turn state
-  `queued`/`active`/`terminal`, active phase `running` or
-  `awaiting_model_call_recovery`, terminal disposition
+  `queued`/`active`/`terminal`, active phase `running`,
+  `awaiting_model_call_recovery`, `awaiting_tool_approval`, or
+  `awaiting_tool_recovery`, terminal disposition
   `failed`/`completed`/`refused`/`cancelled`/`reconciliation_required`, attempt
   state `prepared`/`running`/`stop_requested`/`ended` with end variants
   `without_stop` and `after_cancellation`, and model-call state
