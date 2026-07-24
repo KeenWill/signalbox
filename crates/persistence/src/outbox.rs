@@ -35,6 +35,7 @@ const STORAGE_VERSION: i16 = 1;
 
 type OutboxSlotRow = (
     Decimal,
+    bool,
     Option<Decimal>,
     Option<String>,
     Option<i16>,
@@ -351,11 +352,11 @@ impl OutboxDispatcher {
             transaction.rollback().await?;
             return Ok(OutboxDispatchOutcome::Idle);
         };
-        let (allocated, event) = load_event(&mut transaction, next).await?;
+        let (allocated, event_beyond_allocated, event) = load_event(&mut transaction, next).await?;
         if allocated < delivered {
             return Err(OutboxCorruption::DeliveryBeyondAllocatedSequence.into());
         }
-        if event.is_some() && allocated < next {
+        if event_beyond_allocated {
             return Err(OutboxCorruption::EventBeyondAllocatedSequence.into());
         }
         let Some(event) = event else {
@@ -403,10 +404,15 @@ async fn load_allocated_sequence(
 async fn load_event(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     expected_sequence: u64,
-) -> Result<(u64, Option<DispatchedOutboxEvent>), OutboxDispatchError> {
+) -> Result<(u64, bool, Option<DispatchedOutboxEvent>), OutboxDispatchError> {
     let row: Option<OutboxSlotRow> = sqlx::query_as(
         "SELECT
             allocator.last_sequence,
+            EXISTS (
+                SELECT 1
+                  FROM outbox_event AS unallocated
+                 WHERE unallocated.event_sequence > allocator.last_sequence
+            ),
             event.event_sequence,
             event.event_kind,
             event.storage_version,
@@ -419,14 +425,21 @@ async fn load_event(
     .bind(Decimal::from(expected_sequence))
     .fetch_optional(&mut **transaction)
     .await?;
-    let Some((allocated, stored_sequence, event_kind, storage_version, stored_session)) = row
+    let Some((
+        allocated,
+        event_beyond_allocated,
+        stored_sequence,
+        event_kind,
+        storage_version,
+        stored_session,
+    )) = row
     else {
         return Err(OutboxCorruption::MissingSequenceState.into());
     };
     let allocated = decode_nonnegative_sequence(allocated)?;
     let (stored_sequence, event_kind, storage_version, stored_session) =
         match (stored_sequence, event_kind, storage_version, stored_session) {
-            (None, None, None, None) => return Ok((allocated, None)),
+            (None, None, None, None) => return Ok((allocated, event_beyond_allocated, None)),
             (Some(sequence), Some(kind), Some(version), Some(session)) => {
                 (sequence, kind, version, session)
             }
@@ -735,16 +748,32 @@ async fn load_event(
             let state_kind: String = row.try_get("call_state_kind")?;
             let terminal_disposition: Option<String> = row.try_get("terminal_disposition_kind")?;
             let state = decode_model_call_state(&state_kind, terminal_disposition.as_deref())?;
-            if matches!(state, DispatchedModelCallState::Terminal(_)) {
-                let authoritative_state_kind: Option<String> =
-                    row.try_get("authoritative_state_kind")?;
-                let authoritative_terminal_disposition: Option<String> =
-                    row.try_get("authoritative_terminal_disposition_kind")?;
-                if authoritative_state_kind.as_deref() != Some("terminal")
-                    || authoritative_terminal_disposition != terminal_disposition
+            let authoritative_state_kind: String = row.try_get("authoritative_state_kind")?;
+            let authoritative_terminal_disposition: Option<String> =
+                row.try_get("authoritative_terminal_disposition_kind")?;
+            let authoritative_state = decode_model_call_state(
+                &authoritative_state_kind,
+                authoritative_terminal_disposition.as_deref(),
+            )?;
+            match state {
+                DispatchedModelCallState::Prepared => {}
+                DispatchedModelCallState::InFlight
+                    if authoritative_state == DispatchedModelCallState::Prepared =>
                 {
+                    return Err(OutboxCorruption::InvalidModelCallState.into());
+                }
+                DispatchedModelCallState::CancellationRequested
+                    if matches!(
+                        authoritative_state,
+                        DispatchedModelCallState::Prepared | DispatchedModelCallState::InFlight
+                    ) =>
+                {
+                    return Err(OutboxCorruption::InvalidModelCallState.into());
+                }
+                DispatchedModelCallState::Terminal(_) if authoritative_state != state => {
                     return Err(OutboxCorruption::InvalidTerminalEventCorrelation.into());
                 }
+                _ => {}
             }
             DispatchedOutboxEventKind::ModelCallTransition {
                 turn: TurnId::from_uuid(row.try_get("turn_id")?),
@@ -1006,6 +1035,7 @@ async fn load_event(
 
     Ok((
         allocated,
+        event_beyond_allocated,
         Some(DispatchedOutboxEvent {
             sequence: expected_sequence,
             session,
