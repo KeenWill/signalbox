@@ -19,8 +19,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use signalbox_model_runtime::{
     AssistantPart, BoundaryLossEvidence, CompletionEvidence, ExchangeFacts, FinishReason,
     LossCause, Observation, ObservationFact, ObservationSink, ProviderErrorEvidence,
-    ProviderMessageId, ProviderReportedModel, RefusalEvidence, SseRecord, StreamInterruption,
-    TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
+    ProviderJsonNestingValidator, ProviderMessageId, ProviderReportedModel, RefusalEvidence,
+    SseRecord, StreamInterruption, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal,
+    ToolName, validate_provider_json_nesting,
 };
 
 use crate::response::{convert_usage, map_finish};
@@ -53,6 +54,7 @@ enum BlockBuilder {
         name: String,
         start_input: String,
         accumulated: String,
+        argument_nesting: ProviderJsonNestingValidator,
     },
 }
 
@@ -103,6 +105,9 @@ impl StreamDecoder {
         let Some(event) = record.event.as_deref() else {
             return self.violation("SSE record without an event name");
         };
+        if let Err(error) = validate_provider_json_nesting(record.data.as_bytes()) {
+            return self.violation(format!("SSE event payload exceeds the JSON bound: {error}"));
+        }
         match event {
             "ping" => StreamStep::Continue,
             "error" => self.apply_error(record),
@@ -306,6 +311,7 @@ impl StreamDecoder {
                     name,
                     start_input,
                     accumulated: String::new(),
+                    argument_nesting: ProviderJsonNestingValidator::new(),
                 }
             }
             WireResponseBlock::Thinking {
@@ -388,7 +394,19 @@ impl StreamDecoder {
                 *signature = Some(value);
                 StreamStep::Continue
             }
-            (BlockBuilder::ToolUse { accumulated, .. }, WireDelta::InputJson { partial_json }) => {
+            (
+                BlockBuilder::ToolUse {
+                    accumulated,
+                    argument_nesting,
+                    ..
+                },
+                WireDelta::InputJson { partial_json },
+            ) => {
+                if let Err(error) = argument_nesting.validate_fragment(partial_json.as_bytes()) {
+                    return self.violation(format!(
+                        "tool_use block {index} arguments exceed the JSON bound: {error}"
+                    ));
+                }
                 accumulated.push_str(&partial_json);
                 StreamStep::Continue
             }
@@ -448,12 +466,19 @@ impl StreamDecoder {
                 name,
                 start_input,
                 accumulated,
+                ..
             } => {
                 let arguments_json = if accumulated.is_empty() {
                     start_input
                 } else {
                     accumulated
                 };
+                if let Err(error) = validate_provider_json_nesting(arguments_json.as_bytes()) {
+                    return self.violation(format!(
+                        "tool_use block {} arguments exceed the JSON bound: {error}",
+                        event.index
+                    ));
+                }
                 if !serde_json::from_str::<serde_json::Value>(&arguments_json)
                     .is_ok_and(|value| value.is_object())
                 {
@@ -621,9 +646,9 @@ impl StreamDecoder {
 mod tests {
     use signalbox_model_runtime::{
         AssistantPart, CompletionFinish, ExchangeFacts, FinishReason, LossCause, Observation,
-        ObservationFact, ProviderErrorKind, ProviderMessageId, ProviderReportedModel,
-        ProviderRequestId, SseFraming, SseRecord, StreamInterruption, TerminalEvidence, TokenUsage,
-        ToolCallId, ToolCallProposal, ToolName,
+        ObservationFact, PROVIDER_JSON_NESTING_LIMIT, ProviderErrorKind, ProviderMessageId,
+        ProviderReportedModel, ProviderRequestId, SseFraming, SseRecord, StreamInterruption,
+        TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
     };
 
     use super::{StreamDecoder, StreamStep};
@@ -697,6 +722,18 @@ mod tests {
           data: {\"type\":\"message_start\",\"message\":{\"type\":\"message\",\
           \"role\":\"assistant\",\"id\":\"msg_1\",\
           \"model\":\"model-exact-1\",\"content\":[],\"usage\":{\"input_tokens\":25}}}\n\n"
+    }
+
+    fn tool_input_delta(partial_json: &str) -> Vec<u8> {
+        let data = serde_json::json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {
+                "type": "input_json_delta",
+                "partial_json": partial_json,
+            },
+        });
+        format!("event: content_block_delta\ndata: {data}\n\n").into_bytes()
     }
 
     #[track_caller]
@@ -848,6 +885,31 @@ mod tests {
                 fragment: r#"{"city":"Oslo"}"#.to_string(),
             },
         }));
+    }
+
+    #[test]
+    fn overdeep_tool_arguments_fail_on_the_first_prohibited_fragment() {
+        let exact_limit = "[".repeat(PROVIDER_JSON_NESTING_LIMIT);
+        let exact_limit_delta = tool_input_delta(&exact_limit);
+        let prohibited_delta = tool_input_delta("[");
+        let (terminal, _) = drive(&[
+            message_start(),
+            b"event: content_block_start\n\
+              data: {\"type\":\"content_block_start\",\"index\":0,\
+              \"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\
+              \"name\":\"lookup\",\"input\":{}}}\n\n",
+            exact_limit_delta.as_slice(),
+            prohibited_delta.as_slice(),
+        ]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("the first over-limit argument fragment must terminate decoding");
+        };
+        let LossCause::StreamProtocolViolation { detail } = loss.cause else {
+            panic!("over-limit tool arguments must be a stream protocol violation");
+        };
+        let expected = format!("{PROVIDER_JSON_NESTING_LIMIT}-container nesting limit");
+        assert!(detail.contains(&expected));
     }
 
     #[test]
@@ -1112,6 +1174,28 @@ mod tests {
             loss.cause,
             LossCause::StreamProtocolViolation { .. }
         ));
+    }
+
+    #[test]
+    fn overdeep_unknown_event_payload_is_a_protocol_violation() {
+        let nested = format!(
+            "{}null{}",
+            "[".repeat(PROVIDER_JSON_NESTING_LIMIT + 1),
+            "]".repeat(PROVIDER_JSON_NESTING_LIMIT + 1)
+        );
+        let event = format!(
+            "event: future_event\ndata: {{\"type\":\"future_event\",\"raw\":{nested}}}\n\n"
+        );
+        let (terminal, _) = drive(&[event.as_bytes()]);
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = terminal else {
+            panic!("overdeep unknown event material must not bypass the depth bound");
+        };
+        let LossCause::StreamProtocolViolation { detail } = loss.cause else {
+            panic!("deep SSE JSON must surface as a stream protocol violation");
+        };
+        let expected = format!("{PROVIDER_JSON_NESTING_LIMIT}-container nesting limit");
+        assert!(detail.contains(&expected));
     }
 
     #[test]

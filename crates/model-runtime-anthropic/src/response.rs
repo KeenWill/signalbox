@@ -6,7 +6,7 @@ use signalbox_model_runtime::{
     AssistantPart, BoundaryLossEvidence, CompletionEvidence, ExchangeFacts, FinishReason,
     LossCause, Observation, ObservationFact, ObservationSink, ProviderMessageId,
     ProviderReportedModel, RefusalEvidence, TerminalEvidence, TokenUsage, ToolCallId,
-    ToolCallProposal, ToolName,
+    ToolCallProposal, ToolName, validate_provider_json_nesting,
 };
 
 use crate::wire::{MessagesResponse, WireResponseBlock, WireUsage, parse_response_block};
@@ -93,6 +93,17 @@ pub(crate) fn decode_buffered_response<C: Clone>(
     correlation: &C,
     sink: &mut (dyn ObservationSink<C> + Send),
 ) -> TerminalEvidence {
+    if let Err(error) = validate_provider_json_nesting(body) {
+        return TerminalEvidence::BoundaryLoss(BoundaryLossEvidence {
+            cause: LossCause::ResponseUnintelligible {
+                detail: format!("success response body exceeds the provider JSON bound: {error}"),
+            },
+            exchange,
+            reported_model: None,
+            finish_reported: None,
+            usage: TokenUsage::unreported(),
+        });
+    }
     let response: MessagesResponse = match serde_json::from_slice(body) {
         Ok(response) => response,
         Err(error) => {
@@ -333,8 +344,8 @@ mod tests {
     use signalbox_expect_table::table;
     use signalbox_model_runtime::{
         AssistantPart, CompletionFinish, ExchangeFacts, FinishReason, LossCause, Observation,
-        ObservationFact, ProviderMessageId, ProviderReportedModel, ProviderRequestId,
-        TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
+        ObservationFact, PROVIDER_JSON_NESTING_LIMIT, ProviderMessageId, ProviderReportedModel,
+        ProviderRequestId, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal, ToolName,
     };
 
     use super::{decode_buffered_response, map_finish};
@@ -664,6 +675,48 @@ mod tests {
         ));
         assert_eq!(loss.exchange, exchange());
         assert_eq!(observations, vec![]);
+    }
+
+    #[test]
+    fn overdeep_raw_content_material_is_response_unintelligible() {
+        let nested = format!(
+            "{}null{}",
+            "[".repeat(PROVIDER_JSON_NESTING_LIMIT + 1),
+            "]".repeat(PROVIDER_JSON_NESTING_LIMIT + 1)
+        );
+        let body = format!(
+            r#"{{
+                "id":"msg_1","type":"message","role":"assistant",
+                "model":"model-exact-1",
+                "content":[{{"type":"text","text":"ok","future":{nested}}}],
+                "stop_reason":"end_turn",
+                "usage":{{"input_tokens":1,"output_tokens":1}}
+            }}"#
+        );
+
+        let TerminalEvidence::BoundaryLoss(loss) = decode(&body).0 else {
+            panic!("overdeep RawValue content must be rejected before typed parsing");
+        };
+        let LossCause::ResponseUnintelligible { detail } = loss.cause else {
+            panic!("deep success JSON must be response-unintelligible evidence");
+        };
+        let expected = format!("{PROVIDER_JSON_NESTING_LIMIT}-container nesting limit");
+        assert!(detail.contains(&expected));
+    }
+
+    #[test]
+    fn shallow_additive_fields_remain_tolerated() {
+        let (evidence, _) = decode(
+            r#"{
+                "id":"msg_1","type":"message","role":"assistant",
+                "model":"model-exact-1","future_envelope":{"enabled":true},
+                "content":[{"type":"text","text":"ok","future_block":[1,2]}],
+                "stop_reason":"end_turn",
+                "usage":{"input_tokens":1,"output_tokens":1,"future_usage":"kept-compatible"}
+            }"#,
+        );
+
+        assert!(matches!(evidence, TerminalEvidence::Completed(_)));
     }
 
     #[test]
