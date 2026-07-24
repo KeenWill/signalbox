@@ -50,13 +50,48 @@ Owns: hubd configuration/composition, the model catalog example. Collides-with:
 `apps/hubd`. The merged OpenAI adapter is unreachable; the catalog admits only
 one provider.
 
+## De-hub naming pass [blocked-on: in-flight stacks landing] [size: S-M]
+
+Owns: the `apps/hubd` rename (binary and directory to `signalboxd`) and "hub"
+vocabulary across code, spec prose, and config. Collides-with: everything
+touching `apps/hubd`, so it waits for the current stacks. "Hub" survives only as
+occasional prose metaphor, never as the name of a binary, crate, module, or
+protocol concept. The Swift client's LLMHub-prefixed naming is not this entry's
+job — the native client rewire replaces those names wholesale. Open point
+deferred to the runner-protocol design pass: whether future runner processes are
+the same binary in a different role or a separate `signalbox-runner` binary;
+this entry renames the server only and does not pre-decide that.
+
+## Owner-to-user rename [blocked-on: in-flight stacks landing; inventory step] [size: M]
+
+Owns: naming across domain types, spec prose, and client-facing surfaces.
+Collides-with: a broad prose surface, so it pairs with the de-hub pass after the
+board quiets. Rename the platform actor "owner" to "user" everywhere except two
+carve-outs the owner set: (1) process documents where "the owner" means the
+repository owner personally (`AGENTS.md`, `goal-mode.md`, this backlog, the
+decision-log voice); (2) uses meaning ownership in the computer-science sense —
+a row, aggregate, or state machine owning data. Starts with an inventory pass
+classifying every occurrence before any mechanical rename.
+
 ## Conversation import [in-flight] [size: L]
 
 Owns: new converter crate, session creation/ancestry, imported-conversation
 store (new migration). Collides-with: session-creation surfaces only. Running as
 a goal session with owner addenda (maximum-fidelity conversion, raw
 preservation, adoption as a standing client capability rather than an
-import-time mode).
+import-time mode). Owner addendum: an importer conformance corpus — synthetic
+fixture conversations only, never the owner's real archives, covering each
+source-format era, with golden/expect assertions on the imported result — is
+part of the entry's scope.
+
+## Migration baseline reset [blocked-on: schema-audit verdict; owner checkpoint call] [size: S-M]
+
+Owns: `crates/persistence/migrations` (rewrite to a clean baseline) and
+dev-database recreation notes. Collides-with: any in-flight work carrying a new
+migration. Squash the migration set to a from-scratch baseline embodying the
+correct-choice schema, per the pre-production schema discipline decision; the
+pending schema audit decides scope, and each squash happens only at an
+owner-declared checkpoint.
 
 ## Provider transport security [in-flight] [size: M]
 
@@ -106,6 +141,12 @@ provider-neutral agent event vocabulary spanning both CLIs, and
 none/import_only/adopt_resume/adopt_fork adoption modes for provider-owned
 external sessions held as durable pointers.
 
+Owner addendum on drift defense: the wrapped CLIs are pinned to exact versions
+and bumped frequently via Renovate; a compatibility smoke — cheapest available
+model, real credentials from environment-protected secrets never exposed to fork
+PRs, main-only or manually dispatched — verifies each bump before it lands under
+us.
+
 ### Codex CLI wrap [blocked-on: INV-025/026 request-boundary reconciliation] [size: S-M]
 
 The lead track of the three once unblocked. `codex exec --json`; the
@@ -150,6 +191,21 @@ layer to the local socket; first task is restoring the test-target wiring lost
 with the build-system exclusion (see the import's known-issues list). The
 mock-fixture screenshot harness ports first — it is how the app iterates. iOS
 waits for remote transport.
+
+## Swift client CI [blocked-on: native client rewire] [size: M]
+
+Owns: GitHub Actions macOS workflows for the native client — unit tests and
+screenshot-golden comparisons against the capture manifest. Collides-with:
+`clients/native` and CI config. Blocked because the imported snapshot's test
+targets are unreachable until the rewire re-wires them (the first item of the
+rewire's inventory). The repo is public, so macOS runners are free.
+
+## Swift-to-server E2E CI [blocked-on: native client rewire; process protocol] [size: M]
+
+Owns: an E2E workflow booting the server with Postgres and driving the rewired
+native client against it (scripted provider, no real credentials).
+Collides-with: CI config and `apps/hubd` composition. Exercises the
+client-server protocol as CI evidence rather than manual smoke.
 
 ## Tool loop foundation [blocked-on: owner design pass] [size: XL]
 
@@ -221,6 +277,30 @@ before the semantics.
 Owns: template store, session-creation additions. Collides-with:
 session-creation surfaces. Versioned, derivable prompt/tool/model presets; the
 versioned-defaults machinery is the in-repo analog.
+
+## Goal mode in platform [blocked-on: tool loop; owner design pass] [size: L-XL]
+
+Owns: goal-session semantics (an outcome, constraints, and a verifiable stop),
+scheduling/lifecycle hooks, and the prompt-composition hooks it needs.
+Collides-with: tool loop surfaces and context assembly. Runs goal-directed
+sessions natively in the platform — the workflow the owner currently drives
+through external CLI agents — as a first-class session kind. A destination-tier
+feature from the target model that previously had no entry.
+
+## Context assembly pipeline [blocked-on: owner design pass] [size: XL]
+
+Owns: the model-facing prompt/context composition seam — default and
+per-use-case system prompts, instruction files, skill/tool description
+injection, and lifecycle transformation points. Collides-with: frontier
+materialization, Compaction, Templates. The organizing idea (owner-stated):
+everything composed into the model call — system prompt, instruction files, tool
+metadata, compaction — is frontier composition, so the plugin interface is typed
+transformations over the structured operation at defined lifecycle points, not
+string-to-string middleware. This is the owning entry that Templates' pending
+"system-prompt configuration category," Compaction's prompts, and
+goal-mode-as-plugin hang off; the design pass decides the stage vocabulary.
+Vendoring stance: openly licensed CLI implementations may be vendored with
+attribution; closed-source clients are reference-only — observe, do not copy.
 
 ## Durable session tasks [blocked-on: owner design pass] [size: M]
 
