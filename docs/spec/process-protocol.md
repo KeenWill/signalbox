@@ -16,19 +16,21 @@ Version one uses one Unix domain stream socket. The hub requires its path in
 `SIGNALBOX_SOCKET_PATH`; the terminal client uses its `--socket <path>` override
 when present and otherwise requires that environment value. `signalbox-hubd`
 binds the socket with owner-only `0600` permissions. The configured path must be
-absolute. The hub canonicalizes its existing parent once and uses that resolved
-parent for the socket lifetime; the parent must be a directory owned by the
-hub's effective user with traditional permission mode exactly `0700`. This
-owner-private immediate parent is required even when the socket node itself has
-mode `0600`; version one does not rely on every supported Unix implementation
-enforcing socket-node permissions. Every resolved ancestor up to the filesystem
-root must also resist same-machine replacement: a group- or other-writable
-ancestor is accepted only when it has the sticky bit and the next path component
-toward the socket is owned by the hub's effective user. Every ancestor must
-itself be owned by either root or the hub's effective user, so an unprivileged
-different owner cannot make a currently protected directory writable after
-validation. An untrusted owner, a non-sticky writable ancestor, or a sticky
-writable ancestor containing a component owned by another user fails startup.
+absolute and must end in an explicit filename component; a trailing separator,
+`/.`, or `/..` is rejected rather than normalized. The hub canonicalizes its
+existing parent once and uses that resolved parent for the socket lifetime; the
+parent must be a directory owned by the hub's effective user with traditional
+permission mode exactly `0700`. This owner-private immediate parent is required
+even when the socket node itself has mode `0600`; version one does not rely on
+every supported Unix implementation enforcing socket-node permissions. Every
+resolved ancestor up to the filesystem root must also resist same-machine
+replacement: a group- or other-writable ancestor is accepted only when it has
+the sticky bit and the next path component toward the socket is owned by the
+hub's effective user. Every ancestor must itself be owned by either root or the
+hub's effective user, so an unprivileged different owner cannot make a currently
+protected directory writable after validation. An untrusted owner, a non-sticky
+writable ancestor, or a sticky writable ancestor containing a component owned by
+another user fails startup.
 
 Before inspecting the final path, the hub opens or creates the adjacent
 `<socket-path>.lock` as a no-follow regular file owned by the effective user
@@ -36,29 +38,38 @@ with exact `0600` permissions, takes its nonblocking exclusive advisory file
 lock, and holds that lock through final socket cleanup. Failure to open, verify,
 or lock the sidecar fails without touching the socket path. The sidecar remains
 after shutdown so a later hub can lock the same inode. While holding that
-lifetime path lock, the hub handles the final path as follows:
+lifetime path lock, the hub also reclaims a retained socket left at the reserved
+`<socket-path>.identity` name by an abrupt prior exit only when the public and
+reserved names still identify the same owned socket. An orphaned or differently
+paired entry at the reserved name fails startup without modification. It then
+handles the final path as follows:
 
 1. an absent entry is available;
 2. an entry that is not a socket fails startup without modification;
 3. a socket that accepts a connection is live and fails startup; and
-4. a socket owned by the effective user whose connection fails with
-   `ConnectionRefused` is stale only if a second `lstat` still observes the same
-   socket device and inode. The hub removes only that revalidated entry and then
-   binds; every other ownership, connection, or metadata result fails startup
-   without modification.
+4. a socket owned by the effective user is first retained by a hard link at the
+   reserved identity name so its device and inode cannot be recycled, and a
+   connection failure with `ConnectionRefused` proves it stale only if a second
+   `lstat` still observes that retained identity. The hub removes only that
+   revalidated entry and then binds; every other ownership, connection, or
+   metadata result fails startup without modification.
 
 The path lock makes the final revalidation and removal indivisible with respect
 to another conforming hub. The bind itself must still create a new socket and
-never replace another entry. The hub creates an unlistening Unix stream socket,
-binds it, verifies that the socket's local address is the resolved path, and
-captures the new path entry's socket type, effective-user ownership, device, and
-inode with `lstat`. It then sets owner-only `0600` permissions and verifies with
-a second `lstat` that the same socket entry remains, retains that ownership, and
-has exactly that mode before calling `listen`; no connection can be queued
-before that sequence completes. Any address, identity, ownership, or permission
-mismatch fails startup and removes no raced entry. Graceful shutdown removes the
-path only after a final `lstat` proves it is still the socket device and inode
-captured by this hub, then releases the path lock.
+never replace another entry. The hub binds a new unlistening Unix stream socket
+inside the verified owner-private parent, captures its socket type,
+effective-user ownership, device, and inode with `lstat`, and retains that inode
+with a hard link at the reserved identity name. Without changing the
+process-wide creation mask, it sets exact owner-only `0600` permissions through
+the retained name, then verifies that both names still identify that socket with
+the required mode and that the descriptor's local address is the resolved path
+before calling `listen`; no connection can be queued before that sequence
+completes. The identity link remains for the listener lifetime so the device and
+inode cannot be recycled. Any address, identity, ownership, or permission
+mismatch fails startup and removes no raced entry. Graceful shutdown keeps the
+listener and identity link live while a final `lstat` proves the public path
+still names this hub's socket and removes that path, then releases the identity
+link and path lock.
 
 The transport is local-machine and single-user only. Version one's lack of
 protocol authentication is provisional; it has no authorization exchange or
@@ -290,13 +301,16 @@ transactionally advances the row before constructing its fenced pool. That
 exclusive request waits for all prior pooled sessions and prevents the old
 process from opening another usable connection: an older generation that tries
 again after a failed intermediate successor can acquire only its old shared
-lock, then fails the current-generation check. The first migration creates and
-initializes the row for a database that cannot have a prior fenced hub; later
-startups fence before running any newer migration. This fence migration belongs
-to Signalbox's initial deployment: the owner confirms that no deployed database
-or hub predates it, so there is no legacy unfenced writer to drain during the
-first installation. Importing or upgrading a pre-fence database is unsupported.
-Exhaustion or corruption fails startup rather than wrapping.
+lock, then fails the current-generation check. Pool construction requires a
+non-cloneable capability borrowing the still-live fence session; the copyable
+generation value is observational and cannot construct work after guard release.
+The first migration creates and initializes the row for a database that cannot
+have a prior fenced hub; later startups fence before running any newer
+migration. This fence migration belongs to Signalbox's initial deployment: the
+owner confirms that no deployed database or hub predates it, so there is no
+legacy unfenced writer to drain during the first installation. Importing or
+upgrading a pre-fence database is unsupported. Exhaustion or corruption fails
+startup rather than wrapping.
 
 Together these guards enforce one active hub process—and therefore one
 dispatcher and one process-local fan-out—for a database, while preventing a
