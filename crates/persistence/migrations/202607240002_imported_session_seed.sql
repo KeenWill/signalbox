@@ -847,13 +847,21 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     checked_ancestry_kind text;
+    checked_imported_conversation_id uuid;
+    checked_frontier_position numeric(20, 0);
 BEGIN
     IF NEW.payload_kind <> 'imported_entry' THEN
         RETURN NEW;
     END IF;
 
-    SELECT ancestry_kind
-      INTO checked_ancestry_kind
+    SELECT
+        ancestry_kind,
+        imported_conversation_id,
+        imported_frontier_position
+      INTO
+        checked_ancestry_kind,
+        checked_imported_conversation_id,
+        checked_frontier_position
       FROM session
      WHERE session_id = NEW.source_session_id;
 
@@ -864,6 +872,31 @@ BEGIN
                 ERRCODE = '23514',
                 CONSTRAINT =
                     'imported_semantic_entry_requires_imported_ancestry';
+    END IF;
+
+    -- Each selected-prefix source entry is unique per session. Restricting
+    -- every imported semantic row to the selected conversation and inclusive
+    -- boundary therefore prevents a same-transaction row from extending an
+    -- already validated seed, even after SET CONSTRAINTS ... IMMEDIATE has
+    -- discharged the one deferred full-prefix check.
+    IF NEW.imported_conversation_id IS DISTINCT FROM
+           checked_imported_conversation_id
+       OR NOT EXISTS (
+        SELECT 1
+          FROM imported_transcript_entry AS imported_entry
+         WHERE imported_entry.imported_conversation_id =
+                   NEW.imported_conversation_id
+           AND imported_entry.imported_transcript_entry_id =
+                   NEW.imported_transcript_entry_id
+           AND imported_entry.imported_entry_position <=
+                   checked_frontier_position
+    ) THEN
+        RAISE EXCEPTION
+            'imported semantic entry lies outside the selected prefix'
+            USING
+                ERRCODE = '23514',
+                CONSTRAINT =
+                    'imported_semantic_entry_requires_selected_prefix';
     END IF;
 
     IF EXISTS (
