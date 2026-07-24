@@ -32,11 +32,13 @@ use signalbox_application::{
 };
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputStartingLineage, ActivatedAcceptedInputTurn, ActiveTurnPhase,
-    AssistantText, AuthorizedModelCall, CancelledModelCallTurnIdentities,
-    CompletedModelCallIdentities, ContextFrontierId, CreateSession, CurrentTurnAttemptState,
-    DeliveryRequest, DurableCommandId, FailedModelCallTurnIdentities, ModelAlias, ModelCallId,
-    ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
-    ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition,
+    AssistantResponsePart, AssistantText, AuthorizedModelCall, CancelledModelCallTurnIdentities,
+    CompletedModelCallIdentities, ContextFrontierId, CorrelatedModelCallTerminalObservation,
+    CreateSession, CurrentToolAttemptState, CurrentTurnAttemptState, DecideToolRequest,
+    DecideToolRequestResult, DeliveryRequest, DurableCommandId, FailedModelCallTurnIdentities,
+    InitialToolApproval, ModelAlias, ModelCallId, ModelCallTerminalIdentities,
+    ModelCallTerminalObservation, ModelCallTerminalOutcome, ModelSelectionOverride,
+    ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition, NormalizedToolArguments,
     PerInputConfigurationChoices, PhysicalCancellationModelCallTurnIdentities,
     PreparedCreateSession, PreparedModelCallRequest, ProviderModelIdentity,
     RefusedModelCallTurnIdentities, ReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult,
@@ -44,7 +46,11 @@ use signalbox_domain::{
     SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
     SessionCreationProvenance, SessionId, SubmitInput, SubmitInputAppliedResult,
     SubmitInputReconstitutionFailure, SubmitInputRejectedResult, SubmitInputResult,
-    TranscriptAncestry, TurnAttemptId, TurnConfigurationProvenance, TurnId, UserContent,
+    ToolApprovalDecision, ToolAttemptCrashOutcome, ToolAttemptEnd, ToolAttemptId,
+    ToolAttemptObservation, ToolCallProposal, ToolEffectClass, ToolExecutionError,
+    ToolExecutionErrorKind, ToolName, ToolResponsePartIdentity, ToolResultContent, ToolResultText,
+    ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId,
+    TurnConfigurationProvenance, TurnId, UserContent,
 };
 use signalbox_persistence::{
     MIGRATOR,
@@ -72,6 +78,7 @@ use signalbox_persistence::{
         SubmitInputCorruption, SubmitInputHandlingOutcome, SubmitInputRepository,
         SubmitInputRepositoryError,
     },
+    tool_loop::{PostgresToolLoopRepository, ToolLoopRepositoryError},
 };
 use sqlx::{PgConnection, PgPool, migrate::Migrate, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -1075,6 +1082,430 @@ async fn authorize_checkpointed_model_call_with_prepared(
         panic!("the exact Prepared fixture authorizes")
     };
     Ok((fixture, repository, *request, *authorized))
+}
+
+async fn checkpoint_confirmed_tool_round(
+    pool: &PgPool,
+    seed: u128,
+    tool_name: &str,
+    arguments: &str,
+) -> Result<
+    (
+        RestartModelCallFixture,
+        PostgresModelCallRepository,
+        CorrelatedModelCallTerminalObservation,
+        signalbox_domain::ToolRequestId,
+    ),
+    Box<dyn Error>,
+> {
+    let (fixture, model_repository, authorized) =
+        authorize_checkpointed_model_call(pool, seed).await?;
+    let request = signalbox_domain::ToolRequestId::from_uuid(Uuid::from_u128(seed + 20));
+    let response =
+        ToolUsingAssistantResponse::try_from_parts(vec![AssistantResponsePart::ToolCall(
+            ToolCallProposal::new(
+                ToolName::try_new(String::from(tool_name)).expect("valid fixture tool name"),
+                NormalizedToolArguments::try_from_provider_text(String::from(arguments))
+                    .expect("bounded fixture arguments"),
+            ),
+        )])
+        .expect("one proposal is a tool-using response");
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools { response });
+    let outcome = model_repository
+        .apply_terminal_observation(
+            fixture.session,
+            observation.clone(),
+            ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
+                vec![ToolResponsePartIdentity::tool_call(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 22)),
+                    request,
+                    InitialToolApproval::Confirm,
+                )],
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 21)),
+                None,
+            )),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+    assert!(matches!(
+        outcome,
+        ModelCallTerminalOutcome::ToolRound(ref round)
+            if matches!(
+                round.next_phase(),
+                ActiveTurnPhase::AwaitingApproval { request: waiting }
+                    if *waiting == request
+            )
+    ));
+    Ok((fixture, model_repository, observation, request))
+}
+
+/// S02 / S10 / S11 / INV-005 / INV-006 / INV-019 / INV-027: one confirmed
+/// proposal survives a repository restart, records a replay-safe owner
+/// decision, executes through an exact durable fence, and projects one
+/// reference-only result before the same logical turn continues.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s02_s10_s11_inv005_inv006_inv019_inv027_tool_round_survives_restart_and_projects_result()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7400;
+    let (fixture, model_repository, observation, request) =
+        checkpoint_confirmed_tool_round(&pool, seed, "current_time", "{}").await?;
+    assert_eq!(
+        model_repository
+            .reread_terminal_observation(fixture.session, &observation)
+            .await?,
+        RetainedModelCallObservationStatus::AlreadyCommitted
+    );
+
+    let tool_repository = PostgresToolLoopRepository::new(pool.clone());
+    let restarted_repository = PostgresToolLoopRepository::new(pool.clone());
+    let parked = restarted_repository
+        .load_active_batch(fixture.session, fixture.turn)
+        .await?
+        .expect("the active logical batch reloads after repository restart");
+    assert_eq!(parked.producing_call(), fixture.call);
+    assert_eq!(parked.requests()[0].id(), request);
+    assert!(parked.awaiting_approval().is_some());
+
+    let continuation_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 23));
+    let command_id = DurableCommandId::from_uuid(Uuid::from_u128(seed + 24));
+    let approve = DecideToolRequest::new(command_id, request, ToolApprovalDecision::Approve);
+    let decision = tool_repository
+        .decide(approve.clone(), Some(continuation_attempt))
+        .await?;
+    assert!(matches!(
+        decision.result(),
+        DecideToolRequestResult::Applied(_)
+    ));
+    assert_eq!(
+        tool_repository.decide(approve, None).await?,
+        decision,
+        "same command identity and payload replay the terminal receipt"
+    );
+    assert!(matches!(
+        tool_repository
+            .decide(
+                DecideToolRequest::new(
+                    command_id,
+                    request,
+                    ToolApprovalDecision::Deny { reason: None },
+                ),
+                None,
+            )
+            .await,
+        Err(ToolLoopRepositoryError::InvalidTransition(
+            "command replay payload differs from the durable command"
+        ))
+    ));
+
+    let tool_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 25));
+    let prepared = tool_repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            tool_attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?;
+    assert_eq!(prepared.state(), CurrentToolAttemptState::Prepared);
+    let authorized_attempt = tool_repository
+        .authorize_attempt(fixture.session, fixture.turn, tool_attempt)
+        .await?;
+    let ended = tool_repository
+        .commit_observation(
+            authorized_attempt
+                .correlation()
+                .bind(ToolAttemptObservation::Completed {
+                    result: ToolResultContent::Text(
+                        ToolResultText::try_new(String::from("2026-07-23T12:00:00Z"))
+                            .expect("bounded result"),
+                    ),
+                }),
+        )
+        .await?;
+    assert!(matches!(ended.end(), ToolAttemptEnd::Completed { .. }));
+
+    let resolved = restarted_repository
+        .load_active_batch(fixture.session, fixture.turn)
+        .await?
+        .expect("the ended attempt remains part of the active batch");
+    let result_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 26));
+    let continuation_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(seed + 27));
+    let projection = resolved
+        .prepare_result_projection(vec![result_entry], continuation_frontier)
+        .expect("the fully resolved batch prepares one reference-only result");
+    tool_repository
+        .commit_result_projection(fixture.session, fixture.turn, fixture.call, &projection)
+        .await?;
+
+    let durable_shape: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM tool_round WHERE producing_model_call_id = $1),
+            (SELECT count(*) FROM tool_request WHERE request_id = $2),
+            (SELECT count(*) FROM tool_approval_decision
+              WHERE request_id = $2
+                AND decision_kind = 'approve'
+                AND decision_source = 'owner_command'),
+            (SELECT count(*) FROM tool_attempt
+              WHERE attempt_id = $3
+                AND state_kind = 'terminal'
+                AND terminal_disposition_kind = 'completed'),
+            (SELECT count(*) FROM semantic_transcript_entry
+              WHERE semantic_entry_id = $4
+                AND payload_kind = 'tool_execution_result'
+                AND tool_result_attempt_id = $3),
+            (SELECT count(*) FROM turn_lifecycle
+              WHERE session_id = $5
+                AND turn_id = $6
+                AND state_kind = 'active'
+                AND active_phase_kind = 'running'
+                AND current_attempt_id = $7
+                AND active_tool_round_call_id IS NULL)",
+    )
+    .bind(fixture.call.into_uuid())
+    .bind(request.into_uuid())
+    .bind(tool_attempt.into_uuid())
+    .bind(result_entry.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(continuation_attempt.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(durable_shape, (1, 1, 1, 1, 1, 1));
+    assert!(
+        restarted_repository
+            .load_active_batch(fixture.session, fixture.turn)
+            .await?
+            .is_none(),
+        "the committed continuation boundary no longer exposes an active batch"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S10 / S11 / INV-019 / INV-027: denial never dispatches, schema failure is
+/// durable result evidence, and a lost external-effect attempt parks on exact
+/// recovery authority after restart.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s10_s11_inv019_inv027_tool_denial_schema_failure_and_crash_recovery_are_durable()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+
+    let deny_seed = 0x7500;
+    let (denied_fixture, _, _, denied_request) =
+        checkpoint_confirmed_tool_round(&pool, deny_seed, "dangerous-tool", "{}").await?;
+    let denied_continuation = TurnAttemptId::from_uuid(Uuid::from_u128(deny_seed + 23));
+    let denial = repository
+        .decide(
+            DecideToolRequest::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(deny_seed + 24)),
+                denied_request,
+                ToolApprovalDecision::Deny { reason: None },
+            ),
+            Some(denied_continuation),
+        )
+        .await?;
+    assert!(matches!(
+        denial.result(),
+        DecideToolRequestResult::Applied(applied)
+            if matches!(
+                applied.resolution().decision(),
+                ToolApprovalDecision::Deny { .. }
+            )
+    ));
+    assert!(matches!(
+        repository
+            .decide(
+                DecideToolRequest::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(deny_seed + 25)),
+                    denied_request,
+                    ToolApprovalDecision::Approve,
+                ),
+                None,
+            )
+            .await?
+            .result(),
+        DecideToolRequestResult::Rejected(
+            signalbox_domain::DecideToolRequestRejectedResult::AlreadyResolved { request }
+        ) if *request == denied_request
+    ));
+    let denied_batch = repository
+        .load_active_batch(denied_fixture.session, denied_fixture.turn)
+        .await?
+        .expect("denied batch remains available for reference-only projection");
+    assert!(matches!(
+        repository
+            .prepare_next_attempt(
+                denied_fixture.session,
+                denied_fixture.turn,
+                ToolAttemptId::from_uuid(Uuid::from_u128(deny_seed + 26)),
+                ToolEffectClass::ExternalEffect,
+            )
+            .await,
+        Err(ToolLoopRepositoryError::InvalidTransition(
+            "batch has no next serialized attempt"
+        ))
+    ));
+    let denied_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(deny_seed + 27));
+    let denied_projection = denied_batch
+        .prepare_result_projection(
+            vec![denied_entry],
+            ContextFrontierId::from_uuid(Uuid::from_u128(deny_seed + 28)),
+        )
+        .expect("denial is a complete logical result");
+    repository
+        .commit_result_projection(
+            denied_fixture.session,
+            denied_fixture.turn,
+            denied_fixture.call,
+            &denied_projection,
+        )
+        .await?;
+
+    let schema_seed = 0x7600;
+    let (schema_fixture, _, _, schema_request) =
+        checkpoint_confirmed_tool_round(&pool, schema_seed, "current_time", "{broken").await?;
+    let schema_continuation = TurnAttemptId::from_uuid(Uuid::from_u128(schema_seed + 23));
+    repository
+        .decide(
+            DecideToolRequest::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(schema_seed + 24)),
+                schema_request,
+                ToolApprovalDecision::Approve,
+            ),
+            Some(schema_continuation),
+        )
+        .await?;
+    let schema_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(schema_seed + 25));
+    repository
+        .prepare_next_attempt(
+            schema_fixture.session,
+            schema_fixture.turn,
+            schema_attempt,
+            ToolEffectClass::EffectFree,
+        )
+        .await?;
+    let schema_failure = repository
+        .commit_preflight_error(
+            schema_fixture.session,
+            schema_fixture.turn,
+            schema_attempt,
+            ToolExecutionError::new(ToolExecutionErrorKind::InvalidArguments, None),
+        )
+        .await?;
+    assert!(matches!(
+        schema_failure.end(),
+        ToolAttemptEnd::KnownFailed { error }
+            if error.kind() == ToolExecutionErrorKind::InvalidArguments
+    ));
+    let schema_batch = repository
+        .load_active_batch(schema_fixture.session, schema_fixture.turn)
+        .await?
+        .expect("schema failure remains exact terminal attempt evidence");
+    let schema_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(schema_seed + 26));
+    let schema_projection = schema_batch
+        .prepare_result_projection(
+            vec![schema_entry],
+            ContextFrontierId::from_uuid(Uuid::from_u128(schema_seed + 27)),
+        )
+        .expect("definitive preflight failure projects as a tool result");
+    repository
+        .commit_result_projection(
+            schema_fixture.session,
+            schema_fixture.turn,
+            schema_fixture.call,
+            &schema_projection,
+        )
+        .await?;
+
+    let crash_seed = 0x7700;
+    let (crash_fixture, _, _, crash_request) =
+        checkpoint_confirmed_tool_round(&pool, crash_seed, "external-tool", "{}").await?;
+    let crash_continuation = TurnAttemptId::from_uuid(Uuid::from_u128(crash_seed + 23));
+    repository
+        .decide(
+            DecideToolRequest::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(crash_seed + 24)),
+                crash_request,
+                ToolApprovalDecision::Approve,
+            ),
+            Some(crash_continuation),
+        )
+        .await?;
+    let crash_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(crash_seed + 25));
+    repository
+        .prepare_next_attempt(
+            crash_fixture.session,
+            crash_fixture.turn,
+            crash_attempt,
+            ToolEffectClass::ExternalEffect,
+        )
+        .await?;
+    repository
+        .authorize_attempt(crash_fixture.session, crash_fixture.turn, crash_attempt)
+        .await?;
+    assert!(matches!(
+        repository
+            .classify_crash_loss(crash_fixture.session, crash_fixture.turn, crash_attempt)
+            .await?,
+        ToolAttemptCrashOutcome::Ambiguous(_)
+    ));
+    let restarted = PostgresToolLoopRepository::new(pool.clone())
+        .load_active_batch(crash_fixture.session, crash_fixture.turn)
+        .await?
+        .expect("external-effect ambiguity reloads after restart");
+    assert!(matches!(
+        restarted.awaiting_recovery(),
+        Some(waiting) if waiting.attempt() == crash_attempt
+    ));
+
+    let durable_shape: (i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM semantic_transcript_entry
+              WHERE semantic_entry_id = $1
+                AND payload_kind = 'tool_denied'
+                AND tool_result_request_id = $2),
+            (SELECT count(*) FROM tool_attempt
+              WHERE request_id = $2),
+            (SELECT count(*) FROM tool_attempt
+              WHERE attempt_id = $3
+                AND state_kind = 'terminal'
+                AND terminal_disposition_kind = 'known_failed'
+                AND error_kind = 'invalid_arguments'),
+            (SELECT count(*) FROM semantic_transcript_entry
+              WHERE semantic_entry_id = $4
+                AND payload_kind = 'tool_execution_result'
+                AND tool_result_attempt_id = $3),
+            (SELECT count(*) FROM turn_lifecycle
+              WHERE session_id = $5
+                AND turn_id = $6
+                AND state_kind = 'active'
+                AND active_phase_kind = 'awaiting_tool_recovery'
+                AND active_tool_round_call_id = $7
+                AND recovery_tool_attempt_id = $8)",
+    )
+    .bind(denied_entry.into_uuid())
+    .bind(denied_request.into_uuid())
+    .bind(schema_attempt.into_uuid())
+    .bind(schema_entry.into_uuid())
+    .bind(crash_fixture.session.into_uuid())
+    .bind(crash_fixture.turn.into_uuid())
+    .bind(crash_fixture.call.into_uuid())
+    .bind(crash_attempt.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(durable_shape, (1, 0, 1, 1, 1));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]

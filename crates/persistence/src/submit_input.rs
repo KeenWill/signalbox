@@ -40,6 +40,7 @@ use crate::{
     },
     mapping::{
         PositiveOrdinalMappingError, accepted_input_id_from_uuid, accepted_input_id_to_uuid,
+        dangerous_tool_auto_approval_from_str, dangerous_tool_auto_approval_to_str,
         defaults_version_from_numeric, defaults_version_to_numeric, durable_command_id_from_uuid,
         durable_command_id_to_uuid, input_position_from_numeric, input_position_to_numeric,
         session_id_from_uuid, session_id_to_uuid, turn_id_from_uuid, turn_id_to_uuid,
@@ -50,6 +51,7 @@ use crate::{
         persist_terminal_outcome, require_live_execution_for_restart,
     },
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
+    tool_loop::load_active_batch_from_connection,
 };
 
 const STORAGE_VERSION: i16 = 1;
@@ -421,9 +423,11 @@ impl SubmitInputRepository {
             Some(CommandKind::SubmitInput) => {
                 load_from_connection(&mut connection, command_id).await
             }
-            Some(CommandKind::CreateSession | CommandKind::ReplaceSessionDefaults) => {
-                Err(Self::wrong_kind(command_id))
-            }
+            Some(
+                CommandKind::CreateSession
+                | CommandKind::ReplaceSessionDefaults
+                | CommandKind::DecideToolRequest,
+            ) => Err(Self::wrong_kind(command_id)),
         }
     }
 
@@ -484,7 +488,11 @@ where
                 require_recorded(connection, command_id).await?,
             )));
         }
-        Some(CommandKind::CreateSession | CommandKind::ReplaceSessionDefaults) => {
+        Some(
+            CommandKind::CreateSession
+            | CommandKind::ReplaceSessionDefaults
+            | CommandKind::DecideToolRequest,
+        ) => {
             return Ok(TransactionDecision::Rollback(
                 SubmitInputHandlingOutcome::ConflictingReuse { command_id },
             ));
@@ -512,11 +520,13 @@ where
                 &command,
                 require_recorded(connection, command_id).await?,
             ))),
-            Some(CommandKind::CreateSession | CommandKind::ReplaceSessionDefaults) => {
-                Ok(TransactionDecision::Rollback(
-                    SubmitInputHandlingOutcome::ConflictingReuse { command_id },
-                ))
-            }
+            Some(
+                CommandKind::CreateSession
+                | CommandKind::ReplaceSessionDefaults
+                | CommandKind::DecideToolRequest,
+            ) => Ok(TransactionDecision::Rollback(
+                SubmitInputHandlingOutcome::ConflictingReuse { command_id },
+            )),
             None => Err(SubmitInputCorruption::Inconsistent("winner claim disappeared").into()),
         };
     }
@@ -880,6 +890,7 @@ pub(crate) async fn load_scheduling_projection(
                 AND queued.model_parameters IS NULL
                 AND queued.known_provider_failure_retry IS NULL
                 AND queued.model_fallback IS NULL
+                AND queued.dangerous_tool_auto_approval IS NULL
             ) AS queued_configuration_values_absent,
             queued.defaults_version AS queued_defaults_version,
             queued.requested_model_kind,
@@ -892,6 +903,7 @@ pub(crate) async fn load_scheduling_projection(
             queued.model_parameters,
             queued.known_provider_failure_retry,
             queued.model_fallback,
+            queued.dangerous_tool_auto_approval AS queued_tool_auto_approval,
             turn.turn_id AS lifecycle_turn_id,
             turn.session_id AS lifecycle_session_id,
             turn.state_kind AS lifecycle_state_kind,
@@ -903,6 +915,9 @@ pub(crate) async fn load_scheduling_projection(
             turn.current_attempt_id,
             turn.pinned_provider_model_identity_id,
             turn.recovery_model_call_id,
+            turn.active_tool_round_call_id,
+            turn.approval_tool_request_id,
+            turn.recovery_tool_attempt_id,
             turn.terminal_attempt_id,
             turn.terminal_model_call_id,
             turn.terminal_disposition_kind,
@@ -1092,6 +1107,9 @@ pub(crate) async fn load_scheduling_projection(
         let current_attempt: Option<Uuid> = row.try_get("current_attempt_id")?;
         let pinned_target: Option<Uuid> = row.try_get("pinned_provider_model_identity_id")?;
         let recovery_model_call: Option<Uuid> = row.try_get("recovery_model_call_id")?;
+        let active_tool_round: Option<Uuid> = row.try_get("active_tool_round_call_id")?;
+        let approval_tool_request: Option<Uuid> = row.try_get("approval_tool_request_id")?;
+        let recovery_tool_attempt: Option<Uuid> = row.try_get("recovery_tool_attempt_id")?;
         let terminal_attempt: Option<Uuid> = row.try_get("terminal_attempt_id")?;
         let terminal_model_call: Option<Uuid> = row.try_get("terminal_model_call_id")?;
         let terminal_disposition: Option<String> = row.try_get("terminal_disposition_kind")?;
@@ -1104,6 +1122,9 @@ pub(crate) async fn load_scheduling_projection(
                     || active_phase.is_some()
                     || current_attempt.is_some()
                     || recovery_model_call.is_some()
+                    || active_tool_round.is_some()
+                    || approval_tool_request.is_some()
+                    || recovery_tool_attempt.is_some()
                     || terminal_attempt.is_some()
                     || terminal_model_call.is_some()
                     || terminal_disposition.is_some()
@@ -1124,35 +1145,34 @@ pub(crate) async fn load_scheduling_projection(
                         SubmitInputCorruption::Inconsistent("active scheduling lifecycle").into(),
                     );
                 }
-                let attempt_id = TurnAttemptId::from_uuid(
-                    current_attempt.ok_or(SubmitInputCorruption::Missing("current_attempt_id"))?,
-                );
-                let stored_attempt_id =
-                    TurnAttemptId::from_uuid(required(&row, "turn_attempt_id")?);
-                let attempt_turn = turn_id_from_uuid(required(&row, "attempt_turn_id")?);
-                let attempt_session = session_id_from_uuid(required(&row, "attempt_session_id")?);
-                let continued_from: Option<Uuid> = row.try_get("continued_from_attempt_id")?;
-                let attempt_state: String = required(&row, "attempt_state_kind")?;
-                let end_variant: Option<String> = row.try_get("end_variant")?;
-                let end_disposition: Option<String> = row.try_get("end_disposition")?;
-                if stored_attempt_id != attempt_id
-                    || attempt_turn != lifecycle_turn
-                    || attempt_session != lifecycle_session
-                    || continued_from.is_some()
-                {
-                    return Err(
-                        SubmitInputCorruption::Inconsistent("active current attempt").into(),
-                    );
-                }
                 let phase = match active_phase.as_deref() {
                     Some("running") if recovery_model_call.is_none() => {
+                        if approval_tool_request.is_some() || recovery_tool_attempt.is_some() {
+                            return Err(SubmitInputCorruption::Inconsistent(
+                                "running tool phase references",
+                            )
+                            .into());
+                        }
+                        let attempt_id = TurnAttemptId::from_uuid(
+                            current_attempt
+                                .ok_or(SubmitInputCorruption::Missing("current_attempt_id"))?,
+                        );
+                        require_current_attempt_row(
+                            &row,
+                            lifecycle_session,
+                            lifecycle_turn,
+                            attempt_id,
+                        )?;
+                        let attempt_state: String = required(&row, "attempt_state_kind")?;
+                        let end_variant: Option<String> = row.try_get("end_variant")?;
+                        let end_disposition: Option<String> = row.try_get("end_disposition")?;
                         if end_variant.is_some() || end_disposition.is_some() {
                             return Err(SubmitInputCorruption::Inconsistent(
                                 "active live attempt end",
                             )
                             .into());
                         }
-                        match attempt_state.as_str() {
+                        let phase = match attempt_state.as_str() {
                             "prepared" => ActiveTurnSchedulingReconstitutionInput::prepared(
                                 lifecycle_turn,
                                 attempt_id,
@@ -1183,11 +1203,55 @@ pub(crate) async fn load_scheduling_projection(
                                 }
                                 .into());
                             }
+                        };
+                        if let Some(round_call) = active_tool_round {
+                            let batch = load_active_batch_from_connection(
+                                connection,
+                                lifecycle_session,
+                                lifecycle_turn,
+                            )
+                            .await
+                            .map_err(map_tool_loop_error)?
+                            .ok_or(SubmitInputCorruption::Missing("active tool batch"))?;
+                            if batch.producing_call().into_uuid() != round_call
+                                || !matches!(
+                                    batch.phase(),
+                                    signalbox_domain::ToolBatchPhase::Executing {
+                                        turn_attempt
+                                    } if turn_attempt == attempt_id
+                                )
+                            {
+                                return Err(SubmitInputCorruption::Inconsistent(
+                                    "running tool batch",
+                                )
+                                .into());
+                            }
+                            required_model_calls.insert(round_call);
+                            required_frontiers
+                                .insert(batch.yielded_snapshot().frontier().snapshot().into_uuid());
                         }
+                        phase
                     }
-                    Some("awaiting_model_call_recovery") => {
+                    Some("awaiting_model_call_recovery")
+                        if active_tool_round.is_none()
+                            && approval_tool_request.is_none()
+                            && recovery_tool_attempt.is_none() =>
+                    {
                         let recovery_call = recovery_model_call
                             .ok_or(SubmitInputCorruption::Missing("recovery_model_call_id"))?;
+                        let attempt_id = TurnAttemptId::from_uuid(
+                            current_attempt
+                                .ok_or(SubmitInputCorruption::Missing("current_attempt_id"))?,
+                        );
+                        require_current_attempt_row(
+                            &row,
+                            lifecycle_session,
+                            lifecycle_turn,
+                            attempt_id,
+                        )?;
+                        let attempt_state: String = required(&row, "attempt_state_kind")?;
+                        let end_variant: Option<String> = row.try_get("end_variant")?;
+                        let end_disposition: Option<String> = row.try_get("end_disposition")?;
                         if attempt_state != "ended" {
                             return Err(SubmitInputCorruption::Inconsistent(
                                 "model-call recovery attempt end",
@@ -1247,6 +1311,133 @@ pub(crate) async fn load_scheduling_projection(
                             }
                         }
                     }
+                    Some("awaiting_tool_approval")
+                        if recovery_model_call.is_none()
+                            && recovery_tool_attempt.is_none()
+                            && current_attempt.is_none() =>
+                    {
+                        let round_call = active_tool_round
+                            .ok_or(SubmitInputCorruption::Missing("active_tool_round_call_id"))?;
+                        let request = approval_tool_request
+                            .ok_or(SubmitInputCorruption::Missing("approval_tool_request_id"))?;
+                        if row.try_get::<Option<Uuid>, _>("turn_attempt_id")?.is_some() {
+                            return Err(SubmitInputCorruption::Inconsistent(
+                                "approval wait attempt",
+                            )
+                            .into());
+                        }
+                        let batch = load_active_batch_from_connection(
+                            connection,
+                            lifecycle_session,
+                            lifecycle_turn,
+                        )
+                        .await
+                        .map_err(map_tool_loop_error)?
+                        .ok_or(SubmitInputCorruption::Missing("active tool batch"))?;
+                        let wait = batch
+                            .awaiting_approval()
+                            .filter(|wait| wait.request().into_uuid() == request)
+                            .ok_or(SubmitInputCorruption::Inconsistent(
+                                "tool approval wait evidence",
+                            ))?;
+                        required_model_calls.insert(round_call);
+                        required_frontiers
+                            .insert(batch.yielded_snapshot().frontier().snapshot().into_uuid());
+                        ActiveTurnSchedulingReconstitutionInput::awaiting_approval(
+                            lifecycle_turn,
+                            wait,
+                        )
+                    }
+                    Some("awaiting_tool_recovery")
+                        if recovery_model_call.is_none() && approval_tool_request.is_none() =>
+                    {
+                        let round_call = active_tool_round
+                            .ok_or(SubmitInputCorruption::Missing("active_tool_round_call_id"))?;
+                        let recovery_attempt = recovery_tool_attempt
+                            .ok_or(SubmitInputCorruption::Missing("recovery_tool_attempt_id"))?;
+                        let attempt_id = TurnAttemptId::from_uuid(
+                            current_attempt
+                                .ok_or(SubmitInputCorruption::Missing("current_attempt_id"))?,
+                        );
+                        require_current_attempt_row(
+                            &row,
+                            lifecycle_session,
+                            lifecycle_turn,
+                            attempt_id,
+                        )?;
+                        let attempt_state: String = required(&row, "attempt_state_kind")?;
+                        let end_variant: Option<String> = row.try_get("end_variant")?;
+                        let end_disposition: Option<String> = row.try_get("end_disposition")?;
+                        if attempt_state != "ended" {
+                            return Err(SubmitInputCorruption::Inconsistent(
+                                "tool recovery turn-attempt end",
+                            )
+                            .into());
+                        }
+                        let batch = load_active_batch_from_connection(
+                            connection,
+                            lifecycle_session,
+                            lifecycle_turn,
+                        )
+                        .await
+                        .map_err(map_tool_loop_error)?
+                        .ok_or(SubmitInputCorruption::Missing("active tool batch"))?;
+                        let wait = batch
+                            .awaiting_recovery()
+                            .filter(|wait| wait.attempt().into_uuid() == recovery_attempt)
+                            .ok_or(SubmitInputCorruption::Inconsistent(
+                                "tool recovery wait evidence",
+                            ))?;
+                        required_model_calls.insert(round_call);
+                        required_frontiers
+                            .insert(batch.yielded_snapshot().frontier().snapshot().into_uuid());
+                        match (end_variant.as_deref(), end_disposition.as_deref()) {
+                            (Some("without_stop"), Some("ambiguous")) => {
+                                ActiveTurnSchedulingReconstitutionInput::awaiting_tool_recovery(
+                                    lifecycle_turn,
+                                    attempt_id,
+                                    wait,
+                                )
+                            }
+                            (Some("without_stop"), Some("lost")) => {
+                                ActiveTurnSchedulingReconstitutionInput::awaiting_tool_recovery_after_restart(
+                                    lifecycle_turn,
+                                    attempt_id,
+                                    wait,
+                                )
+                            }
+                            (Some("after_cancellation"), Some("ambiguous")) => {
+                                ActiveTurnSchedulingReconstitutionInput::awaiting_tool_recovery_after_cancellation(
+                                    lifecycle_turn,
+                                    attempt_id,
+                                    wait,
+                                    require_applied_interrupt_from_attempt(
+                                        &row,
+                                        lifecycle_turn,
+                                        &recorded_commands,
+                                    )?,
+                                )
+                            }
+                            (Some("after_cancellation"), Some("lost")) => {
+                                ActiveTurnSchedulingReconstitutionInput::awaiting_tool_recovery_after_cancellation_restart(
+                                    lifecycle_turn,
+                                    attempt_id,
+                                    wait,
+                                    require_applied_interrupt_from_attempt(
+                                        &row,
+                                        lifecycle_turn,
+                                        &recorded_commands,
+                                    )?,
+                                )
+                            }
+                            _ => {
+                                return Err(SubmitInputCorruption::Inconsistent(
+                                    "tool recovery attempt end",
+                                )
+                                .into());
+                            }
+                        }
+                    }
                     Some(value) => {
                         return Err(SubmitInputCorruption::Unsupported {
                             field: "active phase kind",
@@ -1271,6 +1462,9 @@ pub(crate) async fn load_scheduling_projection(
                 if active_phase.is_some()
                     || current_attempt.is_some()
                     || recovery_model_call.is_some()
+                    || active_tool_round.is_some()
+                    || approval_tool_request.is_some()
+                    || recovery_tool_attempt.is_some()
                 {
                     return Err(SubmitInputCorruption::Inconsistent(
                         "terminal scheduling lifecycle",
@@ -1295,8 +1489,6 @@ pub(crate) async fn load_scheduling_projection(
                                     turn_id_from_uuid(required(&row, "attempt_turn_id")?);
                                 let attempt_session =
                                     session_id_from_uuid(required(&row, "attempt_session_id")?);
-                                let continued_from: Option<Uuid> =
-                                    row.try_get("continued_from_attempt_id")?;
                                 let attempt_state: String = required(&row, "attempt_state_kind")?;
                                 let end_variant: Option<String> = row.try_get("end_variant")?;
                                 let end_disposition: Option<String> =
@@ -1304,7 +1496,6 @@ pub(crate) async fn load_scheduling_projection(
                                 if stored_attempt_id.into_uuid() != terminal_attempt
                                     || attempt_turn != lifecycle_turn
                                     || attempt_session != lifecycle_session
-                                    || continued_from.is_some()
                                     || attempt_state != "ended"
                                 {
                                     return Err(SubmitInputCorruption::Inconsistent(
@@ -1433,15 +1624,12 @@ pub(crate) async fn load_scheduling_projection(
                         let attempt_turn = turn_id_from_uuid(required(&row, "attempt_turn_id")?);
                         let attempt_session =
                             session_id_from_uuid(required(&row, "attempt_session_id")?);
-                        let continued_from: Option<Uuid> =
-                            row.try_get("continued_from_attempt_id")?;
                         let attempt_state: String = required(&row, "attempt_state_kind")?;
                         let end_variant: Option<String> = row.try_get("end_variant")?;
                         let end_disposition: Option<String> = row.try_get("end_disposition")?;
                         if stored_attempt_id.into_uuid() != terminal_attempt
                             || attempt_turn != lifecycle_turn
                             || attempt_session != lifecycle_session
-                            || continued_from.is_some()
                             || attempt_state != "ended"
                             || end_variant.as_deref() != Some("after_cancellation")
                             || end_disposition.as_deref() != Some("cancelled")
@@ -1486,15 +1674,12 @@ pub(crate) async fn load_scheduling_projection(
                         let attempt_turn = turn_id_from_uuid(required(&row, "attempt_turn_id")?);
                         let attempt_session =
                             session_id_from_uuid(required(&row, "attempt_session_id")?);
-                        let continued_from: Option<Uuid> =
-                            row.try_get("continued_from_attempt_id")?;
                         let attempt_state: String = required(&row, "attempt_state_kind")?;
                         let end_variant: Option<String> = row.try_get("end_variant")?;
                         let end_disposition: Option<String> = row.try_get("end_disposition")?;
                         if stored_attempt_id.into_uuid() != terminal_attempt
                             || attempt_turn != lifecycle_turn
                             || attempt_session != lifecycle_session
-                            || continued_from.is_some()
                             || attempt_state != "ended"
                         {
                             return Err(SubmitInputCorruption::Inconsistent(
@@ -1578,15 +1763,12 @@ pub(crate) async fn load_scheduling_projection(
                         let attempt_turn = turn_id_from_uuid(required(&row, "attempt_turn_id")?);
                         let attempt_session =
                             session_id_from_uuid(required(&row, "attempt_session_id")?);
-                        let continued_from: Option<Uuid> =
-                            row.try_get("continued_from_attempt_id")?;
                         let attempt_state: String = required(&row, "attempt_state_kind")?;
                         let end_variant: Option<String> = row.try_get("end_variant")?;
                         let end_disposition: Option<String> = row.try_get("end_disposition")?;
                         if stored_attempt_id.into_uuid() != terminal_attempt
                             || attempt_turn != lifecycle_turn
                             || attempt_session != lifecycle_session
-                            || continued_from.is_some()
                             || attempt_state != "ended"
                         {
                             return Err(SubmitInputCorruption::Inconsistent(
@@ -1957,6 +2139,8 @@ pub(crate) async fn load_scheduling_projection(
             assistant_text_value,
             producing_model_call_id,
             assistant_tool_request_id,
+            tool_result_request_id,
+            tool_result_attempt_id,
             completed_turn_id
          FROM semantic_transcript_entry
         WHERE source_session_id = $3
@@ -1990,6 +2174,8 @@ pub(crate) async fn load_scheduling_projection(
         let assistant_text: Option<String> = row.try_get("assistant_text_value")?;
         let producing_call: Option<Uuid> = row.try_get("producing_model_call_id")?;
         let tool_request: Option<Uuid> = row.try_get("assistant_tool_request_id")?;
+        let tool_result_request: Option<Uuid> = row.try_get("tool_result_request_id")?;
+        let tool_result_attempt: Option<Uuid> = row.try_get("tool_result_attempt_id")?;
         let completed_turn: Option<Uuid> = row.try_get("completed_turn_id")?;
         let payload = match (
             payload_kind.as_str(),
@@ -2000,13 +2186,25 @@ pub(crate) async fn load_scheduling_projection(
             assistant_text,
             producing_call,
             tool_request,
+            tool_result_request,
+            tool_result_attempt,
             completed_turn,
         ) {
-            ("origin_accepted_input", Some(origin), None, None, None, None, None, None, None) => {
-                InitialSemanticTranscriptEntryPayload::OriginAcceptedInput {
-                    accepted_input: accepted_input_id_from_uuid(origin),
-                }
-            }
+            (
+                "origin_accepted_input",
+                Some(origin),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ) => InitialSemanticTranscriptEntryPayload::OriginAcceptedInput {
+                accepted_input: accepted_input_id_from_uuid(origin),
+            },
             (
                 "steering_accepted_input",
                 Some(accepted_input),
@@ -2017,31 +2215,53 @@ pub(crate) async fn load_scheduling_projection(
                 None,
                 None,
                 None,
+                None,
+                None,
             ) => InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput {
                 accepted_input: accepted_input_id_from_uuid(accepted_input),
                 source_turn: turn_id_from_uuid(source_turn),
             },
-            ("turn_failed", None, None, Some(turn), None, None, None, None, None) => {
+            ("turn_failed", None, None, Some(turn), None, None, None, None, None, None, None) => {
                 InitialSemanticTranscriptEntryPayload::TurnFailed {
                     turn: turn_id_from_uuid(turn),
                 }
             }
-            ("turn_cancelled", None, None, None, Some(turn), None, None, None, None) => {
-                InitialSemanticTranscriptEntryPayload::TurnCancelled {
-                    turn: turn_id_from_uuid(turn),
-                }
-            }
-            ("assistant_text", None, None, None, None, Some(text), Some(call), None, None) => {
-                InitialSemanticTranscriptEntryPayload::AssistantText {
-                    producing_call: ModelCallId::from_uuid(call),
-                    value: AssistantText::try_new(text).map_err(|error| {
-                        SubmitInputCorruption::InvalidContent {
-                            field: "assistant_text_value",
-                            failure: error.failure(),
-                        }
-                    })?,
-                }
-            }
+            (
+                "turn_cancelled",
+                None,
+                None,
+                None,
+                Some(turn),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ) => InitialSemanticTranscriptEntryPayload::TurnCancelled {
+                turn: turn_id_from_uuid(turn),
+            },
+            (
+                "assistant_text",
+                None,
+                None,
+                None,
+                None,
+                Some(text),
+                Some(call),
+                None,
+                None,
+                None,
+                None,
+            ) => InitialSemanticTranscriptEntryPayload::AssistantText {
+                producing_call: ModelCallId::from_uuid(call),
+                value: AssistantText::try_new(text).map_err(|error| {
+                    SubmitInputCorruption::InvalidContent {
+                        field: "assistant_text_value",
+                        failure: error.failure(),
+                    }
+                })?,
+            },
             (
                 "assistant_tool_use",
                 None,
@@ -2052,15 +2272,72 @@ pub(crate) async fn load_scheduling_projection(
                 Some(call),
                 Some(request),
                 None,
+                None,
+                None,
             ) => InitialSemanticTranscriptEntryPayload::AssistantToolUse {
                 producing_call: ModelCallId::from_uuid(call),
                 request: ToolRequestId::from_uuid(request),
             },
-            ("turn_completed", None, None, None, None, None, None, None, Some(turn)) => {
-                InitialSemanticTranscriptEntryPayload::TurnCompleted {
-                    turn: turn_id_from_uuid(turn),
-                }
-            }
+            (
+                "tool_execution_result",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(attempt),
+                None,
+            ) => InitialSemanticTranscriptEntryPayload::ToolExecutionResult {
+                attempt: signalbox_domain::ToolAttemptId::from_uuid(attempt),
+            },
+            (
+                "tool_denied",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(request),
+                None,
+                None,
+            ) => InitialSemanticTranscriptEntryPayload::ToolDenied {
+                request: ToolRequestId::from_uuid(request),
+            },
+            (
+                "tool_closed_by_turn_end",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(request),
+                None,
+                None,
+            ) => InitialSemanticTranscriptEntryPayload::ToolClosed {
+                request: ToolRequestId::from_uuid(request),
+            },
+            (
+                "turn_completed",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(turn),
+            ) => InitialSemanticTranscriptEntryPayload::TurnCompleted {
+                turn: turn_id_from_uuid(turn),
+            },
             (
                 "origin_accepted_input"
                 | "steering_accepted_input"
@@ -2068,7 +2345,12 @@ pub(crate) async fn load_scheduling_projection(
                 | "turn_cancelled"
                 | "assistant_text"
                 | "assistant_tool_use"
+                | "tool_execution_result"
+                | "tool_denied"
+                | "tool_closed_by_turn_end"
                 | "turn_completed",
+                _,
+                _,
                 _,
                 _,
                 _,
@@ -2080,7 +2362,7 @@ pub(crate) async fn load_scheduling_projection(
             ) => {
                 return Err(SubmitInputCorruption::Inconsistent("semantic entry payload").into());
             }
-            (value, _, _, _, _, _, _, _, _) => {
+            (value, _, _, _, _, _, _, _, _, _, _) => {
                 return Err(SubmitInputCorruption::Unsupported {
                     field: "semantic entry payload_kind",
                     value: value.to_owned(),
@@ -2169,6 +2451,37 @@ pub(crate) async fn load_scheduling_projection(
     })
 }
 
+fn require_current_attempt_row(
+    row: &PgRow,
+    session: SessionId,
+    turn: TurnId,
+    attempt: TurnAttemptId,
+) -> Result<(), SubmitInputRepositoryError> {
+    let stored_attempt: Option<Uuid> = row.try_get("turn_attempt_id")?;
+    let stored_turn: Option<Uuid> = row.try_get("attempt_turn_id")?;
+    let stored_session: Option<Uuid> = row.try_get("attempt_session_id")?;
+    if stored_attempt != Some(attempt.into_uuid())
+        || stored_turn != Some(turn.into_uuid())
+        || stored_session != Some(session.into_uuid())
+    {
+        return Err(SubmitInputCorruption::Inconsistent("active current attempt").into());
+    }
+    Ok(())
+}
+
+fn map_tool_loop_error(
+    error: crate::tool_loop::ToolLoopRepositoryError,
+) -> SubmitInputRepositoryError {
+    match error {
+        crate::tool_loop::ToolLoopRepositoryError::Database(error) => error.into(),
+        crate::tool_loop::ToolLoopRepositoryError::Corruption(_)
+        | crate::tool_loop::ToolLoopRepositoryError::DifferentCommandKind
+        | crate::tool_loop::ToolLoopRepositoryError::InvalidTransition(_) => {
+            SubmitInputCorruption::Inconsistent("active tool batch").into()
+        }
+    }
+}
+
 fn require_applied_interrupt_from_attempt(
     row: &PgRow,
     owning_turn: TurnId,
@@ -2253,6 +2566,11 @@ fn require_stored_origin_configuration(
     require_spelling(row, "model_parameters", "provider_defaults")?;
     require_spelling(row, "known_provider_failure_retry", "disabled")?;
     require_spelling(row, "model_fallback", "disabled")?;
+    let dangerous_tool_auto_approval = decode_dangerous_tool_auto_approval(
+        row,
+        "queued_tool_auto_approval",
+        "scheduling origin configuration",
+    )?;
     let defaults_version = decode_defaults_version(row, "queued_defaults_version")?;
     let requested = decode_model_selection(
         required(row, "requested_model_kind")?,
@@ -2269,6 +2587,7 @@ fn require_stored_origin_configuration(
     if defaults_version != expected.session_defaults_version()
         || requested != expected.requested().model()
         || frozen != *expected.effective().model()
+        || dangerous_tool_auto_approval != expected.effective().dangerous_tool_auto_approval()
     {
         return Err(SubmitInputCorruption::Inconsistent("scheduling origin configuration").into());
     }
@@ -2561,10 +2880,11 @@ async fn insert_prepared(
                  requested_model_alias_id, frozen_model_kind,
                  frozen_direct_model_selection_id, frozen_model_alias_id,
                  frozen_alias_selected_direct_id, model_parameters,
-                 known_provider_failure_retry, model_fallback)
+                 known_provider_failure_retry, model_fallback,
+                 dangerous_tool_auto_approval)
              VALUES
                 ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                 $14, $15, $16, $17)",
+                 $14, $15, $16, $17, $18)",
         )
         .bind(turn_id_to_uuid(applied.turn()))
         .bind(accepted_input_id_to_uuid(applied.accepted_input()))
@@ -2585,6 +2905,9 @@ async fn insert_prepared(
         .bind("provider_defaults")
         .bind("disabled")
         .bind("disabled")
+        .bind(dangerous_tool_auto_approval_to_str(
+            origin.effective().dangerous_tool_auto_approval(),
+        ))
         .execute(&mut *connection)
         .await?;
 
@@ -3089,11 +3412,13 @@ async fn load_complete_rows(
             queued.model_parameters,
             queued.known_provider_failure_retry,
             queued.model_fallback,
+            queued.dangerous_tool_auto_approval AS queued_tool_auto_approval,
             defaults.session_id AS defaults_session_id,
             defaults.version AS defaults_version,
             defaults.model_selection_kind AS defaults_model_kind,
             defaults.direct_model_selection_id AS defaults_direct_id,
             defaults.model_alias_id AS defaults_alias_id,
+            defaults.dangerous_tool_auto_approval AS defaults_tool_auto_approval,
             (
                 SELECT count(*)
                   FROM accepted_input AS effect
@@ -4005,6 +4330,7 @@ fn decode_applied_turn_origin(
         required(row, "defaults_model_kind")?,
         row.try_get("defaults_direct_id")?,
         row.try_get("defaults_alias_id")?,
+        required(row, "defaults_tool_auto_approval")?,
         "selected defaults",
     )?;
     let stored_requested_model = decode_model_selection(
@@ -4270,6 +4596,7 @@ fn decode_rejected(
                 required(row, "defaults_model_kind")?,
                 row.try_get("defaults_direct_id")?,
                 row.try_get("defaults_alias_id")?,
+                required(row, "defaults_tool_auto_approval")?,
                 "selected defaults",
             )?;
             if selected != defaults_version {
@@ -4672,11 +4999,33 @@ fn decode_defaults(
     kind: String,
     direct: Option<Uuid>,
     alias: Option<Uuid>,
+    dangerous_tool_auto_approval: String,
     field: &'static str,
 ) -> Result<SessionConfigurationDefaults, SubmitInputRepositoryError> {
-    Ok(SessionConfigurationDefaults::new(decode_model_selection(
-        kind, direct, alias, field,
-    )?))
+    let model = decode_model_selection(kind, direct, alias, field)?;
+    let dangerous_tool_auto_approval =
+        dangerous_tool_auto_approval_from_str(&dangerous_tool_auto_approval).ok_or({
+            SubmitInputCorruption::Unsupported {
+                field: "dangerous_tool_auto_approval",
+                value: dangerous_tool_auto_approval,
+            }
+        })?;
+    Ok(
+        SessionConfigurationDefaults::with_dangerous_tool_auto_approval(
+            model,
+            dangerous_tool_auto_approval,
+        ),
+    )
+}
+
+fn decode_dangerous_tool_auto_approval(
+    row: &PgRow,
+    column: &'static str,
+    field: &'static str,
+) -> Result<signalbox_domain::DangerousToolAutoApproval, SubmitInputRepositoryError> {
+    let value: String = required(row, column)?;
+    dangerous_tool_auto_approval_from_str(&value)
+        .ok_or_else(|| SubmitInputCorruption::Unsupported { field, value }.into())
 }
 
 fn decode_model_selection(

@@ -12,8 +12,8 @@ use signalbox_domain::{
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
 use crate::mapping::{
-    PositiveOrdinalMappingError, defaults_version_from_numeric, session_id_from_uuid,
-    session_id_to_uuid,
+    PositiveOrdinalMappingError, dangerous_tool_auto_approval_from_str,
+    defaults_version_from_numeric, session_id_from_uuid, session_id_to_uuid,
 };
 
 const OWNER_INITIATED: &str = "owner_initiated";
@@ -162,7 +162,8 @@ pub(crate) async fn load_session_from_connection(
             v.version AS selected_defaults_version,
             v.model_selection_kind,
             v.direct_model_selection_id,
-            v.model_alias_id
+            v.model_alias_id,
+            v.dangerous_tool_auto_approval
          FROM session AS s
          LEFT JOIN session_current_defaults AS p
            ON p.session_id = s.session_id
@@ -206,6 +207,7 @@ fn decode_complete(
         required(&row, "model_selection_kind")?,
         row.try_get("direct_model_selection_id")?,
         row.try_get("model_alias_id")?,
+        required(&row, "dangerous_tool_auto_approval")?,
     )?;
 
     SessionReconstitutionInput::new(
@@ -271,6 +273,7 @@ fn decode_selection(
     kind: String,
     direct: Option<Uuid>,
     alias: Option<Uuid>,
+    dangerous_tool_auto_approval: String,
 ) -> Result<SessionConfigurationDefaults, SessionRepositoryError> {
     let model = match (kind.as_str(), direct, alias) {
         ("direct", Some(value), None) => {
@@ -288,5 +291,17 @@ fn decode_selection(
             .into());
         }
     };
-    Ok(SessionConfigurationDefaults::new(model))
+    let dangerous_tool_auto_approval =
+        dangerous_tool_auto_approval_from_str(&dangerous_tool_auto_approval).ok_or_else(|| {
+            SessionRepositoryError::from(SessionCorruption::Unsupported {
+                field: "dangerous tool auto approval",
+                value: dangerous_tool_auto_approval,
+            })
+        })?;
+    Ok(
+        SessionConfigurationDefaults::with_dangerous_tool_auto_approval(
+            model,
+            dangerous_tool_auto_approval,
+        ),
+    )
 }

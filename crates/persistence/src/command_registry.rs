@@ -8,13 +8,14 @@ use crate::mapping::durable_command_id_to_uuid;
 pub(crate) const CREATE_SESSION_KIND: &str = "create_session";
 pub(crate) const REPLACE_SESSION_DEFAULTS_KIND: &str = "replace_session_defaults";
 pub(crate) const SUBMIT_INPUT_KIND: &str = "submit_input";
-const STORAGE_VERSION: i16 = 1;
+pub(crate) const DECIDE_TOOL_REQUEST_KIND: &str = "decide_tool_request";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CommandKind {
     CreateSession,
     ReplaceSessionDefaults,
     SubmitInput,
+    DecideToolRequest,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -41,7 +42,8 @@ pub(crate) async fn inspect(
             command.storage_version,
             create_command.command_id IS NOT NULL AS has_create_session,
             defaults_command.command_id IS NOT NULL AS has_replace_session_defaults,
-            input_command.command_id IS NOT NULL AS has_submit_input
+            input_command.command_id IS NOT NULL AS has_submit_input,
+            tool_command.command_id IS NOT NULL AS has_decide_tool_request
          FROM durable_command AS command
          LEFT JOIN create_session_command AS create_command
            ON create_command.command_id = command.command_id
@@ -49,6 +51,8 @@ pub(crate) async fn inspect(
            ON defaults_command.command_id = command.command_id
          LEFT JOIN submit_input_command AS input_command
            ON input_command.command_id = command.command_id
+         LEFT JOIN decide_tool_request_command AS tool_command
+           ON tool_command.command_id = command.command_id
          WHERE command.command_id = $1",
     )
     .bind(durable_command_id_to_uuid(command_id))
@@ -60,12 +64,6 @@ pub(crate) async fn inspect(
         let version: i16 = row
             .try_get("storage_version")
             .map_err(RegistryInspectionError::Database)?;
-        if version != STORAGE_VERSION {
-            return Err(RegistryInspectionError::Corruption(
-                RegistryCorruption::UnsupportedVersion(version),
-            ));
-        }
-
         let spelling: String = row
             .try_get("command_kind")
             .map_err(RegistryInspectionError::Database)?;
@@ -73,12 +71,24 @@ pub(crate) async fn inspect(
             CREATE_SESSION_KIND => CommandKind::CreateSession,
             REPLACE_SESSION_DEFAULTS_KIND => CommandKind::ReplaceSessionDefaults,
             SUBMIT_INPUT_KIND => CommandKind::SubmitInput,
+            DECIDE_TOOL_REQUEST_KIND => CommandKind::DecideToolRequest,
             _ => {
                 return Err(RegistryInspectionError::Corruption(
                     RegistryCorruption::UnsupportedKind(spelling),
                 ));
             }
         };
+        let version_supported = match kind {
+            CommandKind::CreateSession | CommandKind::ReplaceSessionDefaults => {
+                matches!(version, 1 | 2)
+            }
+            CommandKind::SubmitInput | CommandKind::DecideToolRequest => version == 1,
+        };
+        if !version_supported {
+            return Err(RegistryInspectionError::Corruption(
+                RegistryCorruption::UnsupportedVersion(version),
+            ));
+        }
         let has_create: bool = row
             .try_get("has_create_session")
             .map_err(RegistryInspectionError::Database)?;
@@ -88,14 +98,19 @@ pub(crate) async fn inspect(
         let has_input: bool = row
             .try_get("has_submit_input")
             .map_err(RegistryInspectionError::Database)?;
+        let has_tool: bool = row
+            .try_get("has_decide_tool_request")
+            .map_err(RegistryInspectionError::Database)?;
 
-        match (kind, has_create, has_defaults, has_input) {
-            (CommandKind::CreateSession, true, false, false)
-            | (CommandKind::ReplaceSessionDefaults, false, true, false)
-            | (CommandKind::SubmitInput, false, false, true) => Ok(kind),
-            (CommandKind::CreateSession, false, false, false)
-            | (CommandKind::ReplaceSessionDefaults, false, false, false)
-            | (CommandKind::SubmitInput, false, false, false) => Err(
+        match (kind, has_create, has_defaults, has_input, has_tool) {
+            (CommandKind::CreateSession, true, false, false, false)
+            | (CommandKind::ReplaceSessionDefaults, false, true, false, false)
+            | (CommandKind::SubmitInput, false, false, true, false)
+            | (CommandKind::DecideToolRequest, false, false, false, true) => Ok(kind),
+            (CommandKind::CreateSession, false, false, false, false)
+            | (CommandKind::ReplaceSessionDefaults, false, false, false, false)
+            | (CommandKind::SubmitInput, false, false, false, false)
+            | (CommandKind::DecideToolRequest, false, false, false, false) => Err(
                 RegistryInspectionError::Corruption(RegistryCorruption::MissingTypedRecord(kind)),
             ),
             _ => Err(RegistryInspectionError::Corruption(

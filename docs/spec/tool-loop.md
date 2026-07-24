@@ -224,7 +224,9 @@ closed additive algebra whose implemented content arm is `Text`; a text value
 may be empty, must exclude U+0000, and is admitted only through a 1 MiB UTF-8
 bound. A result larger than the bound is replaced by the typed `ResultTooLarge`
 error; oversized bytes are never persisted. Error evidence is a closed kind plus
-an optional bounded sanitized detail and is stored once on the attempt row.
+an optional bounded sanitized detail and is stored once on the attempt row. When
+present, the detail is 1–4096 UTF-8 bytes, has no leading or trailing
+whitespace, and contains no control characters.
 
 Semantic tool-result entries contain references only:
 

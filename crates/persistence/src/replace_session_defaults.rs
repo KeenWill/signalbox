@@ -20,13 +20,15 @@ use crate::{
         RegistryInspectionError,
     },
     mapping::{
-        PositiveOrdinalMappingError, defaults_version_from_numeric, defaults_version_to_numeric,
-        durable_command_id_to_uuid, session_id_from_uuid, session_id_to_uuid,
+        PositiveOrdinalMappingError, dangerous_tool_auto_approval_from_str,
+        dangerous_tool_auto_approval_to_str, defaults_version_from_numeric,
+        defaults_version_to_numeric, durable_command_id_to_uuid, session_id_from_uuid,
+        session_id_to_uuid,
     },
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
 };
 
-const STORAGE_VERSION: i16 = 1;
+const STORAGE_VERSION: i16 = 2;
 const APPLIED: &str = "applied";
 const REJECTED: &str = "rejected";
 const SESSION_NOT_FOUND: &str = "session_not_found";
@@ -206,7 +208,7 @@ impl ReplaceSessionDefaultsRepository {
                 transaction.rollback().await?;
                 return Ok(ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id });
             }
-            Some(CommandKind::SubmitInput) => {
+            Some(CommandKind::SubmitInput | CommandKind::DecideToolRequest) => {
                 transaction.rollback().await?;
                 return Ok(ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id });
             }
@@ -240,7 +242,7 @@ impl ReplaceSessionDefaultsRepository {
                 Some(CommandKind::CreateSession) => {
                     ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id }
                 }
-                Some(CommandKind::SubmitInput) => {
+                Some(CommandKind::SubmitInput | CommandKind::DecideToolRequest) => {
                     ReplaceSessionDefaultsHandlingOutcome::ConflictingReuse { command_id }
                 }
                 None => {
@@ -317,7 +319,7 @@ impl ReplaceSessionDefaultsRepository {
             Some(CommandKind::CreateSession) => {
                 Err(ReplaceSessionDefaultsRepositoryError::DifferentCommandKind { command_id })
             }
-            Some(CommandKind::SubmitInput) => {
+            Some(CommandKind::SubmitInput | CommandKind::DecideToolRequest) => {
                 Err(ReplaceSessionDefaultsRepositoryError::DifferentCommandKind { command_id })
             }
         }
@@ -400,14 +402,18 @@ async fn insert_defaults_version(
     sqlx::query(
         "INSERT INTO session_defaults_version
             (session_id, version, model_selection_kind,
-             direct_model_selection_id, model_alias_id)
-         VALUES ($1, $2, $3, $4, $5)",
+             direct_model_selection_id, model_alias_id,
+             dangerous_tool_auto_approval)
+         VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(session_id_to_uuid(applied.session()))
     .bind(defaults_version_to_numeric(installed.version()))
     .bind(selection.kind)
     .bind(selection.direct)
     .bind(selection.alias)
+    .bind(dangerous_tool_auto_approval_to_str(
+        installed.defaults().dangerous_tool_auto_approval(),
+    ))
     .execute(&mut *connection)
     .await?;
     Ok(())
@@ -426,11 +432,11 @@ async fn insert_typed_record(
             (command_id, command_kind, storage_version, session_id,
              expected_current_version, model_selection_kind,
              direct_model_selection_id, model_alias_id,
-             result_kind, rejection_kind, result_session_id,
+             dangerous_tool_auto_approval, result_kind, rejection_kind, result_session_id,
              result_installed_version, result_expected_version,
              result_current_version)
          VALUES
-            ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+            ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
     )
     .bind(durable_command_id_to_uuid(command.command_id()))
     .bind(REPLACE_SESSION_DEFAULTS_KIND)
@@ -442,6 +448,9 @@ async fn insert_typed_record(
     .bind(selection.kind)
     .bind(selection.direct)
     .bind(selection.alias)
+    .bind(dangerous_tool_auto_approval_to_str(
+        command.replacement().dangerous_tool_auto_approval(),
+    ))
     .bind(encoded_result.result_kind)
     .bind(encoded_result.rejection_kind)
     .bind(session_id_to_uuid(encoded_result.session))
@@ -542,6 +551,7 @@ async fn load_from_connection(
             typed.model_selection_kind AS command_model_kind,
             typed.direct_model_selection_id AS command_direct_id,
             typed.model_alias_id AS command_alias_id,
+            typed.dangerous_tool_auto_approval AS command_tool_auto_approval,
             typed.result_kind,
             typed.rejection_kind,
             typed.result_session_id,
@@ -552,7 +562,8 @@ async fn load_from_connection(
             installed.version AS installed_version,
             installed.model_selection_kind AS installed_model_kind,
             installed.direct_model_selection_id AS installed_direct_id,
-            installed.model_alias_id AS installed_alias_id
+            installed.model_alias_id AS installed_alias_id,
+            installed.dangerous_tool_auto_approval AS installed_tool_auto_approval
          FROM durable_command AS command
          LEFT JOIN replace_session_defaults_command AS typed
            ON typed.command_id = command.command_id
@@ -573,10 +584,15 @@ fn decode_complete(
     command_id: DurableCommandId,
 ) -> Result<ReconstitutedReplaceSessionDefaults, ReplaceSessionDefaultsRepositoryError> {
     require_spelling(&row, "registry_kind", REPLACE_SESSION_DEFAULTS_KIND)?;
-    require_version(&row, "registry_version", STORAGE_VERSION)?;
+    let registry_version = require_supported_version(&row, "registry_version")?;
     let _: Uuid = required(&row, "typed_command_id")?;
     require_spelling(&row, "typed_kind", REPLACE_SESSION_DEFAULTS_KIND)?;
-    require_version(&row, "typed_version", STORAGE_VERSION)?;
+    let typed_version = require_supported_version(&row, "typed_version")?;
+    if registry_version != typed_version {
+        return Err(
+            ReplaceSessionDefaultsCorruption::Inconsistent("command storage version").into(),
+        );
+    }
 
     let command = ReplaceSessionDefaults::new(
         command_id,
@@ -586,6 +602,8 @@ fn decode_complete(
             required(&row, "command_model_kind")?,
             row.try_get("command_direct_id")?,
             row.try_get("command_alias_id")?,
+            required(&row, "command_tool_auto_approval")?,
+            typed_version,
             "command model selection",
         )?,
     );
@@ -614,6 +632,8 @@ fn decode_complete(
                 required(&row, "installed_model_kind")?,
                 row.try_get("installed_direct_id")?,
                 row.try_get("installed_alias_id")?,
+                required(&row, "installed_tool_auto_approval")?,
+                typed_version,
                 "installed model selection",
             )?;
             ReplaceSessionDefaultsReconstitutionInput::applied(
@@ -737,14 +757,13 @@ fn require_spelling(
     }
 }
 
-fn require_version(
+fn require_supported_version(
     row: &PgRow,
     field: &'static str,
-    expected: i16,
-) -> Result<(), ReplaceSessionDefaultsRepositoryError> {
+) -> Result<i16, ReplaceSessionDefaultsRepositoryError> {
     let actual: i16 = required(row, field)?;
-    if actual == expected {
-        Ok(())
+    if matches!(actual, 1 | 2) {
+        Ok(actual)
     } else {
         Err(ReplaceSessionDefaultsCorruption::Unsupported {
             field,
@@ -780,6 +799,8 @@ fn decode_selection(
     kind: String,
     direct: Option<Uuid>,
     alias: Option<Uuid>,
+    dangerous_tool_auto_approval: String,
+    storage_version: i16,
     field: &'static str,
 ) -> Result<SessionConfigurationDefaults, ReplaceSessionDefaultsRepositoryError> {
     let model = match (kind.as_str(), direct, alias) {
@@ -796,7 +817,29 @@ fn decode_selection(
             );
         }
     };
-    Ok(SessionConfigurationDefaults::new(model))
+    let dangerous_tool_auto_approval =
+        dangerous_tool_auto_approval_from_str(&dangerous_tool_auto_approval).ok_or_else(|| {
+            ReplaceSessionDefaultsRepositoryError::from(
+                ReplaceSessionDefaultsCorruption::Unsupported {
+                    field: "dangerous tool auto approval",
+                    value: dangerous_tool_auto_approval,
+                },
+            )
+        })?;
+    if storage_version == 1
+        && dangerous_tool_auto_approval != signalbox_domain::DangerousToolAutoApproval::Disabled
+    {
+        return Err(ReplaceSessionDefaultsCorruption::Inconsistent(
+            "version-one dangerous tool auto approval",
+        )
+        .into());
+    }
+    Ok(
+        SessionConfigurationDefaults::with_dangerous_tool_auto_approval(
+            model,
+            dangerous_tool_auto_approval,
+        ),
+    )
 }
 
 async fn inspect_registry(

@@ -16,6 +16,7 @@ pub mod session;
 pub mod start_eligible_turn;
 pub mod startup;
 pub mod submit_input;
+pub mod tool_loop;
 
 use std::str::FromStr;
 
