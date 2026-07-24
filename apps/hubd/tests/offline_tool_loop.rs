@@ -496,8 +496,9 @@ impl ToolExecutor for RecordingExecutor {
 
 /// S10 / INV-004 / INV-005 / INV-019 / INV-021 / INV-024:
 /// one offline scripted turn parks for an owner decision, executes exactly
-/// once after approval, commits a reference-only result at the continuation
-/// boundary, and completes only after the second model round.
+/// once after approval with normalized arguments, commits a reference-only
+/// result at the continuation boundary, and completes only after the second
+/// model round.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s10_inv004_inv005_inv019_inv021_inv024_tool_loop_completes() -> Result<(), Box<dyn Error>>
@@ -511,7 +512,7 @@ async fn s10_inv004_inv005_inv019_inv021_inv024_tool_loop_completes() -> Result<
     let executor = RecordingExecutor::completing();
     let (execution, runtime) = fixture.execution(
         [
-            tool_use_script(&[("confirmed", r#"{"value":"one"}"#)]),
+            tool_use_script(&[("confirmed", r#"{ "value" : "one" }"#)]),
             completion_script("tool result observed"),
         ],
         tool_catalog,
@@ -1021,7 +1022,7 @@ async fn s10_inv020_inv021_blanket_posture_runs_confirm_tool_unattended()
 }
 
 /// S05 / INV-005 / INV-006 / INV-024: losing a dispatched effect-free attempt
-/// never retries it; a fresh process classifies it `known_failed` with
+/// never retries it; startup idempotently classifies it `known_failed` with
 /// `crash_lost` evidence, closes the request, and then fails the turn honestly.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
@@ -1055,6 +1056,9 @@ async fn s05_inv005_inv006_inv024_effect_free_crash_is_known_failed_without_retr
     let recovery = startup.execute().await?;
     assert!(recovery.is_complete());
     assert_eq!(recovery.recovered_turn_count(), 1);
+    let repeated_recovery = startup.execute().await?;
+    assert!(repeated_recovery.is_complete());
+    assert_eq!(repeated_recovery.recovered_turn_count(), 0);
     assert_eq!(crashing.events(), vec![String::from("effect_free")]);
     let classified: (String, String, String, String) = sqlx::query_as(
         "SELECT attempt.terminal_disposition_kind, attempt.error_kind,
@@ -1097,8 +1101,8 @@ async fn s05_inv005_inv006_inv024_effect_free_crash_is_known_failed_without_retr
 }
 
 /// S06 / INV-005 / INV-024: losing a dispatched external-effect
-/// attempt never retries it; a fresh process classifies exact ambiguity and
-/// parks the turn for owner recovery.
+/// attempt never retries it; startup idempotently classifies exact ambiguity
+/// without projecting a result or close, and parks the turn for owner recovery.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s06_inv005_inv024_external_effect_crash_parks_ambiguous_without_retry()
@@ -1134,6 +1138,13 @@ async fn s06_inv005_inv024_external_effect_crash_parks_ambiguous_without_retry()
         recovery.recovered_turn_count(),
         0,
         "the ambiguous turn remains active while its attempt is recovered"
+    );
+    let repeated_recovery = startup.execute().await?;
+    assert!(repeated_recovery.is_complete());
+    assert_eq!(
+        repeated_recovery.recovered_turn_count(),
+        0,
+        "repeated startup leaves the same ambiguous turn parked"
     );
     assert_eq!(crashing.events(), vec![String::from("external_effect")]);
     let classified: (String, String, Option<Uuid>, String) = sqlx::query_as(
@@ -1171,6 +1182,45 @@ async fn s06_inv005_inv024_external_effect_crash_parks_ambiguous_without_retry()
             Some(attempt),
             String::from("lost"),
         )
+    );
+    let semantic_tool_kinds: Vec<String> = sqlx::query_scalar(
+        "SELECT entry.payload_kind
+           FROM semantic_transcript_entry AS entry
+          WHERE entry.source_session_id = $1
+            AND (
+                EXISTS (
+                    SELECT 1
+                      FROM model_call
+                     WHERE model_call.model_call_id =
+                           entry.producing_model_call_id
+                       AND model_call.turn_id = $2
+                )
+                OR EXISTS (
+                    SELECT 1
+                      FROM tool_request
+                     WHERE tool_request.turn_id = $2
+                       AND tool_request.request_id IN (
+                           entry.assistant_tool_request_id,
+                           entry.tool_result_request_id
+                       )
+                )
+                OR EXISTS (
+                    SELECT 1
+                      FROM tool_attempt
+                     WHERE tool_attempt.turn_id = $2
+                       AND tool_attempt.attempt_id =
+                           entry.tool_result_attempt_id
+                )
+            )
+          ORDER BY entry.payload_kind",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .fetch_all(&fixture.pool)
+    .await?;
+    assert_eq!(
+        semantic_tool_kinds,
+        vec![String::from("assistant_tool_use")]
     );
     Ok(())
 }
