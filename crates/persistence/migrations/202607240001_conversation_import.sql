@@ -83,6 +83,9 @@ CREATE TABLE imported_conversation_raw_record (
         DEFERRABLE INITIALLY DEFERRED
 );
 
+CREATE INDEX imported_conversation_raw_record_content_hash_idx
+    ON imported_conversation_raw_record (content_hash);
+
 CREATE TABLE imported_transcript_entry (
     imported_conversation_id uuid NOT NULL,
     imported_entry_position numeric(20, 0) NOT NULL,
