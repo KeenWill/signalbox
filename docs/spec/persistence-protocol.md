@@ -205,11 +205,11 @@ current session state to lock — arrives as an already-prepared
 `PreparedCreateSession` value and is inserted after the claim
 (`create_session.rs`). Authoritative rejections claim the identifier and commit
 their typed record exactly as applied results do. Owner-specified pre-claim
-admission errors are different: after registry inspection, a missing imported
-conversation or frontier returns without inserting a claim or typed record.
-Replay resolution — reconstruct the recorded command, compare structurally,
-return the recorded result or `ConflictingReuse` — follows the owner page's
-contract.
+admission errors are different: after registry inspection, a missing
+conversation named by the selected imported frontier or a boundary absent from
+that conversation returns without inserting a claim or typed record. Replay
+resolution — reconstruct the recorded command, compare structurally, return the
+recorded result or `ConflictingReuse` — follows the owner page's contract.
 
 `load` operations return `None` only for an unseen identifier; a claimed row
 that cannot be reconstructed is corruption, never an unclaimed identifier.
@@ -229,10 +229,11 @@ Locks per transaction, in acquisition order:
 
 - **CreateSessionFromImportedFrontier**: no explicit row lock. Registry claim
   insertion and the command/session uniqueness constraints serialize competing
-  command identities. The selected imported aggregate is immutable and
-  append-only, so complete loading and prefix resolution need no mutable-state
-  lock; semantic-entry candidates are requested only after that checked prefix
-  fixes their cardinality.
+  command identities. The adapter loads the aggregate named by
+  `frontier.conversation()`; that selected aggregate is immutable and
+  append-only, so complete loading and boundary resolution need no mutable-state
+  lock. Semantic-entry candidates are requested only after the resulting checked
+  prefix fixes their cardinality.
 - **SubmitInput** (`prepare_against_locked_state`): session row
   `FOR NO KEY UPDATE`, then `session_scheduler` row `FOR UPDATE`, then
   `session_current_defaults` row `FOR UPDATE`; only then does it read the

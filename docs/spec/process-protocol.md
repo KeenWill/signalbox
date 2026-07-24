@@ -1,9 +1,10 @@
 # Process protocol
 
-This page specifies Signalbox process protocol version one and the terminal
-client that consumes it, verified against the implementing stack through PR #177
-(`agent/terminal-client`). It is the normative boundary between a local client
-process and `signalbox-hubd`; domain values, PostgreSQL records, and wire
+The baseline Signalbox process protocol version one and the terminal client that
+consumes it were verified through PR #177 (`agent/terminal-client`). The
+conversation-import stack adds the conservative imported transcript-snapshot
+projection described here. This page is the normative boundary between a local
+client process and `signalbox-hubd`; domain values, PostgreSQL records, and wire
 messages remain distinct representations.
 
 Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
@@ -298,10 +299,10 @@ Each `transcript_turn` has `turn_id` and one closed `state` object:
   before a call was prepared; or
 - `reconciliation_required { terminal_frontier_id, terminal_attempt_id, terminal_model_call_id }`.
 
-Each non-text frontier member is one `transcript_entry` with `entry_index`,
-`source_session_id`, `entry_id`, and one closed `entry` object:
+Each non-text native frontier member is one `transcript_entry` with
+`entry_index`, `source_session_id`, `entry_id`, and one closed `entry` object:
 `turn_completed { turn_id }`, `turn_failed { turn_id }`, or
-`turn_cancelled { turn_id }`. A text member begins with
+`turn_cancelled { turn_id }`. A native text member begins with
 `transcript_text_entry { entry_index, source_session_id, entry_id, entry }`. Its
 `entry` is either `user { accepted_input_id, turn_id }` or
 `assistant { turn_id, model_call_id }`. It is followed by one or more
@@ -313,6 +314,31 @@ earlier fragment carries `false`. The content is split only at UTF-8 scalar
 boundaries into fragments of at most 1 MiB of UTF-8; even empty content has one
 final empty fragment. The 1 MiB content bound leaves room below the 8 MiB frame
 limit even when every byte requires worst-case JSON escaping.
+
+An imported semantic entry always identifies its source with
+`imported_conversation_id` and `imported_entry_id` and carries the exact
+`source_speaker` attestation. That attestation is one closed object:
+`not_attested`, `attested_absent`, or `attested { speaker }`, where `speaker` is
+exactly `user` or `assistant`.
+
+An imported `Text` whose value is attested begins with
+`transcript_text_entry { entry_index, source_session_id, entry_id, entry }`. Its
+`entry` is
+`imported { imported_conversation_id, imported_entry_id, source_speaker }`, and
+its exact text follows in the same `transcript_content` fragment sequence used
+for native text, including one final empty fragment for attested empty text.
+
+Every other imported content value, including unattested or explicitly absent
+`Text`, is one `transcript_entry` whose `entry` is
+`imported { imported_conversation_id, imported_entry_id, source_speaker, content_kind }`.
+`content_kind` is one closed string discriminator: `source_event`,
+`source_message_block`, `text`, `tool_call`, `tool_result`, `thinking`,
+`redacted_thinking`, `document`, or `message_content_absent`. This conservative
+projection carries no imported tool fields, results, thinking, media,
+source-event payload, absence detail, or raw record. The complete normalized
+imported content and verbatim raw source remain authoritative only in the
+immutable imported-conversation aggregate; the wire snapshot neither fabricates
+native evidence nor replaces that authority.
 
 `entry_index` is zero-based and contiguous in frontier-member order; the first
 entry is zero and each later entry is exactly its predecessor plus one.
