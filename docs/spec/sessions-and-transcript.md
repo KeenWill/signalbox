@@ -345,9 +345,10 @@ Imported semantic entries have a different commit boundary. Imported-frontier
 session creation appends the complete selected prefix before any native turn
 exists, together with imported ancestry and the exact seed frontier. They never
 require or create accepted-input, turn, attempt, call, or native tool records.
-The first native turn's eligibility transaction extends that immutable seed
-frontier with its ordinary `OriginAcceptedInput`; every later native frontier
-follows the existing predecessor-prefix rules (INV-039).
+The first native turn's eligibility transaction creates a new successor frontier
+whose predecessor is that immutable seed frontier and whose appended member is
+the ordinary `OriginAcceptedInput`; every later native frontier follows the
+existing predecessor-prefix rules (INV-039).
 
 Pending steering has a separate safe-point boundary (INV-036). Immediately
 before a later call is prepared, the transaction appends one
@@ -450,6 +451,17 @@ agencies exist would force a semantic migration.
 that has not been taken. `Recovery`, `Model`, and `Tool` are representable but
 no implemented boundary constructs them.
 
+## Implemented transcript projections
+
+The terminal client renders the authoritative semantic-entry projection for
+`transcript` and snapshot-first `follow`, including user and assistant text plus
+completed- and failed-turn markers. The version-one wire mapping, update
+synchronization, and presentation rules are owned by
+[process-protocol](process-protocol.md). The provider-prompt projection is also
+implemented: `PreparedModelOperation::render` maps frontier entries to
+provider-neutral messages; system-prompt composition remains deferred under the
+open edges of [model-call-execution](model-call-execution.md).
+
 ## Open edges
 
 - Native fork creation remains typed but unimplemented: `SingleSource` ancestry
@@ -469,11 +481,6 @@ no implemented boundary constructs them.
 - Assistant-text, completed-turn, steering, and cancelled-turn semantic entries
   are implemented; the tool-use variant is typed but storage-blocked; refusal,
   reconciliation, approval, and delegation entry variants remain open.
-- The client transcript rendering projection over semantic entries is not
-  implemented. The provider-prompt message projection is:
-  `PreparedModelOperation::render` maps frontier entries to provider-neutral
-  messages ([model-call-execution](model-call-execution.md)); only system-prompt
-  composition remains deferred, as that page's open edge.
 - `ReplaceSessionDefaults` carries no `actor` field although the accepted
   actor-attribution design slated it for first-accepted-version adoption; its
   record family has since committed at storage version 1 without one, so under

@@ -1,0 +1,58 @@
+[package]
+name = "signalbox-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "signalbox"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.6.4", default-features = false, features = [
+    "derive",
+    "error-context",
+    "help",
+    "std",
+    "suggestions",
+    "usage",
+] }
+signalbox-process-protocol = { path = "../../crates/process-protocol" }
+tempfile = "3.27.0"
+tokio = { version = "1.53.0", default-features = false, features = [
+    "io-util",
+    "macros",
+    "net",
+    "rt-multi-thread",
+] }
+uuid = { version = "1.24.0", default-features = false, features = ["std", "v7"] }
+
+[dev-dependencies]
+expect-test = "1.5.1"
+signalbox-application = { path = "../../crates/application" }
+signalbox-domain = { path = "../../crates/domain" }
+signalbox-hubd = { path = "../hubd" }
+signalbox-model-provider-runtime = { path = "../../crates/model-provider-runtime" }
+signalbox-model-runtime = { path = "../../crates/model-runtime" }
+signalbox-model-runtime-anthropic = { path = "../../crates/model-runtime-anthropic" }
+signalbox-persistence = { path = "../../crates/persistence" }
+sqlx = { version = "0.9.0", default-features = false, features = [
+    "postgres",
+    "runtime-tokio",
+] }
+testcontainers-modules = { version = "0.15.0", default-features = false, features = [
+    "postgres",
+    "ring",
+] }
+tokio = { version = "1.53.0", default-features = false, features = [
+    "process",
+    "sync",
+    "test-util",
+    "time",
+] }
+
+[lints]
+workspace = true
