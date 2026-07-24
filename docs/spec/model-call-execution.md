@@ -172,17 +172,19 @@ that may already be terminal (INV-037).
    failure and commits no provider-failure closure.
 3. **Authorize-send transaction.** After acquiring the process-shared
    per-attempt dispatch gate, a distinct transaction reloads authority and
-   commits `Prepared -> InFlight` with the attempt's `Prepared -> Running` and a
-   `ModelCallTransition` (`InFlight`) outbox event — every durable physical
-   transition, not just the terminal one, is externally observable atomically
-   with its commit. The gate permit is retained into the send and released at
-   the runtime's first report that provider acceptance is possible
-   (`SendCommenced`); if no acceptance report ever arrives, it is released when
-   the provider interaction returns, and the ambiguous-authorization reread
-   paths drop it before returning. Why: holding the gate across the authorize
-   commit and send start serializes execution-service passes for that attempt
-   across the acceptance-capable boundary; it does not serialize interrupt
-   application.
+   commits `Prepared -> InFlight`; an initial attempt moves
+   `Prepared -> Running`, while a tool-continuation attempt already entered
+   `Running` while executing its tool batch and remains there. The same
+   transaction appends a `ModelCallTransition` (`InFlight`) outbox event — every
+   durable physical transition, not just the terminal one, is externally
+   observable atomically with its commit. The gate permit is retained into the
+   send and released at the runtime's first report that provider acceptance is
+   possible (`SendCommenced`); if no acceptance report ever arrives, it is
+   released when the provider interaction returns, and the
+   ambiguous-authorization reread paths drop it before returning. Why: holding
+   the gate across the authorize commit and send start serializes
+   execution-service passes for that attempt across the acceptance-capable
+   boundary; it does not serialize interrupt application.
 4. **Provider interaction (no transaction).** The provider port is invoked at
    most once per invocation, and exactly once only after the `InFlight` commit
    is known. It consumes the capability exactly once and returns one

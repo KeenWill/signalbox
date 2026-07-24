@@ -245,6 +245,13 @@ every request in the batch is executed or denied, one continuation transaction:
 3. derives the exact prefix-preserving frontier extension; and
 4. creates the next round's `Prepared` model call against that frontier.
 
+The same continuation turn attempt already entered `Running` when it authorized
+the tool batch. It therefore owns the new `Prepared` call without moving
+backward to `Prepared`; send authorization advances only the call to `InFlight`
+and leaves the attempt `Running`. Reconstitution and the deferred database
+assertion admit that pairing only for a continuation-chain attempt whose exact
+call frontier contains durable tool-result evidence.
+
 Those effects commit or roll back together (INV-036). A newly prepared call ends
 the invocation and is reloaded before provider capability preparation,
 preserving the existing staged-call discipline. If the call completes with
