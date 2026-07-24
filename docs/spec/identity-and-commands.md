@@ -1,10 +1,11 @@
 # Identity, commands, and telemetry correlation
 
-This page describes the implemented identity, durable-command, and telemetry
-correlation behavior of Signalbox as verified against the implementing stack
-through PR #175 (`agent/stop-requests`). The behavior lives in `crates/domain`
-(identity newtypes, command payloads, actor attribution, replay equality),
-`crates/application` (identity generation, command boundaries),
+The baseline identity, durable-command, and telemetry-correlation behavior was
+verified through PR #175 (`agent/stop-requests`). The conversation-import stack
+adds the imported identity kinds, their generators and SQL mappings, and the
+imported-frontier command family described here. The combined behavior lives in
+`crates/domain` (identity newtypes, command payloads, actor attribution, replay
+equality), `crates/application` (identity generation, command boundaries),
 `crates/persistence` (the owner-global command registry and typed record
 families), and `apps/hubd` (telemetry wiring). Storage transaction mechanics,
 locking, and the reconstitution seam are owned by
@@ -111,7 +112,7 @@ across all migrations).
 Imported-frontier session creation draws its fixed session and seed-frontier
 candidates before the transaction. It passes the same orchestration slice's
 application-owned semantic-entry generator closure into the transaction; after
-the adapter resolves the selected imported prefix under its lock, it invokes the
+the adapter checks and resolves the selected imported prefix, it invokes the
 closure once per imported entry and immediately supplies each candidate to the
 checked seed transition. No pre-transaction inventory read determines that
 cardinality.
@@ -132,14 +133,15 @@ Every persisted UUID-backed identity uses native Postgres `uuid` columns.
 Identity kind is carried by table, column, and foreign key — never by UUID
 contents (INV-002). `crates/persistence/src/mapping.rs` defines named conversion
 functions for `DurableCommandId`, `SessionId`, `AcceptedInputId`, and `TurnId`;
-the remaining persisted kinds (`TurnAttemptId`, `ContextFrontierId`,
+the remaining persisted kinds (`ImportedConversationId`,
+`ImportedTranscriptEntryId`, `TurnAttemptId`, `ContextFrontierId`,
 `SemanticTranscriptEntryId`, `DirectModelSelection`, `ModelAlias`,
 `ModelCallId`, `ProviderModelIdentity`, `ToolRequestId`) cross the SQL boundary
 through inline `from_uuid`/`into_uuid` calls at typed repository call sites (for
-example `crates/persistence/src/submit_input.rs`, `start_eligible_turn.rs`, and
-`model_execution.rs`). Every crossing is explicit; none is derive-generated.
-Version ordinals and queue positions use checked `numeric(20, 0)` mappings in
-`mapping.rs` and are not identities.
+example `crates/persistence/src/conversation_import.rs`, `submit_input.rs`,
+`start_eligible_turn.rs`, and `model_execution.rs`). Every crossing is explicit;
+none is derive-generated. Version ordinals and queue positions use checked
+`numeric(20, 0)` mappings in `mapping.rs` and are not identities.
 
 Telemetry renders identities in two forms. Application sites render the
 lowercase hyphenated RFC 9562 form (`session_id = %session.as_uuid()` in
@@ -212,11 +214,12 @@ from recorded domain rejection.
 
 `CreateSession` v1 records applied results only (its one preparation failure is
 an error, not a recorded rejection); `CreateSessionFromImportedFrontier` also
-records applied results only, because a missing imported conversation or
-frontier is a pre-claim admission error rather than an authoritative rejection;
-`ReplaceSessionDefaults` and `SubmitInput` record both applied results and
-closed, typed rejection discriminators. Authoritative rejections claim the
-identifier exactly as applied results do.
+records applied results only, because a missing conversation named by the
+frontier or a boundary absent from that conversation is a pre-claim admission
+error rather than an authoritative rejection; `ReplaceSessionDefaults` and
+`SubmitInput` record both applied results and closed, typed rejection
+discriminators. Authoritative rejections claim the identifier exactly as applied
+results do.
 
 ## Replay and equality
 
@@ -248,11 +251,11 @@ durable operation, before any current-state validation (INV-012):
 
 After registry inspection and before claiming an unseen identifier, a command
 may perform an owner-specified pre-claim admission read.
-`CreateSessionFromImportedFrontier` uses that phase to resolve the selected
-imported conversation and boundary; a missing target returns the corresponding
-admission error without claiming the identifier. This is distinct from an
-authoritative rejection, which is derived only after claim and stored for
-replay.
+`CreateSessionFromImportedFrontier` uses that phase to load the conversation
+named by `frontier.conversation()` and resolve the frontier's inclusive
+boundary; a missing target returns the corresponding admission error without
+claiming the identifier. This is distinct from an authoritative rejection, which
+is derived only after claim and stored for replay.
 
 First handling may re-derive the terminal result inside the claim transaction:
 `ReplaceSessionDefaults` applies through a compare-and-set `UPDATE` on
