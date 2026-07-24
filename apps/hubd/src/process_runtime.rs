@@ -2689,7 +2689,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn imported_entries_map_only_to_version_two_conservative_shapes()
+    async fn s28_imported_entries_map_only_to_version_two_conservative_shapes()
     -> Result<(), Box<dyn Error>> {
         let request_id = RequestId::try_new(11)?;
         let source_session = SessionId::from_uuid(Uuid::from_u128(1));

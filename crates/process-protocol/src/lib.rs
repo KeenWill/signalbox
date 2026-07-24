@@ -2004,7 +2004,7 @@ mod tests {
     }
 
     #[test]
-    fn inv033_imported_snapshot_entries_exist_only_in_version_two()
+    fn inv033_imported_text_entries_exist_only_in_version_two()
     -> Result<(), Box<dyn std::error::Error>> {
         let imported_text = ServerMessage::TranscriptTextEntry {
             entry_index: CanonicalU64::new(0),
@@ -2030,21 +2030,32 @@ mod tests {
             r#""entry":{"type":"imported","imported_conversation_id":"00000000-0000-0000-0000-000000000003","imported_entry_id":"00000000-0000-0000-0000-000000000004","source_speaker":{"type":"attested","speaker":"user"}}"#
         ));
         assert_eq!(decode_server_line(&encoded_text)?, text_frame);
+        Ok(())
+    }
 
+    #[test]
+    fn inv033_imported_conservative_entries_exist_only_in_version_two()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let imported_conservative = ServerMessage::TranscriptEntry {
+            entry_index: CanonicalU64::new(1),
+            source_session_id: uuid(1),
+            entry_id: uuid(5),
+            entry: TranscriptEntry::Imported {
+                imported_conversation_id: uuid(3),
+                imported_entry_id: uuid(6),
+                source_speaker: ImportedSourceSpeaker::NotAttested {},
+                content_kind: ImportedContentKind::ToolResult,
+            },
+        };
+        assert_eq!(
+            ServerFrame::try_new(request(9)?, imported_conservative.clone())
+                .expect_err("version one must retain its native-only vocabulary"),
+            FrameValidationError::MessageRequiresVersionTwo
+        );
         let conservative = ServerFrame::try_new_for_version(
             ProtocolVersion::Two,
             request(9)?,
-            ServerMessage::TranscriptEntry {
-                entry_index: CanonicalU64::new(1),
-                source_session_id: uuid(1),
-                entry_id: uuid(5),
-                entry: TranscriptEntry::Imported {
-                    imported_conversation_id: uuid(3),
-                    imported_entry_id: uuid(6),
-                    source_speaker: ImportedSourceSpeaker::NotAttested {},
-                    content_kind: ImportedContentKind::ToolResult,
-                },
-            },
+            imported_conservative,
         )?;
         let encoded_conservative = encode_server_line(&conservative)?;
         assert!(

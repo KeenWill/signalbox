@@ -442,8 +442,7 @@ async fn process_runtime_lists_the_alias_session_projection() -> Result<(), Box<
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s28_imported_session_requires_v2_and_streams_its_conservative_seed_snapshot()
--> Result<(), Box<dyn Error>> {
+async fn s28_version_one_read_rejects_imported_session() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let session_id = create_imported_session(&runtime.pool).await?;
 
@@ -461,6 +460,17 @@ async fn s28_imported_session_requires_v2_and_streams_its_conservative_seed_snap
             ..
         } if message.contains("version 2")
     ));
+
+    drop(legacy_read);
+    runtime.stop().await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s28_version_two_read_streams_conservative_imported_seed_snapshot()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let session_id = create_imported_session(&runtime.pool).await?;
 
     let mut upgraded_read = Connection::connect(runtime.socket()).await?;
     upgraded_read
@@ -530,6 +540,17 @@ async fn s28_imported_session_requires_v2_and_streams_its_conservative_seed_snap
         } if turn_count.value() == 0 && entry_count.value() == 2
     ));
 
+    drop(upgraded_read);
+    runtime.stop().await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s28_version_one_submit_rejects_imported_session_without_mutation()
+-> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let session_id = create_imported_session(&runtime.pool).await?;
+
     let mut legacy_submit = Connection::connect(runtime.socket()).await?;
     legacy_submit
         .request(
@@ -556,6 +577,17 @@ async fn s28_imported_session_requires_v2_and_streams_its_conservative_seed_snap
             .await?;
     assert_eq!(turn_count, 0);
 
+    drop(legacy_submit);
+    runtime.stop().await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s28_version_two_submit_accepts_imported_session_continuation() -> Result<(), Box<dyn Error>>
+{
+    let runtime = RunningRuntime::start().await?;
+    let session_id = create_imported_session(&runtime.pool).await?;
+
     let mut upgraded_submit = Connection::connect(runtime.socket()).await?;
     upgraded_submit
         .request_version(
@@ -579,7 +611,7 @@ async fn s28_imported_session_requires_v2_and_streams_its_conservative_seed_snap
         } if *submitted == session_id
     ));
 
-    drop((legacy_read, upgraded_read, legacy_submit, upgraded_submit));
+    drop(upgraded_submit);
     runtime.stop().await
 }
 
