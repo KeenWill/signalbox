@@ -82,6 +82,43 @@ model-input rendering, append-only Postgres storage, the domain/application
 spines, and opt-in content-silent real-transcript validation. Native lifecycle,
 slot locking, execution evidence, retry, and outbox semantics do not change.
 
+## 2026-07-23 — Configure process-socket mode through its retained identity
+
+**Context.** Unix socket bind does not accept a filesystem mode. Temporarily
+changing `umask` is process-wide, so a module-local mutex cannot prevent
+unrelated threads from creating files under the temporary mask.
+
+**Decision.** Bind the socket unlistening inside its verified owner-private
+parent, retain the observed inode at `<socket-path>.identity`, set exact `0600`
+mode through that retained name, and revalidate both names and their modes
+before listening. Never change the process-wide creation mask.
+
+**Rejected alternatives.** A mutex coordinates only participating creators.
+Leaving a restrictive mask installed changes unrelated process behavior.
+Listening before permissioning admits clients before validation.
+
+**Affects.** Guarded local process-socket bind, its tests, and the process
+transport specification.
+
+## 2026-07-23 — Pin compared process-socket identities
+
+**Context.** A device-and-inode comparison cannot prove pathname identity after
+the observed socket has no remaining filesystem link: its inode could be reused
+for a replacement before revalidation or cleanup.
+
+**Decision.** While holding the existing path lock, retain each compared socket
+with a hard link at the reserved adjacent `<socket-path>.identity` name. Reclaim
+an owned socket left there by an abrupt prior exit, fail closed on another
+entry, and hold the active listener's link through public-path removal.
+
+**Rejected alternatives.** Comparing device and inode without retaining the
+inode admits reuse. Opening a socket node as a metadata descriptor is not
+portable to macOS. Random link names leak unbounded directory entries after
+abrupt exits.
+
+**Affects.** Stale-socket recovery, guarded bind, graceful cleanup, and the
+local process-transport specification.
+
 ## 2026-07-23 — Bound process-frame JSON container depth
 
 **Context.** The 8 MiB frame limit bounds input bytes, but duplicate-member
@@ -200,6 +237,29 @@ implementation.
 **Affects.** Hub deployment requirements, database configuration, fencing
 documentation, and operator guidance.
 
+## 2026-07-23 — Bound each single-hub guard ping at one second
+
+**Context.** The recorded guard polling cadence does not bound how long one
+`PgConnection::ping` may remain pending. An unbounded response wait would also
+leave fatal guard-loss detection unbounded during a database stall or network
+partition.
+
+**Decision.** Give each guard-check query a separate one-second response
+deadline. A deadline expiry is fatal guard loss for that hub incarnation, just
+like a database error; the runtime does not retry or reacquire in place. Treat
+one second as a provisional operational threshold independent of the polling
+cadence.
+
+**Rejected alternatives.** No query deadline can stall the supervisor
+indefinitely. Retrying within the incarnation delays guarded startup recovery
+without proving that the same session still owns authority. A longer threshold
+widens the ambiguous-health window; a shorter one increases false fatal exits
+under ordinary transient latency before measurements justify that trade.
+
+**Affects.** The response deadline and failure classification of
+`SingleHubGuard::check`; it does not change the polling cadence or the
+generation-fence protocol.
+
 ## 2026-07-23 — Bind follow rereads to their terminal trigger
 
 **Context.** A transcript reread started by one terminal follow event can
@@ -235,6 +295,46 @@ platform-specific exception would make the same protocol path carry different
 trust guarantees.
 
 **Affects.** Local process-socket deployment, validation, and startup tests.
+
+## 2026-07-23 — Bound the local process-socket backlog at 128
+
+**Context.** The guarded Unix listener must select a finite kernel accept queue.
+The value affects only how many already-authenticated local connection attempts
+can wait before hubd accepts them; request concurrency and application admission
+remain separately bounded by runtime task ownership.
+
+**Decision.** Request a backlog of 128 when the verified owner-only process
+socket begins listening. Treat it as a provisional local-transport capacity, not
+a protocol or application limit.
+
+**Rejected alternatives.** Leaving the value implicit would make behavior depend
+on a library default that the raw listen boundary does not provide. One would
+make ordinary local bursts fragile. The platform maximum would add no useful
+bound and is still kernel-clamped.
+
+**Affects.** Only the hub-owned local Unix listener's pending connection queue;
+it does not change framing, request ordering, or durable admission.
+
+## 2026-07-23 — Use Rustix for guarded Unix-socket construction
+
+**Context.** The process socket must remain unlistening until its path identity,
+effective-user ownership, and exact permissions are verified. The standard
+library binds and listens in one operation and exposes neither the effective
+user ID nor a separate safe bind/listen sequence. Workspace code also forbids
+unsafe blocks.
+
+**Decision.** hubd directly uses the already locked Rustix crate with only its
+filesystem, network, process, and standard-library features. Rustix supplies
+safe effective-user lookup and the unlistening Unix socket operations; the
+result is converted to Tokio only after path verification and `listen`.
+
+**Rejected alternatives.** `std::os::unix::net::UnixListener::bind` listens too
+early. A local `libc` adapter would require unsafe code and duplicate a
+well-audited syscall abstraction. A subprocess user-ID lookup would add parsing
+and executable-path failure modes without solving separate bind/listen.
+
+**Affects.** The hub-owned local process transport and its direct dependency
+surface; no domain, persistence, or wire representation changes.
 
 ## 2026-07-23 — Reuse Serde and uuid for the closed process wire crate
 
