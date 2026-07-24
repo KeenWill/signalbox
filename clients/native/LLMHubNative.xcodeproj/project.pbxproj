@@ -1,0 +1,578 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXContainerItemProxy section */
+		48F6765C2FAD5A4C007FA401 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 48F676462FAD5A49007FA401 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 48F6764D2FAD5A49007FA401;
+			remoteInfo = LLMHubNative;
+		};
+		48F676662FAD5A4C007FA401 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 48F676462FAD5A49007FA401 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 48F6764D2FAD5A49007FA401;
+			remoteInfo = LLMHubNative;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		48F6764E2FAD5A49007FA401 /* LLMHubNative.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LLMHubNative.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		48F6765B2FAD5A4C007FA401 /* LLMHubNativeTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LLMHubNativeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		48F676652FAD5A4C007FA401 /* LLMHubNativeUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LLMHubNativeUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		48F676502FAD5A49007FA401 /* LLMHubNative */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = LLMHubNative;
+			sourceTree = "<group>";
+		};
+		48F6765E2FAD5A4C007FA401 /* LLMHubNativeTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = LLMHubNativeTests;
+			sourceTree = "<group>";
+		};
+		48F676682FAD5A4C007FA401 /* LLMHubNativeUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = LLMHubNativeUITests;
+			sourceTree = "<group>";
+		};
+		48F676782FAD7000007FA401 /* Sources */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Sources;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		48F6764B2FAD5A49007FA401 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		48F676582FAD5A4C007FA401 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		48F676622FAD5A4C007FA401 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		48F676452FAD5A49007FA401 = {
+			isa = PBXGroup;
+			children = (
+				48F676502FAD5A49007FA401 /* LLMHubNative */,
+				48F676782FAD7000007FA401 /* Sources */,
+				48F6765E2FAD5A4C007FA401 /* LLMHubNativeTests */,
+				48F676682FAD5A4C007FA401 /* LLMHubNativeUITests */,
+				48F6764F2FAD5A49007FA401 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		48F6764F2FAD5A49007FA401 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				48F6764E2FAD5A49007FA401 /* LLMHubNative.app */,
+				48F6765B2FAD5A4C007FA401 /* LLMHubNativeTests.xctest */,
+				48F676652FAD5A4C007FA401 /* LLMHubNativeUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		48F6764D2FAD5A49007FA401 /* LLMHubNative */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 48F6766F2FAD5A4C007FA401 /* Build configuration list for PBXNativeTarget "LLMHubNative" */;
+			buildPhases = (
+				48F6764A2FAD5A49007FA401 /* Sources */,
+				48F6764B2FAD5A49007FA401 /* Frameworks */,
+				48F6764C2FAD5A49007FA401 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				48F676502FAD5A49007FA401 /* LLMHubNative */,
+				48F676782FAD7000007FA401 /* Sources */,
+			);
+			name = LLMHubNative;
+			packageProductDependencies = (
+			);
+			productName = LLMHubNative;
+			productReference = 48F6764E2FAD5A49007FA401 /* LLMHubNative.app */;
+			productType = "com.apple.product-type.application";
+		};
+		48F6765A2FAD5A4C007FA401 /* LLMHubNativeTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 48F676722FAD5A4C007FA401 /* Build configuration list for PBXNativeTarget "LLMHubNativeTests" */;
+			buildPhases = (
+				48F676572FAD5A4C007FA401 /* Sources */,
+				48F676582FAD5A4C007FA401 /* Frameworks */,
+				48F676592FAD5A4C007FA401 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				48F6765D2FAD5A4C007FA401 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				48F6765E2FAD5A4C007FA401 /* LLMHubNativeTests */,
+			);
+			name = LLMHubNativeTests;
+			packageProductDependencies = (
+			);
+			productName = LLMHubNativeTests;
+			productReference = 48F6765B2FAD5A4C007FA401 /* LLMHubNativeTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		48F676642FAD5A4C007FA401 /* LLMHubNativeUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 48F676752FAD5A4C007FA401 /* Build configuration list for PBXNativeTarget "LLMHubNativeUITests" */;
+			buildPhases = (
+				48F676612FAD5A4C007FA401 /* Sources */,
+				48F676622FAD5A4C007FA401 /* Frameworks */,
+				48F676632FAD5A4C007FA401 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				48F676672FAD5A4C007FA401 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				48F676682FAD5A4C007FA401 /* LLMHubNativeUITests */,
+			);
+			name = LLMHubNativeUITests;
+			packageProductDependencies = (
+			);
+			productName = LLMHubNativeUITests;
+			productReference = 48F676652FAD5A4C007FA401 /* LLMHubNativeUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		48F676462FAD5A49007FA401 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2640;
+				LastUpgradeCheck = 2640;
+				TargetAttributes = {
+					48F6764D2FAD5A49007FA401 = {
+						CreatedOnToolsVersion = 26.4.1;
+					};
+					48F6765A2FAD5A4C007FA401 = {
+						CreatedOnToolsVersion = 26.4.1;
+						TestTargetID = 48F6764D2FAD5A49007FA401;
+					};
+					48F676642FAD5A4C007FA401 = {
+						CreatedOnToolsVersion = 26.4.1;
+						TestTargetID = 48F6764D2FAD5A49007FA401;
+					};
+				};
+			};
+			buildConfigurationList = 48F676492FAD5A49007FA401 /* Build configuration list for PBXProject "LLMHubNative" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 48F676452FAD5A49007FA401;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 48F6764F2FAD5A49007FA401 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				48F6764D2FAD5A49007FA401 /* LLMHubNative */,
+				48F6765A2FAD5A4C007FA401 /* LLMHubNativeTests */,
+				48F676642FAD5A4C007FA401 /* LLMHubNativeUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		48F6764C2FAD5A49007FA401 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		48F676592FAD5A4C007FA401 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		48F676632FAD5A4C007FA401 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		48F6764A2FAD5A49007FA401 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		48F676572FAD5A4C007FA401 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		48F676612FAD5A4C007FA401 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		48F6765D2FAD5A4C007FA401 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 48F6764D2FAD5A49007FA401 /* LLMHubNative */;
+			targetProxy = 48F6765C2FAD5A4C007FA401 /* PBXContainerItemProxy */;
+		};
+		48F676672FAD5A4C007FA401 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 48F6764D2FAD5A49007FA401 /* LLMHubNative */;
+			targetProxy = 48F676662FAD5A4C007FA401 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		48F6766D2FAD5A4C007FA401 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.4;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				SDKROOT = auto;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		48F6766E2FAD5A4C007FA401 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.4;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				SDKROOT = auto;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SWIFT_COMPILATION_MODE = wholemodule;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		48F676702FAD5A4C007FA401 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Resources/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = co.rdwd.LLMHubNative;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2,6";
+			};
+			name = Debug;
+		};
+		48F676712FAD5A4C007FA401 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Resources/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = co.rdwd.LLMHubNative;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2,6";
+			};
+			name = Release;
+		};
+		48F676732FAD5A4C007FA401 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.4;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = co.rdwd.LLMHubNativeTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/LLMHubNative.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/LLMHubNative";
+			};
+			name = Debug;
+		};
+		48F676742FAD5A4C007FA401 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.4;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = co.rdwd.LLMHubNativeTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/LLMHubNative.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/LLMHubNative";
+			};
+			name = Release;
+		};
+		48F676762FAD5A4C007FA401 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = co.rdwd.LLMHubNativeUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = LLMHubNative;
+			};
+			name = Debug;
+		};
+		48F676772FAD5A4C007FA401 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = co.rdwd.LLMHubNativeUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = LLMHubNative;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		48F676492FAD5A49007FA401 /* Build configuration list for PBXProject "LLMHubNative" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				48F6766D2FAD5A4C007FA401 /* Debug */,
+				48F6766E2FAD5A4C007FA401 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		48F6766F2FAD5A4C007FA401 /* Build configuration list for PBXNativeTarget "LLMHubNative" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				48F676702FAD5A4C007FA401 /* Debug */,
+				48F676712FAD5A4C007FA401 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		48F676722FAD5A4C007FA401 /* Build configuration list for PBXNativeTarget "LLMHubNativeTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				48F676732FAD5A4C007FA401 /* Debug */,
+				48F676742FAD5A4C007FA401 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		48F676752FAD5A4C007FA401 /* Build configuration list for PBXNativeTarget "LLMHubNativeUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				48F676762FAD5A4C007FA401 /* Debug */,
+				48F676772FAD5A4C007FA401 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 48F676462FAD5A49007FA401 /* Project object */;
+}
