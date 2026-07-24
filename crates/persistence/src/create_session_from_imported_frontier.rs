@@ -12,15 +12,16 @@ use signalbox_domain::{
     CreateSessionFromImportedFrontierPreparationFailure,
     CreateSessionFromImportedFrontierReconstitutionFailure,
     CreateSessionFromImportedFrontierReconstitutionInput, DirectModelSelection, DurableCommandId,
-    ImportedConversation, ImportedConversationId, ImportedSessionRelationship,
+    ImportedConversation, ImportedConversationId, ImportedSessionReconstitutionFailure,
+    ImportedSessionReconstitutionInput, ImportedSessionRelationship,
     ImportedSessionSeedHeaderReconstitutionInput, ImportedSessionSeedReconstitutionInput,
     ImportedTranscriptEntryId, ImportedTranscriptPosition, ModelAlias, ModelSelectionRequest,
-    PreparedCreateSessionFromImportedFrontier, ReconstitutedSessionCreationFromImportedFrontier,
-    ResolvedContextFrontierReconstitutionInput, SemanticTranscriptEntryId,
-    SemanticTranscriptEntryPayload, SemanticTranscriptEntryReconstitutionInput,
-    SemanticTranscriptEntryRef, Session, SessionConfigurationDefaults,
-    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
-    SessionId, TranscriptAncestry,
+    PreparedCreateSessionFromImportedFrontier, ReconstitutedImportedSession,
+    ReconstitutedSessionCreationFromImportedFrontier, ResolvedContextFrontierReconstitutionInput,
+    SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
+    SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
+    SessionCreationProvenance, SessionId, TranscriptAncestry,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -80,6 +81,8 @@ pub enum ImportedSessionCorruption {
     CreationDomain(CreateSessionFromImportedFrontierReconstitutionFailure),
     /// Stored bounded current-session facts fail domain-owned correlation.
     BoundedCurrentDomain(BoundedImportedSessionReconstitutionFailure),
+    /// Stored complete imported-session facts fail domain-owned correlation.
+    CurrentDomain(ImportedSessionReconstitutionFailure),
 }
 
 impl fmt::Display for ImportedSessionCorruption {
@@ -109,6 +112,12 @@ impl fmt::Display for ImportedSessionCorruption {
                 write!(
                     formatter,
                     "bounded current imported-session reconstitution failed: {failure:?}"
+                )
+            }
+            Self::CurrentDomain(failure) => {
+                write!(
+                    formatter,
+                    "complete current imported-session reconstitution failed: {failure:?}"
                 )
             }
         }
@@ -809,6 +818,40 @@ pub(crate) fn reconstitute_bounded_current(
     )
     .reconstitute()
     .map_err(|error| ImportedSessionCorruption::BoundedCurrentDomain(error.failure()).into())
+}
+
+pub(crate) async fn load_complete_current(
+    connection: &mut PgConnection,
+    session: &Session,
+) -> Result<ReconstitutedImportedSession, ImportedSessionRepositoryError> {
+    let TranscriptAncestry::ImportedConversation {
+        source_frontier, ..
+    } = session.creation_provenance().ancestry()
+    else {
+        return Err(ImportedSessionCorruption::Inconsistent("complete current ancestry").into());
+    };
+    let conversation = load_imported_conversation(connection, source_frontier.conversation())
+        .await?
+        .ok_or(ImportedSessionCorruption::Missing("imported conversation"))?;
+    let projection = load_seed_projection(connection, session.id(), &conversation).await?;
+    let current_defaults = session.current_configuration_defaults();
+
+    ImportedSessionReconstitutionInput::new(
+        session.id(),
+        session.id(),
+        session.creation_provenance(),
+        session.id(),
+        current_defaults.version(),
+        session.id(),
+        current_defaults.version(),
+        *current_defaults.defaults(),
+        conversation,
+        projection.seed_records,
+        projection.seed_snapshots,
+        projection.semantic_entries,
+    )
+    .reconstitute()
+    .map_err(|error| ImportedSessionCorruption::CurrentDomain(error.failure()).into())
 }
 
 struct SeedProjection {
