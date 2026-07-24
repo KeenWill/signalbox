@@ -27,8 +27,9 @@ use crate::{
     ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
     SemanticTranscriptEntry, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session, SessionId,
-    SessionInputPosition, TranscriptAncestry, TurnAttemptId, TurnConfigurationProvenance,
-    TurnDisposition, TurnId, UnstoppedAttemptDisposition, derive_accepted_input_total_order,
+    SessionInputPosition, ToolRequestId, TranscriptAncestry, TurnAttemptId,
+    TurnConfigurationProvenance, TurnDisposition, TurnId, UnstoppedAttemptDisposition,
+    derive_accepted_input_total_order,
 };
 
 /// The lifecycle fact stored for one accepted-input scheduling record.
@@ -354,6 +355,13 @@ pub struct ActiveTurnSchedulingReconstitutionInput {
 enum StoredActiveTurnPhase {
     Prepared,
     Running,
+    RunningToolBatch {
+        session: SessionId,
+        producing_call: crate::ModelCallId,
+        yielded_snapshot: ResolvedContextFrontierSnapshot,
+        batch_attempt: Option<TurnAttemptId>,
+        requests: Box<[ToolRequestId]>,
+    },
     StopRequested {
         call: crate::ModelCallId,
         interrupt: AppliedInterruptCommandResult,
@@ -387,6 +395,34 @@ impl ActiveTurnSchedulingReconstitutionInput {
             owning_turn,
             current_attempt: Some(current_attempt),
             state: StoredActiveTurnPhase::Running,
+        }
+    }
+
+    /// Supplies a stored running attempt plus independently reconstituted
+    /// evidence for its active tool batch.
+    pub fn running_with_tool_batch(
+        owning_turn: TurnId,
+        current_attempt: TurnAttemptId,
+        batch: &crate::ToolBatch,
+    ) -> Self {
+        Self {
+            owning_turn,
+            current_attempt: Some(current_attempt),
+            state: StoredActiveTurnPhase::RunningToolBatch {
+                session: batch.session(),
+                producing_call: batch.producing_call(),
+                yielded_snapshot: batch.yielded_snapshot().clone(),
+                batch_attempt: match batch.phase() {
+                    crate::ToolBatchPhase::Executing { turn_attempt } => Some(turn_attempt),
+                    crate::ToolBatchPhase::AwaitingApproval { .. }
+                    | crate::ToolBatchPhase::AwaitingRecovery { .. } => None,
+                },
+                requests: batch
+                    .requests()
+                    .iter()
+                    .map(crate::ToolRequest::id)
+                    .collect(),
+            },
         }
     }
 
@@ -587,9 +623,11 @@ impl ActiveTurnSchedulingReconstitutionInput {
         )]
         let current_attempt = match &self.state {
             StoredActiveTurnPhase::Prepared => current_attempt,
-            StoredActiveTurnPhase::Running => current_attempt
-                .begin_running()
-                .expect("a stored running attempt starts from the validated prepared value"),
+            StoredActiveTurnPhase::Running | StoredActiveTurnPhase::RunningToolBatch { .. } => {
+                current_attempt
+                    .begin_running()
+                    .expect("a stored running attempt starts from the validated prepared value")
+            }
             StoredActiveTurnPhase::StopRequested { interrupt, .. } => current_attempt
                 .begin_running()
                 .and_then(|attempt| attempt.request_cancellation(interrupt.proof()))
@@ -1710,6 +1748,16 @@ pub struct AcceptedInputSchedulingProjection {
     attempt_owners: BTreeMap<TurnAttemptId, TurnId>,
     active_model_call_recovery: Option<ActiveModelCallRecoveryWait>,
     active_tool_recovery_attempt: Option<EndedTurnAttempt>,
+    active_executing_tool_batch: Option<ActiveExecutingToolBatchCorrelation>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ActiveExecutingToolBatchCorrelation {
+    session: SessionId,
+    turn: TurnId,
+    producing_call: crate::ModelCallId,
+    yielded_frontier: ContextFrontierId,
+    turn_attempt: TurnAttemptId,
 }
 
 impl AcceptedInputSchedulingProjection {
@@ -1845,8 +1893,17 @@ impl AcceptedInputSchedulingProjection {
         interrupt: AppliedInterruptCommandResult,
         identities: crate::CancelledModelCallTurnIdentities,
     ) -> Result<crate::CancelledModelCallTurn, crate::ModelCallClosureError> {
-        if self.resolved_snapshot(batch.yielded_snapshot().frontier().snapshot())
-            != Some(batch.yielded_snapshot())
+        let Some(correlation) = self.active_executing_tool_batch else {
+            return Err(crate::ModelCallClosureError::InterruptCorrelationMismatch);
+        };
+        let crate::ToolBatchPhase::Executing { turn_attempt } = batch.phase() else {
+            return Err(crate::ModelCallClosureError::AttemptStateMismatch);
+        };
+        if correlation.session != batch.session()
+            || correlation.turn != batch.turn()
+            || correlation.producing_call != batch.producing_call()
+            || correlation.yielded_frontier != batch.yielded_snapshot().frontier().snapshot()
+            || correlation.turn_attempt != turn_attempt
         {
             return Err(crate::ModelCallClosureError::InterruptCorrelationMismatch);
         }
@@ -2922,6 +2979,7 @@ fn reconstitute_inner(
                                     StoredActiveTurnPhase::Running,
                                     crate::ModelCallReconstitutionState::InFlight,
                                 ) => true,
+                                (StoredActiveTurnPhase::RunningToolBatch { .. }, _) => false,
                                 (
                                     StoredActiveTurnPhase::StopRequested { call, .. },
                                     crate::ModelCallReconstitutionState::CancellationRequested,
@@ -3207,6 +3265,7 @@ fn reconstitute_inner(
     let mut active = None;
     let mut active_model_call_recovery = None;
     let mut active_tool_recovery_attempt = None;
+    let mut active_executing_tool_batch = None;
     let mut queued_seen = false;
     let mut referenced_snapshots = consumed_snapshots;
     referenced_snapshots.extend(initial_seed_frontier);
@@ -3269,14 +3328,120 @@ fn reconstitute_inner(
                     &mut referenced_snapshots,
                 )?;
                 let canonical_phase = match &phase.state {
-                    StoredActiveTurnPhase::Prepared | StoredActiveTurnPhase::Running => phase
-                        .canonical_evidence_free_phase()
-                        .ok_or(
+                    StoredActiveTurnPhase::Prepared | StoredActiveTurnPhase::Running => {
+                        phase.canonical_evidence_free_phase().ok_or(
                             AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
                                 turn,
                                 accepted_input: record.accepted_input.id(),
                             },
-                        )?,
+                        )?
+                    }
+                    StoredActiveTurnPhase::RunningToolBatch {
+                        session: batch_session,
+                        producing_call,
+                        yielded_snapshot,
+                        batch_attempt,
+                        requests,
+                    } => {
+                        let yielded_frontier = yielded_snapshot.frontier().snapshot();
+                        let stored_yielded = snapshots.get(&yielded_frontier);
+                        let producing = model_calls.get(producing_call);
+                        let source = producing.and_then(|call| match call {
+                            crate::ReconstitutedModelCall::Ended(call) => {
+                                snapshots.get(&call.frontier().snapshot())
+                            }
+                            crate::ReconstitutedModelCall::Current(_) => None,
+                        });
+                        let mut observed_requests = Vec::new();
+                        let suffix_valid = source.is_some_and(|source| {
+                            source.is_semantic_prefix_of(yielded_snapshot)
+                                && source.entry_count() < yielded_snapshot.entry_count()
+                                && yielded_snapshot
+                                    .ordered_entries()
+                                    .skip(source.entry_count())
+                                    .all(|reference| {
+                                        let Some(entry) = semantic_entries.get(&reference) else {
+                                            return false;
+                                        };
+                                        match entry.payload() {
+                                            SemanticTranscriptEntryPayload::AssistantText {
+                                                producing_call: entry_call,
+                                                ..
+                                            } => *entry_call == *producing_call,
+                                            SemanticTranscriptEntryPayload::AssistantToolUse {
+                                                producing_call: entry_call,
+                                                request,
+                                            } if *entry_call == *producing_call => {
+                                                observed_requests.push(*request);
+                                                true
+                                            }
+                                            SemanticTranscriptEntryPayload::AssistantToolUse {
+                                                ..
+                                            }
+                                            | SemanticTranscriptEntryPayload::Imported { .. }
+                                            | SemanticTranscriptEntryPayload::OriginAcceptedInput {
+                                                ..
+                                            }
+                                            | SemanticTranscriptEntryPayload::SteeringAcceptedInput {
+                                                ..
+                                            }
+                                            | SemanticTranscriptEntryPayload::ToolExecutionResult {
+                                                ..
+                                            }
+                                            | SemanticTranscriptEntryPayload::ToolDenied { .. }
+                                            | SemanticTranscriptEntryPayload::ToolClosed { .. }
+                                            | SemanticTranscriptEntryPayload::TurnCompleted { .. }
+                                            | SemanticTranscriptEntryPayload::TurnFailed { .. }
+                                            | SemanticTranscriptEntryPayload::TurnCancelled { .. } => {
+                                                false
+                                            }
+                                        }
+                                    })
+                        });
+                        let producing_matches = matches!(
+                            producing,
+                            Some(crate::ReconstitutedModelCall::Ended(call))
+                                if call.turn() == turn
+                                    && call.disposition() == ModelCallDisposition::Completed
+                        );
+                        let Some(turn_attempt) = *batch_attempt else {
+                            return Err(
+                                AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
+                                    turn,
+                                    accepted_input: record.accepted_input.id(),
+                                },
+                            );
+                        };
+                        if *batch_session != session
+                            || Some(turn_attempt) != phase.current_attempt
+                            || stored_yielded != Some(yielded_snapshot)
+                            || !producing_matches
+                            || !suffix_valid
+                            || observed_requests.as_slice() != requests.as_ref()
+                        {
+                            return Err(
+                                AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
+                                    turn,
+                                    accepted_input: record.accepted_input.id(),
+                                },
+                            );
+                        }
+                        referenced_model_calls.insert(*producing_call);
+                        referenced_snapshots.insert(yielded_frontier);
+                        active_executing_tool_batch = Some(ActiveExecutingToolBatchCorrelation {
+                            session,
+                            turn,
+                            producing_call: *producing_call,
+                            yielded_frontier,
+                            turn_attempt,
+                        });
+                        phase.canonical_evidence_free_phase().ok_or(
+                            AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
+                                turn,
+                                accepted_input: record.accepted_input.id(),
+                            },
+                        )?
+                    }
                     StoredActiveTurnPhase::AwaitingApproval { wait } => {
                         if wait.session() != session || wait.turn() != turn {
                             return Err(
@@ -4373,6 +4538,7 @@ fn reconstitute_inner(
         attempt_owners,
         active_model_call_recovery,
         active_tool_recovery_attempt,
+        active_executing_tool_batch,
     })
 }
 
@@ -4421,6 +4587,7 @@ fn reconstitute_active_acceptance_tail(
             }
             StoredActiveTurnPhase::Prepared
             | StoredActiveTurnPhase::Running
+            | StoredActiveTurnPhase::RunningToolBatch { .. }
             | StoredActiveTurnPhase::AwaitingApproval { .. } => None,
         },
         AcceptedInputTurnSchedulingRecordState::Queued
@@ -6601,6 +6768,115 @@ mod tests {
                 if current_attempt.id() == expected_attempt
                     && current_attempt.state() == &CurrentTurnAttemptState::Running
         ));
+    }
+
+    /// S07 / INV-006 / INV-011: a running continuation retains the exact
+    /// independently checked tool batch correlation needed by interruption.
+    #[test]
+    fn s07_inv006_inv011_running_tool_batch_correlation_is_reconstituted() {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let origin_entry = ActiveReconstitutionFacts::matching_origin_entry();
+        let starting_frontier = ActiveReconstitutionFacts::matching_starting_frontier();
+        let producing_call = model_call_id(50);
+        let continuation_attempt = turn_attempt_id(60);
+        let request_id = tool_request_id(70);
+        let assistant_tool_entry = semantic_entry(31);
+        let yielded_frontier = frontier(41);
+        let request = ToolRequestReconstitutionInput::new(
+            request_id,
+            session.id(),
+            active.turn(),
+            producing_call,
+            ToolRequestOrdinal::from_u32(0),
+            ToolName::try_new(String::from("current_time")).expect("fixture name is canonical"),
+            NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+                .expect("fixture arguments are canonical"),
+        )
+        .into_request();
+        let approval = ToolApprovalResolutionReconstitutionInput::new(
+            request_id,
+            ToolApprovalDecision::Approve,
+            ToolDecisionSource::OwnerCommand,
+        )
+        .reconstitute()
+        .expect("owner approval is implemented");
+        let yielded = ResolvedContextFrontierSnapshot::try_from_candidate(
+            session.id(),
+            yielded_frontier.id(),
+            vec![
+                origin_entry.reference(&session),
+                assistant_tool_entry.reference(&session),
+            ],
+        )
+        .expect("the tool response extends the starting frontier");
+        let batch = ToolBatchReconstitutionInput::new(
+            session.id(),
+            active.turn(),
+            producing_call,
+            yielded,
+            vec![request],
+            vec![approval],
+            vec![],
+            ToolBatchPhaseReconstitutionInput::Executing {
+                turn_attempt: continuation_attempt,
+            },
+        )
+        .reconstitute()
+        .expect("the complete approved batch is executing");
+        let mut facts = ActiveReconstitutionFacts::matching(&session, active);
+        facts.replace_active_phase(
+            ActiveTurnSchedulingReconstitutionInput::running_with_tool_batch(
+                active.turn(),
+                continuation_attempt,
+                &batch,
+            ),
+        );
+        facts
+            .semantic_entries
+            .push(SemanticTranscriptEntryReconstitutionInput::new(
+                assistant_tool_entry.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::AssistantToolUse {
+                    producing_call,
+                    request: request_id,
+                },
+            ));
+        facts
+            .snapshots
+            .push(yielded_frontier.snapshot(&session, &[origin_entry, assistant_tool_entry]));
+        let model_call = ModelCallReconstitutionInput::new(
+            producing_call,
+            active.turn(),
+            turn_attempt_id(59),
+            FrozenModelSelection::Direct(direct(1)),
+            ResolvedProviderTarget::naming(provider_model_identity(51)),
+            starting_frontier.id(),
+            ModelCallReconstitutionState::Terminal(ModelCallDisposition::Completed),
+        );
+
+        let projection = facts
+            .input()
+            .with_model_call_facts(
+                vec![crate::PinnedProviderTargetReconstitutionInput::new(
+                    active.turn(),
+                    model_call.target(),
+                )],
+                vec![model_call],
+            )
+            .reconstitute()
+            .expect("the running batch is bound to its exact call and yielded frontier");
+
+        assert_eq!(
+            projection.active_executing_tool_batch,
+            Some(ActiveExecutingToolBatchCorrelation {
+                session: session.id(),
+                turn: active.turn(),
+                producing_call,
+                yielded_frontier: yielded_frontier.id(),
+                turn_attempt: continuation_attempt,
+            })
+        );
     }
 
     /// S03 / INV-034: startup recovery consumes the complete active
