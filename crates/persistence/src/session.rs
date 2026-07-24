@@ -11,7 +11,9 @@ use signalbox_domain::{
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
-use crate::imported_session::{self, ImportedSessionCorruption, ImportedSessionRepositoryError};
+use crate::create_session_from_imported_frontier::{
+    self, ImportedSessionCorruption, ImportedSessionRepositoryError,
+};
 use crate::mapping::{
     PositiveOrdinalMappingError, defaults_version_from_numeric, session_id_from_uuid,
     session_id_to_uuid,
@@ -216,8 +218,11 @@ fn decode_complete(
 ) -> Result<Session, SessionRepositoryError> {
     let ancestry: String = required(&row, "stored_ancestry")?;
     if ancestry == "imported_conversation" {
-        return imported_session::reconstitute_bounded_current(requested_session, row)
-            .map_err(map_imported_error);
+        return create_session_from_imported_frontier::reconstitute_bounded_current(
+            requested_session,
+            row,
+        )
+        .map_err(map_imported_error);
     }
     if row.try_get::<Option<Uuid>, _>("seed_session_id")?.is_some() {
         return Err(

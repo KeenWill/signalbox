@@ -54,7 +54,9 @@ use signalbox_persistence::{
         CreateSessionCorruption, CreateSessionHandlingOutcome, CreateSessionRepository,
         CreateSessionRepositoryError,
     },
-    imported_session::{ImportedSessionRepository, ImportedSessionRepositoryError},
+    create_session_from_imported_frontier::{
+        ImportedSessionRepository, ImportedSessionRepositoryError,
+    },
     local_test_connection_options, migrate,
     model_execution::{
         ModelCallCorruption, ModelCallIdentityCollision, ModelCallRepositoryError,

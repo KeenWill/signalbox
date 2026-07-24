@@ -27,7 +27,7 @@ use signalbox_domain::{
 };
 use signalbox_persistence::{
     conversation_import::ImportedConversationRepository,
-    imported_session::{ImportedSessionCorruption, ImportedSessionRepository},
+    create_session_from_imported_frontier::{ImportedSessionCorruption, ImportedSessionRepository},
     local_test_connection_options, migrate,
     session::{SessionCorruption, SessionRepository, SessionRepositoryError},
 };
@@ -102,13 +102,11 @@ fn imported_command(
     )
 }
 
-/// S28 / INV-012 / INV-038 / INV-039: first handling commits the exact
-/// imported prefix atomically, checked command replay returns the original
-/// result without consuming fresh identities, and ordinary loading validates
-/// the one-to-one seed before returning the current session.
+/// S28 / INV-038 / INV-039: first handling commits the exact imported prefix,
+/// seed, command result, session, and outbox event atomically.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_inv012_inv038_inv039_imported_frontier_creation_replays_and_loads_checked_seed()
+async fn s28_inv038_inv039_first_imported_frontier_creation_commits_exact_seed_atomically()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let conversation = imported(
@@ -163,16 +161,58 @@ async fn s28_inv012_inv038_inv039_imported_frontier_creation_replays_and_loads_c
     .fetch_one(&pool)
     .await?;
     assert_eq!(counts, (1, 1, 1, 2, 2, 1, 1));
+    Ok(())
+}
 
-    let mut replay_generation = 0_u64;
-    let replay = repository
+/// S28 / INV-012 / INV-039: equal replay returns the recorded result without
+/// consuming any fresh semantic identity.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s28_inv012_inv039_equal_replay_returns_recorded_session_without_generation()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let conversation = imported(
+        0x101,
+        0x210,
+        concat!(
+            "{\"type\":\"summary\",\"value\":null}\n",
+            "{\"type\":\"summary\",\"value\":null}"
+        ),
+    );
+    ImportedConversationStore::resolve_or_insert(
+        &mut ImportedConversationRepository::new(pool.clone()),
+        conversation.clone(),
+    )
+    .await?;
+
+    let command = imported_command(0x301, &conversation, ImportedSessionRelationship::Resume);
+    let repository = ImportedSessionRepository::new(pool);
+    let mut next_semantic = 0x610_u128;
+    let first = repository
         .handle(
             command,
             SessionId::from_uuid(Uuid::from_u128(0x401)),
             ContextFrontierId::from_uuid(Uuid::from_u128(0x701)),
             || {
+                let value = next_semantic;
+                next_semantic += 1;
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(value))
+            },
+        )
+        .await?;
+    let CreateSessionFromImportedFrontierOutcome::Applied(applied) = first else {
+        panic!("first handling must apply")
+    };
+
+    let mut replay_generation = 0_u64;
+    let replay = repository
+        .handle(
+            command,
+            SessionId::from_uuid(Uuid::from_u128(0x402)),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0x702)),
+            || {
                 replay_generation += 1;
-                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x699))
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x619))
             },
         )
         .await?;
@@ -181,6 +221,48 @@ async fn s28_inv012_inv038_inv039_imported_frontier_creation_replays_and_loads_c
         CreateSessionFromImportedFrontierOutcome::Applied(applied)
     );
     assert_eq!(replay_generation, 0);
+    Ok(())
+}
+
+/// S28 / INV-002 / INV-038 / INV-039: the purpose-specific command load
+/// reconstitutes the complete stored command, result, semantic prefix, and seed.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s28_inv002_inv038_inv039_command_load_reconstitutes_complete_checked_seed()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let conversation = imported(
+        0x102,
+        0x220,
+        concat!(
+            "{\"type\":\"summary\",\"value\":null}\n",
+            "{\"type\":\"summary\",\"value\":null}"
+        ),
+    );
+    ImportedConversationStore::resolve_or_insert(
+        &mut ImportedConversationRepository::new(pool.clone()),
+        conversation.clone(),
+    )
+    .await?;
+
+    let command = imported_command(0x302, &conversation, ImportedSessionRelationship::Fork);
+    let repository = ImportedSessionRepository::new(pool);
+    let mut next_semantic = 0x620_u128;
+    let created = repository
+        .handle(
+            command,
+            SessionId::from_uuid(Uuid::from_u128(0x403)),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0x703)),
+            || {
+                let value = next_semantic;
+                next_semantic += 1;
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(value))
+            },
+        )
+        .await?;
+    let CreateSessionFromImportedFrontierOutcome::Applied(applied) = created else {
+        panic!("fixture creation must apply")
+    };
 
     let recorded = repository
         .load(command.command_id())
@@ -190,6 +272,48 @@ async fn s28_inv012_inv038_inv039_imported_frontier_creation_replays_and_loads_c
     assert_eq!(recorded.applied_result(), applied);
     assert_eq!(recorded.semantic_entries().len(), 2);
     assert_eq!(recorded.seed_snapshot().entry_count(), 2);
+    Ok(())
+}
+
+/// S28 / INV-002 / INV-039: ordinary current-session loading returns the
+/// imported ancestry after validating the bounded one-to-one seed proof.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s28_inv002_inv039_current_session_load_reconstitutes_imported_ancestry()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let conversation = imported(
+        0x103,
+        0x230,
+        concat!(
+            "{\"type\":\"summary\",\"value\":null}\n",
+            "{\"type\":\"summary\",\"value\":null}"
+        ),
+    );
+    ImportedConversationStore::resolve_or_insert(
+        &mut ImportedConversationRepository::new(pool.clone()),
+        conversation.clone(),
+    )
+    .await?;
+
+    let command = imported_command(0x303, &conversation, ImportedSessionRelationship::Resume);
+    let repository = ImportedSessionRepository::new(pool.clone());
+    let mut next_semantic = 0x630_u128;
+    let created = repository
+        .handle(
+            command,
+            SessionId::from_uuid(Uuid::from_u128(0x404)),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0x704)),
+            || {
+                let value = next_semantic;
+                next_semantic += 1;
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(value))
+            },
+        )
+        .await?;
+    let CreateSessionFromImportedFrontierOutcome::Applied(applied) = created else {
+        panic!("fixture creation must apply")
+    };
 
     let loaded = SessionRepository::new(pool.clone())
         .load_session(applied.session())
@@ -203,12 +327,55 @@ async fn s28_inv012_inv038_inv039_imported_frontier_creation_replays_and_loads_c
             ..
         }
     ));
+    Ok(())
+}
+
+/// S28 / INV-012 / INV-039: a changed canonical payload under a claimed
+/// command identity returns typed conflicting reuse without generating entries.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s28_inv012_inv039_conflicting_reuse_is_typed_and_generation_free()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let conversation = imported(
+        0x104,
+        0x240,
+        concat!(
+            "{\"type\":\"summary\",\"value\":null}\n",
+            "{\"type\":\"summary\",\"value\":null}"
+        ),
+    );
+    ImportedConversationStore::resolve_or_insert(
+        &mut ImportedConversationRepository::new(pool.clone()),
+        conversation.clone(),
+    )
+    .await?;
+
+    let command = imported_command(0x304, &conversation, ImportedSessionRelationship::Resume);
+    let repository = ImportedSessionRepository::new(pool);
+    let mut next_semantic = 0x640_u128;
+    let created = repository
+        .handle(
+            command,
+            SessionId::from_uuid(Uuid::from_u128(0x405)),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0x705)),
+            || {
+                let value = next_semantic;
+                next_semantic += 1;
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(value))
+            },
+        )
+        .await?;
+    assert!(matches!(
+        created,
+        CreateSessionFromImportedFrontierOutcome::Applied(_)
+    ));
 
     let conflict = repository
         .handle(
-            imported_command(0x300, &conversation, ImportedSessionRelationship::Fork),
-            SessionId::from_uuid(Uuid::from_u128(0x402)),
-            ContextFrontierId::from_uuid(Uuid::from_u128(0x702)),
+            imported_command(0x304, &conversation, ImportedSessionRelationship::Fork),
+            SessionId::from_uuid(Uuid::from_u128(0x406)),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0x706)),
             || panic!("conflicting reuse must not request semantic identities"),
         )
         .await?;
