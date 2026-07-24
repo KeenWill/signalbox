@@ -10,6 +10,45 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-23 — Expose ambiguous commits as a stable process error
+
+**Context.** A lost PostgreSQL commit response can leave `create_session` or
+`submit_input` durably applied even though the hub cannot observe the outcome.
+Mapping that state to the same `unavailable` code as a definitely uncommitted
+failure leaves only unstable human text to tell a client whether replay is
+required.
+
+**Decision.** Version one uses the distinct stable error code `commit_ambiguous`
+when a mutation may have committed. The client retries the exact durable command
+identity and payload to discover the recorded outcome; `unavailable` means no
+mutation may have committed.
+
+**Rejected alternatives.** A free-form message is not protocol state. An
+optional flag complicates every otherwise detail-free error and admits a missing
+value, while generating a new command identity defeats durable replay.
+
+**Affects.** Process error encoding, commit-failure classification, mutation
+serving, and terminal-client diagnostics.
+
+## 2026-07-23 — Require session-affine PostgreSQL for hub fencing
+
+**Context.** PostgreSQL session advisory locks belong to one server backend.
+Transaction- or statement-pooled proxies may execute successive operations from
+one logical client on different backends, invalidating both the dedicated
+single-hub guard and per-connection generation fence.
+
+**Decision.** `DATABASE_URL` must name a direct or otherwise session-affine
+PostgreSQL endpoint. Transaction- and statement-pooled proxy modes are
+unsupported while hub fencing uses session advisory locks.
+
+**Rejected alternatives.** Treating pooled proxies as supported silently weakens
+the singleton invariant. Replacing session locks with a proxy-safe fencing
+design is a materially different persistence protocol without an accepted
+implementation.
+
+**Affects.** Hub deployment requirements, database configuration, fencing
+documentation, and operator guidance.
+
 ## 2026-07-23 — Bind follow rereads to their terminal trigger
 
 **Context.** A transcript reread started by one terminal follow event can
