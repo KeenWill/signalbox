@@ -877,11 +877,19 @@ async fn validate_real_transcript(
         ClaudeCodeJsonlConverter,
         repository,
     );
-    let winner = match service.execute(source).await? {
+    let winner = match service
+        .execute(source)
+        .await
+        .map_err(|_| "real transcript first import failed")?
+    {
         ImportConversationOutcome::Inserted { conversation }
         | ImportConversationOutcome::AlreadyImported { conversation } => conversation,
     };
-    match service.execute(source).await? {
+    match service
+        .execute(source)
+        .await
+        .map_err(|_| "real transcript repeat import failed")?
+    {
         ImportConversationOutcome::AlreadyImported { conversation } if conversation == winner => {}
         ImportConversationOutcome::AlreadyImported { .. } => {
             return Err("real transcript reimport resolved a different identity".into());
