@@ -11,12 +11,13 @@ finishing a milestone.
   in the target model: take the earliest unfinished step whose blocking
   decisions are accepted, or propose that step's blocking decision as the
   milestone. [The work backlog](backlog.md) is the owner-curated granular
-  expansion of that order: when a goal names no milestone, take the highest
-  backlog entry that is `ready` (or whose blocker the goal itself clears) and
-  whose `Owns`/`Collides-with` groups are free of the concurrent claims the
-  owner names at launch. Agents never reorder the backlog. The priority order is
-  binding for selection; the target model's concept descriptions are directional
-  and yield to accepted records.
+  expansion of that order: when a goal names no milestone, propose for owner
+  confirmation at launch the highest backlog entry that is `ready` (or whose
+  blocker the goal itself clears) and whose `Owns`/`Collides-with` groups are
+  free of the concurrent claims the owner names at launch — do not silently
+  commit to it. Agents never reorder the backlog. The priority order is binding
+  for selection; the target model's concept descriptions are directional and
+  yield to accepted records.
 - A milestone delivers one coherent capability toward its step — or, when the
   step is blocked, the proposal that unblocks it.
 - Any new public domain or application type ships with a consumer in the same

@@ -7,11 +7,12 @@ disjoint `Owns`/`Collides-with` groups may run concurrently. This is a
 parallelism-and-collision map, not a design document — designs happen as
 specification diffs when an item is picked up.
 
-Entry order here is a default-proposed sequence pending the owner's curation; it
-does not override the milestone priority. Milestone priority remains the target
-model's priority order plus explicit owner flags (the tool-loop foundation is
-owner-flagged as the next major milestone regardless of its position below). The
-owner reorders, adds, and retires entries; agents never reorder.
+Entry order here is curated through owner sessions and does not override the
+milestone priority; the owner revises it anytime. Milestone priority remains the
+target model's priority order plus explicit owner flags (the tool-loop
+foundation is owner-flagged as the next major milestone regardless of its
+position below). The owner reorders, adds, and retires entries; agents never
+reorder.
 
 Entry format: status is `ready`, `in-flight`, or `blocked-on: <what>`; size is
 S/M/L/XL. Standing engineering cautions for every entry: hold typed identities
@@ -56,15 +57,25 @@ and takes the deliberate reqwest upgrade with loopback re-verification.
 
 New `ModelRuntime` adapters that spend subscription capacity instead of API
 billing. Each is a self-contained crate colliding with runtime crates only —
-parallel-safe against everything else and against each other. The runtime trait
-is rated stable (two-method signature byte-stable since early on; evidence
-vocabulary grows additively), so adapters written now are unlikely to reshape.
-Prior art for all three: the owner's own native-provider subprocess handlers on
-the private-mono importer branch — its exact CLI argv, JSON-event parsing, and
-process-supervision lessons transfer; its lossy turn-shaped semantics must be
-tightened to Signalbox's evidence-shaped contract (a subprocess is one physical
-request the adapter cannot prove is retry-free internally — an explicitly
-accepted cost; exit-0-without-a-terminal-marker is BoundaryLoss, not success).
+parallel-safe against everything else and against each other. One caveat: every
+runtime-track crate edits the root `Cargo.toml` workspace-member list and
+`Cargo.lock`, and the provider-security track also touches `Cargo.lock` (reqwest
+upgrade). That is a light merge-coordination point (lockfile conflicts), not a
+semantic collision — land them in sequence or expect trivial lockfile rebases.
+The runtime trait is rated stable (two-method signature byte-stable since early
+on; evidence vocabulary grows additively), so adapters written now are unlikely
+to reshape. Prior art exists in the owner's own prior subprocess-based provider
+work and is supplied per session at launch, not pointed at here; whatever CLI
+argv, JSON-event parsing, and process-supervision it carries, its turn-shaped
+semantics must be tightened to Signalbox's evidence-shaped contract
+(exit-0-without-a-terminal-marker is BoundaryLoss, not success). Open design
+tensions the track's spec-diff must resolve, not decide here: (1) a subprocess
+is one physical request the adapter cannot prove is retry-free internally, so
+the spec-diff has to reconcile that boundary with the one-physical-request
+invariants (INV-025/026); (2) for the wrapped-CLI tracks below, auth rides the
+CLI's ambient subscription login, so the spec-diff has to reconcile that with
+the credential-reference boundary and per-request value durability the
+`ModelRuntime` contract pins (recovered calls, logged-in-account changes).
 
 The FIRST of these to wire also introduces the provider-dispatch mechanism hubd
 lacks today (selection is currently two hardcoded "anthropic" points); an
@@ -133,11 +144,12 @@ Collides-with: little — parallel-safe against turn machinery. Titles, tags,
 archive/restore, filtered and paginated listing — plus visibility control for
 the automation era: sessions spawned by automations and background work must not
 crowd the interactive default view, while monitor surfaces see everything and
-can hop into any session. Start simple: creation cause and actor attribution
-already distinguish owner-initiated from automation-spawned sessions for free,
-so the default view is "sessions with recent owner interaction" plus manual tags
-as the override; expressive filter rules stay an open edge. Owner-flagged high
-priority — the daily-driver item.
+can hop into any session. A likely simple starting point, to be settled in the
+entry's spec-diff and not here: creation cause and actor attribution already
+distinguish owner-initiated from automation-spawned sessions for free, so the
+interactive default could derive from that attribution with manual tags as an
+override; expressive filter rules stay an open edge. Owner-flagged high priority
+— the daily-driver item.
 
 ## Monitor stream [blocked-on: client stack merge] [size: M]
 
@@ -146,7 +158,7 @@ Collides-with: dispatcher wiring. Hub-wide fleet view fed by the outbox: session
 summaries, needs-attention triage, the operator escape hatch. The future web
 surface's backbone.
 
-## Channel integrations [blocked-on: client stack merge] [size: M]
+## Channel integrations [blocked-on: client stack merge; actor-admissibility decision (inbound path)] [size: M]
 
 Owns: new channel-adapter crate(s), channel-binding satellite, outbox consumer
 registration. Collides-with: dispatcher wiring only. Slack/email/SMS as outbound
@@ -191,7 +203,7 @@ completion, placement. Collides-with: tool loop machinery. Carries the remote
 tool catalog; runner auth (separate credentials, allowlists, no
 permission-downgrade on re-registration) is designed in from day one.
 
-## Delegation and child sessions [blocked-on: delegation cause decision; tool loop] [size: L]
+## Delegation and child sessions [blocked-on: delegation cause decision; tool loop; selectable transcript-frontier decision (fork selection)] [size: L]
 
 Owns: delegated creation cause (typed, rejected today), child-result delivery,
 delegation tools. Collides-with: session creation + tool loop. The orchestrator
@@ -222,9 +234,9 @@ seam.
 Owns: trigger/condition machinery, automation session provenance. Collides-with:
 broad — late-stage item. Standing automations that create and drive sessions
 from input conditions (mail arriving, schedules, watched states). The owner's
-private adapters (for example email infrastructure) stay outside the repo as
-plugins; Signalbox owns the trigger seam, session provenance, and the visibility
-classification they rely on.
+private integrations stay outside the repo as plugins; Signalbox owns the
+trigger seam, session provenance, and the visibility classification they rely
+on.
 
 ## Client SDK [blocked-on: protocol stabilization] [size: M]
 
