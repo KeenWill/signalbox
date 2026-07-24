@@ -100,6 +100,8 @@ pub enum AnthropicConstructionError {
     },
     /// The configured `anthropic-version` cannot form an HTTP header value.
     InvalidVersion,
+    /// The configured whole-exchange timeout is zero.
+    InvalidExchangeTimeout,
     /// The configured SSE record limit cannot admit any record bytes.
     InvalidSseRecordLimit,
     /// The HTTP client could not be constructed.
@@ -115,6 +117,9 @@ impl std::fmt::Display for AnthropicConstructionError {
             Self::InvalidBaseUrl { detail } => write!(f, "invalid base URL: {detail}"),
             Self::InvalidVersion => {
                 f.write_str("anthropic-version cannot form an HTTP header value")
+            }
+            Self::InvalidExchangeTimeout => {
+                f.write_str("exchange timeout must be greater than zero")
             }
             Self::InvalidSseRecordLimit => {
                 f.write_str("SSE record limit must be greater than zero")
@@ -136,6 +141,10 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
     /// Per `docs/spec/runtime-substrate.md`, the client is configured so
     /// that a single send is provably a single request:
     ///
+    /// - **TLS uses rustls with the platform verifier and a TLS 1.2 floor.**
+    ///   Certificate and hostname verification remain enabled.
+    /// - **Ambient proxy discovery is disabled** (`no_proxy()`), so provider
+    ///   credentials cannot traverse an environment-selected intermediary.
     /// - **Redirect following is disabled** ([`Policy::none`]). reqwest's
     ///   default policy follows up to ten redirects and, on a 307 or 308
     ///   response, replays the buffered POST body — a hidden second physical
@@ -156,9 +165,10 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
     ///   connect failure provably precede any request byte, which is what
     ///   lets [`UnsentCause::ConnectFailed`] claim proven-unsent.
     ///
-    /// No timeout budget is specified — timeout budgets remain an open edge
-    /// in `docs/spec/model-call-execution.md`: both timeouts default to none
-    /// and are caller-owned configuration.
+    /// The caller may leave the separate connect timeout unset, but every
+    /// exchange has a positive whole-exchange timeout that covers connection
+    /// establishment, response headers, and buffered or streamed body
+    /// delivery.
     pub fn new(
         config: AnthropicConfig,
         credentials: A,
@@ -166,6 +176,59 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
         if config.sse_record_limit == 0 {
             return Err(AnthropicConstructionError::InvalidSseRecordLimit);
         }
+        if config.exchange_timeout.is_zero() {
+            return Err(AnthropicConstructionError::InvalidExchangeTimeout);
+        }
+        // Parse and validate the caller's base independently. Appending first
+        // can turn an authority-less value such as `https://` into the
+        // apparently valid but unintended authority `https://v1/...`.
+        let base_url = Url::parse(&config.base_url).map_err(|error| {
+            AnthropicConstructionError::InvalidBaseUrl {
+                detail: error.to_string(),
+            }
+        })?;
+        if base_url.query().is_some() || base_url.fragment().is_some() {
+            // Concatenating the endpoint path onto a base with a query or
+            // fragment would route the request somewhere else entirely.
+            return Err(AnthropicConstructionError::InvalidBaseUrl {
+                detail: "base URL must not carry a query or fragment".to_string(),
+            });
+        }
+        if !base_url.username().is_empty() || base_url.password().is_some() {
+            return Err(AnthropicConstructionError::InvalidBaseUrl {
+                detail: "base URL must not carry user information".to_string(),
+            });
+        }
+        if !matches!(base_url.scheme(), "http" | "https") {
+            // A non-HTTP scheme would fail only inside send(), after
+            // SendCommenced, and read as ambiguous transport loss; it is an
+            // invalid configuration, caught here.
+            return Err(AnthropicConstructionError::InvalidBaseUrl {
+                detail: format!("unsupported scheme {:?}", base_url.scheme()),
+            });
+        }
+        if base_url.scheme() == "http"
+            && !base_url
+                .host_str()
+                .and_then(|host| {
+                    host.trim_matches(&['[', ']'][..])
+                        .parse::<std::net::IpAddr>()
+                        .ok()
+                })
+                .is_some_and(|address| address.is_loopback())
+        {
+            return Err(AnthropicConstructionError::InvalidBaseUrl {
+                detail: "plain HTTP requires a literal loopback IP host".to_string(),
+            });
+        }
+        if base_url.host_str().is_none() {
+            return Err(AnthropicConstructionError::InvalidBaseUrl {
+                detail: "base URL must carry an authority".to_string(),
+            });
+        }
+        // Retain the adapter's established concatenation semantics: the
+        // complete caller-supplied base path is kept and trailing slashes are
+        // collapsed before the endpoint is appended.
         let messages_url = Url::parse(&format!(
             "{}/v1/messages",
             config.base_url.trim_end_matches('/')
@@ -173,37 +236,23 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
         .map_err(|error| AnthropicConstructionError::InvalidBaseUrl {
             detail: error.to_string(),
         })?;
-        if messages_url.query().is_some() || messages_url.fragment().is_some() {
-            // Concatenating the endpoint path onto a base with a query or
-            // fragment would route the request somewhere else entirely.
-            return Err(AnthropicConstructionError::InvalidBaseUrl {
-                detail: "base URL must not carry a query or fragment".to_string(),
-            });
-        }
-        if !messages_url.username().is_empty() || messages_url.password().is_some() {
-            return Err(AnthropicConstructionError::InvalidBaseUrl {
-                detail: "base URL must not carry user information".to_string(),
-            });
-        }
-        if !matches!(messages_url.scheme(), "http" | "https") {
-            // A non-HTTP scheme would fail only inside send(), after
-            // SendCommenced, and read as ambiguous transport loss; it is an
-            // invalid configuration, caught here.
-            return Err(AnthropicConstructionError::InvalidBaseUrl {
-                detail: format!("unsupported scheme {:?}", messages_url.scheme()),
-            });
-        }
         let version_header = HeaderValue::from_str(&config.anthropic_version)
             .map_err(|_| AnthropicConstructionError::InvalidVersion)?;
+        // The workspace graph selects only ring; installation may already
+        // have occurred through SQLx in the composed process.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let mut builder = Client::builder()
+            .tls_backend_rustls()
+            .tls_version_min(reqwest::tls::Version::TLS_1_2)
+            .tls_danger_accept_invalid_certs(false)
+            .tls_danger_accept_invalid_hostnames(false)
+            .no_proxy()
             .redirect(Policy::none())
             .retry(reqwest::retry::never())
-            .pool_max_idle_per_host(0);
+            .pool_max_idle_per_host(0)
+            .timeout(config.exchange_timeout);
         if let Some(timeout) = config.connect_timeout {
             builder = builder.connect_timeout(timeout);
-        }
-        if let Some(timeout) = config.exchange_timeout {
-            builder = builder.timeout(timeout);
         }
         let client =
             builder
@@ -1445,6 +1494,7 @@ mod tests {
 
     #[test]
     fn request_build_failure_is_a_preparation_defect() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let builder = reqwest::Client::new()
             .get("http://127.0.0.1/")
             .header("invalid\nheader", "value");
@@ -1639,6 +1689,33 @@ mod tests {
             streamed_response_prefix_len(MAX_STREAMED_RESPONSE_BYTES, usize::MAX),
             (0, true)
         );
+    }
+
+    #[test]
+    fn streamed_response_overflow_is_typed_protocol_loss() {
+        let mut streamed_bytes = MAX_STREAMED_RESPONSE_BYTES;
+        let mut framing = SseFraming::new(1024);
+        let mut decoder = StreamDecoder::with_stop_sequences(ExchangeFacts::default(), Vec::new());
+        let mut observations = Vec::new();
+        let mut cancellation = CancellationSignal::never();
+
+        let evidence = process_streamed_chunk(
+            b"x",
+            &mut streamed_bytes,
+            &mut framing,
+            &mut decoder,
+            &"call-1".to_string(),
+            &mut observations,
+            &mut cancellation,
+        );
+
+        let Some(TerminalEvidence::BoundaryLoss(loss)) = evidence else {
+            panic!("an oversized streamed response must fail closed as boundary loss");
+        };
+        assert!(matches!(
+            loss.cause,
+            LossCause::StreamProtocolViolation { .. }
+        ));
     }
 
     #[test]
