@@ -204,35 +204,32 @@ deadlines would add unrelated timing semantics.
 process-runtime memory retention under response backpressure; wire shapes and
 admission limits do not change.
 
-## 2026-07-24 — Bind imported sessions to immutable seed provenance
+## 2026-07-24 — Version generic result-block encoding and keep fixtures synthetic
 
-**Context.** The conversation-import decision separates pure ingestion from
-later session creation, but the durable link between a created session and its
-materialized imported prefix, and the repository-safe validation boundary for
-source transcripts, need an explicit record.
+**Context.** Maximum-fidelity conversion adds a generic result-block variant to
+the existing [conversation-import](spec/conversation-import.md) vocabulary.
+Persistence version 1 already includes the generic message-block tag, but its
+nested result-block tags are closed. Repository validation also needs source
+files without publishing their content.
 
-**Decision.** Store one separate immutable `ImportedSessionSeed` for each
-imported-ancestry session, binding that session one-to-one to the exact local
-frontier that materializes its selected prefix. Committed test fixtures are
-synthetic. Validation against owner transcripts is explicit local opt-in and
-never prints transcript content. An owner-private importer was studied read-only
-as provenance and background only; it is not normative authority, and the public
-repository does not reproduce its private vocabulary or design details. The
-persistence adapter advances new imported-content encodings to version 2 for the
-generic message/result block tags while retaining decoding of the original
-closed version-1 content vocabulary.
+**Decision.** Preserve version-1 encoding and decoding for every existing
+content shape, including generic message blocks. Encode content as version 2
+only when it contains a generic result block, and reject that new nested tag
+beneath a version-1 header. Committed fixtures are synthetic. Optional local
+source-file validation is path-configured, content-silent, and excluded from
+ordinary test runs. A private repository was consulted only as non-normative
+provenance.
 
-**Rejected alternatives.** Deriving seed provenance from whichever native turn
-happens to exist would lose the creation-time boundary and fail for a newly
-created or merely queued session. Committing real transcripts would expose
-private content. Treating private prior art as a public design source would
-violate the repository's public-source boundary. Extending version 1 in place
-would make rollback and mixed-version readers interpret one version
-inconsistently.
+**Rejected alternatives.** Adding the new nested tag beneath version 1 would
+make one version describe two vocabularies. Stamping every newly written content
+value as version 2 would needlessly reduce rollback readability for unchanged
+content. Committing source files or printing their transcript data would violate
+the public-source boundary.
 
-**Affects.** Imported-session storage and reconstitution, synthetic and opt-in
-import tests, the imported-content adapter encoding, and the provenance boundary
-of the conversation-import stack.
+**Affects.** S28; INV-002/INV-038; synthetic and opt-in import tests, the
+imported-content adapter encoding, and the provenance boundary of the
+conversation-import stack. Imported-session seed ownership remains recorded by
+[the separate seed decision](#2026-07-24--separate-imported-ancestry-from-its-materialized-seed-frontier).
 
 ## 2026-07-23 — Import external conversations as records and seed native sessions
 
