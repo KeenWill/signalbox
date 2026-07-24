@@ -2823,6 +2823,23 @@ pub enum ModelConversationMessage {
         producing_call: ModelCallId,
         content: AssistantText,
     },
+    AssistantToolUse {
+        source: SemanticTranscriptEntryRef,
+        producing_call: ModelCallId,
+        request: ToolRequest,
+    },
+    ToolResult {
+        source: SemanticTranscriptEntryRef,
+        request: ToolRequestId,
+        content: ModelToolResultContent,
+    },
+}
+
+pub enum ModelToolResultContent {
+    Success(ToolResultContent),
+    ExecutionError(ToolExecutionError),
+    Denied { reason: Option<ToolDenialReason> },
+    ClosedByTurnEnd,
 }
 
 pub struct PreparedModelOperation { /* private */ }
@@ -2835,7 +2852,10 @@ pub enum ModelFrontierRenderingError {
         entry: SemanticTranscriptEntryRef,
         accepted_input: AcceptedInputId,
     },
-    UnsupportedAssistantToolUse { entry: SemanticTranscriptEntryRef },
+    DuplicateToolEvidence { entry: SemanticTranscriptEntryRef },
+    MissingOrMismatchedToolEvidence { entry: SemanticTranscriptEntryRef },
+    UnrenderableToolResult { entry: SemanticTranscriptEntryRef },
+    UnexpectedToolEvidence { entry: SemanticTranscriptEntryRef },
 }
 // impl Display + std::error::Error + ClassifyOperatorFailure
 
@@ -3456,8 +3476,20 @@ pub trait SubmitInputTransaction {
 
 pub struct SubmitInputService<Generator, Transaction, Nudge> { /* private */ }
 impl<Generator, Transaction, Nudge> SubmitInputService<Generator, Transaction, Nudge> {
-    pub const fn new(ids: Generator, transaction: Transaction, nudge: Nudge) -> Self;
-    pub fn into_parts(self) -> (Generator, Transaction, Nudge);
+    pub const fn new(
+        ids: Generator,
+        transaction: Transaction,
+        nudge: Nudge,
+        tool_dispatch_gate: InProcessToolDispatchGate,
+    ) -> Self;
+    pub fn into_parts(
+        self,
+    ) -> (
+        Generator,
+        Transaction,
+        Nudge,
+        InProcessToolDispatchGate,
+    );
 }
 impl<
     Generator: SubmitInputIdGenerator + Send,
@@ -3470,6 +3502,20 @@ impl<
         request: SubmitInputRequest,
     ) -> Result<SubmitInputOutcome, Transaction::Error>;
 }
+```
+
+## application: tool_dispatch_gate
+
+```rust
+pub struct InProcessToolDispatchGate { /* private */ }
+impl InProcessToolDispatchGate {
+    pub fn acquire(
+        &self,
+        turn: TurnId,
+    ) -> impl Future<Output = InProcessToolDispatchPermit> + Send;
+}
+
+pub struct InProcessToolDispatchPermit { /* private */ }
 ```
 
 ## application: tool_loop_ports
@@ -3534,6 +3580,11 @@ pub enum RetainedToolAttemptObservationStatus {
     AlreadyCommitted,
 }
 
+pub enum ToolAttemptAuthorizationStatus {
+    Prepared(CurrentToolAttempt),
+    InFlight(AuthorizedToolAttempt),
+}
+
 pub trait ToolExecutionTransaction {
     type Error: ClassifyOperatorFailure;
     fn load_active_batch(
@@ -3554,6 +3605,12 @@ pub trait ToolExecutionTransaction {
         turn: TurnId,
         attempt: ToolAttemptId,
     ) -> impl Future<Output = Result<AuthorizedToolAttempt, Self::Error>> + Send;
+    fn reread_ambiguous_authorization(
+        &mut self,
+        session: SessionId,
+        turn: TurnId,
+        attempt: ToolAttemptId,
+    ) -> impl Future<Output = Result<ToolAttemptAuthorizationStatus, Self::Error>> + Send;
     fn commit_preflight_error(
         &mut self,
         session: SessionId,
@@ -3622,12 +3679,13 @@ pub trait ToolExecutionTransaction {
 | **signalbox-domain total**            | **295 (+1 free fn)** |
 | application: create_session           | 8 (incl. 2 traits)   |
 | application: load_session             | 2 (incl. 1 trait)    |
-| application: model_execution          | 29 (incl. 7 traits)  |
+| application: model_execution          | 30 (incl. 7 traits)  |
 | application: operator_failure         | 2 (incl. 1 trait)    |
 | application: replace_session_defaults | 4 (incl. 1 trait)    |
 | application: scheduler                | 12 (incl. 4 traits)  |
 | application: start_eligible_turn      | 5 (incl. 2 traits)   |
 | application: startup_scan             | 7 (incl. 2 traits)   |
 | application: submit_input             | 7 (incl. 2 traits)   |
-| application: tool_loop_ports          | 6 (incl. 2 traits)   |
-| **signalbox-application total**       | **82**               |
+| application: tool_dispatch_gate       | 2                    |
+| application: tool_loop_ports          | 7 (incl. 2 traits)   |
+| **signalbox-application total**       | **86**               |

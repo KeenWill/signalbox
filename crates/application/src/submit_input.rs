@@ -15,7 +15,8 @@ use signalbox_domain::{
 };
 
 use crate::{
-    EligibilityNudge, EligibilityNudgeOutcome, InvalidDurableCommandId, OperatorFailureClass,
+    EligibilityNudge, EligibilityNudgeOutcome, InProcessToolDispatchGate, InvalidDurableCommandId,
+    OperatorFailureClass,
 };
 
 /// Why caller input cannot enter canonical `SubmitInput` construction.
@@ -209,21 +210,33 @@ pub struct SubmitInputService<Generator, Transaction, Nudge> {
     ids: Generator,
     transaction: Transaction,
     nudge: Nudge,
+    tool_dispatch_gate: InProcessToolDispatchGate,
 }
 
 impl<Generator, Transaction, Nudge> SubmitInputService<Generator, Transaction, Nudge> {
     /// Composes the application identity, transaction, and nudge ports.
-    pub const fn new(ids: Generator, transaction: Transaction, nudge: Nudge) -> Self {
+    pub const fn new(
+        ids: Generator,
+        transaction: Transaction,
+        nudge: Nudge,
+        tool_dispatch_gate: InProcessToolDispatchGate,
+    ) -> Self {
         Self {
             ids,
             transaction,
             nudge,
+            tool_dispatch_gate,
         }
     }
 
-    /// Returns all three ports, primarily for explicit ownership handoff.
-    pub fn into_parts(self) -> (Generator, Transaction, Nudge) {
-        (self.ids, self.transaction, self.nudge)
+    /// Returns every port, primarily for explicit ownership handoff.
+    pub fn into_parts(self) -> (Generator, Transaction, Nudge, InProcessToolDispatchGate) {
+        (
+            self.ids,
+            self.transaction,
+            self.nudge,
+            self.tool_dispatch_gate,
+        )
     }
 }
 
@@ -244,6 +257,19 @@ where
         request: SubmitInputRequest,
     ) -> Result<SubmitInputOutcome, Transaction::Error> {
         let session = request.session;
+        let interrupt_turn = match request.delivery {
+            DeliveryRequest::Interrupt {
+                expected_active_turn,
+                ..
+            } => Some(expected_active_turn),
+            DeliveryRequest::StartWhenNoActiveTurn { .. }
+            | DeliveryRequest::AfterCurrentTurn { .. }
+            | DeliveryRequest::NextSafePoint { .. } => None,
+        };
+        let _tool_dispatch_permit = match interrupt_turn {
+            Some(turn) => Some(self.tool_dispatch_gate.acquire(turn).await),
+            None => None,
+        };
         let turn = match request.delivery {
             DeliveryRequest::NextSafePoint { .. } => None,
             DeliveryRequest::StartWhenNoActiveTurn { .. }
@@ -332,10 +358,11 @@ mod tests {
 
     use super::{
         AcceptedInputId, CancelledModelCallTurnIdentities, DeliveryRequest, DomainSubmitInput,
-        DurableCommandId, EligibilityNudge, EligibilityNudgeOutcome, InvalidDurableCommandId,
-        SessionId, SubmitInputAppliedResult, SubmitInputIdGenerator, SubmitInputOutcome,
-        SubmitInputRequest, SubmitInputRequestError, SubmitInputResult, SubmitInputService,
-        SubmitInputTransaction, TurnId, UserContent, UuidV7SubmitInputIdGenerator,
+        DurableCommandId, EligibilityNudge, EligibilityNudgeOutcome, InProcessToolDispatchGate,
+        InvalidDurableCommandId, SessionId, SubmitInputAppliedResult, SubmitInputIdGenerator,
+        SubmitInputOutcome, SubmitInputRequest, SubmitInputRequestError, SubmitInputResult,
+        SubmitInputService, SubmitInputTransaction, TurnId, UserContent,
+        UuidV7SubmitInputIdGenerator,
     };
 
     fn command_id(value: u128) -> DurableCommandId {
@@ -608,12 +635,52 @@ mod tests {
             FakeIds::expecting_no_calls(),
             FakeTransaction::expecting_no_calls(),
             FakeNudge::default(),
+            InProcessToolDispatchGate::default(),
         );
-        let (ids, transaction, nudge) = service.into_parts();
+        let (ids, transaction, nudge, _) = service.into_parts();
         assert_eq!(ids.accepted_input_calls, 0);
         assert_eq!(ids.turn_calls, 0);
         assert!(transaction.observed.is_empty());
         assert!(nudge.observed.into_inner().is_empty());
+    }
+
+    /// INV-011 / INV-037: immediate interrupt handling waits on the same
+    /// turn-keyed gate held across tool authorization, execution, and result
+    /// commit.
+    #[tokio::test]
+    async fn inv011_inv037_interrupt_waits_for_tool_dispatch_gate() {
+        let expected_turn = turn_id(9);
+        let request = SubmitInputRequest::try_new(
+            command_id(10),
+            session_id(2),
+            content("stop"),
+            DeliveryRequest::Interrupt {
+                expected_active_turn: expected_turn,
+                configuration: choices(1),
+            },
+        )
+        .expect("fixture interrupt is valid");
+        let expected = SubmitInputOutcome::ConflictingReuse {
+            command_id: request.command_id(),
+        };
+        let gate = InProcessToolDispatchGate::default();
+        let permit = gate.acquire(expected_turn).await;
+        let mut service = SubmitInputService::new(
+            FakeIds::new([accepted_input_id(11)], [turn_id(12)]),
+            FakeTransaction::returning([Ok(expected.clone())]),
+            FakeNudge::default(),
+            gate,
+        );
+        let mut handling = Box::pin(service.execute(request));
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut handling)
+                .await
+                .is_err(),
+            "interrupt handling must remain behind the active tool dispatch"
+        );
+        drop(permit);
+        assert_eq!(handling.await.expect("fake transaction succeeds"), expected);
     }
 
     /// Decision log 2026-07-20: exact-bound text remains admissible before
@@ -691,13 +758,14 @@ mod tests {
             FakeIds::new([accepted_input], [turn]),
             FakeTransaction::returning([Ok(expected.clone())]),
             FakeNudge::default(),
+            InProcessToolDispatchGate::default(),
         );
 
         let actual =
             run_ready(service.execute(request.clone())).expect("fake transaction succeeds");
 
         assert_eq!(actual, expected);
-        let (ids, transaction, nudge) = service.into_parts();
+        let (ids, transaction, nudge, _) = service.into_parts();
         assert_eq!(ids.accepted_input_calls, 1);
         assert_eq!(ids.turn_calls, 1);
         assert_eq!(transaction.observed.len(), 1);
@@ -736,13 +804,14 @@ mod tests {
             FakeIds::new([accepted_input_id(4)], NO_TURN_CANDIDATES),
             FakeTransaction::returning([Ok(expected.clone())]),
             FakeNudge::default(),
+            InProcessToolDispatchGate::default(),
         );
 
         assert_eq!(
             run_ready(service.execute(request)).expect("fake transaction succeeds"),
             expected
         );
-        let (ids, transaction, nudge) = service.into_parts();
+        let (ids, transaction, nudge, _) = service.into_parts();
         assert_eq!(ids.accepted_input_calls, 1);
         assert_eq!(ids.turn_calls, 0);
         assert_eq!(transaction.observed[0].2, None);
@@ -763,13 +832,14 @@ mod tests {
             FakeIds::new([accepted_input_id(8)], [turn_id(9)]),
             FakeTransaction::returning([Ok(expected.clone())]),
             FakeNudge::default(),
+            InProcessToolDispatchGate::default(),
         );
 
         assert_eq!(
             run_ready(service.execute(request(1))).expect("recorded terminal result is returned"),
             expected
         );
-        let (_, transaction, nudge) = service.into_parts();
+        let (_, transaction, nudge, _) = service.into_parts();
         assert_eq!(transaction.observed.len(), 1);
         assert_eq!(
             nudge.observed.into_inner(),
@@ -845,6 +915,7 @@ mod tests {
             ),
             FakeTransaction::returning([Ok(expected.clone()), Ok(expected.clone())]),
             FakeNudge::default(),
+            InProcessToolDispatchGate::default(),
         );
 
         let first = run_ready(service.execute(request.clone())).expect("first invocation succeeds");
@@ -852,7 +923,7 @@ mod tests {
 
         assert_eq!(first, expected);
         assert_eq!(replay, expected);
-        let (ids, transaction, nudge) = service.into_parts();
+        let (ids, transaction, nudge, _) = service.into_parts();
         assert_eq!(ids.accepted_input_calls, 2);
         assert_eq!(ids.turn_calls, 2);
         assert_eq!(transaction.observed.len(), 2);
@@ -878,12 +949,13 @@ mod tests {
             FakeIds::new([accepted_input_id(4)], [turn_id(5)]),
             FakeTransaction::returning([Ok(expected.clone())]),
             FakeNudge::default(),
+            InProcessToolDispatchGate::default(),
         );
 
         let actual = run_ready(service.execute(request)).expect("conflict is terminal");
 
         assert_eq!(actual, expected);
-        let (_, transaction, nudge) = service.into_parts();
+        let (_, transaction, nudge, _) = service.into_parts();
         assert_eq!(transaction.observed.len(), 1);
         assert!(nudge.observed.into_inner().is_empty());
     }
@@ -897,13 +969,14 @@ mod tests {
             FakeIds::new([accepted_input_id(4)], [turn_id(5)]),
             FakeTransaction::returning([Err(FakeTransactionError::Unavailable)]),
             FakeNudge::default(),
+            InProcessToolDispatchGate::default(),
         );
 
         let error = run_ready(service.execute(request(1)))
             .expect_err("infrastructure failure remains nonterminal");
 
         assert_eq!(error, FakeTransactionError::Unavailable);
-        let (ids, transaction, nudge) = service.into_parts();
+        let (ids, transaction, nudge, _) = service.into_parts();
         assert_eq!(ids.accepted_input_calls, 1);
         assert_eq!(ids.turn_calls, 1);
         assert_eq!(transaction.observed.len(), 1);

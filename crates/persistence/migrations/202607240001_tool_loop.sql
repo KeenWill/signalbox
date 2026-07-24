@@ -1,4 +1,5 @@
 -- Durable in-turn tool rounds, approval commands, and fenced tool attempts.
+-- This migration follows the process-runtime schema merged from main.
 --
 -- Legacy tool-free turns retain the prior commit-boundary assertions. Tool
 -- rounds add their own normalized authority records and are selected by the
@@ -523,6 +524,8 @@ CREATE TABLE tool_request (
         UNIQUE (producing_model_call_id, request_ordinal),
     CONSTRAINT tool_request_correlation_key
         UNIQUE (request_id, producing_model_call_id, session_id),
+    CONSTRAINT tool_request_session_correlation_key
+        UNIQUE (request_id, session_id),
     CONSTRAINT tool_request_turn_correlation_key
         UNIQUE (request_id, turn_id, session_id),
     CONSTRAINT tool_request_round_fk
@@ -700,6 +703,8 @@ CREATE TABLE tool_attempt (
         ),
     CONSTRAINT tool_attempt_turn_correlation_key
         UNIQUE (attempt_id, turn_id, session_id),
+    CONSTRAINT tool_attempt_session_correlation_key
+        UNIQUE (attempt_id, session_id),
     CONSTRAINT tool_attempt_request_fk
         FOREIGN KEY (request_id, turn_id, session_id)
         REFERENCES tool_request (request_id, turn_id, session_id)
@@ -806,6 +811,20 @@ BEGIN
        )
     THEN
         RAISE EXCEPTION 'unsent tool attempt has impossible terminal evidence'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF OLD.state_kind = 'in_flight'
+       AND NEW.state_kind = 'terminal'
+       AND (
+            NEW.error_kind IN ('unknown_tool', 'invalid_arguments')
+            OR (
+                OLD.effect_class = 'external_effect'
+                AND NEW.error_kind = 'crash_lost'
+            )
+       )
+    THEN
+        RAISE EXCEPTION 'dispatched tool attempt has impossible terminal evidence'
             USING ERRCODE = '23514';
     END IF;
 
@@ -979,14 +998,14 @@ ALTER TABLE semantic_transcript_entry
         ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED,
     ADD CONSTRAINT semantic_transcript_entry_tool_result_request_fk
-        FOREIGN KEY (tool_result_request_id)
-        REFERENCES tool_request (request_id)
+        FOREIGN KEY (tool_result_request_id, source_session_id)
+        REFERENCES tool_request (request_id, session_id)
         ON UPDATE RESTRICT
         ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED,
     ADD CONSTRAINT semantic_transcript_entry_tool_result_attempt_fk
-        FOREIGN KEY (tool_result_attempt_id)
-        REFERENCES tool_attempt (attempt_id)
+        FOREIGN KEY (tool_result_attempt_id, source_session_id)
+        REFERENCES tool_attempt (attempt_id, session_id)
         ON UPDATE RESTRICT
         ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED,
