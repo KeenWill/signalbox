@@ -1217,6 +1217,8 @@ where
             turn,
             model_call,
             request,
+            name,
+            arguments,
         } => {
             write_message(
                 writer,
@@ -1229,6 +1231,8 @@ where
                         turn_id: wire_uuid(turn.into_uuid()),
                         model_call_id: wire_uuid(model_call.into_uuid()),
                         tool_request_id: wire_uuid(request.into_uuid()),
+                        tool_name: name.clone(),
+                        arguments: arguments.clone(),
                     },
                 },
             )
@@ -1240,6 +1244,7 @@ where
             entry,
             request,
             attempt,
+            content,
         } => {
             write_message(
                 writer,
@@ -1251,6 +1256,7 @@ where
                     entry: TranscriptEntry::ToolExecutionResult {
                         tool_request_id: wire_uuid(request.into_uuid()),
                         tool_attempt_id: wire_uuid(attempt.into_uuid()),
+                        content: content.clone(),
                     },
                 },
             )
@@ -1261,6 +1267,7 @@ where
             source_session,
             entry,
             request,
+            content,
         } => {
             write_message(
                 writer,
@@ -1271,6 +1278,7 @@ where
                     entry_id: wire_uuid(entry.into_uuid()),
                     entry: TranscriptEntry::ToolDenied {
                         tool_request_id: wire_uuid(request.into_uuid()),
+                        content: content.clone(),
                     },
                 },
             )
@@ -1281,6 +1289,7 @@ where
             source_session,
             entry,
             request,
+            content,
         } => {
             write_message(
                 writer,
@@ -1291,6 +1300,7 @@ where
                     entry_id: wire_uuid(entry.into_uuid()),
                     entry: TranscriptEntry::ToolClosed {
                         tool_request_id: wire_uuid(request.into_uuid()),
+                        content: content.clone(),
                     },
                 },
             )
