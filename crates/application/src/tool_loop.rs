@@ -13,21 +13,22 @@ use std::{
 };
 
 use signalbox_domain::{
-    AcceptedInputId, AuthorizedToolAttempt, CorrelatedToolAttemptObservation,
-    CurrentToolAttemptState, DangerousToolAutoApproval, DecideToolRequest, EndedToolAttempt,
-    FailedModelCallTurn, FailedModelCallTurnIdentities, InitialToolApproval, ModelCallId,
-    NormalizedToolArguments, PreparedDecideToolRequest, SemanticTranscriptEntryId,
-    SemanticTranscriptEntryRef, SessionId, ToolApprovalResolution, ToolArgumentsKind,
+    AuthorizedToolAttempt, CorrelatedToolAttemptObservation, CurrentToolAttemptState,
+    DangerousToolAutoApproval, DecideToolRequest, EndedToolAttempt, FailedModelCallTurn,
+    FailedModelCallTurnIdentities, InitialToolApproval, ModelCallId, NormalizedToolArguments,
+    PreparedDecideToolRequest, SemanticTranscriptEntryId, SessionId, ToolArgumentsKind,
     ToolAttemptCrashOutcome, ToolAttemptDispatchCorrelation, ToolAttemptId, ToolAttemptObservation,
     ToolBatch, ToolBatchPhase, ToolEffectClass, ToolExecutionError, ToolExecutionErrorDetail,
     ToolExecutionErrorKind, ToolName, ToolPermissionDefault, ToolRequest, ToolRequestId,
     ToolResultContent, ToolResultText, ToolResultTextFailure, TurnAttemptId, TurnId,
 };
+#[cfg(test)]
+use signalbox_domain::AcceptedInputId;
 
 use crate::{
     ClassifyOperatorFailure, DecideToolRequestTransaction, OperatorFailureClass,
-    PrepareToolContinuationOutcome, ResolvedToolConversationEntry,
-    RetainedToolAttemptObservationStatus, ToolContinuationIdentities, ToolExecutionTransaction,
+    PrepareToolContinuationOutcome, RetainedToolAttemptObservationStatus,
+    ToolContinuationIdentities, ToolExecutionTransaction,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
