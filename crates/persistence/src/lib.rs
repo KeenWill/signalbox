@@ -5,11 +5,11 @@
 
 mod command_registry;
 mod lock_inventory;
-mod outbox;
 
 pub mod create_session;
 pub mod mapping;
 pub mod model_execution;
+pub mod outbox;
 pub mod replace_session_defaults;
 pub mod scheduler;
 pub mod session;
