@@ -9,10 +9,13 @@ specification diffs when an item is picked up.
 
 Entry order here is curated through owner sessions and does not override the
 milestone priority; the owner revises it anytime. Milestone priority remains the
-target model's priority order plus explicit owner flags (the tool-loop
-foundation is owner-flagged as the next major milestone regardless of its
-position below). The owner reorders, adds, and retires entries; agents never
-reorder.
+target model's priority order plus explicit owner flags. The owner-flagged next
+major milestone comes first regardless of its position below: the tool-loop
+foundation today. Because it is blocked on an owner design pass, a
+milestone-less run proposes scheduling that design pass rather than selecting a
+lower `ready` item; only when nothing is owner-flagged does selection fall to
+the top `ready` non-colliding entry. The owner reorders, adds, and retires
+entries; agents never reorder.
 
 Entry format: status is `ready`, `in-flight`, or `blocked-on: <what>`; size is
 S/M/L/XL. Standing engineering cautions for every entry: hold typed identities
@@ -47,17 +50,20 @@ a goal session with owner addenda (maximum-fidelity conversion, raw
 preservation, adoption as a standing client capability rather than an
 import-time mode).
 
-## Provider transport security [ready] [size: M]
+## Provider transport security [in-flight] [size: M]
 
-Owns: the runtime adapter crates only. Collides-with: nothing on the board.
-Launch prompt already drafted. Closes the provider-call-security open question
-and takes the deliberate reqwest upgrade with loopback re-verification.
+Owns: the runtime adapter crates only. Collides-with: nothing on the board. The
+transport/TLS/reqwest-upgrade work is landing; the parser piece is the remaining
+open PR. No longer an unstarted item exposed to selection.
 
 ## Subscription-backed provider runtimes (three tracks)
 
 New `ModelRuntime` adapters that spend subscription capacity instead of API
-billing. Each is a self-contained crate colliding with runtime crates only —
-parallel-safe against everything else and against each other. One caveat: every
+billing. A pure adapter crate that adds no hubd wiring collides with runtime
+crates only — parallel-safe against everything else and against each other. The
+exception is provider dispatch: whichever runtime track wires it first (see
+below) also touches hubd composition, and therefore collides with the OpenAI
+composition wiring entry and any other hubd-composition work. One caveat: every
 runtime-track crate edits the root `Cargo.toml` workspace-member list and
 `Cargo.lock`, and the provider-security track also touches `Cargo.lock` (reqwest
 upgrade). That is a light merge-coordination point (lockfile conflicts), not a
@@ -84,21 +90,26 @@ must add the enum/factory. The adapter-author conformance checklist and the
 loopback test pattern from the runtime-adapter study are the reusable body of
 each goal prompt.
 
-### Codex CLI wrap [ready] [size: S-M]
+### Codex CLI wrap [blocked-on: INV-025/026 request-boundary reconciliation] [size: S-M]
 
-The lead track of the three. `codex exec --json`; the thread/turn/item event
-taxonomy is cleanly namespaced with an unambiguous turn.completed/turn.failed
-terminal (the demanding part of the evidence model). CLI owns subscription auth
-— zero credential handling. Officially sanctioned automation path; only real
-risk is event-schema drift between CLI versions (pin a version, snapshot-test).
+The lead track of the three once unblocked. `codex exec --json`; the
+thread/turn/item event taxonomy is cleanly namespaced with an unambiguous
+turn.completed/turn.failed terminal (the demanding part of the evidence model).
+CLI owns subscription auth — zero credential handling. Officially sanctioned
+automation path; only real event risk is schema drift between CLI versions (pin
+a version, snapshot-test). The subprocess request-boundary question above
+(INV-025/026) is a foundation decision the spec-diff must settle and the owner
+must accept before implementation starts.
 
-### Claude Code CLI wrap [ready] [size: S-M]
+### Claude Code CLI wrap [blocked-on: INV-025/026 request-boundary reconciliation] [size: S-M]
 
 `claude -p --output-format stream-json --verbose` (+
 `--include-partial-messages` for deltas). Clean result terminal message; CLI
 owns subscription auth. Fragility: the full stream-json event set is
 undocumented and version-fragile — snapshot-test. Do not use `--bare` for
-subscription runs (it forces an API key).
+subscription runs (it forces an API key). Same blocker as the Codex track: the
+subprocess request-boundary reconciliation (INV-025/026) is a foundation
+decision the spec-diff must settle and the owner must accept first.
 
 ### Codex-subscription Rust reimplementation [blocked-on: owner ToS-cost decision] [size: L-XL]
 
@@ -132,10 +143,9 @@ Owns: domain turn machinery, tool entries (the storage-blocked assistant
 tool-use variant), ToolRequest/ToolAttempt lifecycle, approval algebra
 (AwaitingApproval storage and flow), persistence slice, first hub-local tool.
 Collides-with: everything turn-side — runs solo. The gate for the entire tool
-economy (catalog, permissions, confirm/deny, shared tools, delegation). A proven
-approval UX policy (oldest-first queue, approve-fast deny-deliberate,
-error-aware requeue, durable decision audit) is the reference for the client
-half that follows.
+economy (catalog, permissions, confirm/deny, shared tools, delegation). This
+foundation is the hub-side approval algebra plus the first hub-local tool; the
+client approval surface is a separate later milestone whose UX is settled then.
 
 ## Session metadata, tags, and visibility [blocked-on: owner design pass] [size: M-L]
 
@@ -195,6 +205,12 @@ Collides-with: little. Per-session task rows with status/priority hierarchy.
 Owns: artifact store, entry linkage, protocol frames. Collides-with: tool loop
 (artifacts largely arrive from tools). Prompt-context artifacts — "what did the
 model actually see" — are the observability target worth matching.
+
+## Restricted executor [blocked-on: sandbox-minimum decision; execution-identity decision] [size: L]
+
+Owns: execution placement and sandboxing for tool execution. Collides-with: tool
+loop and runner-protocol machinery. A first restricted placement for tool
+execution per the target model's execution-isolation target.
 
 ## Runner protocol and placement [blocked-on: runner capability/auth decisions] [size: XL]
 
