@@ -1479,7 +1479,8 @@ async fn s02_s10_s11_inv005_inv006_inv019_inv027_tool_round_survives_restart_and
             tool_attempt,
             ToolEffectClass::EffectFree,
         )
-        .await?;
+        .await?
+        .expect("the revalidated batch still has work");
     assert_eq!(prepared_attempt.state(), CurrentToolAttemptState::Prepared);
     assert!(matches!(
         tool_repository
@@ -1822,6 +1823,18 @@ async fn inv006_inv011_inv037_interrupt_closes_checkpointed_tool_execution()
         outcome,
         SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(_))
     ));
+    assert!(
+        tool_repository
+            .prepare_next_attempt(
+                fixture.session,
+                fixture.turn,
+                ToolAttemptId::from_uuid(Uuid::from_u128(seed + 29)),
+                ToolEffectClass::EffectFree,
+            )
+            .await?
+            .is_none(),
+        "a winning interrupt makes stale attempt preparation a clean no-op"
+    );
 
     let rows: Vec<String> = sqlx::query_scalar(
         "SELECT entry.payload_kind

@@ -175,7 +175,7 @@ fn tools_and_choice<C>(
     operation: &ModelOperation<C>,
 ) -> Result<(Option<Vec<WireTool>>, Option<WireToolChoice>), PreparationFailure> {
     for tool in &operation.tools {
-        if !tool.input_schema.is_object() {
+        if !crate::wire::raw_json_is_object(&tool.input_schema) {
             return Err(PreparationFailure::UnsupportedOperation {
                 detail: format!(
                     "Anthropic requires tool {} to carry a JSON Schema object",
@@ -185,7 +185,7 @@ fn tools_and_choice<C>(
         }
     }
     if let Some(contract) = &operation.output_contract
-        && !contract.schema.is_object()
+        && !crate::wire::raw_json_is_object(&contract.schema)
     {
         return Err(PreparationFailure::UnsupportedOperation {
             detail: format!(
@@ -287,9 +287,7 @@ fn wire_message(message: &ConversationMessage) -> Result<WireMessage, Preparatio
                                 proposal.id.as_str()
                             ),
                         })?;
-                if !serde_json::from_str::<serde_json::Value>(input.get())
-                    .is_ok_and(|value| value.is_object())
-                {
+                if !crate::wire::raw_json_is_object(&input) {
                     return Err(PreparationFailure::UnsupportedOperation {
                         detail: format!(
                             "replayed tool call {} carries arguments that are not a JSON object",
@@ -367,6 +365,47 @@ mod tests {
         let request = build_request(operation).expect("translatable operation builds");
         let value = serde_json::to_value(&request).expect("wire request serializes");
         format!("{value:#}")
+    }
+
+    #[test]
+    fn deep_schema_and_replay_arguments_remain_stack_safe_through_wire_lifetime() {
+        let depth = 512;
+        let nested = format!(
+            "{}\"leaf\"{}",
+            r#"{"nested":"#.repeat(depth),
+            "}".repeat(depth)
+        );
+        let schema = format!(r#"{{"type":"object","deep":{nested}}}"#);
+        let arguments = format!(r#"{{"deep":{nested}}}"#);
+        let mut operation = operation("call-deep-json");
+        operation.tools.push(ToolDefinition::with_raw_schema(
+            "deep",
+            "Deep stack-safety fixture.",
+            serde_json::value::RawValue::from_string(schema)
+                .expect("deep schema is valid raw JSON"),
+        ));
+        operation.messages.push(ConversationMessage {
+            role: ConversationRole::Assistant,
+            parts: vec![MessagePart::ToolCall(ToolCallProposal {
+                id: ToolCallId::new("call_deep"),
+                name: ToolName::new("deep"),
+                arguments_json: arguments,
+            })],
+        });
+        operation.messages.push(ConversationMessage {
+            role: ConversationRole::User,
+            parts: vec![MessagePart::ToolResult(ToolResultRecord {
+                tool_call_id: ToolCallId::new("call_deep"),
+                content: "done".to_owned(),
+                is_error: false,
+            })],
+        });
+
+        let request = build_request(&operation).expect("deep raw JSON translates");
+        let encoded = serde_json::to_string(&request).expect("deep raw JSON serializes");
+        assert!(encoded.contains(r#""leaf""#));
+        drop(request);
+        drop(operation);
     }
 
     #[track_caller]
@@ -582,7 +621,8 @@ mod tests {
         operation.output_contract = Some(StructuredOutputContract {
             name: ToolName::new("a".repeat(65)),
             description: "An invalid contract.".to_string(),
-            schema: serde_json::json!({"type": "object"}),
+            schema: serde_json::value::to_raw_value(&serde_json::json!({"type": "object"}))
+                .expect("fixture schema serializes"),
         });
 
         assert!(matches!(
@@ -615,7 +655,8 @@ mod tests {
         operation.output_contract = Some(StructuredOutputContract {
             name: ToolName::new("verdict"),
             description: "The verdict.".to_string(),
-            schema: serde_json::json!({"type": "object"}),
+            schema: serde_json::value::to_raw_value(&serde_json::json!({"type": "object"}))
+                .expect("fixture schema serializes"),
         });
 
         let request = build_request(&operation).expect("contract-bearing operation builds");
@@ -653,7 +694,8 @@ mod tests {
         operation.output_contract = Some(StructuredOutputContract {
             name: ToolName::new("verdict"),
             description: "The verdict.".to_string(),
-            schema: serde_json::json!([]),
+            schema: serde_json::value::to_raw_value(&serde_json::json!([]))
+                .expect("fixture schema serializes"),
         });
 
         assert!(matches!(
@@ -668,7 +710,8 @@ mod tests {
         operation.output_contract = Some(StructuredOutputContract {
             name: ToolName::new("verdict"),
             description: "The verdict.".to_string(),
-            schema: serde_json::json!({"type": "object"}),
+            schema: serde_json::value::to_raw_value(&serde_json::json!({"type": "object"}))
+                .expect("fixture schema serializes"),
         });
         operation.tools = vec![ToolDefinition::with_schema(
             "lookup",
@@ -697,7 +740,8 @@ mod tests {
         operation.output_contract = Some(StructuredOutputContract {
             name: ToolName::new("verdict"),
             description: "The verdict.".to_string(),
-            schema: serde_json::json!({"type": "object"}),
+            schema: serde_json::value::to_raw_value(&serde_json::json!({"type": "object"}))
+                .expect("fixture schema serializes"),
         });
         operation.tools = vec![ToolDefinition::with_schema(
             "verdict",

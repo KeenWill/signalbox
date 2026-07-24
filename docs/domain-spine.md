@@ -3902,7 +3902,7 @@ pub trait ToolExecutionTransaction {
         turn: TurnId,
         attempt: ToolAttemptId,
         effect_class: ToolEffectClass,
-    ) -> impl Future<Output = Result<CurrentToolAttempt, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<Option<CurrentToolAttempt>, Self::Error>> + Send;
     fn authorize_attempt(
         &mut self,
         session: SessionId,
