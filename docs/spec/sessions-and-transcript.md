@@ -314,8 +314,9 @@ and closed:
 - `ToolDenied { request }` — a denial owned by the referenced request and
   decision;
 - `ToolClosed { request }` — a request closed by turn end before it completed
-  ordinary execution, including undecided, approved-but-unattempted, and
-  interrupt-classified crash-lost requests;
+  ordinary execution, including undecided and approved-but-unattempted requests.
+  A crash-lost attempt is terminal `KnownFailed` evidence and uses
+  `ToolExecutionResult`;
 - `Imported { imported_entry, source_speaker, content }` — one exact normalized
   imported content value and its speaker attestation, including source event,
   source-defined message block, message-content absence, text, tool, result,

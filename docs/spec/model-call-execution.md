@@ -318,7 +318,7 @@ terminal observation; nothing is inferred from timing or injected I/O errors.
 
 ## Terminal outcomes
 
-`apply_terminal_observation` derives one of six outcomes from fresh state, and
+`apply_terminal_observation` derives one of seven outcomes from fresh state, and
 persistence commits it atomically with its outbox rows
 ([persistence-protocol](persistence-protocol.md)):
 

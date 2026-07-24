@@ -63,14 +63,15 @@ embedded timestamps; those facts live in purpose-specific domain values and
 records (INV-001, INV-004).
 
 The nil and max UUIDs are rejected as `DurableCommandId` values at two
-boundaries: application request construction (`try_new` on
+boundaries: checked command/request construction (`try_new` on
 `CreateSessionRequest`, `CreateSessionFromImportedFrontierRequest`,
 `ReplaceSessionDefaultsRequest`, and `SubmitInputRequest` in
-`crates/application`) and persistence decoding (`durable_command_id_from_uuid`
-in `crates/persistence/src/mapping.rs`). Rejection occurs before canonical
-command construction and claims no identifier. Why: sentinel-like values are
-common accidental defaults and would otherwise become permanent owner-global
-claims.
+`crates/application`, plus `DecideToolRequest` in `crates/domain`) and
+persistence decoding (`durable_command_id_from_uuid` in
+`crates/persistence/src/mapping.rs`). Rejection occurs before a canonical
+command can reach a transaction and claims no identifier. Why: sentinel-like
+values are common accidental defaults and would otherwise become permanent
+owner-global claims.
 
 ## Generation and minting boundary
 
