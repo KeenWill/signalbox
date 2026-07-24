@@ -1089,7 +1089,7 @@ where
     }
     let reclassifications = pending_reclassification_candidates(&execution, &mut next_turn)?;
     let failed = execution
-        .recover_evidence_free_after_restart(
+        .recover_tool_crash_after_restart(
             identities.with_pending_steering_reclassifications(reclassifications),
         )
         .map_err(|_| {

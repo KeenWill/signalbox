@@ -166,6 +166,22 @@ questions below remain open.
 
 ## Tool safety
 
+- **Future tool-attempt retry.** Version one never automatically retries a
+  prepared, known-failed, crash-lost, or ambiguous tool attempt. Any later
+  owner-command retry needs effect/evidence eligibility, duplicate-risk,
+  idempotency-key, resource-limit, and audit decisions. Blocks tool retry
+  features. (S05, S06)
+- **Ambiguous tool-wait resolution.** Version one can preserve the exact
+  external-effect attempt and terminalize through a proof-bearing interrupt. Who
+  may record resolving evidence, how an exact accepted-risk continuation is
+  represented, and which effects permit it remain undecided. Blocks
+  reconciliation and continuation from `AwaitingToolRecovery`. (S06)
+- **Durable tool-definition revisioning.** The implemented compiled catalog is
+  immutable for one process lifetime. A dynamic catalog or a deployment that
+  changes a definition while requests are outstanding must first decide how the
+  advertised schema, permission default, effect class, validator, and executor
+  revision are pinned and compared. Blocks runtime catalog mutation and safe
+  rebinding across outstanding requests.
 - **Execution-strategy configuration placement.** Version one serializes tool
   attempts without exposing a knob. Whether a later serial/concurrent choice is
   a deployment, session-default, per-turn, or executor-selection value remains

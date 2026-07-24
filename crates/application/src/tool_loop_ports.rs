@@ -147,6 +147,44 @@ impl ToolContinuationIdentities {
     }
 }
 
+/// Fresh identities for proposal-ordered closure before a known crash failure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolCrashClosureIdentities {
+    result_entries: Box<[SemanticTranscriptEntryId]>,
+    result_frontier: signalbox_domain::ContextFrontierId,
+    failure: FailedModelCallTurnIdentities,
+}
+
+impl ToolCrashClosureIdentities {
+    /// Supplies one closure identity per request plus the terminal failure pair.
+    pub fn new(
+        result_entries: Vec<SemanticTranscriptEntryId>,
+        result_frontier: signalbox_domain::ContextFrontierId,
+        failure: FailedModelCallTurnIdentities,
+    ) -> Self {
+        Self {
+            result_entries: result_entries.into_boxed_slice(),
+            result_frontier,
+            failure,
+        }
+    }
+
+    /// Returns closure-entry identities in proposal order.
+    pub fn result_entries(&self) -> &[SemanticTranscriptEntryId] {
+        &self.result_entries
+    }
+
+    /// Returns the yielded-plus-closures frontier candidate.
+    pub const fn result_frontier(&self) -> signalbox_domain::ContextFrontierId {
+        self.result_frontier
+    }
+
+    /// Borrows the subsequent `TurnFailed` identity pair.
+    pub const fn failure(&self) -> &FailedModelCallTurnIdentities {
+        &self.failure
+    }
+}
+
 /// Atomic continuation outcome.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PrepareToolContinuationOutcome {
@@ -231,7 +269,7 @@ pub trait ToolExecutionTransaction {
         session: SessionId,
         turn: TurnId,
         attempt: ToolAttemptId,
-        failure_identities: FailedModelCallTurnIdentities,
+        identities: ToolCrashClosureIdentities,
         next_turn: NextTurn,
     ) -> impl Future<Output = Result<ToolAttemptCrashOutcome, Self::Error>> + Send
     where
