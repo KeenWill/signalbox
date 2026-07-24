@@ -18,8 +18,8 @@ use std::{
 
 use signalbox_application::{
     ClassifyOperatorFailure, EligibilityPass, EligibilityWorkSource, InProcessAttemptDispatchGate,
-    InProcessEligibilityWorkSource, ModelCallCredentialReference, OperatorFailureClass,
-    SchedulerLoop, StartEligibleTurnService, StartupScanService,
+    InProcessEligibilityWorkSource, InProcessToolDispatchGate, ModelCallCredentialReference,
+    OperatorFailureClass, SchedulerLoop, StartEligibleTurnService, StartupScanService,
     UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
 };
 use signalbox_domain::{SessionId, TurnId};
@@ -333,6 +333,7 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
         || async move {
             let sweep = PostgresEligibilitySweep::new(scheduler_pool.clone());
             let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
+            let tool_dispatch_gate = InProcessToolDispatchGate::default();
             let (execution, fatal_execution) = FatalExecutionSupervisor::new(
                 PostgresProviderModelExecution::new(
                     PostgresModelCallRepository::new(
@@ -349,6 +350,7 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
                         model_targets,
                         credential_reference,
                     ),
+                    tool_dispatch_gate,
                     tool_catalog,
                     tool_executor,
                 ),
