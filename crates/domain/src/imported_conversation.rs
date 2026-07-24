@@ -2422,24 +2422,50 @@ mod tests {
         value
     }
 
-    /// S28 / INV-002 / INV-038: unvalidated source values retain stack-safe
-    /// structural traits before typed depth rejection.
+    /// S28 / INV-002 / INV-038: cloning an unvalidated source value is
+    /// stack-safe before typed depth rejection.
     #[test]
-    fn s28_inv002_inv038_unvalidated_structured_traits_are_stack_safe() {
+    fn s28_inv002_inv038_unvalidated_structured_clone_is_stack_safe() {
         let value = nested_array(32_768);
         let cloned = value.clone();
 
-        assert_eq!(value, cloned);
+        drop(cloned);
+    }
+
+    /// S28 / INV-002 / INV-038: structural equality for unvalidated source
+    /// values is stack-safe before typed depth rejection.
+    #[test]
+    fn s28_inv002_inv038_unvalidated_structured_equality_is_stack_safe() {
+        let value = nested_array(32_768);
+
+        assert_eq!(value, nested_array(32_768));
         assert_ne!(value, nested_array(32_767));
+    }
+
+    /// S28 / INV-002 / INV-038: formatting an unvalidated source value is
+    /// stack-safe before typed depth rejection.
+    #[test]
+    fn s28_inv002_inv038_unvalidated_structured_debug_is_stack_safe() {
+        let value = nested_array(32_768);
+
         let rendered = format!("{value:?}");
         assert!(rendered.starts_with("Array([Array(["));
         assert!(rendered.ends_with("])])"));
+    }
+
+    /// S28 / INV-002 / INV-038: hashing an unvalidated source value is
+    /// stack-safe before typed depth rejection.
+    #[test]
+    fn s28_inv002_inv038_unvalidated_structured_hash_is_stack_safe() {
+        let value = nested_array(32_768);
+        let equal = nested_array(32_768);
 
         let mut value_hash = DefaultHasher::new();
         value.hash(&mut value_hash);
-        let mut cloned_hash = DefaultHasher::new();
-        cloned.hash(&mut cloned_hash);
-        assert_eq!(value_hash.finish(), cloned_hash.finish());
+        let mut equal_hash = DefaultHasher::new();
+        equal.hash(&mut equal_hash);
+
+        assert_eq!(value_hash.finish(), equal_hash.finish());
     }
 
     fn metadata(role: ImportedSourceAttestation<ImportedSpeaker>) -> ImportedSourceMetadata {
