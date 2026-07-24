@@ -2069,6 +2069,14 @@ impl AcceptedInputSchedulingProjection {
         interrupt: AppliedInterruptCommandResult,
         identities: AmbiguousModelCallTurnIdentities,
     ) -> Result<ReconciliationRequiredModelCallTurn, ModelCallClosureError>;
+    pub fn apply_interrupt_to_tool_batch(
+        self,
+        batch: ToolBatch,
+        result_entries: Vec<SemanticTranscriptEntryId>,
+        result_frontier: ContextFrontierId,
+        interrupt: AppliedInterruptCommandResult,
+        identities: CancelledModelCallTurnIdentities,
+    ) -> Result<CancelledModelCallTurn, ModelCallClosureError>;
     pub fn apply_interrupt_to_tool_recovery(
         self,
         wait: AwaitingToolRecovery,
@@ -3228,6 +3236,11 @@ impl ToolBatch {
         result_frontier: ContextFrontierId,
     ) -> Result<PreparedToolResultProjection, ToolResultProjectionError>;
     pub fn prepare_failure_projection(
+        &self,
+        entry_ids: Vec<SemanticTranscriptEntryId>,
+        result_frontier: ContextFrontierId,
+    ) -> Result<PreparedToolResultProjection, ToolResultProjectionError>;
+    pub fn prepare_cancellation_projection(
         &self,
         entry_ids: Vec<SemanticTranscriptEntryId>,
         result_frontier: ContextFrontierId,
