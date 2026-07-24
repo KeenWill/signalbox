@@ -5,6 +5,8 @@
     reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
 )]
 
+mod support;
+
 use std::{
     error::Error,
     sync::{
@@ -27,8 +29,13 @@ use signalbox_domain::{
 };
 use signalbox_persistence::{
     conversation_import::ImportedConversationRepository,
-    create_session_from_imported_frontier::{ImportedSessionCorruption, ImportedSessionRepository},
-    local_test_connection_options, migrate,
+    create_session_from_imported_frontier::{
+        ImportedSessionCorruption, ImportedSessionIdentityCollision, ImportedSessionRepository,
+        ImportedSessionRepositoryError,
+    },
+    local_test_connection_options,
+    mapping::DurableCommandIdMappingError,
+    migrate,
     session::{SessionCorruption, SessionRepository, SessionRepositoryError},
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
@@ -36,6 +43,8 @@ use testcontainers_modules::{
     postgres::Postgres,
     testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
 };
+
+use support::blocked_backends_reached;
 
 const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_NAME: &str = "signalbox_imported_session_integration";
@@ -388,19 +397,13 @@ async fn s28_inv012_inv039_conflicting_reuse_is_typed_and_generation_free()
     Ok(())
 }
 
-/// S28 / INV-012 / INV-039: missing imported targets are pre-claim typed
-/// outcomes and generate no semantic identities.
+/// S28 / INV-012 / INV-039: a missing imported conversation is a pre-claim
+/// typed outcome and generates no semantic identities.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_inv012_inv039_missing_targets_remain_unclaimed_and_generation_free()
+async fn s28_inv012_inv039_missing_conversation_remains_unclaimed_and_generation_free()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let stored = imported(0x110, 0x210, "{\"type\":\"summary\",\"value\":null}");
-    ImportedConversationStore::resolve_or_insert(
-        &mut ImportedConversationRepository::new(pool.clone()),
-        stored.clone(),
-    )
-    .await?;
     let repository = ImportedSessionRepository::new(pool.clone());
 
     let absent = imported(0x111, 0x211, "{\"type\":\"summary\",\"value\":null}");
@@ -418,6 +421,28 @@ async fn s28_inv012_inv039_missing_targets_remain_unclaimed_and_generation_free(
             conversation: absent.id()
         }
     );
+
+    let claimed: i64 = sqlx::query_scalar("SELECT count(*) FROM durable_command")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(claimed, 0);
+    Ok(())
+}
+
+/// S28 / INV-012 / INV-039: a missing imported frontier is a pre-claim typed
+/// outcome and generates no semantic identities.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s28_inv012_inv039_missing_frontier_remains_unclaimed_and_generation_free()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let stored = imported(0x110, 0x210, "{\"type\":\"summary\",\"value\":null}");
+    ImportedConversationStore::resolve_or_insert(
+        &mut ImportedConversationRepository::new(pool.clone()),
+        stored.clone(),
+    )
+    .await?;
+    let repository = ImportedSessionRepository::new(pool.clone());
 
     let alternate = imported(0x110, 0x212, "{\"type\":\"summary\",\"value\":\"other\"}");
     let missing_frontier_command =
@@ -469,37 +494,53 @@ async fn s28_inv001_inv012_inv039_concurrent_equal_creation_has_one_identity_con
     let generated = Arc::new(AtomicU64::new(0));
     let first_generated = Arc::clone(&generated);
     let second_generated = Arc::clone(&generated);
-    let mut first_identity = 0x680_u128;
-    let mut second_identity = 0x690_u128;
+    let mut claim_gate = pool.begin().await?;
+    sqlx::query("LOCK TABLE durable_command IN SHARE MODE")
+        .execute(&mut *claim_gate)
+        .await?;
 
-    let (first, second) = tokio::join!(
-        first_repository.handle(
-            command,
-            SessionId::from_uuid(Uuid::from_u128(0x415)),
-            ContextFrontierId::from_uuid(Uuid::from_u128(0x715)),
-            || {
-                first_generated.fetch_add(1, Ordering::SeqCst);
-                let value = first_identity;
-                first_identity += 1;
-                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(value))
-            },
-        ),
-        second_repository.handle(
-            command,
-            SessionId::from_uuid(Uuid::from_u128(0x416)),
-            ContextFrontierId::from_uuid(Uuid::from_u128(0x716)),
-            || {
-                second_generated.fetch_add(1, Ordering::SeqCst);
-                let value = second_identity;
-                second_identity += 1;
-                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(value))
-            },
-        )
+    let first = tokio::spawn(async move {
+        let mut first_identity = 0x680_u128;
+        first_repository
+            .handle(
+                command,
+                SessionId::from_uuid(Uuid::from_u128(0x415)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x715)),
+                || {
+                    first_generated.fetch_add(1, Ordering::SeqCst);
+                    let value = first_identity;
+                    first_identity += 1;
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(value))
+                },
+            )
+            .await
+    });
+    let second = tokio::spawn(async move {
+        let mut second_identity = 0x690_u128;
+        second_repository
+            .handle(
+                command,
+                SessionId::from_uuid(Uuid::from_u128(0x416)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x716)),
+                || {
+                    second_generated.fetch_add(1, Ordering::SeqCst);
+                    let value = second_identity;
+                    second_identity += 1;
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(value))
+                },
+            )
+            .await
+    });
+    assert!(
+        blocked_backends_reached(&pool, 2).await?,
+        "both handlers must reach the held command-claim insert"
     );
+    claim_gate.commit().await?;
+
     let (
         CreateSessionFromImportedFrontierOutcome::Applied(first),
         CreateSessionFromImportedFrontierOutcome::Applied(second),
-    ) = (first?, second?)
+    ) = (first.await??, second.await??)
     else {
         panic!("both equal handlers must return the recorded applied result")
     };
@@ -515,6 +556,209 @@ async fn s28_inv001_inv012_inv039_concurrent_equal_creation_has_one_identity_con
     .fetch_one(&pool)
     .await?;
     assert_eq!(counts, (1, 2, 1));
+    Ok(())
+}
+
+/// S28 / INV-001 / INV-039: a generated session identity collision is typed
+/// and rolls back the command claim.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s28_inv001_inv039_generated_session_identity_collision_is_typed()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let conversation = imported(0x116, 0x216, "{\"type\":\"summary\",\"value\":null}");
+    ImportedConversationStore::resolve_or_insert(
+        &mut ImportedConversationRepository::new(pool.clone()),
+        conversation.clone(),
+    )
+    .await?;
+    let repository = ImportedSessionRepository::new(pool);
+    let occupied_session = SessionId::from_uuid(Uuid::from_u128(0x416));
+    repository
+        .handle(
+            imported_command(0x316, &conversation, ImportedSessionRelationship::Resume),
+            occupied_session,
+            ContextFrontierId::from_uuid(Uuid::from_u128(0x716)),
+            || SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x616)),
+        )
+        .await?;
+
+    let colliding_command =
+        imported_command(0x317, &conversation, ImportedSessionRelationship::Fork);
+    let error = repository
+        .handle(
+            colliding_command,
+            occupied_session,
+            ContextFrontierId::from_uuid(Uuid::from_u128(0x717)),
+            || SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x617)),
+        )
+        .await
+        .expect_err("occupied session identity must be a typed collision");
+    assert!(matches!(
+        error,
+        ImportedSessionRepositoryError::IdentityCollision(
+            ImportedSessionIdentityCollision::Session
+        )
+    ));
+    assert!(
+        repository
+            .load(colliding_command.command_id())
+            .await?
+            .is_none()
+    );
+    Ok(())
+}
+
+/// S28 / INV-001 / INV-039: a generated semantic-entry identity collision is
+/// typed and rolls back the command claim.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s28_inv001_inv039_generated_semantic_entry_identity_collision_is_typed()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let conversation = imported(0x118, 0x218, "{\"type\":\"summary\",\"value\":null}");
+    ImportedConversationStore::resolve_or_insert(
+        &mut ImportedConversationRepository::new(pool.clone()),
+        conversation.clone(),
+    )
+    .await?;
+    let repository = ImportedSessionRepository::new(pool);
+    let occupied_semantic = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x618));
+    repository
+        .handle(
+            imported_command(0x318, &conversation, ImportedSessionRelationship::Resume),
+            SessionId::from_uuid(Uuid::from_u128(0x418)),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0x718)),
+            || occupied_semantic,
+        )
+        .await?;
+
+    let colliding_command =
+        imported_command(0x319, &conversation, ImportedSessionRelationship::Fork);
+    let error = repository
+        .handle(
+            colliding_command,
+            SessionId::from_uuid(Uuid::from_u128(0x419)),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0x719)),
+            || occupied_semantic,
+        )
+        .await
+        .expect_err("occupied semantic-entry identity must be a typed collision");
+    assert!(matches!(
+        error,
+        ImportedSessionRepositoryError::IdentityCollision(
+            ImportedSessionIdentityCollision::SemanticEntry
+        )
+    ));
+    assert!(
+        repository
+            .load(colliding_command.command_id())
+            .await?
+            .is_none()
+    );
+    Ok(())
+}
+
+/// S28 / INV-001 / INV-039: a generated seed-frontier identity collision is
+/// typed and rolls back the command claim.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s28_inv001_inv039_generated_seed_frontier_identity_collision_is_typed()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let conversation = imported(0x11a, 0x21a, "{\"type\":\"summary\",\"value\":null}");
+    ImportedConversationStore::resolve_or_insert(
+        &mut ImportedConversationRepository::new(pool.clone()),
+        conversation.clone(),
+    )
+    .await?;
+    let repository = ImportedSessionRepository::new(pool);
+    let occupied_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0x71a));
+    repository
+        .handle(
+            imported_command(0x31a, &conversation, ImportedSessionRelationship::Resume),
+            SessionId::from_uuid(Uuid::from_u128(0x41a)),
+            occupied_frontier,
+            || SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x61a)),
+        )
+        .await?;
+
+    let colliding_command =
+        imported_command(0x31b, &conversation, ImportedSessionRelationship::Fork);
+    let error = repository
+        .handle(
+            colliding_command,
+            SessionId::from_uuid(Uuid::from_u128(0x41b)),
+            occupied_frontier,
+            || SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x61b)),
+        )
+        .await
+        .expect_err("occupied seed-frontier identity must be a typed collision");
+    assert!(matches!(
+        error,
+        ImportedSessionRepositoryError::IdentityCollision(
+            ImportedSessionIdentityCollision::SeedFrontier
+        )
+    ));
+    assert!(
+        repository
+            .load(colliding_command.command_id())
+            .await?
+            .is_none()
+    );
+    Ok(())
+}
+
+/// S28 / INV-002: purpose loading rejects a stored sentinel command UUID
+/// before reconstructing a domain command.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s28_inv002_command_load_rejects_stored_sentinel_command_identity()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let conversation = imported(0x11c, 0x21c, "{\"type\":\"summary\",\"value\":null}");
+    ImportedConversationStore::resolve_or_insert(
+        &mut ImportedConversationRepository::new(pool.clone()),
+        conversation.clone(),
+    )
+    .await?;
+    let repository = ImportedSessionRepository::new(pool.clone());
+    let command = imported_command(0x31c, &conversation, ImportedSessionRelationship::Resume);
+    repository
+        .handle(
+            command,
+            SessionId::from_uuid(Uuid::from_u128(0x41c)),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0x71c)),
+            || SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x61c)),
+        )
+        .await?;
+
+    sqlx::raw_sql(
+        "ALTER TABLE durable_command DISABLE TRIGGER ALL;
+         ALTER TABLE create_session_from_imported_frontier_command DISABLE TRIGGER ALL;
+         UPDATE create_session_from_imported_frontier_command
+            SET command_id = '00000000-0000-0000-0000-000000000000';
+         UPDATE durable_command
+            SET command_id = '00000000-0000-0000-0000-000000000000';
+         ALTER TABLE create_session_from_imported_frontier_command ENABLE TRIGGER ALL;
+         ALTER TABLE durable_command ENABLE TRIGGER ALL;",
+    )
+    .execute(&pool)
+    .await?;
+
+    let error = repository
+        .load(DurableCommandId::from_uuid(Uuid::nil()))
+        .await
+        .expect_err("stored sentinel command identity must fail closed");
+    assert!(matches!(
+        error,
+        ImportedSessionRepositoryError::Corruption(
+            ImportedSessionCorruption::InvalidCommandIdentity {
+                field: "typed command identity",
+                reason: DurableCommandIdMappingError::SentinelUuid,
+            }
+        )
+    ));
     Ok(())
 }
 

@@ -277,6 +277,11 @@ fn map_imported_error(error: ImportedSessionRepositoryError) -> SessionRepositor
                 "imported load reported an impossible preparation failure",
             ))
         }
+        ImportedSessionRepositoryError::IdentityCollision(_) => {
+            SessionRepositoryError::Corruption(SessionCorruption::Inconsistent(
+                "imported load reported an impossible identity collision",
+            ))
+        }
     }
 }
 

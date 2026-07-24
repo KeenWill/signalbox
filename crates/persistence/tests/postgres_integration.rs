@@ -5,6 +5,8 @@
     reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
 )]
 
+mod support;
+
 use std::{
     collections::VecDeque,
     error::Error,
@@ -92,6 +94,8 @@ use testcontainers_modules::{
     postgres::Postgres,
     testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
 };
+
+use support::blocked_backends_reached;
 
 const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_NAME: &str = "signalbox_integration";
@@ -7250,28 +7254,6 @@ async fn s01_inv009_concurrent_start_eligible_turn_passes_activate_once()
     pool.close().await;
     drop(container);
     Ok(())
-}
-
-/// Polls until exactly `expected` backends are lock-blocked behind another
-/// backend, returning whether that count appeared within the polling budget.
-/// The per-test database serves only this test's connections and each racer
-/// is spawned only after the previous blocked count is observed, so spawn
-/// order identifies the racers without matching their SQL text.
-async fn blocked_backends_reached(pool: &PgPool, expected: i64) -> Result<bool, sqlx::Error> {
-    for _ in 0..400 {
-        let observed: i64 = sqlx::query_scalar(
-            "SELECT count(*)
-               FROM pg_stat_activity
-              WHERE cardinality(pg_blocking_pids(pid)) > 0",
-        )
-        .fetch_one(pool)
-        .await?;
-        if observed == expected {
-            return Ok(true);
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
-    Ok(false)
 }
 
 #[tokio::test(flavor = "multi_thread")]

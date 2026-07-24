@@ -34,8 +34,9 @@ use crate::{
         ImportedConversationRepositoryError,
     },
     mapping::{
-        PositiveOrdinalMappingError, defaults_version_from_numeric, defaults_version_to_numeric,
-        durable_command_id_to_uuid, session_id_from_uuid, session_id_to_uuid,
+        DurableCommandIdMappingError, PositiveOrdinalMappingError, defaults_version_from_numeric,
+        defaults_version_to_numeric, durable_command_id_from_uuid, durable_command_id_to_uuid,
+        session_id_from_uuid, session_id_to_uuid,
     },
     outbox,
 };
@@ -66,6 +67,13 @@ pub enum ImportedSessionCorruption {
         /// Why the numeric value is invalid.
         reason: PositiveOrdinalMappingError,
     },
+    /// A stored command identity is a reserved sentinel UUID.
+    InvalidCommandIdentity {
+        /// Durable field carrying the identity.
+        field: &'static str,
+        /// Why the UUID cannot construct a command identity.
+        reason: DurableCommandIdMappingError,
+    },
     /// The referenced imported aggregate cannot be reconstructed.
     ImportedConversation(ImportedConversationCorruption),
     /// Stored creation facts fail domain-owned correlation.
@@ -85,6 +93,9 @@ impl fmt::Display for ImportedSessionCorruption {
                 write!(formatter, "inconsistent imported-session {relationship}")
             }
             Self::InvalidOrdinal { field, reason } => {
+                write!(formatter, "invalid imported-session {field}: {reason}")
+            }
+            Self::InvalidCommandIdentity { field, reason } => {
                 write!(formatter, "invalid imported-session {field}: {reason}")
             }
             Self::ImportedConversation(error) => error.fmt(formatter),
@@ -107,11 +118,36 @@ impl fmt::Display for ImportedSessionCorruption {
 impl Error for ImportedSessionCorruption {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::InvalidCommandIdentity { reason, .. } => Some(reason),
             Self::ImportedConversation(error) => Some(error),
             _ => None,
         }
     }
 }
+
+/// Which generated imported-session identity collided with durable state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ImportedSessionIdentityCollision {
+    /// The proposed session identity already exists.
+    Session,
+    /// A proposed semantic-entry identity already exists.
+    SemanticEntry,
+    /// The proposed seed context-frontier identity already exists.
+    SeedFrontier,
+}
+
+impl fmt::Display for ImportedSessionIdentityCollision {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let identity = match self {
+            Self::Session => "session",
+            Self::SemanticEntry => "semantic-entry",
+            Self::SeedFrontier => "seed context-frontier",
+        };
+        write!(formatter, "{identity} identity already exists")
+    }
+}
+
+impl Error for ImportedSessionIdentityCollision {}
 
 /// PostgreSQL or fail-closed imported-session repository failure.
 #[derive(Debug)]
@@ -127,6 +163,8 @@ pub enum ImportedSessionRepositoryError {
     },
     /// Application-supplied identities could not form a checked candidate.
     Preparation(CreateSessionFromImportedFrontierPreparationFailure),
+    /// A supplied fresh identity already names a durable record.
+    IdentityCollision(ImportedSessionIdentityCollision),
     /// Durable facts cannot reconstruct their admitted domain values.
     Corruption(ImportedSessionCorruption),
 }
@@ -153,6 +191,7 @@ impl fmt::Display for ImportedSessionRepositoryError {
                     "imported-session candidate preparation failed: {failure:?}"
                 )
             }
+            Self::IdentityCollision(error) => error.fmt(formatter),
             Self::Corruption(error) => error.fmt(formatter),
         }
     }
@@ -163,6 +202,7 @@ impl Error for ImportedSessionRepositoryError {
         match self {
             Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
             Self::DifferentCommandKind { .. } | Self::Preparation(_) => None,
+            Self::IdentityCollision(error) => Some(error),
             Self::Corruption(error) => Some(error),
         }
     }
@@ -187,6 +227,10 @@ impl ImportedSessionRepositoryError {
         } else {
             Self::Database(error)
         }
+    }
+
+    fn from_insert_failure(error: sqlx::Error) -> Self {
+        identity_collision(&error).map_or_else(|| Self::Database(error), Self::IdentityCollision)
     }
 }
 
@@ -389,7 +433,8 @@ async fn insert_prepared(
     .bind(Decimal::from(frontier.through_position().as_u64()))
     .bind(relationship)
     .execute(&mut *connection)
-    .await?;
+    .await
+    .map_err(ImportedSessionRepositoryError::from_insert_failure)?;
 
     sqlx::query("INSERT INTO session_scheduler (session_id) VALUES ($1)")
         .bind(session_id_to_uuid(session.id()))
@@ -467,7 +512,8 @@ async fn insert_prepared(
         .bind(frontier.conversation().into_uuid())
         .bind(imported_entry.into_uuid())
         .execute(&mut *connection)
-        .await?;
+        .await
+        .map_err(ImportedSessionRepositoryError::from_insert_failure)?;
     }
 
     let seed_snapshot = prepared.seed_snapshot();
@@ -483,7 +529,8 @@ async fn insert_prepared(
     .bind(seed_context.snapshot().into_uuid())
     .bind(Decimal::from(member_count))
     .execute(&mut *connection)
-    .await?;
+    .await
+    .map_err(ImportedSessionRepositoryError::from_insert_failure)?;
     for (index, entry) in seed_snapshot.ordered_entries().enumerate() {
         let position = u64::try_from(index)
             .ok()
@@ -586,7 +633,14 @@ async fn load_creation_from_connection(
         CREATE_SESSION_FROM_IMPORTED_FRONTIER_KIND,
     )?;
     require_version(&row, "registry_version", STORAGE_VERSION)?;
-    let _: Uuid = required(&row, "typed_command_id")?;
+    let stored_command = durable_command_id_from_uuid(required(&row, "typed_command_id")?)
+        .map_err(|reason| ImportedSessionCorruption::InvalidCommandIdentity {
+            field: "typed command identity",
+            reason,
+        })?;
+    if stored_command != command_id {
+        return Err(ImportedSessionCorruption::Inconsistent("typed command identity").into());
+    }
     require_spelling(
         &row,
         "typed_kind",
@@ -622,7 +676,7 @@ async fn load_creation_from_connection(
         "command model selection",
     )?;
     let command = CreateSessionFromImportedFrontier::new(
-        command_id,
+        stored_command,
         command_frontier,
         command_relationship,
         command_defaults,
@@ -657,6 +711,22 @@ async fn load_creation_from_connection(
     .reconstitute()
     .map(Some)
     .map_err(|error| ImportedSessionCorruption::CreationDomain(error.failure()).into())
+}
+
+fn identity_collision(error: &sqlx::Error) -> Option<ImportedSessionIdentityCollision> {
+    match error
+        .as_database_error()
+        .and_then(|database| database.constraint())
+    {
+        Some("session_pkey") => Some(ImportedSessionIdentityCollision::Session),
+        Some("semantic_transcript_entry_pk" | "semantic_transcript_entry_id_global") => {
+            Some(ImportedSessionIdentityCollision::SemanticEntry)
+        }
+        Some("context_frontier_pk" | "context_frontier_id_global") => {
+            Some(ImportedSessionIdentityCollision::SeedFrontier)
+        }
+        _ => None,
+    }
 }
 
 pub(crate) fn reconstitute_bounded_current(
