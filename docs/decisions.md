@@ -109,6 +109,25 @@ the source-content digest would change raw-content idempotency.
 raw-occurrence schema and adapter, domain spine, conversation-import
 specification, and synthetic domain/Postgres corruption tests.
 
+## 2026-07-24 — Release decoded process payloads before response backpressure
+
+**Context.** Cloning a decoded request retained both the frame-owned payload and
+its clone after releasing the inbound-frame permit. Rejected oversized input
+could then remain live while a non-reading peer blocked the error response.
+
+**Decision.** Consume each decoded frame into its request without cloning. Move
+submitted text into application admission, so rejected text is dropped before
+awaiting response output and admitted text reuses the decoded allocation.
+
+**Rejected alternatives.** Keeping the frame until request completion makes the
+frame budget cease to bound its allocation lifetime. Explicitly dropping only
+rejected clones leaves avoidable duplication on successful submissions. Response
+deadlines would add unrelated timing semantics.
+
+**Affects.** Process-protocol frame ownership, submitted-input admission, and
+process-runtime memory retention under response backpressure; wire shapes and
+admission limits do not change.
+
 ## 2026-07-23 — Import external conversations as records and seed native sessions
 
 **Context.** External AI transcripts need to become durable Signalbox history
@@ -155,25 +174,6 @@ session ancestry and creation, semantic entries, first native frontier,
 model-input rendering, append-only Postgres storage, the domain/application
 spines, and opt-in content-silent real-transcript validation. Native lifecycle,
 slot locking, execution evidence, retry, and outbox semantics do not change.
-
-## 2026-07-24 — Release decoded process payloads before response backpressure
-
-**Context.** Cloning a decoded request retained both the frame-owned payload and
-its clone after releasing the inbound-frame permit. Rejected oversized input
-could then remain live while a non-reading peer blocked the error response.
-
-**Decision.** Consume each decoded frame into its request without cloning. Move
-submitted text into application admission, so rejected text is dropped before
-awaiting response output and admitted text reuses the decoded allocation.
-
-**Rejected alternatives.** Keeping the frame until request completion makes the
-frame budget cease to bound its allocation lifetime. Explicitly dropping only
-rejected clones leaves avoidable duplication on successful submissions. Response
-deadlines would add unrelated timing semantics.
-
-**Affects.** Process-protocol frame ownership, submitted-input admission, and
-process-runtime memory retention under response backpressure; wire shapes and
-admission limits do not change.
 
 ## 2026-07-23 — Reserve inbound frame capacity only after bounded read readiness
 
