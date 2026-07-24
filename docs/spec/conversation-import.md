@@ -118,6 +118,13 @@ raw-record occurrence, position within that record, and source metadata:
 - sidechain flag; and
 - metadata-record flag.
 
+Global imported positions are one-based and contiguous across the conversation.
+Positions within one raw-record occurrence are likewise the one-based contiguous
+sequence `1..=K` for that record's `K` emitted entries and restart at `1` for
+the next raw occurrence. A source event, text message, or content-absence record
+that emits one entry therefore uses within-record position `1`; an array block
+at zero-based source index `i` uses within-record position `i + 1`.
+
 Each source field is independently `Attested(value)`, `AttestedAbsent`, or
 `NotAttested`. JSON `null` maps to `AttestedAbsent`; an omitted field maps to
 `NotAttested`. The converter never derives a missing value from a filename,
@@ -135,6 +142,10 @@ source token and never converts through an integer or binary floating-point
 type. Thus `9007199254740993`, `1e400`, and distinct valid spellings such as `1`
 and `1.0` remain exact and distinct. Raw records remain the authority for
 whitespace, string-escape spellings, delimiters, and other lexical details.
+Paired JSON UTF-16 surrogate escapes decode to their one Unicode supplementary
+scalar. A lone high surrogate, lone low surrogate, or mismatched pair has no
+decoded Unicode scalar sequence and rejects the complete conversion as invalid
+JSON; it is never replaced or retained as a pseudo-character.
 
 The closed normalized content vocabulary is:
 
@@ -292,9 +303,13 @@ events.
 Malformed JSON, a blank line, invalid UTF-8, unsupported content, an identity
 collision inside the candidate set, a position overflow, JSON deeper than 128
 nested array or object containers, or a source with no JSON records rejects the
-complete conversion. The depth bound applies to every complete source record and
-modeled nested value. U+0000, empty strings, and a source containing only
-non-message records do not: raw and normalized storage retain them.
+complete conversion. Container depth is the count of arrays and objects on one
+root-to-value path: the required top-level record object has depth `1`, entering
+each child array or object adds `1`, and scalars add nothing. Depth `128` is
+admitted and attempting to enter a container at depth `129` rejects the whole
+source. The same count applies to every complete source record and modeled
+nested value. U+0000, empty strings, and a source containing only non-message
+records do not: raw and normalized storage retain them.
 
 ## Persistence and reconstitution
 
@@ -311,13 +326,18 @@ drive capacity allocation: collections grow fallibly after each decoded element.
 One transaction resolves or inserts a complete aggregate:
 
 - an existing format/source-content digest must reconstitute completely and
-  byte-match every raw occurrence before returning `AlreadyImported`;
+  match the candidate conversion before returning `AlreadyImported`. Equality
+  includes every exact raw record, normalized structured record, conversion
+  digest, entry position, raw/within-record position, speaker attestation,
+  content, and source metadata; only the candidate conversation and entry
+  identities are excluded. A semantic mismatch is typed
+  `ExistingSnapshotMismatch`, never accepted as replay;
 - a new digest inserts or verifies every content-addressed raw blob, then
   atomically inserts one header, every raw occurrence, and every normalized
   entry; a concurrent header-insert loser re-inspects and completely
   reconstitutes the winner, returning `AlreadyImported` only after the same
-  byte-for-byte match, and raw-blob insert conflicts likewise reload and verify
-  the winning bytes before reuse; and
+  conversion-equivalence check, and raw-blob insert conflicts likewise reload
+  and verify the winning bytes before reuse; and
 - every raw occurrence stores and rechecks its conversion digest before its
   normalized value is accepted; and
 - deferred constraints require exact declared counts, contiguous positions,
