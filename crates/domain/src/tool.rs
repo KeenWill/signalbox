@@ -15,6 +15,7 @@ const MAX_TOOL_ARGUMENT_BYTES: usize = 1024 * 1024;
 const MAX_TOOL_NAME_BYTES: usize = 64;
 const MAX_TOOL_DENIAL_REASON_BYTES: usize = 1024;
 const MAX_TOOL_RESULT_TEXT_BYTES: usize = 1024 * 1024;
+const MAX_TOOL_REQUESTS_PER_RESPONSE: usize = 32;
 
 /// One checked model-facing tool name.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -333,7 +334,8 @@ pub struct ToolUsingAssistantResponse {
 }
 
 impl ToolUsingAssistantResponse {
-    /// Checks the nonempty-tool requirement while preserving part order.
+    /// Checks the positive bounded tool-count requirement while preserving
+    /// part order.
     pub fn try_from_parts(
         parts: Vec<AssistantResponsePart>,
     ) -> Result<Self, ToolUsingAssistantResponseError> {
@@ -341,7 +343,7 @@ impl ToolUsingAssistantResponse {
             .iter()
             .filter(|part| matches!(part, AssistantResponsePart::ToolCall(_)))
             .count();
-        if tool_count == 0 {
+        if tool_count == 0 || tool_count > MAX_TOOL_REQUESTS_PER_RESPONSE {
             return Err(ToolUsingAssistantResponseError { parts });
         }
         Ok(Self {
@@ -361,7 +363,8 @@ impl ToolUsingAssistantResponse {
     }
 }
 
-/// A response rejected because it contained no tool proposal.
+/// A response rejected because its tool-proposal count was zero or exceeded
+/// the per-response bound.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ToolUsingAssistantResponseError {
     parts: Vec<AssistantResponsePart>,
@@ -674,50 +677,83 @@ impl ToolApprovalResolution {
     }
 }
 
-/// Independently stored approval facts supplied for checked reconstitution.
+/// Independently stored approval evidence supplied for checked
+/// reconstitution.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ToolApprovalResolutionReconstitutionInput {
-    request: ToolRequestId,
-    decision: ToolApprovalDecision,
-    source: ToolDecisionSource,
+    evidence: StoredToolApprovalEvidence,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum StoredToolApprovalEvidence {
+    OwnerCommand(PreparedDecideToolRequest),
+    PolicyAuto(ToolRequestId),
+    SessionBlanket(ToolRequestId),
 }
 
 impl ToolApprovalResolutionReconstitutionInput {
-    /// Supplies one stored request-bound decision and source.
-    pub const fn new(
-        request: ToolRequestId,
-        decision: ToolApprovalDecision,
-        source: ToolDecisionSource,
-    ) -> Self {
+    /// Supplies the exact applied owner command that owns one stored decision.
+    pub const fn owner_command(command: PreparedDecideToolRequest) -> Self {
         Self {
-            request,
-            decision,
-            source,
+            evidence: StoredToolApprovalEvidence::OwnerCommand(command),
         }
     }
 
-    /// Checks implemented source/decision combinations.
+    /// Supplies one request-bound registry-policy approval.
+    pub const fn policy_auto(request: ToolRequestId) -> Self {
+        Self {
+            evidence: StoredToolApprovalEvidence::PolicyAuto(request),
+        }
+    }
+
+    /// Supplies one request-bound frozen-session-blanket approval.
+    pub const fn session_blanket(request: ToolRequestId) -> Self {
+        Self {
+            evidence: StoredToolApprovalEvidence::SessionBlanket(request),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn owner_fixture(request: ToolRequestId, decision: ToolApprovalDecision) -> Self {
+        let command = DecideToolRequest::try_new(
+            DurableCommandId::from_uuid(uuid::Uuid::from_u128(1)),
+            request,
+            decision.clone(),
+        )
+        .expect("the fixture command identity is admitted");
+        Self::owner_command(PreparedDecideToolRequest {
+            command,
+            result: DecideToolRequestResult::Applied(DecideToolRequestAppliedResult {
+                resolution: ToolApprovalResolution::owner(request, decision),
+            }),
+        })
+    }
+
+    /// Checks source-specific evidence before restoring execution authority.
     pub fn reconstitute(
         self,
     ) -> Result<ToolApprovalResolution, ToolApprovalResolutionReconstitutionError> {
-        let valid = match (&self.decision, self.source) {
-            (_, ToolDecisionSource::OwnerCommand)
-            | (ToolApprovalDecision::Approve, ToolDecisionSource::PolicyAuto)
-            | (ToolApprovalDecision::Approve, ToolDecisionSource::SessionBlanket) => true,
-            (_, ToolDecisionSource::SessionOverride | ToolDecisionSource::JudgeRecommendation)
-            | (
-                ToolApprovalDecision::Deny { .. },
-                ToolDecisionSource::PolicyAuto | ToolDecisionSource::SessionBlanket,
-            ) => false,
+        let resolution = match &self.evidence {
+            StoredToolApprovalEvidence::OwnerCommand(command) => match command.result() {
+                DecideToolRequestResult::Applied(applied)
+                    if command.command().request() == applied.resolution().request()
+                        && applied.resolution().source() == ToolDecisionSource::OwnerCommand =>
+                {
+                    Some(applied.resolution().clone())
+                }
+                DecideToolRequestResult::Applied(_) | DecideToolRequestResult::Rejected(_) => None,
+            },
+            StoredToolApprovalEvidence::PolicyAuto(request) => {
+                Some(ToolApprovalResolution::policy_auto(*request))
+            }
+            StoredToolApprovalEvidence::SessionBlanket(request) => {
+                Some(ToolApprovalResolution::session_blanket(*request))
+            }
         };
-        if !valid {
-            return Err(ToolApprovalResolutionReconstitutionError { input: self });
+        match resolution {
+            Some(resolution) => Ok(resolution),
+            None => Err(ToolApprovalResolutionReconstitutionError { input: self }),
         }
-        Ok(ToolApprovalResolution {
-            request: self.request,
-            decision: self.decision,
-            source: self.source,
-        })
     }
 }
 
@@ -769,17 +805,31 @@ pub struct DecideToolRequest {
 }
 
 impl DecideToolRequest {
-    /// Constructs the complete canonical caller payload.
-    pub const fn new(
+    /// Constructs the complete canonical caller payload after rejecting the
+    /// owner-global nil and max command sentinels.
+    pub fn try_new(
+        command_id: DurableCommandId,
+        request: ToolRequestId,
+        decision: ToolApprovalDecision,
+    ) -> Result<Self, DecideToolRequestConstructionError> {
+        if command_id.as_uuid().is_nil() || command_id.as_uuid().is_max() {
+            return Err(DecideToolRequestConstructionError { command_id });
+        }
+        Ok(Self {
+            command_id,
+            request,
+            decision,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new(
         command_id: DurableCommandId,
         request: ToolRequestId,
         decision: ToolApprovalDecision,
     ) -> Self {
-        Self {
-            command_id,
-            request,
-            decision,
-        }
+        Self::try_new(command_id, request, decision)
+            .expect("the fixture command identity is admitted")
     }
 
     /// Returns the owner-global command identity.
@@ -846,6 +896,19 @@ impl DecideToolRequest {
                 DecideToolRequestRejectedResult::NotEarliestUndecided { request, earliest },
             ),
         }
+    }
+}
+
+/// A tool-decision command used a reserved owner-global identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DecideToolRequestConstructionError {
+    command_id: DurableCommandId,
+}
+
+impl DecideToolRequestConstructionError {
+    /// Returns the rejected command identity.
+    pub const fn command_id(self) -> DurableCommandId {
+        self.command_id
     }
 }
 
@@ -1069,6 +1132,19 @@ mod tests {
         .into_request()
     }
 
+    fn tool_response_parts(count: usize) -> Vec<AssistantResponsePart> {
+        (0..count)
+            .map(|_| {
+                AssistantResponsePart::ToolCall(ToolCallProposal::new(
+                    ToolName::try_new(String::from("current_time"))
+                        .expect("canonical tool name is valid"),
+                    NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+                        .expect("canonical arguments are valid"),
+                ))
+            })
+            .collect()
+    }
+
     /// S10 / INV-019: request names are exact and restricted to the recorded
     /// ASCII spelling.
     #[test]
@@ -1191,6 +1267,58 @@ mod tests {
             ToolDecisionSource::OwnerCommand
         );
         assert!(applied.resolution().is_approved());
+    }
+
+    /// S10 / INV-019: one provider response admits at most the recorded 32
+    /// logical tool requests without accepting a partial prefix.
+    #[test]
+    fn s10_inv019_tool_response_request_count_is_bounded() {
+        let admitted = ToolUsingAssistantResponse::try_from_parts(tool_response_parts(32))
+            .expect("the exact per-response limit is admitted");
+        let rejected = ToolUsingAssistantResponse::try_from_parts(tool_response_parts(33))
+            .expect_err("the first response above the limit is rejected whole");
+
+        assert_eq!(admitted.tool_count(), 32);
+        assert_eq!(rejected.into_parts().len(), 33);
+    }
+
+    /// INV-012: owner-global command sentinels never enter the canonical
+    /// tool-decision command space.
+    #[test]
+    fn inv012_tool_decision_rejects_reserved_command_identities() {
+        for value in [uuid::Uuid::nil(), uuid::Uuid::max()] {
+            let command_id = DurableCommandId::from_uuid(value);
+            let error = DecideToolRequest::try_new(
+                command_id,
+                tool_request_id(1),
+                ToolApprovalDecision::Approve,
+            )
+            .expect_err("reserved command identities are rejected");
+
+            assert_eq!(error.command_id(), command_id);
+        }
+    }
+
+    /// S10 / INV-020: only an applied owner command can restore
+    /// owner-command approval authority.
+    #[test]
+    fn s10_inv020_rejected_owner_command_cannot_restore_approval() {
+        let command = DecideToolRequest::new(
+            command_id(5),
+            tool_request_id(4),
+            ToolApprovalDecision::Approve,
+        )
+        .prepare_request_not_found();
+        let input = ToolApprovalResolutionReconstitutionInput::owner_command(command);
+
+        assert!(
+            input
+                .clone()
+                .reconstitute()
+                .expect_err("a rejected command carries no approval authority")
+                .input()
+                == &input
+        );
     }
 
     /// S10: denial admission follows the persisted POSIX-whitespace contract

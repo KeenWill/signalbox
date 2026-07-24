@@ -4214,9 +4214,9 @@ mod tests {
         SessionCreationProvenance, SessionReconstitutionInput, ToolApprovalDecision,
         ToolApprovalResolutionReconstitutionInput, ToolAttemptEnd, ToolAttemptReconstitutionInput,
         ToolAttemptReconstitutionState, ToolBatchPhaseReconstitutionInput,
-        ToolBatchReconstitutionInput, ToolDecisionSource, ToolDispatchGeneration, ToolEffectClass,
-        ToolExecutionError, ToolExecutionErrorKind, ToolName, ToolRequestOrdinal,
-        ToolRequestReconstitutionInput, TranscriptAncestry,
+        ToolBatchReconstitutionInput, ToolDispatchGeneration, ToolEffectClass, ToolExecutionError,
+        ToolExecutionErrorKind, ToolName, ToolRequestOrdinal, ToolRequestReconstitutionInput,
+        TranscriptAncestry,
         test_support::{
             accepted_input_id, context_frontier_id, direct, model_call_id, provider_model_identity,
             semantic_transcript_entry_id, session_id, tool_attempt_id, tool_request_id,
@@ -4535,10 +4535,9 @@ mod tests {
     }
 
     fn denied_approval(request: ToolRequestId) -> ToolApprovalResolution {
-        ToolApprovalResolutionReconstitutionInput::new(
+        ToolApprovalResolutionReconstitutionInput::owner_fixture(
             request,
             ToolApprovalDecision::Deny { reason: None },
-            ToolDecisionSource::OwnerCommand,
         )
         .reconstitute()
         .expect("the denial fixture is implemented")
@@ -4819,10 +4818,9 @@ mod tests {
         );
         let mut approved_instead = input.clone();
         approved_instead.tool_denial_correlations = vec![
-            ToolApprovalResolutionReconstitutionInput::new(
+            ToolApprovalResolutionReconstitutionInput::owner_fixture(
                 request,
                 ToolApprovalDecision::Approve,
-                ToolDecisionSource::OwnerCommand,
             )
             .reconstitute()
             .expect("the mismatching approval fixture is valid"),
@@ -5827,10 +5825,9 @@ mod tests {
             .current_snapshot
             .derive_appending_candidate(context_frontier_id(43), vec![tool_use.reference()])
             .expect("the tool proposal extends the current frontier");
-        let approval = ToolApprovalResolutionReconstitutionInput::new(
+        let approval = ToolApprovalResolutionReconstitutionInput::owner_fixture(
             request.id(),
             ToolApprovalDecision::Approve,
-            ToolDecisionSource::OwnerCommand,
         )
         .reconstitute()
         .expect("the owner approval is valid");
@@ -5846,7 +5843,8 @@ mod tests {
                 error: ToolExecutionError::new(ToolExecutionErrorKind::CrashLost, None),
             }),
         )
-        .reconstitute();
+        .reconstitute()
+        .expect("the first tool dispatch generation is supported");
         let batch = ToolBatchReconstitutionInput::new(
             execution.session(),
             execution.turn(),
@@ -5885,8 +5883,8 @@ mod tests {
         assert_eq!(cancelled.tool_result_entries().len(), 1);
         assert!(matches!(
             cancelled.tool_result_entries()[0].payload(),
-            SemanticTranscriptEntryPayload::ToolClosed { request: closed }
-                if *closed == request.id()
+            SemanticTranscriptEntryPayload::ToolExecutionResult { attempt }
+                if *attempt == tool_attempt_id(44)
         ));
     }
 
