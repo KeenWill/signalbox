@@ -230,6 +230,28 @@ INV-032/INV-033 enforcement, S01/S02/S24, and
 [open questions](open-questions.md#protocols-and-persistence). Authenticated
 transports and remote clients remain explicitly open upgrade paths.
 
+## 2026-07-23 — Owner-curated work backlog under docs/agents
+
+**Context.** With the domain core landed, throughput is bounded by how many
+non-colliding work items can run concurrently across goal sessions. Ordering
+lived in the target model's priority order (coarse) and in owner sessions
+(unrecorded); collision analysis was redone by hand for every launch.
+
+**Decision.** `docs/agents/backlog.md` is the owner-curated granular expansion
+of the priority order: pullable entries carrying status, size, and
+`Owns`/`Collides-with` collision groups so concurrent launches are mechanical.
+It is an ordering and parallelism artifact, not a design document — designs
+remain specification diffs at pickup. Goal-mode selection consults it when a
+goal names no milestone. The owner reorders; agents never do.
+
+**Rejected alternatives.** An external task tracker: invisible to goal agents
+and review bots, and a dead end once the platform itself hosts orchestration.
+Design detail in backlog entries: recreates a living record corpus with
+consistency obligations.
+
+**Affects.** `docs/agents/backlog.md` (new), `docs/agents/goal-mode.md`
+(selection rule), launch workflow for concurrent goal sessions.
+
 ## 2026-07-23 — Bound and authenticate every provider exchange
 
 **Context.** The first provider adapters landed with one-send discipline,
