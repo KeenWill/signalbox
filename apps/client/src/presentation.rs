@@ -1,8 +1,8 @@
 use std::io::{self, Write};
 
 use signalbox_process_protocol::{
-    CanonicalUuid, CurrentModelCallState, ModelCallDisposition, ModelCallState, SessionEvent,
-    TranscriptEntry, TranscriptTextEntry, TurnState,
+    CanonicalUuid, CurrentModelCallState, FailedModelCallDisposition, ModelCallDisposition,
+    ModelCallState, SessionEvent, TranscriptEntry, TranscriptTextEntry, TurnState,
 };
 
 use crate::{
@@ -21,6 +21,9 @@ pub(crate) enum SnapshotSelection {
         model_call_id: CanonicalUuid,
     },
     Failed {
+        turn_id: CanonicalUuid,
+    },
+    Cancelled {
         turn_id: CanonicalUuid,
     },
 }
@@ -220,6 +223,24 @@ impl<'a> Output<'a> {
                 "event={cursor} session={session_id} turn_refused turn={turn_id} \
                  call={model_call_id} frontier={terminal_frontier_id}"
             ),
+            SessionEvent::TurnCancelled {
+                turn_id,
+                cancellation_entry_id,
+                terminal_frontier_id,
+            } => writeln!(
+                self.stdout,
+                "event={cursor} session={session_id} turn_cancelled turn={turn_id} \
+                 entry={cancellation_entry_id} frontier={terminal_frontier_id}"
+            ),
+            SessionEvent::TurnReconciliationRequired {
+                turn_id,
+                model_call_id,
+                terminal_frontier_id,
+            } => writeln!(
+                self.stdout,
+                "event={cursor} session={session_id} turn_reconciliation_required \
+                 turn={turn_id} call={model_call_id} frontier={terminal_frontier_id}"
+            ),
         }
     }
 
@@ -290,11 +311,32 @@ impl<'a> Output<'a> {
             ),
             TurnState::Failed {
                 terminal_frontier_id,
-            } => writeln!(
-                self.stdout,
-                "turn={turn_id} position={position} state=failed \
-                 frontier={terminal_frontier_id}"
-            ),
+                terminal_attempt_id,
+                terminal_model_call,
+            } => match (terminal_attempt_id, terminal_model_call) {
+                (None, None) => writeln!(
+                    self.stdout,
+                    "turn={turn_id} position={position} state=failed \
+                     frontier={terminal_frontier_id} attempt=none call=none"
+                ),
+                (Some(attempt_id), None) => writeln!(
+                    self.stdout,
+                    "turn={turn_id} position={position} state=failed \
+                     frontier={terminal_frontier_id} attempt={attempt_id} call=none"
+                ),
+                (Some(attempt_id), Some(call)) => writeln!(
+                    self.stdout,
+                    "turn={turn_id} position={position} state=failed \
+                     frontier={terminal_frontier_id} attempt={attempt_id} call={} \
+                     call_disposition={}",
+                    call.model_call_id(),
+                    failed_model_call_disposition(call.disposition())
+                ),
+                (None, Some(_)) => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "failed turn carried terminal call evidence without an attempt",
+                )),
+            },
             TurnState::Completed {
                 terminal_frontier_id,
                 terminal_attempt_id,
@@ -312,6 +354,33 @@ impl<'a> Output<'a> {
             } => writeln!(
                 self.stdout,
                 "turn={turn_id} position={position} state=refused \
+                 frontier={terminal_frontier_id} attempt={terminal_attempt_id} \
+                 call={terminal_model_call_id}"
+            ),
+            TurnState::Cancelled {
+                terminal_frontier_id,
+                terminal_attempt_id,
+                terminal_model_call_id,
+            } => match terminal_model_call_id {
+                Some(model_call_id) => writeln!(
+                    self.stdout,
+                    "turn={turn_id} position={position} state=cancelled \
+                     frontier={terminal_frontier_id} attempt={terminal_attempt_id} \
+                     call={model_call_id}"
+                ),
+                None => writeln!(
+                    self.stdout,
+                    "turn={turn_id} position={position} state=cancelled \
+                     frontier={terminal_frontier_id} attempt={terminal_attempt_id} call=none"
+                ),
+            },
+            TurnState::ReconciliationRequired {
+                terminal_frontier_id,
+                terminal_attempt_id,
+                terminal_model_call_id,
+            } => writeln!(
+                self.stdout,
+                "turn={turn_id} position={position} state=reconciliation_required \
                  frontier={terminal_frontier_id} attempt={terminal_attempt_id} \
                  call={terminal_model_call_id}"
             ),
@@ -346,6 +415,13 @@ impl<'a> Output<'a> {
                 writeln!(
                     self.stdout,
                     "turn_failed turn={turn_id} source={} entry={}",
+                    entry.source_session_id, entry.entry_id
+                )
+            }
+            SnapshotEntryKind::Marker(TranscriptEntry::TurnCancelled { turn_id }) => {
+                writeln!(
+                    self.stdout,
+                    "turn_cancelled turn={turn_id} source={} entry={}",
                     entry.source_session_id, entry.entry_id
                 )
             }
@@ -386,12 +462,20 @@ impl SnapshotSelection {
                 SnapshotEntryKind::Marker(TranscriptEntry::TurnFailed {
                     turn_id: entry_turn,
                 }),
+            )
+            | (
+                Self::Cancelled { turn_id },
+                SnapshotEntryKind::Marker(TranscriptEntry::TurnCancelled {
+                    turn_id: entry_turn,
+                }),
             ) => turn_id == *entry_turn,
             (
-                Self::Completed { .. } | Self::Failed { .. },
+                Self::Completed { .. } | Self::Failed { .. } | Self::Cancelled { .. },
                 SnapshotEntryKind::Text(_)
                 | SnapshotEntryKind::Marker(
-                    TranscriptEntry::TurnCompleted { .. } | TranscriptEntry::TurnFailed { .. },
+                    TranscriptEntry::TurnCompleted { .. }
+                    | TranscriptEntry::TurnFailed { .. }
+                    | TranscriptEntry::TurnCancelled { .. },
                 ),
             ) => false,
         }
@@ -402,6 +486,7 @@ fn model_call_state(state: ModelCallState) -> &'static str {
     match state {
         ModelCallState::Prepared {} => "prepared",
         ModelCallState::InFlight {} => "in_flight",
+        ModelCallState::CancellationRequested {} => "cancellation_requested",
         ModelCallState::Terminal { disposition } => match disposition {
             ModelCallDisposition::Completed => "terminal:completed",
             ModelCallDisposition::KnownFailed => "terminal:known_failed",
@@ -416,6 +501,14 @@ const fn current_model_call_state(state: CurrentModelCallState) -> &'static str 
     match state {
         CurrentModelCallState::Prepared {} => "prepared",
         CurrentModelCallState::InFlight {} => "in_flight",
+        CurrentModelCallState::CancellationRequested {} => "cancellation_requested",
+    }
+}
+
+const fn failed_model_call_disposition(disposition: FailedModelCallDisposition) -> &'static str {
+    match disposition {
+        FailedModelCallDisposition::KnownFailed => "known_failed",
+        FailedModelCallDisposition::Cancelled => "cancelled",
     }
 }
 
@@ -437,8 +530,9 @@ mod tests {
     use std::io::{self, Write};
 
     use signalbox_process_protocol::{
-        CanonicalU64, CanonicalUuid, ContentFragment, InputContent, ServerMessage, TranscriptEntry,
-        TranscriptTextEntry, TurnState,
+        CanonicalU64, CanonicalUuid, ContentFragment, CurrentModelCall, CurrentModelCallState,
+        FailedModelCallDisposition, FailedTerminalModelCall, InputContent, ModelCallState,
+        ServerMessage, SessionEvent, TranscriptEntry, TranscriptTextEntry, TurnState,
     };
     use uuid::Uuid;
 
@@ -566,6 +660,163 @@ mod tests {
         assert!(rendered.contains("selected reply"));
         assert!(rendered.contains("turn_completed"));
         assert!(!rendered.contains("later reply"));
+        assert!(!rendered.contains(&later_turn.to_string()));
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn snapshots_render_cancellation_reconciliation_and_failed_call_evidence() {
+        let mut snapshot = TranscriptSnapshot::from_messages(
+            12,
+            [
+                ServerMessage::TranscriptTurn {
+                    turn_id: wire_uuid(1),
+                    acceptance_position: CanonicalU64::new(1),
+                    state: TurnState::ActiveRunning {
+                        current_attempt_id: wire_uuid(2),
+                        current_model_call: Some(CurrentModelCall::new(
+                            wire_uuid(3),
+                            CurrentModelCallState::CancellationRequested {},
+                        )),
+                    },
+                },
+                ServerMessage::TranscriptTurn {
+                    turn_id: wire_uuid(4),
+                    acceptance_position: CanonicalU64::new(2),
+                    state: TurnState::Failed {
+                        terminal_frontier_id: wire_uuid(5),
+                        terminal_attempt_id: Some(wire_uuid(6)),
+                        terminal_model_call: Some(FailedTerminalModelCall::new(
+                            wire_uuid(7),
+                            FailedModelCallDisposition::Cancelled,
+                        )),
+                    },
+                },
+                ServerMessage::TranscriptTurn {
+                    turn_id: wire_uuid(8),
+                    acceptance_position: CanonicalU64::new(3),
+                    state: TurnState::Cancelled {
+                        terminal_frontier_id: wire_uuid(9),
+                        terminal_attempt_id: wire_uuid(10),
+                        terminal_model_call_id: None,
+                    },
+                },
+                ServerMessage::TranscriptTurn {
+                    turn_id: wire_uuid(11),
+                    acceptance_position: CanonicalU64::new(4),
+                    state: TurnState::ReconciliationRequired {
+                        terminal_frontier_id: wire_uuid(12),
+                        terminal_attempt_id: wire_uuid(13),
+                        terminal_model_call_id: wire_uuid(14),
+                    },
+                },
+            ],
+        )
+        .expect("test snapshot must spool");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .snapshot(&mut snapshot)
+            .expect("new terminal states must render");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        assert!(rendered.contains("call_state=cancellation_requested"));
+        assert!(rendered.contains("state=failed"));
+        assert!(rendered.contains("call_disposition=cancelled"));
+        assert!(rendered.contains("state=cancelled"));
+        assert!(rendered.contains("state=reconciliation_required"));
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn follow_events_render_new_cancellation_and_reconciliation_shapes() {
+        let session_id = wire_uuid(1);
+        let turn_id = wire_uuid(2);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut stderr, false);
+        output
+            .event(
+                1,
+                session_id,
+                &SessionEvent::ModelCallTransition {
+                    turn_id,
+                    model_call_id: wire_uuid(3),
+                    state: ModelCallState::CancellationRequested {},
+                },
+            )
+            .expect("cancellation request event must render");
+        output
+            .event(
+                2,
+                session_id,
+                &SessionEvent::TurnCancelled {
+                    turn_id,
+                    cancellation_entry_id: wire_uuid(4),
+                    terminal_frontier_id: wire_uuid(5),
+                },
+            )
+            .expect("cancelled event must render");
+        output
+            .event(
+                3,
+                session_id,
+                &SessionEvent::TurnReconciliationRequired {
+                    turn_id,
+                    model_call_id: wire_uuid(6),
+                    terminal_frontier_id: wire_uuid(7),
+                },
+            )
+            .expect("reconciliation event must render");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        assert!(rendered.contains("state=cancellation_requested"));
+        assert!(rendered.contains("turn_cancelled"));
+        assert!(rendered.contains("turn_reconciliation_required"));
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn cancelled_terminal_reread_selects_only_its_exact_marker() {
+        let selected_turn = wire_uuid(1);
+        let later_turn = wire_uuid(2);
+        let mut snapshot = TranscriptSnapshot::from_messages(
+            12,
+            [
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(0),
+                    source_session_id: wire_uuid(10),
+                    entry_id: wire_uuid(11),
+                    entry: TranscriptEntry::TurnCancelled {
+                        turn_id: selected_turn,
+                    },
+                },
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(1),
+                    source_session_id: wire_uuid(10),
+                    entry_id: wire_uuid(12),
+                    entry: TranscriptEntry::TurnCancelled {
+                        turn_id: later_turn,
+                    },
+                },
+            ],
+        )
+        .expect("test snapshot must spool");
+        let mut displayed = SnapshotIdentitySet::new().expect("identity spool must open");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .terminal_material(
+                &mut snapshot,
+                &mut displayed,
+                SnapshotSelection::Cancelled {
+                    turn_id: selected_turn,
+                },
+            )
+            .expect("selected cancellation marker must render");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        assert!(rendered.contains(&selected_turn.to_string()));
         assert!(!rendered.contains(&later_turn.to_string()));
         assert!(stderr.is_empty());
     }

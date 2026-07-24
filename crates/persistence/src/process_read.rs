@@ -62,6 +62,8 @@ pub enum ProcessCurrentModelCallState {
     Prepared,
     /// Provider work was authorized and may have happened.
     InFlight,
+    /// Cancellation was durably requested for issued provider work.
+    CancellationRequested,
 }
 
 /// Current model call attached to the active turn attempt.
@@ -80,6 +82,35 @@ impl ProcessCurrentModelCall {
     /// Returns the exact durable call state.
     pub const fn state(&self) -> ProcessCurrentModelCallState {
         self.state
+    }
+}
+
+/// Terminal model-call dispositions admitted by a failed turn projection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessFailedModelCallDisposition {
+    /// The provider interaction definitively failed.
+    KnownFailed,
+    /// The provider call was cancelled without terminalizing the turn as
+    /// cancelled.
+    Cancelled,
+}
+
+/// Optional terminal model-call evidence for a failed turn.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProcessFailedTerminalModelCall {
+    call: ModelCallId,
+    disposition: ProcessFailedModelCallDisposition,
+}
+
+impl ProcessFailedTerminalModelCall {
+    /// Returns the terminal model-call identity.
+    pub const fn call(&self) -> ModelCallId {
+        self.call
+    }
+
+    /// Returns the exact terminal model-call disposition.
+    pub const fn disposition(&self) -> ProcessFailedModelCallDisposition {
+        self.disposition
     }
 }
 
@@ -111,6 +142,11 @@ pub enum ProcessTurnState {
     Failed {
         /// Exact terminal semantic frontier.
         terminal_frontier: ContextFrontierId,
+        /// Terminal physical attempt, absent only for an evidence-free
+        /// recovery failure.
+        terminal_attempt: Option<TurnAttemptId>,
+        /// Terminal call evidence, absent when no call existed.
+        terminal_model_call: Option<ProcessFailedTerminalModelCall>,
     },
     /// The turn terminalized as completed.
     Completed {
@@ -128,6 +164,24 @@ pub enum ProcessTurnState {
         /// Outcome-authoritative attempt.
         terminal_attempt: TurnAttemptId,
         /// Outcome-authoritative model call.
+        terminal_call: ModelCallId,
+    },
+    /// The turn terminalized after confirmed cancellation.
+    Cancelled {
+        /// Exact terminal semantic frontier.
+        terminal_frontier: ContextFrontierId,
+        /// Outcome-authoritative attempt.
+        terminal_attempt: TurnAttemptId,
+        /// Terminal call, absent when cancellation preceded preparation.
+        terminal_call: Option<ModelCallId>,
+    },
+    /// The turn terminalized requiring external reconciliation.
+    ReconciliationRequired {
+        /// Exact terminal semantic frontier.
+        terminal_frontier: ContextFrontierId,
+        /// Outcome-authoritative attempt.
+        terminal_attempt: TurnAttemptId,
+        /// Ambiguous terminal call.
         terminal_call: ModelCallId,
     },
 }
@@ -210,6 +264,17 @@ pub enum ProcessTranscriptEntry {
         /// Semantic entry identity.
         entry: SemanticTranscriptEntryId,
         /// Completed turn.
+        turn: TurnId,
+    },
+    /// Explicit cancelled-turn marker.
+    TurnCancelled {
+        /// Zero-based position in the projected frontier.
+        entry_index: u64,
+        /// Session that owns the immutable semantic entry.
+        source_session: SessionId,
+        /// Semantic entry identity.
+        entry: SemanticTranscriptEntryId,
+        /// Cancelled turn.
         turn: TurnId,
     },
 }
@@ -413,6 +478,8 @@ impl ProcessReadRepository {
                 turn.recovery_model_call_id,
                 turn.terminal_attempt_id,
                 turn.terminal_model_call_id,
+                terminal_call.terminal_disposition_kind
+                    AS terminal_model_call_disposition_kind,
                 accepted.accepted_input_id,
                 accepted.acceptance_position AS accepted_position,
                 accepted.origin_turn_id,
@@ -428,6 +495,12 @@ impl ProcessReadRepository {
                 AND current_call.turn_id = turn.turn_id
                 AND current_call.session_id = turn.session_id
                 AND current_call.state_kind <> 'terminal'
+               LEFT JOIN model_call AS terminal_call
+                 ON terminal_call.model_call_id = turn.terminal_model_call_id
+                AND terminal_call.turn_attempt_id = turn.terminal_attempt_id
+                AND terminal_call.turn_id = turn.turn_id
+                AND terminal_call.session_id = turn.session_id
+                AND terminal_call.state_kind = 'terminal'
               WHERE turn.session_id = $1
               ORDER BY turn.acceptance_position",
         )
@@ -645,6 +718,8 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
     let recovery_call: Option<Uuid> = row.try_get("recovery_model_call_id")?;
     let terminal_attempt: Option<Uuid> = row.try_get("terminal_attempt_id")?;
     let terminal_call: Option<Uuid> = row.try_get("terminal_model_call_id")?;
+    let terminal_call_disposition: Option<String> =
+        row.try_get("terminal_model_call_disposition_kind")?;
     let current_model_call: Option<Uuid> = row.try_get("current_model_call_id")?;
     let current_model_call_state: Option<String> = row.try_get("current_model_call_state_kind")?;
 
@@ -665,7 +740,10 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         .into());
     }
     if let Some(value) = terminal_disposition.as_deref()
-        && !matches!(value, "failed" | "completed" | "refused")
+        && !matches!(
+            value,
+            "failed" | "completed" | "refused" | "cancelled" | "reconciliation_required"
+        )
     {
         return Err(ProcessReadCorruption::Unsupported {
             field: "turn terminal disposition",
@@ -682,6 +760,10 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         (Some(call), Some("in_flight")) => Some(ProcessCurrentModelCall {
             call: ModelCallId::from_uuid(call),
             state: ProcessCurrentModelCallState::InFlight,
+        }),
+        (Some(call), Some("cancellation_requested")) => Some(ProcessCurrentModelCall {
+            call: ModelCallId::from_uuid(call),
+            state: ProcessCurrentModelCallState::CancellationRequested,
         }),
         (Some(_), Some(value)) => {
             return Err(ProcessReadCorruption::Unsupported {
@@ -705,9 +787,10 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         recovery_call,
         terminal_attempt,
         terminal_call,
+        terminal_call_disposition.as_deref(),
         current_model_call,
     ) {
-        ("queued", None, None, None, None, None, None, None, None, None) => (
+        ("queued", None, None, None, None, None, None, None, None, None, None) => (
             ProcessTurnState::Queued {
                 accepted_input,
                 content: accepted_content,
@@ -720,6 +803,7 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
             None,
             Some("running"),
             Some(attempt),
+            None,
             None,
             None,
             None,
@@ -743,6 +827,7 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
             None,
             None,
             None,
+            None,
         ) => (
             ProcessTurnState::ActiveAwaitingModelCallRecovery {
                 ended_attempt: TurnAttemptId::from_uuid(attempt),
@@ -761,9 +846,12 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
             None,
             None,
             None,
+            None,
         ) => (
             ProcessTurnState::Failed {
                 terminal_frontier: ContextFrontierId::from_uuid(frontier),
+                terminal_attempt: None,
+                terminal_model_call: None,
             },
             Some(ContextFrontierId::from_uuid(frontier)),
         ),
@@ -775,12 +863,42 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
             None,
             Some("failed"),
             None,
-            Some(_),
-            _,
+            Some(attempt),
+            None,
+            None,
             None,
         ) => (
             ProcessTurnState::Failed {
                 terminal_frontier: ContextFrontierId::from_uuid(frontier),
+                terminal_attempt: Some(TurnAttemptId::from_uuid(attempt)),
+                terminal_model_call: None,
+            },
+            Some(ContextFrontierId::from_uuid(frontier)),
+        ),
+        (
+            "terminal",
+            Some(_),
+            Some(frontier),
+            None,
+            None,
+            Some("failed"),
+            None,
+            Some(attempt),
+            Some(call),
+            Some(disposition @ ("known_failed" | "cancelled")),
+            None,
+        ) => (
+            ProcessTurnState::Failed {
+                terminal_frontier: ContextFrontierId::from_uuid(frontier),
+                terminal_attempt: Some(TurnAttemptId::from_uuid(attempt)),
+                terminal_model_call: Some(ProcessFailedTerminalModelCall {
+                    call: ModelCallId::from_uuid(call),
+                    disposition: match disposition {
+                        "known_failed" => ProcessFailedModelCallDisposition::KnownFailed,
+                        "cancelled" => ProcessFailedModelCallDisposition::Cancelled,
+                        _ => unreachable!("the pattern closes failed call dispositions"),
+                    },
+                }),
             },
             Some(ContextFrontierId::from_uuid(frontier)),
         ),
@@ -794,6 +912,7 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
             None,
             Some(attempt),
             Some(call),
+            Some("completed"),
             None,
         ) => (
             ProcessTurnState::Completed {
@@ -813,9 +932,70 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
             None,
             Some(attempt),
             Some(call),
+            Some("refused"),
             None,
         ) => (
             ProcessTurnState::Refused {
+                terminal_frontier: ContextFrontierId::from_uuid(frontier),
+                terminal_attempt: TurnAttemptId::from_uuid(attempt),
+                terminal_call: ModelCallId::from_uuid(call),
+            },
+            Some(ContextFrontierId::from_uuid(frontier)),
+        ),
+        (
+            "terminal",
+            Some(_),
+            Some(frontier),
+            None,
+            None,
+            Some("cancelled"),
+            None,
+            Some(attempt),
+            None,
+            None,
+            None,
+        ) => (
+            ProcessTurnState::Cancelled {
+                terminal_frontier: ContextFrontierId::from_uuid(frontier),
+                terminal_attempt: TurnAttemptId::from_uuid(attempt),
+                terminal_call: None,
+            },
+            Some(ContextFrontierId::from_uuid(frontier)),
+        ),
+        (
+            "terminal",
+            Some(_),
+            Some(frontier),
+            None,
+            None,
+            Some("cancelled"),
+            None,
+            Some(attempt),
+            Some(call),
+            Some("cancelled"),
+            None,
+        ) => (
+            ProcessTurnState::Cancelled {
+                terminal_frontier: ContextFrontierId::from_uuid(frontier),
+                terminal_attempt: TurnAttemptId::from_uuid(attempt),
+                terminal_call: Some(ModelCallId::from_uuid(call)),
+            },
+            Some(ContextFrontierId::from_uuid(frontier)),
+        ),
+        (
+            "terminal",
+            Some(_),
+            Some(frontier),
+            None,
+            None,
+            Some("reconciliation_required"),
+            None,
+            Some(attempt),
+            Some(call),
+            Some("ambiguous"),
+            None,
+        ) => (
+            ProcessTurnState::ReconciliationRequired {
                 terminal_frontier: ContextFrontierId::from_uuid(frontier),
                 terminal_attempt: TurnAttemptId::from_uuid(attempt),
                 terminal_call: ModelCallId::from_uuid(call),
@@ -868,11 +1048,13 @@ async fn load_transcript_entries(
             member.semantic_entry_id,
             entry.payload_kind,
             entry.origin_accepted_input_id,
+            entry.steering_source_turn_id,
             entry.failed_turn_id,
             entry.assistant_text_value,
             entry.producing_model_call_id,
             entry.assistant_tool_request_id,
             entry.completed_turn_id,
+            entry.cancelled_turn_id,
             accepted.content_text AS origin_content,
             accepted.origin_turn_id,
             call.turn_id AS assistant_turn_id
@@ -929,11 +1111,13 @@ fn decode_transcript_entry(
     let entry = SemanticTranscriptEntryId::from_uuid(required(row, "semantic_entry_id")?);
     let payload_kind: String = required(row, "payload_kind")?;
     let origin: Option<Uuid> = row.try_get("origin_accepted_input_id")?;
+    let steering_source_turn: Option<Uuid> = row.try_get("steering_source_turn_id")?;
     let failed_turn: Option<Uuid> = row.try_get("failed_turn_id")?;
     let assistant_text: Option<String> = row.try_get("assistant_text_value")?;
     let producing_call: Option<Uuid> = row.try_get("producing_model_call_id")?;
     let tool_request: Option<Uuid> = row.try_get("assistant_tool_request_id")?;
     let completed_turn: Option<Uuid> = row.try_get("completed_turn_id")?;
+    let cancelled_turn: Option<Uuid> = row.try_get("cancelled_turn_id")?;
     let origin_content: Option<String> = row.try_get("origin_content")?;
     let origin_turn: Option<Uuid> = row.try_get("origin_turn_id")?;
     let assistant_turn: Option<Uuid> = row.try_get("assistant_turn_id")?;
@@ -941,11 +1125,13 @@ fn decode_transcript_entry(
     let projected = match (
         payload_kind.as_str(),
         origin,
+        steering_source_turn,
         failed_turn,
         assistant_text,
         producing_call,
         tool_request,
         completed_turn,
+        cancelled_turn,
         origin_content,
         origin_turn,
         assistant_turn,
@@ -953,6 +1139,8 @@ fn decode_transcript_entry(
         (
             "origin_accepted_input",
             Some(accepted_input),
+            None,
+            None,
             None,
             None,
             None,
@@ -970,11 +1158,34 @@ fn decode_transcript_entry(
             content,
         },
         (
+            "steering_accepted_input",
+            Some(accepted_input),
+            Some(turn),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(content),
+            None,
+            None,
+        ) if !content.is_empty() => ProcessTranscriptEntry::User {
+            entry_index,
+            source_session,
+            entry,
+            accepted_input: AcceptedInputId::from_uuid(accepted_input),
+            turn: TurnId::from_uuid(turn),
+            content,
+        },
+        (
             "assistant_text",
+            None,
             None,
             None,
             Some(content),
             Some(call),
+            None,
             None,
             None,
             None,
@@ -988,7 +1199,7 @@ fn decode_transcript_entry(
             model_call: ModelCallId::from_uuid(call),
             content,
         },
-        ("turn_failed", None, Some(turn), None, None, None, None, None, None, None) => {
+        ("turn_failed", None, None, Some(turn), None, None, None, None, None, None, None, None) => {
             ProcessTranscriptEntry::TurnFailed {
                 entry_index,
                 source_session,
@@ -996,15 +1207,45 @@ fn decode_transcript_entry(
                 turn: TurnId::from_uuid(turn),
             }
         }
-        ("turn_completed", None, None, None, None, None, Some(turn), None, None, None) => {
-            ProcessTranscriptEntry::TurnCompleted {
-                entry_index,
-                source_session,
-                entry,
-                turn: TurnId::from_uuid(turn),
-            }
-        }
-        ("assistant_tool_use", _, _, _, _, _, _, _, _, _) => {
+        (
+            "turn_completed",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(turn),
+            None,
+            None,
+            None,
+            None,
+        ) => ProcessTranscriptEntry::TurnCompleted {
+            entry_index,
+            source_session,
+            entry,
+            turn: TurnId::from_uuid(turn),
+        },
+        (
+            "turn_cancelled",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(turn),
+            None,
+            None,
+            None,
+        ) => ProcessTranscriptEntry::TurnCancelled {
+            entry_index,
+            source_session,
+            entry,
+            turn: TurnId::from_uuid(turn),
+        },
+        ("assistant_tool_use", _, _, _, _, _, _, _, _, _, _, _) => {
             return Err(ProcessReadCorruption::Unsupported {
                 field: "semantic transcript payload kind",
                 value: payload_kind,
@@ -1012,7 +1253,14 @@ fn decode_transcript_entry(
             .into());
         }
         (
-            "origin_accepted_input" | "assistant_text" | "turn_failed" | "turn_completed",
+            "origin_accepted_input"
+            | "steering_accepted_input"
+            | "assistant_text"
+            | "turn_failed"
+            | "turn_completed"
+            | "turn_cancelled",
+            _,
+            _,
             _,
             _,
             _,

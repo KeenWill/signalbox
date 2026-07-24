@@ -20,6 +20,8 @@ pub(crate) enum ClientError {
     TurnRecoveryRequired,
     TurnFailed,
     TurnRefused,
+    TurnCancelled,
+    TurnReconciliationRequired,
 }
 
 impl ClientError {
@@ -42,7 +44,9 @@ impl ClientError {
             | Self::Input(_)
             | Self::TurnRecoveryRequired
             | Self::TurnFailed
-            | Self::TurnRefused => Self::AmbiguousMutation,
+            | Self::TurnRefused
+            | Self::TurnCancelled
+            | Self::TurnReconciliationRequired => Self::AmbiguousMutation,
         }
     }
 }
@@ -79,6 +83,10 @@ impl fmt::Display for ClientError {
             ),
             Self::TurnFailed => formatter.write_str("the submitted turn failed"),
             Self::TurnRefused => formatter.write_str("the submitted turn was refused"),
+            Self::TurnCancelled => formatter.write_str("the submitted turn was cancelled"),
+            Self::TurnReconciliationRequired => {
+                formatter.write_str("the submitted turn requires external reconciliation")
+            }
         }
     }
 }
@@ -95,7 +103,9 @@ impl Error for ClientError {
             | Self::Input(_)
             | Self::TurnRecoveryRequired
             | Self::TurnFailed
-            | Self::TurnRefused => None,
+            | Self::TurnRefused
+            | Self::TurnCancelled
+            | Self::TurnReconciliationRequired => None,
         }
     }
 }

@@ -47,14 +47,7 @@ pub async fn advance_hub_fence(
     let stored: Option<Decimal> = sqlx::query_scalar(lock_inventory::HUB_FENCE_GENERATION)
         .fetch_optional(&mut *transaction)
         .await?;
-    let stored = stored.ok_or(HubFenceCorruption::MissingState)?;
-    let prior = stored
-        .to_u64()
-        .filter(|generation| *generation > 0)
-        .ok_or(HubFenceCorruption::InvalidGeneration)?;
-    if stored != Decimal::from(prior) {
-        return Err(HubFenceCorruption::InvalidGeneration.into());
-    }
+    let prior = decode_generation(stored.ok_or(HubFenceCorruption::MissingState)?)?.get();
     let next = prior
         .checked_add(1)
         .ok_or(HubFenceCorruption::GenerationExhausted)?;
@@ -120,13 +113,37 @@ pub async fn connect_fenced_pool(
             Box::pin(async move {
                 sqlx::query("SELECT pg_advisory_lock_shared($1)")
                     .bind(key)
-                    .execute(connection)
+                    .execute(&mut *connection)
                     .await?;
+                let stored: Option<Decimal> =
+                    sqlx::query_scalar("SELECT generation FROM hub_fence_state WHERE singleton")
+                        .fetch_optional(&mut *connection)
+                        .await?;
+                let current = decode_generation(stored.ok_or_else(|| {
+                    sqlx::Error::Protocol(HubFenceCorruption::MissingState.to_string())
+                })?)
+                .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+                if current != generation {
+                    return Err(sqlx::Error::Protocol(
+                        HubFenceCorruption::GenerationMismatch.to_string(),
+                    ));
+                }
                 Ok(())
             })
         })
         .connect_with(options)
         .await
+}
+
+fn decode_generation(stored: Decimal) -> Result<HubFenceGeneration, HubFenceCorruption> {
+    let generation = stored
+        .to_u64()
+        .filter(|generation| *generation > 0)
+        .ok_or(HubFenceCorruption::InvalidGeneration)?;
+    if stored != Decimal::from(generation) {
+        return Err(HubFenceCorruption::InvalidGeneration);
+    }
+    Ok(HubFenceGeneration(generation))
 }
 
 fn advisory_key(generation: u64) -> i64 {
@@ -145,6 +162,9 @@ pub enum HubFenceCorruption {
     GenerationExhausted,
     /// The locked singleton did not advance from the observed generation.
     StateChanged,
+    /// A pool session acquired a lock for a generation other than the durable
+    /// current generation.
+    GenerationMismatch,
     /// The prior-generation lock could not be retained for the hub lifetime.
     FenceRetentionFailed,
 }
@@ -156,6 +176,7 @@ impl fmt::Display for HubFenceCorruption {
             Self::InvalidGeneration => "hub fence generation is invalid",
             Self::GenerationExhausted => "hub fence generation is exhausted",
             Self::StateChanged => "hub fence state changed unexpectedly",
+            Self::GenerationMismatch => "hub pool generation is no longer current",
             Self::FenceRetentionFailed => "hub fence could not retain the prior generation",
         })
     }

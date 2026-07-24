@@ -276,6 +276,8 @@ async fn send(
         }
         TurnTerminal::Failed => Err(ClientError::TurnFailed),
         TurnTerminal::Refused => Err(ClientError::TurnRefused),
+        TurnTerminal::Cancelled => Err(ClientError::TurnCancelled),
+        TurnTerminal::ReconciliationRequired => Err(ClientError::TurnReconciliationRequired),
     }
 }
 
@@ -315,6 +317,8 @@ enum TurnTerminal {
     Completed,
     Failed,
     Refused,
+    Cancelled,
+    ReconciliationRequired,
 }
 
 async fn await_turn_terminal(
@@ -395,6 +399,10 @@ fn terminal_snapshot_state(state: Option<&TurnState>) -> Result<Option<TurnTermi
         Some(TurnState::Completed { .. }) => Ok(Some(TurnTerminal::Completed)),
         Some(TurnState::Failed { .. }) => Ok(Some(TurnTerminal::Failed)),
         Some(TurnState::Refused { .. }) => Ok(Some(TurnTerminal::Refused)),
+        Some(TurnState::Cancelled { .. }) => Ok(Some(TurnTerminal::Cancelled)),
+        Some(TurnState::ReconciliationRequired { .. }) => {
+            Ok(Some(TurnTerminal::ReconciliationRequired))
+        }
         Some(TurnState::Queued { .. } | TurnState::ActiveRunning { .. }) => Ok(None),
         Some(TurnState::ActiveAwaitingModelCallRecovery { .. }) => {
             Err(ClientError::TurnRecoveryRequired)
@@ -419,13 +427,21 @@ fn terminal_event_state(
         SessionEvent::TurnRefused { turn_id, .. } if *turn_id == selected_turn => {
             Some(TurnTerminal::Refused)
         }
+        SessionEvent::TurnCancelled { turn_id, .. } if *turn_id == selected_turn => {
+            Some(TurnTerminal::Cancelled)
+        }
+        SessionEvent::TurnReconciliationRequired { turn_id, .. } if *turn_id == selected_turn => {
+            Some(TurnTerminal::ReconciliationRequired)
+        }
         SessionEvent::SessionCreated {}
         | SessionEvent::InputAccepted { .. }
         | SessionEvent::TurnActivated { .. }
         | SessionEvent::ModelCallTransition { .. }
         | SessionEvent::TurnCompleted { .. }
         | SessionEvent::TurnFailed { .. }
-        | SessionEvent::TurnRefused { .. } => None,
+        | SessionEvent::TurnRefused { .. }
+        | SessionEvent::TurnCancelled { .. }
+        | SessionEvent::TurnReconciliationRequired { .. } => None,
     }
 }
 
@@ -505,7 +521,10 @@ fn terminal_snapshot_selection(event: &SessionEvent) -> Option<SnapshotSelection
         SessionEvent::TurnFailed { turn_id, .. } => {
             Some(SnapshotSelection::Failed { turn_id: *turn_id })
         }
-        SessionEvent::TurnRefused { .. } => None,
+        SessionEvent::TurnCancelled { turn_id, .. } => {
+            Some(SnapshotSelection::Cancelled { turn_id: *turn_id })
+        }
+        SessionEvent::TurnRefused { .. } | SessionEvent::TurnReconciliationRequired { .. } => None,
         SessionEvent::SessionCreated {}
         | SessionEvent::InputAccepted { .. }
         | SessionEvent::TurnActivated { .. }
@@ -659,8 +678,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        MAX_INPUT_CONTENT_BYTES, ProcessClient, model_call_recovery_transition, read_input, run,
-        socket_path, submit_input, terminal_snapshot_selection, terminal_snapshot_state,
+        MAX_INPUT_CONTENT_BYTES, ProcessClient, SnapshotSelection, TurnTerminal,
+        model_call_recovery_transition, read_input, run, socket_path, submit_input,
+        terminal_event_state, terminal_snapshot_selection, terminal_snapshot_state,
     };
     use crate::error::ClientError;
 
@@ -704,6 +724,55 @@ mod tests {
     }
 
     #[test]
+    fn send_classifies_cancelled_and_reconciliation_terminal_truth() {
+        let cancelled = TurnState::Cancelled {
+            terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+            terminal_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+            terminal_model_call_id: None,
+        };
+        let reconciliation = TurnState::ReconciliationRequired {
+            terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+            terminal_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(4)),
+            terminal_model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(5)),
+        };
+
+        assert_eq!(
+            terminal_snapshot_state(Some(&cancelled))
+                .expect("cancelled state is terminal protocol truth"),
+            Some(TurnTerminal::Cancelled)
+        );
+        assert_eq!(
+            terminal_snapshot_state(Some(&reconciliation))
+                .expect("reconciliation state is terminal protocol truth"),
+            Some(TurnTerminal::ReconciliationRequired)
+        );
+    }
+
+    #[test]
+    fn send_classifies_cancelled_and_reconciliation_events_for_its_turn() {
+        let selected_turn = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let cancelled = SessionEvent::TurnCancelled {
+            turn_id: selected_turn,
+            cancellation_entry_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+            terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+        };
+        let reconciliation = SessionEvent::TurnReconciliationRequired {
+            turn_id: selected_turn,
+            model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(4)),
+            terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(5)),
+        };
+
+        assert_eq!(
+            terminal_event_state(&cancelled, selected_turn),
+            Some(TurnTerminal::Cancelled)
+        );
+        assert_eq!(
+            terminal_event_state(&reconciliation, selected_turn),
+            Some(TurnTerminal::ReconciliationRequired)
+        );
+    }
+
+    #[test]
     fn configured_socket_paths_must_be_absolute() {
         assert!(matches!(
             socket_path(Some(PathBuf::from("relative.sock")), None),
@@ -744,6 +813,29 @@ mod tests {
                 turn_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
                 model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
                 terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+            })
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn cancellation_rereads_its_marker_but_reconciliation_has_no_semantic_material() {
+        let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        assert!(matches!(
+            terminal_snapshot_selection(&SessionEvent::TurnCancelled {
+                turn_id,
+                cancellation_entry_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+                terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+            }),
+            Some(SnapshotSelection::Cancelled {
+                turn_id: selected
+            }) if selected == turn_id
+        ));
+        assert!(
+            terminal_snapshot_selection(&SessionEvent::TurnReconciliationRequired {
+                turn_id,
+                model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(4)),
+                terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(5)),
             })
             .is_none()
         );
