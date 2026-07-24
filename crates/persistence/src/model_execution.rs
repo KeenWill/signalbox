@@ -3136,6 +3136,17 @@ async fn persist_reclassified_pending_steering(
         .await?
         .rows_affected();
         require_single(lifecycle_rows, "reclassified successor lifecycle")?;
+
+        outbox::append(
+            connection,
+            OutboxEvent::InputAccepted {
+                session,
+                accepted_input: successor.accepted_input().id(),
+                turn: successor.turn(),
+                acceptance_position: successor.order().acceptance_position(),
+            },
+        )
+        .await?;
     }
     Ok(())
 }
@@ -3493,6 +3504,9 @@ async fn finish_optional_commit<T>(
 fn map_scheduling_error(error: SubmitInputRepositoryError) -> ModelCallRepositoryError {
     match error {
         SubmitInputRepositoryError::Database(error) => error.into(),
+        SubmitInputRepositoryError::CommitAmbiguous(error) => {
+            ModelCallRepositoryError::from_database(error, true)
+        }
         SubmitInputRepositoryError::Corruption(error) => {
             ModelCallCorruption::Scheduling(error).into()
         }
