@@ -1,0 +1,8 @@
+DerivedData/
+build/
+.build/
+xcuserdata/
+*.xcuserstate
+.derivedData/
+.derivedData-macos/
+.tart-results/

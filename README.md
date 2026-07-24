@@ -26,12 +26,13 @@ these capabilities directionally — accepted records decide them — and severa
 (fork selection, delegation, steering consumption) remain
 [open decisions](docs/open-questions.md).
 
-> **Status:** design and foundation phase, not yet a usable product. The initial
-> domain and persistence slices exist behind accepted decisions — session
-> creation and loading, defaults replacement, durable input acceptance, and
-> eligible-turn activation — plus the first offline and Anthropic model-call
-> paths; runners and clients are milestones ahead, and APIs, protocols, and
-> storage details are not yet stable.
+> **Status:** early implementation phase, not yet a broadly usable product. The
+> initial domain and persistence slices exist behind accepted decisions —
+> session creation and loading, defaults replacement, durable input acceptance,
+> and eligible-turn activation — plus offline and Anthropic model-call paths,
+> the first local process protocol, and a terminal client. Runners and graphical
+> clients remain milestones ahead, and APIs and storage details are not yet
+> stable.
 
 ```text
  Terminal       Web       macOS / iOS
@@ -89,11 +90,12 @@ list of required commands and their setup notes — from the repository root.
 
 ### Scripted debug harness
 
-The `signalbox-debug` binary is a local harness, not the future client protocol
-(still open; see [client scope](docs/open-questions.md#client-scope)). Against a
-disposable local PostgreSQL database it runs migrations, creates one session,
-submits one input, lets the real scheduler execute a deterministic reply, and
-prints the terminal semantic transcript:
+The `signalbox-debug` binary is a local development harness, not the supported
+terminal client defined by the
+[process protocol](docs/spec/process-protocol.md). Against a disposable local
+PostgreSQL database it runs migrations, creates one session, submits one input,
+lets the real scheduler execute a deterministic reply, and prints the terminal
+semantic transcript:
 
 ```console
 SIGNALBOX_DEBUG_DATABASE_URL=postgres://signalbox:signalbox@localhost/signalbox \
@@ -117,9 +119,11 @@ ANTHROPIC_API_KEY_FILE=/path/to/anthropic-api-key \
   "Reply with exactly: signalbox smoke ok"
 ```
 
-Production `signalbox-hubd` requires `DATABASE_URL`, `SIGNALBOX_CONFIG_FILE`,
-and `ANTHROPIC_API_KEY_FILE`. Model configuration and credential delivery are
-recorded in the [decision log](docs/decisions.md).
+Production process configuration is specified in
+[configuration and credentials](docs/spec/configuration-and-credentials.md#process-configuration).
+The process boundary is specified in the
+[process protocol](docs/spec/process-protocol.md); model configuration and
+credential delivery are recorded in the [decision log](docs/decisions.md).
 
 ## License
 

@@ -55,11 +55,13 @@ records applied files with checksums (the integration tests read the ledger
 directly); serialization of concurrent migration runs is SQLx dependency
 behavior, relied on but not demonstrated in this repo. `.gitattributes` pins
 migration files to LF so checksums do not vary by platform, and a build script
-re-embeds the set whenever a file changes. The production binary wires the
-required ordering (INV-034): `apps/hubd` (`migrate_scan_then_schedule`) runs
-`migrate` as its first startup phase, then the startup scan, then the scheduler.
-Why: checksummed forward-only files make every schema change a reviewed,
-immutable artifact, so a deployed database's history is never silently edited.
+re-embeds the set whenever a file changes. The production binary holds the
+singleton hub guard and fences the prior pool generation, then runs `migrate` as
+its first schema phase, followed by the startup scan and runtime (INV-034). The
+fence migration's first installation is the sole case without a prior fenced
+pool, because no earlier schema can have admitted one. Why: checksummed
+forward-only files make every schema change a reviewed, immutable artifact, so a
+deployed database's history is never silently edited.
 
 Container-backed integration tests (`postgres-integration` feature, ignored by
 default, failing loudly when Docker is absent) exercise the real constraints,
@@ -91,6 +93,8 @@ Implemented table families (across the forward-only migrations):
   provider-target pin on `turn_lifecycle`, and its pinned
   `credential_reference`);
 - `semantic_transcript_entry`, `context_frontier`, `context_frontier_member`;
+- the singleton `hub_fence_state`, which supplies the generation used by
+  hub-owned session advisory pool fences;
 - the outbox family (below).
 
 Representation rules, all enforced in the schema:
@@ -382,7 +386,8 @@ protocol scope). Implemented storage:
 
 - `outbox_event` header (allocator-owned `event_sequence`, closed `event_kind`,
   `storage_version`, `session_id`) plus one typed record table per kind —
-  `session_created_outbox_event`, `turn_failed_outbox_event`,
+  `session_created_outbox_event`, `input_accepted_outbox_event`,
+  `turn_activated_outbox_event`, `turn_failed_outbox_event`,
   `model_call_transition_outbox_event`, `turn_completed_outbox_event`,
   `turn_refused_outbox_event`, `turn_cancelled_outbox_event`, and
   `turn_reconciliation_required_outbox_event` — with a deferred trigger
@@ -405,28 +410,27 @@ Appends happen only through the crate-private `outbox::append` on the caller's
 existing connection; it never begins or commits a transaction, so the
 state-changing adapter owns the atomic boundary and no post-commit publish step
 exists in application code. Implemented appends: `CreateSession` and
-`CreateSessionFromImportedFrontier` handling each append `session_created`;
-startup recovery appends `turn_failed` for a failed lost turn and
-`turn_reconciliation_required` when stopped issued work becomes ambiguous.
-Model-call state transitions append `model_call_transition`, completion closure
-appends `turn_completed`, refusal closure appends `turn_refused`, and
-known-failure closure appends `turn_failed`; interrupt-confirmed cancellation
-appends `turn_cancelled`, and live stopped ambiguity appends
-`turn_reconciliation_required`. A guarded transition that changes zero rows
-appends zero events. Why: writing the event in the committing transaction makes
-the dual-write failure (state without event, or event without state)
-unrepresentable.
+`CreateSessionFromImportedFrontier` handling each append `session_created`; an
+applied `SubmitInput` that creates a turn origin appends `input_accepted`, while
+`PendingSteering` appends nothing until terminal reclassification mints its
+successor turn and appends that correlated `input_accepted`; an applied
+`StartEligibleTurn` appends `turn_activated`. Startup recovery appends
+`turn_failed` for a failed lost turn and `turn_reconciliation_required` when
+stopped issued work becomes ambiguous. Model-call state transitions append
+`model_call_transition`, completion closure appends `turn_completed`, refusal
+closure appends `turn_refused`, and known-failure closure appends `turn_failed`;
+interrupt-confirmed cancellation appends `turn_cancelled`, and live stopped
+ambiguity appends `turn_reconciliation_required`. A guarded transition that
+changes zero rows appends zero events. Why: writing the event in the committing
+transaction makes the dual-write failure (state without event, or event without
+state) unrepresentable.
 
 ## Open edges
 
-- No outbox publisher, drain task, or subscription layer exists;
-  `outbox_delivery_state` is advanced only by integration tests.
-- The outbox event-kind set is `session_created`, `turn_failed`,
-  `model_call_transition`, `turn_completed`, `turn_refused`, and
-  `turn_cancelled`, plus `turn_reconciliation_required`; input acceptance,
-  activation, and defaults replacement commit no events yet, pending the
-  protocol projections that define client visibility.
-- Outbox retention and pruning of delivered rows are undecided.
+- The version-one outbox dispatcher and process-local subscription layer are
+  specified by [process-protocol](process-protocol.md).
+- Deferred outbox retention, pruning, and multiple-hub fan-out are cataloged in
+  [open questions](../open-questions.md#protocols-and-persistence).
 - Attempt continuation is deliberately blocked: a `turn_attempt` with a
   predecessor is rejected (`turn_attempt_continuation_unavailable`) until
   durable wait/closure storage exists.
