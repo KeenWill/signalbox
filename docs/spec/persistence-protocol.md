@@ -76,7 +76,7 @@ is the durable statement of record, and no state is rebuilt by replaying events
 constraints over current-state rows; an event log would move them back into
 projection code.
 
-Implemented table families (across the fifteen migrations):
+Implemented table families (across the sixteen migrations):
 
 - `durable_command` plus typed command records (`create_session_command`,
   `replace_session_defaults_command`, `submit_input_command`,

@@ -285,6 +285,8 @@ Each `transcript_turn` has `turn_id` and one closed `state` object:
   `current_model_call` is null before preparation or `{ model_call_id, state }`
   with state exactly `prepared`, `in_flight`, or `cancellation_requested`;
 - `active_awaiting_model_call_recovery { ended_attempt_id, recovery_model_call_id }`;
+- `active_awaiting_tool_approval { tool_request_id }`;
+- `active_awaiting_tool_recovery { ended_attempt_id, recovery_tool_attempt_id }`;
 - `failed { terminal_frontier_id, terminal_attempt_id, terminal_model_call }`,
   where `terminal_attempt_id` is null only for an evidence-free recovery
   failure, and `terminal_model_call` is null when that failure or physical
@@ -296,10 +298,15 @@ Each `transcript_turn` has `turn_id` and one closed `state` object:
 - `cancelled { terminal_frontier_id, terminal_attempt_id, terminal_model_call_id }`,
   where `terminal_model_call_id` is null when cancellation closed the turn
   before a call was prepared; or
-- `reconciliation_required { terminal_frontier_id, terminal_attempt_id, terminal_model_call_id }`.
+- `reconciliation_required { terminal_frontier_id, terminal_attempt_id, operation }`,
+  where `operation` is exactly `model_call { model_call_id }` or
+  `tool_attempt { tool_attempt_id }`.
 
 Each non-text frontier member is one `transcript_entry` with `entry_index`,
 `source_session_id`, `entry_id`, and one closed `entry` object:
+`assistant_tool_use { turn_id, model_call_id, tool_request_id }`,
+`tool_execution_result { tool_request_id, tool_attempt_id }`,
+`tool_denied { tool_request_id }`, `tool_closed { tool_request_id }`,
 `turn_completed { turn_id }`, `turn_failed { turn_id }`, or
 `turn_cancelled { turn_id }`. A text member begins with
 `transcript_text_entry { entry_index, source_session_id, entry_id, entry }`. Its
@@ -392,17 +399,17 @@ receives `resync_required` and reconnects for another snapshot.
 Each `session_event` message carries `cursor`, `session_id`, and exactly one of
 these closed `event` objects:
 
-| Event                          | Additional members                                                                         |
-| ------------------------------ | ------------------------------------------------------------------------------------------ |
-| `session_created`              | none                                                                                       |
-| `input_accepted`               | `accepted_input_id`, `turn_id`, `acceptance_position`, and `content`                       |
-| `turn_activated`               | `turn_id` and `current_attempt_id`                                                         |
-| `model_call_transition`        | `turn_id`, `model_call_id`, and `state`                                                    |
-| `turn_completed`               | `turn_id`, `model_call_id`, `completion_entry_id`, and `terminal_frontier_id`              |
-| `turn_failed`                  | `turn_id`, `failure_entry_id`, and `terminal_frontier_id`                                  |
-| `turn_refused`                 | `turn_id`, `model_call_id`, and `terminal_frontier_id`                                     |
-| `turn_cancelled`               | `turn_id`, `cancellation_entry_id`, and `terminal_frontier_id`                             |
-| `turn_reconciliation_required` | `turn_id`, exactly one of `model_call_id` or `tool_attempt_id`, and `terminal_frontier_id` |
+| Event                          | Additional members                                                                                                                              |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `session_created`              | none                                                                                                                                            |
+| `input_accepted`               | `accepted_input_id`, `turn_id`, `acceptance_position`, and `content`                                                                            |
+| `turn_activated`               | `turn_id` and `current_attempt_id`                                                                                                              |
+| `model_call_transition`        | `turn_id`, `model_call_id`, and `state`                                                                                                         |
+| `turn_completed`               | `turn_id`, `model_call_id`, `completion_entry_id`, and `terminal_frontier_id`                                                                   |
+| `turn_failed`                  | `turn_id`, `failure_entry_id`, and `terminal_frontier_id`                                                                                       |
+| `turn_refused`                 | `turn_id`, `model_call_id`, and `terminal_frontier_id`                                                                                          |
+| `turn_cancelled`               | `turn_id`, `cancellation_entry_id`, and `terminal_frontier_id`                                                                                  |
+| `turn_reconciliation_required` | `turn_id`, `operation`, and `terminal_frontier_id`; `operation` is exactly `model_call { model_call_id }` or `tool_attempt { tool_attempt_id }` |
 
 The model-call `state` object is exactly `prepared`, `in_flight`,
 `cancellation_requested`, or `terminal { disposition }`; terminal disposition is
@@ -430,13 +437,15 @@ remain transient inside the model-runtime boundary and are not added to the
 outbox. The terminal `send` command follows the submitted turn, accepts terminal
 state from the initial snapshot or waits for its durable terminal event, rereads
 the authoritative transcript, and prints the committed assistant text. A client
-that observes `active_awaiting_model_call_recovery` in the initial snapshot
-exits with a typed nonzero recovery-required diagnostic: version one has no
-writer that can complete that wait. When the selected turn instead emits a live
-terminal `ambiguous` model-call transition, `send` rereads the authoritative
-snapshot and produces that same diagnostic if the turn has entered the recovery
-wait. A client disconnect never cancels model work. After each terminal turn
-event, `follow` uses a separate connection to read and validate a fresh
+that observes `active_awaiting_model_call_recovery` or
+`active_awaiting_tool_recovery` in the initial snapshot exits with a typed
+nonzero recovery-required diagnostic: version one has no writer that can
+complete either wait. An `active_awaiting_tool_approval` turn remains an
+ordinary nonterminal wait. When the selected turn instead emits a live terminal
+`ambiguous` model-call transition, `send` rereads the authoritative snapshot and
+produces that same diagnostic if the turn has entered the model-call recovery
+wait. A client disconnect never cancels model or tool work. After each terminal
+turn event, `follow` uses a separate connection to read and validate a fresh
 authoritative transcript before it resumes printing later followed events. That
 side reread does not advance the follow connection's observed cursor: only
 events consumed from the subscribed connection do so, and every buffered event
