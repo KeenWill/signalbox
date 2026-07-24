@@ -127,8 +127,12 @@ Imported text retains the exact decoded Unicode scalar sequence, including an
 empty sequence, whitespace, line endings, normalization distinctions, and
 U+0000. Imported structured values use a source-neutral JSON algebra rather than
 `serde_json` or provider wire types. They retain decoded scalar values, array
-order, and every object member; raw records remain the authority for lexical
-JSON details and member spelling/order.
+order, and every object member. A JSON number is an arbitrary-length string that
+must match the complete RFC 8259 number grammar; normalization retains its exact
+source token and never converts through an integer or binary floating-point
+type. Thus `9007199254740993`, `1e400`, and distinct valid spellings such as `1`
+and `1.0` remain exact and distinct. Raw records remain the authority for
+whitespace, string-escape spellings, delimiters, and other lexical details.
 
 The closed normalized content vocabulary is:
 
@@ -181,10 +185,20 @@ external causality.
 ## Converter seam
 
 `ImportedConversationConverter` is the application-facing edge seam. A converter
-consumes source bytes plus caller-supplied hub identity candidates and returns
-one completely checked domain aggregate or a typed conversion error. The
-application calls the append-only store once only after complete conversion; a
-conversion failure performs no durable write.
+consumes source bytes, one caller-supplied conversation identity, and a total
+lazy callback that supplies hub-minted imported-entry identities. After it has
+completely parsed and normalized the source, the converter invokes that callback
+exactly once immediately before emitting each normalized entry, in global
+physical entry order; it neither preallocates identities nor invokes the
+callback for an entry it does not emit. The callback's return type is an
+identity, not an option or result, so exhaustion is deliberately unrepresentable
+at this seam: a caller must provide one identity for every invocation. A
+duplicate identity or any later aggregate failure rejects the complete
+conversion without retrying or reusing consumed candidates.
+
+The converter returns one completely checked domain aggregate or a typed
+conversion error. The application calls the append-only store once only after
+complete conversion; a conversion failure performs no durable write.
 
 Every converter declares a closed `ImportedConversationFormat` containing both
 the source family and Signalbox converter version. Converter versions describe
@@ -220,25 +234,53 @@ Records then normalize as follows:
 1. A top-level record whose `type` is neither `user` nor `assistant` produces
    one `SourceEvent` containing its type attestation and complete normalized
    object.
+
 2. For a user or assistant record, the top-level type supplies its attested
    speaker. The `message` envelope and its `role` are retained independently as
    attested, explicitly absent, or unattested; a present role must agree with
    the top-level type. A non-null envelope or role of the wrong JSON type fails
    conversion.
+
 3. String message content produces one `Text` entry. Array content produces one
    entry per block, preserving block order within its source record. An omitted
    or null message, omitted or null content, or empty content array produces one
    precisely distinguished `MessageContentAbsent` entry.
+
 4. `text`, `tool_use`, `tool_result`, `thinking`, `redacted_thinking`, and
-   `document` blocks map to their corresponding normalized variants. A
-   `fallback` block maps to `SourceMessageBlock`; its `from` and `to` objects
-   remain in the complete normalized owning record. Tool-result arrays admit
-   ordered `text`, `image`, and `tool_reference` blocks. All modeled fields
-   retain their exact decoded or structured values and typed attestations; a
-   `text` or image-result block whose value is omitted or null remains that
-   block with precise typed absence.
+   `document` blocks map to their corresponding normalized variants using these
+   exact consulted members:
+
+   - `text.text` supplies the text attestation;
+   - `tool_use.id`, `.name`, `.input`, and `.caller` supply call identity, tool
+     name, structured input, and caller metadata;
+   - `tool_result.tool_use_id`, `.is_error`, and `.content` supply call
+     identity, error status, and result content. String content is exact text;
+     array content is an ordered result-block sequence;
+   - `thinking.thinking` and `.signature` supply exact thinking and signature;
+   - `redacted_thinking.data` supplies exact redacted data;
+   - `document.source` supplies the media source; and
+   - `fallback.type` supplies the `SourceMessageBlock` type attestation, while
+     `from`, `to`, and every other member remain in the complete normalized
+     owning record.
+
+   A tool-result `text.text` supplies its text attestation, `image.source`
+   supplies its media source, and `tool_reference.tool_name` supplies its
+   tool-name attestation. Every media source consults exactly `type`,
+   `media_type`, and `data`.
+
 5. An unknown content shape, content-block type, or tool-result block type fails
    the complete conversion rather than being silently dropped or guessed.
+
+For every consulted text member, omitted, null, and string map respectively to
+`NotAttested`, `AttestedAbsent`, and `Attested(exact text)`; any other JSON type
+fails conversion. Consulted booleans follow the same rule with a Boolean value.
+Consulted structured members admit any non-null source-neutral JSON value.
+Consulted media sources admit omitted, null, or an object whose three consulted
+members follow the text rule; every other shape fails. Each content or result
+block must be an object with exactly one consulted `type` member containing a
+recognized string. As above, repeating any consulted member at its object level
+fails the complete conversion. These rules apply independently, so a missing or
+null `tool_use.id` remains typed absence while a non-string value is invalid.
 
 Version 1 accepts both user/final-response-only records and records containing
 structured tool traffic, signed thinking, image results, tool references,

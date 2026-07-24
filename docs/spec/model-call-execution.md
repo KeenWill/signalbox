@@ -448,8 +448,14 @@ prints the semantic transcript; it is deliberately not the client protocol.
 - `AssistantToolUse` construction is schema-blocked pending the reserved tool
   decisions.
 - Imported source-event, absence, and non-text entries remain model-invisible
-  under the conservative projection; richer rendering is routed through
-  [conversation-import](conversation-import.md).
+  under the conservative projection. Richer rendering remains routed through the
+  open [model-input projection](../open-questions.md#model-input-projection),
+  whose accepted implementation would update this projection and the frontier
+  extension owners in
+  [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) and
+  [sessions-and-transcript](sessions-and-transcript.md);
+  [conversation-import](conversation-import.md) continues to own only normalized
+  imported source content.
 - Same-incarnation retained-evidence reconciliation gets exactly one production
   pass (`reconcile_retained_once`) before fatal escalation; repeated
   same-incarnation drains are exercised only by tests.
