@@ -112,8 +112,10 @@ carrying command identity, one addressable `ImportedTranscriptFrontier`, one
 initial defaults. The frontier itself names its `ImportedConversationId` and
 inclusive entry boundary; the command accepts no second independently supplied
 conversation identity. Its structural replay equality excludes only command
-identity. Separating the family preserves storage version 1 and the no-ancestry
-contract of `CreateSession`.
+identity. Separating the family preserves its imported-ancestry contract and
+keeps its replay record distinct from the no-ancestry `CreateSession` family;
+the shared defaults-bearing storage versions are owned by
+[persistence-protocol](persistence-protocol.md).
 
 The relationship records the client's creation-time intent: `Resume` declares a
 new Signalbox continuation from the selected imported point; `Fork` declares a

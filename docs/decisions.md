@@ -1054,18 +1054,19 @@ approval decision.
 [tool-loop](spec/tool-loop.md): tool-using model completions yield within the
 same logical turn; requests and reference-only semantic entries commit
 atomically; approval sources remain explicit; the dangerous session blanket is
-versioned and frozen per turn; execution is serialized behind catalog/executor
-ports and durably fenced; a process-shared turn dispatch gate orders execution
-against interrupts; deny-and-end records the canonical denial before applying
-the separately durable interrupt from execution, with the ordinary dispatch race
-after execution opens; interrupting an ambiguous tool recovery wait retains that
-exact ambiguity in the proof-bearing terminal boundary; 1 MiB bounds both
-normalized arguments and admitted text results; crash classification follows
-recorded effect class, and a known crash failure materializes proposal-ordered
-tool closure before `TurnFailed`; and the proposal-ordered all-resolved boundary
-atomically projects results, consumes steering, and prepares the next model
-call. `current_time` is the first effect-free auto tool, with an injected clock
-and IANA conversion supplied by the focused `jiff` dependency.
+versioned, stored by every defaults-bearing command family, and frozen per turn;
+execution is serialized behind catalog/executor ports and durably fenced; a
+process-shared turn dispatch gate orders execution against interrupts;
+deny-and-end records the canonical denial before applying the separately durable
+interrupt from execution, with the ordinary dispatch race after execution opens;
+interrupting an ambiguous tool recovery wait retains that exact ambiguity in the
+proof-bearing terminal boundary; 1 MiB bounds both normalized arguments and
+admitted text results; crash classification follows recorded effect class, and a
+known crash failure materializes proposal-ordered tool closure before
+`TurnFailed`; and the proposal-ordered all-resolved boundary atomically projects
+results, consumes steering, and prepares the next model call. `current_time` is
+the first effect-free auto tool, with an injected clock and IANA conversion
+supplied by the focused `jiff` dependency.
 
 **Rejected alternatives.** Making each round a new turn would fragment one
 conversational outcome and misplace `TurnCompleted`. Process-local approvals or
