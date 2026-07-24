@@ -145,11 +145,20 @@ pub enum DispatchedOutboxEventKind {
     TurnReconciliationRequired {
         /// Turn requiring reconciliation.
         turn: TurnId,
-        /// Exact ambiguous model call.
-        call: ModelCallId,
+        /// Exact ambiguous operation.
+        operation: DispatchedReconciliationOperation,
         /// Exact terminal frontier.
         terminal_frontier: ContextFrontierId,
     },
+}
+
+/// Exact operation that made a turn require reconciliation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DispatchedReconciliationOperation {
+    /// Ambiguous provider call.
+    ModelCall(ModelCallId),
+    /// Ambiguous tool attempt.
+    ToolAttempt(ToolAttemptId),
 }
 
 /// Durable model-call state carried by one dispatched transition.
@@ -532,21 +541,12 @@ async fn load_event(
         TURN_ACTIVATED => {
             let row: Option<(Uuid, Uuid, bool)> = sqlx::query_as(
                 "SELECT event.turn_id, event.current_attempt_id,
-                        turn.turn_id IS NOT NULL AS lifecycle_correlated
+                        attempt.turn_attempt_id IS NOT NULL AS lifecycle_correlated
                    FROM turn_activated_outbox_event AS event
-                   LEFT JOIN turn_lifecycle AS turn
-                     ON turn.turn_id = event.turn_id
-                    AND turn.session_id = event.session_id
-                    AND (
-                        (
-                            turn.state_kind = 'active'
-                            AND turn.current_attempt_id = event.current_attempt_id
-                        )
-                        OR (
-                            turn.state_kind = 'terminal'
-                            AND turn.terminal_attempt_id = event.current_attempt_id
-                        )
-                    )
+                   LEFT JOIN turn_attempt AS attempt
+                     ON attempt.turn_attempt_id = event.current_attempt_id
+                    AND attempt.turn_id = event.turn_id
+                    AND attempt.session_id = event.session_id
                   WHERE event.event_sequence = $1
                     AND event.session_id = $2",
             )
@@ -614,13 +614,6 @@ async fn load_event(
                         )
                         OR (
                             turn.terminal_attempt_id IS NOT NULL
-                            AND (
-                                SELECT count(*)
-                                  FROM turn_attempt AS counted_attempt
-                                 WHERE counted_attempt.turn_id = event.turn_id
-                                   AND counted_attempt.session_id =
-                                       event.session_id
-                            ) = 1
                             AND EXISTS (
                                 SELECT 1
                                   FROM turn_attempt AS terminal_attempt
@@ -652,24 +645,9 @@ async fn load_event(
                             AND (
                                 (
                                     turn.terminal_model_call_id IS NULL
-                                    AND NOT EXISTS (
-                                        SELECT 1
-                                          FROM model_call AS any_call
-                                         WHERE any_call.turn_id = event.turn_id
-                                           AND any_call.session_id =
-                                               event.session_id
-                                    )
                                 )
                                 OR (
                                     turn.terminal_model_call_id IS NOT NULL
-                                    AND (
-                                        SELECT count(*)
-                                          FROM model_call AS counted_call
-                                         WHERE counted_call.turn_id =
-                                               event.turn_id
-                                           AND counted_call.session_id =
-                                               event.session_id
-                                    ) = 1
                                     AND EXISTS (
                                         SELECT 1
                                           FROM model_call AS terminal_call
@@ -940,24 +918,11 @@ async fn load_event(
                         (
                             turn.terminal_model_call_id IS NULL
                             AND terminal_call.model_call_id IS NULL
-                            AND NOT EXISTS (
-                                SELECT 1
-                                  FROM model_call AS any_call
-                                 WHERE any_call.turn_id = event.turn_id
-                                   AND any_call.session_id = event.session_id
-                            )
                         )
                         OR (
                             turn.terminal_model_call_id IS NOT NULL
                             AND terminal_call.model_call_id =
                                 turn.terminal_model_call_id
-                            AND (
-                                SELECT count(*)
-                                  FROM model_call AS counted_call
-                                 WHERE counted_call.turn_id = event.turn_id
-                                   AND counted_call.session_id =
-                                       event.session_id
-                            ) = 1
                         )
                     )",
             )
@@ -974,9 +939,9 @@ async fn load_event(
             }
         }
         TURN_RECONCILIATION_REQUIRED => {
-            let row: Option<(Uuid, Uuid, Uuid)> = sqlx::query_as(
+            let row: Option<(Uuid, Option<Uuid>, Option<Uuid>, Uuid)> = sqlx::query_as(
                 "SELECT event.turn_id, event.model_call_id,
-                        event.terminal_frontier_id
+                        event.tool_attempt_id, event.terminal_frontier_id
                    FROM turn_reconciliation_required_outbox_event AS event
                    JOIN turn_lifecycle AS turn
                      ON turn.turn_id = event.turn_id
@@ -984,36 +949,20 @@ async fn load_event(
                     AND turn.state_kind = 'terminal'
                     AND turn.terminal_disposition_kind = 'reconciliation_required'
                     AND turn.terminal_frontier_id = event.terminal_frontier_id
-                    AND turn.terminal_model_call_id = event.model_call_id
-                   JOIN model_call AS call
-                     ON call.model_call_id = event.model_call_id
-                    AND call.turn_id = event.turn_id
-                    AND call.session_id = event.session_id
-                    AND call.turn_attempt_id = turn.terminal_attempt_id
-                    AND call.state_kind = 'terminal'
-                    AND call.terminal_disposition_kind = 'ambiguous'
-                   JOIN turn_attempt AS terminal_attempt
-                     ON terminal_attempt.turn_attempt_id =
-                        turn.terminal_attempt_id
-                    AND terminal_attempt.turn_id = event.turn_id
-                    AND terminal_attempt.session_id = event.session_id
-                    AND terminal_attempt.state_kind = 'ended'
-                    AND terminal_attempt.end_disposition
-                        IN ('ambiguous', 'lost')
                     AND (
                         (
-                            terminal_attempt.end_variant =
-                                'after_cancellation'
-                            AND terminal_attempt.interrupt_command_id
-                                IS NOT NULL
-                            AND terminal_attempt.interrupt_predecessor_turn_id =
-                                event.turn_id
+                            event.model_call_id IS NOT NULL
+                            AND event.tool_attempt_id IS NULL
+                            AND turn.terminal_model_call_id =
+                                event.model_call_id
+                            AND turn.terminal_tool_attempt_id IS NULL
                         )
                         OR (
-                            terminal_attempt.end_variant = 'without_stop'
-                            AND terminal_attempt.interrupt_command_id IS NULL
-                            AND terminal_attempt.interrupt_predecessor_turn_id
-                                IS NULL
+                            event.model_call_id IS NULL
+                            AND event.tool_attempt_id IS NOT NULL
+                            AND turn.terminal_model_call_id IS NULL
+                            AND turn.terminal_tool_attempt_id =
+                                event.tool_attempt_id
                         )
                     )
                   WHERE event.event_sequence = $1
@@ -1023,11 +972,108 @@ async fn load_event(
             .bind(stored_session)
             .fetch_optional(&mut **transaction)
             .await?;
-            let (turn, call, terminal_frontier) =
+            let (turn, call, tool_attempt, terminal_frontier) =
                 row.ok_or(OutboxCorruption::InvalidTerminalEventCorrelation)?;
+            let operation = match (call, tool_attempt) {
+                (Some(call), None) => {
+                    let valid: Option<bool> = sqlx::query_scalar(
+                        "SELECT true
+                           FROM turn_lifecycle AS turn
+                           JOIN model_call AS call
+                             ON call.model_call_id = $3
+                            AND call.turn_id = turn.turn_id
+                            AND call.session_id = turn.session_id
+                            AND call.turn_attempt_id =
+                                turn.terminal_attempt_id
+                            AND call.state_kind = 'terminal'
+                            AND call.terminal_disposition_kind = 'ambiguous'
+                           JOIN turn_attempt AS terminal_attempt
+                             ON terminal_attempt.turn_attempt_id =
+                                turn.terminal_attempt_id
+                            AND terminal_attempt.turn_id = turn.turn_id
+                            AND terminal_attempt.session_id = turn.session_id
+                            AND terminal_attempt.state_kind = 'ended'
+                            AND terminal_attempt.end_disposition
+                                IN ('ambiguous', 'lost')
+                            AND (
+                                (
+                                    terminal_attempt.end_variant =
+                                        'after_cancellation'
+                                    AND terminal_attempt.interrupt_command_id
+                                        IS NOT NULL
+                                    AND terminal_attempt.interrupt_predecessor_turn_id =
+                                        turn.turn_id
+                                )
+                                OR (
+                                    terminal_attempt.end_variant =
+                                        'without_stop'
+                                    AND terminal_attempt.interrupt_command_id
+                                        IS NULL
+                                    AND terminal_attempt.interrupt_predecessor_turn_id
+                                        IS NULL
+                                )
+                            )
+                          WHERE turn.turn_id = $1
+                            AND turn.session_id = $2
+                            AND turn.terminal_model_call_id = $3",
+                    )
+                    .bind(turn)
+                    .bind(stored_session)
+                    .bind(call)
+                    .fetch_optional(&mut **transaction)
+                    .await?;
+                    if valid.is_none() {
+                        return Err(OutboxCorruption::InvalidTerminalEventCorrelation.into());
+                    }
+                    DispatchedReconciliationOperation::ModelCall(ModelCallId::from_uuid(call))
+                }
+                (None, Some(attempt)) => {
+                    let valid: Option<bool> = sqlx::query_scalar(
+                        "SELECT true
+                           FROM turn_lifecycle AS turn
+                           JOIN tool_attempt AS attempt
+                             ON attempt.attempt_id = $3
+                            AND attempt.turn_id = turn.turn_id
+                            AND attempt.session_id = turn.session_id
+                            AND attempt.issuing_turn_attempt_id =
+                                turn.terminal_attempt_id
+                            AND attempt.state_kind = 'terminal'
+                            AND attempt.terminal_disposition_kind = 'ambiguous'
+                           JOIN turn_attempt AS terminal_attempt
+                             ON terminal_attempt.turn_attempt_id =
+                                turn.terminal_attempt_id
+                            AND terminal_attempt.turn_id = turn.turn_id
+                            AND terminal_attempt.session_id = turn.session_id
+                            AND terminal_attempt.state_kind = 'ended'
+                            AND terminal_attempt.end_variant = 'without_stop'
+                            AND terminal_attempt.end_disposition
+                                IN ('ambiguous', 'lost')
+                            AND terminal_attempt.interrupt_command_id IS NULL
+                            AND terminal_attempt.interrupt_predecessor_turn_id
+                                IS NULL
+                          WHERE turn.turn_id = $1
+                            AND turn.session_id = $2
+                            AND turn.terminal_tool_attempt_id = $3",
+                    )
+                    .bind(turn)
+                    .bind(stored_session)
+                    .bind(attempt)
+                    .fetch_optional(&mut **transaction)
+                    .await?;
+                    if valid.is_none() {
+                        return Err(OutboxCorruption::InvalidTerminalEventCorrelation.into());
+                    }
+                    DispatchedReconciliationOperation::ToolAttempt(ToolAttemptId::from_uuid(
+                        attempt,
+                    ))
+                }
+                (Some(_), Some(_)) | (None, None) => {
+                    return Err(OutboxCorruption::InvalidTerminalEventCorrelation.into());
+                }
+            };
             DispatchedOutboxEventKind::TurnReconciliationRequired {
                 turn: TurnId::from_uuid(turn),
-                call: ModelCallId::from_uuid(call),
+                operation,
                 terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
             }
         }

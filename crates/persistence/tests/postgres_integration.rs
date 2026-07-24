@@ -67,12 +67,13 @@ use signalbox_persistence::{
     },
     outbox::{
         DispatchedModelCallState, DispatchedOutboxEvent, DispatchedOutboxEventKind,
-        OutboxCorruption, OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome,
-        OutboxDispatcher,
+        DispatchedReconciliationOperation, OutboxCorruption, OutboxDeliveryDecision,
+        OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
     },
     process_read::{
         ProcessCurrentModelCallState, ProcessFailedModelCallDisposition, ProcessModelSelection,
-        ProcessReadRepository, ProcessTranscriptEntry, ProcessTurnState,
+        ProcessReadRepository, ProcessReconciliationOperation, ProcessTranscriptEntry,
+        ProcessTurnState,
     },
     replace_session_defaults::{
         ReplaceSessionDefaultsCorruption, ReplaceSessionDefaultsHandlingOutcome,
@@ -1745,6 +1746,21 @@ async fn inv006_inv011_inv037_interrupt_closes_checkpointed_tool_execution()
     .fetch_one(&pool)
     .await?;
     assert_eq!(disposition, "cancelled");
+    let mut cancellation_dispatched = false;
+    drain_outbox(&pool, |event| {
+        if matches!(
+            event.kind(),
+            DispatchedOutboxEventKind::TurnCancelled { turn, .. }
+                if *turn == fixture.turn
+        ) {
+            cancellation_dispatched = true;
+        }
+    })
+    .await?;
+    assert!(
+        cancellation_dispatched,
+        "tool-batch cancellation must remain deliverable after its producing call"
+    );
 
     pool.close().await;
     drop(container);
@@ -1854,6 +1870,42 @@ async fn inv006_inv025_inv029_inv037_interrupt_preserves_tool_recovery_ambiguity
         )
     );
 
+    let snapshot = ProcessReadRepository::new(pool.clone())
+        .read_transcript(fixture.session)
+        .await?
+        .expect("tool reconciliation remains process-readable");
+    assert!(matches!(
+        snapshot.turns()[0].state(),
+        ProcessTurnState::ReconciliationRequired {
+            terminal_attempt,
+            operation: ProcessReconciliationOperation::ToolAttempt(attempt),
+            ..
+        } if *terminal_attempt == issuing_attempt && *attempt == tool_attempt
+    ));
+    assert!(snapshot.entries().iter().any(|entry| matches!(
+        entry,
+        ProcessTranscriptEntry::AssistantToolUse { request: stored, .. }
+            if *stored == request
+    )));
+    let mut dispatched = false;
+    drain_outbox(&pool, |event| {
+        if matches!(
+            event.kind(),
+            DispatchedOutboxEventKind::TurnReconciliationRequired {
+                turn,
+                operation: DispatchedReconciliationOperation::ToolAttempt(attempt),
+                ..
+            } if *turn == fixture.turn && *attempt == tool_attempt
+        ) {
+            dispatched = true;
+        }
+    })
+    .await?;
+    assert!(
+        dispatched,
+        "the tool reconciliation event must not block dispatch"
+    );
+
     assert!(matches!(
         StartEligibleTurnRepository::new(pool.clone())
             .handle(
@@ -1887,6 +1939,15 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
     let deny_seed = 0x7500;
     let (denied_fixture, _, _, denied_request) =
         checkpoint_confirmed_tool_round(&pool, deny_seed, "dangerous-tool", "{}").await?;
+    let approval_snapshot = ProcessReadRepository::new(pool.clone())
+        .read_transcript(denied_fixture.session)
+        .await?
+        .expect("approval waits remain process-readable");
+    assert!(matches!(
+        approval_snapshot.turns()[0].state(),
+        ProcessTurnState::ActiveAwaitingToolApproval { request }
+            if *request == denied_request
+    ));
     let malformed_command_error = sqlx::query(
         "INSERT INTO decide_tool_request_command
             (command_id, command_kind, storage_version, request_id,
@@ -2064,6 +2125,21 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
         ToolAttemptEnd::KnownFailed { error }
             if error.kind() == ToolExecutionErrorKind::InvalidArguments
     ));
+    let mut completed_attempt_recovery_ids = FixedStartupScanIds::new([], []);
+    assert!(matches!(
+        PostgresStartupScanRepository::new(pool.clone())
+            .recover(
+                schema_fixture.session,
+                signalbox_domain::AcceptedInputTurnFailureIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(schema_seed + 90)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(schema_seed + 91)),
+                ),
+                &mut completed_attempt_recovery_ids,
+            )
+            .await?,
+        StartupScanSessionOutcome::ResumableToolBatch { turn }
+            if turn == schema_fixture.turn
+    ));
     let schema_batch = repository
         .load_active_batch(schema_fixture.session, schema_fixture.turn)
         .await?
@@ -2145,6 +2221,17 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
     assert!(matches!(
         restarted.awaiting_recovery(),
         Some(waiting) if waiting.attempt() == crash_attempt
+    ));
+    let recovery_snapshot = ProcessReadRepository::new(pool.clone())
+        .read_transcript(crash_fixture.session)
+        .await?
+        .expect("tool recovery waits remain process-readable");
+    assert!(matches!(
+        recovery_snapshot.turns()[0].state(),
+        ProcessTurnState::ActiveAwaitingToolRecovery {
+            ended_attempt,
+            recovery_attempt,
+        } if *ended_attempt == crash_continuation && *recovery_attempt == crash_attempt
     ));
     let pending_ambiguous_disposition: String = sqlx::query_scalar(
         "SELECT disposition_kind
@@ -2303,6 +2390,30 @@ async fn s05_s10_s11_inv006_inv019_inv027_tool_failures_close_durably() -> Resul
             "tool_closed_by_turn_end",
             "turn_failed",
         ]
+    );
+    let effect_free_snapshot = ProcessReadRepository::new(pool.clone())
+        .read_transcript(effect_free_fixture.session)
+        .await?
+        .expect("known tool-crash failure remains process-readable");
+    assert!(effect_free_snapshot.entries().iter().any(|entry| matches!(
+        entry,
+        ProcessTranscriptEntry::ToolClosed { request, .. }
+            if *request == effect_free_request
+    )));
+    let mut failure_dispatched = false;
+    drain_outbox(&pool, |event| {
+        if matches!(
+            event.kind(),
+            DispatchedOutboxEventKind::TurnFailed { turn, .. }
+                if *turn == effect_free_fixture.turn
+        ) {
+            failure_dispatched = true;
+        }
+    })
+    .await?;
+    assert!(
+        failure_dispatched,
+        "known tool-crash failure must not be rejected for earlier call history"
     );
 
     pool.close().await;
@@ -3571,7 +3682,7 @@ async fn stopped_ambiguity_commits_reconciliation_and_rereads_exactly() -> Resul
         &ProcessTurnState::ReconciliationRequired {
             terminal_frontier: ContextFrontierId::from_uuid(Uuid::from_u128(seed + 22)),
             terminal_attempt: fixture.attempt,
-            terminal_call: fixture.call,
+            operation: ProcessReconciliationOperation::ModelCall(fixture.call),
         }
     );
 
@@ -3579,7 +3690,7 @@ async fn stopped_ambiguity_commits_reconciliation_and_rereads_exactly() -> Resul
     drain_outbox(&pool, |event| {
         if let DispatchedOutboxEventKind::TurnReconciliationRequired {
             turn,
-            call,
+            operation: DispatchedReconciliationOperation::ModelCall(call),
             terminal_frontier,
         } = event.kind()
         {
@@ -8541,8 +8652,9 @@ async fn s01_s03_inv002_inv009_inv015_start_eligible_turn_survives_restart()
     Ok(())
 }
 
-/// S03 / INV-007 / INV-009: the Postgres safety-net sweep finds durable queued
-/// work without an active slot and excludes sessions already being progressed.
+/// S03 / S10 / INV-007 / INV-009: the Postgres safety-net sweep finds durable
+/// queued work and resumable tool batches while excluding unrelated active
+/// model work.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s03_inv007_inv009_postgres_sweep_reconstructs_only_candidate_sessions()
@@ -8594,6 +8706,19 @@ async fn s03_inv007_inv009_postgres_sweep_reconstructs_only_candidate_sessions()
         activation.execute(active_session).await?,
         StartEligibleTurnOutcome::Activated(_)
     ));
+    let tool_seed = 0x7900;
+    let (tool_fixture, _, _, tool_request) =
+        checkpoint_confirmed_tool_round(&pool, tool_seed, "current_time", "{}").await?;
+    PostgresToolLoopRepository::new(pool.clone())
+        .decide(
+            DecideToolRequest::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(tool_seed + 24)),
+                tool_request,
+                ToolApprovalDecision::Approve,
+            ),
+            || TurnAttemptId::from_uuid(Uuid::from_u128(tool_seed + 23)),
+        )
+        .await?;
 
     let mut sweep = PostgresEligibilitySweep::new(pool.clone());
     let (candidates, continuation) = EligibilitySweep::find_sessions(&mut sweep)
@@ -8610,7 +8735,13 @@ async fn s03_inv007_inv009_postgres_sweep_reconstructs_only_candidate_sessions()
     .fetch_one(&pool)
     .await?;
 
-    assert_eq!(candidates, vec![queued_session]);
+    assert_eq!(candidates, vec![queued_session, tool_fixture.session]);
+    assert_eq!(
+        PostgresToolLoopRepository::new(pool.clone())
+            .find_resumable_turn(tool_fixture.session)
+            .await?,
+        Some(tool_fixture.turn)
+    );
     assert_eq!(queued_index_count, 1);
 
     pool.close().await;

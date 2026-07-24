@@ -10,6 +10,26 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-24 — Reuse serde_json for current_time argument and result JSON
+
+**Context.** The hub-local `current_time` tool must inspect normalized object
+arguments and emit one compact JSON result without exporting a codec type
+through its catalog or executor ports. `serde_json` is already pinned and used
+at adjacent runtime boundaries.
+
+**Decision.** Add the existing focused `serde_json` dependency directly to
+`signalbox-hubd` for `current_time` argument-shape decoding and result
+serialization. Keep every serde value private to the tool adapter.
+
+**Rejected alternatives.** Hand-parse or hand-escape JSON: either duplicates
+security-sensitive codec behavior. Move JSON values into the application port:
+that would leak a framework representation across the boundary. Return an ad-hoc
+text format: it would weaken the declared tool result contract.
+
+**Affects.** `apps/hubd/Cargo.toml`, `apps/hubd/src/current_time.rs`, and the
+lockfile dependency edge; no new resolved package or public serde type is
+introduced.
+
 ## 2026-07-24 — Use jiff for IANA time-zone conversion
 
 **Context.** `current_time` must resolve IANA names, apply historical offsets,
@@ -32,28 +52,44 @@ the implemented IANA-name contract.
 lockfile, and the `current_time` behavior recorded in the tool-loop
 specification.
 
-## 2026-07-24 — Reuse serde_json at the tool runtime bridge
+## 2026-07-24 — Guard provider tool-schema decoding against stack depth
 
-**Context.** The provider bridge must decode checked application JSON Schemas,
-serialize durable tool-result errors safely, and distinguish object-shaped
-arguments from valid scalars or arrays that provider function-call history
-cannot accept. The model runtime owns `serde_json::Value`; application and
-domain APIs must not.
+**Context.** Application tool schemas are valid, object-shaped, and bounded, but
+their contract imposes no nesting limit. The provider bridge must decode them
+into runtime values without reintroducing Serde JSON's default depth cutoff or
+traversing untrusted nesting on the native stack.
 
-**Decision.** Add the already pinned `serde_json` dependency directly to
-`signalbox-model-provider-runtime` for schema decoding, object-shape validation,
-and safe error serialization. A checked-schema decode failure is a fail-closed
-adapter defect; serde values remain private to the outward bridge.
+**Decision.** Enable Serde JSON's unbounded-depth decoder in
+`signalbox-model-provider-runtime` and reuse the already pinned `serde_stacker`
+adapter for guarded deserialization. Keep every decoded value private to the
+provider bridge.
 
-**Rejected alternatives.** Put `serde_json::Value` in the application catalog:
-that leaks a codec representation across the boundary. Hand-escape JSON: it
-duplicates a security-sensitive codec. Admit non-object function arguments:
-provider replay remains invalid. Reparse in each provider adapter: duplicated
-work and inconsistent failure ownership.
+**Rejected alternatives.** Add a provider-only depth limit: it would reject
+schemas the application admits. Treat a checked schema as opaque text: runtime
+adapters require structured JSON. Write a second JSON parser: unnecessary codec
+ownership.
 
-**Affects.** `crates/model-provider-runtime/Cargo.toml`, its tool-definition
-projection, durable tool-history translation, and lockfile dependency edge; no
-new resolved package or public serde type is introduced.
+**Affects.** Provider tool-definition projection and the crate's direct
+dependency edges; no resolved package or public API is added.
+
+## 2026-07-24 — Reuse serde_json for provider-neutral tool-history rendering
+
+**Context.** The model-provider bridge must replay durable tool results as
+bounded JSON error objects and distinguish object-shaped arguments from valid
+JSON scalars or arrays that provider function-call history cannot accept.
+`serde_json` is already pinned and used throughout the model-runtime layer.
+
+**Decision.** Add the existing focused `serde_json` dependency directly to
+`signalbox-model-provider-runtime` for object-shape validation and safe error
+serialization.
+
+**Rejected alternatives.** Hand-escape JSON: it would duplicate a
+security-sensitive codec. Admit non-object function arguments: provider replay
+would remain invalid. Move provider replay shapes into the domain: that would
+cross the runtime boundary.
+
+**Affects.** `crates/model-provider-runtime/Cargo.toml` and its durable
+tool-history translation.
 
 ## 2026-07-24 — Normalize bounded JSON with stack-safe Serde traversal
 
@@ -845,7 +881,8 @@ normalized arguments and admitted text results; crash classification follows
 recorded effect class, and a known crash failure materializes proposal-ordered
 tool closure before `TurnFailed`; and the proposal-ordered all-resolved boundary
 atomically projects results, consumes steering, and prepares the next model
-call. `current_time` is the first effect-free auto tool with an injected clock.
+call. `current_time` is the first effect-free auto tool, with an injected clock
+and IANA conversion supplied by the focused `jiff` dependency.
 
 **Rejected alternatives.** Making each round a new turn would fragment one
 conversational outcome and misplace `TurnCompleted`. Process-local approvals or
