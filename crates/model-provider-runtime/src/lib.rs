@@ -10,6 +10,7 @@
 
 use std::{collections::HashMap, error::Error, fmt, future::Future, sync::Arc};
 
+use serde::Deserialize;
 use signalbox_application::{
     ClassifyOperatorFailure, ModelCallCapabilityPreparation, ModelCallProvider,
     ModelConversationMessage, ModelToolResultContent, OperatorFailureClass, PreparedModelOperation,
@@ -335,7 +336,7 @@ where
             .tools()
             .iter()
             .map(|definition| {
-                let schema = serde_json::from_str(definition.input_schema().as_str())
+                let schema = decode_checked_json(definition.input_schema().as_str())
                     .map_err(|_| RuntimeModelCallProviderError::InvalidToolSchema)?;
                 Ok(ToolDefinition::with_schema(
                     definition.name().as_str(),
@@ -525,10 +526,7 @@ fn render_runtime_messages(messages: &[ModelConversationMessage]) -> Vec<Convers
 
 fn replay_safe_arguments(request: &signalbox_domain::ToolRequest) -> String {
     if request.arguments().kind() == ToolArgumentsKind::Json
-        && serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
-            request.arguments().as_str(),
-        )
-        .is_ok()
+        && decode_checked_json(request.arguments().as_str()).is_ok_and(|value| value.is_object())
     {
         request.arguments().as_str().to_owned()
     } else {
@@ -537,6 +535,17 @@ fn replay_safe_arguments(request: &signalbox_domain::ToolRequest) -> String {
         // scalar, array, or undecodable value.
         String::from(r#"{"signalbox_invalid_arguments":true}"#)
     }
+}
+
+fn decode_checked_json(value: &str) -> Result<serde_json::Value, serde_json::Error> {
+    let mut deserializer = serde_json::Deserializer::from_str(value);
+    deserializer.disable_recursion_limit();
+    let decoded = {
+        let deserializer = serde_stacker::Deserializer::new(&mut deserializer);
+        serde_json::Value::deserialize(deserializer)?
+    };
+    deserializer.end()?;
+    Ok(decoded)
 }
 
 fn require_correlation(
@@ -646,12 +655,15 @@ fn classify_terminal(
                     }
                     AssistantPart::ToolCall(proposal) => {
                         tool_count += 1;
-                        let name = DomainToolName::try_new(proposal.name.as_str().to_owned())
-                            .map_err(|_| RuntimeModelCallProviderError::InvalidToolProposal)?;
-                        let arguments = NormalizedToolArguments::try_from_provider_text(
+                        let Ok(name) = DomainToolName::try_new(proposal.name.as_str().to_owned())
+                        else {
+                            return Ok(ModelCallTerminalObservation::KnownFailed);
+                        };
+                        let Ok(arguments) = NormalizedToolArguments::try_from_provider_text(
                             proposal.arguments_json,
-                        )
-                        .map_err(|_| RuntimeModelCallProviderError::InvalidToolProposal)?;
+                        ) else {
+                            return Ok(ModelCallTerminalObservation::KnownFailed);
+                        };
                         response_parts.push(AssistantResponsePart::ToolCall(
                             DomainToolCallProposal::new(name, arguments),
                         ));
@@ -663,7 +675,7 @@ fn classify_terminal(
             }
             if tool_count == 0 {
                 if matches!(finish, CompletionFinish::ToolUse) {
-                    return Err(RuntimeModelCallProviderError::InvalidToolProposal);
+                    return Ok(ModelCallTerminalObservation::KnownFailed);
                 }
                 Ok(ModelCallTerminalObservation::Completed {
                     assistant_text: response_parts
@@ -678,10 +690,12 @@ fn classify_terminal(
                 })
             } else {
                 if !matches!(finish, CompletionFinish::ToolUse) {
-                    return Err(RuntimeModelCallProviderError::InvalidToolProposal);
+                    return Ok(ModelCallTerminalObservation::KnownFailed);
                 }
-                let response = ToolUsingAssistantResponse::try_from_parts(response_parts)
-                    .map_err(|_| RuntimeModelCallProviderError::InvalidToolProposal)?;
+                let Ok(response) = ToolUsingAssistantResponse::try_from_parts(response_parts)
+                else {
+                    return Ok(ModelCallTerminalObservation::KnownFailed);
+                };
                 Ok(ModelCallTerminalObservation::CompletedWithTools { response })
             }
         }
@@ -733,7 +747,7 @@ mod tests {
 
     use super::{
         AcceptanceObservations, RuntimeModelCatalog, RuntimeModelCatalogError,
-        RuntimeModelDefinition, classify_terminal, render_runtime_messages,
+        RuntimeModelDefinition, classify_terminal, decode_checked_json, render_runtime_messages,
     };
     use signalbox_domain::ResolvedProviderTarget;
 
@@ -1083,6 +1097,68 @@ mod tests {
                 if proposal.name().as_str() == "current_time"
                     && proposal.arguments().as_str() == r#"{"timezone":"UTC"}"#
         ));
+    }
+
+    #[test]
+    fn checked_tool_json_decoding_is_stack_guarded_beyond_serde_default_depth() {
+        let depth = 256;
+        let json = format!(r#"{{"nested":{}{}}}"#, "[".repeat(depth), "]".repeat(depth));
+
+        assert!(
+            decode_checked_json(&json)
+                .expect("checked bounded JSON remains decodable")
+                .is_object()
+        );
+    }
+
+    /// INV-014: malformed tool proposals are terminal known failures, so the
+    /// provider operation cannot remain durably in flight.
+    #[test]
+    fn inv014_invalid_tool_proposals_close_as_known_failure() {
+        let invalid_name = TerminalEvidence::Completed(CompletionEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: Some(ProviderReportedModel::new("model-exact")),
+            finish: CompletionFinish::ToolUse,
+            content: vec![AssistantPart::ToolCall(ToolCallProposal {
+                id: ToolCallId::new("provider-call-opaque"),
+                name: ToolName::new("bad name"),
+                arguments_json: String::from("{}"),
+            })],
+            usage: TokenUsage::unreported(),
+        });
+        let oversized_arguments = TerminalEvidence::Completed(CompletionEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: Some(ProviderReportedModel::new("model-exact")),
+            finish: CompletionFinish::ToolUse,
+            content: vec![AssistantPart::ToolCall(ToolCallProposal {
+                id: ToolCallId::new("provider-call-opaque"),
+                name: ToolName::new("current_time"),
+                arguments_json: "x".repeat(1024 * 1024 + 1),
+            })],
+            usage: TokenUsage::unreported(),
+        });
+        let mismatched_finish = TerminalEvidence::Completed(CompletionEvidence {
+            exchange: ExchangeFacts::default(),
+            message_id: None,
+            reported_model: Some(ProviderReportedModel::new("model-exact")),
+            finish: CompletionFinish::EndTurn,
+            content: vec![AssistantPart::ToolCall(ToolCallProposal {
+                id: ToolCallId::new("provider-call-opaque"),
+                name: ToolName::new("current_time"),
+                arguments_json: String::from("{}"),
+            })],
+            usage: TokenUsage::unreported(),
+        });
+
+        for evidence in [invalid_name, oversized_arguments, mismatched_finish] {
+            assert_eq!(
+                classify_terminal(evidence, &[], "model-exact")
+                    .expect("invalid proposal has a durable terminal classification"),
+                ModelCallTerminalObservation::KnownFailed
+            );
+        }
     }
 
     /// INV-014: either early or terminal provider-model mismatch prevents

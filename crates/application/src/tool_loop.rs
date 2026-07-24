@@ -590,6 +590,7 @@ enum RetainedToolExecutionStateKind {
         turn: TurnId,
         attempt: ToolAttemptId,
         request: ToolRequest,
+        definition: ToolDefinition,
         dispatch_permit: InProcessToolDispatchPermit,
     },
     Observation {
@@ -854,6 +855,7 @@ where
                     turn,
                     attempt,
                     request,
+                    definition,
                     dispatch_permit,
                 } => match self
                     .transaction
@@ -866,7 +868,7 @@ where
                     }
                     Ok(ToolAttemptAuthorizationStatus::InFlight(authorized)) => {
                         return self
-                            .execute_authorized(request, authorized, dispatch_permit)
+                            .execute_authorized(request, definition, authorized, dispatch_permit)
                             .await;
                     }
                     Err(error) => {
@@ -876,6 +878,7 @@ where
                                 turn,
                                 attempt,
                                 request,
+                                definition,
                                 dispatch_permit,
                             },
                         });
@@ -1089,9 +1092,7 @@ where
                 ended,
             )));
         }
-        if definition.is_none() {
-            return Err(ToolExecutionServiceError::CatalogDrift);
-        }
+        let definition = definition.ok_or(ToolExecutionServiceError::CatalogDrift)?;
         let dispatch_permit = self.gate.acquire(prepared.turn()).await;
         let Some(revalidated_batch) = self
             .transaction
@@ -1149,6 +1150,7 @@ where
                                 turn: prepared.turn(),
                                 attempt: prepared.attempt(),
                                 request,
+                                definition,
                                 dispatch_permit,
                             },
                         });
@@ -1163,22 +1165,20 @@ where
                 return Err(ToolExecutionServiceError::Authorize(error));
             }
         };
-        self.execute_authorized(request, authorized, dispatch_permit)
+        self.execute_authorized(request, definition, authorized, dispatch_permit)
             .await
     }
 
     async fn execute_authorized(
         &mut self,
         request: ToolRequest,
+        definition: ToolDefinition,
         authorized: AuthorizedToolAttempt,
         dispatch_permit: InProcessToolDispatchPermit,
     ) -> Result<
         ToolExecutionServiceOutcome,
         ToolExecutionServiceError<Transaction::Error, Executor::Error>,
     > {
-        let Some(definition) = self.catalog.definition(request.name()) else {
-            return Err(ToolExecutionServiceError::CatalogDrift);
-        };
         let invocation = ToolExecutionInvocation::try_new(request, definition, &authorized)
             .ok_or(ToolExecutionServiceError::CatalogDrift)?;
         let evidence = self
@@ -1324,7 +1324,10 @@ pub(crate) fn initial_tool_approval(
 mod tests {
     use std::{
         collections::VecDeque,
-        sync::{Arc, Mutex},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     use super::*;
@@ -1678,6 +1681,35 @@ mod tests {
         }
     }
 
+    struct OneShotCatalog {
+        definition: ToolDefinition,
+        definition_reads: Arc<AtomicUsize>,
+    }
+
+    impl ToolCatalog for OneShotCatalog {
+        fn definitions(&self) -> Box<[ToolDefinition]> {
+            vec![self.definition.clone()].into_boxed_slice()
+        }
+
+        fn definition(&self, name: &ToolName) -> Option<ToolDefinition> {
+            (name == self.definition.name()
+                && self.definition_reads.fetch_add(1, Ordering::SeqCst) == 0)
+                .then(|| self.definition.clone())
+        }
+
+        fn validate_arguments(
+            &self,
+            name: &ToolName,
+            _arguments: &NormalizedToolArguments,
+        ) -> Result<(), ToolCatalogValidationFailure> {
+            if name == self.definition.name() {
+                Ok(())
+            } else {
+                Err(ToolCatalogValidationFailure::UnknownTool)
+            }
+        }
+    }
+
     /// INV-020: registry automation records policy provenance, while blanket
     /// automation remains explicitly distinct from owner agency.
     #[test]
@@ -1934,6 +1966,59 @@ mod tests {
         let (_, _, _, executor, _, _) = service.into_parts();
         assert_eq!(executor.calls, 0);
         assert!(events.lock().expect("event lock").is_empty());
+    }
+
+    /// INV-011 / INV-024: the definition selected by successful preflight is
+    /// the exact same-incarnation declaration carried across authorization.
+    #[tokio::test]
+    async fn inv011_inv024_authorization_uses_preflight_definition_snapshot() {
+        let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let prepared = match batch.attempt(batch.requests()[0].id()) {
+            Some(signalbox_domain::ReconstitutedToolAttempt::Current(current)) => current.clone(),
+            _ => panic!("fixture has one prepared attempt"),
+        };
+        let transaction = FakeTransaction {
+            batch: batch.clone(),
+            prepared,
+            events: Arc::clone(&events),
+            dispatch_consumed_after_first_load: false,
+            load_count: 0,
+            ambiguous_authorization: false,
+            authorization_committed: false,
+            commit_failures: 0,
+            committed: false,
+        };
+        let definition_reads = Arc::new(AtomicUsize::new(0));
+        let catalog = OneShotCatalog {
+            definition: definition(
+                "known",
+                ToolPermissionDefault::Auto,
+                ToolEffectClass::EffectFree,
+            ),
+            definition_reads: Arc::clone(&definition_reads),
+        };
+        let executor = RecordingExecutor {
+            events: Arc::clone(&events),
+            calls: 0,
+        };
+        let mut service = ToolExecutionService::new(
+            FixedIds::new(),
+            transaction,
+            catalog,
+            executor,
+            InProcessToolDispatchGate::default(),
+        );
+
+        assert!(matches!(
+            service.execute(batch.session(), batch.turn()).await,
+            Ok(ToolExecutionServiceOutcome::ObservationCommitted(_))
+        ));
+        assert_eq!(definition_reads.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *events.lock().expect("event lock"),
+            ["authorize", "execute", "commit"]
+        );
     }
 
     /// INV-011 / INV-024: a lost authorization acknowledgement is reread
