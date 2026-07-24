@@ -23,8 +23,8 @@ use signalbox_domain::{
 };
 use signalbox_persistence::{
     conversation_import::{
-        ImportedConversationCorruption, ImportedConversationRepository,
-        ImportedConversationRepositoryError,
+        ImportedConversationCorruption, ImportedConversationIdentityCollision,
+        ImportedConversationRepository, ImportedConversationRepositoryError,
     },
     local_test_connection_options, migrate,
 };
@@ -180,6 +180,144 @@ async fn s28_inv038_inv039_import_round_trip_is_idempotent_and_restart_safe()
     assert_eq!(restarted, stored);
 
     restarted_pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S28 / INV-038: imports sharing raw blobs acquire their global content keys
+/// in one stable order even when the source occurrences are reversed.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s28_inv038_concurrent_reversed_raws_use_stable_blob_order() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let forward_source = concat!(
+        "{\"type\":\"summary\",\"value\":\"first\"}\n",
+        "{\"type\":\"summary\",\"value\":\"second\"}"
+    );
+    let reverse_source = concat!(
+        "{\"type\":\"summary\",\"value\":\"second\"}\n",
+        "{\"type\":\"summary\",\"value\":\"first\"}"
+    );
+    let forward_id = ImportedConversationId::from_uuid(Uuid::from_u128(0x800));
+    let reverse_id = ImportedConversationId::from_uuid(Uuid::from_u128(0x900));
+    let mut forward = ImportConversationService::new(
+        FixedIds::new(&[0x800], [0x801, 0x802]),
+        ClaudeCodeJsonlConverter,
+        ImportedConversationRepository::new(pool.clone()),
+    );
+    let mut reverse = ImportConversationService::new(
+        FixedIds::new(&[0x900], [0x901, 0x902]),
+        ClaudeCodeJsonlConverter,
+        ImportedConversationRepository::new(pool.clone()),
+    );
+
+    let (forward_result, reverse_result) = tokio::join!(
+        forward.execute(forward_source.as_bytes()),
+        reverse.execute(reverse_source.as_bytes())
+    );
+    assert_eq!(
+        forward_result?,
+        ImportConversationOutcome::Inserted {
+            conversation: forward_id
+        }
+    );
+    assert_eq!(
+        reverse_result?,
+        ImportConversationOutcome::Inserted {
+            conversation: reverse_id
+        }
+    );
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM imported_raw_source_record),
+            (SELECT count(*) FROM imported_conversation)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(counts, (2, 2));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-001: the late unique-constraint path reached after a concurrent
+/// precheck race retains the repository's typed imported-entry collision.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv001_late_entry_identity_constraint_is_typed_collision() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let existing_entry = ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(0xa01));
+    let mut service = ImportConversationService::new(
+        FixedIds::new(&[0xa00], [0xa01]),
+        ClaudeCodeJsonlConverter,
+        ImportedConversationRepository::new(pool.clone()),
+    );
+    service
+        .execute(br#"{"type":"summary","value":null}"#)
+        .await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO imported_conversation
+            (imported_conversation_id, storage_version, source_format,
+             converter_version, source_digest, declared_raw_record_count,
+             declared_entry_count)
+         VALUES ($1, 1, 'claude_code_session_jsonl', 1, $2, 1, 1)",
+    )
+    .bind(Uuid::from_u128(0xa10))
+    .bind(vec![0x10_u8; 32])
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO imported_raw_source_record (content_hash, raw_bytes)
+         VALUES ($1, $2)",
+    )
+    .bind(vec![0x11_u8; 32])
+    .bind(vec![0x12_u8])
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO imported_conversation_raw_record
+            (imported_conversation_id, raw_record_position, content_hash,
+             normalized_value_encoding, declared_entry_count)
+         VALUES ($1, 1, $2, $3, 1)",
+    )
+    .bind(Uuid::from_u128(0xa10))
+    .bind(vec![0x11_u8; 32])
+    .bind(vec![0x13_u8])
+    .execute(&mut *transaction)
+    .await?;
+    let database_error = sqlx::query(
+        "INSERT INTO imported_transcript_entry
+            (imported_conversation_id, imported_entry_position,
+             imported_transcript_entry_id, raw_record_position,
+             record_entry_position, source_speaker_kind, content_encoding,
+             source_metadata_encoding)
+         VALUES ($1, 1, $2, 1, 1, 'not_attested', $3, $4)",
+    )
+    .bind(Uuid::from_u128(0xa10))
+    .bind(existing_entry.into_uuid())
+    .bind(vec![1_u8])
+    .bind(vec![1_u8])
+    .execute(&mut *transaction)
+    .await
+    .expect_err("duplicate imported-entry identity must violate its unique constraint");
+    assert_eq!(
+        database_error
+            .as_database_error()
+            .and_then(sqlx::error::DatabaseError::constraint),
+        Some("imported_transcript_entry_identity_unique")
+    );
+    let error = ImportedConversationRepositoryError::from(database_error);
+    assert!(matches!(
+        error,
+        ImportedConversationRepositoryError::IdentityCollision(
+            ImportedConversationIdentityCollision::TranscriptEntry
+        )
+    ));
+    transaction.rollback().await?;
+
+    pool.close().await;
     drop(container);
     Ok(())
 }

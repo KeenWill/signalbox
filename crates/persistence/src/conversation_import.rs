@@ -26,6 +26,7 @@ use crate::{
 const STORAGE_VERSION: i16 = 1;
 const CLAUDE_CODE_FORMAT: &str = "claude_code_session_jsonl";
 const CLAUDE_CODE_VERSION: i16 = 1;
+const TRANSCRIPT_ENTRY_IDENTITY_UNIQUE: &str = "imported_transcript_entry_identity_unique";
 
 /// Why a versioned imported domain-algebra encoding is invalid.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -178,7 +179,15 @@ impl Error for ImportedConversationRepositoryError {
 
 impl From<sqlx::Error> for ImportedConversationRepositoryError {
     fn from(error: sqlx::Error) -> Self {
-        Self::Database(error)
+        if error
+            .as_database_error()
+            .and_then(sqlx::error::DatabaseError::constraint)
+            == Some(TRANSCRIPT_ENTRY_IDENTITY_UNIQUE)
+        {
+            Self::IdentityCollision(ImportedConversationIdentityCollision::TranscriptEntry)
+        } else {
+            Self::Database(error)
+        }
     }
 }
 
@@ -403,7 +412,17 @@ async fn insert_raws(
     conversation: ImportedConversationId,
     raws: &[EncodedRawRecord],
 ) -> Result<(), ImportedConversationRepositoryError> {
-    for (index, raw) in raws.iter().enumerate() {
+    let mut blobs = raws.iter().collect::<Vec<_>>();
+    blobs.sort_unstable_by_key(|raw| raw.content_hash);
+    if blobs
+        .windows(2)
+        .any(|pair| pair[0].content_hash == pair[1].content_hash && pair[0].bytes != pair[1].bytes)
+    {
+        return Err(ImportedConversationCorruption::RawRecordHashCollision.into());
+    }
+    blobs.dedup_by_key(|raw| raw.content_hash);
+
+    for raw in blobs {
         let hash = raw.content_hash.as_bytes().as_slice();
         sqlx::query(
             "INSERT INTO imported_raw_source_record (content_hash, raw_bytes)
@@ -425,6 +444,10 @@ async fn insert_raws(
         if durable_bytes != raw.bytes {
             return Err(ImportedConversationCorruption::RawRecordHashCollision.into());
         }
+    }
+
+    for (index, raw) in raws.iter().enumerate() {
+        let hash = raw.content_hash.as_bytes().as_slice();
         sqlx::query(
             "INSERT INTO imported_conversation_raw_record
                 (imported_conversation_id, raw_record_position, content_hash,
