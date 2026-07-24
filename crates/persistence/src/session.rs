@@ -262,6 +262,11 @@ fn map_imported_error(error: ImportedSessionRepositoryError) -> SessionRepositor
                 "imported load reported an impossible commit ambiguity",
             ))
         }
+        ImportedSessionRepositoryError::DifferentCommandKind { .. } => {
+            SessionRepositoryError::Corruption(SessionCorruption::Inconsistent(
+                "imported session lookup reached another command family",
+            ))
+        }
         ImportedSessionRepositoryError::Preparation(_) => {
             SessionRepositoryError::Corruption(SessionCorruption::Inconsistent(
                 "imported load reported an impossible preparation failure",

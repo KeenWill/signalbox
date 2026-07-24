@@ -108,7 +108,8 @@ fn imported_command(
 /// the one-to-one seed before returning the current session.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn imported_frontier_creation_replays_and_loads_checked_seed() -> Result<(), Box<dyn Error>> {
+async fn s28_inv012_inv038_inv039_imported_frontier_creation_replays_and_loads_checked_seed()
+-> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let conversation = imported(
         0x100,
@@ -224,7 +225,8 @@ async fn imported_frontier_creation_replays_and_loads_checked_seed() -> Result<(
 /// outcomes and generate no semantic identities.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn missing_targets_remain_unclaimed_and_generation_free() -> Result<(), Box<dyn Error>> {
+async fn s28_inv012_inv039_missing_targets_remain_unclaimed_and_generation_free()
+-> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let stored = imported(0x110, 0x210, "{\"type\":\"summary\",\"value\":null}");
     ImportedConversationStore::resolve_or_insert(
@@ -273,13 +275,13 @@ async fn missing_targets_remain_unclaimed_and_generation_free() -> Result<(), Bo
     Ok(())
 }
 
-/// INV-001 / INV-012 / INV-039: concurrent equal first handling converges on
-/// one committed seed, and only the command-claim winner consumes semantic
-/// identities.
+/// S28 / INV-001 / INV-012 / INV-039: concurrent equal first handling
+/// converges on one committed seed, and only the command-claim winner consumes
+/// semantic identities.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn concurrent_equal_creation_has_one_identity_consuming_winner() -> Result<(), Box<dyn Error>>
-{
+async fn s28_inv001_inv012_inv039_concurrent_equal_creation_has_one_identity_consuming_winner()
+-> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let conversation = imported(
         0x115,
@@ -349,11 +351,11 @@ async fn concurrent_equal_creation_has_one_identity_consuming_winner() -> Result
     Ok(())
 }
 
-/// INV-039: an imported session whose one-to-one seed is absent fails closed
-/// at the ordinary current-session load boundary.
+/// S28 / INV-039: an imported session whose one-to-one seed is absent fails
+/// closed at the ordinary current-session load boundary.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn current_load_rejects_missing_imported_seed() -> Result<(), Box<dyn Error>> {
+async fn s28_inv039_current_load_rejects_missing_imported_seed() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let conversation = imported(0x120, 0x220, "{\"type\":\"summary\",\"value\":null}");
     ImportedConversationStore::resolve_or_insert(
@@ -397,11 +399,12 @@ async fn current_load_rejects_missing_imported_seed() -> Result<(), Box<dyn Erro
     Ok(())
 }
 
-/// INV-002 / INV-039: the constant-size current-session proof rejects a seed
-/// header whose declared member count differs from the imported boundary.
+/// S28 / INV-002 / INV-039: the constant-size current-session proof rejects a
+/// seed header whose declared member count differs from the imported boundary.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn current_load_rejects_cross_wired_seed_header_count() -> Result<(), Box<dyn Error>> {
+async fn s28_inv002_inv039_current_load_rejects_cross_wired_seed_header_count()
+-> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let conversation = imported(0x121, 0x221, "{\"type\":\"summary\",\"value\":null}");
     ImportedConversationStore::resolve_or_insert(

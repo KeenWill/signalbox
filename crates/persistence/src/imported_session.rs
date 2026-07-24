@@ -120,6 +120,11 @@ pub enum ImportedSessionRepositoryError {
     Database(sqlx::Error),
     /// PostgreSQL obscured whether the requested commit succeeded.
     CommitAmbiguous(sqlx::Error),
+    /// The command identity is valid but belongs to another command family.
+    DifferentCommandKind {
+        /// The cross-kind command identity.
+        command_id: DurableCommandId,
+    },
     /// Application-supplied identities could not form a checked candidate.
     Preparation(CreateSessionFromImportedFrontierPreparationFailure),
     /// Durable facts cannot reconstruct their admitted domain values.
@@ -138,6 +143,10 @@ impl fmt::Display for ImportedSessionRepositoryError {
                     "imported-session commit outcome is ambiguous: {error}"
                 )
             }
+            Self::DifferentCommandKind { command_id } => write!(
+                formatter,
+                "durable command {command_id:?} does not name CreateSessionFromImportedFrontier"
+            ),
             Self::Preparation(failure) => {
                 write!(
                     formatter,
@@ -153,7 +162,7 @@ impl Error for ImportedSessionRepositoryError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
-            Self::Preparation(_) => None,
+            Self::DifferentCommandKind { .. } | Self::Preparation(_) => None,
             Self::Corruption(error) => Some(error),
         }
     }
@@ -300,9 +309,7 @@ impl ImportedSessionRepository {
             Some(CommandKind::CreateSessionFromImportedFrontier) => {
                 load_creation_from_connection(&mut connection, command_id).await
             }
-            Some(_) => {
-                Err(ImportedSessionCorruption::Inconsistent("durable command family").into())
-            }
+            Some(_) => Err(ImportedSessionRepositoryError::DifferentCommandKind { command_id }),
         }
     }
 }

@@ -54,6 +54,7 @@ use signalbox_persistence::{
         CreateSessionCorruption, CreateSessionHandlingOutcome, CreateSessionRepository,
         CreateSessionRepositoryError,
     },
+    imported_session::{ImportedSessionRepository, ImportedSessionRepositoryError},
     local_test_connection_options, migrate,
     model_execution::{
         ModelCallCorruption, ModelCallIdentityCollision, ModelCallRepositoryError,
@@ -5798,10 +5799,18 @@ async fn inv012_cross_kind_reuse_is_conflict_not_corruption_or_absence()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let create_repository = CreateSessionRepository::new(pool.clone());
+    let imported_repository = ImportedSessionRepository::new(pool.clone());
     let defaults_repository = ReplaceSessionDefaultsRepository::new(pool.clone());
     let input_repository = SubmitInputRepository::new(pool.clone());
     let creation = prepared(0x221, 0x721, direct(0x821));
     create_repository.handle(creation).await?;
+    assert!(matches!(
+        imported_repository
+            .load(DurableCommandId::from_uuid(Uuid::from_u128(0x221)))
+            .await
+            .expect_err("a CreateSession ID is not an unseen imported creation"),
+        ImportedSessionRepositoryError::DifferentCommandKind { .. }
+    ));
 
     let defaults_reuse = replacement(0x221, 0x721, 1, alias(0x822));
     assert_eq!(
