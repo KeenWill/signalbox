@@ -873,6 +873,7 @@ ALTER TABLE turn_lifecycle
     ADD COLUMN active_tool_round_call_id uuid,
     ADD COLUMN approval_tool_request_id uuid,
     ADD COLUMN recovery_tool_attempt_id uuid,
+    ADD COLUMN terminal_tool_attempt_id uuid,
     DROP CONSTRAINT turn_lifecycle_active_phase_closed,
     DROP CONSTRAINT turn_lifecycle_state_payload_shape;
 
@@ -904,6 +905,7 @@ ALTER TABLE turn_lifecycle
                 AND recovery_tool_attempt_id IS NULL
                 AND terminal_attempt_id IS NULL
                 AND terminal_model_call_id IS NULL
+                AND terminal_tool_attempt_id IS NULL
             )
             OR (
                 state_kind = 'active'
@@ -918,6 +920,7 @@ ALTER TABLE turn_lifecycle
                 AND recovery_tool_attempt_id IS NULL
                 AND terminal_attempt_id IS NULL
                 AND terminal_model_call_id IS NULL
+                AND terminal_tool_attempt_id IS NULL
             )
             OR (
                 state_kind = 'active'
@@ -933,6 +936,7 @@ ALTER TABLE turn_lifecycle
                 AND recovery_tool_attempt_id IS NULL
                 AND terminal_attempt_id IS NULL
                 AND terminal_model_call_id IS NULL
+                AND terminal_tool_attempt_id IS NULL
             )
             OR (
                 state_kind = 'active'
@@ -948,6 +952,7 @@ ALTER TABLE turn_lifecycle
                 AND recovery_tool_attempt_id IS NULL
                 AND terminal_attempt_id IS NULL
                 AND terminal_model_call_id IS NULL
+                AND terminal_tool_attempt_id IS NULL
             )
             OR (
                 state_kind = 'active'
@@ -963,6 +968,7 @@ ALTER TABLE turn_lifecycle
                 AND recovery_tool_attempt_id IS NOT NULL
                 AND terminal_attempt_id IS NULL
                 AND terminal_model_call_id IS NULL
+                AND terminal_tool_attempt_id IS NULL
             )
             OR (
                 state_kind = 'terminal'
@@ -980,8 +986,12 @@ ALTER TABLE turn_lifecycle
                     (
                         terminal_attempt_id IS NULL
                         AND terminal_model_call_id IS NULL
+                        AND terminal_tool_attempt_id IS NULL
                     )
-                    OR terminal_attempt_id IS NOT NULL
+                    OR (
+                        terminal_attempt_id IS NOT NULL
+                        AND terminal_tool_attempt_id IS NULL
+                    )
                 )
             )
             OR (
@@ -998,6 +1008,7 @@ ALTER TABLE turn_lifecycle
                 AND recovery_tool_attempt_id IS NULL
                 AND terminal_attempt_id IS NOT NULL
                 AND terminal_model_call_id IS NOT NULL
+                AND terminal_tool_attempt_id IS NULL
             )
             OR (
                 state_kind = 'terminal'
@@ -1012,6 +1023,7 @@ ALTER TABLE turn_lifecycle
                 AND approval_tool_request_id IS NULL
                 AND recovery_tool_attempt_id IS NULL
                 AND terminal_attempt_id IS NOT NULL
+                AND terminal_tool_attempt_id IS NULL
             )
             OR (
                 state_kind = 'terminal'
@@ -1026,7 +1038,16 @@ ALTER TABLE turn_lifecycle
                 AND approval_tool_request_id IS NULL
                 AND recovery_tool_attempt_id IS NULL
                 AND terminal_attempt_id IS NOT NULL
-                AND terminal_model_call_id IS NOT NULL
+                AND (
+                    (
+                        terminal_model_call_id IS NOT NULL
+                        AND terminal_tool_attempt_id IS NULL
+                    )
+                    OR (
+                        terminal_model_call_id IS NULL
+                        AND terminal_tool_attempt_id IS NOT NULL
+                    )
+                )
             )
         ),
     ADD CONSTRAINT turn_lifecycle_active_tool_round_fk
@@ -1047,6 +1068,28 @@ ALTER TABLE turn_lifecycle
         DEFERRABLE INITIALLY DEFERRED,
     ADD CONSTRAINT turn_lifecycle_recovery_tool_attempt_fk
         FOREIGN KEY (recovery_tool_attempt_id, turn_id, session_id)
+        REFERENCES tool_attempt (attempt_id, turn_id, session_id)
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED,
+    ADD CONSTRAINT turn_lifecycle_terminal_tool_attempt_fk
+        FOREIGN KEY (terminal_tool_attempt_id, turn_id, session_id)
+        REFERENCES tool_attempt (attempt_id, turn_id, session_id)
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED;
+
+ALTER TABLE turn_reconciliation_required_outbox_event
+    ALTER COLUMN model_call_id DROP NOT NULL,
+    ADD COLUMN tool_attempt_id uuid UNIQUE,
+    ADD CONSTRAINT turn_reconciliation_required_outbox_operation_shape
+        CHECK (
+            (model_call_id IS NOT NULL)::integer
+            + (tool_attempt_id IS NOT NULL)::integer
+            = 1
+        ),
+    ADD CONSTRAINT turn_reconciliation_required_outbox_tool_attempt_fk
+        FOREIGN KEY (tool_attempt_id, turn_id, session_id)
         REFERENCES tool_attempt (attempt_id, turn_id, session_id)
         ON UPDATE RESTRICT
         ON DELETE RESTRICT
@@ -2250,6 +2293,221 @@ BEGIN
             RAISE EXCEPTION 'terminal tool-loop turn has unresolved requests'
                 USING ERRCODE = '23514';
         END IF;
+    END IF;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION assert_reconciliation_required_turn_final_state(
+    checked_turn_id uuid
+)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    checked_session uuid;
+    checked_attempt uuid;
+    checked_call uuid;
+    checked_tool_attempt uuid;
+    checked_terminal_frontier uuid;
+    source_frontier uuid;
+    member_mismatch_count bigint;
+    contradictory_entry_count bigint;
+    outbox_count bigint;
+    interrupt_command uuid;
+    interrupt_record_count bigint;
+BEGIN
+    SELECT
+        session_id,
+        terminal_attempt_id,
+        terminal_model_call_id,
+        terminal_tool_attempt_id,
+        terminal_frontier_id
+      INTO
+        checked_session,
+        checked_attempt,
+        checked_call,
+        checked_tool_attempt,
+        checked_terminal_frontier
+      FROM turn_lifecycle
+     WHERE turn_id = checked_turn_id
+       AND state_kind = 'terminal'
+       AND terminal_disposition_kind = 'reconciliation_required';
+
+    IF NOT FOUND THEN
+        RETURN;
+    END IF;
+
+    PERFORM assert_terminal_started_turn_common_final_state(checked_turn_id);
+
+    IF NOT EXISTS (
+        SELECT 1
+          FROM turn_attempt
+         WHERE turn_attempt_id = checked_attempt
+           AND turn_id = checked_turn_id
+           AND session_id = checked_session
+           AND state_kind = 'ended'
+           AND end_disposition IN ('ambiguous', 'lost')
+           AND (
+                (
+                    end_variant = 'after_cancellation'
+                    AND interrupt_command_id IS NOT NULL
+                    AND interrupt_predecessor_turn_id = checked_turn_id
+                )
+                OR (
+                    end_variant = 'without_stop'
+                    AND interrupt_command_id IS NULL
+                    AND interrupt_predecessor_turn_id IS NULL
+                )
+           )
+    ) THEN
+        RAISE EXCEPTION
+            'reconciliation-required turn lacks exact ambiguous attempt'
+            USING ERRCODE = '23514';
+    END IF;
+
+    SELECT interrupt_command_id
+      INTO interrupt_command
+      FROM turn_attempt
+     WHERE turn_attempt_id = checked_attempt;
+    IF interrupt_command IS NOT NULL THEN
+        PERFORM assert_interrupt_attempt_proof(checked_attempt);
+    END IF;
+
+    SELECT count(*)
+      INTO interrupt_record_count
+      FROM submit_input_command AS command
+      JOIN accepted_input AS accepted
+        ON accepted.accepting_command_id = command.command_id
+       AND accepted.accepted_input_id = command.result_accepted_input_id
+       AND accepted.session_id = command.result_session_id
+       AND accepted.origin_turn_id = command.result_turn_id
+      JOIN queued_input_origin AS successor
+        ON successor.accepted_input_id = accepted.accepted_input_id
+       AND successor.turn_id = accepted.origin_turn_id
+       AND successor.session_id = accepted.session_id
+       AND successor.priority_kind = 'interrupt_immediately_after'
+       AND successor.interrupt_predecessor_turn_id = checked_turn_id
+     WHERE command.session_id = checked_session
+       AND command.delivery_kind = 'interrupt'
+       AND command.expected_active_turn_id = checked_turn_id
+       AND command.result_kind = 'applied'
+       AND command.rejection_kind IS NULL
+       AND accepted.disposition_kind = 'origin_of'
+       AND (
+            interrupt_command IS NULL
+            OR command.command_id = interrupt_command
+       );
+    IF interrupt_record_count <> 1 THEN
+        RAISE EXCEPTION
+            'reconciliation-required turn lacks its exact applied interrupt'
+            USING ERRCODE = '23514';
+    END IF;
+
+    IF checked_call IS NOT NULL THEN
+        SELECT context_frontier_id
+          INTO source_frontier
+          FROM model_call
+         WHERE model_call_id = checked_call
+           AND turn_attempt_id = checked_attempt
+           AND turn_id = checked_turn_id
+           AND session_id = checked_session
+           AND state_kind = 'terminal'
+           AND terminal_disposition_kind = 'ambiguous';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION
+                'reconciliation-required turn lacks exact ambiguous call'
+                USING ERRCODE = '23514';
+        END IF;
+        PERFORM assert_model_call_final_state(checked_call);
+    ELSE
+        SELECT round.boundary_frontier_id
+          INTO source_frontier
+          FROM tool_attempt AS attempt
+          JOIN tool_request AS request
+            ON request.request_id = attempt.request_id
+          JOIN tool_round AS round
+            ON round.producing_model_call_id =
+               request.producing_model_call_id
+           AND round.turn_id = request.turn_id
+           AND round.session_id = request.session_id
+         WHERE attempt.attempt_id = checked_tool_attempt
+           AND attempt.issuing_turn_attempt_id = checked_attempt
+           AND attempt.turn_id = checked_turn_id
+           AND attempt.session_id = checked_session
+           AND attempt.state_kind = 'terminal'
+           AND attempt.terminal_disposition_kind = 'ambiguous'
+           AND round.boundary_kind = 'continuing';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION
+                'reconciliation-required turn lacks exact ambiguous tool attempt'
+                USING ERRCODE = '23514';
+        END IF;
+    END IF;
+
+    SELECT count(*)
+      INTO member_mismatch_count
+      FROM (
+            (
+                SELECT member_position, source_session_id, semantic_entry_id
+                  FROM context_frontier_member
+                 WHERE owning_session_id = checked_session
+                   AND context_frontier_id = source_frontier
+                EXCEPT
+                SELECT member_position, source_session_id, semantic_entry_id
+                  FROM context_frontier_member
+                 WHERE owning_session_id = checked_session
+                   AND context_frontier_id = checked_terminal_frontier
+            )
+            UNION ALL
+            (
+                SELECT member_position, source_session_id, semantic_entry_id
+                  FROM context_frontier_member
+                 WHERE owning_session_id = checked_session
+                   AND context_frontier_id = checked_terminal_frontier
+                EXCEPT
+                SELECT member_position, source_session_id, semantic_entry_id
+                  FROM context_frontier_member
+                 WHERE owning_session_id = checked_session
+                   AND context_frontier_id = source_frontier
+            )
+      ) AS mismatch;
+
+    SELECT count(*)
+      INTO contradictory_entry_count
+      FROM semantic_transcript_entry
+     WHERE source_session_id = checked_session
+       AND (
+            failed_turn_id = checked_turn_id
+            OR completed_turn_id = checked_turn_id
+            OR cancelled_turn_id = checked_turn_id
+            OR (
+                checked_call IS NOT NULL
+                AND producing_model_call_id = checked_call
+            )
+       )
+       AND payload_kind IN (
+            'turn_failed',
+            'turn_completed',
+            'turn_cancelled',
+            'assistant_text'
+       );
+
+    SELECT count(*)
+      INTO outbox_count
+      FROM turn_reconciliation_required_outbox_event
+     WHERE session_id = checked_session
+       AND turn_id = checked_turn_id
+       AND model_call_id IS NOT DISTINCT FROM checked_call
+       AND tool_attempt_id IS NOT DISTINCT FROM checked_tool_attempt
+       AND terminal_frontier_id = checked_terminal_frontier;
+
+    IF member_mismatch_count <> 0
+       OR contradictory_entry_count <> 0
+       OR outbox_count <> 1
+    THEN
+        RAISE EXCEPTION
+            'reconciliation-required turn lacks exact frontier or outbox boundary'
+            USING ERRCODE = '23514';
     END IF;
 END;
 $$;

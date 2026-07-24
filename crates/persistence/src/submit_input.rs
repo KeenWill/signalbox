@@ -15,12 +15,13 @@ use signalbox_domain::{
     CancelledModelCallTurnIdentities, CancelledTurnExecutionReconstitutionInput,
     ConsumedSteeringReconstitutionInput, ContextFrontierId, DeliveryRequest, DirectModelSelection,
     DurableCommandId, FailedTurnExecutionReconstitutionInput, FrozenAliasDefinition,
-    FrozenModelSelection, ModelAlias, ModelCallDisposition, ModelCallId, ModelCallInterruptOutcome,
-    ModelCallReconstitutionInput, ModelCallReconstitutionState, ModelCallTerminalOutcome,
-    ModelSelectionOverride, ModelSelectionRequest, NonEmptyUnicodeTextFailure, OriginConfiguration,
-    PerInputConfigurationChoices, PinnedProviderTargetReconstitutionInput, PreparedSubmitInput,
-    ProviderModelIdentity, ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput,
-    ResolvedProviderTarget, SemanticTranscriptEntryId,
+    FrozenModelSelection, IssuedOperationRef, ModelAlias, ModelCallDisposition, ModelCallId,
+    ModelCallInterruptOutcome, ModelCallReconstitutionInput, ModelCallReconstitutionState,
+    ModelCallTerminalOutcome, ModelSelectionOverride, ModelSelectionRequest,
+    NonEmptyUnicodeTextFailure, OriginConfiguration, PerInputConfigurationChoices,
+    PinnedProviderTargetReconstitutionInput, PreparedSubmitInput, ProviderModelIdentity,
+    ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget,
+    SemanticTranscriptEntryId,
     SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session,
     SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
@@ -48,10 +49,13 @@ use crate::{
     model_execution::{
         ModelCallRepositoryError, attach_interrupt_reclassification_candidates,
         attach_recovery_interrupt_reclassification_candidates, persist_stop_requested,
-        persist_terminal_outcome, require_live_execution_for_restart,
+        persist_terminal_outcome, persist_tool_reconciliation_required,
+        require_live_execution_for_restart, require_live_tool_execution,
     },
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
-    tool_loop::load_active_batch_from_connection,
+    tool_loop::{
+        load_active_batch_from_connection, load_recovery_batch_by_attempt, persist_ended_attempt,
+    },
 };
 
 const STORAGE_VERSION: i16 = 1;
@@ -372,16 +376,23 @@ impl SubmitInputRepository {
     /// locks the session and its current-defaults pointer before reading
     /// state, serializes position assignment on the session row, and commits
     /// the typed terminal result with all applied effects.
-    pub async fn handle_with_candidates<NextTurn>(
+    pub async fn handle_with_candidates<NextTurn, NextToolCancellation>(
         &self,
         command: SubmitInput,
         accepted_input: AcceptedInputId,
         turn: Option<TurnId>,
         cancellation_identities: CancelledModelCallTurnIdentities,
         next_reclassified_turn: NextTurn,
+        next_tool_cancellation: NextToolCancellation,
     ) -> Result<SubmitInputHandlingOutcome, SubmitInputRepositoryError>
     where
         NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+        NextToolCancellation: FnMut(
+                &[signalbox_domain::ToolRequestId],
+            ) -> (
+                Vec<signalbox_domain::SemanticTranscriptEntryId>,
+                signalbox_domain::ContextFrontierId,
+            ) + Send,
     {
         let mut transaction = self.pool.begin().await?;
         let decision = handle_in_transaction(
@@ -391,6 +402,7 @@ impl SubmitInputRepository {
             turn,
             cancellation_identities,
             next_reclassified_turn,
+            next_tool_cancellation,
         )
         .await;
 
@@ -439,16 +451,23 @@ impl SubmitInputRepository {
 impl SubmitInputTransaction for SubmitInputRepository {
     type Error = SubmitInputRepositoryError;
 
-    async fn handle<NextTurn>(
+    async fn handle<NextTurn, NextToolCancellation>(
         &mut self,
         command: SubmitInput,
         accepted_input: AcceptedInputId,
         turn: Option<TurnId>,
         cancellation_identities: CancelledModelCallTurnIdentities,
         next_reclassified_turn: NextTurn,
+        next_tool_cancellation: NextToolCancellation,
     ) -> Result<SubmitInputOutcome, Self::Error>
     where
         NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+        NextToolCancellation: FnMut(
+                &[signalbox_domain::ToolRequestId],
+            ) -> (
+                Vec<signalbox_domain::SemanticTranscriptEntryId>,
+                signalbox_domain::ContextFrontierId,
+            ) + Send,
     {
         let outcome = SubmitInputRepository::handle_with_candidates(
             self,
@@ -457,6 +476,7 @@ impl SubmitInputTransaction for SubmitInputRepository {
             turn,
             cancellation_identities,
             next_reclassified_turn,
+            next_tool_cancellation,
         )
         .await?;
 
@@ -469,16 +489,23 @@ impl SubmitInputTransaction for SubmitInputRepository {
     }
 }
 
-async fn handle_in_transaction<NextTurn>(
+async fn handle_in_transaction<NextTurn, NextToolCancellation>(
     connection: &mut PgConnection,
     command: SubmitInput,
     accepted_input: AcceptedInputId,
     turn: Option<TurnId>,
     cancellation_identities: CancelledModelCallTurnIdentities,
     mut next_reclassified_turn: NextTurn,
+    mut next_tool_cancellation: NextToolCancellation,
 ) -> Result<TransactionDecision, SubmitInputRepositoryError>
 where
     NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+    NextToolCancellation: FnMut(
+            &[signalbox_domain::ToolRequestId],
+        ) -> (
+            Vec<signalbox_domain::SemanticTranscriptEntryId>,
+            signalbox_domain::ContextFrontierId,
+        ) + Send,
 {
     let command_id = command.command_id();
     match inspect_registry(connection, command_id).await? {
@@ -544,59 +571,229 @@ where
         | SubmitInputResult::Rejected(_) => None,
     };
     let interrupt_outcome = if let Some(interrupt) = interrupt {
-        let recovery_wait = scheduling
+        let active_turn = scheduling
             .as_ref()
-            .and_then(AcceptedInputSchedulingProjection::active_turn_execution)
-            .is_some_and(|active| {
-                matches!(
+            .and_then(AcceptedInputSchedulingProjection::active_turn_execution);
+        let executing_tool_batch = match active_turn {
+            Some(active)
+                if matches!(
                     active.phase(),
-                    signalbox_domain::ActiveTurnPhase::AwaitingRecoveryDecision {
-                        applied_interrupt: None,
-                        ..
-                    }
-                )
-            });
-        if recovery_wait {
-            let scheduling = scheduling.ok_or(SubmitInputCorruption::Inconsistent(
-                "applied interrupt lacks active scheduling state",
-            ))?;
-            let active_turn =
-                scheduling
-                    .active_turn_execution()
-                    .ok_or(SubmitInputCorruption::Inconsistent(
-                        "applied interrupt lacks active turn execution",
-                    ))?;
-            let identities = attach_recovery_interrupt_reclassification_candidates(
-                cancellation_identities,
-                &active_turn,
-                &mut next_reclassified_turn,
-            )?;
-            Some(ModelCallInterruptOutcome::ReconciliationRequired(
-                scheduling
-                    .apply_interrupt_to_model_call_recovery(interrupt, identities.into_ambiguous())
-                    .map_err(|_| {
-                        SubmitInputCorruption::Inconsistent(
-                            "applied interrupt does not match model-call recovery wait",
+                    signalbox_domain::ActiveTurnPhase::Running { .. }
+                ) =>
+            {
+                load_active_batch_from_connection(connection, interrupt.session(), active.turn())
+                    .await
+                    .map_err(map_tool_loop_error)?
+                    .filter(|batch| {
+                        matches!(
+                            batch.phase(),
+                            signalbox_domain::ToolBatchPhase::Executing { .. }
                         )
-                    })?,
-            ))
-        } else {
-            let execution =
-                require_live_execution_for_restart(connection, interrupt.session()).await?;
+                    })
+            }
+            Some(_) | None => None,
+        };
+        if let Some(mut batch) = executing_tool_batch {
+            if let Some(current) =
+                batch
+                    .requests()
+                    .iter()
+                    .find_map(|request| match batch.attempt(request.id()) {
+                        Some(signalbox_domain::ReconstitutedToolAttempt::Current(current)) => {
+                            Some(current.clone())
+                        }
+                        Some(signalbox_domain::ReconstitutedToolAttempt::Ended(_)) | None => None,
+                    })
+            {
+                if current.state() == signalbox_domain::CurrentToolAttemptState::InFlight {
+                    return Err(SubmitInputCorruption::Inconsistent(
+                        "in-flight tool attempt escaped the dispatch gate",
+                    )
+                    .into());
+                }
+                let ended = match current.classify_crash_loss() {
+                    signalbox_domain::ToolAttemptCrashOutcome::KnownFailed(ended) => ended,
+                    signalbox_domain::ToolAttemptCrashOutcome::Ambiguous(_) => {
+                        return Err(SubmitInputCorruption::Inconsistent(
+                            "prepared tool attempt classified ambiguous",
+                        )
+                        .into());
+                    }
+                };
+                persist_ended_attempt(connection, &ended)
+                    .await
+                    .map_err(map_tool_loop_error)?;
+                batch = load_active_batch_from_connection(
+                    connection,
+                    interrupt.session(),
+                    batch.turn(),
+                )
+                .await
+                .map_err(map_tool_loop_error)?
+                .ok_or(SubmitInputCorruption::Missing("closed tool batch"))?;
+            }
+            let request_ids = batch
+                .requests()
+                .iter()
+                .map(signalbox_domain::ToolRequest::id)
+                .collect::<Vec<_>>();
+            let (result_entries, result_frontier) = next_tool_cancellation(&request_ids);
+            let projection = batch
+                .prepare_cancellation_projection(result_entries, result_frontier)
+                .map_err(|_| {
+                    SubmitInputCorruption::Inconsistent(
+                        "tool batch cannot materialize interrupt results",
+                    )
+                })?;
+            let execution = require_live_tool_execution(connection, interrupt.session(), &batch)
+                .await
+                .map_err(|_| {
+                    SubmitInputCorruption::Inconsistent(
+                        "tool interrupt lacks live execution authority",
+                    )
+                })?;
             let identities = attach_interrupt_reclassification_candidates(
                 cancellation_identities,
                 &execution,
                 &mut next_reclassified_turn,
-            )?;
-            Some(
+            )
+            .map_err(|_| {
+                SubmitInputCorruption::Inconsistent("tool interrupt reclassification candidates")
+            })?;
+            Some(ModelCallInterruptOutcome::Cancelled(
                 execution
-                    .apply_interrupt(interrupt, identities)
+                    .apply_interrupt_to_tool_batch(interrupt, projection, identities)
                     .map_err(|_| {
                         SubmitInputCorruption::Inconsistent(
-                            "applied interrupt does not match active model execution",
+                            "applied interrupt does not match executing tool batch",
                         )
                     })?,
-            )
+            ))
+        } else {
+            let recovery_operation = scheduling
+                .as_ref()
+                .and_then(AcceptedInputSchedulingProjection::active_turn_execution)
+                .and_then(|active| match active.phase() {
+                    signalbox_domain::ActiveTurnPhase::AwaitingRecoveryDecision {
+                        ambiguous_operations,
+                        applied_interrupt: None,
+                    } if ambiguous_operations.operation_count() == 1 => {
+                        ambiguous_operations.iter().next()
+                    }
+                    signalbox_domain::ActiveTurnPhase::Running { .. }
+                    | signalbox_domain::ActiveTurnPhase::AwaitingApproval { .. }
+                    | signalbox_domain::ActiveTurnPhase::AwaitingRecoveryDecision { .. } => None,
+                });
+            if let Some(IssuedOperationRef::ToolAttempt(recovery_attempt)) = recovery_operation {
+                let scheduling = scheduling.ok_or(SubmitInputCorruption::Inconsistent(
+                    "applied interrupt lacks active scheduling state",
+                ))?;
+                let batch = load_recovery_batch_by_attempt(
+                    connection,
+                    interrupt.session(),
+                    interrupt.proof().predecessor(),
+                    recovery_attempt,
+                )
+                .await
+                .map_err(map_tool_loop_error)?;
+                let wait = batch
+                    .awaiting_recovery()
+                    .ok_or(SubmitInputCorruption::Inconsistent(
+                        "tool recovery wait evidence",
+                    ))?;
+                let tool_attempt = batch
+                    .requests()
+                    .iter()
+                    .find_map(|request| match batch.attempt(request.id()) {
+                        Some(signalbox_domain::ReconstitutedToolAttempt::Ended(attempt))
+                            if attempt.attempt() == recovery_attempt =>
+                        {
+                            Some(attempt.clone())
+                        }
+                        Some(signalbox_domain::ReconstitutedToolAttempt::Current(_))
+                        | Some(signalbox_domain::ReconstitutedToolAttempt::Ended(_))
+                        | None => None,
+                    })
+                    .ok_or(SubmitInputCorruption::Inconsistent(
+                        "ambiguous tool attempt evidence",
+                    ))?;
+                let turn_attempt_disposition = load_unstopped_recovery_turn_attempt_disposition(
+                    connection,
+                    interrupt.session(),
+                    wait,
+                )
+                .await?;
+                let source_snapshot = batch.yielded_snapshot().clone();
+                let active_turn = scheduling.active_turn_execution().ok_or(
+                    SubmitInputCorruption::Inconsistent(
+                        "applied interrupt lacks active turn execution",
+                    ),
+                )?;
+                let identities = attach_recovery_interrupt_reclassification_candidates(
+                    cancellation_identities,
+                    &active_turn,
+                    &mut next_reclassified_turn,
+                )?;
+                Some(ModelCallInterruptOutcome::ToolReconciliationRequired(
+                    scheduling
+                        .apply_interrupt_to_tool_recovery(
+                            wait,
+                            tool_attempt,
+                            turn_attempt_disposition,
+                            source_snapshot,
+                            interrupt,
+                            identities.into_ambiguous(),
+                        )
+                        .map_err(|_| {
+                            SubmitInputCorruption::Inconsistent(
+                                "applied interrupt does not match tool recovery wait",
+                            )
+                        })?,
+                ))
+            } else if matches!(recovery_operation, Some(IssuedOperationRef::ModelCall(_))) {
+                let scheduling = scheduling.ok_or(SubmitInputCorruption::Inconsistent(
+                    "applied interrupt lacks active scheduling state",
+                ))?;
+                let active_turn = scheduling.active_turn_execution().ok_or(
+                    SubmitInputCorruption::Inconsistent(
+                        "applied interrupt lacks active turn execution",
+                    ),
+                )?;
+                let identities = attach_recovery_interrupt_reclassification_candidates(
+                    cancellation_identities,
+                    &active_turn,
+                    &mut next_reclassified_turn,
+                )?;
+                Some(ModelCallInterruptOutcome::ReconciliationRequired(
+                    scheduling
+                        .apply_interrupt_to_model_call_recovery(
+                            interrupt,
+                            identities.into_ambiguous(),
+                        )
+                        .map_err(|_| {
+                            SubmitInputCorruption::Inconsistent(
+                                "applied interrupt does not match model-call recovery wait",
+                            )
+                        })?,
+                ))
+            } else {
+                let execution =
+                    require_live_execution_for_restart(connection, interrupt.session()).await?;
+                let identities = attach_interrupt_reclassification_candidates(
+                    cancellation_identities,
+                    &execution,
+                    &mut next_reclassified_turn,
+                )?;
+                Some(
+                    execution
+                        .apply_interrupt(interrupt, identities)
+                        .map_err(|_| {
+                            SubmitInputCorruption::Inconsistent(
+                                "applied interrupt does not match active model execution",
+                            )
+                        })?,
+                )
+            }
         }
     } else {
         None
@@ -617,17 +814,48 @@ where
             )
             .await?;
         }
-        Some(ModelCallInterruptOutcome::ToolReconciliationRequired(_)) => {
-            return Err(SubmitInputCorruption::Inconsistent(
-                "tool reconciliation outcome requires tool storage",
-            )
-            .into());
+        Some(ModelCallInterruptOutcome::ToolReconciliationRequired(reconciliation)) => {
+            persist_tool_reconciliation_required(connection, &reconciliation).await?;
         }
         None => {}
     }
     Ok(TransactionDecision::Commit(
         SubmitInputHandlingOutcome::Recorded(recorded),
     ))
+}
+
+async fn load_unstopped_recovery_turn_attempt_disposition(
+    connection: &mut PgConnection,
+    session: SessionId,
+    wait: signalbox_domain::AwaitingToolRecovery,
+) -> Result<UnstoppedAttemptDisposition, SubmitInputRepositoryError> {
+    let row = sqlx::query(
+        "SELECT state_kind, end_variant, end_disposition
+           FROM turn_attempt
+          WHERE turn_attempt_id = $1
+            AND turn_id = $2
+            AND session_id = $3",
+    )
+    .bind(wait.issuing_attempt().into_uuid())
+    .bind(turn_id_to_uuid(wait.turn()))
+    .bind(session_id_to_uuid(session))
+    .fetch_optional(&mut *connection)
+    .await?
+    .ok_or(SubmitInputCorruption::Missing("tool recovery turn attempt"))?;
+    if required::<String>(&row, "state_kind")? != "ended"
+        || required::<String>(&row, "end_variant")? != "without_stop"
+    {
+        return Err(SubmitInputCorruption::Inconsistent("tool recovery turn attempt end").into());
+    }
+    match required::<String>(&row, "end_disposition")?.as_str() {
+        "ambiguous" => Ok(UnstoppedAttemptDisposition::Ambiguous),
+        "lost" => Ok(UnstoppedAttemptDisposition::Lost),
+        value => Err(SubmitInputCorruption::Unsupported {
+            field: "tool recovery turn attempt end_disposition",
+            value: value.to_owned(),
+        }
+        .into()),
+    }
 }
 
 async fn require_recorded(
@@ -920,6 +1148,7 @@ pub(crate) async fn load_scheduling_projection(
             turn.recovery_tool_attempt_id,
             turn.terminal_attempt_id,
             turn.terminal_model_call_id,
+            turn.terminal_tool_attempt_id,
             turn.terminal_disposition_kind,
             (
                 SELECT call.model_call_id
@@ -1112,6 +1341,7 @@ pub(crate) async fn load_scheduling_projection(
         let recovery_tool_attempt: Option<Uuid> = row.try_get("recovery_tool_attempt_id")?;
         let terminal_attempt: Option<Uuid> = row.try_get("terminal_attempt_id")?;
         let terminal_model_call: Option<Uuid> = row.try_get("terminal_model_call_id")?;
+        let terminal_tool_attempt: Option<Uuid> = row.try_get("terminal_tool_attempt_id")?;
         let terminal_disposition: Option<String> = row.try_get("terminal_disposition_kind")?;
         let state = match state_kind.as_str() {
             "queued" => {
@@ -1127,6 +1357,7 @@ pub(crate) async fn load_scheduling_projection(
                     || recovery_tool_attempt.is_some()
                     || terminal_attempt.is_some()
                     || terminal_model_call.is_some()
+                    || terminal_tool_attempt.is_some()
                     || terminal_disposition.is_some()
                 {
                     return Err(
@@ -1139,6 +1370,7 @@ pub(crate) async fn load_scheduling_projection(
                 if terminal_frontier.is_some()
                     || terminal_attempt.is_some()
                     || terminal_model_call.is_some()
+                    || terminal_tool_attempt.is_some()
                     || terminal_disposition.is_some()
                 {
                     return Err(
@@ -1472,6 +1704,14 @@ pub(crate) async fn load_scheduling_projection(
                 required_frontiers.insert(starting_frontier);
                 required_frontiers.insert(terminal_frontier);
                 let starting_lineage = decode_starting_lineage(lineage_kind, predecessor)?;
+                if terminal_tool_attempt.is_some()
+                    && terminal_disposition.as_deref() != Some("reconciliation_required")
+                {
+                    return Err(SubmitInputCorruption::Inconsistent(
+                        "terminal tool attempt disposition",
+                    )
+                    .into());
+                }
                 match terminal_disposition.as_deref() {
                     Some("failed") => {
                         let terminal_execution = match (terminal_attempt, terminal_model_call) {
@@ -1661,8 +1901,6 @@ pub(crate) async fn load_scheduling_projection(
                     Some("reconciliation_required") => {
                         let terminal_attempt = terminal_attempt
                             .ok_or(SubmitInputCorruption::Missing("terminal_attempt_id"))?;
-                        let terminal_call = terminal_model_call
-                            .ok_or(SubmitInputCorruption::Missing("terminal_model_call_id"))?;
                         let stored_attempt_id =
                             TurnAttemptId::from_uuid(required(&row, "turn_attempt_id")?);
                         let attempt_turn = turn_id_from_uuid(required(&row, "attempt_turn_id")?);
@@ -1736,15 +1974,61 @@ pub(crate) async fn load_scheduling_projection(
                                     .into());
                                 }
                             };
-                        required_model_calls.insert(terminal_call);
-                        AcceptedInputTurnSchedulingRecordState::TerminalReconciliationRequired {
-                            starting_lineage,
-                            starting_frontier: ContextFrontierId::from_uuid(starting_frontier),
-                            reconciling_attempt: stored_attempt_id,
-                            reconciling_attempt_end,
-                            ambiguous_call: ModelCallId::from_uuid(terminal_call),
-                            interrupt,
-                            terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
+                        match (terminal_model_call, terminal_tool_attempt) {
+                            (Some(terminal_call), None) => {
+                                required_model_calls.insert(terminal_call);
+                                AcceptedInputTurnSchedulingRecordState::TerminalReconciliationRequired {
+                                    starting_lineage,
+                                    starting_frontier: ContextFrontierId::from_uuid(starting_frontier),
+                                    reconciling_attempt: stored_attempt_id,
+                                    reconciling_attempt_end,
+                                    ambiguous_call: ModelCallId::from_uuid(terminal_call),
+                                    interrupt,
+                                    terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
+                                }
+                            }
+                            (None, Some(terminal_tool_attempt)) => {
+                                let batch = load_recovery_batch_by_attempt(
+                                    connection,
+                                    lifecycle_session,
+                                    lifecycle_turn,
+                                    signalbox_domain::ToolAttemptId::from_uuid(
+                                        terminal_tool_attempt,
+                                    ),
+                                )
+                                .await
+                                .map_err(map_tool_loop_error)?;
+                                let ambiguous_tool = batch.awaiting_recovery().ok_or(
+                                    SubmitInputCorruption::Inconsistent(
+                                        "terminal tool recovery evidence",
+                                    ),
+                                )?;
+                                if ambiguous_tool.issuing_attempt() != stored_attempt_id {
+                                    return Err(SubmitInputCorruption::Inconsistent(
+                                        "terminal tool recovery turn attempt",
+                                    )
+                                    .into());
+                                }
+                                required_model_calls
+                                    .insert(ambiguous_tool.producing_call().into_uuid());
+                                required_frontiers
+                                    .insert(ambiguous_tool.yielded_frontier().into_uuid());
+                                AcceptedInputTurnSchedulingRecordState::TerminalToolReconciliationRequired {
+                                    starting_lineage,
+                                    starting_frontier: ContextFrontierId::from_uuid(starting_frontier),
+                                    reconciling_attempt: stored_attempt_id,
+                                    reconciling_attempt_end,
+                                    ambiguous_tool,
+                                    interrupt,
+                                    terminal_frontier: ContextFrontierId::from_uuid(terminal_frontier),
+                                }
+                            }
+                            (Some(_), Some(_)) | (None, None) => {
+                                return Err(SubmitInputCorruption::Inconsistent(
+                                    "reconciliation terminal operation",
+                                )
+                                .into());
+                            }
                         }
                     }
                     Some("completed" | "refused") => {
@@ -2480,7 +2764,8 @@ fn map_tool_loop_error(
 ) -> SubmitInputRepositoryError {
     match error {
         crate::tool_loop::ToolLoopRepositoryError::Database { source, .. } => source.into(),
-        crate::tool_loop::ToolLoopRepositoryError::Corruption(_)
+        crate::tool_loop::ToolLoopRepositoryError::IdentityCollision
+        | crate::tool_loop::ToolLoopRepositoryError::Corruption(_)
         | crate::tool_loop::ToolLoopRepositoryError::DifferentCommandKind
         | crate::tool_loop::ToolLoopRepositoryError::InvalidTransition(_) => {
             SubmitInputCorruption::Inconsistent("active tool batch").into()

@@ -738,7 +738,8 @@ fn map_active_turn_failure(
 fn map_tool_loop_error(error: ToolLoopRepositoryError) -> StartupScanRepositoryError {
     match error {
         ToolLoopRepositoryError::Database { source, .. } => source.into(),
-        ToolLoopRepositoryError::Corruption(_)
+        ToolLoopRepositoryError::IdentityCollision
+        | ToolLoopRepositoryError::Corruption(_)
         | ToolLoopRepositoryError::DifferentCommandKind
         | ToolLoopRepositoryError::InvalidTransition(_) => {
             StartupScanCorruption::Inconsistent("tool-attempt restart state").into()

@@ -4,11 +4,13 @@
 //! scheduler lock before asking the domain aggregate for authority. Executor
 //! work remains outside database transactions.
 
-use std::{error::Error, fmt};
+use std::{collections::BTreeMap, error::Error, fmt};
 
 use rust_decimal::Decimal;
 use signalbox_application::{
-    ClassifyOperatorFailure, ModelCallCredentialReference, OperatorFailureClass,
+    ClassifyOperatorFailure, DecideToolRequestTransaction, ModelCallCredentialReference,
+    OperatorFailureClass, PrepareToolContinuationOutcome, RetainedToolAttemptObservationStatus,
+    ToolContinuationIdentities, ToolExecutionTransaction,
 };
 use signalbox_domain::{
     ActiveTurnPhase, AuthorizedToolAttempt, CorrelatedToolAttemptObservation, CurrentToolAttempt,
@@ -18,8 +20,8 @@ use signalbox_domain::{
     ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
     SemanticTranscriptEntryPayload, SessionId, ToolApprovalDecision,
     ToolApprovalResolutionReconstitutionInput, ToolArgumentsKind, ToolAttemptEnd, ToolAttemptId,
-    ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
-    ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionFailure,
+    ToolAttemptObservation, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState,
+    ToolBatch, ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionFailure,
     ToolBatchReconstitutionInput, ToolDecisionSource, ToolDenialReason, ToolDispatchGeneration,
     ToolEffectClass, ToolExecutionError, ToolExecutionErrorDetail, ToolExecutionErrorKind,
     ToolName, ToolRequestId, ToolRequestOrdinal, ToolRequestReconstitutionInput, ToolResultContent,
@@ -86,6 +88,8 @@ pub enum ToolLoopRepositoryError {
         /// Whether a failed commit acknowledgement leaves outcome unknown.
         commit_ambiguous: bool,
     },
+    /// A fresh application-owned identity collided with durable state.
+    IdentityCollision,
     /// Durable facts failed closed reconstruction.
     Corruption(ToolLoopCorruption),
     /// The command identity belongs to another durable command kind.
@@ -99,6 +103,9 @@ impl fmt::Display for ToolLoopRepositoryError {
         match self {
             Self::Database { source, .. } => {
                 write!(formatter, "tool-loop database failure: {source}")
+            }
+            Self::IdentityCollision => {
+                formatter.write_str("tool-loop identity candidate already exists")
             }
             Self::Corruption(error) => error.fmt(formatter),
             Self::DifferentCommandKind => {
@@ -116,16 +123,27 @@ impl Error for ToolLoopRepositoryError {
         match self {
             Self::Database { source, .. } => Some(source),
             Self::Corruption(error) => Some(error),
-            Self::DifferentCommandKind | Self::InvalidTransition(_) => None,
+            Self::IdentityCollision | Self::DifferentCommandKind | Self::InvalidTransition(_) => {
+                None
+            }
         }
     }
 }
 
 impl From<sqlx::Error> for ToolLoopRepositoryError {
     fn from(error: sqlx::Error) -> Self {
-        Self::Database {
-            source: error,
-            commit_ambiguous: false,
+        if error
+            .as_database_error()
+            .and_then(sqlx::error::DatabaseError::code)
+            .as_deref()
+            == Some("23505")
+        {
+            Self::IdentityCollision
+        } else {
+            Self::Database {
+                source: error,
+                commit_ambiguous: false,
+            }
         }
     }
 }
@@ -144,6 +162,7 @@ impl ClassifyOperatorFailure for ToolLoopRepositoryError {
             } => OperatorFailureClass::Infrastructure {
                 commit_ambiguous: *commit_ambiguous,
             },
+            Self::IdentityCollision => OperatorFailureClass::IdentityCollision,
             Self::Corruption(_) => OperatorFailureClass::FailClosedCorruption,
             Self::DifferentCommandKind | Self::InvalidTransition(_) => {
                 OperatorFailureClass::CallerOrHubBug
@@ -156,12 +175,32 @@ impl ClassifyOperatorFailure for ToolLoopRepositoryError {
 #[derive(Clone, Debug)]
 pub struct PostgresToolLoopRepository {
     pool: PgPool,
+    continuation_targets: Option<signalbox_domain::ModelTargetCatalog>,
+    continuation_credential: Option<ModelCallCredentialReference>,
 }
 
 impl PostgresToolLoopRepository {
     /// Uses the shared production pool.
     pub const fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            continuation_targets: None,
+            continuation_credential: None,
+        }
+    }
+
+    /// Uses the shared pool plus immutable model-call configuration required
+    /// by atomic tool-result continuation.
+    pub fn with_model_calls(
+        pool: PgPool,
+        targets: signalbox_domain::ModelTargetCatalog,
+        credential_reference: ModelCallCredentialReference,
+    ) -> Self {
+        Self {
+            pool,
+            continuation_targets: Some(targets),
+            continuation_credential: Some(credential_reference),
+        }
     }
 
     /// Reloads the active logical batch without granting mutation authority.
@@ -180,11 +219,14 @@ impl PostgresToolLoopRepository {
     /// Atomically records one replay-idempotent owner decision and successor
     /// phase. A fresh continuation attempt is supplied only for the final
     /// undecided request.
-    pub async fn decide(
+    pub async fn decide<NextAttempt>(
         &self,
         command: DecideToolRequest,
-        continuation_attempt: Option<signalbox_domain::TurnAttemptId>,
-    ) -> Result<PreparedDecideToolRequest, ToolLoopRepositoryError> {
+        mut next_attempt: NextAttempt,
+    ) -> Result<PreparedDecideToolRequest, ToolLoopRepositoryError>
+    where
+        NextAttempt: FnMut() -> signalbox_domain::TurnAttemptId,
+    {
         let mut transaction = self.pool.begin().await?;
         let result = async {
             if let Some(kind) = inspect_registry(&mut transaction, command.command_id()).await? {
@@ -259,6 +301,18 @@ impl PostgresToolLoopRepository {
                     let batch = load_active_batch_from_connection(&mut transaction, session, turn)
                         .await?
                         .ok_or(ToolLoopCorruption::Missing("active tool batch"))?;
+                    let continuation_attempt = batch
+                        .awaiting_approval()
+                        .filter(|waiting| waiting.request() == command.request())
+                        .filter(|_| {
+                            batch
+                                .requests()
+                                .iter()
+                                .filter(|request| batch.approval(request.id()).is_none())
+                                .count()
+                                == 1
+                        })
+                        .map(|_| next_attempt());
                     let decision = batch
                         .prepare_owner_decision(command, continuation_attempt)
                         .map_err(|_| {
@@ -408,6 +462,47 @@ impl PostgresToolLoopRepository {
         finish_commit(transaction, result).await
     }
 
+    /// Rereads whether one unchanged executor observation committed.
+    pub async fn reread_observation(
+        &self,
+        observation: &CorrelatedToolAttemptObservation,
+    ) -> Result<RetainedToolAttemptObservationStatus, ToolLoopRepositoryError> {
+        let correlation = observation.correlation();
+        let mut transaction = self.pool.begin().await?;
+        lock_tool_session(&mut transaction, correlation.session()).await?;
+        let mut attempts = load_attempts_by_id(&mut transaction, &[correlation.attempt()]).await?;
+        let attempt = attempts
+            .remove(&correlation.attempt())
+            .ok_or(ToolLoopCorruption::Missing("retained tool attempt"))?;
+        let status = match attempt {
+            ReconstitutedToolAttempt::Current(current)
+                if current.state() == CurrentToolAttemptState::InFlight
+                    && current.session() == correlation.session()
+                    && current.turn() == correlation.turn()
+                    && current.issuing_attempt() == correlation.issuing_attempt()
+                    && current.request() == correlation.request()
+                    && current.generation() == correlation.generation() =>
+            {
+                RetainedToolAttemptObservationStatus::Pending
+            }
+            ReconstitutedToolAttempt::Ended(ended)
+                if ended.session() == correlation.session()
+                    && ended.turn() == correlation.turn()
+                    && ended.issuing_attempt() == correlation.issuing_attempt()
+                    && ended.request() == correlation.request()
+                    && ended.generation() == correlation.generation()
+                    && attempt_end_matches_observation(ended.end(), observation.observation()) =>
+            {
+                RetainedToolAttemptObservationStatus::AlreadyCommitted
+            }
+            ReconstitutedToolAttempt::Current(_) | ReconstitutedToolAttempt::Ended(_) => {
+                return Err(ToolLoopCorruption::Inconsistent("retained tool observation").into());
+            }
+        };
+        transaction.rollback().await?;
+        Ok(status)
+    }
+
     /// Atomically records a lookup/schema error before any executor effect.
     pub async fn commit_preflight_error(
         &self,
@@ -430,6 +525,60 @@ impl PostgresToolLoopRepository {
             })?;
             persist_ended_attempt(&mut transaction, &ended).await?;
             Ok(ended)
+        }
+        .await;
+        finish_commit(transaction, result).await
+    }
+
+    /// Classifies one process-lost attempt and, for known loss, atomically
+    /// closes the current turn with proof-bearing failure identities.
+    pub async fn classify_crash_loss_and_close<NextTurn>(
+        &self,
+        session: SessionId,
+        turn: TurnId,
+        attempt: ToolAttemptId,
+        failure_identities: signalbox_domain::FailedModelCallTurnIdentities,
+        next_turn: NextTurn,
+    ) -> Result<signalbox_domain::ToolAttemptCrashOutcome, ToolLoopRepositoryError>
+    where
+        NextTurn: FnMut(signalbox_domain::AcceptedInputId) -> TurnId,
+    {
+        let mut transaction = self.pool.begin().await?;
+        let result = async {
+            lock_tool_session(&mut transaction, session).await?;
+            let batch = load_active_batch_from_connection(&mut transaction, session, turn)
+                .await?
+                .ok_or(ToolLoopCorruption::Missing("active tool batch"))?;
+            let current = load_current_attempt(&mut transaction, attempt)
+                .await?
+                .ok_or(ToolLoopCorruption::Missing("live tool attempt"))?;
+            if current.session() != session || current.turn() != turn {
+                return Err(ToolLoopCorruption::Inconsistent("attempt ownership").into());
+            }
+            let outcome = current.classify_crash_loss();
+            let ended = match &outcome {
+                signalbox_domain::ToolAttemptCrashOutcome::KnownFailed(ended)
+                | signalbox_domain::ToolAttemptCrashOutcome::Ambiguous(ended) => ended,
+            };
+            persist_ended_attempt(&mut transaction, ended).await?;
+            match &outcome {
+                signalbox_domain::ToolAttemptCrashOutcome::Ambiguous(_) => {
+                    persist_tool_recovery_wait(&mut transaction, ended, true).await?;
+                }
+                signalbox_domain::ToolAttemptCrashOutcome::KnownFailed(_) => {
+                    crate::model_execution::fail_tool_crash_in_transaction(
+                        &mut transaction,
+                        session,
+                        turn,
+                        batch.yielded_snapshot(),
+                        failure_identities,
+                        next_turn,
+                    )
+                    .await
+                    .map_err(map_model_call_error)?;
+                }
+            }
+            Ok(outcome)
         }
         .await;
         finish_commit(transaction, result).await
@@ -509,6 +658,220 @@ impl PostgresToolLoopRepository {
         .await;
         finish_commit(transaction, result).await
     }
+
+    /// Atomically derives and commits result projection, consumes all pending
+    /// steering, and prepares the next same-turn model call.
+    pub async fn prepare_continuation<NextSteering>(
+        &self,
+        session: SessionId,
+        turn: TurnId,
+        producing_call: signalbox_domain::ModelCallId,
+        identities: ToolContinuationIdentities,
+        next_steering: NextSteering,
+    ) -> Result<PrepareToolContinuationOutcome, ToolLoopRepositoryError>
+    where
+        NextSteering: FnMut(
+            signalbox_domain::AcceptedInputId,
+        ) -> (signalbox_domain::SemanticTranscriptEntryId, TurnId),
+    {
+        let targets = self.continuation_targets.as_ref().ok_or(
+            ToolLoopRepositoryError::InvalidTransition(
+                "tool continuation model targets are not configured",
+            ),
+        )?;
+        let credential_reference = self.continuation_credential.as_ref().ok_or(
+            ToolLoopRepositoryError::InvalidTransition(
+                "tool continuation credential reference is not configured",
+            ),
+        )?;
+        let mut transaction = self.pool.begin().await?;
+        let result = async {
+            lock_tool_session(&mut transaction, session).await?;
+            let batch = load_active_batch_from_connection(&mut transaction, session, turn)
+                .await?
+                .ok_or(ToolLoopCorruption::Missing("active tool batch"))?;
+            let turn_attempt = match batch.phase() {
+                signalbox_domain::ToolBatchPhase::Executing { turn_attempt }
+                    if batch.producing_call() == producing_call =>
+                {
+                    turn_attempt
+                }
+                _ => return Ok(PrepareToolContinuationOutcome::NoWork),
+            };
+            let projection = batch
+                .prepare_result_projection(
+                    identities.result_entries().to_vec(),
+                    identities.result_frontier(),
+                )
+                .map_err(|_| {
+                    ToolLoopRepositoryError::InvalidTransition(
+                        "tool batch is not ready for continuation",
+                    )
+                })?;
+            persist_result_entries(&mut transaction, &projection).await?;
+            insert_snapshot(&mut transaction, projection.snapshot())
+                .await
+                .map_err(|_| ToolLoopCorruption::Inconsistent("result frontier"))?;
+            let outcome = crate::model_execution::prepare_tool_continuation_call(
+                &mut transaction,
+                session,
+                turn,
+                targets,
+                credential_reference,
+                projection.snapshot(),
+                identities.call(),
+                identities.target_failure().clone(),
+                identities.steering_frontier(),
+                next_steering,
+            )
+            .await
+            .map_err(map_model_call_error)?;
+            if matches!(outcome, PrepareToolContinuationOutcome::Checkpointed(_)) {
+                let rows = sqlx::query(
+                    "UPDATE turn_lifecycle
+                        SET active_tool_round_call_id = NULL,
+                            approval_tool_request_id = NULL,
+                            recovery_tool_attempt_id = NULL
+                      WHERE turn_id = $1
+                        AND session_id = $2
+                        AND current_attempt_id = $3
+                        AND state_kind = 'active'
+                        AND active_phase_kind = 'running'
+                        AND active_tool_round_call_id = $4",
+                )
+                .bind(turn_id_to_uuid(turn))
+                .bind(session_id_to_uuid(session))
+                .bind(turn_attempt.into_uuid())
+                .bind(producing_call.into_uuid())
+                .execute(&mut *transaction)
+                .await?
+                .rows_affected();
+                require_single(rows, "tool continuation call boundary")?;
+            }
+            Ok(outcome)
+        }
+        .await;
+        finish_commit(transaction, result).await
+    }
+}
+
+impl DecideToolRequestTransaction for PostgresToolLoopRepository {
+    type Error = ToolLoopRepositoryError;
+
+    async fn decide<NextAttempt>(
+        &mut self,
+        command: DecideToolRequest,
+        next_attempt: NextAttempt,
+    ) -> Result<PreparedDecideToolRequest, Self::Error>
+    where
+        NextAttempt: FnMut() -> signalbox_domain::TurnAttemptId + Send,
+    {
+        PostgresToolLoopRepository::decide(self, command, next_attempt).await
+    }
+}
+
+impl ToolExecutionTransaction for PostgresToolLoopRepository {
+    type Error = ToolLoopRepositoryError;
+
+    async fn load_active_batch(
+        &mut self,
+        session: SessionId,
+        turn: TurnId,
+    ) -> Result<Option<ToolBatch>, Self::Error> {
+        PostgresToolLoopRepository::load_active_batch(self, session, turn).await
+    }
+
+    async fn prepare_next_attempt(
+        &mut self,
+        session: SessionId,
+        turn: TurnId,
+        attempt: ToolAttemptId,
+        effect_class: ToolEffectClass,
+    ) -> Result<CurrentToolAttempt, Self::Error> {
+        PostgresToolLoopRepository::prepare_next_attempt(self, session, turn, attempt, effect_class)
+            .await
+    }
+
+    async fn authorize_attempt(
+        &mut self,
+        session: SessionId,
+        turn: TurnId,
+        attempt: ToolAttemptId,
+    ) -> Result<AuthorizedToolAttempt, Self::Error> {
+        PostgresToolLoopRepository::authorize_attempt(self, session, turn, attempt).await
+    }
+
+    async fn commit_preflight_error(
+        &mut self,
+        session: SessionId,
+        turn: TurnId,
+        attempt: ToolAttemptId,
+        error: ToolExecutionError,
+    ) -> Result<EndedToolAttempt, Self::Error> {
+        PostgresToolLoopRepository::commit_preflight_error(self, session, turn, attempt, error)
+            .await
+    }
+
+    async fn commit_observation(
+        &mut self,
+        observation: CorrelatedToolAttemptObservation,
+    ) -> Result<EndedToolAttempt, Self::Error> {
+        PostgresToolLoopRepository::commit_observation(self, observation).await
+    }
+
+    async fn reread_observation(
+        &mut self,
+        observation: &CorrelatedToolAttemptObservation,
+    ) -> Result<RetainedToolAttemptObservationStatus, Self::Error> {
+        PostgresToolLoopRepository::reread_observation(self, observation).await
+    }
+
+    async fn classify_crash_loss<NextTurn>(
+        &mut self,
+        session: SessionId,
+        turn: TurnId,
+        attempt: ToolAttemptId,
+        failure_identities: signalbox_domain::FailedModelCallTurnIdentities,
+        next_turn: NextTurn,
+    ) -> Result<signalbox_domain::ToolAttemptCrashOutcome, Self::Error>
+    where
+        NextTurn: FnMut(signalbox_domain::AcceptedInputId) -> TurnId + Send,
+    {
+        PostgresToolLoopRepository::classify_crash_loss_and_close(
+            self,
+            session,
+            turn,
+            attempt,
+            failure_identities,
+            next_turn,
+        )
+        .await
+    }
+
+    async fn prepare_continuation<NextSteering>(
+        &mut self,
+        session: SessionId,
+        turn: TurnId,
+        producing_call: signalbox_domain::ModelCallId,
+        identities: ToolContinuationIdentities,
+        next_steering: NextSteering,
+    ) -> Result<PrepareToolContinuationOutcome, Self::Error>
+    where
+        NextSteering: FnMut(
+                signalbox_domain::AcceptedInputId,
+            ) -> (signalbox_domain::SemanticTranscriptEntryId, TurnId)
+            + Send,
+    {
+        PostgresToolLoopRepository::prepare_continuation(
+            self,
+            session,
+            turn,
+            producing_call,
+            identities,
+            next_steering,
+        )
+        .await
+    }
 }
 
 fn map_model_call_error(
@@ -522,8 +885,10 @@ fn map_model_call_error(
             source,
             commit_ambiguous,
         },
+        crate::model_execution::ModelCallRepositoryError::IdentityCollision(_) => {
+            ToolLoopRepositoryError::IdentityCollision
+        }
         crate::model_execution::ModelCallRepositoryError::Corruption(_)
-        | crate::model_execution::ModelCallRepositoryError::IdentityCollision(_)
         | crate::model_execution::ModelCallRepositoryError::NoLiveExecution
         | crate::model_execution::ModelCallRepositoryError::InvalidTransition(_) => {
             ToolLoopCorruption::Inconsistent("continuation model call").into()
@@ -617,6 +982,62 @@ pub(crate) async fn load_active_batch_from_connection(
     .map_err(|error| ToolLoopCorruption::Batch(error.failure()).into())
 }
 
+pub(crate) async fn load_recovery_batch_by_attempt(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    recovery_attempt: ToolAttemptId,
+) -> Result<ToolBatch, ToolLoopRepositoryError> {
+    let producing_call = sqlx::query_scalar::<_, Uuid>(
+        "SELECT request.producing_model_call_id
+           FROM tool_attempt AS attempt
+           JOIN tool_request AS request
+             ON request.request_id = attempt.request_id
+          WHERE attempt.attempt_id = $1
+            AND attempt.session_id = $2
+            AND attempt.turn_id = $3",
+    )
+    .bind(tool_attempt_id_to_uuid(recovery_attempt))
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .fetch_optional(&mut *connection)
+    .await?
+    .map(signalbox_domain::ModelCallId::from_uuid)
+    .ok_or(ToolLoopCorruption::Missing("tool recovery round"))?;
+    let round = sqlx::query(
+        "SELECT boundary_kind, boundary_frontier_id
+           FROM tool_round
+          WHERE producing_model_call_id = $1
+            AND session_id = $2
+            AND turn_id = $3",
+    )
+    .bind(producing_call.into_uuid())
+    .bind(session_id_to_uuid(session))
+    .bind(turn_id_to_uuid(turn))
+    .fetch_optional(&mut *connection)
+    .await?
+    .ok_or(ToolLoopCorruption::Missing("tool recovery round"))?;
+    if required::<String>(&round, "boundary_kind")? != "continuing" {
+        return Err(ToolLoopCorruption::Inconsistent("tool recovery round boundary").into());
+    }
+    let frontier =
+        signalbox_domain::ContextFrontierId::from_uuid(required(&round, "boundary_frontier_id")?);
+    ToolBatchReconstitutionInput::new(
+        session,
+        turn,
+        producing_call,
+        load_snapshot(connection, session, frontier).await?,
+        load_requests(connection, producing_call, session, turn).await?,
+        load_approvals(connection, producing_call).await?,
+        load_attempts(connection, producing_call).await?,
+        ToolBatchPhaseReconstitutionInput::AwaitingRecovery {
+            attempt: recovery_attempt,
+        },
+    )
+    .reconstitute()
+    .map_err(|error| ToolLoopCorruption::Batch(error.failure()).into())
+}
+
 async fn load_snapshot(
     connection: &mut PgConnection,
     session: SessionId,
@@ -690,7 +1111,7 @@ async fn load_requests(
         .collect()
 }
 
-fn decode_request(
+pub(crate) fn decode_request(
     row: PgRow,
     producing_call: signalbox_domain::ModelCallId,
     session: SessionId,
@@ -746,7 +1167,7 @@ async fn load_approvals(
     rows.into_iter().map(decode_approval).collect()
 }
 
-fn decode_approval(
+pub(crate) fn decode_approval(
     row: PgRow,
 ) -> Result<signalbox_domain::ToolApprovalResolution, ToolLoopRepositoryError> {
     let request = tool_request_id_from_uuid(required(&row, "request_id")?);
@@ -807,7 +1228,9 @@ async fn load_attempts(
     rows.into_iter().map(decode_attempt).collect()
 }
 
-fn decode_attempt(row: PgRow) -> Result<ReconstitutedToolAttempt, ToolLoopRepositoryError> {
+pub(crate) fn decode_attempt(
+    row: PgRow,
+) -> Result<ReconstitutedToolAttempt, ToolLoopRepositoryError> {
     let effect_class = match required::<String>(&row, "effect_class")?.as_str() {
         "effect_free" => ToolEffectClass::EffectFree,
         "external_effect" => ToolEffectClass::ExternalEffect,
@@ -856,6 +1279,69 @@ fn decode_attempt(row: PgRow) -> Result<ReconstitutedToolAttempt, ToolLoopReposi
     .reconstitute())
 }
 
+pub(crate) async fn load_approvals_by_request(
+    connection: &mut PgConnection,
+    requests: &[ToolRequestId],
+) -> Result<
+    BTreeMap<ToolRequestId, signalbox_domain::ToolApprovalResolution>,
+    ToolLoopRepositoryError,
+> {
+    if requests.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let request_uuids = requests
+        .iter()
+        .map(|request| tool_request_id_to_uuid(*request))
+        .collect::<Vec<_>>();
+    let rows = sqlx::query(
+        "SELECT request_id, decision_kind, decision_source, denial_reason
+           FROM tool_approval_decision
+          WHERE request_id = ANY($1)",
+    )
+    .bind(&request_uuids)
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut approvals = BTreeMap::new();
+    for row in rows {
+        let request = tool_request_id_from_uuid(required(&row, "request_id")?);
+        let approval = decode_approval(row)?;
+        if approvals.insert(request, approval).is_some() {
+            return Err(ToolLoopCorruption::Inconsistent("duplicate tool approval").into());
+        }
+    }
+    Ok(approvals)
+}
+
+pub(crate) async fn load_attempts_by_id(
+    connection: &mut PgConnection,
+    attempts: &[ToolAttemptId],
+) -> Result<BTreeMap<ToolAttemptId, ReconstitutedToolAttempt>, ToolLoopRepositoryError> {
+    if attempts.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let attempt_uuids = attempts
+        .iter()
+        .map(|attempt| tool_attempt_id_to_uuid(*attempt))
+        .collect::<Vec<_>>();
+    let rows = sqlx::query(
+        "SELECT *
+           FROM tool_attempt
+          WHERE attempt_id = ANY($1)",
+    )
+    .bind(&attempt_uuids)
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut loaded = BTreeMap::new();
+    for row in rows {
+        let attempt = tool_attempt_id_from_uuid(required(&row, "attempt_id")?);
+        let reconstituted = decode_attempt(row)?;
+        if loaded.insert(attempt, reconstituted).is_some() {
+            return Err(ToolLoopCorruption::Inconsistent("duplicate tool attempt").into());
+        }
+    }
+    Ok(loaded)
+}
+
 fn decode_attempt_end(row: &PgRow) -> Result<ToolAttemptEnd, ToolLoopRepositoryError> {
     match required::<String>(row, "terminal_disposition_kind")?.as_str() {
         "completed" => match required::<String>(row, "result_content_kind")?.as_str() {
@@ -891,6 +1377,28 @@ fn decode_attempt_end(row: &PgRow) -> Result<ToolAttemptEnd, ToolLoopRepositoryE
         }
         .into()),
     }
+}
+
+fn attempt_end_matches_observation(
+    end: &ToolAttemptEnd,
+    observation: &ToolAttemptObservation,
+) -> bool {
+    matches!(
+        (end, observation),
+        (
+            ToolAttemptEnd::Completed { result: stored },
+            ToolAttemptObservation::Completed { result: observed },
+        ) if stored == observed
+    ) || matches!(
+        (end, observation),
+        (
+            ToolAttemptEnd::KnownFailed { error: stored },
+            ToolAttemptObservation::KnownFailed { error: observed },
+        ) if stored == observed
+    ) || matches!(
+        (end, observation),
+        (ToolAttemptEnd::Ambiguous, ToolAttemptObservation::Ambiguous)
+    )
 }
 
 fn decode_error_kind(value: &str) -> Result<ToolExecutionErrorKind, ToolLoopRepositoryError> {
@@ -1354,7 +1862,7 @@ async fn request_closed_by_turn_end(
     .map_err(Into::into)
 }
 
-async fn load_request_by_id(
+pub(crate) async fn load_request_by_id(
     connection: &mut PgConnection,
     request: ToolRequestId,
 ) -> Result<Option<signalbox_domain::ToolRequest>, ToolLoopRepositoryError> {
@@ -1376,6 +1884,42 @@ async fn load_request_by_id(
         decode_request(row, call, session, turn)
     })
     .transpose()
+}
+
+pub(crate) async fn load_requests_by_id(
+    connection: &mut PgConnection,
+    requests: &[ToolRequestId],
+) -> Result<BTreeMap<ToolRequestId, signalbox_domain::ToolRequest>, ToolLoopRepositoryError> {
+    if requests.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let request_uuids = requests
+        .iter()
+        .map(|request| tool_request_id_to_uuid(*request))
+        .collect::<Vec<_>>();
+    let rows = sqlx::query(
+        "SELECT request_id, request_ordinal, tool_name,
+                arguments_kind, arguments_text,
+                producing_model_call_id, session_id, turn_id
+           FROM tool_request
+          WHERE request_id = ANY($1)",
+    )
+    .bind(&request_uuids)
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut loaded = BTreeMap::new();
+    for row in rows {
+        let request = tool_request_id_from_uuid(required(&row, "request_id")?);
+        let call =
+            signalbox_domain::ModelCallId::from_uuid(required(&row, "producing_model_call_id")?);
+        let session = session_id_from_uuid(required(&row, "session_id")?);
+        let turn = turn_id_from_uuid(required(&row, "turn_id")?);
+        let record = decode_request(row, call, session, turn)?;
+        if loaded.insert(request, record).is_some() {
+            return Err(ToolLoopCorruption::Inconsistent("duplicate tool request").into());
+        }
+    }
+    Ok(loaded)
 }
 
 fn decode_command_decision(row: &PgRow) -> Result<ToolApprovalDecision, ToolLoopRepositoryError> {
@@ -1408,11 +1952,18 @@ fn encode_approval(decision: &ToolApprovalDecision) -> (&'static str, Option<&st
     }
 }
 
-async fn persist_result_entries(
+pub(crate) async fn persist_result_entries(
     connection: &mut PgConnection,
     projection: &PreparedToolResultProjection,
 ) -> Result<(), ToolLoopRepositoryError> {
-    for entry in projection.entries() {
+    persist_result_entry_slice(connection, projection.entries()).await
+}
+
+pub(crate) async fn persist_result_entry_slice(
+    connection: &mut PgConnection,
+    entries: &[signalbox_domain::SemanticTranscriptEntry],
+) -> Result<(), ToolLoopRepositoryError> {
+    for entry in entries {
         let (kind, request, attempt) = match entry.payload() {
             SemanticTranscriptEntryPayload::ToolExecutionResult { attempt } => (
                 "tool_execution_result",
