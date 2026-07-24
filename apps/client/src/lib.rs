@@ -401,10 +401,15 @@ fn terminal_snapshot_state(state: Option<&TurnState>) -> Result<Option<TurnTermi
         Some(TurnState::ReconciliationRequired { .. }) => {
             Ok(Some(TurnTerminal::ReconciliationRequired))
         }
-        Some(TurnState::Queued { .. } | TurnState::ActiveRunning { .. }) => Ok(None),
-        Some(TurnState::ActiveAwaitingModelCallRecovery { .. }) => {
-            Err(ClientError::TurnRecoveryRequired)
-        }
+        Some(
+            TurnState::Queued { .. }
+            | TurnState::ActiveRunning { .. }
+            | TurnState::ActiveAwaitingToolApproval { .. },
+        ) => Ok(None),
+        Some(
+            TurnState::ActiveAwaitingModelCallRecovery { .. }
+            | TurnState::ActiveAwaitingToolRecovery { .. },
+        ) => Err(ClientError::TurnRecoveryRequired),
         None => Err(ClientError::Protocol(
             "follow snapshot omitted the submitted turn",
         )),
@@ -677,8 +682,8 @@ mod tests {
 
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ClientRequest, CommandId, InputContent, ModelCallDisposition,
-        ModelCallState, ModelSelection, ServerFrame, ServerMessage, SessionEvent, TurnState,
-        decode_client_line, encode_server_line,
+        ModelCallState, ModelSelection, ReconciliationOperation, ServerFrame, ServerMessage,
+        SessionEvent, TurnState, decode_client_line, encode_server_line,
     };
     use tokio::{
         io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -753,7 +758,9 @@ mod tests {
         let state = TurnState::ReconciliationRequired {
             terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
             terminal_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
-            terminal_model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+            operation: ReconciliationOperation::ModelCall {
+                model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
+            },
         };
 
         assert_eq!(
@@ -783,7 +790,9 @@ mod tests {
         let selected_turn = CanonicalUuid::from_uuid(Uuid::from_u128(1));
         let event = SessionEvent::TurnReconciliationRequired {
             turn_id: selected_turn,
-            model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+            operation: ReconciliationOperation::ModelCall {
+                model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+            },
             terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
         };
 
@@ -867,7 +876,9 @@ mod tests {
         assert!(
             terminal_snapshot_selection(&SessionEvent::TurnReconciliationRequired {
                 turn_id,
-                model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+                operation: ReconciliationOperation::ModelCall {
+                    model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+                },
                 terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
             })
             .is_none()

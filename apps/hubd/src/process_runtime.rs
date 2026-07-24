@@ -25,13 +25,13 @@ use signalbox_persistence::{
     create_session::{CreateSessionRepository, CreateSessionRepositoryError},
     outbox::{
         DispatchedModelCallDisposition, DispatchedModelCallState, DispatchedOutboxEvent,
-        DispatchedOutboxEventKind, OutboxDeliveryDecision, OutboxDispatchError,
-        OutboxDispatchOutcome, OutboxDispatcher,
+        DispatchedOutboxEventKind, DispatchedReconciliationOperation, OutboxDeliveryDecision,
+        OutboxDispatchError, OutboxDispatchOutcome, OutboxDispatcher,
     },
     process_read::{
         ProcessCurrentModelCallState, ProcessFailedModelCallDisposition, ProcessModelSelection,
-        ProcessReadError, ProcessReadRepository, ProcessTranscriptEntry, ProcessTranscriptItem,
-        ProcessTranscriptTurn, ProcessTurnState,
+        ProcessReadError, ProcessReadRepository, ProcessReconciliationOperation,
+        ProcessTranscriptEntry, ProcessTranscriptItem, ProcessTranscriptTurn, ProcessTurnState,
     },
     submit_input::{SubmitInputHandlingOutcome, SubmitInputRepository, SubmitInputRepositoryError},
 };
@@ -39,9 +39,9 @@ use signalbox_process_protocol::{
     CanonicalU64, CanonicalUuid, ClientRequest, CurrentModelCall, CurrentModelCallState, ErrorCode,
     ErrorDetail, FailedModelCallDisposition, FailedTerminalModelCall, FrameDecodeErrorKind,
     FrameEncodeError, InputContent, MAX_FRAME_BYTES, ModelCallDisposition, ModelCallState,
-    ModelSelection as WireModelSelection, RejectionDetail, RequestId, ServerFrame, ServerMessage,
-    SessionEvent, TranscriptEntry, TranscriptTextEntry, TurnState, content_fragments,
-    decode_client_line, encode_server_line, recover_bounded_client_request_id,
+    ModelSelection as WireModelSelection, ReconciliationOperation, RejectionDetail, RequestId,
+    ServerFrame, ServerMessage, SessionEvent, TranscriptEntry, TranscriptTextEntry, TurnState,
+    content_fragments, decode_client_line, encode_server_line, recover_bounded_client_request_id,
 };
 use sqlx::PgPool;
 use tokio::{
@@ -1209,6 +1209,92 @@ where
             .await?;
             write_content(writer, request_id, *entry_index, content).await
         }
+        ProcessTranscriptEntry::AssistantToolUse {
+            entry_index,
+            source_session,
+            entry,
+            turn,
+            model_call,
+            request,
+        } => {
+            write_message(
+                writer,
+                request_id,
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(*entry_index),
+                    source_session_id: wire_uuid(source_session.into_uuid()),
+                    entry_id: wire_uuid(entry.into_uuid()),
+                    entry: TranscriptEntry::AssistantToolUse {
+                        turn_id: wire_uuid(turn.into_uuid()),
+                        model_call_id: wire_uuid(model_call.into_uuid()),
+                        tool_request_id: wire_uuid(request.into_uuid()),
+                    },
+                },
+            )
+            .await
+        }
+        ProcessTranscriptEntry::ToolExecutionResult {
+            entry_index,
+            source_session,
+            entry,
+            request,
+            attempt,
+        } => {
+            write_message(
+                writer,
+                request_id,
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(*entry_index),
+                    source_session_id: wire_uuid(source_session.into_uuid()),
+                    entry_id: wire_uuid(entry.into_uuid()),
+                    entry: TranscriptEntry::ToolExecutionResult {
+                        tool_request_id: wire_uuid(request.into_uuid()),
+                        tool_attempt_id: wire_uuid(attempt.into_uuid()),
+                    },
+                },
+            )
+            .await
+        }
+        ProcessTranscriptEntry::ToolDenied {
+            entry_index,
+            source_session,
+            entry,
+            request,
+        } => {
+            write_message(
+                writer,
+                request_id,
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(*entry_index),
+                    source_session_id: wire_uuid(source_session.into_uuid()),
+                    entry_id: wire_uuid(entry.into_uuid()),
+                    entry: TranscriptEntry::ToolDenied {
+                        tool_request_id: wire_uuid(request.into_uuid()),
+                    },
+                },
+            )
+            .await
+        }
+        ProcessTranscriptEntry::ToolClosed {
+            entry_index,
+            source_session,
+            entry,
+            request,
+        } => {
+            write_message(
+                writer,
+                request_id,
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(*entry_index),
+                    source_session_id: wire_uuid(source_session.into_uuid()),
+                    entry_id: wire_uuid(entry.into_uuid()),
+                    entry: TranscriptEntry::ToolClosed {
+                        tool_request_id: wire_uuid(request.into_uuid()),
+                    },
+                },
+            )
+            .await
+        }
         ProcessTranscriptEntry::TurnFailed {
             entry_index,
             source_session,
@@ -1411,6 +1497,18 @@ fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
             ended_attempt_id: wire_uuid(ended_attempt.into_uuid()),
             recovery_model_call_id: wire_uuid(recovery_call.into_uuid()),
         },
+        ProcessTurnState::ActiveAwaitingToolApproval { request } => {
+            TurnState::ActiveAwaitingToolApproval {
+                tool_request_id: wire_uuid(request.into_uuid()),
+            }
+        }
+        ProcessTurnState::ActiveAwaitingToolRecovery {
+            ended_attempt,
+            recovery_attempt,
+        } => TurnState::ActiveAwaitingToolRecovery {
+            ended_attempt_id: wire_uuid(ended_attempt.into_uuid()),
+            recovery_tool_attempt_id: wire_uuid(recovery_attempt.into_uuid()),
+        },
         ProcessTurnState::Failed {
             terminal_frontier,
             terminal_attempt,
@@ -1462,11 +1560,22 @@ fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
         ProcessTurnState::ReconciliationRequired {
             terminal_frontier,
             terminal_attempt,
-            terminal_call,
+            operation,
         } => TurnState::ReconciliationRequired {
             terminal_frontier_id: wire_uuid(terminal_frontier.into_uuid()),
             terminal_attempt_id: wire_uuid(terminal_attempt.into_uuid()),
-            terminal_model_call_id: wire_uuid(terminal_call.into_uuid()),
+            operation: match operation {
+                ProcessReconciliationOperation::ModelCall(call) => {
+                    ReconciliationOperation::ModelCall {
+                        model_call_id: wire_uuid(call.into_uuid()),
+                    }
+                }
+                ProcessReconciliationOperation::ToolAttempt(attempt) => {
+                    ReconciliationOperation::ToolAttempt {
+                        tool_attempt_id: wire_uuid(attempt.into_uuid()),
+                    }
+                }
+            },
         },
     }
 }
@@ -1722,7 +1831,7 @@ enum ProcessUpdateEvent {
     },
     TurnReconciliationRequired {
         turn: signalbox_domain::TurnId,
-        call: signalbox_domain::ModelCallId,
+        operation: DispatchedReconciliationOperation,
         terminal_frontier: signalbox_domain::ContextFrontierId,
     },
 }
@@ -1796,11 +1905,11 @@ impl From<&DispatchedOutboxEventKind> for ProcessUpdateEvent {
             },
             DispatchedOutboxEventKind::TurnReconciliationRequired {
                 turn,
-                call,
+                operation,
                 terminal_frontier,
             } => Self::TurnReconciliationRequired {
                 turn: *turn,
-                call: *call,
+                operation: *operation,
                 terminal_frontier: *terminal_frontier,
             },
         }
@@ -1874,11 +1983,22 @@ impl ProcessUpdateEvent {
             },
             Self::TurnReconciliationRequired {
                 turn,
-                call,
+                operation,
                 terminal_frontier,
             } => SessionEvent::TurnReconciliationRequired {
                 turn_id: wire_uuid(turn.into_uuid()),
-                model_call_id: wire_uuid(call.into_uuid()),
+                operation: match operation {
+                    DispatchedReconciliationOperation::ModelCall(call) => {
+                        ReconciliationOperation::ModelCall {
+                            model_call_id: wire_uuid(call.into_uuid()),
+                        }
+                    }
+                    DispatchedReconciliationOperation::ToolAttempt(attempt) => {
+                        ReconciliationOperation::ToolAttempt {
+                            tool_attempt_id: wire_uuid(attempt.into_uuid()),
+                        }
+                    }
+                },
                 terminal_frontier_id: wire_uuid(terminal_frontier.into_uuid()),
             },
         }
@@ -2037,8 +2157,8 @@ mod tests {
     };
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ErrorCode, FrameEncodeError, InputContent,
-        MAX_CONTENT_FRAGMENT_BYTES, ServerFrame, ServerMessage, SessionEvent, TurnState,
-        decode_server_line, encode_server_line,
+        MAX_CONTENT_FRAGMENT_BYTES, ReconciliationOperation, ServerFrame, ServerMessage,
+        SessionEvent, TurnState, decode_server_line, encode_server_line,
     };
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt, BufReader, duplex},
@@ -2060,8 +2180,9 @@ mod tests {
     use signalbox_persistence::{
         outbox::{
             DispatchedModelCallDisposition, DispatchedModelCallState, DispatchedOutboxEventKind,
+            DispatchedReconciliationOperation,
         },
-        process_read::ProcessTurnState,
+        process_read::{ProcessReconciliationOperation, ProcessTurnState},
     };
     use signalbox_process_protocol::{ModelCallDisposition, ModelCallState};
 
@@ -2498,12 +2619,14 @@ mod tests {
             wire_turn_state(&ProcessTurnState::ReconciliationRequired {
                 terminal_frontier: frontier,
                 terminal_attempt: attempt,
-                terminal_call: call,
+                operation: ProcessReconciliationOperation::ModelCall(call),
             }),
             TurnState::ReconciliationRequired {
                 terminal_frontier_id: CanonicalUuid::from_uuid(frontier.into_uuid()),
                 terminal_attempt_id: CanonicalUuid::from_uuid(attempt.into_uuid()),
-                terminal_model_call_id: CanonicalUuid::from_uuid(call.into_uuid()),
+                operation: ReconciliationOperation::ModelCall {
+                    model_call_id: CanonicalUuid::from_uuid(call.into_uuid()),
+                },
             }
         );
 
@@ -2523,14 +2646,16 @@ mod tests {
         let reconciliation =
             ProcessUpdateEvent::from(&DispatchedOutboxEventKind::TurnReconciliationRequired {
                 turn,
-                call,
+                operation: DispatchedReconciliationOperation::ModelCall(call),
                 terminal_frontier: frontier,
             });
         assert_eq!(
             reconciliation.wire(),
             SessionEvent::TurnReconciliationRequired {
                 turn_id: CanonicalUuid::from_uuid(turn.into_uuid()),
-                model_call_id: CanonicalUuid::from_uuid(call.into_uuid()),
+                operation: ReconciliationOperation::ModelCall {
+                    model_call_id: CanonicalUuid::from_uuid(call.into_uuid()),
+                },
                 terminal_frontier_id: CanonicalUuid::from_uuid(frontier.into_uuid()),
             }
         );

@@ -3391,6 +3391,7 @@ pub enum StartupScanSessionOutcome {
     Recovered(Box<FailedAcceptedInputTurn>),
     RecoveredModelCall(Box<ModelCallTerminalOutcome>),
     RecoveredToolAttempt(Box<ToolAttemptCrashOutcome>),
+    ResumableToolBatch { turn: TurnId },
     DeferredPendingSteering { accepted_input: AcceptedInputId },
 }
 
