@@ -1972,6 +1972,7 @@ impl ResolvedContextFrontierReconstitutionInput {
         snapshot: ContextFrontierId,
         ordered_entries: Vec<SemanticTranscriptEntryRef>,
     ) -> Self;
+    pub fn reconstitute(self) -> Option<ResolvedContextFrontierSnapshot>;
     // accessors: owning_session(), snapshot(), ordered_entries()
 }
 
