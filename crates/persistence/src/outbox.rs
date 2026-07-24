@@ -771,6 +771,14 @@ async fn load_event(
                     AND call.turn_attempt_id = turn.terminal_attempt_id
                     AND call.state_kind = 'terminal'
                     AND call.terminal_disposition_kind = 'completed'
+                   JOIN turn_attempt AS terminal_attempt
+                     ON terminal_attempt.turn_attempt_id =
+                        turn.terminal_attempt_id
+                    AND terminal_attempt.turn_id = event.turn_id
+                    AND terminal_attempt.session_id = event.session_id
+                    AND terminal_attempt.state_kind = 'ended'
+                    AND terminal_attempt.end_disposition
+                        IN ('turn_completed', 'lost')
                    JOIN semantic_transcript_entry AS completion
                      ON completion.source_session_id = event.session_id
                     AND completion.semantic_entry_id = event.completion_entry_id
@@ -824,6 +832,14 @@ async fn load_event(
                     AND call.turn_attempt_id = turn.terminal_attempt_id
                     AND call.state_kind = 'terminal'
                     AND call.terminal_disposition_kind = 'refused'
+                   JOIN turn_attempt AS terminal_attempt
+                     ON terminal_attempt.turn_attempt_id =
+                        turn.terminal_attempt_id
+                    AND terminal_attempt.turn_id = event.turn_id
+                    AND terminal_attempt.session_id = event.session_id
+                    AND terminal_attempt.state_kind = 'ended'
+                    AND terminal_attempt.end_disposition
+                        IN ('turn_refused', 'lost')
                   WHERE event.event_sequence = $1
                     AND event.session_id = $2",
             )
@@ -946,6 +962,30 @@ async fn load_event(
                     AND call.turn_attempt_id = turn.terminal_attempt_id
                     AND call.state_kind = 'terminal'
                     AND call.terminal_disposition_kind = 'ambiguous'
+                   JOIN turn_attempt AS terminal_attempt
+                     ON terminal_attempt.turn_attempt_id =
+                        turn.terminal_attempt_id
+                    AND terminal_attempt.turn_id = event.turn_id
+                    AND terminal_attempt.session_id = event.session_id
+                    AND terminal_attempt.state_kind = 'ended'
+                    AND terminal_attempt.end_disposition
+                        IN ('ambiguous', 'lost')
+                    AND (
+                        (
+                            terminal_attempt.end_variant =
+                                'after_cancellation'
+                            AND terminal_attempt.interrupt_command_id
+                                IS NOT NULL
+                            AND terminal_attempt.interrupt_predecessor_turn_id =
+                                event.turn_id
+                        )
+                        OR (
+                            terminal_attempt.end_variant = 'without_stop'
+                            AND terminal_attempt.interrupt_command_id IS NULL
+                            AND terminal_attempt.interrupt_predecessor_turn_id
+                                IS NULL
+                        )
+                    )
                   WHERE event.event_sequence = $1
                     AND event.session_id = $2",
             )
