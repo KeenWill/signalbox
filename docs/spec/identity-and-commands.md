@@ -19,13 +19,14 @@ Every semantic identity is a distinct, opaque, UUID-backed newtype built by the
 `define_identity!` macro in `crates/domain/src/lib.rs`: `DurableCommandId`,
 `SessionId`, `AcceptedInputId`, `TurnId`, `TurnAttemptId`, `ModelCallId`,
 `ProviderTargetEvidenceId`, `ToolRequestId`, and `ToolAttemptId` there, plus
-`SemanticTranscriptEntryId` and `ContextFrontierId` (`context_frontier.rs`),
-`DirectModelSelection` and `ModelAlias` (`configuration.rs`), and
-`ProviderModelIdentity` (`model_call.rs`). Each exposes only `from_uuid`,
-`as_uuid`, and `into_uuid`; the macro derives value semantics and `Debug` but no
-storage or serialization traits, so every storage boundary maps explicitly
-(INV-001, INV-002). The derived `Debug` is the one logging-reachable render path
-(see Encoding).
+`ImportedConversationId` and `ImportedTranscriptEntryId`
+(`imported_conversation.rs`), `SemanticTranscriptEntryId` and
+`ContextFrontierId` (`context_frontier.rs`), `DirectModelSelection` and
+`ModelAlias` (`configuration.rs`), and `ProviderModelIdentity`
+(`model_call.rs`). Each exposes only `from_uuid`, `as_uuid`, and `into_uuid`;
+the macro derives value semantics and `Debug` but no storage or serialization
+traits, so every storage boundary maps explicitly (INV-001, INV-002). The
+derived `Debug` is the one logging-reachable render path (see Encoding).
 
 Identities fall into three supply classes:
 
@@ -35,14 +36,14 @@ Identities fall into three supply classes:
   rejected (see below) — without checking its version bits. Why: idempotency
   correctness comes from the owner-global durable claim plus canonical payload
   comparison, never from trusting a caller's clock or version bits (INV-012).
-- **Hub-minted durable-fact identity** — `SessionId`, `AcceptedInputId`,
-  `TurnId`, `TurnAttemptId`, `SemanticTranscriptEntryId`, `ContextFrontierId`,
-  and `ModelCallId` today; `ProviderTargetEvidenceId`, `ToolRequestId`, and
-  `ToolAttemptId` are assigned here but not yet minted (see Open edges). All
-  production generators mint UUIDv7 (`uuid::Uuid::now_v7()`). Why: the recorded
-  rationale for UUIDv7 is insertion locality for append-heavy Postgres B-tree
-  keys without changing the 128-bit storage shape; no index-level artifact
-  measures this.
+- **Hub-minted durable-fact identity** — `SessionId`, `ImportedConversationId`,
+  `ImportedTranscriptEntryId`, `AcceptedInputId`, `TurnId`, `TurnAttemptId`,
+  `SemanticTranscriptEntryId`, `ContextFrontierId`, and `ModelCallId` today;
+  `ProviderTargetEvidenceId`, `ToolRequestId`, and `ToolAttemptId` are assigned
+  here but not yet minted (see Open edges). All production generators mint
+  UUIDv7 (`uuid::Uuid::now_v7()`). Why: the recorded rationale for UUIDv7 is
+  insertion locality for append-heavy Postgres B-tree keys without changing the
+  128-bit storage shape; no index-level artifact measures this.
 - **Configuration reference key** — `DirectModelSelection` and `ModelAlias`.
   Callers supply them inside command payloads to name owner-configured model
   selections; they persist in `uuid` columns (`direct_model_selection_id`,
@@ -78,13 +79,14 @@ crate cannot mint an identity. `crates/application` enables the `v7` feature and
 defines one generator trait per orchestration slice, each with a production
 UUIDv7 implementation:
 
-| Generator                             | Mints                                                                                               |
-| ------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `UuidV7SessionIdGenerator`            | `SessionId`                                                                                         |
-| `UuidV7SubmitInputIdGenerator`        | `AcceptedInputId`, `TurnId`, `SemanticTranscriptEntryId`, `ContextFrontierId`                       |
-| `UuidV7StartEligibleTurnIdGenerator`  | `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnAttemptId`                                   |
-| `UuidV7StartupScanIdGenerator`        | `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnId` (reclassified successors)                |
-| `UuidV7ModelCallExecutionIdGenerator` | `ModelCallId`, `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnId` (reclassified successors) |
+| Generator                               | Mints                                                                                               |
+| --------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `UuidV7SessionIdGenerator`              | `SessionId`                                                                                         |
+| `UuidV7ImportedConversationIdGenerator` | `ImportedConversationId`, `ImportedTranscriptEntryId`                                               |
+| `UuidV7SubmitInputIdGenerator`          | `AcceptedInputId`, `TurnId`, `SemanticTranscriptEntryId`, `ContextFrontierId`                       |
+| `UuidV7StartEligibleTurnIdGenerator`    | `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnAttemptId`                                   |
+| `UuidV7StartupScanIdGenerator`          | `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnId` (reclassified successors)                |
+| `UuidV7ModelCallExecutionIdGenerator`   | `ModelCallId`, `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnId` (reclassified successors) |
 
 `ProviderTargetEvidenceId`, `ToolRequestId`, and `ToolAttemptId` exist as domain
 types but have no production minting seam yet; their generators land with their
@@ -146,24 +148,25 @@ Open edges).
 All claimed command identifiers live in one owner-global, append-only
 `durable_command` registry (migration `202607180001` and successors): primary
 key `command_id`, a closed `command_kind` discriminator (`create_session`,
-`replace_session_defaults`, `submit_input`), a `storage_version` (currently 1
-for all kinds), and `claimed_at` (`transaction_timestamp()`), which is
-non-semantic operational metadata. No command kind, session, or client has a
-separate command-ID namespace.
+`create_session_from_imported_frontier`, `replace_session_defaults`,
+`submit_input`), a `storage_version` (currently 1 for all kinds), and
+`claimed_at` (`transaction_timestamp()`), which is non-semantic operational
+metadata. No command kind, session, or client has a separate command-ID
+namespace.
 
 Each admitted kind has one purpose-specific typed record family
-(`create_session_command`, `replace_session_defaults_command`,
-`submit_input_command`) keyed one-to-one by `command_id`, storing every
-caller-supplied semantic field, the terminal `applied`/`rejected` result
-discriminator, and the typed result fields, all under `CHECK` constraints and
-foreign keys. Kind and version agreement between the registry row and its typed
-record is enforced by a composite foreign key, and a deferred constraint trigger
-(`durable_command_requires_typed_record`, executing function
-`require_durable_command_typed_record`) requires exactly one typed record per
-claim at every transaction boundary. Why: typed relational records keep each
-command's comparison payload and result reviewable and constraint-checked
-instead of delegating meaning to a serializer; there is no universal JSONB or
-byte-blob payload anywhere.
+(`create_session_command`, `create_session_from_imported_frontier_command`,
+`replace_session_defaults_command`, `submit_input_command`) keyed one-to-one by
+`command_id`, storing every caller-supplied semantic field, the terminal
+`applied`/`rejected` result discriminator, and the typed result fields, all
+under `CHECK` constraints and foreign keys. Kind and version agreement between
+the registry row and its typed record is enforced by a composite foreign key,
+and a deferred constraint trigger (`durable_command_requires_typed_record`,
+executing function `require_durable_command_typed_record`) requires exactly one
+typed record per claim at every transaction boundary. Why: typed relational
+records keep each command's comparison payload and result reviewable and
+constraint-checked instead of delegating meaning to a serializer; there is no
+universal JSONB or byte-blob payload anywhere.
 
 For `SubmitInput`, a second deferred constraint trigger
 (`submit_input_command_requires_correlated_effect`, migration `202607180003`,
@@ -197,18 +200,21 @@ undecodable claim as unseen would let one identifier acquire a second meaning
 from recorded domain rejection.
 
 `CreateSession` v1 records applied results only (its one preparation failure is
-an error, not a recorded rejection); `ReplaceSessionDefaults` and `SubmitInput`
-record both applied results and closed, typed rejection discriminators.
-Rejections claim the identifier exactly as applied results do.
+an error, not a recorded rejection); `CreateSessionFromImportedFrontier` records
+either the applied session or its closed imported-target rejection;
+`ReplaceSessionDefaults` and `SubmitInput` record both applied results and
+closed, typed rejection discriminators. Rejections claim the identifier exactly
+as applied results do.
 
 ## Replay and equality
 
 The canonical command payload is the typed domain value constructed at the
 boundary before registry lookup — not a serialization. Structural equality
-(hand-written `PartialEq` on `CreateSession`, `ReplaceSessionDefaults`, and
-`SubmitInput` in `crates/domain`) covers every caller-supplied semantic field
-and excludes `DurableCommandId`. Why: the identifier is the lookup key that
-names the payload, not part of the meaning it names.
+(hand-written `PartialEq` on `CreateSession`,
+`CreateSessionFromImportedFrontier`, `ReplaceSessionDefaults`, and `SubmitInput`
+in `crates/domain`) covers every caller-supplied semantic field and excludes
+`DurableCommandId`. Why: the identifier is the lookup key that names the
+payload, not part of the meaning it names.
 
 Every command repository (`crates/persistence/src/create_session.rs`,
 `replace_session_defaults.rs`, `submit_input.rs`) follows one claim protocol,

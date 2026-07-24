@@ -333,6 +333,12 @@ pub enum ImportedConversationReconstitutionFailure {
     RawRecordHashMismatch {
         position: ImportedRawRecordPosition,
     },
+    EmptyRawRecord {
+        position: ImportedRawRecordPosition,
+    },
+    RawRecordHashCollision {
+        position: ImportedRawRecordPosition,
+    },
     RawRecordNormalizedValueNotObject {
         position: ImportedRawRecordPosition,
     },
@@ -369,6 +375,9 @@ pub enum ImportedConversationReconstitutionFailure {
         position: ImportedRawRecordPosition,
     },
     SourceEventSpeakerMismatch {
+        entry: ImportedTranscriptEntryId,
+    },
+    SourceRecordTypeMismatch {
         entry: ImportedTranscriptEntryId,
     },
     MessageSpeakerUnavailable {
@@ -2527,6 +2536,9 @@ pub enum ImportConversationError<ConverterError, StoreError> {
     ConverterFormatMismatch {
         declared: ImportedConversationFormat,
         converted: ImportedConversationFormat,
+    },
+    ConverterEntryIdentityNotIssued {
+        entry: ImportedTranscriptEntryId,
     },
     StoreSourceDigestMismatch {
         expected: ImportedConversationSourceDigest,
