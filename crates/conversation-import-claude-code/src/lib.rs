@@ -715,15 +715,17 @@ mod tests {
     }
 
     #[track_caller]
-    fn assert_all_frontiers_resolve_exact_prefixes(imported: &ImportedConversation) {
-        for frontier in imported.frontiers() {
-            assert_eq!(
-                imported
-                    .prefix(frontier)
-                    .map(<[ImportedTranscriptEntry]>::len),
-                usize::try_from(frontier.through_position().as_u64()).ok()
-            );
-        }
+    fn convert_synthetic(source: &str) -> ImportedConversation {
+        let mut next_identity = 100_u128;
+        ClaudeCodeJsonlConverter
+            .convert(conversation(), source.as_bytes(), || {
+                let identity = ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(next_identity));
+                next_identity = next_identity
+                    .checked_add(1)
+                    .expect("synthetic identity range is bounded");
+                identity
+            })
+            .unwrap_or_else(|_| panic!("synthetic transcript should convert"))
     }
 
     #[track_caller]
@@ -738,73 +740,209 @@ mod tests {
     }
 
     #[test]
-    fn inv038_converts_every_observed_content_kind_and_frontier() {
-        let source = concat!(
-            "{\"type\":\"system\",\"subtype\":\"init\",\"value\":1e+09}\n",
-            "{\"type\":\"user\",\"uuid\":\"u1\",\"parentUuid\":null,",
-            "\"sessionId\":\"s\",\"timestamp\":\"t\",\"isSidechain\":true,",
-            "\"isMeta\":false,\"message\":{\"role\":\"user\",\"content\":[",
-            "{\"type\":\"text\",\"text\":\"ask\\u0000\"},",
-            "{\"type\":\"tool_result\",\"tool_use_id\":\"call\",\"is_error\":false,",
-            "\"content\":[{\"type\":\"text\",\"text\":null},",
-            "{\"type\":\"image\",\"source\":{\"type\":\"base64\",",
-            "\"media_type\":\"image/png\",\"data\":\"AA==\"}},",
-            "{\"type\":\"tool_reference\",\"tool_name\":\"lookup\"}]}]}}\r\n",
-            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[",
-            "{\"type\":\"thinking\",\"thinking\":\"private\",\"signature\":\"sig\"},",
-            "{\"type\":\"redacted_thinking\",\"data\":\"sealed\"},",
-            "{\"type\":\"fallback\",\"from\":{\"model\":\"before\"},",
-            "\"to\":{\"model\":\"after\"}},",
-            "{\"type\":\"tool_use\",\"id\":\"call\",\"name\":\"lookup\",",
-            "\"input\":{\"same\":1,\"same\":2},\"caller\":{\"kind\":\"direct\"}},",
-            "{\"type\":\"document\",\"source\":{\"type\":\"base64\",",
-            "\"media_type\":\"application/pdf\",\"data\":\"AA==\"}},",
-            "{\"type\":\"text\",\"text\":\"done\"}]}}"
-        );
-        let mut ids = ids(11);
-        let imported = ClaudeCodeJsonlConverter
-            .convert(conversation(), source.as_bytes(), || {
-                ids.pop_front().unwrap_or_else(|| {
-                    ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(u128::MAX))
-                })
-            })
-            .unwrap_or_else(|_| panic!("synthetic full-vocabulary transcript should convert"));
+    fn s28_inv038_crlf_delimiter_is_not_raw_record_content() {
+        let imported =
+            convert_synthetic("{\"type\":\"system\"}\r\n{\"type\":\"system\",\"value\":1}");
 
-        assert_eq!(imported.raw_records().len(), 3);
-        assert_eq!(
-            imported.raw_records()[1].bytes().last(),
-            Some(&b'}'),
-            "CRLF is a delimiter, not raw record content"
+        assert_eq!(imported.raw_records()[0].bytes(), br#"{"type":"system"}"#);
+    }
+
+    #[test]
+    fn s28_inv038_each_entry_boundary_resolves_its_exact_prefix() {
+        let imported = convert_synthetic(
+            "{\"type\":\"user\",\"message\":{\"content\":[\
+             {\"type\":\"text\",\"text\":\"one\"},\
+             {\"type\":\"text\",\"text\":\"two\"}]}}",
         );
-        assert_eq!(imported.entries().len(), 9);
-        assert_eq!(imported.frontiers().count(), imported.entries().len());
-        assert_all_frontiers_resolve_exact_prefixes(&imported);
+        let mut frontiers = imported.frontiers();
+        let first = frontiers.next().expect("first entry has a frontier");
+        let second = frontiers.next().expect("second entry has a frontier");
+
+        assert_eq!(imported.prefix(first), Some(&imported.entries()[..1]));
+        assert_eq!(imported.prefix(second), Some(imported.entries()));
+        assert_eq!(frontiers.next(), None);
+    }
+
+    #[test]
+    fn s28_inv038_within_record_positions_follow_exact_sequence() {
+        let imported = convert_synthetic(
+            "{\"type\":\"user\",\"message\":{\"content\":[\
+             {\"type\":\"text\",\"text\":\"one\"},\
+             {\"type\":\"text\",\"text\":\"two\"}]}}\n\
+             {\"type\":\"assistant\",\"message\":{\"content\":\"three\"}}",
+        );
+
+        assert_eq!(imported.entries()[0].record_entry_position().as_u64(), 1);
+        assert_eq!(imported.entries()[1].record_entry_position().as_u64(), 2);
+        assert_eq!(imported.entries()[2].record_entry_position().as_u64(), 1);
+    }
+
+    #[test]
+    fn s28_inv038_maps_non_message_records_to_source_events() {
+        let imported = convert_synthetic("{\"type\":\"system\",\"subtype\":\"init\"}");
+
         assert!(matches!(
             imported.entries()[0].content(),
-            ImportedTranscriptContent::SourceEvent { .. }
+            ImportedTranscriptContent::SourceEvent {
+                source_type: ImportedSourceAttestation::Attested(value)
+            } if value.as_str() == "system"
         ));
+    }
+
+    #[test]
+    fn s28_inv038_attests_message_speaker_from_top_level_type() {
+        let imported = convert_synthetic("{\"type\":\"user\",\"message\":{\"content\":\"ask\"}}");
+
         assert!(matches!(
-            imported.entries()[1].source_speaker(),
+            imported.entries()[0].source_speaker(),
             ImportedSourceAttestation::Attested(ImportedSpeaker::User)
         ));
-        let ImportedTranscriptContent::ToolResult { content, .. } = imported.entries()[2].content()
+    }
+
+    #[test]
+    fn s28_inv038_preserves_absent_text_inside_tool_result_blocks() {
+        let imported = convert_synthetic(
+            "{\"type\":\"user\",\"message\":{\"content\":[\
+             {\"type\":\"tool_result\",\"content\":[\
+             {\"type\":\"text\",\"text\":null}]}]}}",
+        );
+        let ImportedTranscriptContent::ToolResult { content, .. } = imported.entries()[0].content()
         else {
-            panic!("third synthetic entry should be a tool result");
+            panic!("synthetic entry should be a tool result");
         };
         let ImportedSourceAttestation::Attested(ImportedToolResultValue::Blocks(blocks)) = content
         else {
-            panic!("synthetic tool result should retain its rich blocks");
+            panic!("synthetic tool result should retain result blocks");
         };
+
+        assert_eq!(
+            blocks.as_ref(),
+            [ImportedToolResultBlock::Text(
+                ImportedSourceAttestation::AttestedAbsent
+            )]
+        );
+    }
+
+    #[test]
+    fn s28_inv038_maps_fallback_to_source_message_block() {
+        let imported = convert_synthetic(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[\
+             {\"type\":\"fallback\",\"from\":{\"model\":\"before\"},\
+             \"to\":{\"model\":\"after\"}}]}}",
+        );
+
         assert!(matches!(
-            &blocks[0],
-            ImportedToolResultBlock::Text(ImportedSourceAttestation::AttestedAbsent)
-        ));
-        assert!(matches!(
-            imported.entries()[5].content(),
+            imported.entries()[0].content(),
             ImportedTranscriptContent::SourceMessageBlock {
                 source_type: ImportedSourceAttestation::Attested(value)
             } if value.as_str() == "fallback"
         ));
+    }
+
+    #[test]
+    fn s28_inv038_maps_tool_call_fields_together() {
+        let imported = convert_synthetic(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[\
+             {\"type\":\"tool_use\",\"id\":\"call\",\"name\":\"lookup\",\
+             \"input\":{\"query\":\"x\"},\"caller\":{\"kind\":\"direct\"}}]}}",
+        );
+        let ImportedTranscriptContent::ToolCall {
+            source_call_id,
+            name,
+            input,
+            caller,
+        } = imported.entries()[0].content()
+        else {
+            panic!("synthetic entry should be a tool call");
+        };
+
+        assert!(
+            matches!(source_call_id, ImportedSourceAttestation::Attested(value) if value.as_str() == "call")
+        );
+        assert!(
+            matches!(name, ImportedSourceAttestation::Attested(value) if value.as_str() == "lookup")
+        );
+        assert!(matches!(input, ImportedSourceAttestation::Attested(_)));
+        assert!(matches!(caller, ImportedSourceAttestation::Attested(_)));
+    }
+
+    #[test]
+    fn s28_inv038_maps_thinking_and_signature_together() {
+        let imported = convert_synthetic(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[\
+             {\"type\":\"thinking\",\"thinking\":\"private\",\
+             \"signature\":\"sig\"}]}}",
+        );
+        let ImportedTranscriptContent::Thinking {
+            thinking,
+            signature,
+        } = imported.entries()[0].content()
+        else {
+            panic!("synthetic entry should be thinking");
+        };
+
+        assert!(
+            matches!(thinking, ImportedSourceAttestation::Attested(value) if value.as_str() == "private")
+        );
+        assert!(
+            matches!(signature, ImportedSourceAttestation::Attested(value) if value.as_str() == "sig")
+        );
+    }
+
+    #[test]
+    fn s28_inv038_maps_redacted_thinking_data() {
+        let imported = convert_synthetic(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[\
+             {\"type\":\"redacted_thinking\",\"data\":\"sealed\"}]}}",
+        );
+
+        assert!(matches!(
+            imported.entries()[0].content(),
+            ImportedTranscriptContent::RedactedThinking {
+                data: ImportedSourceAttestation::Attested(value)
+            } if value.as_str() == "sealed"
+        ));
+    }
+
+    #[test]
+    fn s28_inv038_maps_document_media_source_fields_together() {
+        let imported = convert_synthetic(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[\
+             {\"type\":\"document\",\"source\":{\"type\":\"base64\",\
+             \"media_type\":\"application/pdf\",\"data\":\"AA==\"}}]}}",
+        );
+        let ImportedTranscriptContent::Document {
+            source: ImportedSourceAttestation::Attested(source),
+        } = imported.entries()[0].content()
+        else {
+            panic!("synthetic entry should be a document");
+        };
+
+        assert!(
+            matches!(source.kind(), ImportedSourceAttestation::Attested(value) if value.as_str() == "base64")
+        );
+        assert!(
+            matches!(source.media_type(), ImportedSourceAttestation::Attested(value) if value.as_str() == "application/pdf")
+        );
+        assert!(
+            matches!(source.data(), ImportedSourceAttestation::Attested(value) if value.as_str() == "AA==")
+        );
+    }
+
+    #[test]
+    fn s28_inv038_rejects_unpaired_unicode_surrogates() {
+        let error = ClaudeCodeJsonlConverter
+            .convert(
+                conversation(),
+                br#"{"type":"user","message":{"content":"\uDEAD"}}"#,
+                || ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(100)),
+            )
+            .expect_err("a lone low surrogate has no decoded Unicode scalar");
+
+        assert_eq!(
+            error.failure(),
+            ClaudeCodeJsonlConversionFailure::InvalidJson { line: 1 }
+        );
     }
 
     #[test]

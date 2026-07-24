@@ -262,9 +262,9 @@ mod tests {
     }
 
     #[test]
-    fn bounds_container_nesting() {
-        let accepted = format!("{}0{}", "[".repeat(128), "]".repeat(128));
-        let rejected = format!("{}0{}", "[".repeat(129), "]".repeat(129));
+    fn s28_inv038_counts_top_level_object_as_first_container() {
+        let accepted = format!("{{\"nested\":{}0{}}}", "[".repeat(127), "]".repeat(127));
+        let rejected = format!("{{\"nested\":{}0{}}}", "[".repeat(128), "]".repeat(128));
         assert!(parse_record(accepted.as_bytes()).is_ok());
         assert_eq!(
             parse_record(rejected.as_bytes()),
