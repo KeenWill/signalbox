@@ -244,6 +244,10 @@ Locks per transaction, in acquisition order:
   on the `session_current_defaults` pointer row is the serialization point, and
   its `session_defaults_version` insert takes `FOR KEY SHARE` on the session row
   through the non-deferrable session foreign key.
+- **Outbox dispatch**: `outbox_delivery_state` is locked `FOR UPDATE`, then
+  exactly `delivered_through + 1` and its typed record are read. Only an
+  accepted synchronous offer advances that same singleton inside the
+  transaction.
 
 Two standing constraints (recorded beside the code):
 
@@ -425,10 +429,28 @@ changes zero rows appends zero events. Why: writing the event in the committing
 transaction makes the dual-write failure (state without event, or event without
 state) unrepresentable.
 
+The public `OutboxDispatcher` is the storage-side single-consumer seam. It locks
+the delivery singleton, decodes exactly the next typed event, invokes a
+synchronous consumer while retaining the lock, and advances and commits the
+cursor only after consumer acceptance. Consumer retry or exit before the commit
+request leaves the prefix unchanged for redelivery. A lost commit response is
+resolved by the next locked cursor read: a committed advance proceeds, while a
+rolled-back advance redelivers. The injected rolled-back-commit PostgreSQL test
+enforces ordered at-least-once behavior. Before offering a record or reporting
+idle, the dispatcher proves that no header exceeds the allocator cursor. An
+activation must agree with the durable turn's active current attempt or retained
+terminal attempt; a model-call transition must be reachable from the
+authoritative monotonic call state, with an exact disposition match at terminal;
+and failed, completed, refused, cancelled, and reconciliation-required records
+must agree with the durable turn, terminal frontier, semantic marker where
+present, and terminal model call where present. Historical Prepared and InFlight
+transition records remain dispatchable after their call advances. Exhausted
+delivery still validates the allocator singleton and cursor. Hub task ownership,
+polling, fan-out, and client observation semantics are owned by
+[process-protocol](process-protocol.md).
+
 ## Open edges
 
-- The version-one outbox dispatcher and process-local subscription layer are
-  specified by [process-protocol](process-protocol.md).
 - Deferred outbox retention, pruning, and multiple-hub fan-out are cataloged in
   [open questions](../open-questions.md#protocols-and-persistence).
 - Attempt continuation is deliberately blocked: a `turn_attempt` with a
