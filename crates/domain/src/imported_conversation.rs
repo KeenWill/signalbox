@@ -1374,15 +1374,6 @@ fn validate_raw_records(
                 },
             );
         }
-        if record.stored_conversion_digest
-            != ImportedRawRecordConversionDigest::derive(record.stored_hash, &record.normalized)
-        {
-            return Err(
-                ImportedConversationReconstitutionFailure::RawRecordConversionDigestMismatch {
-                    position: record.position,
-                },
-            );
-        }
         if !matches!(&record.normalized, ImportedStructuredValue::Object(_)) {
             return Err(
                 ImportedConversationReconstitutionFailure::RawRecordNormalizedValueNotObject {
@@ -1393,6 +1384,15 @@ fn validate_raw_records(
         if !structured_value_within_depth(&record.normalized) {
             return Err(
                 ImportedConversationReconstitutionFailure::RawRecordStructuredValueDepthExceeded {
+                    position: record.position,
+                },
+            );
+        }
+        if record.stored_conversion_digest
+            != ImportedRawRecordConversionDigest::derive(record.stored_hash, &record.normalized)
+        {
+            return Err(
+                ImportedConversationReconstitutionFailure::RawRecordConversionDigestMismatch {
                     position: record.position,
                 },
             );
@@ -2941,6 +2941,50 @@ mod tests {
             )
             .expect_err("top-level object plus 128 nested arrays exceeds the bound")
             .failure(),
+            ImportedConversationReconstitutionFailure::RawRecordStructuredValueDepthExceeded {
+                position: ImportedRawRecordPosition::first(),
+            }
+        );
+    }
+
+    /// S28 / INV-002 / INV-038: stored structured depth is checked iteratively
+    /// before any recursive conversion-digest traversal.
+    #[test]
+    fn s28_inv002_inv038_checks_raw_depth_before_recursive_conversion_digest() {
+        let owner = conversation(1);
+        let bytes = br#"{"type":"system","nested":[]}"#.to_vec();
+        let stored_hash = ImportedRawRecordHash::digest(&bytes);
+        let raw_records = vec![ImportedRawSourceRecordReconstitutionInput::new(
+            ImportedRawRecordPosition::first(),
+            stored_hash,
+            ImportedRawRecordConversionDigest::from_bytes([0; 32]),
+            bytes,
+            object_with_members(vec![
+                ("type", ImportedStructuredValue::String(text("system"))),
+                ("nested", nested_array(32_768)),
+            ]),
+        )];
+        let source_digest = ImportedConversationSourceDigest::derive(
+            ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
+            &raw_records,
+        );
+        let error = ImportedConversationReconstitutionInput::new(
+            owner,
+            owner,
+            ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
+            source_digest,
+            1,
+            raw_records,
+            0,
+            Vec::new(),
+        )
+        .reconstitute()
+        .expect_err("excessive stored depth must fail before digest traversal");
+
+        let failure = error.failure();
+        std::mem::forget(error);
+        assert_eq!(
+            failure,
             ImportedConversationReconstitutionFailure::RawRecordStructuredValueDepthExceeded {
                 position: ImportedRawRecordPosition::first(),
             }

@@ -10,32 +10,7 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
-## 2026-07-24 — Authenticate each imported raw-record conversion
-
-**Context.** Exact raw bytes are durable authority, but the stored normalized
-record and its projected entries could otherwise be changed together and still
-pass entry-to-normalized comparison. Reconstitution must detect that
-contradiction without moving the format parser from the recorded edge-owned
-decoder boundary into the domain or persistence adapter.
-
-**Decision.** Every converted raw occurrence carries a SHA-256 conversion digest
-over a fixed domain tag, its exact raw hash, and a closed, length-framed
-encoding of its complete source-neutral structured value. The domain computes
-the digest at conversion, persistence stores it independently from the
-normalized-value encoding, and domain reconstitution derives and compares it
-before trusting the normalized projection.
-
-**Rejected alternatives.** Re-parsing provider JSON in the domain would reverse
-the edge-owned decoder boundary. Adapter-only checking would leave the public
-domain reconstitution path unauthenticated. Hashing the storage codec bytes
-would couple domain integrity to an adapter encoding. Including normalization in
-the source-content digest would change raw-content idempotency.
-
-**Affects.** Imported raw-record domain types and corruption vocabulary, the
-raw-occurrence schema and adapter, domain spine, conversation-import
-specification, and synthetic domain/Postgres corruption tests.
-
-## 2026-07-23 — Version the imported-value storage encoding
+## 2026-07-24 — Version the imported-value storage encoding
 
 **Context.** PostgreSQL must retain the complete source-neutral structured,
 content, and attestation algebra without introducing provider JSON as a domain
@@ -60,7 +35,7 @@ stronger checked boundary.
 **Affects.** The imported raw-occurrence and transcript-entry encoding columns,
 Postgres repository, corruption vocabulary, and codec round-trip tests.
 
-## 2026-07-23 — Preserve JSON structure with an edge-owned bounded decoder
+## 2026-07-24 — Preserve JSON structure with an edge-owned bounded decoder
 
 **Context.** The Claude Code converter must retain ordered and repeated object
 members plus exact valid number spellings. Deserializing through
@@ -83,6 +58,31 @@ task Signalbox can express directly.
 
 **Affects.** The Claude Code version 1 converter implementation and its
 synthetic structure-preservation and depth-bound tests.
+
+## 2026-07-24 — Authenticate each imported raw-record conversion
+
+**Context.** Exact raw bytes are durable authority, but the stored normalized
+record and its projected entries could otherwise be changed together and still
+pass entry-to-normalized comparison. Reconstitution must detect that
+contradiction without moving the format parser from the recorded edge-owned
+decoder boundary into the domain or persistence adapter.
+
+**Decision.** Every converted raw occurrence carries a SHA-256 conversion digest
+over a fixed domain tag, its exact raw hash, and a closed, length-framed
+encoding of its complete source-neutral structured value. The domain computes
+the digest at conversion, persistence stores it independently from the
+normalized-value encoding, and domain reconstitution derives and compares it
+before trusting the normalized projection.
+
+**Rejected alternatives.** Re-parsing provider JSON in the domain would reverse
+the edge-owned decoder boundary. Adapter-only checking would leave the public
+domain reconstitution path unauthenticated. Hashing the storage codec bytes
+would couple domain integrity to an adapter encoding. Including normalization in
+the source-content digest would change raw-content idempotency.
+
+**Affects.** Imported raw-record domain types and corruption vocabulary, the
+raw-occurrence schema and adapter, domain spine, conversation-import
+specification, and synthetic domain/Postgres corruption tests.
 
 ## 2026-07-23 — Import external conversations as records and seed native sessions
 
