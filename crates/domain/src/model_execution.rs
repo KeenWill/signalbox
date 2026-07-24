@@ -15,13 +15,14 @@ use crate::{
     AcceptedInputDisposition, AcceptedInputId, AcceptedInputLifecycle, AcceptedInputQueueOrder,
     AcceptedInputTurnStart, ActivatedAcceptedInputTurn, ActiveTurnPhase,
     AppliedInterruptCommandResult, AppliedInterruptProof, AssistantResponsePart, AssistantText,
-    AttemptEnd, CancellationStopDisposition, ContextFrontierId, CurrentModelCall,
-    CurrentModelCallState, CurrentTurnAttempt, CurrentTurnAttemptState, DangerousToolAutoApproval,
-    DirectModelSelection, EffectiveConfiguration, EndedModelCall, EndedTurnAttempt,
-    FrozenModelSelection, InitialToolApproval, ModelCallDisposition, ModelCallId,
-    ModelCallReconstitutionInput, NonEmptyIssuedOperationRefs, OriginConfiguration,
-    PinnedProviderTarget, PinnedProviderTargetReconstitutionInput, ReconciliationMarker,
-    ReconstitutedModelCall, ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput,
+    AttemptEnd, AwaitingToolRecovery, CancellationStopDisposition, ContextFrontierId,
+    CurrentModelCall, CurrentModelCallState, CurrentTurnAttempt, CurrentTurnAttemptState,
+    DangerousToolAutoApproval, DirectModelSelection, EffectiveConfiguration, EndedModelCall,
+    EndedToolAttempt, EndedTurnAttempt, FrozenModelSelection, InitialToolApproval,
+    ModelCallDisposition, ModelCallId, ModelCallReconstitutionInput, NonEmptyIssuedOperationRefs,
+    OriginConfiguration, PinnedProviderTarget, PinnedProviderTargetReconstitutionInput,
+    PreparedToolResultProjection, ReconciliationMarker, ReconstitutedModelCall,
+    ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput,
     ResolvedContextFrontierSnapshot, ResolvedProviderTarget, SemanticTranscriptEntry,
     SemanticTranscriptEntryId, SemanticTranscriptEntryPayload, SessionId, SteeringBinding,
     SteeringReclassificationReason, SubmitInputResult, SubmitInputTurnOriginReconstitutionInput,
@@ -743,6 +744,46 @@ impl ModelCallExecution {
             }
             _ => Err(ModelCallClosureError::AttemptStateMismatch),
         }
+    }
+
+    /// Applies an interrupt after a tool batch has closed every logical
+    /// request and no executor effect remains live.
+    pub fn apply_interrupt_to_tool_batch(
+        self,
+        interrupt: AppliedInterruptCommandResult,
+        result_projection: PreparedToolResultProjection,
+        identities: CancelledModelCallTurnIdentities,
+    ) -> Result<CancelledModelCallTurn, ModelCallClosureError> {
+        if self.current_call.is_some()
+            || interrupt.session() != self.session
+            || result_projection.snapshot().frontier().owning_session() != self.session
+            || !self
+                .current_snapshot
+                .is_semantic_prefix_of(result_projection.snapshot())
+            || result_projection.snapshot().entry_count()
+                != self.current_snapshot.entry_count() + result_projection.entries().len()
+        {
+            return Err(ModelCallClosureError::InterruptCorrelationMismatch);
+        }
+        let reclassified_pending_steering = reclassify_pending_steering(
+            &self.active_turn,
+            &identities.pending_steering_reclassifications,
+        )?;
+        let (result_entries, result_snapshot) = result_projection.into_parts();
+        let mut cancelled = close_cancelled_turn(
+            ModelCallTurnScope {
+                session: self.session,
+                turn: self.turn,
+            },
+            self.current_attempt,
+            None,
+            result_snapshot,
+            interrupt.proof(),
+            identities,
+            reclassified_pending_steering,
+        )?;
+        cancelled.tool_result_entries = result_entries;
+        Ok(cancelled)
     }
 
     /// Applies one provider observation to freshly reloaded issued state.
@@ -2098,6 +2139,8 @@ pub enum ModelCallInterruptOutcome {
     CancellationRequested(StopRequestedModelCallTurn),
     /// An existing physical-ambiguity wait closed under the applied interrupt.
     ReconciliationRequired(ReconciliationRequiredModelCallTurn),
+    /// An existing tool-attempt ambiguity closed under the applied interrupt.
+    ToolReconciliationRequired(ReconciliationRequiredToolTurn),
 }
 
 impl ModelCallTerminalIdentities {
@@ -2436,6 +2479,7 @@ pub struct CancelledModelCallTurn {
     call: Option<EndedModelCall>,
     attempt: EndedTurnAttempt,
     disposition: TurnDisposition,
+    tool_result_entries: Box<[SemanticTranscriptEntry]>,
     cancellation_entry: SemanticTranscriptEntry,
     terminal_snapshot: ResolvedContextFrontierSnapshot,
     reclassified_pending_steering: Box<[ReclassifiedPendingSteeringTurn]>,
@@ -2461,6 +2505,10 @@ impl CancelledModelCallTurn {
     /// Borrows the proof-bearing cancelled disposition.
     pub const fn disposition(&self) -> &TurnDisposition {
         &self.disposition
+    }
+    /// Borrows proposal-ordered tool results materialized before cancellation.
+    pub fn tool_result_entries(&self) -> &[SemanticTranscriptEntry] {
+        &self.tool_result_entries
     }
     /// Borrows the explicit cancellation marker.
     pub const fn cancellation_entry(&self) -> &SemanticTranscriptEntry {
@@ -2599,6 +2647,49 @@ impl ReconciliationRequiredModelCallTurn {
         &self.disposition
     }
     /// Borrows the terminal frontier.
+    pub const fn terminal_snapshot(&self) -> &ResolvedContextFrontierSnapshot {
+        &self.terminal_snapshot
+    }
+    /// Returns queued turns created from every pending steering input.
+    pub fn reclassified_pending_steering(&self) -> &[ReclassifiedPendingSteeringTurn] {
+        &self.reclassified_pending_steering
+    }
+}
+
+/// One proof-bearing tool-attempt reconciliation commit candidate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReconciliationRequiredToolTurn {
+    session: SessionId,
+    turn: TurnId,
+    tool_attempt: EndedToolAttempt,
+    attempt: EndedTurnAttempt,
+    disposition: TurnDisposition,
+    terminal_snapshot: ResolvedContextFrontierSnapshot,
+    reclassified_pending_steering: Box<[ReclassifiedPendingSteeringTurn]>,
+}
+
+impl ReconciliationRequiredToolTurn {
+    /// Returns the owning session.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+    /// Returns the turn whose ambiguity requires reconciliation.
+    pub const fn turn(&self) -> TurnId {
+        self.turn
+    }
+    /// Borrows the exact ambiguous physical tool attempt.
+    pub const fn tool_attempt(&self) -> &EndedToolAttempt {
+        &self.tool_attempt
+    }
+    /// Borrows the proof-bearing ended turn attempt.
+    pub const fn attempt(&self) -> &EndedTurnAttempt {
+        &self.attempt
+    }
+    /// Borrows the exact reconciliation disposition and marker.
+    pub const fn disposition(&self) -> &TurnDisposition {
+        &self.disposition
+    }
+    /// Borrows the equal-content terminal frontier.
     pub const fn terminal_snapshot(&self) -> &ResolvedContextFrontierSnapshot {
         &self.terminal_snapshot
     }
@@ -3397,6 +3488,74 @@ pub(crate) fn apply_interrupt_to_recovery_wait(
     })
 }
 
+pub(crate) fn apply_interrupt_to_tool_recovery_wait(
+    active_turn: ActivatedAcceptedInputTurn,
+    wait: AwaitingToolRecovery,
+    tool_attempt: EndedToolAttempt,
+    attempt_disposition: UnstoppedAttemptDisposition,
+    source_snapshot: ResolvedContextFrontierSnapshot,
+    interrupt: AppliedInterruptCommandResult,
+    identities: AmbiguousModelCallTurnIdentities,
+) -> Result<ReconciliationRequiredToolTurn, ModelCallClosureError> {
+    let attempt = CurrentTurnAttempt::prepared(wait.issuing_attempt())
+        .begin_running()
+        .and_then(|attempt| attempt.end_without_stop(attempt_disposition))
+        .map_err(|_| ModelCallClosureError::AttemptStateMismatch)?;
+    let proof = interrupt.proof();
+    let ActiveTurnPhase::AwaitingRecoveryDecision {
+        ambiguous_operations,
+        applied_interrupt: None,
+    } = active_turn.phase()
+    else {
+        return Err(ModelCallClosureError::AttemptStateMismatch);
+    };
+    if interrupt.session() != active_turn.session()
+        || proof.predecessor() != active_turn.turn()
+        || interrupt.successor() == active_turn.turn()
+        || interrupt.successor_order().priority()
+            != (crate::AcceptedInputQueuePriority::InterruptImmediatelyAfter {
+                predecessor: active_turn.turn(),
+            })
+        || ambiguous_operations.operation_count() != 1
+        || !ambiguous_operations.contains(crate::IssuedOperationRef::ToolAttempt(wait.attempt()))
+        || wait.session() != active_turn.session()
+        || wait.turn() != active_turn.turn()
+        || wait.issuing_attempt() != attempt.id()
+        || wait.attempt() != tool_attempt.attempt()
+        || wait.yielded_frontier() != source_snapshot.frontier().snapshot()
+        || tool_attempt.session() != active_turn.session()
+        || tool_attempt.turn() != active_turn.turn()
+        || tool_attempt.issuing_attempt() != attempt.id()
+        || tool_attempt.end() != &crate::ToolAttemptEnd::Ambiguous
+    {
+        return Err(ModelCallClosureError::InterruptCorrelationMismatch);
+    }
+    if !matches!(
+        attempt.end(),
+        AttemptEnd::WithoutStop {
+            disposition: UnstoppedAttemptDisposition::Ambiguous | UnstoppedAttemptDisposition::Lost,
+        }
+    ) {
+        return Err(ModelCallClosureError::AttemptStateMismatch);
+    }
+    let reclassified_pending_steering =
+        reclassify_pending_steering(&active_turn, &identities.pending_steering_reclassifications)?;
+    let terminal_snapshot = source_snapshot
+        .derive_appending_candidate(identities.terminal_frontier, Vec::new())
+        .map_err(|_| ModelCallClosureError::FrontierDerivationFailed)?;
+    let marker =
+        ReconciliationMarker::from_interrupt_ambiguity(ambiguous_operations.clone(), proof);
+    Ok(ReconciliationRequiredToolTurn {
+        session: active_turn.session(),
+        turn: active_turn.turn(),
+        tool_attempt,
+        attempt,
+        disposition: TurnDisposition::ReconciliationRequired { marker },
+        terminal_snapshot,
+        reclassified_pending_steering,
+    })
+}
+
 fn complete_turn(
     scope: ModelCallTurnScope,
     call: EndedModelCall,
@@ -3581,6 +3740,7 @@ fn close_cancelled_turn(
         call,
         attempt: ended_attempt,
         disposition: TurnDisposition::Cancelled { cause: proof },
+        tool_result_entries: Box::new([]),
         cancellation_entry,
         terminal_snapshot,
         reclassified_pending_steering,

@@ -234,6 +234,8 @@ impl ToolBatch {
                             Some(AwaitingToolRecovery {
                                 session: self.session,
                                 turn: self.turn,
+                                producing_call: self.producing_call,
+                                yielded_frontier: self.yielded_snapshot.frontier().snapshot(),
                                 issuing_attempt: ended.issuing_attempt(),
                                 attempt,
                             })
@@ -508,6 +510,105 @@ impl ToolBatch {
             snapshot,
         })
     }
+
+    /// Builds proposal-ordered results for an interrupt-cancelled executing
+    /// batch after every physical attempt has reached a durable end.
+    pub fn prepare_cancellation_projection(
+        &self,
+        entry_ids: Vec<SemanticTranscriptEntryId>,
+        result_frontier: crate::ContextFrontierId,
+    ) -> Result<PreparedToolResultProjection, ToolResultProjectionError> {
+        if !matches!(self.phase, ToolBatchPhase::Executing { .. })
+            || entry_ids.len() != self.requests.len()
+            || self
+                .attempts
+                .values()
+                .any(|attempt| matches!(attempt, ReconstitutedToolAttempt::Current(_)))
+        {
+            return Err(ToolResultProjectionError {
+                failure: ToolResultProjectionFailure::BatchNotResolved,
+            });
+        }
+        let mut used = self
+            .yielded_snapshot
+            .ordered_entries()
+            .map(|reference| reference.entry())
+            .collect::<BTreeSet<_>>();
+        if entry_ids.iter().any(|identity| !used.insert(*identity)) {
+            return Err(ToolResultProjectionError {
+                failure: ToolResultProjectionFailure::EntryIdentityReuse,
+            });
+        }
+        let mut entries = Vec::with_capacity(self.requests.len());
+        for (request, identity) in self.requests.iter().zip(entry_ids) {
+            let payload = match self.approvals.get(&request.id()) {
+                Some(resolution)
+                    if matches!(resolution.decision(), ToolApprovalDecision::Deny { .. }) =>
+                {
+                    SemanticTranscriptEntryPayload::ToolDenied {
+                        request: request.id(),
+                    }
+                }
+                Some(resolution) if resolution.is_approved() => {
+                    match self.attempts.get(&request.id()) {
+                        Some(ReconstitutedToolAttempt::Ended(attempt))
+                            if matches!(
+                                attempt.end(),
+                                ToolAttemptEnd::KnownFailed { error }
+                                    if error.kind() == ToolExecutionErrorKind::CrashLost
+                            ) =>
+                        {
+                            SemanticTranscriptEntryPayload::ToolClosed {
+                                request: request.id(),
+                            }
+                        }
+                        Some(ReconstitutedToolAttempt::Ended(attempt))
+                            if attempt.end() != &ToolAttemptEnd::Ambiguous =>
+                        {
+                            SemanticTranscriptEntryPayload::ToolExecutionResult {
+                                attempt: attempt.attempt(),
+                            }
+                        }
+                        Some(ReconstitutedToolAttempt::Ended(_)) => {
+                            return Err(ToolResultProjectionError {
+                                failure: ToolResultProjectionFailure::TurnLevelFailure,
+                            });
+                        }
+                        Some(ReconstitutedToolAttempt::Current(_)) => unreachable!(
+                            "the live-attempt guard rejects current cancellation evidence"
+                        ),
+                        None => SemanticTranscriptEntryPayload::ToolClosed {
+                            request: request.id(),
+                        },
+                    }
+                }
+                Some(_) | None => SemanticTranscriptEntryPayload::ToolClosed {
+                    request: request.id(),
+                },
+            };
+            entries.push(SemanticTranscriptEntry::from_validated_parts(
+                identity,
+                self.session,
+                payload,
+            ));
+        }
+        let snapshot = self
+            .yielded_snapshot
+            .derive_appending_candidate(
+                result_frontier,
+                entries
+                    .iter()
+                    .map(SemanticTranscriptEntry::reference)
+                    .collect(),
+            )
+            .map_err(|_| ToolResultProjectionError {
+                failure: ToolResultProjectionFailure::FrontierDerivationFailed,
+            })?;
+        Ok(PreparedToolResultProjection {
+            entries: entries.into_boxed_slice(),
+            snapshot,
+        })
+    }
 }
 
 /// Opaque evidence for one exact approval wait.
@@ -540,6 +641,8 @@ impl AwaitingToolApproval {
 pub struct AwaitingToolRecovery {
     session: SessionId,
     turn: TurnId,
+    producing_call: crate::ModelCallId,
+    yielded_frontier: crate::ContextFrontierId,
     issuing_attempt: TurnAttemptId,
     attempt: ToolAttemptId,
 }
@@ -553,6 +656,16 @@ impl AwaitingToolRecovery {
     /// Returns the owning logical turn.
     pub const fn turn(&self) -> TurnId {
         self.turn
+    }
+
+    /// Returns the model call that produced the ambiguous tool batch.
+    pub const fn producing_call(&self) -> crate::ModelCallId {
+        self.producing_call
+    }
+
+    /// Returns the batch frontier retained while recovery is unresolved.
+    pub const fn yielded_frontier(&self) -> crate::ContextFrontierId {
+        self.yielded_frontier
     }
 
     /// Returns the turn attempt that authorized the ambiguous tool attempt.

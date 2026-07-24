@@ -118,6 +118,24 @@ pub enum AcceptedInputTurnSchedulingRecordState {
         /// The equal-content terminal frontier identifying the turn boundary.
         terminal_frontier: ContextFrontierId,
     },
+    /// The turn released its slot while one interrupted tool attempt remains
+    /// durably ambiguous.
+    TerminalToolReconciliationRequired {
+        /// The stored lineage selected at eligibility.
+        starting_lineage: AcceptedInputStartingLineage,
+        /// The stored starting snapshot identity.
+        starting_frontier: ContextFrontierId,
+        /// The ended turn attempt that owns the ambiguous tool attempt.
+        reconciling_attempt: TurnAttemptId,
+        /// The preserved stored end classification for that attempt.
+        reconciling_attempt_end: TerminalAttemptEndReconstitutionInput,
+        /// Opaque evidence for the exact ambiguous tool attempt and its source.
+        ambiguous_tool: crate::AwaitingToolRecovery,
+        /// The later or already-applied interrupt that requires reconciliation.
+        interrupt: AppliedInterruptCommandResult,
+        /// The equal-content terminal frontier identifying the turn boundary.
+        terminal_frontier: ContextFrontierId,
+    },
 }
 
 /// Correlated stored execution provenance for one failed terminal turn.
@@ -1783,6 +1801,31 @@ impl AcceptedInputSchedulingProjection {
         )
     }
 
+    /// Closes the active tool-attempt recovery wait under one newly applied
+    /// interrupt while preserving its exact ambiguity.
+    pub fn apply_interrupt_to_tool_recovery(
+        self,
+        wait: crate::AwaitingToolRecovery,
+        tool_attempt: crate::EndedToolAttempt,
+        attempt_disposition: UnstoppedAttemptDisposition,
+        source_snapshot: ResolvedContextFrontierSnapshot,
+        interrupt: AppliedInterruptCommandResult,
+        identities: crate::AmbiguousModelCallTurnIdentities,
+    ) -> Result<crate::ReconciliationRequiredToolTurn, crate::ModelCallClosureError> {
+        let active_turn = self
+            .active_turn_execution()
+            .ok_or(crate::ModelCallClosureError::AttemptStateMismatch)?;
+        crate::model_execution::apply_interrupt_to_tool_recovery_wait(
+            active_turn,
+            wait,
+            tool_attempt,
+            attempt_disposition,
+            source_snapshot,
+            interrupt,
+            identities,
+        )
+    }
+
     /// Consumes this complete projection and prepares the earliest queued turn
     /// as one sealed commit candidate.
     pub fn prepare_earliest_queued_activation(
@@ -2862,6 +2905,16 @@ fn reconstitute_inner(
                                     ModelCallDisposition::Ambiguous,
                                 )
                     }
+                    AcceptedInputTurnSchedulingRecordState::TerminalToolReconciliationRequired {
+                        ambiguous_tool,
+                        ..
+                    } => {
+                        model_call.id() == ambiguous_tool.producing_call()
+                            && model_call.state()
+                                == crate::ModelCallReconstitutionState::Terminal(
+                                    ModelCallDisposition::Completed,
+                                )
+                    }
                 };
                     model_call.turn() == consumed.source_turn
                         && semantic_source_turn == consumed.source_turn
@@ -2931,6 +2984,10 @@ fn reconstitute_inner(
                 starting_frontier, ..
             }
             | AcceptedInputTurnSchedulingRecordState::TerminalReconciliationRequired {
+                starting_frontier,
+                ..
+            }
+            | AcceptedInputTurnSchedulingRecordState::TerminalToolReconciliationRequired {
                 starting_frontier,
                 ..
             } => Some(starting_frontier),
@@ -3011,6 +3068,10 @@ fn reconstitute_inner(
                 starting_frontier, ..
             }
             | AcceptedInputTurnSchedulingRecordState::TerminalReconciliationRequired {
+                starting_frontier,
+                ..
+            }
+            | AcceptedInputTurnSchedulingRecordState::TerminalToolReconciliationRequired {
                 starting_frontier,
                 ..
             } => Some(starting_frontier),
@@ -4029,6 +4090,100 @@ fn reconstitute_inner(
                     terminal_frontier: terminal,
                 }
             }
+            AcceptedInputTurnSchedulingRecordState::TerminalToolReconciliationRequired {
+                starting_lineage,
+                starting_frontier,
+                reconciling_attempt,
+                reconciling_attempt_end,
+                ambiguous_tool,
+                interrupt,
+                terminal_frontier,
+            } => {
+                if active.is_some() || queued_seen {
+                    return Err(
+                        AcceptedInputSchedulingReconstitutionFailure::InvalidLifecycleOrder {
+                            turn,
+                        },
+                    );
+                }
+                let attempt_end_matches = match reconciling_attempt_end.end() {
+                    AttemptEnd::WithoutStop {
+                        disposition:
+                            UnstoppedAttemptDisposition::Ambiguous | UnstoppedAttemptDisposition::Lost,
+                    } => reconciling_attempt_end.interrupt().is_none(),
+                    AttemptEnd::AfterCancellation {
+                        cause,
+                        disposition:
+                            CancellationStopDisposition::Ambiguous | CancellationStopDisposition::Lost,
+                    } => {
+                        *cause == interrupt.proof()
+                            && reconciling_attempt_end.interrupt() == Some(*interrupt)
+                    }
+                    _ => false,
+                };
+                let successor = records_by_turn.get(&interrupt.successor());
+                if interrupt.session() != session
+                    || interrupt.proof().predecessor() != turn
+                    || !attempt_end_matches
+                    || ambiguous_tool.session() != session
+                    || ambiguous_tool.turn() != turn
+                    || ambiguous_tool.issuing_attempt() != *reconciling_attempt
+                    || successor.is_none_or(|successor| {
+                        successor.stored_session != session
+                            || successor.accepted_input.id() != interrupt.accepted_input()
+                            || successor.order != interrupt.successor_order()
+                    })
+                    || attempt_owners.insert(*reconciling_attempt, turn).is_some()
+                {
+                    return Err(
+                        AcceptedInputSchedulingReconstitutionFailure::TerminalAttemptEndMismatch {
+                            turn,
+                            attempt: *reconciling_attempt,
+                        },
+                    );
+                }
+                let start = validate_start(
+                    index,
+                    turn,
+                    *starting_lineage,
+                    *starting_frontier,
+                    previous_terminal.as_ref(),
+                    &origin_by_turn,
+                    &snapshots,
+                    &mut referenced_snapshots,
+                )?;
+                let source_frontier = ambiguous_tool.yielded_frontier();
+                if source_frontier != *starting_frontier {
+                    referenced_snapshots.insert(source_frontier);
+                }
+                let source = snapshots.get(&source_frontier).ok_or(
+                    AcceptedInputSchedulingReconstitutionFailure::StartingSnapshotMissing { turn },
+                )?;
+                if !snapshots[starting_frontier].is_semantic_prefix_of(source) {
+                    return Err(
+                        AcceptedInputSchedulingReconstitutionFailure::TerminalFrontierMismatch {
+                            turn,
+                        },
+                    );
+                }
+                let terminal = snapshots.get(terminal_frontier).cloned().ok_or(
+                    AcceptedInputSchedulingReconstitutionFailure::TerminalSnapshotMissing { turn },
+                )?;
+                if !referenced_snapshots.insert(*terminal_frontier)
+                    || terminal.ordered_entries().ne(source.ordered_entries())
+                {
+                    return Err(
+                        AcceptedInputSchedulingReconstitutionFailure::TerminalFrontierMismatch {
+                            turn,
+                        },
+                    );
+                }
+                previous_terminal = Some((turn, terminal.clone()));
+                ReconstitutedSchedulingState::TerminalReconciliationRequired {
+                    start,
+                    terminal_frontier: terminal,
+                }
+            }
         };
 
         if !matches!(state, ReconstitutedSchedulingState::Queued)
@@ -4140,7 +4295,8 @@ fn reconstitute_active_acceptance_tail(
         | AcceptedInputTurnSchedulingRecordState::TerminalCompleted { .. }
         | AcceptedInputTurnSchedulingRecordState::TerminalRefused { .. }
         | AcceptedInputTurnSchedulingRecordState::TerminalCancelled { .. }
-        | AcceptedInputTurnSchedulingRecordState::TerminalReconciliationRequired { .. } => None,
+        | AcceptedInputTurnSchedulingRecordState::TerminalReconciliationRequired { .. }
+        | AcceptedInputTurnSchedulingRecordState::TerminalToolReconciliationRequired { .. } => None,
     };
     let expected_anchor = active_record.accepted_input.id();
     if candidate.anchor != expected_anchor {
@@ -4389,6 +4545,10 @@ fn terminal_record_interrupt(
             terminal_execution, ..
         } => Some(terminal_execution.interrupt),
         AcceptedInputTurnSchedulingRecordState::TerminalReconciliationRequired {
+            interrupt,
+            ..
+        }
+        | AcceptedInputTurnSchedulingRecordState::TerminalToolReconciliationRequired {
             interrupt,
             ..
         } => Some(*interrupt),
@@ -8781,10 +8941,11 @@ mod tests {
         ));
     }
 
-    /// S06 / INV-025 / INV-026: an opaque wait from a completely validated
-    /// ambiguous tool batch reconstructs the exact typed recovery subject.
+    /// S06 / S07 / INV-025 / INV-026 / INV-029 / INV-037: an opaque wait from
+    /// a completely validated ambiguous tool batch reconstructs the exact
+    /// typed recovery subject and preserves it through interruption.
     #[test]
-    fn s06_inv025_inv026_ambiguous_tool_reconstructs_recovery_wait() {
+    fn s06_s07_inv025_inv026_inv029_inv037_ambiguous_tool_recovery_and_interrupt() {
         let session = current_session();
         let active = accepted_origin(1);
         let origin_entry = semantic_entry(30);
@@ -8904,6 +9065,60 @@ mod tests {
             }) if ambiguous_operations.contains(
                 crate::IssuedOperationRef::ToolAttempt(tool_attempt_id(80))
             )
+        ));
+
+        let successor = accepted_origin(2);
+        let successor_order = AcceptedInputQueueOrder::interrupt_immediately_after(
+            successor.position(),
+            active.turn(),
+        );
+        let interrupt = AppliedInterruptCommandResult::from_correlated_submit(
+            command_id(90),
+            session.id(),
+            active.turn(),
+            successor.accepted_input(),
+            successor.turn(),
+            successor_order,
+        )
+        .expect("the fixture interrupt is exactly correlated");
+        let ended_tool = batch
+            .requests()
+            .iter()
+            .find_map(|request| match batch.attempt(request.id()) {
+                Some(crate::ReconstitutedToolAttempt::Ended(attempt))
+                    if attempt.attempt() == tool_attempt_id(80) =>
+                {
+                    Some(attempt.clone())
+                }
+                Some(crate::ReconstitutedToolAttempt::Current(_))
+                | Some(crate::ReconstitutedToolAttempt::Ended(_))
+                | None => None,
+            })
+            .expect("the batch retains its exact ambiguous attempt");
+        let reconciled = projection
+            .apply_interrupt_to_tool_recovery(
+                wait,
+                ended_tool,
+                UnstoppedAttemptDisposition::Ambiguous,
+                batch.yielded_snapshot().clone(),
+                interrupt,
+                crate::AmbiguousModelCallTurnIdentities::new(frontier(41).id()),
+            )
+            .expect("the interrupt retains exact tool ambiguity");
+        assert_eq!(reconciled.tool_attempt().attempt(), tool_attempt_id(80));
+        assert_eq!(
+            reconciled
+                .terminal_snapshot()
+                .ordered_entries()
+                .collect::<Vec<_>>(),
+            vec![origin_entry.reference(&session)]
+        );
+        assert!(matches!(
+            reconciled.disposition(),
+            crate::TurnDisposition::ReconciliationRequired { marker }
+                if marker.ambiguous_operations().contains(
+                    crate::IssuedOperationRef::ToolAttempt(tool_attempt_id(80))
+                )
         ));
     }
 

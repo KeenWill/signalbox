@@ -68,10 +68,11 @@ pub use model_execution::{
     ModelTargetCatalogError, ModelTargetDefinition, ModelTargetResolutionError,
     PendingSteeringReclassificationIdentity, PhysicalCancellationModelCallTurnIdentities,
     PreparedInitialModelCall, PreparedModelCallRequest, PreparedSteeringConsumption,
-    ReclassifiedPendingSteeringTurn, ReconciliationRequiredModelCallTurn, RefusedModelCallTurn,
-    RefusedModelCallTurnIdentities, ResolvedModelSelection, StopRequestedModelCallTurn,
-    StoppedToolResponsePartIdentity, StoppedToolRoundModelCallIdentities, ToolResponsePartIdentity,
-    ToolRoundModelCallIdentities, ToolRoundModelCallTurn,
+    ReclassifiedPendingSteeringTurn, ReconciliationRequiredModelCallTurn,
+    ReconciliationRequiredToolTurn, RefusedModelCallTurn, RefusedModelCallTurnIdentities,
+    ResolvedModelSelection, StopRequestedModelCallTurn, StoppedToolResponsePartIdentity,
+    StoppedToolRoundModelCallIdentities, ToolResponsePartIdentity, ToolRoundModelCallIdentities,
+    ToolRoundModelCallTurn,
 };
 pub use provider_evidence::{
     ProviderTargetEvidence, ProviderTargetEvidenceLog, ProviderTargetMismatchInvalidation,
