@@ -300,6 +300,7 @@ impl ImportedTranscriptEntry {
 
 pub struct ImportedTranscriptFrontier { /* private */ }
 // sealed: ImportedConversation frontier methods
+// Copy; equality is the exact imported-conversation boundary.
 impl ImportedTranscriptFrontier {
     // accessors: conversation(), through_entry(), through_position()
 }
@@ -534,14 +535,17 @@ impl ImportedSessionSeed {
 }
 
 pub struct InitialSession { /* private */ }
-// sealed: carried only by PreparedCreateSession::session and
-// ReconstitutedSessionCreation::session
+// sealed: carried only by PreparedCreateSession,
+// ReconstitutedSessionCreation, PreparedCreateSessionFromImportedFrontier,
+// and ReconstitutedSessionCreationFromImportedFrontier
 impl InitialSession {
     // accessors: id(), provenance(), configuration_defaults()
 }
 
 pub struct Session { /* private */ }
-// sealed: SessionReconstitutionInput::reconstitute
+// sealed: SessionReconstitutionInput::reconstitute,
+// BoundedImportedSessionReconstitutionInput::reconstitute, or
+// ReconstitutedImportedSession::into_parts
 // non-Copy: owned snapshot, cloned deliberately (session aggregate,
 // spec/sessions-and-transcript.md)
 impl Session {

@@ -139,8 +139,10 @@ pub enum CreateSessionFromImportedFrontierOutcome {
 /// unseen identity, the transaction loads the complete immutable conversation,
 /// resolves the selected prefix, then invokes `next_semantic_entry_id` exactly
 /// once per prefix member and supplies those identities to checked domain
-/// preparation. Missing targets and infrastructure failure leave the command
-/// unclaimed; first handling commits every seed fact and its result atomically.
+/// preparation. Missing targets and proven pre-commit infrastructure failures
+/// leave the command unclaimed. A commit-ambiguous failure requires replaying
+/// the exact command identity and payload; first handling commits every seed
+/// fact and its result atomically.
 pub trait CreateSessionFromImportedFrontierTransaction {
     /// Adapter-specific infrastructure, integrity, or identity failure.
     type Error;
