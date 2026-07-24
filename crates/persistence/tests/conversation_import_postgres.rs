@@ -34,7 +34,7 @@ use signalbox_persistence::{
     },
     local_test_connection_options, migrate,
 };
-use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
+use sqlx::{PgPool, Transaction, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
     postgres::Postgres,
     testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
@@ -133,6 +133,316 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String
         .await?;
     migrate(&pool).await?;
     Ok((container, pool, database_url))
+}
+
+async fn insert_imported_seed_base(
+    transaction: &mut Transaction<'_, sqlx::Postgres>,
+) -> Result<(), sqlx::Error> {
+    sqlx::raw_sql(
+        "INSERT INTO imported_raw_source_record (content_hash, raw_bytes)
+         VALUES (decode(repeat('11', 32), 'hex'), decode('01', 'hex'));
+         INSERT INTO imported_conversation
+            (imported_conversation_id, storage_version, source_format,
+             converter_version, source_digest, declared_raw_record_count,
+             declared_entry_count)
+         VALUES
+            ('10000000-0000-4000-8000-000000000039', 1,
+             'claude_code_session_jsonl', 1,
+             decode(repeat('22', 32), 'hex'), 1, 2);
+         INSERT INTO imported_conversation_raw_record
+            (imported_conversation_id, raw_record_position, content_hash,
+             conversion_digest, normalized_value_encoding,
+             declared_entry_count)
+         VALUES
+            ('10000000-0000-4000-8000-000000000039', 1,
+             decode(repeat('11', 32), 'hex'),
+             decode(repeat('33', 32), 'hex'), decode('01', 'hex'), 2);
+         INSERT INTO imported_transcript_entry
+            (imported_conversation_id, imported_entry_position,
+             imported_transcript_entry_id, raw_record_position,
+             record_entry_position, source_speaker_kind, content_encoding,
+             source_metadata_encoding)
+         VALUES
+            ('10000000-0000-4000-8000-000000000039', 1,
+             '20000000-0000-4000-8000-000000000039', 1, 1,
+             'attested_user', decode('01', 'hex'), decode('01', 'hex')),
+            ('10000000-0000-4000-8000-000000000039', 2,
+             '20000000-0000-4000-8000-000000000040', 1, 2,
+             'attested_assistant', decode('02', 'hex'), decode('02', 'hex'));
+         INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES
+            ('30000000-0000-4000-8000-000000000039',
+             'create_session_from_imported_frontier', 1,
+             transaction_timestamp());
+         INSERT INTO session
+            (session_id, creation_cause, ancestry_kind,
+             imported_conversation_id, imported_frontier_entry_id,
+             imported_frontier_position, imported_relationship_kind)
+         VALUES
+            ('40000000-0000-4000-8000-000000000039',
+             'owner_initiated', 'imported_conversation',
+             '10000000-0000-4000-8000-000000000039',
+             '20000000-0000-4000-8000-000000000040', 2, 'resume');
+         INSERT INTO session_scheduler (session_id)
+         VALUES ('40000000-0000-4000-8000-000000000039');
+         INSERT INTO session_defaults_version
+            (session_id, version, model_selection_kind,
+             direct_model_selection_id, model_alias_id)
+         VALUES
+            ('40000000-0000-4000-8000-000000000039', 1, 'direct',
+             '50000000-0000-4000-8000-000000000039', NULL);
+         INSERT INTO session_current_defaults (session_id, current_version)
+         VALUES ('40000000-0000-4000-8000-000000000039', 1);
+         INSERT INTO create_session_from_imported_frontier_command
+            (command_id, command_kind, storage_version,
+             imported_conversation_id, imported_frontier_entry_id,
+             imported_frontier_position, imported_relationship_kind,
+             creation_cause, ancestry_kind, initial_defaults_version,
+             model_selection_kind, direct_model_selection_id, model_alias_id,
+             result_kind, created_session_id)
+         VALUES
+            ('30000000-0000-4000-8000-000000000039',
+             'create_session_from_imported_frontier', 1,
+             '10000000-0000-4000-8000-000000000039',
+             '20000000-0000-4000-8000-000000000040', 2, 'resume',
+             'owner_initiated', 'imported_conversation', 1,
+             'direct', '50000000-0000-4000-8000-000000000039', NULL,
+             'applied', '40000000-0000-4000-8000-000000000039');
+         INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             imported_conversation_id, imported_transcript_entry_id)
+         VALUES
+            ('40000000-0000-4000-8000-000000000039',
+             '60000000-0000-4000-8000-000000000039', 'imported_entry',
+             '10000000-0000-4000-8000-000000000039',
+             '20000000-0000-4000-8000-000000000039'),
+            ('40000000-0000-4000-8000-000000000039',
+             '60000000-0000-4000-8000-000000000040', 'imported_entry',
+             '10000000-0000-4000-8000-000000000039',
+             '20000000-0000-4000-8000-000000000040');
+         INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count)
+         VALUES
+            ('40000000-0000-4000-8000-000000000039',
+             '70000000-0000-4000-8000-000000000039', 2);",
+    )
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn insert_exact_seed_members(
+    transaction: &mut Transaction<'_, sqlx::Postgres>,
+) -> Result<(), sqlx::Error> {
+    sqlx::raw_sql(
+        "INSERT INTO context_frontier_member
+            (owning_session_id, context_frontier_id, member_position,
+             source_session_id, semantic_entry_id)
+         VALUES
+            ('40000000-0000-4000-8000-000000000039',
+             '70000000-0000-4000-8000-000000000039', 1,
+             '40000000-0000-4000-8000-000000000039',
+             '60000000-0000-4000-8000-000000000039'),
+            ('40000000-0000-4000-8000-000000000039',
+             '70000000-0000-4000-8000-000000000039', 2,
+             '40000000-0000-4000-8000-000000000039',
+             '60000000-0000-4000-8000-000000000040');",
+    )
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+/// INV-039: one applied imported-frontier command can commit only with its
+/// exact ancestry, imported semantic prefix, and one-to-one seed frontier.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv039_exact_imported_session_seed_commits() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let mut transaction = pool.begin().await?;
+    insert_imported_seed_base(&mut transaction).await?;
+    insert_exact_seed_members(&mut transaction).await?;
+    sqlx::query(
+        "INSERT INTO imported_session_seed
+            (session_id, seed_context_frontier_id)
+         VALUES
+            ('40000000-0000-4000-8000-000000000039',
+             '70000000-0000-4000-8000-000000000039')",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+
+    let stored: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM imported_session_seed),
+            (SELECT count(*) FROM semantic_transcript_entry
+              WHERE payload_kind = 'imported_entry'),
+            (SELECT count(*) FROM context_frontier_member)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(stored, (1, 2, 2));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-039: imported ancestry cannot commit without the separate one-to-one
+/// seed record, even when the materialized frontier content is exact.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv039_imported_ancestry_without_seed_is_rejected() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let mut transaction = pool.begin().await?;
+    insert_imported_seed_base(&mut transaction).await?;
+    insert_exact_seed_members(&mut transaction).await?;
+    let error = transaction
+        .commit()
+        .await
+        .expect_err("imported ancestry without its seed record must fail");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(sqlx::error::DatabaseError::constraint),
+        Some("imported_session_requires_seed")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-039: equal imported members in the wrong order are not the selected
+/// imported prefix.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv039_reordered_imported_seed_members_are_rejected() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let mut transaction = pool.begin().await?;
+    insert_imported_seed_base(&mut transaction).await?;
+    sqlx::raw_sql(
+        "INSERT INTO context_frontier_member
+            (owning_session_id, context_frontier_id, member_position,
+             source_session_id, semantic_entry_id)
+         VALUES
+            ('40000000-0000-4000-8000-000000000039',
+             '70000000-0000-4000-8000-000000000039', 1,
+             '40000000-0000-4000-8000-000000000039',
+             '60000000-0000-4000-8000-000000000040'),
+            ('40000000-0000-4000-8000-000000000039',
+             '70000000-0000-4000-8000-000000000039', 2,
+             '40000000-0000-4000-8000-000000000039',
+             '60000000-0000-4000-8000-000000000039');
+         INSERT INTO imported_session_seed
+            (session_id, seed_context_frontier_id)
+         VALUES
+            ('40000000-0000-4000-8000-000000000039',
+             '70000000-0000-4000-8000-000000000039');",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    let error = transaction
+        .commit()
+        .await
+        .expect_err("reordered imported members must fail");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(sqlx::error::DatabaseError::constraint),
+        Some("imported_session_seed_exact_prefix")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-039: an imported semantic payload cannot fabricate any native
+/// accepted-input, turn, call, or tool evidence.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv039_imported_semantic_entry_rejects_native_payload_columns()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let error = sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             imported_conversation_id, imported_transcript_entry_id,
+             assistant_text_value)
+         VALUES
+            ('40000000-0000-4000-8000-000000000039',
+             '60000000-0000-4000-8000-000000000039', 'imported_entry',
+             '10000000-0000-4000-8000-000000000039',
+             '20000000-0000-4000-8000-000000000039', 'fabricated')",
+    )
+    .execute(&pool)
+    .await
+    .expect_err("an imported payload with native evidence columns must fail");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(sqlx::error::DatabaseError::constraint),
+        Some("semantic_transcript_entry_imported_shape")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-039: the new durable command discriminator still requires its complete
+/// typed record at the transaction boundary.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv039_imported_creation_registry_claim_requires_typed_record()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES
+            ('30000000-0000-4000-8000-000000000039',
+             'create_session_from_imported_frontier', 1,
+             transaction_timestamp())",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    let error = transaction
+        .commit()
+        .await
+        .expect_err("an imported creation claim without its typed row must fail");
+    assert_eq!(
+        error.as_database_error().and_then(|error| error.code()),
+        Some(std::borrow::Cow::Borrowed("23503"))
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-039: replacing the native-only reverse creation FK does not make the
+/// preexisting native command table truncatable.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv039_native_creation_command_truncate_remains_rejected() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let error = sqlx::query("TRUNCATE TABLE create_session_command")
+        .execute(&pool)
+        .await
+        .expect_err("native creation commands must remain protected from truncate");
+    assert_eq!(
+        error.as_database_error().and_then(|error| error.code()),
+        Some(std::borrow::Cow::Borrowed("23514"))
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
 }
 
 /// S28 / INV-038: exact reingestion resolves the immutable winner, raw blobs
