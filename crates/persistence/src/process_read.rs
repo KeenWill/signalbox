@@ -1926,10 +1926,6 @@ fn decode_imported_source_speaker(
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the closed imported projection keeps every identity explicit"
-)]
 fn project_imported_entry(
     entry_index: u64,
     source_session: SessionId,

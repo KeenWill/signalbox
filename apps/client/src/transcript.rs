@@ -3,6 +3,8 @@ use std::{
     io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write},
 };
 
+#[cfg(test)]
+use signalbox_process_protocol::ProtocolVersion;
 use signalbox_process_protocol::{
     CanonicalUuid, ContentFragment, ServerFrame, ServerMessage, TranscriptEntry,
     TranscriptTextEntry, TurnState, decode_server_line, encode_server_line,
@@ -54,7 +56,7 @@ impl TranscriptSnapshot {
             .map_err(|_| ClientError::Protocol("test request identity was invalid"))?;
         let mut spool = tempfile::tempfile()?;
         for message in messages {
-            let frame = ServerFrame::try_new(request_id, message)
+            let frame = ServerFrame::try_new_for_version(ProtocolVersion::Two, request_id, message)
                 .map_err(signalbox_process_protocol::FrameEncodeError::Validation)?;
             append_frame(&mut spool, &frame)?;
         }

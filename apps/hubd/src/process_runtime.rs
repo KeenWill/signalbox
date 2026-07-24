@@ -1001,6 +1001,10 @@ where
     write_spooled_transcript(writer, spool).await.map(|_| ())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the follow stream keeps its request, snapshot, update, and shutdown boundaries explicit"
+)]
 async fn handle_follow_session<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
