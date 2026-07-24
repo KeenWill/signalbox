@@ -1248,7 +1248,6 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
     DuplicateConsumedSteering { accepted_input: AcceptedInputId },
     SteeringSemanticEntryMismatch { entry: SemanticTranscriptEntryId },
     ConsumedSteeringMismatch { accepted_input: AcceptedInputId },
-    UnsupportedSemanticEntry { entry: SemanticTranscriptEntryId },
     SemanticEntryCallMissing {
         entry: SemanticTranscriptEntryId,
         call: ModelCallId,

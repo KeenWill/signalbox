@@ -1159,12 +1159,6 @@ pub enum AcceptedInputSchedulingReconstitutionFailure {
         /// The affected accepted input.
         accepted_input: AcceptedInputId,
     },
-    /// A tool-use entry was supplied before its execution decisions authorize
-    /// construction and reconstitution.
-    UnsupportedSemanticEntry {
-        /// The affected entry.
-        entry: SemanticTranscriptEntryId,
-    },
     /// A semantic entry names a model call absent from the purpose-specific
     /// complete call facts.
     SemanticEntryCallMissing {
@@ -2543,22 +2537,16 @@ fn reconstitute_inner(
                     );
                 }
             }
-            InitialSemanticTranscriptEntryPayload::AssistantText { producing_call, .. } => {
+            InitialSemanticTranscriptEntryPayload::AssistantText { producing_call, .. }
+            | InitialSemanticTranscriptEntryPayload::AssistantToolUse { producing_call, .. } => {
                 assistant_by_call
                     .entry(*producing_call)
                     .or_default()
                     .insert(entry_reference);
             }
-            InitialSemanticTranscriptEntryPayload::AssistantToolUse { .. }
-            | InitialSemanticTranscriptEntryPayload::ToolExecutionResult { .. }
+            InitialSemanticTranscriptEntryPayload::ToolExecutionResult { .. }
             | InitialSemanticTranscriptEntryPayload::ToolDenied { .. }
-            | InitialSemanticTranscriptEntryPayload::ToolClosed { .. } => {
-                return Err(
-                    AcceptedInputSchedulingReconstitutionFailure::UnsupportedSemanticEntry {
-                        entry: candidate.identity(),
-                    },
-                );
-            }
+            | InitialSemanticTranscriptEntryPayload::ToolClosed { .. } => {}
             InitialSemanticTranscriptEntryPayload::TurnCompleted { turn } => {
                 let Some(record) = records_by_turn.get(turn) else {
                     return Err(
@@ -2975,31 +2963,77 @@ fn reconstitute_inner(
             AcceptedInputSchedulingReconstitutionFailure::UnreferencedPinnedTarget { turn },
         );
     }
+    let mut referenced_model_calls = consumed_model_calls;
+    let mut assistant_call_snapshots = BTreeSet::new();
     for (call, entries) in &assistant_by_call {
-        let Some(reconstituted) = model_calls.get(call) else {
-            if let Some(entry) = entries.first().copied() {
-                return Err(
-                    AcceptedInputSchedulingReconstitutionFailure::SemanticEntryCallMissing {
-                        entry: entry.entry(),
-                        call: *call,
-                    },
-                );
-            }
+        let Some(first_entry) = entries.first().copied() else {
             continue;
         };
-        if !matches!(
-            reconstituted,
-            ReconstitutedModelCall::Ended(ended)
-                if ended.disposition() == ModelCallDisposition::Completed
-        ) && let Some(entry) = entries.first().copied()
+        let Some(reconstituted) = model_calls.get(call) else {
+            return Err(
+                AcceptedInputSchedulingReconstitutionFailure::SemanticEntryCallMissing {
+                    entry: first_entry.entry(),
+                    call: *call,
+                },
+            );
+        };
+        let ReconstitutedModelCall::Ended(ended) = reconstituted else {
+            return Err(
+                AcceptedInputSchedulingReconstitutionFailure::SemanticEntryCallMismatch {
+                    entry: first_entry.entry(),
+                    call: *call,
+                },
+            );
+        };
+        let Some(record) = records_by_turn.get(&ended.turn()).copied() else {
+            return Err(
+                AcceptedInputSchedulingReconstitutionFailure::SemanticEntryCallMismatch {
+                    entry: first_entry.entry(),
+                    call: *call,
+                },
+            );
+        };
+        let starting_frontier = match record.state {
+            AcceptedInputTurnSchedulingRecordState::Queued => None,
+            AcceptedInputTurnSchedulingRecordState::Active {
+                starting_frontier, ..
+            }
+            | AcceptedInputTurnSchedulingRecordState::TerminalFailed {
+                starting_frontier, ..
+            }
+            | AcceptedInputTurnSchedulingRecordState::TerminalCompleted {
+                starting_frontier, ..
+            }
+            | AcceptedInputTurnSchedulingRecordState::TerminalRefused {
+                starting_frontier, ..
+            }
+            | AcceptedInputTurnSchedulingRecordState::TerminalCancelled {
+                starting_frontier, ..
+            }
+            | AcceptedInputTurnSchedulingRecordState::TerminalReconciliationRequired {
+                starting_frontier,
+                ..
+            } => Some(starting_frontier),
+        };
+        let call_snapshot = snapshots.get(&ended.frontier().snapshot());
+        if ended.disposition() != ModelCallDisposition::Completed
+            || ended.selection() != *record.origin_configuration.effective().model()
+            || starting_frontier
+                .and_then(|starting| snapshots.get(&starting))
+                .zip(call_snapshot)
+                .is_none_or(|(starting, call_snapshot)| {
+                    !starting.is_semantic_prefix_of(call_snapshot)
+                })
         {
             return Err(
                 AcceptedInputSchedulingReconstitutionFailure::SemanticEntryCallMismatch {
-                    entry: entry.entry(),
+                    entry: first_entry.entry(),
                     call: *call,
                 },
             );
         }
+        referenced_model_calls.insert(*call);
+        assistant_call_snapshots.insert(ended.frontier().snapshot());
     }
 
     let mut turns = Vec::with_capacity(total_order.len());
@@ -3008,7 +3042,6 @@ fn reconstitute_inner(
     let mut active_model_call_recovery = None;
     let mut queued_seen = false;
     let mut referenced_snapshots = consumed_snapshots;
-    let mut referenced_model_calls = consumed_model_calls;
     let mut attempt_owners = BTreeMap::new();
 
     for (index, turn) in total_order.into_iter().enumerate() {
@@ -4017,6 +4050,7 @@ fn reconstitute_inner(
         });
     }
 
+    referenced_snapshots.extend(assistant_call_snapshots);
     if let Some(snapshot) = snapshots
         .keys()
         .copied()
@@ -6254,6 +6288,106 @@ mod tests {
             frontier_collision.failure(),
             AcceptedInputTurnFailureFailure::TerminalFrontierIdentityAlreadyExists
         );
+    }
+
+    /// S02 / S11 / INV-005: complete scheduling reconstitution admits every
+    /// reference-only tool entry while retaining completed-call provenance
+    /// for assistant tool use from an earlier intra-turn round.
+    #[test]
+    fn s02_s11_inv005_scheduling_reconstitutes_tool_round_history() {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let producing_call = model_call_id(90);
+        let request = tool_request_id(91);
+        let attempt = tool_attempt_id(92);
+        let denied_request = tool_request_id(93);
+        let closed_request = tool_request_id(94);
+        let tool_use = semantic_entry(31);
+        let execution_result = semantic_entry(32);
+        let denied = semantic_entry(33);
+        let closed = semantic_entry(34);
+        let mut facts = ActiveReconstitutionFacts::matching(&session, active);
+        facts.semantic_entries.extend([
+            SemanticTranscriptEntryReconstitutionInput::new(
+                tool_use.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::AssistantToolUse {
+                    producing_call,
+                    request,
+                },
+            ),
+            SemanticTranscriptEntryReconstitutionInput::new(
+                execution_result.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::ToolExecutionResult { attempt },
+            ),
+            SemanticTranscriptEntryReconstitutionInput::new(
+                denied.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::ToolDenied {
+                    request: denied_request,
+                },
+            ),
+            SemanticTranscriptEntryReconstitutionInput::new(
+                closed.id(),
+                session.id(),
+                InitialSemanticTranscriptEntryPayload::ToolClosed {
+                    request: closed_request,
+                },
+            ),
+        ]);
+        let target = ResolvedProviderTarget::naming(provider_model_identity(51));
+        let projection = facts
+            .input()
+            .with_model_call_facts(
+                vec![crate::PinnedProviderTargetReconstitutionInput::new(
+                    active.turn(),
+                    target,
+                )],
+                vec![ModelCallReconstitutionInput::new(
+                    producing_call,
+                    active.turn(),
+                    turn_attempt_id(49),
+                    FrozenModelSelection::Direct(direct(1)),
+                    target,
+                    ActiveReconstitutionFacts::matching_starting_frontier().id(),
+                    ModelCallReconstitutionState::Terminal(ModelCallDisposition::Completed),
+                )],
+            )
+            .reconstitute()
+            .expect("tool-round history and its completed producing call agree");
+
+        assert!(matches!(
+            projection
+                .semantic_entry(tool_use.reference(&session))
+                .map(SemanticTranscriptEntry::payload),
+            Some(InitialSemanticTranscriptEntryPayload::AssistantToolUse {
+                producing_call: actual_call,
+                request: actual_request,
+            }) if *actual_call == producing_call && *actual_request == request
+        ));
+        assert!(matches!(
+            projection
+                .semantic_entry(execution_result.reference(&session))
+                .map(SemanticTranscriptEntry::payload),
+            Some(InitialSemanticTranscriptEntryPayload::ToolExecutionResult {
+                attempt: actual,
+            }) if *actual == attempt
+        ));
+        assert!(matches!(
+            projection
+                .semantic_entry(denied.reference(&session))
+                .map(SemanticTranscriptEntry::payload),
+            Some(InitialSemanticTranscriptEntryPayload::ToolDenied { request: actual })
+                if *actual == denied_request
+        ));
+        assert!(matches!(
+            projection
+                .semantic_entry(closed.reference(&session))
+                .map(SemanticTranscriptEntry::payload),
+            Some(InitialSemanticTranscriptEntryPayload::ToolClosed { request: actual })
+                if *actual == closed_request
+        ));
     }
 
     /// S02 / S08 / S09 / INV-012 / INV-016 / INV-036: scheduling
