@@ -47,6 +47,7 @@ mod observation;
 mod operation;
 mod output;
 mod preparation;
+mod provider_json;
 mod runtime;
 mod scripted;
 mod settings;
@@ -76,6 +77,10 @@ pub use output::{
     decode_structured, decode_structured_json,
 };
 pub use preparation::{PreparationDefect, PreparationFailure, PreparationOutcome};
+pub use provider_json::{
+    PROVIDER_JSON_NESTING_LIMIT, ProviderJsonNestingExceeded, ProviderJsonNestingValidator,
+    validate_provider_json_nesting,
+};
 pub use runtime::{CancellationSignal, ModelRuntime};
 pub use scripted::{Script, ScriptedModel, ScriptedPrepared};
 pub use settings::ModelSettings;
