@@ -300,6 +300,7 @@ impl ImportedTranscriptEntry {
 
 pub struct ImportedTranscriptFrontier { /* private */ }
 // sealed: ImportedConversation frontier methods
+// Copy; equality is the exact imported-conversation boundary.
 impl ImportedTranscriptFrontier {
     // accessors: conversation(), through_entry(), through_position()
 }
