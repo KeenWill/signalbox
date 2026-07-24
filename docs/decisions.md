@@ -10,6 +10,30 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-23 — Spool process snapshots outside transcript-sized memory
+
+**Context.** A valid durable transcript has no aggregate size limit, while the
+process runtime admits 128 connections. Fetching every turn and semantic entry
+into vectors before writing a snapshot therefore made valid concurrent reads an
+unbounded heap-allocation path.
+
+**Decision.** Persistence exposes a repeatable-read cursor that validates the
+execution lineage in PostgreSQL and yields one decoded turn or frontier member
+at a time. hubd encodes those items into a secure unnamed temporary file using
+the focused `tempfile` 3.27 dependency, commits the read transaction, then
+streams the completed spool to the client. Per-request heap use is bounded by
+one decoded row, one protocol frame, and fixed I/O buffers.
+
+**Rejected alternatives.** Retaining complete vectors leaves the defect. Holding
+a PostgreSQL snapshot open while writing to an arbitrarily slow client ties
+database capacity and MVCC retention to that client. An aggregate transcript
+limit would make valid durable state unreadable despite the existing bounded
+multi-frame wire representation.
+
+**Affects.** Process transcript reads and follow-snapshot startup, the
+persistence read cursor, hubd's direct dependency set, and temporary disk usage;
+wire messages and authoritative snapshot semantics do not change.
+
 ## 2026-07-23 — Bound concurrent inbound frame buffers at eight
 
 **Context.** The 128 accepted process connections could each retain nearly one 8

@@ -1,6 +1,13 @@
 //! Local process-protocol serving and durable outbox fan-out.
 
-use std::{error::Error, fmt, future::Future, io, sync::Arc, time::Duration};
+use std::{
+    error::Error,
+    fmt,
+    future::Future,
+    io::{self, SeekFrom},
+    sync::Arc,
+    time::Duration,
+};
 
 use signalbox_application::{
     CreateSessionError, CreateSessionOutcome, CreateSessionRequest, CreateSessionService,
@@ -23,8 +30,8 @@ use signalbox_persistence::{
     },
     process_read::{
         ProcessCurrentModelCallState, ProcessFailedModelCallDisposition, ProcessModelSelection,
-        ProcessReadError, ProcessReadRepository, ProcessTranscriptEntry, ProcessTranscriptSnapshot,
-        ProcessTurnState,
+        ProcessReadError, ProcessReadRepository, ProcessTranscriptEntry, ProcessTranscriptItem,
+        ProcessTranscriptTurn, ProcessTurnState,
     },
     submit_input::{SubmitInputHandlingOutcome, SubmitInputRepository, SubmitInputRepositoryError},
 };
@@ -38,7 +45,7 @@ use signalbox_process_protocol::{
 };
 use sqlx::PgPool;
 use tokio::{
-    io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt, BufReader},
     net::UnixStream,
     sync::{OwnedSemaphorePermit, Semaphore, broadcast, watch},
     task::{JoinError, JoinSet},
@@ -641,11 +648,14 @@ async fn handle_read_transcript<Writer>(
 where
     Writer: AsyncWrite + Unpin,
 {
-    let snapshot = match ProcessReadRepository::new(pool.clone())
-        .read_transcript(SessionId::from_uuid(session_id.into_uuid()))
-        .await
+    let mut spool = match spool_transcript(
+        ProcessReadRepository::new(pool.clone()),
+        SessionId::from_uuid(session_id.into_uuid()),
+        request_id,
+    )
+    .await
     {
-        Ok(Some(snapshot)) => snapshot,
+        Ok(Some(spool)) => spool,
         Ok(None) => {
             return write_error(
                 writer,
@@ -654,9 +664,12 @@ where
             )
             .await;
         }
-        Err(error) => return write_process_read_error(writer, request_id, error).await,
+        Err(TranscriptSpoolError::Read(error)) => {
+            return write_process_read_error(writer, request_id, error).await;
+        }
+        Err(TranscriptSpoolError::Spool(error)) => return Err(error),
     };
-    write_snapshot(writer, request_id, &snapshot).await
+    write_spooled_transcript(writer, &mut spool).await
 }
 
 async fn handle_follow_session<Writer>(
@@ -674,14 +687,18 @@ where
     let selected_session = SessionId::from_uuid(session_id.into_uuid());
     let snapshot_result = run_until_shutdown(
         &mut shutdown,
-        ProcessReadRepository::new(pool.clone()).read_transcript(selected_session),
+        spool_transcript(
+            ProcessReadRepository::new(pool.clone()),
+            selected_session,
+            request_id,
+        ),
     )
     .await;
     let Some(snapshot_result) = snapshot_result else {
         return Ok(());
     };
-    let snapshot = match snapshot_result {
-        Ok(Some(snapshot)) => snapshot,
+    let mut spool = match snapshot_result {
+        Ok(Some(spool)) => spool,
         Ok(None) => {
             return run_until_shutdown(
                 &mut shutdown,
@@ -694,7 +711,7 @@ where
             .await
             .unwrap_or(Ok(()));
         }
-        Err(error) => {
+        Err(TranscriptSpoolError::Read(error)) => {
             return run_until_shutdown(
                 &mut shutdown,
                 write_process_read_error(writer, request_id, error),
@@ -702,14 +719,15 @@ where
             .await
             .unwrap_or(Ok(()));
         }
+        Err(TranscriptSpoolError::Spool(error)) => return Err(error),
     };
     let Some(snapshot_write) =
-        run_until_shutdown(&mut shutdown, write_snapshot(writer, request_id, &snapshot)).await
+        run_until_shutdown(&mut shutdown, write_spooled_transcript(writer, &mut spool)).await
     else {
         return Ok(());
     };
     snapshot_write?;
-    let mut observed_cursor = snapshot.cursor();
+    let mut observed_cursor = spool.cursor;
 
     loop {
         let update = tokio::select! {
@@ -759,49 +777,115 @@ where
     }
 }
 
-async fn write_snapshot<Writer>(
-    writer: &mut Writer,
+struct TranscriptSpool {
+    file: tokio::fs::File,
+    cursor: u64,
+}
+
+enum TranscriptSpoolError {
+    Read(ProcessReadError),
+    Spool(ProcessConnectionError),
+}
+
+async fn spool_transcript(
+    repository: ProcessReadRepository,
+    session: SessionId,
     request_id: RequestId,
-    snapshot: &ProcessTranscriptSnapshot,
-) -> Result<(), ProcessConnectionError>
-where
-    Writer: AsyncWrite + Unpin,
-{
-    let session_id = wire_uuid(snapshot.session().into_uuid());
-    let cursor = CanonicalU64::new(snapshot.cursor());
+) -> Result<Option<TranscriptSpool>, TranscriptSpoolError> {
+    let Some(mut reader) = repository
+        .open_transcript(session)
+        .await
+        .map_err(TranscriptSpoolError::Read)?
+    else {
+        return Ok(None);
+    };
+    let standard_file = tempfile::tempfile()
+        .map_err(ProcessConnectionError::from)
+        .map_err(TranscriptSpoolError::Spool)?;
+    let mut file = tokio::fs::File::from_std(standard_file);
+    let session_id = wire_uuid(reader.session().into_uuid());
+    let cursor = CanonicalU64::new(reader.cursor());
     write_message(
-        writer,
+        &mut file,
         request_id,
         ServerMessage::TranscriptSnapshotStart { session_id, cursor },
     )
-    .await?;
-    for turn in snapshot.turns() {
-        write_message(
-            writer,
-            request_id,
-            ServerMessage::TranscriptTurn {
-                turn_id: wire_uuid(turn.turn().into_uuid()),
-                acceptance_position: CanonicalU64::new(turn.acceptance_position()),
-                state: wire_turn_state(turn.state()),
-            },
-        )
-        .await?;
+    .await
+    .map_err(TranscriptSpoolError::Spool)?;
+    while let Some(item) = reader
+        .next_item()
+        .await
+        .map_err(TranscriptSpoolError::Read)?
+    {
+        match item {
+            ProcessTranscriptItem::Turn(turn) => {
+                write_transcript_turn(&mut file, request_id, &turn)
+                    .await
+                    .map_err(TranscriptSpoolError::Spool)?;
+            }
+            ProcessTranscriptItem::Entry(entry) => {
+                write_transcript_entry(&mut file, request_id, &entry)
+                    .await
+                    .map_err(TranscriptSpoolError::Spool)?;
+            }
+        }
     }
-    for entry in snapshot.entries() {
-        write_transcript_entry(writer, request_id, entry).await?;
-    }
-    let turn_count = u64::try_from(snapshot.turns().len())
-        .map_err(|_| ProcessConnectionError::EncodeInvariant)?;
-    let entry_count = u64::try_from(snapshot.entries().len())
-        .map_err(|_| ProcessConnectionError::EncodeInvariant)?;
+    let summary = reader
+        .summary()
+        .ok_or(ProcessConnectionError::EncodeInvariant)
+        .map_err(TranscriptSpoolError::Spool)?;
     write_message(
-        writer,
+        &mut file,
         request_id,
         ServerMessage::TranscriptSnapshotEnd {
             session_id,
             cursor,
-            turn_count: CanonicalU64::new(turn_count),
-            entry_count: CanonicalU64::new(entry_count),
+            turn_count: CanonicalU64::new(summary.turn_count()),
+            entry_count: CanonicalU64::new(summary.entry_count()),
+        },
+    )
+    .await
+    .map_err(TranscriptSpoolError::Spool)?;
+    file.flush()
+        .await
+        .map_err(ProcessConnectionError::from)
+        .map_err(TranscriptSpoolError::Spool)?;
+    file.seek(SeekFrom::Start(0))
+        .await
+        .map_err(ProcessConnectionError::from)
+        .map_err(TranscriptSpoolError::Spool)?;
+    Ok(Some(TranscriptSpool {
+        file,
+        cursor: summary.cursor(),
+    }))
+}
+
+async fn write_spooled_transcript<Writer>(
+    writer: &mut Writer,
+    spool: &mut TranscriptSpool,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    tokio::io::copy(&mut spool.file, writer).await?;
+    Ok(())
+}
+
+async fn write_transcript_turn<Writer>(
+    writer: &mut Writer,
+    request_id: RequestId,
+    turn: &ProcessTranscriptTurn,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    write_message(
+        writer,
+        request_id,
+        ServerMessage::TranscriptTurn {
+            turn_id: wire_uuid(turn.turn().into_uuid()),
+            acceptance_position: CanonicalU64::new(turn.acceptance_position()),
+            state: wire_turn_state(turn.state()),
         },
     )
     .await

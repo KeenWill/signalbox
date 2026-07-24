@@ -4,18 +4,14 @@
 //! domain aggregates. Both public reads use one read-only repeatable-read
 //! transaction so the hub can map a complete, stable projection explicitly.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    error::Error,
-    fmt,
-};
+use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
 use signalbox_domain::{
     AcceptedInputId, ContextFrontierId, DirectModelSelection, ModelAlias, ModelCallId,
     SemanticTranscriptEntryId, SessionId, TurnAttemptId, TurnId,
 };
-use sqlx::{PgPool, Row, postgres::PgRow, types::Uuid};
+use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
 use crate::mapping::{session_id_from_uuid, session_id_to_uuid};
 
@@ -310,6 +306,180 @@ impl ProcessTranscriptSnapshot {
     }
 }
 
+/// One bounded-memory item yielded from a repeatable-read transcript snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProcessTranscriptItem {
+    /// One turn in acceptance order.
+    Turn(ProcessTranscriptTurn),
+    /// One semantic entry in frontier order.
+    Entry(ProcessTranscriptEntry),
+}
+
+/// Counts and cursor observed after a transcript reader reaches its committed
+/// end.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProcessTranscriptSummary {
+    session: SessionId,
+    cursor: u64,
+    turn_count: u64,
+    entry_count: u64,
+}
+
+impl ProcessTranscriptSummary {
+    /// Returns the selected session.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    /// Returns the global outbox cursor from the repeatable-read snapshot.
+    pub const fn cursor(&self) -> u64 {
+        self.cursor
+    }
+
+    /// Returns the exact number of yielded turns.
+    pub const fn turn_count(&self) -> u64 {
+        self.turn_count
+    }
+
+    /// Returns the exact number of yielded semantic entries.
+    pub const fn entry_count(&self) -> u64 {
+        self.entry_count
+    }
+}
+
+/// One repeatable-read transcript cursor that owns at most one decoded row.
+///
+/// Call [`Self::next_item`] until it returns `None`. That terminal call commits
+/// the read-only transaction and makes [`Self::summary`] available. Dropping a
+/// reader early rolls its transaction back.
+#[derive(Debug)]
+pub struct ProcessTranscriptReader {
+    transaction: Option<Transaction<'static, Postgres>>,
+    session: SessionId,
+    cursor: u64,
+    lineage_tip: Option<TurnId>,
+    latest_frontier: Option<ContextFrontierId>,
+    expected_turn_count: u64,
+    turn_count: u64,
+    next_turn_after: Option<u64>,
+    turns_complete: bool,
+    entry_count: Option<u64>,
+    next_entry_index: u64,
+    summary: Option<ProcessTranscriptSummary>,
+}
+
+impl ProcessTranscriptReader {
+    /// Returns the selected session while the reader is active.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    /// Returns the snapshot's global outbox cursor.
+    pub const fn cursor(&self) -> u64 {
+        self.cursor
+    }
+
+    /// Returns the committed summary only after [`Self::next_item`] returned
+    /// `None`.
+    pub const fn summary(&self) -> Option<ProcessTranscriptSummary> {
+        self.summary
+    }
+
+    /// Yields one turn or entry without retaining prior decoded rows.
+    pub async fn next_item(&mut self) -> Result<Option<ProcessTranscriptItem>, ProcessReadError> {
+        if self.summary.is_some() {
+            return Ok(None);
+        }
+
+        if !self.turns_complete {
+            let session = self.session;
+            let next_turn_after = self.next_turn_after;
+            let row = load_next_transcript_turn(self.transaction_mut()?, session, next_turn_after)
+                .await?;
+            if let Some(row) = row {
+                let decoded = decode_transcript_turn(&row)?;
+                match (decoded.start_lineage, decoded.latest_frontier) {
+                    (None, None) => {}
+                    (Some(_), Some(frontier)) => {
+                        if Some(decoded.turn.turn()) == self.lineage_tip
+                            && self.latest_frontier.replace(frontier).is_some()
+                        {
+                            return Err(ProcessReadCorruption::Inconsistent(
+                                "turn execution lineage",
+                            )
+                            .into());
+                        }
+                    }
+                    _ => {
+                        return Err(ProcessReadCorruption::Inconsistent(
+                            "started turn frontier shape",
+                        )
+                        .into());
+                    }
+                }
+                self.next_turn_after = Some(decoded.turn.acceptance_position());
+                self.turn_count =
+                    self.turn_count
+                        .checked_add(1)
+                        .ok_or(ProcessReadCorruption::InvalidOrdinal(
+                            "transcript turn count",
+                        ))?;
+                return Ok(Some(ProcessTranscriptItem::Turn(decoded.turn)));
+            }
+            if self.turn_count != self.expected_turn_count {
+                return Err(ProcessReadCorruption::Inconsistent("turn acceptance ordering").into());
+            }
+            if self.lineage_tip.is_some() != self.latest_frontier.is_some() {
+                return Err(ProcessReadCorruption::Inconsistent("turn execution lineage").into());
+            }
+            self.turns_complete = true;
+            let session = self.session;
+            let latest_frontier = self.latest_frontier;
+            self.entry_count = Some(
+                load_transcript_entry_count(self.transaction_mut()?, session, latest_frontier)
+                    .await?,
+            );
+        }
+
+        let entry_count = self
+            .entry_count
+            .ok_or(ProcessReadCorruption::Missing("transcript entry count"))?;
+        if self.next_entry_index < entry_count {
+            let entry_index = self.next_entry_index;
+            let session = self.session;
+            let frontier = self.latest_frontier.ok_or(ProcessReadCorruption::Missing(
+                "context frontier for transcript entries",
+            ))?;
+            let entry =
+                load_transcript_entry(self.transaction_mut()?, session, frontier, entry_index)
+                    .await?;
+            self.next_entry_index = self.next_entry_index.checked_add(1).ok_or(
+                ProcessReadCorruption::InvalidOrdinal("transcript entry index"),
+            )?;
+            return Ok(Some(ProcessTranscriptItem::Entry(entry)));
+        }
+
+        let transaction = self
+            .transaction
+            .take()
+            .ok_or(ProcessReadCorruption::Missing("process read transaction"))?;
+        transaction.commit().await?;
+        self.summary = Some(ProcessTranscriptSummary {
+            session: self.session,
+            cursor: self.cursor,
+            turn_count: self.turn_count,
+            entry_count,
+        });
+        Ok(None)
+    }
+
+    fn transaction_mut(&mut self) -> Result<&mut Transaction<'static, Postgres>, ProcessReadError> {
+        self.transaction
+            .as_mut()
+            .ok_or_else(|| ProcessReadCorruption::Missing("process read transaction").into())
+    }
+}
+
 /// A committed read shape that cannot form the closed process projection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProcessReadCorruption {
@@ -436,6 +606,38 @@ impl ProcessReadRepository {
         &self,
         requested_session: SessionId,
     ) -> Result<Option<ProcessTranscriptSnapshot>, ProcessReadError> {
+        let Some(mut reader) = self.open_transcript(requested_session).await? else {
+            return Ok(None);
+        };
+        let mut turns = Vec::new();
+        let mut entries = Vec::new();
+        while let Some(item) = reader.next_item().await? {
+            match item {
+                ProcessTranscriptItem::Turn(turn) => turns.push(turn),
+                ProcessTranscriptItem::Entry(entry) => entries.push(entry),
+            }
+        }
+        let summary = reader
+            .summary()
+            .ok_or(ProcessReadCorruption::Missing("process transcript summary"))?;
+        Ok(Some(ProcessTranscriptSnapshot {
+            session: summary.session(),
+            cursor: summary.cursor(),
+            turns,
+            entries,
+        }))
+    }
+
+    /// Opens one repeatable-read transcript cursor, or `None` only when the
+    /// session is absent from that transaction snapshot.
+    ///
+    /// The cursor yields at most one decoded turn or entry at a time. This is
+    /// the production boundary for spooling snapshots without transcript-sized
+    /// process memory.
+    pub async fn open_transcript(
+        &self,
+        requested_session: SessionId,
+    ) -> Result<Option<ProcessTranscriptReader>, ProcessReadError> {
         let mut transaction = self.pool.begin().await?;
         sqlx::query(REPEATABLE_READ_ONLY)
             .execute(&mut *transaction)
@@ -461,95 +663,22 @@ impl ProcessReadRepository {
             stored_cursor.ok_or(ProcessReadCorruption::Missing("outbox sequence state"))?,
             "outbox cursor",
         )?;
-
-        let turn_rows = sqlx::query(
-            "SELECT
-                turn.turn_id,
-                turn.acceptance_position,
-                turn.origin_accepted_input_id,
-                turn.state_kind,
-                turn.start_lineage_kind,
-                turn.immediate_predecessor_turn_id,
-                turn.starting_frontier_id,
-                turn.terminal_frontier_id,
-                turn.active_phase_kind,
-                turn.current_attempt_id,
-                turn.terminal_disposition_kind,
-                turn.recovery_model_call_id,
-                turn.terminal_attempt_id,
-                turn.terminal_model_call_id,
-                terminal_call.terminal_disposition_kind
-                    AS terminal_model_call_disposition_kind,
-                accepted.accepted_input_id,
-                accepted.acceptance_position AS accepted_position,
-                accepted.origin_turn_id,
-                accepted.content_text AS accepted_content,
-                current_call.model_call_id AS current_model_call_id,
-                current_call.state_kind AS current_model_call_state_kind,
-                current_call.context_frontier_id AS current_model_call_frontier_id,
-                recovery_call.context_frontier_id AS recovery_model_call_frontier_id
-               FROM turn_lifecycle AS turn
-               LEFT JOIN accepted_input AS accepted
-                 ON accepted.accepted_input_id = turn.origin_accepted_input_id
-                AND accepted.session_id = turn.session_id
-               LEFT JOIN model_call AS current_call
-                 ON current_call.turn_attempt_id = turn.current_attempt_id
-                AND current_call.turn_id = turn.turn_id
-                AND current_call.session_id = turn.session_id
-                AND current_call.state_kind <> 'terminal'
-               LEFT JOIN model_call AS recovery_call
-                 ON recovery_call.model_call_id = turn.recovery_model_call_id
-                AND recovery_call.turn_attempt_id = turn.current_attempt_id
-                AND recovery_call.turn_id = turn.turn_id
-                AND recovery_call.session_id = turn.session_id
-                AND recovery_call.state_kind = 'terminal'
-               LEFT JOIN model_call AS terminal_call
-                 ON terminal_call.model_call_id = turn.terminal_model_call_id
-                AND terminal_call.turn_attempt_id = turn.terminal_attempt_id
-                AND terminal_call.turn_id = turn.turn_id
-                AND terminal_call.session_id = turn.session_id
-                AND terminal_call.state_kind = 'terminal'
-              WHERE turn.session_id = $1
-              ORDER BY turn.acceptance_position",
-        )
-        .bind(session_id_to_uuid(requested_session))
-        .fetch_all(&mut *transaction)
-        .await?;
-
-        let mut turns = Vec::with_capacity(turn_rows.len());
-        let mut started_turns = BTreeMap::new();
-        for row in turn_rows {
-            let decoded = decode_transcript_turn(&row)?;
-            match (decoded.start_lineage, decoded.latest_frontier) {
-                (None, None) => {}
-                (Some(lineage), Some(frontier)) => {
-                    if started_turns
-                        .insert(decoded.turn.turn(), (lineage, frontier))
-                        .is_some()
-                    {
-                        return Err(
-                            ProcessReadCorruption::Inconsistent("duplicate started turn").into(),
-                        );
-                    }
-                }
-                _ => {
-                    return Err(
-                        ProcessReadCorruption::Inconsistent("started turn frontier shape").into(),
-                    );
-                }
-            }
-            turns.push(decoded.turn);
-        }
-        let latest_frontier = latest_execution_frontier(&started_turns)?;
-        let entries =
-            load_transcript_entries(&mut transaction, requested_session, latest_frontier).await?;
-
-        transaction.commit().await?;
-        Ok(Some(ProcessTranscriptSnapshot {
+        let lineage_tip = load_execution_lineage_tip(&mut transaction, requested_session).await?;
+        let expected_turn_count =
+            load_transcript_turn_count(&mut transaction, requested_session).await?;
+        Ok(Some(ProcessTranscriptReader {
+            transaction: Some(transaction),
             session: requested_session,
             cursor,
-            turns,
-            entries,
+            lineage_tip,
+            latest_frontier: None,
+            expected_turn_count,
+            turn_count: 0,
+            next_turn_after: None,
+            turns_complete: false,
+            entry_count: None,
+            next_entry_index: 0,
+            summary: None,
         }))
     }
 }
@@ -598,74 +727,198 @@ enum DecodedStartLineage {
     After(TurnId),
 }
 
-fn latest_execution_frontier(
-    started_turns: &BTreeMap<TurnId, (DecodedStartLineage, ContextFrontierId)>,
-) -> Result<Option<ContextFrontierId>, ProcessReadError> {
-    if started_turns.is_empty() {
-        return Ok(None);
-    }
+async fn load_execution_lineage_tip(
+    transaction: &mut Transaction<'static, Postgres>,
+    session: SessionId,
+) -> Result<Option<TurnId>, ProcessReadError> {
+    let row = sqlx::query(
+        "WITH RECURSIVE
+            started AS (
+                SELECT
+                    turn_id,
+                    start_lineage_kind,
+                    immediate_predecessor_turn_id
+                  FROM turn_lifecycle
+                 WHERE session_id = $1
+                   AND state_kind IN ('active', 'terminal')
+            ),
+            chain(turn_id) AS (
+                SELECT turn_id
+                  FROM started
+                 WHERE start_lineage_kind = 'first_in_session'
+                UNION
+                SELECT child.turn_id
+                  FROM started AS child
+                  JOIN chain AS predecessor
+                    ON child.start_lineage_kind = 'after'
+                   AND child.immediate_predecessor_turn_id = predecessor.turn_id
+            ),
+            tips AS (
+                SELECT candidate.turn_id
+                  FROM started AS candidate
+                 WHERE NOT EXISTS (
+                    SELECT 1
+                      FROM started AS successor
+                     WHERE successor.start_lineage_kind = 'after'
+                       AND successor.immediate_predecessor_turn_id = candidate.turn_id
+                 )
+            )
+         SELECT
+            (SELECT count(*) FROM started) AS started_count,
+            (SELECT count(*) FROM started
+              WHERE start_lineage_kind = 'first_in_session') AS root_count,
+            (SELECT count(*) FROM chain) AS visited_count,
+            (SELECT count(*) FROM tips) AS tip_count,
+            EXISTS (
+                SELECT 1
+                  FROM started
+                 WHERE start_lineage_kind = 'after'
+                 GROUP BY immediate_predecessor_turn_id
+                HAVING count(*) > 1
+            ) AS branched,
+            EXISTS (
+                SELECT 1
+                  FROM started AS child
+                  LEFT JOIN started AS predecessor
+                    ON predecessor.turn_id = child.immediate_predecessor_turn_id
+                 WHERE child.start_lineage_kind = 'after'
+                   AND predecessor.turn_id IS NULL
+            ) AS missing_predecessor,
+            (SELECT turn_id FROM tips LIMIT 1) AS tip_turn_id",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_one(&mut **transaction)
+    .await?;
+    decode_execution_lineage_tip(
+        decode_database_count(&row, "started_count", "started turn count")?,
+        decode_database_count(&row, "root_count", "root turn count")?,
+        decode_database_count(&row, "visited_count", "visited turn count")?,
+        decode_database_count(&row, "tip_count", "tip turn count")?,
+        row.try_get("branched")?,
+        row.try_get("missing_predecessor")?,
+        row.try_get::<Option<Uuid>, _>("tip_turn_id")?
+            .map(TurnId::from_uuid),
+    )
+}
 
-    let mut root_count = 0_usize;
-    let mut successor_by_predecessor = BTreeMap::new();
-    for (turn, (lineage, _)) in started_turns {
-        match lineage {
-            DecodedStartLineage::FirstInSession => root_count += 1,
-            DecodedStartLineage::After(predecessor) => {
-                if !started_turns.contains_key(predecessor)
-                    || successor_by_predecessor
-                        .insert(*predecessor, *turn)
-                        .is_some()
-                {
-                    return Err(
-                        ProcessReadCorruption::Inconsistent("turn execution lineage").into(),
-                    );
-                }
-            }
-        }
-    }
-    if root_count != 1 {
-        return Err(ProcessReadCorruption::Inconsistent("turn execution lineage").into());
-    }
-
-    let mut tips = started_turns
-        .keys()
-        .filter(|turn| !successor_by_predecessor.contains_key(turn));
-    let tip = *tips.next().ok_or(ProcessReadCorruption::Inconsistent(
-        "turn execution lineage",
-    ))?;
-    if tips.next().is_some() {
-        return Err(ProcessReadCorruption::Inconsistent("turn execution lineage").into());
-    }
-
-    let mut visited = BTreeSet::new();
-    let mut current = tip;
-    loop {
-        if !visited.insert(current) {
-            return Err(ProcessReadCorruption::Inconsistent("turn execution lineage").into());
-        }
-        match started_turns
-            .get(&current)
-            .ok_or(ProcessReadCorruption::Inconsistent(
-                "turn execution lineage",
-            ))?
-            .0
+fn decode_execution_lineage_tip(
+    started_count: u64,
+    root_count: u64,
+    visited_count: u64,
+    tip_count: u64,
+    branched: bool,
+    missing_predecessor: bool,
+    tip: Option<TurnId>,
+) -> Result<Option<TurnId>, ProcessReadError> {
+    if started_count == 0 {
+        return if root_count == 0
+            && visited_count == 0
+            && tip_count == 0
+            && !branched
+            && !missing_predecessor
+            && tip.is_none()
         {
-            DecodedStartLineage::FirstInSession => break,
-            DecodedStartLineage::After(predecessor) => current = predecessor,
-        }
+            Ok(None)
+        } else {
+            Err(ProcessReadCorruption::Inconsistent("turn execution lineage").into())
+        };
     }
-    if visited.len() != started_turns.len() {
+    if root_count != 1
+        || visited_count != started_count
+        || tip_count != 1
+        || branched
+        || missing_predecessor
+    {
         return Err(ProcessReadCorruption::Inconsistent("turn execution lineage").into());
     }
+    tip.map(Some)
+        .ok_or_else(|| ProcessReadCorruption::Inconsistent("turn execution lineage").into())
+}
 
-    Ok(Some(
-        started_turns
-            .get(&tip)
-            .ok_or(ProcessReadCorruption::Inconsistent(
-                "turn execution lineage",
-            ))?
-            .1,
-    ))
+async fn load_transcript_turn_count(
+    transaction: &mut Transaction<'static, Postgres>,
+    session: SessionId,
+) -> Result<u64, ProcessReadError> {
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM turn_lifecycle WHERE session_id = $1")
+            .bind(session_id_to_uuid(session))
+            .fetch_one(&mut **transaction)
+            .await?;
+    u64::try_from(count)
+        .map_err(|_| ProcessReadCorruption::InvalidOrdinal("transcript turn count").into())
+}
+
+async fn load_next_transcript_turn(
+    transaction: &mut Transaction<'static, Postgres>,
+    session: SessionId,
+    after: Option<u64>,
+) -> Result<Option<PgRow>, ProcessReadError> {
+    sqlx::query(
+        "SELECT
+            turn.turn_id,
+            turn.acceptance_position,
+            turn.origin_accepted_input_id,
+            turn.state_kind,
+            turn.start_lineage_kind,
+            turn.immediate_predecessor_turn_id,
+            turn.starting_frontier_id,
+            turn.terminal_frontier_id,
+            turn.active_phase_kind,
+            turn.current_attempt_id,
+            turn.terminal_disposition_kind,
+            turn.recovery_model_call_id,
+            turn.terminal_attempt_id,
+            turn.terminal_model_call_id,
+            terminal_call.terminal_disposition_kind
+                AS terminal_model_call_disposition_kind,
+            accepted.accepted_input_id,
+            accepted.acceptance_position AS accepted_position,
+            accepted.origin_turn_id,
+            accepted.content_text AS accepted_content,
+            current_call.model_call_id AS current_model_call_id,
+            current_call.state_kind AS current_model_call_state_kind,
+            current_call.context_frontier_id AS current_model_call_frontier_id,
+            recovery_call.context_frontier_id AS recovery_model_call_frontier_id
+           FROM turn_lifecycle AS turn
+           LEFT JOIN accepted_input AS accepted
+             ON accepted.accepted_input_id = turn.origin_accepted_input_id
+            AND accepted.session_id = turn.session_id
+           LEFT JOIN model_call AS current_call
+             ON current_call.turn_attempt_id = turn.current_attempt_id
+            AND current_call.turn_id = turn.turn_id
+            AND current_call.session_id = turn.session_id
+            AND current_call.state_kind <> 'terminal'
+           LEFT JOIN model_call AS recovery_call
+             ON recovery_call.model_call_id = turn.recovery_model_call_id
+            AND recovery_call.turn_attempt_id = turn.current_attempt_id
+            AND recovery_call.turn_id = turn.turn_id
+            AND recovery_call.session_id = turn.session_id
+            AND recovery_call.state_kind = 'terminal'
+           LEFT JOIN model_call AS terminal_call
+             ON terminal_call.model_call_id = turn.terminal_model_call_id
+            AND terminal_call.turn_attempt_id = turn.terminal_attempt_id
+            AND terminal_call.turn_id = turn.turn_id
+            AND terminal_call.session_id = turn.session_id
+            AND terminal_call.state_kind = 'terminal'
+          WHERE turn.session_id = $1
+            AND ($2::numeric IS NULL OR turn.acceptance_position > $2)
+          ORDER BY turn.acceptance_position
+          LIMIT 1",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(after.map(Decimal::from))
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(Into::into)
+}
+
+fn decode_database_count(
+    row: &PgRow,
+    column: &'static str,
+    field: &'static str,
+) -> Result<u64, ProcessReadError> {
+    let count: i64 = row.try_get(column)?;
+    u64::try_from(count).map_err(|_| ProcessReadCorruption::InvalidOrdinal(field).into())
 }
 
 fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> {
@@ -1055,13 +1308,13 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
     })
 }
 
-async fn load_transcript_entries(
-    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+async fn load_transcript_entry_count(
+    transaction: &mut Transaction<'static, Postgres>,
     session: SessionId,
     frontier: Option<ContextFrontierId>,
-) -> Result<Vec<ProcessTranscriptEntry>, ProcessReadError> {
+) -> Result<u64, ProcessReadError> {
     let Some(frontier) = frontier else {
-        return Ok(Vec::new());
+        return Ok(0);
     };
     let stored_member_count: Option<Decimal> = sqlx::query_scalar(
         "SELECT member_count
@@ -1077,8 +1330,39 @@ async fn load_transcript_entries(
         stored_member_count.ok_or(ProcessReadCorruption::Missing("context frontier"))?,
         "context frontier member count",
     )?;
+    let actual_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM context_frontier_member
+          WHERE owning_session_id = $1
+            AND context_frontier_id = $2",
+    )
+    .bind(session_id_to_uuid(session))
+    .bind(frontier.into_uuid())
+    .fetch_one(&mut **transaction)
+    .await?;
+    let actual_count = u64::try_from(actual_count)
+        .map_err(|_| ProcessReadCorruption::InvalidOrdinal("transcript entry count"))?;
+    if actual_count != member_count {
+        return Err(
+            ProcessReadCorruption::Inconsistent("context frontier declared membership").into(),
+        );
+    }
+    Ok(member_count)
+}
 
-    let rows = sqlx::query(
+async fn load_transcript_entry(
+    transaction: &mut Transaction<'static, Postgres>,
+    session: SessionId,
+    frontier: ContextFrontierId,
+    entry_index: u64,
+) -> Result<ProcessTranscriptEntry, ProcessReadError> {
+    let member_position =
+        entry_index
+            .checked_add(1)
+            .ok_or(ProcessReadCorruption::InvalidOrdinal(
+                "frontier member position",
+            ))?;
+    let row = sqlx::query(
         "SELECT
             member.member_position,
             member.source_session_id,
@@ -1107,37 +1391,24 @@ async fn load_transcript_entries(
             AND call.model_call_id = entry.producing_model_call_id
           WHERE member.owning_session_id = $1
             AND member.context_frontier_id = $2
-          ORDER BY member.member_position",
+            AND member.member_position = $3",
     )
     .bind(session_id_to_uuid(session))
     .bind(frontier.into_uuid())
-    .fetch_all(&mut **transaction)
+    .bind(Decimal::from(member_position))
+    .fetch_optional(&mut **transaction)
     .await?;
-    let actual_count = u64::try_from(rows.len())
-        .map_err(|_| ProcessReadCorruption::InvalidOrdinal("transcript entry count"))?;
-    if actual_count != member_count {
+    let row = row.ok_or(ProcessReadCorruption::Missing("context frontier member"))?;
+    let stored_position = decode_positive(
+        required(&row, "member_position")?,
+        "frontier member position",
+    )?;
+    if stored_position != member_position {
         return Err(
-            ProcessReadCorruption::Inconsistent("context frontier declared membership").into(),
+            ProcessReadCorruption::Inconsistent("context frontier contiguous membership").into(),
         );
     }
-
-    let mut entries = Vec::with_capacity(rows.len());
-    for (zero_based_index, row) in rows.into_iter().enumerate() {
-        let expected_index = u64::try_from(zero_based_index)
-            .map_err(|_| ProcessReadCorruption::InvalidOrdinal("transcript entry index"))?;
-        let stored_position = decode_positive(
-            required(&row, "member_position")?,
-            "frontier member position",
-        )?;
-        if stored_position != expected_index + 1 {
-            return Err(ProcessReadCorruption::Inconsistent(
-                "context frontier contiguous membership",
-            )
-            .into());
-        }
-        entries.push(decode_transcript_entry(&row, expected_index)?);
-    }
-    Ok(entries)
+    decode_transcript_entry(&row, entry_index)
 }
 
 fn decode_transcript_entry(
@@ -1349,40 +1620,25 @@ fn decode_positive(value: Decimal, field: &'static str) -> Result<u64, ProcessRe
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
-    use signalbox_domain::{ContextFrontierId, TurnId};
+    use signalbox_domain::TurnId;
     use sqlx::types::Uuid;
 
-    use super::{DecodedStartLineage, latest_execution_frontier};
+    use super::decode_execution_lineage_tip;
 
     fn turn(value: u128) -> TurnId {
         TurnId::from_uuid(Uuid::from_u128(value))
     }
 
-    fn frontier(value: u128) -> ContextFrontierId {
-        ContextFrontierId::from_uuid(Uuid::from_u128(value))
-    }
-
     /// S24 / INV-032: acceptance order A, B, C may execute as A, C, B; the
-    /// process snapshot selects B's frontier from persisted start lineage.
+    /// database lineage diagnostic selects B as the one complete-chain tip.
     #[test]
-    fn s24_inv032_latest_frontier_follows_execution_lineage() {
-        let first = turn(1);
+    fn s24_inv032_latest_tip_follows_execution_lineage() {
         let second = turn(2);
-        let interrupt = turn(3);
-        let started = BTreeMap::from([
-            (first, (DecodedStartLineage::FirstInSession, frontier(11))),
-            (
-                second,
-                (DecodedStartLineage::After(interrupt), frontier(12)),
-            ),
-            (interrupt, (DecodedStartLineage::After(first), frontier(13))),
-        ]);
 
         assert_eq!(
-            latest_execution_frontier(&started).expect("the lineage is one complete chain"),
-            Some(frontier(12))
+            decode_execution_lineage_tip(3, 1, 3, 1, false, false, Some(second))
+                .expect("the lineage is one complete chain"),
+            Some(second)
         );
     }
 
@@ -1390,13 +1646,6 @@ mod tests {
     /// authoritative snapshot frontier and therefore fails closed.
     #[test]
     fn inv032_latest_frontier_rejects_branched_execution_lineage() {
-        let first = turn(1);
-        let started = BTreeMap::from([
-            (first, (DecodedStartLineage::FirstInSession, frontier(11))),
-            (turn(2), (DecodedStartLineage::After(first), frontier(12))),
-            (turn(3), (DecodedStartLineage::After(first), frontier(13))),
-        ]);
-
-        assert!(latest_execution_frontier(&started).is_err());
+        assert!(decode_execution_lineage_tip(3, 1, 3, 2, true, false, Some(turn(2))).is_err());
     }
 }

@@ -231,6 +231,17 @@ One logical snapshot is a bounded message sequence sharing the request identity:
 3. the entry messages below in frontier-member order; and
 4. `transcript_snapshot_end { session_id, cursor, turn_count, entry_count }`.
 
+The hub builds that complete sequence in a secure unnamed temporary file before
+writing its first snapshot frame to the connection. Persistence validates the
+execution lineage in PostgreSQL and yields one turn or frontier member at a time
+from the same read-only repeatable-read transaction; hubd encodes each item
+directly to the spool, commits the transaction after the final item, rewinds,
+and streams the completed file. A slow client therefore holds neither a
+PostgreSQL snapshot nor transcript-sized heap state. Per request, heap retention
+is bounded by one decoded row, one protocol frame, and fixed I/O buffers;
+temporary disk usage follows the complete encoded transcript size. Projection or
+spool failure exposes no partial snapshot sequence.
+
 Each `transcript_turn` has `turn_id` and one closed `state` object:
 
 - `queued { accepted_input_id, content }`;
