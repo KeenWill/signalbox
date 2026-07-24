@@ -61,5 +61,5 @@ pub use tool_dispatch_gate::{InProcessToolDispatchGate, InProcessToolDispatchPer
 pub use tool_loop_ports::{
     DecideToolRequestTransaction, PrepareToolContinuationOutcome, ResolvedToolConversationEntry,
     RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationStatus,
-    ToolContinuationIdentities, ToolExecutionTransaction,
+    ToolContinuationIdentities, ToolCrashClosureIdentities, ToolExecutionTransaction,
 };
