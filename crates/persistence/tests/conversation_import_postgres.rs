@@ -20,7 +20,12 @@ use signalbox_application::{
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
-    ImportedConversationId, ImportedConversationReconstitutionFailure, ImportedTranscriptEntryId,
+    ImportedConversation, ImportedConversationFormat, ImportedConversationId,
+    ImportedConversationReconstitutionFailure, ImportedRawRecordPosition, ImportedRawSourceRecord,
+    ImportedRecordEntryPosition, ImportedSourceAttestation, ImportedSourceMetadata,
+    ImportedSpeaker, ImportedStructuredObjectMember, ImportedStructuredValue, ImportedText,
+    ImportedTranscriptContent, ImportedTranscriptEntryId, ImportedTranscriptEntryInput,
+    ImportedTranscriptPosition,
 };
 use signalbox_persistence::{
     conversation_import::{
@@ -181,6 +186,93 @@ async fn s28_inv038_import_round_trip_is_idempotent_and_restart_safe() -> Result
     assert_eq!(restarted, stored);
 
     restarted_pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S28 / INV-038: equal source bytes cannot resolve as replay when a drifting
+/// converter supplies a different normalized record and semantic projection.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s28_inv038_reingestion_rejects_converter_projection_drift() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let source = br#"{"type":"user","message":{"content":"original"}}"#;
+    let winner = ImportedConversationId::from_uuid(Uuid::from_u128(0x100));
+    let repository = ImportedConversationRepository::new(pool.clone());
+    let mut service = ImportConversationService::new(
+        FixedIds::new(&[0x100], [0x200]),
+        ClaudeCodeJsonlConverter,
+        repository,
+    );
+    assert_eq!(
+        service.execute(source).await?,
+        ImportConversationOutcome::Inserted {
+            conversation: winner
+        }
+    );
+    let (_, _, repository) = service.into_parts();
+
+    let candidate = ImportedConversationId::from_uuid(Uuid::from_u128(0x300));
+    let text = |value: &str| ImportedText::new(String::from(value));
+    let member = |name: &str, value| {
+        ImportedStructuredObjectMember::new(ImportedText::new(String::from(name)), value)
+    };
+    let normalized = ImportedStructuredValue::Object(
+        vec![
+            member("type", ImportedStructuredValue::String(text("user"))),
+            member(
+                "message",
+                ImportedStructuredValue::Object(
+                    vec![member(
+                        "content",
+                        ImportedStructuredValue::String(text("drifted")),
+                    )]
+                    .into_boxed_slice(),
+                ),
+            ),
+        ]
+        .into_boxed_slice(),
+    );
+    let raw = ImportedRawSourceRecord::from_converted(source.to_vec(), normalized);
+    let metadata = ImportedSourceMetadata::new(
+        ImportedSourceAttestation::NotAttested,
+        ImportedSourceAttestation::NotAttested,
+        ImportedSourceAttestation::NotAttested,
+        ImportedSourceAttestation::NotAttested,
+        ImportedSourceAttestation::NotAttested,
+        ImportedSourceAttestation::NotAttested,
+        ImportedSourceAttestation::NotAttested,
+    );
+    let projected = ImportedTranscriptEntryInput::new(
+        ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(0x400)),
+        candidate,
+        ImportedTranscriptPosition::first(),
+        ImportedRawRecordPosition::first(),
+        ImportedRecordEntryPosition::first(),
+        ImportedSourceAttestation::Attested(ImportedSpeaker::User),
+        ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(text("drifted"))),
+        metadata,
+    );
+    let drifted = ImportedConversation::from_converted_records(
+        candidate,
+        ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
+        vec![raw],
+        vec![projected],
+    )
+    .expect("the drifting projection is internally coherent");
+
+    let error = repository
+        .resolve_or_insert(drifted)
+        .await
+        .expect_err("the same source digest cannot replay with new semantics");
+    assert!(matches!(
+        error,
+        ImportedConversationRepositoryError::Corruption(
+            ImportedConversationCorruption::ExistingSnapshotMismatch
+        )
+    ));
+
+    pool.close().await;
     drop(container);
     Ok(())
 }
