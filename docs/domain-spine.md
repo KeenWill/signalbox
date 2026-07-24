@@ -197,7 +197,7 @@ pub enum ImportedToolResultBlock {
 }
 
 pub enum ImportedToolResultValue {
-    Text(ImportedSourceAttestation<ImportedText>),
+    Text(ImportedText),
     Blocks(Box<[ImportedToolResultBlock]>),
 }
 
@@ -205,7 +205,10 @@ pub enum ImportedTranscriptContent {
     SourceEvent {
         source_type: ImportedSourceAttestation<ImportedText>,
     },
-    Text(ImportedText),
+    SourceMessageBlock {
+        source_type: ImportedSourceAttestation<ImportedText>,
+    },
+    Text(ImportedSourceAttestation<ImportedText>),
     ToolCall {
         source_call_id: ImportedSourceAttestation<ImportedText>,
         name: ImportedSourceAttestation<ImportedText>,

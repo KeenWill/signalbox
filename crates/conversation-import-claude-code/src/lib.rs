@@ -473,6 +473,10 @@ fn normalize_content_block(
             source: media_source_attestation(members, "source")
                 .map_err(|()| invalid_content_block(line, block))?,
         }),
+        "fallback" => Ok(ImportedTranscriptContent::SourceMessageBlock {
+            source_type: text_attestation(members, "type")
+                .map_err(|()| invalid_content_block(line, block))?,
+        }),
         _ => Err(conversion_error(
             ClaudeCodeJsonlConversionFailure::UnknownContentBlockType { line, block },
         )),
@@ -684,9 +688,10 @@ mod tests {
 
     use signalbox_application::ImportedConversationConverter;
     use signalbox_domain::{
-        ImportedConversationId, ImportedMessageContentAbsence, ImportedSourceAttestation,
-        ImportedSpeaker, ImportedToolResultBlock, ImportedToolResultValue,
-        ImportedTranscriptContent, ImportedTranscriptEntryId,
+        ImportedConversation, ImportedConversationId, ImportedMessageContentAbsence,
+        ImportedSourceAttestation, ImportedSpeaker, ImportedToolResultBlock,
+        ImportedToolResultValue, ImportedTranscriptContent, ImportedTranscriptEntry,
+        ImportedTranscriptEntryId,
     };
     use uuid::Uuid;
 
@@ -709,6 +714,29 @@ mod tests {
             .collect()
     }
 
+    #[track_caller]
+    fn assert_all_frontiers_resolve_exact_prefixes(imported: &ImportedConversation) {
+        for frontier in imported.frontiers() {
+            assert_eq!(
+                imported
+                    .prefix(frontier)
+                    .map(<[ImportedTranscriptEntry]>::len),
+                usize::try_from(frontier.through_position().as_u64()).ok()
+            );
+        }
+    }
+
+    #[track_caller]
+    fn assert_message_absence(
+        entry: &ImportedTranscriptEntry,
+        expected: ImportedMessageContentAbsence,
+    ) {
+        assert_eq!(
+            entry.content(),
+            &ImportedTranscriptContent::MessageContentAbsent(expected)
+        );
+    }
+
     #[test]
     fn inv038_converts_every_observed_content_kind_and_frontier() {
         let source = concat!(
@@ -725,6 +753,8 @@ mod tests {
             "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[",
             "{\"type\":\"thinking\",\"thinking\":\"private\",\"signature\":\"sig\"},",
             "{\"type\":\"redacted_thinking\",\"data\":\"sealed\"},",
+            "{\"type\":\"fallback\",\"from\":{\"model\":\"before\"},",
+            "\"to\":{\"model\":\"after\"}},",
             "{\"type\":\"tool_use\",\"id\":\"call\",\"name\":\"lookup\",",
             "\"input\":{\"same\":1,\"same\":2},\"caller\":{\"kind\":\"direct\"}},",
             "{\"type\":\"document\",\"source\":{\"type\":\"base64\",",
@@ -746,16 +776,9 @@ mod tests {
             Some(&b'}'),
             "CRLF is a delimiter, not raw record content"
         );
-        assert_eq!(imported.entries().len(), 8);
+        assert_eq!(imported.entries().len(), 9);
         assert_eq!(imported.frontiers().count(), imported.entries().len());
-        for frontier in imported.frontiers() {
-            assert_eq!(
-                imported
-                    .prefix(frontier)
-                    .map(<[signalbox_domain::ImportedTranscriptEntry]>::len),
-                usize::try_from(frontier.through_position().as_u64()).ok()
-            );
-        }
+        assert_all_frontiers_resolve_exact_prefixes(&imported);
         assert!(matches!(
             imported.entries()[0].content(),
             ImportedTranscriptContent::SourceEvent { .. }
@@ -776,6 +799,12 @@ mod tests {
             &blocks[0],
             ImportedToolResultBlock::Text(ImportedSourceAttestation::AttestedAbsent)
         ));
+        assert!(matches!(
+            imported.entries()[5].content(),
+            ImportedTranscriptContent::SourceMessageBlock {
+                source_type: ImportedSourceAttestation::Attested(value)
+            } if value.as_str() == "fallback"
+        ));
     }
 
     #[test]
@@ -795,19 +824,26 @@ mod tests {
                 })
             })
             .unwrap_or_else(|_| panic!("synthetic absence transcript should convert"));
-        let expected = [
+        assert_message_absence(
+            &imported.entries()[0],
             ImportedMessageContentAbsence::MessageNotAttested,
+        );
+        assert_message_absence(
+            &imported.entries()[1],
             ImportedMessageContentAbsence::MessageAttestedAbsent,
+        );
+        assert_message_absence(
+            &imported.entries()[2],
             ImportedMessageContentAbsence::ContentNotAttested,
+        );
+        assert_message_absence(
+            &imported.entries()[3],
             ImportedMessageContentAbsence::ContentAttestedAbsent,
+        );
+        assert_message_absence(
+            &imported.entries()[4],
             ImportedMessageContentAbsence::EmptyBlockArray,
-        ];
-        for (entry, expected) in imported.entries().iter().zip(expected) {
-            assert_eq!(
-                entry.content(),
-                &ImportedTranscriptContent::MessageContentAbsent(expected)
-            );
-        }
+        );
     }
 
     #[test]
