@@ -10,6 +10,7 @@ pub mod create_session;
 pub mod mapping;
 pub mod model_execution;
 pub mod outbox;
+pub mod process_read;
 pub mod replace_session_defaults;
 pub mod scheduler;
 pub mod session;

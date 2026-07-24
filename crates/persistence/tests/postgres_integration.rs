@@ -34,15 +34,16 @@ use signalbox_domain::{
     AcceptedInputId, AcceptedInputStartingLineage, ActivatedAcceptedInputTurn, ActiveTurnPhase,
     AmbiguousModelCallTurnIdentities, AssistantText, AuthorizedModelCall,
     CancelledModelCallTurnIdentities, CompletedModelCallIdentities, ContextFrontierId,
-    CreateSession, CurrentTurnAttemptState, DeliveryRequest, DurableCommandId,
-    FailedModelCallTurnIdentities, ModelAlias, ModelCallId, ModelCallTerminalIdentities,
-    ModelCallTerminalObservation, ModelCallTerminalOutcome, ModelSelectionOverride,
-    ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition, PerInputConfigurationChoices,
-    PhysicalCancellationModelCallTurnIdentities, PreparedCreateSession, PreparedModelCallRequest,
-    ProviderModelIdentity, RefusedModelCallTurnIdentities, ReplaceSessionDefaults,
-    ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult, ResolvedProviderTarget,
-    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
-    SessionCreationCause, SessionCreationProvenance, SessionId, SessionInputPosition, SubmitInput,
+    CreateSession, CurrentTurnAttemptState, DeliveryRequest, DirectModelSelection,
+    DurableCommandId, FailedModelCallTurnIdentities, ModelAlias, ModelCallId,
+    ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
+    ModelSelectionOverride, ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition,
+    PerInputConfigurationChoices, PhysicalCancellationModelCallTurnIdentities,
+    PreparedCreateSession, PreparedModelCallRequest, ProviderModelIdentity,
+    RefusedModelCallTurnIdentities, ReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult,
+    ReplaceSessionDefaultsResult, ResolvedProviderTarget, SemanticTranscriptEntryId,
+    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
+    SessionCreationProvenance, SessionId, SessionInputPosition, SubmitInput,
     SubmitInputAppliedResult, SubmitInputReconstitutionFailure, SubmitInputRejectedResult,
     SubmitInputResult, TranscriptAncestry, TurnAttemptId, TurnConfigurationProvenance, TurnId,
     UserContent,
@@ -62,6 +63,10 @@ use signalbox_persistence::{
         DispatchedModelCallState, DispatchedOutboxEvent, DispatchedOutboxEventKind,
         OutboxCorruption, OutboxDeliveryDecision, OutboxDispatchError, OutboxDispatchOutcome,
         OutboxDispatcher,
+    },
+    process_read::{
+        ProcessCurrentModelCallState, ProcessFailedModelCallDisposition, ProcessModelSelection,
+        ProcessReadRepository, ProcessTranscriptEntry, ProcessTurnState,
     },
     replace_session_defaults::{
         ReplaceSessionDefaultsCorruption, ReplaceSessionDefaultsHandlingOutcome,
@@ -428,6 +433,11 @@ async fn assert_outbox_truncate_rejected(
     Ok(())
 }
 
+/// Derives the direct model selection installed by the outbox session fixture.
+fn outbox_session_fixture_model_selection(session_seed: u128) -> DirectModelSelection {
+    DirectModelSelection::from_uuid(Uuid::from_u128(session_seed ^ 0x2000))
+}
+
 async fn drain_outbox<Inspect>(
     pool: &PgPool,
     mut inspect: Inspect,
@@ -506,15 +516,14 @@ async fn rewind_outbox_delivery_before(
 
 /// Inserts the complete pre-outbox session record family for allocator tests.
 ///
-/// The command and model identities derive from the one session seed so the
-/// fixture states only the session identity those tests observe.
+/// The command and model identities derive from the one session seed.
 async fn insert_outbox_session_fixture(
     pool: &PgPool,
     session_seed: u128,
 ) -> Result<Uuid, sqlx::Error> {
     let session = Uuid::from_u128(session_seed);
     let command = Uuid::from_u128(session_seed ^ 0x1000);
-    let model = Uuid::from_u128(session_seed ^ 0x2000);
+    let model = outbox_session_fixture_model_selection(session_seed);
     let mut transaction = pool.begin().await?;
 
     sqlx::query(
@@ -543,7 +552,7 @@ async fn insert_outbox_session_fixture(
          VALUES ($1, 1, 'direct', $2, NULL)",
     )
     .bind(session)
-    .bind(model)
+    .bind(model.into_uuid())
     .execute(&mut *transaction)
     .await?;
     sqlx::query(
@@ -567,7 +576,7 @@ async fn insert_outbox_session_fixture(
          )",
     )
     .bind(command)
-    .bind(model)
+    .bind(model.into_uuid())
     .bind(session)
     .execute(&mut *transaction)
     .await?;
@@ -1563,6 +1572,24 @@ async fn model_call_noncompleted_rereads_validate_each_durable_closure()
             .await?,
         RetainedModelCallObservationStatus::AlreadyCommitted
     );
+    let cancelled_failure_snapshot = ProcessReadRepository::new(pool.clone())
+        .read_transcript(cancelled.session)
+        .await?
+        .expect("the failed-after-cancellation session has a transcript projection");
+    let ProcessTurnState::Failed {
+        terminal_attempt: Some(terminal_attempt),
+        terminal_model_call: Some(terminal_call),
+        ..
+    } = cancelled_failure_snapshot.turns()[0].state()
+    else {
+        panic!("the failed projection must retain its cancelled call");
+    };
+    assert_eq!(*terminal_attempt, cancelled.attempt);
+    assert_eq!(terminal_call.call(), cancelled.call);
+    assert_eq!(
+        terminal_call.disposition(),
+        ProcessFailedModelCallDisposition::Cancelled
+    );
     sqlx::query("ALTER TABLE turn_failed_outbox_event DISABLE TRIGGER USER")
         .execute(&pool)
         .await?;
@@ -1814,6 +1841,16 @@ async fn issued_interrupt_requests_and_confirms_durable_cancellation() -> Result
     .fetch_one(&pool)
     .await?;
     assert_eq!(stopped_shape, (1, 1, 1));
+    let stopped_snapshot = ProcessReadRepository::new(pool.clone())
+        .read_transcript(fixture.session)
+        .await?
+        .expect("the stopped session has a transcript projection");
+    assert_running_current_model_call(
+        stopped_snapshot.turns()[0].state(),
+        fixture.attempt,
+        fixture.call,
+        ProcessCurrentModelCallState::CancellationRequested,
+    );
 
     let ModelCallAuthorizationReread::CancellationRequested(stopped) = model_repository
         .reread_ambiguous_authorization(fixture.session, &prepared)
@@ -1886,6 +1923,27 @@ async fn issued_interrupt_requests_and_confirms_durable_cancellation() -> Result
     .fetch_one(&pool)
     .await?;
     assert_eq!(terminal_shape, (1, 1, 1, 1));
+    let cancelled_snapshot = ProcessReadRepository::new(pool.clone())
+        .read_transcript(fixture.session)
+        .await?
+        .expect("the cancelled session has a transcript projection");
+    assert_eq!(
+        cancelled_snapshot.turns()[0].state(),
+        &ProcessTurnState::Cancelled {
+            terminal_frontier: ContextFrontierId::from_uuid(Uuid::from_u128(seed + 23)),
+            terminal_attempt: fixture.attempt,
+            terminal_call: Some(fixture.call),
+        }
+    );
+    assert!(matches!(
+        cancelled_snapshot.entries().last(),
+        Some(ProcessTranscriptEntry::TurnCancelled {
+            entry,
+            turn,
+            ..
+        }) if *entry == SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 22))
+            && *turn == fixture.turn
+    ));
     assert_eq!(
         model_repository
             .reread_terminal_observation(fixture.session, &observation)
@@ -2055,6 +2113,18 @@ async fn stopped_ambiguity_commits_reconciliation_and_rereads_exactly() -> Resul
     .fetch_one(&pool)
     .await?;
     assert_eq!(stored, (1, 1, 1));
+    let reconciliation_snapshot = ProcessReadRepository::new(pool.clone())
+        .read_transcript(fixture.session)
+        .await?
+        .expect("the reconciliation-required session has a transcript projection");
+    assert_eq!(
+        reconciliation_snapshot.turns()[0].state(),
+        &ProcessTurnState::ReconciliationRequired {
+            terminal_frontier: ContextFrontierId::from_uuid(Uuid::from_u128(seed + 22)),
+            terminal_attempt: fixture.attempt,
+            terminal_call: fixture.call,
+        }
+    );
 
     let mut reconciliation_event = None;
     drain_outbox(&pool, |event| {
@@ -2102,6 +2172,18 @@ async fn stopped_ambiguity_commits_reconciliation_and_rereads_exactly() -> Resul
             if ambiguous.turn() == waiting.turn
                 && ambiguous.call().id() == waiting.call
     ));
+    let waiting_snapshot = ProcessReadRepository::new(pool.clone())
+        .read_transcript(waiting.session)
+        .await?
+        .expect("the ambiguous call has a transcript projection");
+    assert_eq!(
+        waiting_snapshot.turns()[0].state(),
+        &ProcessTurnState::ActiveAwaitingModelCallRecovery {
+            ended_attempt: waiting.attempt,
+            recovery_call: waiting.call,
+        }
+    );
+    assert_eq!(waiting_snapshot.entries().len(), 1);
     let submit_repository = SubmitInputRepository::new(pool.clone());
     let waiting_steering_command = input_with_delivery(
         waiting_seed + 0x100,
@@ -2288,6 +2370,28 @@ async fn stopped_ambiguity_commits_reconciliation_and_rereads_exactly() -> Resul
             .reread_terminal_observation(failed.session, &failed_observation)
             .await?,
         RetainedModelCallObservationStatus::AlreadyCommitted
+    );
+    let failed_snapshot = ProcessReadRepository::new(pool.clone())
+        .read_transcript(failed.session)
+        .await?
+        .expect("the failed session has a transcript projection");
+    let ProcessTurnState::Failed {
+        terminal_frontier,
+        terminal_attempt: Some(terminal_attempt),
+        terminal_model_call: Some(terminal_call),
+    } = failed_snapshot.turns()[0].state()
+    else {
+        panic!("the failed projection must retain its physical evidence");
+    };
+    assert_eq!(
+        *terminal_frontier,
+        ContextFrontierId::from_uuid(Uuid::from_u128(failed_seed + 23))
+    );
+    assert_eq!(*terminal_attempt, failed.attempt);
+    assert_eq!(terminal_call.call(), failed.call);
+    assert_eq!(
+        terminal_call.disposition(),
+        ProcessFailedModelCallDisposition::KnownFailed
     );
 
     let refused_seed = seed + 0x80;
@@ -3020,11 +3124,32 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
     Ok(())
 }
 
-/// S02 / S08 / INV-005 / INV-012 / INV-014 / INV-015 / INV-036: the scripted
+#[track_caller]
+fn assert_projected_steering_entry(
+    entry: &ProcessTranscriptEntry,
+    expected_input: AcceptedInputId,
+    expected_turn: TurnId,
+    expected_content: &str,
+) {
+    assert!(matches!(
+        entry,
+        ProcessTranscriptEntry::User {
+            accepted_input,
+            turn,
+            content,
+            ..
+        } if *accepted_input == expected_input
+            && *turn == expected_turn
+            && content == expected_content
+    ));
+}
+
+/// S02 / S08 / INV-005 / INV-012 / INV-014 / INV-015 / INV-032 / INV-036: the scripted
 /// application path consumes multiple steering inputs at preparation, renders
-/// them to the provider in acceptance order, rejects noncontiguous stored
-/// snapshot ordinals before resume, preserves the staged terminal commits, and
-/// replays each immutable pending-steering receipt after consumption.
+/// them immediately in the process projection and to the provider in acceptance
+/// order, rejects noncontiguous stored snapshot ordinals before resume,
+/// preserves the staged terminal commits, and replays each immutable
+/// pending-steering receipt after consumption.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s02_inv014_inv015_application_service_completes_scripted_reply()
@@ -3261,6 +3386,23 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
         service.execute(session).await?,
         ModelCallExecutionOutcome::Checkpointed(call)
     );
+    let prepared_snapshot = ProcessReadRepository::new(pool.clone())
+        .read_transcript(session)
+        .await?
+        .expect("the prepared call has a transcript projection");
+    assert_eq!(prepared_snapshot.entries().len(), 3);
+    assert_projected_steering_entry(
+        &prepared_snapshot.entries()[1],
+        steering_inputs[0],
+        turn,
+        "first steering",
+    );
+    assert_projected_steering_entry(
+        &prepared_snapshot.entries()[2],
+        steering_inputs[1],
+        turn,
+        "second steering",
+    );
     sqlx::query("ALTER TABLE context_frontier_member DISABLE TRIGGER USER")
         .execute(&pool)
         .await?;
@@ -3394,6 +3536,22 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
     .fetch_one(&pool)
     .await?;
     assert_eq!(durable_terminal, (1, 1, 2, 2));
+    let transcript = ProcessReadRepository::new(pool.clone())
+        .read_transcript(session)
+        .await?
+        .expect("the completed session has a transcript projection");
+    assert_projected_steering_entry(
+        &transcript.entries()[1],
+        steering_inputs[0],
+        turn,
+        "first steering",
+    );
+    assert_projected_steering_entry(
+        &transcript.entries()[2],
+        steering_inputs[1],
+        turn,
+        "second steering",
+    );
     let successor_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x19e4));
     let successor_turn = TurnId::from_uuid(Uuid::from_u128(0x1ae4));
     let successor = submit_repository
@@ -12689,6 +12847,209 @@ async fn s24_inv032_outbox_delivery_prefix_is_stable() -> Result<(), Box<dyn Err
     assert_eq!(first_sequence, Decimal::ONE);
     assert_eq!(second_sequence, Decimal::from(2));
     assert_eq!(undelivered_suffix, vec![second_sequence]);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S24: session summaries are one complete repeatable-read projection in
+/// stable session-identity order, including the selected defaults row.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_process_session_summary_sequence_matches_repeatable_projection()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let earlier_selection = outbox_session_fixture_model_selection(0xe31);
+    let earlier_session = insert_outbox_session_fixture(&pool, 0xe31).await?;
+    let later_session = Uuid::from_u128(0xe32);
+    let alias = ModelAlias::from_uuid(Uuid::from_u128(0xae32));
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(0x4e32, 0xe32, ModelSelectionRequest::Alias(alias)))
+        .await?;
+
+    let summaries = ProcessReadRepository::new(pool.clone())
+        .list_sessions()
+        .await?;
+
+    assert_eq!(summaries.len(), 2);
+    assert_eq!(summaries[0].session().into_uuid(), earlier_session);
+    assert_eq!(summaries[0].defaults_version(), 1);
+    assert_eq!(
+        summaries[0].model_selection(),
+        ProcessModelSelection::Direct(earlier_selection)
+    );
+    assert_eq!(summaries[1].session().into_uuid(), later_session);
+    assert_eq!(summaries[1].defaults_version(), 1);
+    assert_eq!(
+        summaries[1].model_selection(),
+        ProcessModelSelection::Alias(alias)
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S24 / INV-032: the process transcript read observes the global outbox
+/// cursor, ordered turn state, and latest semantic frontier in one
+/// repeatable-read snapshot.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_inv032_process_transcript_is_one_authoritative_snapshot() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = SessionId::from_uuid(Uuid::from_u128(0x8e41));
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0xce41));
+    CreateSessionRepository::new(pool.clone())
+        .handle(prepared(
+            0x4e41,
+            0x8e41,
+            ModelSelectionRequest::Direct(selection),
+        ))
+        .await?;
+    let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x9e41));
+    let turn = TurnId::from_uuid(Uuid::from_u128(0xae41));
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                0x4e42,
+                0x8e41,
+                "projected user request",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            accepted_input,
+            Some(turn),
+        )
+        .await?;
+    let repository = ProcessReadRepository::new(pool.clone());
+    assert!(
+        repository
+            .read_transcript(SessionId::from_uuid(Uuid::from_u128(0xffff)))
+            .await?
+            .is_none()
+    );
+    let queued_snapshot = repository
+        .read_transcript(session)
+        .await?
+        .expect("the committed session has a transcript projection");
+
+    assert_eq!(queued_snapshot.session(), session);
+    assert_eq!(queued_snapshot.cursor(), 2);
+    assert_eq!(queued_snapshot.turns().len(), 1);
+    assert_eq!(queued_snapshot.turns()[0].turn(), turn);
+    assert_eq!(queued_snapshot.turns()[0].acceptance_position(), 1);
+    assert_eq!(
+        queued_snapshot.turns()[0].state(),
+        &ProcessTurnState::Queued {
+            accepted_input,
+            content: "projected user request".to_owned(),
+        }
+    );
+    assert!(queued_snapshot.entries().is_empty());
+
+    let origin_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde41));
+    let starting_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0xee41));
+    let attempt = TurnAttemptId::from_uuid(Uuid::from_u128(0xbe41));
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: session.into_uuid(),
+            origin_entry: origin_entry.into_uuid(),
+            starting_frontier: starting_frontier.into_uuid(),
+            initial_attempt: attempt.into_uuid(),
+        },
+    )
+    .await?;
+
+    let snapshot = repository
+        .read_transcript(session)
+        .await?
+        .expect("the committed session has a transcript projection");
+
+    assert_eq!(snapshot.session(), session);
+    assert_eq!(snapshot.cursor(), 3);
+    assert_eq!(snapshot.turns().len(), 1);
+    assert_eq!(snapshot.turns()[0].turn(), turn);
+    assert_eq!(snapshot.turns()[0].acceptance_position(), 1);
+    assert_eq!(
+        snapshot.turns()[0].state(),
+        &ProcessTurnState::ActiveRunning {
+            current_attempt: attempt,
+            current_model_call: None,
+        }
+    );
+    assert_eq!(
+        snapshot.entries(),
+        [ProcessTranscriptEntry::User {
+            entry_index: 0,
+            source_session: session,
+            entry: origin_entry,
+            accepted_input,
+            turn,
+            content: "projected user request".to_owned(),
+        }]
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[track_caller]
+fn assert_running_current_model_call(
+    state: &ProcessTurnState,
+    expected_attempt: TurnAttemptId,
+    expected_call: ModelCallId,
+    expected_state: ProcessCurrentModelCallState,
+) {
+    let ProcessTurnState::ActiveRunning {
+        current_attempt,
+        current_model_call: Some(current_model_call),
+    } = state
+    else {
+        panic!("expected one current model call on a running turn");
+    };
+    assert_eq!(*current_attempt, expected_attempt);
+    assert_eq!(current_model_call.call(), expected_call);
+    assert_eq!(current_model_call.state(), expected_state);
+}
+
+/// S24 / INV-032: a process transcript snapshot exposes the exact durable
+/// Prepared, InFlight, or CancellationRequested state of the current model
+/// call.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s24_inv032_process_transcript_projects_current_model_call_state()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let prepared = checkpoint_restart_model_call(&pool, 0x8e50, false).await?;
+    let in_flight = checkpoint_restart_model_call(&pool, 0x8e60, true).await?;
+    let repository = ProcessReadRepository::new(pool.clone());
+    let prepared_snapshot = repository
+        .read_transcript(prepared.session)
+        .await?
+        .expect("the prepared-call session is committed");
+    let in_flight_snapshot = repository
+        .read_transcript(in_flight.session)
+        .await?
+        .expect("the in-flight-call session is committed");
+
+    assert_eq!(prepared_snapshot.turns().len(), 1);
+    assert_running_current_model_call(
+        prepared_snapshot.turns()[0].state(),
+        prepared.attempt,
+        prepared.call,
+        ProcessCurrentModelCallState::Prepared,
+    );
+    assert_eq!(in_flight_snapshot.turns().len(), 1);
+    assert_running_current_model_call(
+        in_flight_snapshot.turns()[0].state(),
+        in_flight.attempt,
+        in_flight.call,
+        ProcessCurrentModelCallState::InFlight,
+    );
 
     pool.close().await;
     drop(container);
