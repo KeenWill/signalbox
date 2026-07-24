@@ -16,7 +16,7 @@ use std::{
 use rust_decimal::Decimal;
 use signalbox_application::{
     ImportConversationError, ImportConversationOutcome, ImportConversationService,
-    ImportedConversationIdGenerator,
+    ImportedConversationConverter, ImportedConversationIdGenerator,
 };
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_conversation_import_codex::CodexRolloutJsonlConverter;
@@ -1559,6 +1559,14 @@ async fn opt_in_real_transcript_postgres_round_trip() -> Result<(), Box<dyn Erro
     validate_opt_in_real_transcript_postgres_round_trip().await
 }
 
+/// Local-only Codex validation with the same content-silent contract as the
+/// Claude Code real-transcript test above.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires explicit local real-rollout and PostgreSQL opt-in"]
+async fn opt_in_real_codex_rollout_postgres_round_trip() -> Result<(), Box<dyn Error>> {
+    validate_opt_in_real_codex_rollout_postgres_round_trip().await
+}
+
 async fn validate_opt_in_real_transcript_postgres_round_trip() -> Result<(), Box<dyn Error>> {
     if env::var("SIGNALBOX_RUN_REAL_CLAUDE_IMPORT").as_deref() != Ok("1") {
         return Ok(());
@@ -1577,7 +1585,7 @@ async fn validate_opt_in_real_transcript_postgres_round_trip() -> Result<(), Box
     let (container, pool, _database_url) = migrated_postgres().await?;
     for (file_index, path) in paths.into_iter().enumerate() {
         let source = fs::read(path).map_err(|_| "real input unavailable")?;
-        validate_real_transcript(&pool, &source, file_index).await?;
+        validate_real_source(&pool, &source, file_index, ClaudeCodeJsonlConverter).await?;
     }
 
     pool.close().await;
@@ -1585,11 +1593,41 @@ async fn validate_opt_in_real_transcript_postgres_round_trip() -> Result<(), Box
     Ok(())
 }
 
-async fn validate_real_transcript(
+async fn validate_opt_in_real_codex_rollout_postgres_round_trip() -> Result<(), Box<dyn Error>> {
+    if env::var("SIGNALBOX_RUN_REAL_CODEX_IMPORT").as_deref() != Ok("1") {
+        return Ok(());
+    }
+    let Some(root) = env::var_os("SIGNALBOX_REAL_CODEX_ROLLOUTS") else {
+        return Err("real rollout inputs were not configured".into());
+    };
+    let mut paths = Vec::new();
+    for root in env::split_paths(&root) {
+        collect_transcripts(&root, &mut paths).map_err(|()| "real inputs unavailable")?;
+    }
+    paths.sort();
+    if paths.is_empty() {
+        return Err("real rollout directory contained no JSONL files".into());
+    }
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    for (file_index, path) in paths.into_iter().enumerate() {
+        let source = fs::read(path).map_err(|_| "real input unavailable")?;
+        validate_real_source(&pool, &source, file_index, CodexRolloutJsonlConverter).await?;
+    }
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+async fn validate_real_source<Converter>(
     pool: &PgPool,
     source: &[u8],
     file_index: usize,
-) -> Result<(), Box<dyn Error>> {
+    converter: Converter,
+) -> Result<(), Box<dyn Error>>
+where
+    Converter: ImportedConversationConverter,
+{
     let ordinal = u128::try_from(file_index)
         .ok()
         .and_then(|value| value.checked_add(1))
@@ -1607,13 +1645,13 @@ async fn validate_real_transcript(
     let repository = ImportedConversationRepository::new(pool.clone());
     let mut service = ImportConversationService::new(
         SequentialIds::new([first_candidate, second_candidate], first_entry),
-        ClaudeCodeJsonlConverter,
+        converter,
         repository,
     );
     let winner = match service
         .execute(source)
         .await
-        .map_err(|_| "real transcript first import failed")?
+        .map_err(|_| "real source first import failed")?
     {
         ImportConversationOutcome::Inserted { conversation }
         | ImportConversationOutcome::AlreadyImported { conversation } => conversation,
@@ -1621,14 +1659,14 @@ async fn validate_real_transcript(
     match service
         .execute(source)
         .await
-        .map_err(|_| "real transcript repeat import failed")?
+        .map_err(|_| "real source repeat import failed")?
     {
         ImportConversationOutcome::AlreadyImported { conversation } if conversation == winner => {}
         ImportConversationOutcome::AlreadyImported { .. } => {
-            return Err("real transcript reimport resolved a different identity".into());
+            return Err("real source reimport resolved a different identity".into());
         }
         ImportConversationOutcome::Inserted { .. } => {
-            return Err("real transcript reimport was not idempotent".into());
+            return Err("real source reimport was not idempotent".into());
         }
     }
     let (_, _, repository) = service.into_parts();
