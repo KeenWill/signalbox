@@ -22,7 +22,10 @@ use signalbox_domain::{
     SessionConfigurationDefaultsVersion, SessionId, SubmitInputAppliedResult, SubmitInputResult,
     TurnId, UserContent,
 };
-use signalbox_hubd::{ActivatedTurnPass, FatalExecutionSupervisor, PostgresProviderModelExecution};
+use signalbox_hubd::{
+    ActivatedTurnPass, FatalExecutionSupervisor, PostgresContinuationToolLoopRepository,
+    PostgresProviderModelExecution,
+};
 use signalbox_model_provider_runtime::{
     RuntimeModelCallProvider, RuntimeModelCatalog, RuntimeModelDefinition,
 };
@@ -34,7 +37,6 @@ use signalbox_persistence::{
     create_session::CreateSessionRepository, local_test_connection_options, migrate,
     model_execution::PostgresModelCallRepository, scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository, submit_input::SubmitInputRepository,
-    tool_loop::PostgresToolLoopRepository,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -217,7 +219,7 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
             provider,
         )
         .with_tool_loop(
-            PostgresToolLoopRepository::with_model_calls(
+            PostgresContinuationToolLoopRepository::new(
                 pool.clone(),
                 targets,
                 credential_reference,

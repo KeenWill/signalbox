@@ -9,18 +9,20 @@ use std::{error::Error, fmt, future::Future};
 
 use signalbox_application::{
     ClassifyOperatorFailure, EligibilityPass, InProcessAttemptDispatchGate,
-    InProcessToolDispatchGate, ModelCallExecutionError, ModelCallExecutionOutcome,
-    ModelCallExecutionService, ModelCallProvider, OperatorFailureClass, ScriptedModelCallError,
-    ScriptedModelCallProvider, ScriptedModelCallStep, StartEligibleTurnIdGenerator,
-    StartEligibleTurnOutcome, StartEligibleTurnService, StartEligibleTurnTransaction, ToolCatalog,
-    ToolExecutionService, ToolExecutionServiceError, ToolExecutionServiceOutcome, ToolExecutor,
-    UuidV7ModelCallExecutionIdGenerator, UuidV7ToolLoopIdGenerator,
+    InProcessToolDispatchGate, ModelCallCredentialReference, ModelCallExecutionError,
+    ModelCallExecutionOutcome, ModelCallExecutionService, ModelCallProvider, OperatorFailureClass,
+    ScriptedModelCallError, ScriptedModelCallProvider, ScriptedModelCallStep,
+    StartEligibleTurnIdGenerator, StartEligibleTurnOutcome, StartEligibleTurnService,
+    StartEligibleTurnTransaction, ToolCatalog, ToolExecutionService, ToolExecutionServiceError,
+    ToolExecutionServiceOutcome, ToolExecutor, UuidV7ModelCallExecutionIdGenerator,
+    UuidV7ToolLoopIdGenerator,
 };
-use signalbox_domain::{ActivatedAcceptedInputTurn, AssistantText, SessionId};
+use signalbox_domain::{ActivatedAcceptedInputTurn, AssistantText, ModelTargetCatalog, SessionId};
 use signalbox_persistence::model_execution::{
     ModelCallRepositoryError, PostgresModelCallRepository,
 };
 use signalbox_persistence::tool_loop::{PostgresToolLoopRepository, ToolLoopRepositoryError};
+use sqlx::PgPool;
 use tokio::sync::watch;
 
 mod configuration;
@@ -486,6 +488,30 @@ pub struct PostgresProviderModelExecution<Provider> {
     provider: Provider,
 }
 
+/// PostgreSQL tool repository carrying the model-call configuration required
+/// to commit a completed batch and its continuation atomically.
+#[derive(Clone, Debug)]
+pub struct PostgresContinuationToolLoopRepository {
+    inner: PostgresToolLoopRepository,
+}
+
+impl PostgresContinuationToolLoopRepository {
+    /// Configures the continuation target catalog and credential reference.
+    pub fn new(
+        pool: PgPool,
+        targets: ModelTargetCatalog,
+        credential_reference: ModelCallCredentialReference,
+    ) -> Self {
+        Self {
+            inner: PostgresToolLoopRepository::with_model_calls(
+                pool,
+                targets,
+                credential_reference,
+            ),
+        }
+    }
+}
+
 impl<Provider> PostgresProviderModelExecution<Provider> {
     /// Supplies shared persistence, the per-attempt gate, and provider port.
     pub const fn new(
@@ -504,14 +530,14 @@ impl<Provider> PostgresProviderModelExecution<Provider> {
     /// composition without changing the provider-facing application boundary.
     pub fn with_tool_loop<Catalog, Executor>(
         self,
-        tool_repository: PostgresToolLoopRepository,
+        tool_repository: PostgresContinuationToolLoopRepository,
         tool_dispatch_gate: InProcessToolDispatchGate,
         catalog: Catalog,
         executor: Executor,
     ) -> PostgresProviderToolLoopExecution<Provider, Catalog, Executor> {
         PostgresProviderToolLoopExecution {
             model_repository: self.repository,
-            tool_repository,
+            tool_repository: tool_repository.inner,
             model_gate: self.gate,
             tool_gate: tool_dispatch_gate,
             provider: self.provider,
