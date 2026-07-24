@@ -1808,7 +1808,7 @@ impl AcceptedInputSchedulingProjection {
         self,
         wait: crate::AwaitingToolRecovery,
         tool_attempt: crate::EndedToolAttempt,
-        source_snapshot: ResolvedContextFrontierSnapshot,
+        result_projection: crate::PreparedToolResultProjection,
         interrupt: AppliedInterruptCommandResult,
         identities: crate::AmbiguousModelCallTurnIdentities,
     ) -> Result<crate::ReconciliationRequiredToolTurn, crate::ModelCallClosureError> {
@@ -1823,7 +1823,7 @@ impl AcceptedInputSchedulingProjection {
             wait,
             tool_attempt,
             attempt,
-            source_snapshot,
+            result_projection,
             interrupt,
             identities,
         )
@@ -9163,11 +9163,15 @@ mod tests {
                 | None => None,
             })
             .expect("the batch retains its exact ambiguous attempt");
+        let result_entry = semantic_entry(31);
+        let result_projection = batch
+            .prepare_reconciliation_projection(vec![result_entry.id()], frontier(41).id())
+            .expect("the terminal batch closes its logical request");
         let reconciled = projection
             .apply_interrupt_to_tool_recovery(
                 wait,
                 ended_tool,
-                batch.yielded_snapshot().clone(),
+                result_projection,
                 interrupt,
                 crate::AmbiguousModelCallTurnIdentities::new(frontier(41).id()),
             )
@@ -9185,7 +9189,16 @@ mod tests {
                 .terminal_snapshot()
                 .ordered_entries()
                 .collect::<Vec<_>>(),
-            vec![origin_entry.reference(&session)]
+            vec![
+                origin_entry.reference(&session),
+                result_entry.reference(&session)
+            ]
+        );
+        assert_eq!(
+            reconciled.tool_result_entries()[0].payload(),
+            &crate::SemanticTranscriptEntryPayload::ToolClosed {
+                request: tool_request_id(70),
+            }
         );
         assert!(matches!(
             reconciled.disposition(),

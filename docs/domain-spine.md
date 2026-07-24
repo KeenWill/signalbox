@@ -1373,7 +1373,7 @@ impl AcceptedInputSchedulingProjection {
         self,
         wait: AwaitingToolRecovery,
         tool_attempt: EndedToolAttempt,
-        source_snapshot: ResolvedContextFrontierSnapshot,
+        result_projection: PreparedToolResultProjection,
         interrupt: AppliedInterruptCommandResult,
         identities: AmbiguousModelCallTurnIdentities,
     ) -> Result<ReconciliationRequiredToolTurn, ModelCallClosureError>;
@@ -1950,7 +1950,7 @@ pub struct ReconciliationRequiredModelCallTurn { /* private */ }
 // terminal_snapshot(), reclassified_pending_steering()
 pub struct ReconciliationRequiredToolTurn { /* private */ }
 // accessors: session(), turn(), attempt(), tool_attempt(), disposition(),
-// terminal_snapshot(), reclassified_pending_steering()
+// tool_result_entries(), terminal_snapshot(), reclassified_pending_steering()
 pub struct ReclassifiedPendingSteeringTurn { /* private */ }
 // sealed: successful model-call terminalization with exact pending identities
 impl ReclassifiedPendingSteeringTurn {
@@ -2489,6 +2489,11 @@ impl ToolBatch {
         &self,
         entry_ids: Vec<SemanticTranscriptEntryId>,
         continuation_frontier: ContextFrontierId,
+    ) -> Result<PreparedToolResultProjection, ToolResultProjectionError>;
+    pub fn prepare_reconciliation_projection(
+        &self,
+        entry_ids: Vec<SemanticTranscriptEntryId>,
+        terminal_frontier: ContextFrontierId,
     ) -> Result<PreparedToolResultProjection, ToolResultProjectionError>;
     // accessors: session(), turn(), producing_call(), yielded_snapshot(), requests(),
     // approval(), attempt(), phase()
