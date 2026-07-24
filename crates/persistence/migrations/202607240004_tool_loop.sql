@@ -45,8 +45,28 @@ ALTER TABLE replace_session_defaults_command
             OR dangerous_tool_auto_approval = 'disabled'
         );
 
+ALTER TABLE create_session_from_imported_frontier_command
+    ADD COLUMN dangerous_tool_auto_approval text NOT NULL DEFAULT 'disabled',
+    DROP CONSTRAINT
+        create_session_from_imported_frontier_command_version_supported;
+
+ALTER TABLE create_session_from_imported_frontier_command
+    ADD CONSTRAINT
+        create_session_from_imported_frontier_command_version_supported
+        CHECK (storage_version IN (1, 2)),
+    ADD CONSTRAINT imported_frontier_command_tool_auto_approval_closed
+        CHECK (dangerous_tool_auto_approval IN ('disabled', 'approve_all')),
+    ADD CONSTRAINT imported_frontier_command_v1_tool_auto_approval
+        CHECK (
+            storage_version <> 1
+            OR dangerous_tool_auto_approval = 'disabled'
+        );
+
 ALTER TABLE create_session_command
     DROP CONSTRAINT create_session_command_initial_defaults_fk;
+
+ALTER TABLE create_session_from_imported_frontier_command
+    DROP CONSTRAINT create_session_from_imported_frontier_command_defaults_fk;
 
 ALTER TABLE replace_session_defaults_command
     DROP CONSTRAINT replace_session_defaults_command_applied_defaults_fk;
@@ -82,6 +102,26 @@ ALTER TABLE create_session_command
         )
         ON UPDATE RESTRICT
         ON DELETE RESTRICT;
+
+ALTER TABLE create_session_from_imported_frontier_command
+    ADD CONSTRAINT create_session_from_imported_frontier_command_defaults_fk
+        FOREIGN KEY (
+            created_session_id,
+            initial_defaults_version,
+            model_selection_kind,
+            model_selection_reference,
+            dangerous_tool_auto_approval
+        )
+        REFERENCES session_defaults_version (
+            session_id,
+            version,
+            model_selection_kind,
+            model_selection_reference,
+            dangerous_tool_auto_approval
+        )
+        ON UPDATE RESTRICT
+        ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED;
 
 ALTER TABLE replace_session_defaults_command
     ADD CONSTRAINT replace_session_defaults_command_applied_defaults_fk
@@ -183,6 +223,7 @@ ALTER TABLE durable_command
         CHECK (
             command_kind IN (
                 'create_session',
+                'create_session_from_imported_frontier',
                 'replace_session_defaults',
                 'submit_input',
                 'decide_tool_request'
@@ -193,6 +234,7 @@ ALTER TABLE durable_command
             (
                 command_kind IN (
                     'create_session',
+                    'create_session_from_imported_frontier',
                     'replace_session_defaults'
                 )
                 AND storage_version IN (1, 2)
@@ -304,6 +346,11 @@ BEGIN
             SELECT count(*)
               INTO matching_records
               FROM create_session_command
+             WHERE command_id = NEW.command_id;
+        WHEN 'create_session_from_imported_frontier' THEN
+            SELECT count(*)
+              INTO matching_records
+              FROM create_session_from_imported_frontier_command
              WHERE command_id = NEW.command_id;
         WHEN 'replace_session_defaults' THEN
             SELECT count(*)
@@ -940,6 +987,7 @@ ALTER TABLE semantic_transcript_entry
     ADD CONSTRAINT semantic_transcript_entry_payload_kind_closed
         CHECK (
             payload_kind IN (
+                'imported_entry',
                 'origin_accepted_input',
                 'steering_accepted_input',
                 'turn_failed',
@@ -955,6 +1003,12 @@ ALTER TABLE semantic_transcript_entry
     ADD CONSTRAINT semantic_transcript_entry_payload_shape
         CHECK (
             (
+                payload_kind = 'imported_entry'
+                AND tool_result_request_id IS NULL
+                AND tool_result_attempt_id IS NULL
+                AND assistant_response_part_ordinal IS NULL
+            )
+            OR (
                 payload_kind IN (
                     'origin_accepted_input',
                     'steering_accepted_input'
@@ -3261,6 +3315,10 @@ BEGIN
         entry := NEW;
     END IF;
     checked_producing_call_id := entry.producing_model_call_id;
+
+    IF entry.payload_kind = 'imported_entry' THEN
+        RETURN NULL;
+    END IF;
 
     CASE entry.payload_kind
         WHEN 'origin_accepted_input' THEN
