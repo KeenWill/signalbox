@@ -99,7 +99,7 @@ loopback test pattern from the runtime-adapter study are the reusable body of
 each goal prompt.
 
 Further prior art, for the design rather than the code: an earlier unmerged
-prototype of the owner's holds a working dual-runtime reference —
+prototype from the owner holds a working dual-runtime reference —
 runtime-backend plus capability-snapshot routing with fail-explicit rejection (a
 session requiring tools cannot land on a backend lacking them), a
 provider-neutral agent event vocabulary spanning both CLIs, and
@@ -169,8 +169,8 @@ Owns: a waiting-for-confirmation turn state, dedupe-keyed resume commands in the
 outbox, replay eligibility on the executor path. Collides-with: turn machinery —
 these are the wait mechanics the tool loop's approval flow will need, so it
 lands with or just behind that foundation. Closes the spec's open edge for
-tool/approval waits. The reference design is an earlier unmerged prototype of
-the owner's: resume commands keyed `resume_turn:{turn}:{invocation}` in the
+tool/approval waits. The reference design is an earlier unmerged prototype from
+the owner: resume commands keyed `resume_turn:{turn}:{invocation}` in the
 outbox, claimed with `FOR UPDATE SKIP LOCKED` and replayed to reconnecting
 executors, with replay eligibility conditioned on turn state.
 
@@ -295,7 +295,7 @@ call, mapping onto the outbox/durable-command idempotency doctrine); judge and
 dedupe confidence policy versioned as data (accept ≥0.70, publish ≥0.80 in the
 reference); model and workspace providers behind protocol seams; and merge-based
 stack propagation. Port the design, not the code. Prior art: an earlier unmerged
-prototype of the owner's — implemented and unit-tested, never production-smoked.
+prototype from the owner — implemented and unit-tested, never production-smoked.
 
 ## Client SDK [blocked-on: protocol stabilization] [size: M]
 
