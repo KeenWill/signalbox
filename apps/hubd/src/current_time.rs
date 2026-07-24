@@ -216,7 +216,7 @@ where
 
 struct ResolvedArguments {
     time_zone: TimeZone,
-    canonical_name: String,
+    selected_name: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -236,20 +236,16 @@ fn resolve_arguments(
     let Some(value) = object.remove("timezone") else {
         return Ok(ResolvedArguments {
             time_zone: TimeZone::UTC,
-            canonical_name: String::from("UTC"),
+            selected_name: String::from("UTC"),
         });
     };
     let serde_json::Value::String(name) = value else {
         return Err(InvalidCurrentTimeArguments);
     };
     let time_zone = TimeZone::get(&name).map_err(|_| InvalidCurrentTimeArguments)?;
-    let canonical_name = time_zone
-        .iana_name()
-        .ok_or(InvalidCurrentTimeArguments)?
-        .to_owned();
     Ok(ResolvedArguments {
         time_zone,
-        canonical_name,
+        selected_name: name,
     })
 }
 
@@ -279,7 +275,7 @@ fn current_time_evidence(
         .map_err(|_| CurrentTimeExecutorError::TimestampFormatting)?;
     let result = serde_json::to_string(&serde_json::json!({
         "datetime": datetime,
-        "timezone": resolved.canonical_name,
+        "timezone": resolved.selected_name,
     }))
     .map_err(|_| CurrentTimeExecutorError::ResultEncoding)?;
     Ok(ToolExecutorEvidence::CompletedText(result))
@@ -378,7 +374,7 @@ mod tests {
         let resolved = resolve_arguments(&arguments("{}"))
             .expect("the empty object selects the default timezone");
 
-        assert_eq!(resolved.canonical_name, "UTC");
+        assert_eq!(resolved.selected_name, "UTC");
     }
 
     /// S15: successful output is the exact compact JSON contract.
@@ -400,13 +396,13 @@ mod tests {
         );
     }
 
-    /// S15 / INV-024: IANA lookup canonicalizes the selected name and applies
-    /// the zone's offset to the injected instant.
+    /// S15 / INV-024: IANA lookup preserves a recognized alias and applies the
+    /// zone's offset to the injected instant.
     #[test]
-    fn s15_inv024_current_time_applies_canonical_iana_zone() {
+    fn s15_inv024_current_time_preserves_selected_iana_alias() {
         let evidence = current_time_evidence(
             SystemTime::UNIX_EPOCH,
-            &arguments(r#"{"timezone":"america/new_york"}"#),
+            &arguments(r#"{"timezone":"US/Eastern"}"#),
             &clock_failure_detail(),
             &offset_failure_detail(),
         )
@@ -415,7 +411,7 @@ mod tests {
         assert_eq!(
             evidence,
             ToolExecutorEvidence::CompletedText(String::from(
-                r#"{"datetime":"1969-12-31T19:00:00-05:00","timezone":"America/New_York"}"#
+                r#"{"datetime":"1969-12-31T19:00:00-05:00","timezone":"US/Eastern"}"#
             ))
         );
     }

@@ -10,6 +10,25 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-24 — Preserve accepted IANA time-zone identifiers
+
+**Context.** Jiff's IANA lookup accepts aliases, but the lookup result does not
+promise to distinguish a canonical identifier from another recognized spelling.
+Describing the returned library name as canonical would overstate the enforced
+contract.
+
+**Decision.** Validate an explicit `current_time` zone through Jiff, then
+preserve that exact accepted identifier in the result. Continue to emit `UTC`
+when the argument is absent.
+
+**Rejected alternatives.** Canonicalizing aliases requires a separate
+authoritative alias resolver. Returning Jiff's selected spelling would expose an
+unstated library behavior as a contract. Rejecting aliases would narrow accepted
+IANA input without a recorded need.
+
+**Affects.** The hub-local `current_time` executor, its focused tests, and the
+implemented result contract in [tool-loop.md](spec/tool-loop.md).
+
 ## 2026-07-24 — Retain checked provider JSON as raw text
 
 **Context.** Guarded deserialization admitted deeply nested tool schemas, but an
