@@ -164,7 +164,12 @@ only when its seed satisfies the complete imported-session contract in
 Imported ancestry does not alter lifecycle order, eligibility, slot ownership,
 or lineage. Its resume/fork relationship is immutable creation provenance, not a
 scheduler mode. The first native turn is still `FirstInSession`; imported
-entries are a context prefix, not a synthetic predecessor turn.
+entries are a context prefix, not a synthetic predecessor turn. Migration
+`202607240003_imported_session_first_native_frontier.sql` changes only the
+first-frontier lifecycle check: a native session still starts with its one
+origin entry, while an imported session must start with its exact stored seed
+membership followed by that origin entry. All other lifecycle evidence checks
+remain shared.
 
 ## The activation transaction
 

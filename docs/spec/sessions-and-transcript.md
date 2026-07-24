@@ -78,16 +78,19 @@ The committing transaction atomically inserts the session row, the scheduler
 registration (`session_scheduler`), defaults version one, the current-defaults
 pointer, the typed command record, and the owner-global registry claim.
 Completeness at every commit boundary is enforced by deferred reverse foreign
-keys (`session_current_defaults_fk`, `session_create_command_fk`,
-`session_scheduler_row_fk`) plus one deferred constraint trigger,
-`durable_command_requires_typed_record`, which migration
-`202607180002_replace_session_defaults.sql` installed in place of the dropped
-reverse foreign key (migrations `202607180001_create_session.sql`,
-`202607180004_turn_lifecycle_storage.sql`; INV-008, INV-012). Every table in
-this set is append-only except `session_current_defaults`: its one row per
-session is the deliberately mutable pointer that defaults replacement later
-moves in place. The same transaction appends a `session_created` update event to
-the outbox ([persistence-protocol](persistence-protocol.md)).
+keys (`session_current_defaults_fk`, `session_scheduler_row_fk`) plus deferred
+constraint triggers `session_requires_creation_command` and
+`durable_command_requires_typed_record`. The family-aware session trigger
+replaced `session_create_command_fk` when imported-frontier creation added its
+separate command family (migration `202607240002_imported_session_seed.sql`);
+migration `202607180002_replace_session_defaults.sql` installed in place of the
+dropped durable-command reverse foreign key (migrations
+`202607180001_create_session.sql`, `202607180004_turn_lifecycle_storage.sql`;
+INV-008, INV-012). Every table in this set is append-only except
+`session_current_defaults`: its one row per session is the deliberately mutable
+pointer that defaults replacement later moves in place. The same transaction
+appends a `session_created` update event to the outbox
+([persistence-protocol](persistence-protocol.md)).
 
 Command claim, fail-closed replay reconstitution, and conflicting-reuse
 resolution follow the shared durable-command contract owned by
@@ -330,15 +333,18 @@ Storage (`semantic_transcript_entry`, migration
 `202607180004_turn_lifecycle_storage.sql`) enforces globally unique entry
 identity, at most one origin entry per accepted input, at most one failed marker
 per turn, same-session references, and append-only rows (INV-005). Migration
-`202607220001` adds the unique completion marker, `202607220004` adds the unique
-steering entry, and `202607220005` adds the unique cancellation marker while
-widening the corresponding closed payload shapes. The origin-disposition guard
-arrived later: migration `202607180005_occupied_slot_submit_input.sql` — the
-migration that first admits the `pending_steering` disposition — replaces the
-entry/turn-state trigger so an origin entry additionally requires its input's
-`origin_of` disposition (constraint
-`semantic_transcript_entry_origin_disposition`); pending steering can never
-appear as a semantic origin.
+`202607240002_imported_session_seed.sql` adds imported-entry provenance,
+restricts it to imported-ancestry sessions and the exact selected source prefix,
+and keeps imported entries outside every native subject-identity constraint.
+Migration `202607220001` adds the unique completion marker, `202607220004` adds
+the unique steering entry, and `202607220005` adds the unique cancellation
+marker while widening the corresponding closed payload shapes. The
+origin-disposition guard arrived later: migration
+`202607180005_occupied_slot_submit_input.sql` — the migration that first admits
+the `pending_steering` disposition — replaces the entry/turn-state trigger so an
+origin entry additionally requires its input's `origin_of` disposition
+(constraint `semantic_transcript_entry_origin_disposition`); pending steering
+can never appear as a semantic origin.
 
 ### When entries come to exist
 

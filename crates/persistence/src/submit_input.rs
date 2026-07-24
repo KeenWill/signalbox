@@ -29,8 +29,8 @@ use signalbox_domain::{
     SubmitInputAppliedResult, SubmitInputPreparationFailure, SubmitInputReconstitutionFailure,
     SubmitInputReconstitutionInput, SubmitInputRejectedResult, SubmitInputResult,
     SubmitInputTerminalSourceReconstitutionInput, SubmitInputTurnOriginReconstitutionInput,
-    TerminalAttemptEndReconstitutionInput, ToolRequestId, TurnAttemptId, TurnId,
-    UnstoppedAttemptDisposition, UserContent,
+    TerminalAttemptEndReconstitutionInput, ToolRequestId, TranscriptAncestry, TurnAttemptId,
+    TurnId, UnstoppedAttemptDisposition, UserContent,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -902,6 +902,20 @@ pub(crate) async fn load_scheduling_projection(
     session: Session,
 ) -> Result<AcceptedInputSchedulingProjection, SubmitInputRepositoryError> {
     let session_id = session.id();
+    let imported_session = if matches!(
+        session.creation_provenance().ancestry(),
+        TranscriptAncestry::ImportedConversation { .. }
+    ) {
+        Some(
+            crate::create_session_from_imported_frontier::load_complete_current(
+                connection, &session,
+            )
+            .await
+            .map_err(map_imported_scheduling_error)?,
+        )
+    } else {
+        None
+    };
     let (queue_count, lifecycle_count): (i64, i64) = sqlx::query_as(
         "SELECT
             (SELECT count(*)
@@ -2026,11 +2040,14 @@ pub(crate) async fn load_scheduling_projection(
             assistant_tool_request_id,
             completed_turn_id
          FROM semantic_transcript_entry
-        WHERE source_session_id = $3
-           OR (source_session_id, semantic_entry_id) IN (
+        WHERE payload_kind <> 'imported_entry'
+          AND (
+            source_session_id = $3
+            OR (source_session_id, semantic_entry_id) IN (
             SELECT required.source_session_id, required.semantic_entry_id
               FROM UNNEST($1::uuid[], $2::uuid[])
                 AS required(source_session_id, semantic_entry_id)
+            )
         )
         ORDER BY source_session_id, semantic_entry_id",
     )
@@ -2040,7 +2057,17 @@ pub(crate) async fn load_scheduling_projection(
     .fetch_all(&mut *connection)
     .await?;
     let mut semantic_entries = Vec::with_capacity(semantic_rows.len());
-    let mut loaded_semantic_entries = BTreeSet::new();
+    let mut loaded_semantic_entries = imported_session
+        .as_ref()
+        .into_iter()
+        .flat_map(|imported| imported.semantic_entries())
+        .map(|entry| {
+            (
+                entry.source_session().into_uuid(),
+                entry.identity().into_uuid(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
     for row in semantic_rows {
         let source_session_uuid: Uuid = required(&row, "source_session_id")?;
         let entry_uuid: Uuid = required(&row, "semantic_entry_id")?;
@@ -2220,20 +2247,43 @@ pub(crate) async fn load_scheduling_projection(
         return Err(SubmitInputCorruption::Missing("scheduling context frontier").into());
     }
 
-    AcceptedInputSchedulingReconstitutionInput::new(
+    let mut input = AcceptedInputSchedulingReconstitutionInput::new(
         session,
         turns,
         semantic_entries,
         snapshots,
         active_acceptance_tail,
-    )
-    .with_model_call_facts(pinned_targets, model_calls)
-    .with_consumed_steering_facts(consumed_steering)
-    .reconstitute()
-    .map_err(|error| {
-        let (_, failure) = error.into_parts();
-        SubmitInputCorruption::Scheduling(failure).into()
-    })
+    );
+    if let Some(imported_session) = imported_session {
+        input = input.with_imported_session(imported_session);
+    }
+    input
+        .with_model_call_facts(pinned_targets, model_calls)
+        .with_consumed_steering_facts(consumed_steering)
+        .reconstitute()
+        .map_err(|error| {
+            let (_, failure) = error.into_parts();
+            SubmitInputCorruption::Scheduling(failure).into()
+        })
+}
+
+fn map_imported_scheduling_error(
+    error: crate::create_session_from_imported_frontier::ImportedSessionRepositoryError,
+) -> SubmitInputRepositoryError {
+    use crate::create_session_from_imported_frontier::ImportedSessionRepositoryError;
+
+    match error {
+        ImportedSessionRepositoryError::Database(error) => {
+            SubmitInputRepositoryError::Database(error)
+        }
+        ImportedSessionRepositoryError::Corruption(_)
+        | ImportedSessionRepositoryError::CommitAmbiguous(_)
+        | ImportedSessionRepositoryError::DifferentCommandKind { .. }
+        | ImportedSessionRepositoryError::Preparation(_)
+        | ImportedSessionRepositoryError::IdentityCollision(_) => {
+            SubmitInputCorruption::Inconsistent("complete imported scheduling projection").into()
+        }
+    }
 }
 
 fn require_applied_interrupt_from_attempt(

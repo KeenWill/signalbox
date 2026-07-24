@@ -1872,13 +1872,20 @@ impl AcceptedInputSchedulingReconstitutionInput {
         self,
         consumed_steering: Vec<ConsumedSteeringReconstitutionInput>,
     ) -> Self;
-    // accessors: session(), turns(), semantic_entries(), snapshots(),
-    // pinned_targets(), model_calls(), consumed_steering(),
+    pub fn with_imported_session(
+        self,
+        imported_session: ReconstitutedImportedSession,
+    ) -> Self;
+    // accessors: session(), imported_session(), turns(), semantic_entries(),
+    // snapshots(), pinned_targets(), model_calls(), consumed_steering(),
     // active_acceptance_tail()
 }
 
 pub enum AcceptedInputSchedulingReconstitutionFailure {
     UnsupportedSessionAncestry,
+    MissingImportedSession,
+    UnexpectedImportedSession,
+    ImportedSessionMismatch,
     TurnSessionMismatch { turn: TurnId },
     AcceptedInputSessionMismatch { turn: TurnId },
     QueueSessionMismatch { turn: TurnId },
