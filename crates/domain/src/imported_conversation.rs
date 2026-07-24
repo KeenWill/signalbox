@@ -8,6 +8,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
     fmt,
+    hash::{Hash, Hasher},
 };
 
 use sha2::{Digest, Sha256};
@@ -295,7 +296,6 @@ impl ImportedStructuredObjectMember {
 }
 
 /// Source-neutral decoded JSON values.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum ImportedStructuredValue {
     /// JSON null.
     Null,
@@ -309,6 +309,188 @@ pub enum ImportedStructuredValue {
     Array(Box<[ImportedStructuredValue]>),
     /// Ordered JSON object members, including repeated names.
     Object(Box<[ImportedStructuredObjectMember]>),
+}
+
+impl Clone for ImportedStructuredValue {
+    fn clone(&self) -> Self {
+        enum Task<'a> {
+            Visit(&'a ImportedStructuredValue),
+            FinishArray(usize),
+            FinishObject(&'a [ImportedStructuredObjectMember]),
+        }
+
+        let mut tasks = vec![Task::Visit(self)];
+        let mut built = Vec::new();
+        while let Some(task) = tasks.pop() {
+            match task {
+                Task::Visit(Self::Null) => built.push(Self::Null),
+                Task::Visit(Self::Boolean(value)) => built.push(Self::Boolean(*value)),
+                Task::Visit(Self::Number(value)) => built.push(Self::Number(value.clone())),
+                Task::Visit(Self::String(value)) => built.push(Self::String(value.clone())),
+                Task::Visit(Self::Array(values)) => {
+                    tasks.push(Task::FinishArray(values.len()));
+                    tasks.extend(values.iter().rev().map(Task::Visit));
+                }
+                Task::Visit(Self::Object(members)) => {
+                    tasks.push(Task::FinishObject(members));
+                    tasks.extend(
+                        members
+                            .iter()
+                            .rev()
+                            .map(|member| Task::Visit(member.value())),
+                    );
+                }
+                Task::FinishArray(value_count) => {
+                    let start = built.len().saturating_sub(value_count);
+                    let values = built.split_off(start).into_boxed_slice();
+                    built.push(Self::Array(values));
+                }
+                Task::FinishObject(members) => {
+                    let start = built.len().saturating_sub(members.len());
+                    let values = built.split_off(start);
+                    let cloned_members = members
+                        .iter()
+                        .zip(values)
+                        .map(|(member, value)| {
+                            ImportedStructuredObjectMember::new(member.name().clone(), value)
+                        })
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice();
+                    built.push(Self::Object(cloned_members));
+                }
+            }
+        }
+
+        debug_assert_eq!(built.len(), 1);
+        built.pop().unwrap_or(Self::Null)
+    }
+}
+
+impl fmt::Debug for ImportedStructuredValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        enum Part<'a> {
+            Value(&'a ImportedStructuredValue),
+            Member(&'a ImportedStructuredObjectMember),
+            Literal(&'static str),
+        }
+
+        let mut pending = vec![Part::Value(self)];
+        while let Some(part) = pending.pop() {
+            match part {
+                Part::Value(Self::Null) => formatter.write_str("Null")?,
+                Part::Value(Self::Boolean(value)) => {
+                    write!(formatter, "Boolean({value:?})")?;
+                }
+                Part::Value(Self::Number(value)) => {
+                    formatter.write_str("Number(")?;
+                    fmt::Debug::fmt(value, formatter)?;
+                    formatter.write_str(")")?;
+                }
+                Part::Value(Self::String(value)) => {
+                    formatter.write_str("String(")?;
+                    fmt::Debug::fmt(value, formatter)?;
+                    formatter.write_str(")")?;
+                }
+                Part::Value(Self::Array(values)) => {
+                    formatter.write_str("Array([")?;
+                    pending.push(Part::Literal("])"));
+                    for (index, value) in values.iter().enumerate().rev() {
+                        pending.push(Part::Value(value));
+                        if index != 0 {
+                            pending.push(Part::Literal(", "));
+                        }
+                    }
+                }
+                Part::Value(Self::Object(members)) => {
+                    formatter.write_str("Object([")?;
+                    pending.push(Part::Literal("])"));
+                    for (index, member) in members.iter().enumerate().rev() {
+                        pending.push(Part::Member(member));
+                        if index != 0 {
+                            pending.push(Part::Literal(", "));
+                        }
+                    }
+                }
+                Part::Member(member) => {
+                    formatter.write_str("ImportedStructuredObjectMember { name: ")?;
+                    fmt::Debug::fmt(member.name(), formatter)?;
+                    formatter.write_str(", value: ")?;
+                    pending.push(Part::Literal(" }"));
+                    pending.push(Part::Value(member.value()));
+                }
+                Part::Literal(value) => formatter.write_str(value)?,
+            }
+        }
+        Ok(())
+    }
+}
+
+impl PartialEq for ImportedStructuredValue {
+    fn eq(&self, other: &Self) -> bool {
+        let mut pending = vec![(self, other)];
+        while let Some((left, right)) = pending.pop() {
+            match (left, right) {
+                (Self::Null, Self::Null) => {}
+                (Self::Boolean(left), Self::Boolean(right)) if left == right => {}
+                (Self::Number(left), Self::Number(right)) if left == right => {}
+                (Self::String(left), Self::String(right)) if left == right => {}
+                (Self::Array(left), Self::Array(right)) if left.len() == right.len() => {
+                    pending.extend(left.iter().zip(right.iter()));
+                }
+                (Self::Object(left), Self::Object(right)) if left.len() == right.len() => {
+                    for (left, right) in left.iter().zip(right.iter()) {
+                        if left.name() != right.name() {
+                            return false;
+                        }
+                        pending.push((left.value(), right.value()));
+                    }
+                }
+                _ => return false,
+            }
+        }
+        true
+    }
+}
+
+impl Eq for ImportedStructuredValue {}
+
+impl Hash for ImportedStructuredValue {
+    fn hash<State>(&self, state: &mut State)
+    where
+        State: Hasher,
+    {
+        enum Part<'a> {
+            Value(&'a ImportedStructuredValue),
+            MemberName(&'a ImportedText),
+        }
+
+        let mut pending = vec![Part::Value(self)];
+        while let Some(part) = pending.pop() {
+            match part {
+                Part::Value(value) => {
+                    std::mem::discriminant(value).hash(state);
+                    match value {
+                        Self::Null => {}
+                        Self::Boolean(value) => value.hash(state),
+                        Self::Number(value) => value.hash(state),
+                        Self::String(value) => value.hash(state),
+                        Self::Array(values) => {
+                            values.len().hash(state);
+                            pending.extend(values.iter().rev().map(Part::Value));
+                        }
+                        Self::Object(members) => {
+                            members.len().hash(state);
+                            for member in members.iter().rev() {
+                                pending.push(Part::Value(member.value()));
+                                pending.push(Part::MemberName(member.name()));
+                            }
+                        }
+                    }
+                }
+                Part::MemberName(name) => name.hash(state),
+            }
+        }
+    }
 }
 
 impl Drop for ImportedStructuredValue {
@@ -2158,6 +2340,11 @@ fn build_conversation(input: ImportedConversationReconstitutionInput) -> Importe
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        collections::hash_map::DefaultHasher,
+        hash::{Hash, Hasher},
+    };
+
     use super::{
         ImportedConversation, ImportedConversationFormat,
         ImportedConversationReconstitutionFailure, ImportedConversationReconstitutionInput,
@@ -2212,6 +2399,26 @@ mod tests {
             value = ImportedStructuredValue::Array(vec![value].into_boxed_slice());
         }
         value
+    }
+
+    /// S28 / INV-002 / INV-038: unvalidated source values retain stack-safe
+    /// structural traits before typed depth rejection.
+    #[test]
+    fn s28_inv002_inv038_unvalidated_structured_traits_are_stack_safe() {
+        let value = nested_array(32_768);
+        let cloned = value.clone();
+
+        assert_eq!(value, cloned);
+        assert_ne!(value, nested_array(32_767));
+        let rendered = format!("{value:?}");
+        assert!(rendered.starts_with("Array([Array(["));
+        assert!(rendered.ends_with("])])"));
+
+        let mut value_hash = DefaultHasher::new();
+        value.hash(&mut value_hash);
+        let mut cloned_hash = DefaultHasher::new();
+        cloned.hash(&mut cloned_hash);
+        assert_eq!(value_hash.finish(), cloned_hash.finish());
     }
 
     fn metadata(role: ImportedSourceAttestation<ImportedSpeaker>) -> ImportedSourceMetadata {
