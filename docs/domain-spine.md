@@ -3314,20 +3314,10 @@ pub trait ToolExecutionIdGenerator {
 pub struct UuidV7ToolLoopIdGenerator;
 // Copy + Default; impl ToolApprovalIdGenerator + ToolExecutionIdGenerator
 
-pub struct InProcessToolDecisionWake { /* private */ }
-// Clone + Default
-impl InProcessToolDecisionWake {
-    pub async fn wait(&self, request: ToolRequestId);
-}
-
 pub struct DecideToolRequestService<Ids, Transaction> { /* private */ }
 impl<Ids, Transaction> DecideToolRequestService<Ids, Transaction> {
-    pub const fn new(
-        ids: Ids,
-        transaction: Transaction,
-        wake: InProcessToolDecisionWake,
-    ) -> Self;
-    pub fn into_parts(self) -> (Ids, Transaction, InProcessToolDecisionWake);
+    pub const fn new(ids: Ids, transaction: Transaction) -> Self;
+    pub fn into_parts(self) -> (Ids, Transaction);
 }
 impl<Ids: ToolApprovalIdGenerator + Send, Transaction: DecideToolRequestTransaction>
     DecideToolRequestService<Ids, Transaction>
@@ -3975,7 +3965,7 @@ pub trait ToolExecutionTransaction {
 | application: create_session           | 8 (incl. 2 traits)   |
 | application: load_session             | 2 (incl. 1 trait)    |
 | application: model_execution          | 30 (incl. 7 traits)  |
-| application: tool_loop                | 24 (incl. 5 traits)  |
+| application: tool_loop                | 23 (incl. 5 traits)  |
 | application: operator_failure         | 2 (incl. 1 trait)    |
 | application: replace_session_defaults | 4 (incl. 1 trait)    |
 | application: scheduler                | 12 (incl. 4 traits)  |
@@ -3984,4 +3974,4 @@ pub trait ToolExecutionTransaction {
 | application: submit_input             | 7 (incl. 2 traits)   |
 | application: tool_dispatch_gate       | 2                    |
 | application: tool_loop_ports          | 8 (incl. 2 traits)   |
-| **signalbox-application total**       | **111**              |
+| **signalbox-application total**       | **110**              |

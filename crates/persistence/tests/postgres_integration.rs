@@ -8652,8 +8652,9 @@ async fn s01_s03_inv002_inv009_inv015_start_eligible_turn_survives_restart()
     Ok(())
 }
 
-/// S03 / INV-007 / INV-009: the Postgres safety-net sweep finds durable queued
-/// work without an active slot and excludes sessions already being progressed.
+/// S03 / S10 / INV-007 / INV-009: the Postgres safety-net sweep finds durable
+/// queued work and resumable tool batches while excluding unrelated active
+/// model work.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s03_inv007_inv009_postgres_sweep_reconstructs_only_candidate_sessions()
@@ -8705,6 +8706,19 @@ async fn s03_inv007_inv009_postgres_sweep_reconstructs_only_candidate_sessions()
         activation.execute(active_session).await?,
         StartEligibleTurnOutcome::Activated(_)
     ));
+    let tool_seed = 0x7900;
+    let (tool_fixture, _, _, tool_request) =
+        checkpoint_confirmed_tool_round(&pool, tool_seed, "current_time", "{}").await?;
+    PostgresToolLoopRepository::new(pool.clone())
+        .decide(
+            DecideToolRequest::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(tool_seed + 24)),
+                tool_request,
+                ToolApprovalDecision::Approve,
+            ),
+            || TurnAttemptId::from_uuid(Uuid::from_u128(tool_seed + 23)),
+        )
+        .await?;
 
     let mut sweep = PostgresEligibilitySweep::new(pool.clone());
     let (candidates, continuation) = EligibilitySweep::find_sessions(&mut sweep)
@@ -8721,7 +8735,13 @@ async fn s03_inv007_inv009_postgres_sweep_reconstructs_only_candidate_sessions()
     .fetch_one(&pool)
     .await?;
 
-    assert_eq!(candidates, vec![queued_session]);
+    assert_eq!(candidates, vec![queued_session, tool_fixture.session]);
+    assert_eq!(
+        PostgresToolLoopRepository::new(pool.clone())
+            .find_resumable_turn(tool_fixture.session)
+            .await?,
+        Some(tool_fixture.turn)
+    );
     assert_eq!(queued_index_count, 1);
 
     pool.close().await;

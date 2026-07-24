@@ -4,14 +4,14 @@
 //! catalog policy, mints every durable identity candidate, keeps executor work
 //! outside transactions, and submits only correlated evidence to persistence.
 
-use std::{
-    collections::BTreeMap,
-    error::Error,
-    fmt,
-    future::Future,
-    sync::{Arc, Mutex},
-};
+use std::{collections::BTreeMap, error::Error, fmt, future::Future, sync::Arc};
 
+use crate::{
+    ClassifyOperatorFailure, DecideToolRequestTransaction, InProcessToolDispatchGate,
+    InProcessToolDispatchPermit, OperatorFailureClass, PrepareToolContinuationOutcome,
+    RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationStatus,
+    ToolContinuationIdentities, ToolCrashClosureIdentities, ToolExecutionTransaction,
+};
 #[cfg(test)]
 use signalbox_domain::AcceptedInputId;
 use signalbox_domain::{
@@ -23,14 +23,6 @@ use signalbox_domain::{
     ToolBatch, ToolBatchPhase, ToolEffectClass, ToolExecutionError, ToolExecutionErrorDetail,
     ToolExecutionErrorKind, ToolName, ToolPermissionDefault, ToolRequest, ToolRequestId,
     ToolResultContent, ToolResultText, ToolResultTextFailure, TurnAttemptId, TurnId,
-};
-use tokio::sync::watch;
-
-use crate::{
-    ClassifyOperatorFailure, DecideToolRequestTransaction, InProcessToolDispatchGate,
-    InProcessToolDispatchPermit, OperatorFailureClass, PrepareToolContinuationOutcome,
-    RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationStatus,
-    ToolContinuationIdentities, ToolCrashClosureIdentities, ToolExecutionTransaction,
 };
 
 /// Canonical JSON object used as a model-facing argument schema.
@@ -479,66 +471,21 @@ impl ToolExecutionIdGenerator for UuidV7ToolLoopIdGenerator {
     }
 }
 
-/// Process-local wake coordination between a committed owner decision and the
-/// already-running execution future parked on that exact request.
-#[derive(Clone, Debug, Default)]
-pub struct InProcessToolDecisionWake {
-    decisions: Arc<Mutex<BTreeMap<ToolRequestId, watch::Sender<bool>>>>,
-}
-
-impl InProcessToolDecisionWake {
-    /// Waits until the exact request has a committed decision in this process.
-    pub async fn wait(&self, request: ToolRequestId) {
-        let mut decision = {
-            let mut decisions = self
-                .decisions
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            decisions
-                .entry(request)
-                .or_insert_with(|| watch::channel(false).0)
-                .subscribe()
-        };
-        if !*decision.borrow_and_update() {
-            let _ = decision.changed().await;
-        }
-        self.decisions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&request);
-    }
-
-    /// Wakes the execution future for an exact durably applied decision.
-    fn wake(&self, request: ToolRequestId) {
-        self.decisions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .entry(request)
-            .or_insert_with(|| watch::channel(false).0)
-            .send_replace(true);
-    }
-}
-
 /// Application service for one durable owner approval/denial command.
 pub struct DecideToolRequestService<Ids, Transaction> {
     ids: Ids,
     transaction: Transaction,
-    wake: InProcessToolDecisionWake,
 }
 
 impl<Ids, Transaction> DecideToolRequestService<Ids, Transaction> {
     /// Composes application-owned identities with the authoritative transaction.
-    pub const fn new(ids: Ids, transaction: Transaction, wake: InProcessToolDecisionWake) -> Self {
-        Self {
-            ids,
-            transaction,
-            wake,
-        }
+    pub const fn new(ids: Ids, transaction: Transaction) -> Self {
+        Self { ids, transaction }
     }
 
     /// Returns both owned roles.
-    pub fn into_parts(self) -> (Ids, Transaction, InProcessToolDecisionWake) {
-        (self.ids, self.transaction, self.wake)
+    pub fn into_parts(self) -> (Ids, Transaction) {
+        (self.ids, self.transaction)
     }
 }
 
@@ -565,15 +512,7 @@ where
                 {
                     continue;
                 }
-                result => {
-                    if let Ok(prepared) = &result
-                        && let signalbox_domain::DecideToolRequestResult::Applied(applied) =
-                            prepared.result()
-                    {
-                        self.wake.wake(applied.resolution().request());
-                    }
-                    return result;
-                }
+                result => return result,
             }
         }
     }
@@ -1760,29 +1699,6 @@ mod tests {
         let error = CompiledToolCatalog::try_new([first, second])
             .expect_err("duplicate dispatch names are ambiguous");
         assert_eq!(error.name(), &tool_name("same"));
-    }
-
-    #[tokio::test]
-    async fn applied_decision_wake_is_exact_and_race_free() {
-        let request = ToolRequestId::from_uuid(Uuid::from_u128(90));
-        let wake = InProcessToolDecisionWake::default();
-        let waiter_wake = wake.clone();
-        let waiter = tokio::spawn(async move {
-            waiter_wake.wait(request).await;
-        });
-        tokio::task::yield_now().await;
-        assert!(!waiter.is_finished());
-        wake.wake(request);
-        waiter.await.expect("decision waiter completes");
-
-        let decided_before_wait = ToolRequestId::from_uuid(Uuid::from_u128(91));
-        wake.wake(decided_before_wait);
-        tokio::time::timeout(
-            std::time::Duration::from_millis(10),
-            wake.wait(decided_before_wait),
-        )
-        .await
-        .expect("a committed decision cannot be lost before waiter registration");
     }
 
     #[test]

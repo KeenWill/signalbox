@@ -61,9 +61,9 @@ pub use submit_input::{
 pub use tool_dispatch_gate::{InProcessToolDispatchGate, InProcessToolDispatchPermit};
 pub use tool_loop::{
     CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence, DecideToolRequestService,
-    DuplicateToolDefinition, InProcessToolDecisionWake, NoToolCatalog, RetainedToolExecutionState,
-    ToolApprovalIdGenerator, ToolArgumentValidator, ToolCatalog, ToolCatalogValidationFailure,
-    ToolDefinition, ToolExecutionIdGenerator, ToolExecutionInvocation, ToolExecutionService,
+    DuplicateToolDefinition, NoToolCatalog, RetainedToolExecutionState, ToolApprovalIdGenerator,
+    ToolArgumentValidator, ToolCatalog, ToolCatalogValidationFailure, ToolDefinition,
+    ToolExecutionIdGenerator, ToolExecutionInvocation, ToolExecutionService,
     ToolExecutionServiceError, ToolExecutionServiceOutcome, ToolExecutor, ToolExecutorEvidence,
     ToolInputSchema, ToolInputSchemaError, ToolInputSchemaFailure, UuidV7ToolLoopIdGenerator,
 };

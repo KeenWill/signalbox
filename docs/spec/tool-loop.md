@@ -300,10 +300,14 @@ turn or tool attempt. Raw request identity is not approval-wait evidence.
 Startup scanning leaves an approval wait unchanged. It never fabricates an
 approval or denial, advances to a later request, expires the wait, or creates an
 attempt. Pending approval has no timeout and may wait indefinitely (INV-010).
-Within one hub incarnation, the activated execution future remains parked on an
-exact request-keyed wake. A durably applied owner decision wakes that future to
-reload the batch and continue the same active turn; rejected or uncommitted
-commands do not wake it.
+The activated execution pass returns while approval is pending, releasing its
+bounded scheduler worker. A durably applied final decision advances the stored
+phase to running; the durable eligibility sweep includes that active tool round,
+and the next pass reloads the exact batch before continuing. Rejected or
+uncommitted commands leave the approval phase unchanged and create no resumable
+hint. The same sweep inventories a running batch after restart, including one
+whose decision committed before the prior process stopped, so progress does not
+depend on process-local wake memory.
 
 Running phases use the staged tool-attempt crash classification above; parked
 external-effect ambiguity is never automatically retried. Version one permits

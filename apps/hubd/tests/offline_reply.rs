@@ -9,10 +9,10 @@ use std::{error::Error, process::Command, time::Duration};
 use signalbox_application::{
     ClassifyOperatorFailure, CorrelatedToolExecutorEvidence, CreateSessionOutcome,
     CreateSessionRequest, CreateSessionService, InProcessAttemptDispatchGate,
-    InProcessEligibilityWorkSource, InProcessToolDecisionWake, InProcessToolDispatchGate,
-    ModelCallCredentialReference, NoToolCatalog, OperatorFailureClass, SchedulerLoop,
-    SchedulerLoopExit, StartEligibleTurnService, SubmitInputOutcome, SubmitInputRequest,
-    SubmitInputService, ToolExecutionInvocation, ToolExecutor, UuidV7SessionIdGenerator,
+    InProcessEligibilityWorkSource, InProcessToolDispatchGate, ModelCallCredentialReference,
+    NoToolCatalog, OperatorFailureClass, SchedulerLoop, SchedulerLoopExit,
+    StartEligibleTurnService, SubmitInputOutcome, SubmitInputRequest, SubmitInputService,
+    ToolExecutionInvocation, ToolExecutor, UuidV7SessionIdGenerator,
     UuidV7StartEligibleTurnIdGenerator, UuidV7SubmitInputIdGenerator,
 };
 use signalbox_domain::{
@@ -215,12 +215,7 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
             InProcessAttemptDispatchGate::default(),
             provider,
         )
-        .with_tool_loop(
-            InProcessToolDecisionWake::default(),
-            tool_dispatch_gate,
-            NoToolCatalog,
-            UnexpectedToolExecutor,
-        ),
+        .with_tool_loop(tool_dispatch_gate, NoToolCatalog, UnexpectedToolExecutor),
     );
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(

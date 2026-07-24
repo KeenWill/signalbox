@@ -9,13 +9,12 @@ use std::{error::Error, fmt, future::Future};
 
 use signalbox_application::{
     ClassifyOperatorFailure, EligibilityPass, InProcessAttemptDispatchGate,
-    InProcessToolDecisionWake, InProcessToolDispatchGate, ModelCallExecutionError,
-    ModelCallExecutionOutcome, ModelCallExecutionService, ModelCallProvider, OperatorFailureClass,
-    ScriptedModelCallError, ScriptedModelCallProvider, ScriptedModelCallStep,
-    StartEligibleTurnIdGenerator, StartEligibleTurnOutcome, StartEligibleTurnService,
-    StartEligibleTurnTransaction, ToolCatalog, ToolExecutionService, ToolExecutionServiceError,
-    ToolExecutionServiceOutcome, ToolExecutor, UuidV7ModelCallExecutionIdGenerator,
-    UuidV7ToolLoopIdGenerator,
+    InProcessToolDispatchGate, ModelCallExecutionError, ModelCallExecutionOutcome,
+    ModelCallExecutionService, ModelCallProvider, OperatorFailureClass, ScriptedModelCallError,
+    ScriptedModelCallProvider, ScriptedModelCallStep, StartEligibleTurnIdGenerator,
+    StartEligibleTurnOutcome, StartEligibleTurnService, StartEligibleTurnTransaction, ToolCatalog,
+    ToolExecutionService, ToolExecutionServiceError, ToolExecutionServiceOutcome, ToolExecutor,
+    UuidV7ModelCallExecutionIdGenerator, UuidV7ToolLoopIdGenerator,
 };
 use signalbox_domain::{ActivatedAcceptedInputTurn, AssistantText, SessionId};
 use signalbox_persistence::model_execution::{
@@ -42,13 +41,24 @@ pub use single_hub::{SingleHubGuard, SingleHubGuardError};
 /// Per-activation model execution constructed by the hub composition root.
 pub trait ActivatedTurnExecution {
     /// Classified failure from the application service or provider adapter.
-    type Error: ClassifyOperatorFailure;
+    type Error: ClassifyOperatorFailure + Send + 'static;
 
     /// Consumes one exact activation outcome and drives its initial call.
     fn execute(
         &self,
         activated: Box<ActivatedAcceptedInputTurn>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static;
+
+    /// Reconciles a durable active tool turn for one scheduler hint.
+    ///
+    /// Implementations without tool orchestration have no active work to
+    /// resume. PostgreSQL authority is rechecked by the concrete adapter.
+    fn resume_active(
+        &self,
+        _session: SessionId,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        std::future::ready(Ok(()))
+    }
 
     /// Reports that durable activation may require startup recovery.
     fn report_post_activation_failure(&self) {}
@@ -113,6 +123,14 @@ where
         activated: Box<ActivatedAcceptedInputTurn>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
         let execution = self.execution.execute(activated);
+        supervise_execution(self.fatal_signal.clone(), execution)
+    }
+
+    fn resume_active(
+        &self,
+        session: SessionId,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let execution = self.execution.resume_active(session);
         supervise_execution(self.fatal_signal.clone(), execution)
     }
 
@@ -357,6 +375,10 @@ where
         let activation = self.activation.execute_with_cloned_transaction(session);
         let execution = self.execution.clone();
         async move {
+            execution
+                .resume_active(session)
+                .await
+                .map_err(ActivatedTurnPassError::Execution)?;
             let outcome = match activation.await {
                 Ok(outcome) => outcome,
                 Err(error) => {
@@ -513,7 +535,6 @@ impl<Provider> PostgresProviderModelExecution<Provider> {
     /// composition without changing the provider-facing application boundary.
     pub fn with_tool_loop<Catalog, Executor>(
         self,
-        tool_decision_wake: InProcessToolDecisionWake,
         tool_dispatch_gate: InProcessToolDispatchGate,
         catalog: Catalog,
         executor: Executor,
@@ -523,7 +544,6 @@ impl<Provider> PostgresProviderModelExecution<Provider> {
             model_repository: self.repository,
             tool_repository,
             model_gate: self.gate,
-            tool_decision_wake,
             tool_gate: tool_dispatch_gate,
             provider: self.provider,
             catalog,
@@ -592,15 +612,13 @@ pub struct PostgresProviderToolLoopExecution<Provider, Catalog, Executor> {
     model_repository: PostgresModelCallRepository,
     tool_repository: PostgresToolLoopRepository,
     model_gate: InProcessAttemptDispatchGate,
-    tool_decision_wake: InProcessToolDecisionWake,
     tool_gate: InProcessToolDispatchGate,
     provider: Provider,
     catalog: Catalog,
     executor: Executor,
 }
 
-impl<Provider, Catalog, Executor> ActivatedTurnExecution
-    for PostgresProviderToolLoopExecution<Provider, Catalog, Executor>
+impl<Provider, Catalog, Executor> PostgresProviderToolLoopExecution<Provider, Catalog, Executor>
 where
     Provider: ModelCallProvider + Clone + Send + 'static,
     Provider::Capability: Send,
@@ -609,24 +627,25 @@ where
     Executor: ToolExecutor + Clone + Send + 'static,
     Executor::Error: Send + 'static,
 {
-    type Error = PostgresProviderToolLoopExecutionError<Provider::Error, Executor::Error>;
-
-    fn execute(
+    fn execute_scope(
         &self,
-        activated: Box<ActivatedAcceptedInputTurn>,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        session: SessionId,
+        turn: signalbox_domain::TurnId,
+    ) -> impl Future<
+        Output = Result<
+            (),
+            PostgresProviderToolLoopExecutionError<Provider::Error, Executor::Error>,
+        >,
+    > + Send
+    + 'static {
         let model_repository = self.model_repository.clone();
         let tool_repository = self.tool_repository.clone();
         let model_gate = self.model_gate.clone();
-        let tool_decision_wake = self.tool_decision_wake.clone();
         let tool_gate = self.tool_gate.clone();
         let provider = self.provider.clone();
         let catalog = self.catalog.clone();
         let executor = self.executor.clone();
         async move {
-            let session = activated.session();
-            let turn = activated.turn();
-            drop(activated);
             let mut model = ModelCallExecutionService::new(
                 UuidV7ModelCallExecutionIdGenerator,
                 model_repository.clone(),
@@ -682,11 +701,8 @@ where
                             }
                             run_tools = false;
                         }
-                        ToolExecutionServiceOutcome::AwaitingApproval(request) => {
-                            tool_decision_wake.wait(request).await;
-                            continue;
-                        }
-                        ToolExecutionServiceOutcome::AwaitingRecovery(_)
+                        ToolExecutionServiceOutcome::AwaitingApproval(_)
+                        | ToolExecutionServiceOutcome::AwaitingRecovery(_)
                         | ToolExecutionServiceOutcome::ContinuationTargetUnavailable(_) => {
                             return Ok(());
                         }
@@ -723,6 +739,51 @@ where
                         return_if_tools_absent = true;
                     }
                 }
+            }
+        }
+    }
+}
+
+impl<Provider, Catalog, Executor> ActivatedTurnExecution
+    for PostgresProviderToolLoopExecution<Provider, Catalog, Executor>
+where
+    Provider: ModelCallProvider + Clone + Send + 'static,
+    Provider::Capability: Send,
+    Provider::Error: Send + 'static,
+    Catalog: ToolCatalog + Clone + Send + 'static,
+    Executor: ToolExecutor + Clone + Send + 'static,
+    Executor::Error: Send + 'static,
+{
+    type Error = PostgresProviderToolLoopExecutionError<Provider::Error, Executor::Error>;
+
+    fn execute(
+        &self,
+        activated: Box<ActivatedAcceptedInputTurn>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let session = activated.session();
+        let turn = activated.turn();
+        drop(activated);
+        self.execute_scope(session, turn)
+    }
+
+    fn resume_active(
+        &self,
+        session: SessionId,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let tool_repository = self.tool_repository.clone();
+        let execution = self.clone();
+        async move {
+            let turn = tool_repository
+                .find_resumable_turn(session)
+                .await
+                .map_err(|error| {
+                    PostgresProviderToolLoopExecutionError::Tool(Box::new(
+                        RetainedExecutionError::Primary(ToolExecutionServiceError::Load(error)),
+                    ))
+                })?;
+            match turn {
+                Some(turn) => execution.execute_scope(session, turn).await,
+                None => Ok(()),
             }
         }
     }
@@ -977,6 +1038,79 @@ mod tests {
         ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
             ready(Ok(()))
         }
+    }
+
+    #[derive(Clone, Debug)]
+    struct OrderedResumeTransaction {
+        events: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl StartEligibleTurnTransaction for OrderedResumeTransaction {
+        type Error = ExecutionFailure;
+
+        fn handle(
+            &mut self,
+            _session: SessionId,
+            _identities: AcceptedInputTurnActivationIdentities,
+        ) -> impl Future<Output = Result<StartEligibleTurnOutcome, Self::Error>> + Send {
+            self.events
+                .lock()
+                .expect("ordered event lock")
+                .push("activate");
+            ready(Ok(StartEligibleTurnOutcome::NoEligibleTurn))
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct RecordingResumeExecution {
+        events: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl ActivatedTurnExecution for RecordingResumeExecution {
+        type Error = ExecutionFailure;
+
+        fn execute(
+            &self,
+            _activated: Box<ActivatedAcceptedInputTurn>,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+            ready(Ok(()))
+        }
+
+        fn resume_active(
+            &self,
+            _session: SessionId,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+            self.events
+                .lock()
+                .expect("ordered event lock")
+                .push("resume");
+            ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn active_tool_reconciliation_precedes_queued_activation() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut pass = ActivatedTurnPass::new(
+            StartEligibleTurnService::new(
+                AdvancingIds::new(),
+                OrderedResumeTransaction {
+                    events: Arc::clone(&events),
+                },
+            ),
+            RecordingResumeExecution {
+                events: Arc::clone(&events),
+            },
+        );
+
+        pass.run(SessionId::from_uuid(Uuid::from_u128(9)))
+            .await
+            .expect("active reconciliation and activation check both finish");
+
+        assert_eq!(
+            *events.lock().expect("ordered event lock"),
+            ["resume", "activate"]
+        );
     }
 
     #[tokio::test]
