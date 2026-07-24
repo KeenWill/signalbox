@@ -306,6 +306,10 @@ fn encode_tool_result_block(
             push(bytes, 2);
             encode_attestation(bytes, tool_name, encode_text)?;
         }
+        ImportedToolResultBlock::SourceResultBlock { source_type } => {
+            push(bytes, 3);
+            encode_attestation(bytes, source_type, encode_text)?;
+        }
     }
     Ok(())
 }
@@ -585,6 +589,9 @@ impl<'bytes> Decoder<'bytes> {
             2 => Ok(ImportedToolResultBlock::ToolReference {
                 tool_name: self.attestation(Self::text)?,
             }),
+            3 => Ok(ImportedToolResultBlock::SourceResultBlock {
+                source_type: self.attestation(Self::text)?,
+            }),
             value => Err(ImportedConversationEncodingFailure::UnsupportedTag {
                 kind: "tool-result block",
                 value,
@@ -741,6 +748,9 @@ mod tests {
                     ImportedToolResultBlock::ToolReference {
                         tool_name: ImportedSourceAttestation::AttestedAbsent,
                     },
+                    ImportedToolResultBlock::SourceResultBlock {
+                        source_type: attested_text("future-result-kind"),
+                    },
                 ]
                 .into_boxed_slice(),
             )),
@@ -875,6 +885,21 @@ mod tests {
                 is_error: ImportedSourceAttestation::AttestedAbsent,
             },
             &[1, 1, 3, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 1, 118, 1],
+        );
+        assert_version_one_content(
+            ImportedTranscriptContent::ToolResult {
+                source_call_id: ImportedSourceAttestation::NotAttested,
+                content: ImportedSourceAttestation::Attested(ImportedToolResultValue::Blocks(
+                    vec![ImportedToolResultBlock::SourceResultBlock {
+                        source_type: attested_text("x"),
+                    }]
+                    .into_boxed_slice(),
+                )),
+                is_error: ImportedSourceAttestation::NotAttested,
+            },
+            &[
+                1, 1, 3, 0, 2, 1, 0, 0, 0, 0, 0, 0, 0, 1, 3, 2, 0, 0, 0, 0, 0, 0, 0, 1, 120, 0,
+            ],
         );
         assert_version_one_content(
             ImportedTranscriptContent::Thinking {

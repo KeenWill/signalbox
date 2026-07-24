@@ -170,7 +170,10 @@ The closed normalized content vocabulary is:
   structured input, and caller metadata;
 - `ToolResult`, retaining independently attested source call identity, error
   flag, and either exact text or an ordered sequence of typed text, image, and
-  tool-reference result blocks whose own fields also retain attestations;
+  tool-reference result blocks whose own fields also retain attestations; a
+  source-defined result block without a more specific normalized variant retains
+  its exact block-type attestation as `SourceResultBlock`, while the complete
+  normalized owning record retains every field;
 - `Thinking`, retaining independently attested exact thinking and signature;
 - `RedactedThinking`, retaining the source's independently attested redacted
   data;
@@ -288,18 +291,22 @@ Records then normalize as follows:
    - `thinking.thinking` and `.signature` supply exact thinking and signature;
    - `redacted_thinking.data` supplies exact redacted data;
    - `document.source` supplies the media source; and
-   - the exact block discriminator `"fallback"` maps to `SourceMessageBlock`;
-     its consulted `type` member supplies the source-block type attestation,
-     while `from`, `to`, and every other member remain in the complete
-     normalized owning record. Every other unrecognized discriminator rejects.
+   - any block discriminator without a more specific normalized variant maps to
+     `SourceMessageBlock`; its consulted `type` member supplies the exact,
+     explicitly absent, or unattested source-block type, while every other
+     member remains in the complete normalized owning record.
 
    A tool-result `text.text` supplies its text attestation, `image.source`
    supplies its media source, and `tool_reference.tool_name` supplies its
-   tool-name attestation. Every media source consults exactly `type`,
-   `media_type`, and `data`.
+   tool-name attestation. Any other result-block discriminator, including an
+   omitted or null discriminator, maps to `SourceResultBlock` with that exact
+   type attestation. Every media source consults exactly `type`, `media_type`,
+   and `data`.
 
-5. An unknown content shape, content-block type, or tool-result block type fails
-   the complete conversion rather than being silently dropped or guessed.
+5. A malformed content shape still fails the complete conversion rather than
+   being silently dropped or guessed. Unknown source block types do not: each
+   remains one typed generic block backed by its complete normalized record and
+   verbatim raw source record.
 
 For every consulted text member, omitted, null, and string map respectively to
 `NotAttested`, `AttestedAbsent`, and `Attested(exact text)`; any other JSON type
@@ -309,27 +316,29 @@ value. `tool_result.content` instead admits only the exact string or array
 shapes specified above; Boolean, number, and object values reject the complete
 conversion. Consulted media sources admit omitted, null, or an object whose
 three consulted members follow the text rule; every other shape fails. Each
-content or result block must be an object with exactly one consulted `type`
-member containing a recognized string. As above, repeating any consulted member
-at its object level fails the complete conversion. These rules apply
-independently, so a missing or null `tool_use.id` remains typed absence while a
-non-string value is invalid.
+content or result block must be an object with at most one consulted `type`
+member; omission and null become typed generic blocks, an exact string selects a
+specific or generic variant, and any other value shape fails. As above,
+repeating any consulted member at its object level fails the complete
+conversion. These rules apply independently, so a missing or null `tool_use.id`
+remains typed absence while a non-string value is invalid.
 
 Version 1 accepts both user/final-response-only records and records containing
 structured tool traffic, signed thinking, image results, tool references,
 document blocks, model-fallback notices, attachments, and administrative source
 events.
 
-Malformed JSON, a blank line, invalid UTF-8, unsupported content, an identity
-collision inside the candidate set, a position overflow, JSON deeper than 128
-nested array or object containers, or a source with no JSON records rejects the
-complete conversion. Container depth is the count of arrays and objects on one
-root-to-value path: the required top-level record object has depth `1`, entering
-each child array or object adds `1`, and scalars add nothing. Depth `128` is
-admitted and attempting to enter a container at depth `129` rejects the whole
-source. The same count applies to every complete source record and modeled
-nested value. U+0000, empty strings, and a source containing only non-message
-records do not: raw and normalized storage retain them.
+Malformed JSON, a blank line, invalid UTF-8, malformed modeled content, an
+identity collision inside the candidate set, a position overflow, JSON deeper
+than 128 nested array or object containers, or a source with no JSON records
+rejects the complete conversion. Container depth is the count of arrays and
+objects on one root-to-value path: the required top-level record object has
+depth `1`, entering each child array or object adds `1`, and scalars add
+nothing. Depth `128` is admitted and attempting to enter a container at depth
+`129` rejects the whole source. The same count applies to every complete source
+record and modeled nested value. U+0000, empty strings, unknown source block
+discriminators, and a source containing only non-message records do not: raw and
+normalized storage retain them.
 
 ## Persistence and reconstitution
 

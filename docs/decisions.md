@@ -225,14 +225,24 @@ domain-separated, length-framed source digest makes exact reingestion
 idempotent. Import is pure ingestion: resume-style or fork-style selection is a
 later client-invoked session-creation fact. Both select any addressable imported
 frontier and leave the imported snapshot unchanged. Imported semantic entries
-remain provenance-distinct from native evidence. Initial rendering emits exact
-imported user/assistant text and conservatively omits imported tool, result,
-thinking, and media entries without removing them from the frontier. Claude Code
-JSONL version 1 admits a maximum array/object nesting depth of 128. The required
+remain provenance-distinct from native evidence. A separate immutable one-to-one
+`ImportedSessionSeed` binds each imported session to the exact local frontier
+materializing its selected prefix. Initial rendering emits exact imported
+user/assistant text and conservatively omits imported tool, result, thinking,
+and media entries without removing them from the frontier. Claude Code JSONL
+version 1 admits a maximum array/object nesting depth of 128. The required
 top-level record object counts as depth 1, depth 128 is admitted, and attempting
 to enter a container at depth 129 rejects the complete source, as specified by
 [conversation-import](spec/conversation-import.md). This bounds its recursive
-source-neutral JSON decoder.
+source-neutral JSON decoder. Committed fixtures are synthetic; local validation
+against real transcripts is explicit opt-in and content-silent.
+
+Read-only study of the owner's unmerged `llm_hub` importer informed the
+content-hash deduplication boundary, its
+`import_only`/`adopt_resume`/`adopt_fork` vocabulary, native-event format
+survey, and opt-in real-transcript test pattern. Signalbox reimplements those
+useful ideas through its Rust domain and persistence seams; it does not inherit
+the prior import-time adoption coupling.
 
 **Rejected alternatives.** Replaying imports as native turns or copying them
 into native accepted-input/model-call variants would fabricate execution

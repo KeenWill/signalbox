@@ -728,6 +728,12 @@ pub enum ImportedToolResultBlock {
         /// Exact or absent tool name.
         tool_name: ImportedSourceAttestation<ImportedText>,
     },
+    /// One source-defined result block without a more specific normalized
+    /// variant.
+    SourceResultBlock {
+        /// Exact, explicit-null, or omitted source block type.
+        source_type: ImportedSourceAttestation<ImportedText>,
+    },
 }
 
 /// One present tool-result content value.
@@ -2153,31 +2159,43 @@ fn projected_content_block(
     let ImportedStructuredValue::Object(members) = value else {
         return Err(());
     };
-    match projected_required_type(members)? {
-        "text" => Ok(ImportedTranscriptContent::Text(projected_text_attestation(
-            members, "text",
-        )?)),
-        "tool_use" => Ok(ImportedTranscriptContent::ToolCall {
-            source_call_id: projected_text_attestation(members, "id")?,
-            name: projected_text_attestation(members, "name")?,
-            input: projected_structured_attestation(members, "input")?,
-            caller: projected_structured_attestation(members, "caller")?,
-        }),
-        "tool_result" => projected_tool_result(members),
-        "thinking" => Ok(ImportedTranscriptContent::Thinking {
-            thinking: projected_text_attestation(members, "thinking")?,
-            signature: projected_text_attestation(members, "signature")?,
-        }),
-        "redacted_thinking" => Ok(ImportedTranscriptContent::RedactedThinking {
-            data: projected_text_attestation(members, "data")?,
-        }),
-        "document" => Ok(ImportedTranscriptContent::Document {
-            source: projected_media_source_attestation(members, "source")?,
-        }),
-        "fallback" => Ok(ImportedTranscriptContent::SourceMessageBlock {
-            source_type: projected_text_attestation(members, "type")?,
-        }),
-        _ => Err(()),
+    let source_type = projected_text_attestation(members, "type")?;
+    match &source_type {
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "text" => Ok(
+            ImportedTranscriptContent::Text(projected_text_attestation(members, "text")?),
+        ),
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "tool_use" => {
+            Ok(ImportedTranscriptContent::ToolCall {
+                source_call_id: projected_text_attestation(members, "id")?,
+                name: projected_text_attestation(members, "name")?,
+                input: projected_structured_attestation(members, "input")?,
+                caller: projected_structured_attestation(members, "caller")?,
+            })
+        }
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "tool_result" => {
+            projected_tool_result(members)
+        }
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "thinking" => {
+            Ok(ImportedTranscriptContent::Thinking {
+                thinking: projected_text_attestation(members, "thinking")?,
+                signature: projected_text_attestation(members, "signature")?,
+            })
+        }
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "redacted_thinking" => {
+            Ok(ImportedTranscriptContent::RedactedThinking {
+                data: projected_text_attestation(members, "data")?,
+            })
+        }
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "document" => {
+            Ok(ImportedTranscriptContent::Document {
+                source: projected_media_source_attestation(members, "source")?,
+            })
+        }
+        ImportedSourceAttestation::Attested(_)
+        | ImportedSourceAttestation::AttestedAbsent
+        | ImportedSourceAttestation::NotAttested => {
+            Ok(ImportedTranscriptContent::SourceMessageBlock { source_type })
+        }
     }
 }
 
@@ -2214,24 +2232,24 @@ fn projected_tool_result_block(
     let ImportedStructuredValue::Object(members) = value else {
         return Err(());
     };
-    match projected_required_type(members)? {
-        "text" => Ok(ImportedToolResultBlock::Text(projected_text_attestation(
-            members, "text",
-        )?)),
-        "image" => Ok(ImportedToolResultBlock::Image(
-            projected_media_source_attestation(members, "source")?,
-        )),
-        "tool_reference" => Ok(ImportedToolResultBlock::ToolReference {
-            tool_name: projected_text_attestation(members, "tool_name")?,
-        }),
-        _ => Err(()),
-    }
-}
-
-fn projected_required_type(members: &[ImportedStructuredObjectMember]) -> Result<&str, ()> {
-    match unique_structured_field(members, "type")? {
-        Some(ImportedStructuredValue::String(value)) => Ok(value.as_str()),
-        None | Some(_) => Err(()),
+    let source_type = projected_text_attestation(members, "type")?;
+    match &source_type {
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "text" => Ok(
+            ImportedToolResultBlock::Text(projected_text_attestation(members, "text")?),
+        ),
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "image" => Ok(
+            ImportedToolResultBlock::Image(projected_media_source_attestation(members, "source")?),
+        ),
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "tool_reference" => {
+            Ok(ImportedToolResultBlock::ToolReference {
+                tool_name: projected_text_attestation(members, "tool_name")?,
+            })
+        }
+        ImportedSourceAttestation::Attested(_)
+        | ImportedSourceAttestation::AttestedAbsent
+        | ImportedSourceAttestation::NotAttested => {
+            Ok(ImportedToolResultBlock::SourceResultBlock { source_type })
+        }
     }
 }
 

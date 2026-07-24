@@ -200,6 +200,9 @@ pub enum ImportedToolResultBlock {
     ToolReference {
         tool_name: ImportedSourceAttestation<ImportedText>,
     },
+    SourceResultBlock {
+        source_type: ImportedSourceAttestation<ImportedText>,
+    },
 }
 
 pub enum ImportedToolResultValue {

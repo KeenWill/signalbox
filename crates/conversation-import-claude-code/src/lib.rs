@@ -93,24 +93,8 @@ pub enum ClaudeCodeJsonlConversionFailure {
         /// One-based block position inside message content.
         block: u64,
     },
-    /// One message content block named an unsupported type.
-    UnknownContentBlockType {
-        /// One-based physical line number.
-        line: u64,
-        /// One-based block position inside message content.
-        block: u64,
-    },
     /// One tool-result block had an unsupported shape.
     InvalidToolResultBlock {
-        /// One-based physical line number.
-        line: u64,
-        /// One-based message block position.
-        block: u64,
-        /// One-based tool-result block position.
-        result_block: u64,
-    },
-    /// One tool-result block named an unsupported type.
-    UnknownToolResultBlockType {
         /// One-based physical line number.
         line: u64,
         /// One-based message block position.
@@ -435,51 +419,55 @@ fn normalize_content_block(
     let ImportedStructuredValue::Object(members) = value else {
         return Err(invalid_content_block(line, block));
     };
-    let block_type = required_type(members).map_err(|failure| match failure {
-        RequiredTypeFailure::Invalid => invalid_content_block(line, block),
-        RequiredTypeFailure::Unknown => {
-            conversion_error(ClaudeCodeJsonlConversionFailure::UnknownContentBlockType {
-                line,
-                block,
+    let source_type =
+        text_attestation(members, "type").map_err(|()| invalid_content_block(line, block))?;
+    match &source_type {
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "text" => {
+            Ok(ImportedTranscriptContent::Text(
+                text_attestation(members, "text")
+                    .map_err(|()| invalid_content_block(line, block))?,
+            ))
+        }
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "tool_use" => {
+            Ok(ImportedTranscriptContent::ToolCall {
+                source_call_id: text_attestation(members, "id")
+                    .map_err(|()| invalid_content_block(line, block))?,
+                name: text_attestation(members, "name")
+                    .map_err(|()| invalid_content_block(line, block))?,
+                input: structured_attestation(members, "input")
+                    .map_err(|()| invalid_content_block(line, block))?,
+                caller: structured_attestation(members, "caller")
+                    .map_err(|()| invalid_content_block(line, block))?,
             })
         }
-    })?;
-    match block_type {
-        "text" => Ok(ImportedTranscriptContent::Text(
-            text_attestation(members, "text").map_err(|()| invalid_content_block(line, block))?,
-        )),
-        "tool_use" => Ok(ImportedTranscriptContent::ToolCall {
-            source_call_id: text_attestation(members, "id")
-                .map_err(|()| invalid_content_block(line, block))?,
-            name: text_attestation(members, "name")
-                .map_err(|()| invalid_content_block(line, block))?,
-            input: structured_attestation(members, "input")
-                .map_err(|()| invalid_content_block(line, block))?,
-            caller: structured_attestation(members, "caller")
-                .map_err(|()| invalid_content_block(line, block))?,
-        }),
-        "tool_result" => normalize_tool_result(members, line, block),
-        "thinking" => Ok(ImportedTranscriptContent::Thinking {
-            thinking: text_attestation(members, "thinking")
-                .map_err(|()| invalid_content_block(line, block))?,
-            signature: text_attestation(members, "signature")
-                .map_err(|()| invalid_content_block(line, block))?,
-        }),
-        "redacted_thinking" => Ok(ImportedTranscriptContent::RedactedThinking {
-            data: text_attestation(members, "data")
-                .map_err(|()| invalid_content_block(line, block))?,
-        }),
-        "document" => Ok(ImportedTranscriptContent::Document {
-            source: media_source_attestation(members, "source")
-                .map_err(|()| invalid_content_block(line, block))?,
-        }),
-        "fallback" => Ok(ImportedTranscriptContent::SourceMessageBlock {
-            source_type: text_attestation(members, "type")
-                .map_err(|()| invalid_content_block(line, block))?,
-        }),
-        _ => Err(conversion_error(
-            ClaudeCodeJsonlConversionFailure::UnknownContentBlockType { line, block },
-        )),
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "tool_result" => {
+            normalize_tool_result(members, line, block)
+        }
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "thinking" => {
+            Ok(ImportedTranscriptContent::Thinking {
+                thinking: text_attestation(members, "thinking")
+                    .map_err(|()| invalid_content_block(line, block))?,
+                signature: text_attestation(members, "signature")
+                    .map_err(|()| invalid_content_block(line, block))?,
+            })
+        }
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "redacted_thinking" => {
+            Ok(ImportedTranscriptContent::RedactedThinking {
+                data: text_attestation(members, "data")
+                    .map_err(|()| invalid_content_block(line, block))?,
+            })
+        }
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "document" => {
+            Ok(ImportedTranscriptContent::Document {
+                source: media_source_attestation(members, "source")
+                    .map_err(|()| invalid_content_block(line, block))?,
+            })
+        }
+        ImportedSourceAttestation::Attested(_)
+        | ImportedSourceAttestation::AttestedAbsent
+        | ImportedSourceAttestation::NotAttested => {
+            Ok(ImportedTranscriptContent::SourceMessageBlock { source_type })
+        }
     }
 }
 
@@ -529,36 +517,32 @@ fn normalize_tool_result_block(
     let ImportedStructuredValue::Object(members) = value else {
         return Err(invalid_tool_result_block(line, block, result_block));
     };
-    let block_type = required_type(members).map_err(|failure| match failure {
-        RequiredTypeFailure::Invalid => invalid_tool_result_block(line, block, result_block),
-        RequiredTypeFailure::Unknown => conversion_error(
-            ClaudeCodeJsonlConversionFailure::UnknownToolResultBlockType {
-                line,
-                block,
-                result_block,
-            },
-        ),
-    })?;
-    match block_type {
-        "text" => Ok(ImportedToolResultBlock::Text(
-            text_attestation(members, "text")
-                .map_err(|()| invalid_tool_result_block(line, block, result_block))?,
-        )),
-        "image" => Ok(ImportedToolResultBlock::Image(
-            media_source_attestation(members, "source")
-                .map_err(|()| invalid_tool_result_block(line, block, result_block))?,
-        )),
-        "tool_reference" => Ok(ImportedToolResultBlock::ToolReference {
-            tool_name: text_attestation(members, "tool_name")
-                .map_err(|()| invalid_tool_result_block(line, block, result_block))?,
-        }),
-        _ => Err(conversion_error(
-            ClaudeCodeJsonlConversionFailure::UnknownToolResultBlockType {
-                line,
-                block,
-                result_block,
-            },
-        )),
+    let source_type = text_attestation(members, "type")
+        .map_err(|()| invalid_tool_result_block(line, block, result_block))?;
+    match &source_type {
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "text" => {
+            Ok(ImportedToolResultBlock::Text(
+                text_attestation(members, "text")
+                    .map_err(|()| invalid_tool_result_block(line, block, result_block))?,
+            ))
+        }
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "image" => {
+            Ok(ImportedToolResultBlock::Image(
+                media_source_attestation(members, "source")
+                    .map_err(|()| invalid_tool_result_block(line, block, result_block))?,
+            ))
+        }
+        ImportedSourceAttestation::Attested(value) if value.as_str() == "tool_reference" => {
+            Ok(ImportedToolResultBlock::ToolReference {
+                tool_name: text_attestation(members, "tool_name")
+                    .map_err(|()| invalid_tool_result_block(line, block, result_block))?,
+            })
+        }
+        ImportedSourceAttestation::Attested(_)
+        | ImportedSourceAttestation::AttestedAbsent
+        | ImportedSourceAttestation::NotAttested => {
+            Ok(ImportedToolResultBlock::SourceResultBlock { source_type })
+        }
     }
 }
 
@@ -576,19 +560,6 @@ fn invalid_tool_result_block(
         block,
         result_block,
     })
-}
-
-enum RequiredTypeFailure {
-    Invalid,
-    Unknown,
-}
-
-fn required_type(members: &[ImportedStructuredObjectMember]) -> Result<&str, RequiredTypeFailure> {
-    match unique_field(members, "type").map_err(|()| RequiredTypeFailure::Invalid)? {
-        Some(ImportedStructuredValue::String(value)) => Ok(value.as_str()),
-        None | Some(ImportedStructuredValue::Null) => Err(RequiredTypeFailure::Unknown),
-        Some(_) => Err(RequiredTypeFailure::Invalid),
-    }
 }
 
 fn source_metadata(
@@ -824,19 +795,42 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_maps_fallback_to_source_message_block() {
+    fn s28_inv038_maps_source_defined_tool_result_blocks_without_dropping_the_result() {
         let imported = convert_synthetic(
-            "{\"type\":\"assistant\",\"message\":{\"content\":[\
-             {\"type\":\"fallback\",\"from\":{\"model\":\"before\"},\
-             \"to\":{\"model\":\"after\"}}]}}",
+            "{\"type\":\"user\",\"message\":{\"content\":[\
+             {\"type\":\"tool_result\",\"tool_use_id\":\"call\",\
+             \"content\":[{\"type\":\"future-result-kind\",\"payload\":{\"exact\":1}}]}]}}",
         );
+        let ImportedTranscriptContent::ToolResult { content, .. } = imported.entries()[0].content()
+        else {
+            panic!("synthetic entry should remain one tool result");
+        };
+        let ImportedSourceAttestation::Attested(ImportedToolResultValue::Blocks(blocks)) = content
+        else {
+            panic!("synthetic tool result should retain its ordered blocks");
+        };
 
         assert!(matches!(
-            imported.entries()[0].content(),
-            ImportedTranscriptContent::SourceMessageBlock {
+            blocks.as_ref(),
+            [ImportedToolResultBlock::SourceResultBlock {
                 source_type: ImportedSourceAttestation::Attested(value)
-            } if value.as_str() == "fallback"
+            }] if value.as_str() == "future-result-kind"
         ));
+    }
+
+    #[test]
+    fn s28_inv038_untyped_source_message_block_retains_typed_absence() {
+        let imported = convert_synthetic(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[\
+             {\"payload\":{\"exact\":1}}]}}",
+        );
+
+        assert_eq!(
+            imported.entries()[0].content(),
+            &ImportedTranscriptContent::SourceMessageBlock {
+                source_type: ImportedSourceAttestation::NotAttested,
+            }
+        );
     }
 
     #[test]
@@ -1031,21 +1025,21 @@ mod tests {
     }
 
     #[test]
-    fn s28_inv038_unknown_content_block_fails_complete_conversion() {
+    fn s28_inv038_unknown_content_block_is_normalized_without_omission() {
         let source = concat!(
             "{\"type\":\"user\",\"message\":{\"content\":\"secret-before\"}}\n",
             "{\"type\":\"assistant\",\"message\":{\"content\":[",
             "{\"type\":\"future-secret-kind\",\"payload\":\"secret-after\"}]}}"
         );
-        let error = ClaudeCodeJsonlConverter
-            .convert(conversation(), source.as_bytes(), || {
-                ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(100))
-            })
-            .expect_err("unknown synthetic block must fail the complete conversion");
-        assert_eq!(
-            error.failure(),
-            ClaudeCodeJsonlConversionFailure::UnknownContentBlockType { line: 2, block: 1 }
-        );
+        let imported = convert_synthetic(source);
+
+        assert_eq!(imported.entries().len(), 2);
+        assert!(matches!(
+            imported.entries()[1].content(),
+            ImportedTranscriptContent::SourceMessageBlock {
+                source_type: ImportedSourceAttestation::Attested(value)
+            } if value.as_str() == "future-secret-kind"
+        ));
     }
 
     #[test]
@@ -1053,14 +1047,18 @@ mod tests {
         let source = concat!(
             "{\"type\":\"user\",\"message\":{\"content\":\"secret-before\"}}\n",
             "{\"type\":\"assistant\",\"message\":{\"content\":[",
-            "{\"type\":\"future-secret-kind\",\"payload\":\"secret-after\"}]}}"
+            "{\"type\":17,\"payload\":\"secret-after\"}]}}"
         );
         let error = ClaudeCodeJsonlConverter
             .convert(conversation(), source.as_bytes(), || {
                 ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(100))
             })
-            .expect_err("unknown synthetic block must produce a content-silent error");
+            .expect_err("malformed synthetic block must produce a content-silent error");
 
+        assert_eq!(
+            error.failure(),
+            ClaudeCodeJsonlConversionFailure::InvalidContentBlock { line: 2, block: 1 }
+        );
         let debug = format!("{error:?}");
         assert!(!debug.contains("secret"));
         assert_eq!(error.to_string(), "Claude Code JSONL conversion failed");
