@@ -24,8 +24,9 @@ use signalbox_application::{
 };
 use signalbox_domain::{SessionId, TurnId};
 use signalbox_hubd::{
-    ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, FatalExecutionSupervisor,
+    ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, CurrentTimeTool, FatalExecutionSupervisor,
     FileCredentialAccess, HubModelConfiguration, PostgresProviderModelExecution,
+    SystemCurrentTimeClock,
 };
 use signalbox_model_provider_runtime::RuntimeModelCallProvider;
 use signalbox_model_runtime::CredentialReference;
@@ -33,7 +34,7 @@ use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
 use signalbox_persistence::{
     connect_production, migrate, model_execution::PostgresModelCallRepository,
     scheduler::PostgresEligibilitySweep, start_eligible_turn::StartEligibleTurnRepository,
-    startup::PostgresStartupScanRepository,
+    startup::PostgresStartupScanRepository, tool_loop::PostgresToolLoopRepository,
 };
 use tokio::{pin, select, sync::oneshot, time::timeout};
 
@@ -281,6 +282,9 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
     let provider =
         RuntimeModelCallProvider::new(anthropic, model_configuration.runtime_model_catalog());
     let model_targets = model_configuration.target_catalog();
+    let (tool_catalog, tool_executor) = CurrentTimeTool::try_new(SystemCurrentTimeClock)
+        .map_err(|_| HubRuntimeError::infrastructure(RuntimePhase::Configuration))?
+        .into_parts();
     let pool = connect_production(configuration.database_url())
         .await
         .map_err(|_| HubRuntimeError::infrastructure(RuntimePhase::DatabaseConnection))?;
@@ -329,16 +333,26 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
         || async move {
             let sweep = PostgresEligibilitySweep::new(scheduler_pool.clone());
             let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
-            let (execution, fatal_execution) =
-                FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
+            let (execution, fatal_execution) = FatalExecutionSupervisor::new(
+                PostgresProviderModelExecution::new(
                     PostgresModelCallRepository::new(
+                        scheduler_pool.clone(),
+                        model_targets.clone(),
+                        credential_reference.clone(),
+                    ),
+                    InProcessAttemptDispatchGate::default(),
+                    provider,
+                )
+                .with_tool_loop(
+                    PostgresToolLoopRepository::with_model_calls(
                         scheduler_pool.clone(),
                         model_targets,
                         credential_reference,
                     ),
-                    InProcessAttemptDispatchGate::default(),
-                    provider,
-                ));
+                    tool_catalog,
+                    tool_executor,
+                ),
+            );
             let pass = ActivatedTurnPass::new(
                 StartEligibleTurnService::new(
                     UuidV7StartEligibleTurnIdGenerator,

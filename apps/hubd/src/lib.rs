@@ -26,10 +26,15 @@ use sqlx::PgPool;
 use tokio::sync::watch;
 
 mod configuration;
+mod current_time;
 
 pub use configuration::{
     ANTHROPIC_CREDENTIAL_REFERENCE, FileCredentialAccess, HubModelConfiguration,
     HubModelConfigurationError,
+};
+pub use current_time::{
+    CurrentTimeClock, CurrentTimeExecutor, CurrentTimeExecutorError, CurrentTimeTool,
+    CurrentTimeToolConstructionError, SystemCurrentTimeClock,
 };
 
 /// Per-activation model execution constructed by the hub composition root.
