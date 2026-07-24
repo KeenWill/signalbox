@@ -47,6 +47,17 @@ Owns: the runtime adapter crates only. Collides-with: nothing on the board.
 Closes the provider-call-security open question and takes the deliberate reqwest
 upgrade with loopback re-verification.
 
+## Subscription-backed provider runtimes [blocked-on: owner design pass] [size: L]
+
+Owns: new runtime adapter crate(s) behind the substrate boundary. Collides-with:
+runtime crates only — parallel-safe against everything else. Alternate
+model-runtime backends wrapping the owner's Codex and Claude subscriptions
+(local subprocess adapters rather than HTTPS), so sessions can spend
+subscription capacity in addition to API billing. Design questions: mapping
+subprocess output to typed terminal evidence, cancellation, failure
+classification. Prior art: the owner's own unmerged native-provider subprocess
+handlers in his private monorepo (the same branch as the importer prior art).
+
 ## Native client rewire, macOS first [blocked-on: client stack + snapshot import merges] [size: L]
 
 Owns: `clients/native`, possibly additive process-protocol frames.
@@ -57,6 +68,8 @@ mock-fixture screenshot harness ports first — it is how the app iterates. iOS
 waits for remote transport.
 
 ## Tool loop foundation [blocked-on: owner design pass] [size: XL]
+
+Owner-flagged: the next major milestone — schedule the design pass first.
 
 Owns: domain turn machinery, tool entries (the storage-blocked assistant
 tool-use variant), ToolRequest/ToolAttempt lifecycle, approval algebra
