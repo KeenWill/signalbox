@@ -20,7 +20,7 @@ enum RealTranscriptValidationFailure {
 
 #[test]
 #[ignore = "requires explicit local real-transcript opt-in"]
-fn opt_in_real_transcripts_convert_without_content_output() {
+fn s28_inv038_opt_in_real_transcripts_convert_without_content_output() {
     assert_eq!(validate_opt_in_real_transcripts(), Ok(()));
 }
 
