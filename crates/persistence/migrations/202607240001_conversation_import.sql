@@ -24,7 +24,12 @@ CREATE TABLE imported_conversation (
     CONSTRAINT imported_conversation_storage_version_supported
         CHECK (storage_version = 1),
     CONSTRAINT imported_conversation_source_format_closed
-        CHECK (source_format = 'claude_code_session_jsonl'),
+        CHECK (
+            source_format IN (
+                'claude_code_session_jsonl',
+                'codex_rollout_jsonl'
+            )
+        ),
     CONSTRAINT imported_conversation_converter_version_supported
         CHECK (converter_version = 1),
     CONSTRAINT imported_conversation_source_digest_size
