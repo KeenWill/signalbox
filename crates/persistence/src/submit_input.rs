@@ -483,9 +483,11 @@ impl SubmitInputRepository {
             Some(CommandKind::SubmitInput) => {
                 load_from_connection(&mut connection, command_id).await
             }
-            Some(CommandKind::CreateSession | CommandKind::ReplaceSessionDefaults) => {
-                Err(Self::wrong_kind(command_id))
-            }
+            Some(
+                CommandKind::CreateSession
+                | CommandKind::CreateSessionFromImportedFrontier
+                | CommandKind::ReplaceSessionDefaults,
+            ) => Err(Self::wrong_kind(command_id)),
         }
     }
 
@@ -547,7 +549,11 @@ where
                 require_recorded(connection, command_id).await?,
             )));
         }
-        Some(CommandKind::CreateSession | CommandKind::ReplaceSessionDefaults) => {
+        Some(
+            CommandKind::CreateSession
+            | CommandKind::CreateSessionFromImportedFrontier
+            | CommandKind::ReplaceSessionDefaults,
+        ) => {
             return Ok(TransactionDecision::Rollback(
                 SubmitInputHandlingOutcome::ConflictingReuse { command_id },
             ));
@@ -575,11 +581,13 @@ where
                 &command,
                 require_recorded(connection, command_id).await?,
             ))),
-            Some(CommandKind::CreateSession | CommandKind::ReplaceSessionDefaults) => {
-                Ok(TransactionDecision::Rollback(
-                    SubmitInputHandlingOutcome::ConflictingReuse { command_id },
-                ))
-            }
+            Some(
+                CommandKind::CreateSession
+                | CommandKind::CreateSessionFromImportedFrontier
+                | CommandKind::ReplaceSessionDefaults,
+            ) => Ok(TransactionDecision::Rollback(
+                SubmitInputHandlingOutcome::ConflictingReuse { command_id },
+            )),
             None => Err(SubmitInputCorruption::Inconsistent("winner claim disappeared").into()),
         };
     }

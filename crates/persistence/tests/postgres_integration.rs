@@ -5,6 +5,8 @@
     reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
 )]
 
+mod support;
+
 use std::{
     collections::VecDeque,
     error::Error,
@@ -54,6 +56,9 @@ use signalbox_persistence::{
         CreateSessionCorruption, CreateSessionHandlingOutcome, CreateSessionRepository,
         CreateSessionRepositoryError,
     },
+    create_session_from_imported_frontier::{
+        ImportedSessionRepository, ImportedSessionRepositoryError,
+    },
     local_test_connection_options, migrate,
     model_execution::{
         ModelCallCorruption, ModelCallIdentityCollision, ModelCallRepositoryError,
@@ -89,6 +94,8 @@ use testcontainers_modules::{
     postgres::Postgres,
     testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
 };
+
+use support::blocked_backends_reached;
 
 const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_NAME: &str = "signalbox_integration";
@@ -5798,10 +5805,18 @@ async fn inv012_cross_kind_reuse_is_conflict_not_corruption_or_absence()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let create_repository = CreateSessionRepository::new(pool.clone());
+    let imported_repository = ImportedSessionRepository::new(pool.clone());
     let defaults_repository = ReplaceSessionDefaultsRepository::new(pool.clone());
     let input_repository = SubmitInputRepository::new(pool.clone());
     let creation = prepared(0x221, 0x721, direct(0x821));
     create_repository.handle(creation).await?;
+    assert!(matches!(
+        imported_repository
+            .load(DurableCommandId::from_uuid(Uuid::from_u128(0x221)))
+            .await
+            .expect_err("a CreateSession ID is not an unseen imported creation"),
+        ImportedSessionRepositoryError::DifferentCommandKind { .. }
+    ));
 
     let defaults_reuse = replacement(0x221, 0x721, 1, alias(0x822));
     assert_eq!(
@@ -7239,28 +7254,6 @@ async fn s01_inv009_concurrent_start_eligible_turn_passes_activate_once()
     pool.close().await;
     drop(container);
     Ok(())
-}
-
-/// Polls until exactly `expected` backends are lock-blocked behind another
-/// backend, returning whether that count appeared within the polling budget.
-/// The per-test database serves only this test's connections and each racer
-/// is spawned only after the previous blocked count is observed, so spawn
-/// order identifies the racers without matching their SQL text.
-async fn blocked_backends_reached(pool: &PgPool, expected: i64) -> Result<bool, sqlx::Error> {
-    for _ in 0..400 {
-        let observed: i64 = sqlx::query_scalar(
-            "SELECT count(*)
-               FROM pg_stat_activity
-              WHERE cardinality(pg_blocking_pids(pid)) > 0",
-        )
-        .fetch_one(pool)
-        .await?;
-        if observed == expected {
-            return Ok(true);
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
-    Ok(false)
 }
 
 #[tokio::test(flavor = "multi_thread")]

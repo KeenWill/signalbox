@@ -164,6 +164,10 @@ The committing transaction atomically inserts:
   in imported position order, plus the one-to-one `ImportedSessionSeed` linking
   the session to that exact frontier identity.
 
+Unique conflicts for generated session, semantic-entry, and seed-frontier
+candidates are returned as typed identity collisions by identity kind. The
+failed transaction rolls back its registry claim.
+
 No imported tool, call, attempt, or turn lifecycle event is emitted. The
 imported aggregate remains the content authority: each semantic seed entry
 records its exact imported-entry reference, source-speaker attestation, and

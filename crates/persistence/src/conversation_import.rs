@@ -588,7 +588,7 @@ async fn resolve_existing_snapshot(
     }))
 }
 
-async fn load_from_connection(
+pub(crate) async fn load_from_connection(
     connection: &mut PgConnection,
     requested: ImportedConversationId,
 ) -> Result<Option<ImportedConversation>, ImportedConversationRepositoryError> {

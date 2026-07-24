@@ -45,6 +45,11 @@ path = "tests/conversation_import_postgres.rs"
 required-features = ["postgres-integration"]
 
 [[test]]
+name = "imported_session_postgres"
+path = "tests/imported_session_postgres.rs"
+required-features = ["postgres-integration"]
+
+[[test]]
 name = "postgres_integration"
 path = "tests/postgres_integration.rs"
 required-features = ["postgres-integration"]

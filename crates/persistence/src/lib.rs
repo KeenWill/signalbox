@@ -9,6 +9,7 @@ mod lock_inventory;
 
 pub mod conversation_import;
 pub mod create_session;
+pub mod create_session_from_imported_frontier;
 pub mod hub_fence;
 pub mod mapping;
 pub mod model_execution;
