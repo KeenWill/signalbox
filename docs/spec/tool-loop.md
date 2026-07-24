@@ -300,6 +300,15 @@ turn or tool attempt. Raw request identity is not approval-wait evidence.
 Startup scanning leaves an approval wait unchanged. It never fabricates an
 approval or denial, advances to a later request, expires the wait, or creates an
 attempt. Pending approval has no timeout and may wait indefinitely (INV-010).
+The activated execution pass returns while approval is pending, releasing its
+bounded scheduler worker. A durably applied final decision advances the stored
+phase to running; the durable eligibility sweep includes that active tool round,
+and the next pass reloads the exact batch before continuing. Rejected or
+uncommitted commands leave the approval phase unchanged and create no resumable
+hint. The same sweep inventories a running batch after restart, including one
+whose decision committed before the prior process stopped, so progress does not
+depend on process-local wake memory.
+
 Running phases use the staged tool-attempt crash classification above; parked
 external-effect ambiguity is never automatically retried. Version one permits
 only proof-bearing interruption to terminalize that wait as reconciliation
@@ -326,9 +335,10 @@ proposal-ordered results for that batch are coalesced into the immediately
 following user message. OpenAI carries typed failure JSON as ordinary
 tool-message content because its wire shape has no failure flag; Anthropic also
 receives the provider-neutral failure flag. Malformed proposal arguments remain
-exact on the durable request but replay as an object-shaped invalid-arguments
-placeholder, allowing the paired typed error result to reach either provider
-without pretending the placeholder is durable evidence.
+exact after preparation-time credential scrubbing on the durable request but
+replay as an object-shaped invalid-arguments placeholder, allowing the paired
+typed error result to reach either provider without pretending the placeholder
+is durable evidence.
 
 The first compiled tool is `current_time`:
 
