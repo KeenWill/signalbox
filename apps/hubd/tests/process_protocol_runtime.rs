@@ -442,7 +442,7 @@ async fn process_runtime_lists_the_alias_session_projection() -> Result<(), Box<
 
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn imported_session_requires_v2_and_streams_its_conservative_seed_snapshot()
+async fn s28_imported_session_requires_v2_and_streams_its_conservative_seed_snapshot()
 -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let session_id = create_imported_session(&runtime.pool).await?;

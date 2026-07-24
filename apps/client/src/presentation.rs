@@ -692,7 +692,7 @@ mod tests {
     }
 
     #[test]
-    fn imported_snapshot_renders_attested_text_and_conservative_nontext() {
+    fn s28_imported_snapshot_renders_attested_text() {
         let mut snapshot = TranscriptSnapshot::from_messages(
             9,
             [
@@ -715,17 +715,6 @@ mod tests {
                     content_fragment: ContentFragment::try_new("exact imported text".to_owned())
                         .expect("short content is valid"),
                 },
-                ServerMessage::TranscriptEntry {
-                    entry_index: CanonicalU64::new(1),
-                    source_session_id: wire_uuid(1),
-                    entry_id: wire_uuid(5),
-                    entry: TranscriptEntry::Imported {
-                        imported_conversation_id: wire_uuid(3),
-                        imported_entry_id: wire_uuid(6),
-                        source_speaker: ImportedSourceSpeaker::NotAttested {},
-                        content_kind: ImportedContentKind::ToolCall,
-                    },
-                },
             ],
         )
         .expect("test snapshot must spool");
@@ -739,6 +728,36 @@ mod tests {
         expect![[r#"
             imported_user imported_conversation=00000000-0000-0000-0000-000000000003 imported_entry=00000000-0000-0000-0000-000000000004 source=00000000-0000-0000-0000-000000000001 entry=00000000-0000-0000-0000-000000000002
             exact imported text
+        "#]]
+        .assert_eq(&rendered);
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn s28_imported_snapshot_renders_conservative_nontext() {
+        let mut snapshot = TranscriptSnapshot::from_messages(
+            9,
+            [ServerMessage::TranscriptEntry {
+                entry_index: CanonicalU64::new(0),
+                source_session_id: wire_uuid(1),
+                entry_id: wire_uuid(5),
+                entry: TranscriptEntry::Imported {
+                    imported_conversation_id: wire_uuid(3),
+                    imported_entry_id: wire_uuid(6),
+                    source_speaker: ImportedSourceSpeaker::NotAttested {},
+                    content_kind: ImportedContentKind::ToolCall,
+                },
+            }],
+        )
+        .expect("test snapshot must spool");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .snapshot(&mut snapshot)
+            .expect("imported snapshot must render");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        expect![[r#"
             imported_speaker_unattested kind=tool_call imported_conversation=00000000-0000-0000-0000-000000000003 imported_entry=00000000-0000-0000-0000-000000000006 source=00000000-0000-0000-0000-000000000001 entry=00000000-0000-0000-0000-000000000005
         "#]]
         .assert_eq(&rendered);
