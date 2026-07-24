@@ -2479,7 +2479,7 @@ async fn load_call_credential_reference(
     session: SessionId,
     call: ModelCallId,
 ) -> Result<ModelCallCredentialReference, ModelCallRepositoryError> {
-    let reference = sqlx::query_scalar::<_, Option<String>>(
+    let reference = sqlx::query_scalar::<_, String>(
         "SELECT credential_reference
            FROM model_call
           WHERE session_id = $1
@@ -2489,10 +2489,7 @@ async fn load_call_credential_reference(
     .bind(call.into_uuid())
     .fetch_optional(&mut *connection)
     .await?
-    .ok_or(ModelCallCorruption::Missing("prepared model call"))?
-    .ok_or(ModelCallCorruption::Missing(
-        "model-call credential reference",
-    ))?;
+    .ok_or(ModelCallCorruption::Missing("prepared model call"))?;
     Ok(ModelCallCredentialReference::new(reference))
 }
 
