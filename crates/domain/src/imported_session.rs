@@ -1049,7 +1049,7 @@ mod tests {
 
     use super::*;
     use crate::test_support::{
-        command_id, context_frontier_id, direct, imported_conversation_id,
+        accepted_input_id, command_id, context_frontier_id, direct, imported_conversation_id,
         imported_transcript_entry_id, semantic_transcript_entry_id, session_id,
     };
     use crate::{
@@ -1125,6 +1125,21 @@ mod tests {
             vec![first_entry, second_entry],
         )
         .expect("synthetic source events form a checked imported conversation")
+    }
+
+    fn alternate_conversation_with_same_identity(
+        original: &ImportedConversation,
+    ) -> ImportedConversation {
+        let conversation = original.id();
+        let (first_raw, first_entry) = source_event(conversation, 201, 1, "other-summary");
+        let (second_raw, second_entry) = source_event(conversation, 202, 2, "other-system");
+        ImportedConversation::from_converted_records(
+            conversation,
+            ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
+            vec![first_raw, second_raw],
+            vec![first_entry, second_entry],
+        )
+        .expect("alternate synthetic history remains internally checked")
     }
 
     fn command_for(conversation: &ImportedConversation) -> CreateSessionFromImportedFrontier {
@@ -1310,16 +1325,7 @@ mod tests {
         );
         assert_eq!(calls.get(), 0);
 
-        let conversation_id = selected.id();
-        let (first_raw, first_entry) = source_event(conversation_id, 201, 1, "other-summary");
-        let (second_raw, second_entry) = source_event(conversation_id, 202, 2, "other-system");
-        let same_identity_different_history = ImportedConversation::from_converted_records(
-            conversation_id,
-            ImportedConversationFormat::ClaudeCodeSessionJsonlV1,
-            vec![first_raw, second_raw],
-            vec![first_entry, second_entry],
-        )
-        .expect("alternate checked aggregate");
+        let same_identity_different_history = alternate_conversation_with_same_identity(&selected);
         let mismatched_frontier = CreateSessionFromImportedFrontier::new(
             command_id(6),
             selected.frontiers().next().expect("fixture frontier"),
@@ -1562,6 +1568,250 @@ mod tests {
                 ImportedSessionSeedReconstitutionFailure::SeedSnapshotMembershipMismatch
             )
         );
+    }
+
+    /// S28 / INV-002 / INV-003 / INV-015 / INV-038 / INV-039: every
+    /// constructible imported-seed corruption branch retains its complete
+    /// input and reports one exact typed cause.
+    #[test]
+    fn s28_inv002_inv003_inv015_inv038_inv039_seed_corruption_matrix_is_complete() {
+        let (imported_conversation, _, prepared) = prepared_fixture();
+        let other_conversation = conversation(2);
+        let mut cases = Vec::new();
+
+        let mut ancestry_not_imported = current_input(&imported_conversation, &prepared);
+        ancestry_not_imported.provenance = SessionCreationProvenance::new(
+            SessionCreationCause::OwnerInitiated,
+            TranscriptAncestry::None,
+        );
+        cases.push((
+            "ancestry not imported",
+            ancestry_not_imported,
+            ImportedSessionSeedReconstitutionFailure::AncestryNotImported,
+        ));
+
+        let mut conversation_mismatch = current_input(&imported_conversation, &prepared);
+        conversation_mismatch.provenance = SessionCreationProvenance::new(
+            SessionCreationCause::OwnerInitiated,
+            TranscriptAncestry::ImportedConversation {
+                source_frontier: other_conversation
+                    .frontiers()
+                    .last()
+                    .expect("other fixture frontier"),
+                relationship: crate::ImportedSessionRelationship::Resume,
+            },
+        );
+        cases.push((
+            "imported conversation mismatch",
+            conversation_mismatch,
+            ImportedSessionSeedReconstitutionFailure::ImportedConversationMismatch,
+        ));
+
+        let mut frontier_not_found = current_input(&imported_conversation, &prepared);
+        frontier_not_found.imported_conversation =
+            alternate_conversation_with_same_identity(&imported_conversation);
+        cases.push((
+            "imported frontier not found",
+            frontier_not_found,
+            ImportedSessionSeedReconstitutionFailure::ImportedFrontierNotFound,
+        ));
+
+        let mut missing_snapshot = current_input(&imported_conversation, &prepared);
+        missing_snapshot.seed_snapshots.clear();
+        cases.push((
+            "missing seed snapshot",
+            missing_snapshot,
+            ImportedSessionSeedReconstitutionFailure::MissingSeedSnapshot,
+        ));
+
+        let mut duplicate_snapshot = current_input(&imported_conversation, &prepared);
+        duplicate_snapshot
+            .seed_snapshots
+            .push(duplicate_snapshot.seed_snapshots[0].clone());
+        cases.push((
+            "duplicate seed snapshot",
+            duplicate_snapshot,
+            ImportedSessionSeedReconstitutionFailure::DuplicateSeedSnapshot,
+        ));
+
+        let mut snapshot_session_mismatch = current_input(&imported_conversation, &prepared);
+        let snapshot = &snapshot_session_mismatch.seed_snapshots[0];
+        snapshot_session_mismatch.seed_snapshots[0] =
+            ResolvedContextFrontierReconstitutionInput::new(
+                session_id(99),
+                snapshot.snapshot(),
+                snapshot.ordered_entries().to_vec(),
+            );
+        cases.push((
+            "seed snapshot session mismatch",
+            snapshot_session_mismatch,
+            ImportedSessionSeedReconstitutionFailure::SeedSnapshotSessionMismatch,
+        ));
+
+        let mut semantic_session_mismatch = current_input(&imported_conversation, &prepared);
+        let semantic = semantic_session_mismatch.semantic_entries[0].clone();
+        semantic_session_mismatch.semantic_entries[0] =
+            SemanticTranscriptEntryReconstitutionInput::new(
+                semantic.identity(),
+                session_id(99),
+                semantic.payload().clone(),
+            );
+        cases.push((
+            "semantic entry source session mismatch",
+            semantic_session_mismatch,
+            ImportedSessionSeedReconstitutionFailure::SemanticEntrySourceSessionMismatch {
+                entry: semantic.identity(),
+            },
+        ));
+
+        let mut duplicate_semantic = current_input(&imported_conversation, &prepared);
+        let first_identity = duplicate_semantic.semantic_entries[0].identity();
+        let second = duplicate_semantic.semantic_entries[1].clone();
+        duplicate_semantic.semantic_entries[1] = SemanticTranscriptEntryReconstitutionInput::new(
+            first_identity,
+            second.source_session(),
+            second.payload().clone(),
+        );
+        cases.push((
+            "duplicate semantic entry",
+            duplicate_semantic,
+            ImportedSessionSeedReconstitutionFailure::DuplicateSemanticEntry {
+                entry: first_identity,
+            },
+        ));
+
+        let mut semantic_not_imported = current_input(&imported_conversation, &prepared);
+        let semantic = semantic_not_imported.semantic_entries[0].clone();
+        semantic_not_imported.semantic_entries[0] = SemanticTranscriptEntryReconstitutionInput::new(
+            semantic.identity(),
+            semantic.source_session(),
+            SemanticTranscriptEntryPayload::OriginAcceptedInput {
+                accepted_input: accepted_input_id(99),
+            },
+        );
+        cases.push((
+            "semantic entry not imported",
+            semantic_not_imported,
+            ImportedSessionSeedReconstitutionFailure::SemanticEntryNotImported {
+                entry: semantic.identity(),
+            },
+        ));
+
+        let mut speaker_mismatch = current_input(&imported_conversation, &prepared);
+        let semantic = speaker_mismatch.semantic_entries[0].clone();
+        let SemanticTranscriptEntryPayload::Imported {
+            imported_entry,
+            content,
+            ..
+        } = semantic.payload().clone()
+        else {
+            panic!("fixture is imported");
+        };
+        speaker_mismatch.semantic_entries[0] = SemanticTranscriptEntryReconstitutionInput::new(
+            semantic.identity(),
+            semantic.source_session(),
+            SemanticTranscriptEntryPayload::Imported {
+                imported_entry,
+                source_speaker: ImportedSourceAttestation::Attested(crate::ImportedSpeaker::User),
+                content,
+            },
+        );
+        cases.push((
+            "imported speaker mismatch",
+            speaker_mismatch,
+            ImportedSessionSeedReconstitutionFailure::ImportedSpeakerMismatch {
+                entry: semantic.identity(),
+            },
+        ));
+
+        let mut malformed_snapshot = current_input(&imported_conversation, &prepared);
+        let snapshot = &malformed_snapshot.seed_snapshots[0];
+        let duplicate = snapshot.ordered_entries()[0];
+        malformed_snapshot.seed_snapshots[0] = ResolvedContextFrontierReconstitutionInput::new(
+            snapshot.owning_session(),
+            snapshot.snapshot(),
+            vec![duplicate, duplicate],
+        );
+        cases.push((
+            "malformed seed snapshot",
+            malformed_snapshot,
+            ImportedSessionSeedReconstitutionFailure::SeedSnapshotMalformed,
+        ));
+
+        for (name, input, expected) in cases {
+            let unchanged = input.clone();
+            let error = input.reconstitute().expect_err(name);
+            assert_eq!(
+                error.failure(),
+                ImportedSessionReconstitutionFailure::Seed(expected),
+                "{name}"
+            );
+            assert_eq!(error.input(), &unchanged, "{name}");
+        }
+    }
+
+    /// S28 / INV-002 / INV-003 / INV-008 / INV-012 / INV-039: every
+    /// constructible top-level creation mismatch returns the complete
+    /// unchanged reconstitution input.
+    #[test]
+    fn s28_inv002_inv003_inv008_inv012_inv039_creation_corruption_matrix_is_complete() {
+        let (conversation, command, prepared) = prepared_fixture();
+        let mut cases = Vec::new();
+
+        let mut result_mismatch = creation_input(&conversation, command, &prepared);
+        result_mismatch.result_session = session_id(99);
+        cases.push((
+            "session result mismatch",
+            result_mismatch,
+            CreateSessionFromImportedFrontierReconstitutionFailure::SessionResultMismatch,
+        ));
+
+        let mut provenance_mismatch = creation_input(&conversation, command, &prepared);
+        provenance_mismatch.provenance = SessionCreationProvenance::new(
+            SessionCreationCause::OwnerInitiated,
+            TranscriptAncestry::ImportedConversation {
+                source_frontier: command.imported_frontier(),
+                relationship: crate::ImportedSessionRelationship::Fork,
+            },
+        );
+        cases.push((
+            "provenance mismatch",
+            provenance_mismatch,
+            CreateSessionFromImportedFrontierReconstitutionFailure::ProvenanceMismatch,
+        ));
+
+        let mut defaults_session_mismatch = creation_input(&conversation, command, &prepared);
+        defaults_session_mismatch.defaults_session = session_id(99);
+        cases.push((
+            "defaults session mismatch",
+            defaults_session_mismatch,
+            CreateSessionFromImportedFrontierReconstitutionFailure::DefaultsSessionMismatch,
+        ));
+
+        let mut defaults_version_mismatch = creation_input(&conversation, command, &prepared);
+        defaults_version_mismatch.defaults_version = SessionConfigurationDefaultsVersion::first()
+            .checked_next()
+            .expect("version one has a successor");
+        cases.push((
+            "defaults version is not first",
+            defaults_version_mismatch,
+            CreateSessionFromImportedFrontierReconstitutionFailure::DefaultsVersionIsNotFirst,
+        ));
+
+        let mut defaults_mismatch = creation_input(&conversation, command, &prepared);
+        defaults_mismatch.defaults = defaults(99);
+        cases.push((
+            "defaults mismatch",
+            defaults_mismatch,
+            CreateSessionFromImportedFrontierReconstitutionFailure::DefaultsMismatch,
+        ));
+
+        for (name, input, expected) in cases {
+            let unchanged = input.clone();
+            let error = input.reconstitute().expect_err(name);
+            assert_eq!(error.failure(), expected, "{name}");
+            assert_eq!(error.input(), &unchanged, "{name}");
+        }
     }
 
     /// S28 / INV-039: a different selected imported boundary cannot
