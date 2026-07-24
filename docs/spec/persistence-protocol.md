@@ -173,15 +173,18 @@ states only their storage representation and adapter mechanics.
 One append-only, owner-global `durable_command` registry claims every command
 identifier: `command_id` is the primary key across all kinds and sessions
 (INV-012), with a `CHECK`-closed kind set (`create_session`,
-`replace_session_defaults`, `submit_input`) and `storage_version` (currently
-`1`). Each kind has one typed subordinate record keyed by `command_id` that
-stores every caller-supplied semantic field in typed, `CHECK`-constrained
-columns, plus the terminal `applied`/`rejected` result and its typed result
-fields; result-shape `CHECK` constraints tie each rejection kind to exactly its
-fields, and deferred reverse constraints require exactly one typed record per
-claimed registry row at commit. Why: typed per-kind records keep replay
-semantics reviewable and constraint-checked, where a universal serialized
-payload would make the serializer a second semantic authority.
+`replace_session_defaults`, `submit_input`, `decide_tool_request`). Storage
+versions are kind-scoped: defaults-bearing create/replace records write version
+2 and reconstitute version 1 with the disabled dangerous-tool posture, while
+submit and decision records use version 1. Each kind has one typed subordinate
+record keyed by `command_id` that stores every caller-supplied semantic field in
+typed, `CHECK`-constrained columns, plus the terminal `applied`/`rejected`
+result and its typed result fields; result-shape `CHECK` constraints tie each
+rejection kind to exactly its fields, and deferred reverse constraints require
+exactly one typed record per claimed registry row at commit. Why: typed per-kind
+records keep replay semantics reviewable and constraint-checked, where a
+universal serialized payload would make the serializer a second semantic
+authority.
 
 Adapter mechanics behind the shared protocol: registry inspection is the first
 durable operation, before any current-state read, and an unseen identifier is
