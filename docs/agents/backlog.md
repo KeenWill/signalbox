@@ -143,9 +143,10 @@ with the build-system exclusion (see the import's known-issues list). The
 mock-fixture screenshot harness ports first — it is how the app iterates. iOS
 waits for remote transport.
 
-## Tool loop foundation [blocked-on: owner design pass] [size: XL]
+## Tool loop foundation [in-flight] [size: XL]
 
-Owner-flagged: the next major milestone — schedule the design pass first.
+Owner-flagged: the next major milestone. The owner design pass completed on
+2026-07-23; implementation is running as a solo turn-side goal session.
 
 Owns: domain turn machinery, tool entries (the storage-blocked assistant
 tool-use variant), ToolRequest/ToolAttempt lifecycle, approval algebra
