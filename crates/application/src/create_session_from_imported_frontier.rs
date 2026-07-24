@@ -629,10 +629,11 @@ mod tests {
     fn s28_inv038_inv039_orchestrates_one_atomic_checked_seed_creation() {
         let conversation = imported_conversation();
         let selected = frontier(&conversation);
+        let expected_command = command_id(1);
         let expected_relationship = ImportedSessionRelationship::Resume;
         let expected_defaults = defaults(20);
         let request = CreateSessionFromImportedFrontierRequest::try_new(
-            command_id(1),
+            expected_command,
             selected,
             expected_relationship,
             expected_defaults,
@@ -663,7 +664,7 @@ mod tests {
         assert_eq!(ids.semantic_entry_calls, 2);
         assert_eq!(transaction.observed.len(), 1);
         let (command, session, seed_frontier) = &transaction.observed[0];
-        assert_eq!(command.command_id(), command_id(1));
+        assert_eq!(command.command_id(), expected_command);
         assert_eq!(command.imported_frontier(), selected);
         assert_eq!(command.relationship(), expected_relationship);
         assert_eq!(command.initial_configuration_defaults(), expected_defaults);
