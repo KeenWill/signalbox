@@ -409,6 +409,10 @@ async fn inv002_inv038_corrupt_import_fails_typed_load() -> Result<(), Box<dyn E
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires explicit local real-transcript and PostgreSQL opt-in"]
 async fn opt_in_real_transcript_postgres_round_trip() -> Result<(), Box<dyn Error>> {
+    validate_opt_in_real_transcript_postgres_round_trip().await
+}
+
+async fn validate_opt_in_real_transcript_postgres_round_trip() -> Result<(), Box<dyn Error>> {
     if env::var("SIGNALBOX_RUN_REAL_CLAUDE_IMPORT").as_deref() != Ok("1") {
         return Ok(());
     }
