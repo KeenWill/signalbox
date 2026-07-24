@@ -70,5 +70,5 @@ pub use tool_loop::{
 pub use tool_loop_ports::{
     DecideToolRequestTransaction, PrepareToolContinuationOutcome, ResolvedToolConversationEntry,
     RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationStatus,
-    ToolContinuationIdentities, ToolExecutionTransaction,
+    ToolContinuationIdentities, ToolCrashClosureIdentities, ToolExecutionTransaction,
 };

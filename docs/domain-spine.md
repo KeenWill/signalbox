@@ -1780,6 +1780,10 @@ impl ModelCallExecution {
         self,
         failure_identities: FailedModelCallTurnIdentities,
     ) -> Result<FailedModelCallTurn, ModelCallClosureError>;
+    pub fn recover_tool_crash_after_restart(
+        self,
+        failure_identities: FailedModelCallTurnIdentities,
+    ) -> Result<FailedModelCallTurn, ModelCallClosureError>;
     pub fn apply_interrupt(
         self,
         interrupt: AppliedInterruptCommandResult,
@@ -3624,6 +3628,8 @@ where
 pub trait StartupScanIdGenerator {
     fn next_failure_entry_id(&mut self) -> SemanticTranscriptEntryId;
     fn next_terminal_frontier_id(&mut self) -> ContextFrontierId;
+    fn next_tool_closure_entry_id(&mut self) -> SemanticTranscriptEntryId;
+    fn next_tool_closure_frontier_id(&mut self) -> ContextFrontierId;
     fn next_reclassified_turn_id(&mut self, accepted_input: AcceptedInputId) -> TurnId;
 }
 
@@ -3644,14 +3650,14 @@ pub trait StartupScanRepository {
     fn active_sessions(
         &mut self,
     ) -> impl Future<Output = Result<Box<[SessionId]>, Self::Error>> + Send;
-    fn recover<NextTurn>(
+    fn recover<Generator>(
         &mut self,
         session: SessionId,
         identities: AcceptedInputTurnFailureIdentities,
-        next_reclassified_turn: NextTurn,
+        ids: &mut Generator,
     ) -> impl Future<Output = Result<StartupScanSessionOutcome, Self::Error>> + Send
     where
-        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send;
+        Generator: StartupScanIdGenerator + Send;
 }
 
 pub struct StartupScanOutcome { /* private */ }
@@ -3833,6 +3839,16 @@ impl ToolContinuationIdentities {
     // steering_frontier()
 }
 
+pub struct ToolCrashClosureIdentities { /* private */ }
+impl ToolCrashClosureIdentities {
+    pub fn new(
+        result_entries: Vec<SemanticTranscriptEntryId>,
+        result_frontier: ContextFrontierId,
+        failure: FailedModelCallTurnIdentities,
+    ) -> Self;
+    // accessors: result_entries(), result_frontier(), failure()
+}
+
 pub enum PrepareToolContinuationOutcome {
     NoWork,
     Checkpointed(ModelCallId),
@@ -3895,7 +3911,7 @@ pub trait ToolExecutionTransaction {
         session: SessionId,
         turn: TurnId,
         attempt: ToolAttemptId,
-        failure_identities: FailedModelCallTurnIdentities,
+        identities: ToolCrashClosureIdentities,
         next_turn: NextTurn,
     ) -> impl Future<Output = Result<ToolAttemptCrashOutcome, Self::Error>> + Send
     where
@@ -3952,5 +3968,5 @@ pub trait ToolExecutionTransaction {
 | application: startup_scan             | 7 (incl. 2 traits)   |
 | application: submit_input             | 7 (incl. 2 traits)   |
 | application: tool_dispatch_gate       | 2                    |
-| application: tool_loop_ports          | 7 (incl. 2 traits)   |
-| **signalbox-application total**       | **110**              |
+| application: tool_loop_ports          | 8 (incl. 2 traits)   |
+| **signalbox-application total**       | **111**              |
