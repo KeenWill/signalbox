@@ -39,6 +39,14 @@ reviews:
           Foundation-weight triggers (any): a docs/spec/ page's normative semantics change beyond recording behavior this PR or its stack implements; a boundary between domain, storage, wire, or framework representations moves; an invariant row in docs/invariants.md is weakened or deleted; an entry in docs/open-questions.md is closed or removed AND its resolution has any of these effects (an ordinary closure moving no boundary, weakening no invariant, and introducing no cross-cutting technology is an ordinary decision, not foundation weight). If any fires, the specification diff must ride in this PR or at the bottom of its stack AND a docs/decisions.md entry must record the choice; Fail if either is missing.
           Pass when no trigger fires (mechanical fixes, refactors, formatting, specified-behavior slices), or the required records are present. Report which trigger fired and which record is missing.
 
+      # verdict logic for the public-source hygiene rule owned by AGENTS.md
+      - name: "Public-source hygiene"
+        mode: warning
+        instructions: |-
+          Scope: all text this PR adds on any surface the rule names — code (comments, string literals, identifiers), documentation, all pull-request text (title and description), commit messages, and the head branch name. Pass immediately if none.
+          Fail when added text includes or alludes to non-public material of any organization — internal systems, private documents, specifications not publicly documented, or organization-internal vocabulary — whether as content, source, or inspiration. Citing publicly available open-source projects, papers, and blog posts is always acceptable regardless of publisher. References to the owner's own personal private repositories are acceptable only as provenance notes, never as normative sources (mirroring the owning rule).
+          Report each violation by surface, locator, and category only — file path and line for file surfaces, otherwise the surface name with a content-free locator (pull-request title, description, the commit SHA for a commit message, the head branch). Do NOT quote, excerpt, or paraphrase the violating passage: a review comment is itself persistent pull-request text, and echoing the material would republish exactly what the rule exists to keep out.
+
       # verdict logic for the single-statement-of-record rule owned by AGENTS.md
       - name: "Normative statements live in one place"
         mode: warning

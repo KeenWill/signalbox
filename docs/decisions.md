@@ -10,6 +10,24 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-23 — Public-source hygiene rule committed
+
+**Context.** The repository is public. A content-hygiene rule had been applied
+through owner-briefed review sweeps but never committed, so autonomous agents
+and reviewers reading only the repository could not know it; the tree stayed
+clean by construction rather than by rule.
+
+**Decision.** [AGENTS.md](../AGENTS.md) gains the public-source hygiene rule —
+repository content cites only public sources — and is its one statement of
+record; the rule's scope and allowances live there, not here. A warning-mode
+reviewer check in `.coderabbit.yaml` mirrors the verdict logic.
+
+**Rejected alternatives.** Keeping the rule as out-of-band owner guidance:
+invisible to agents and reviewers, unenforceable at review time. Committing a
+term-level filter list: a list would disclose more than it protects.
+
+**Affects.** `AGENTS.md`, `.coderabbit.yaml`, every future pull request.
+
 ## 2026-07-23 — Poll durable model-call cancellation every 25 milliseconds
 
 **Context.** Capability preparation and provider invocation need one same-call
