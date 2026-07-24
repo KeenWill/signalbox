@@ -1,10 +1,12 @@
 # Process protocol
 
-This page specifies Signalbox process protocol version one and the terminal
-client that consumes it, verified against the implementing stack through PR #177
-(`agent/terminal-client`). It is the normative boundary between a local client
-process and `signalbox-hubd`; domain values, PostgreSQL records, and wire
-messages remain distinct representations.
+The baseline Signalbox process protocol version one and the terminal client that
+consumes it were verified through PR #177 (`agent/terminal-client`). The
+conversation-import stack adds protocol version two for the conservative
+imported transcript-snapshot projection described here; version one's closed
+message vocabulary remains unchanged. This page is the normative boundary
+between a local client process and `signalbox-hubd`; domain values, PostgreSQL
+records, and wire messages remain distinct representations.
 
 Invariant law lives in [docs/invariants.md](../invariants.md), cited here by
 tag. Durable update storage and the delivered-through cursor are owned by
@@ -12,25 +14,25 @@ tag. Durable update storage and the delivered-through cursor are owned by
 
 ## Transport and trust boundary
 
-Version one uses one Unix domain stream socket. The hub requires its path in
-`SIGNALBOX_SOCKET_PATH`; the terminal client uses its `--socket <path>` override
-when present and otherwise requires that environment value. `signalbox-hubd`
-binds the socket with owner-only `0600` permissions. The configured path must be
-absolute and must end in an explicit filename component; a trailing separator,
-`/.`, or `/..` is rejected rather than normalized. The hub canonicalizes its
-existing parent once and uses that resolved parent for the socket lifetime; the
-parent must be a directory owned by the hub's effective user with traditional
-permission mode exactly `0700`. This owner-private immediate parent is required
-even when the socket node itself has mode `0600`; version one does not rely on
-every supported Unix implementation enforcing socket-node permissions. Every
-resolved ancestor up to the filesystem root must also resist same-machine
-replacement: a group- or other-writable ancestor is accepted only when it has
-the sticky bit and the next path component toward the socket is owned by the
-hub's effective user. Every ancestor must itself be owned by either root or the
-hub's effective user, so an unprivileged different owner cannot make a currently
-protected directory writable after validation. An untrusted owner, a non-sticky
-writable ancestor, or a sticky writable ancestor containing a component owned by
-another user fails startup.
+Versions one and two use one Unix domain stream socket. The hub requires its
+path in `SIGNALBOX_SOCKET_PATH`; the terminal client uses its `--socket <path>`
+override when present and otherwise requires that environment value.
+`signalbox-hubd` binds the socket with owner-only `0600` permissions. The
+configured path must be absolute and must end in an explicit filename component;
+a trailing separator, `/.`, or `/..` is rejected rather than normalized. The hub
+canonicalizes its existing parent once and uses that resolved parent for the
+socket lifetime; the parent must be a directory owned by the hub's effective
+user with traditional permission mode exactly `0700`. This owner-private
+immediate parent is required even when the socket node itself has mode `0600`;
+version one does not rely on every supported Unix implementation enforcing
+socket-node permissions. Every resolved ancestor up to the filesystem root must
+also resist same-machine replacement: a group- or other-writable ancestor is
+accepted only when it has the sticky bit and the next path component toward the
+socket is owned by the hub's effective user. Every ancestor must itself be owned
+by either root or the hub's effective user, so an unprivileged different owner
+cannot make a currently protected directory writable after validation. An
+untrusted owner, a non-sticky writable ancestor, or a sticky writable ancestor
+containing a component owned by another user fails startup.
 
 Before inspecting the final path, the hub opens or creates the adjacent
 `<socket-path>.lock` as a no-follow regular file owned by the effective user
@@ -71,10 +73,10 @@ listener and identity link live while a final `lstat` proves the public path
 still names this hub's socket and removes that path, then releases the identity
 link and path lock.
 
-The transport is local-machine and single-user only. Version one's lack of
-protocol authentication is provisional; it has no authorization exchange or
-remote transport. Socket filesystem access is the deployment boundary; it is not
-represented as application-level owner proof.
+The transport is local-machine and single-user only. The process protocol's lack
+of authentication is provisional; neither version has an authorization exchange
+or remote transport. Socket filesystem access is the deployment boundary; it is
+not represented as application-level owner proof.
 
 The hub owns at most 128 accepted connection tasks. At that limit it leaves new
 connections in the bounded listener backlog until an active task exits, then
@@ -108,7 +110,7 @@ later request is read from that connection.
 
 Every client and server frame has these required top-level members:
 
-- `version`: JSON integer `1`;
+- `version`: JSON integer `1` or `2`;
 - `request_id`: the canonical decimal string of an unsigned 64-bit integer; a
   client request, success response, or correlated error requires a nonzero value
   copied unchanged through the exchange;
@@ -120,13 +122,15 @@ and members with the wrong JSON type fail explicitly (INV-033). A frame may
 contain at most 127 simultaneously open JSON objects and arrays; deeper input is
 a `malformed_frame`. Within that bound, repeating a decoded member name in any
 JSON object is a `malformed_frame`, including when two different JSON string
-spellings decode to the same name. An unsupported `version` produces a
-version-one `unsupported_version` error naming the supported version, then the
-server closes the connection. A server error uses `request_id = "0"` only when
-the incoming frame prevents recovery of a valid nonzero identity; zero is never
-a valid client identity or success-response identity. Leading zeroes, a plus
-sign, whitespace, and any spelling other than the shortest ASCII decimal form
-are invalid.
+spellings decode to the same name. A version other than one or two produces an
+`unsupported_version` error naming the supported versions, then the server
+closes the connection. Every response uses the request's admitted version; when
+no version can be admitted, the server error uses version one as the
+pre-admission fallback. A server error uses `request_id = "0"` only when the
+incoming frame prevents recovery of a valid nonzero identity; zero is never a
+valid client identity or success-response identity. Leading zeroes, a plus sign,
+whitespace, and any spelling other than the shortest ASCII decimal form are
+invalid.
 
 The server may close a connection after any error. Clients never reinterpret an
 unknown message as a known one.
@@ -163,9 +167,18 @@ version, and treatment; changing any of them is a conflicting reuse, not
 recovery.
 
 `submit_input` deliberately exposes only the daily sequential-conversation
-treatment in version one. If a turn is already active, the normal typed
+treatment in both versions. If a turn is already active, the normal typed
 application result is returned as a rejection; the protocol does not guess an
 interrupt, steering, or after-current treatment.
+
+Version two admits the same request vocabulary and adds no new mutation
+authority. A version-one `submit_input`, `read_transcript`, or `follow_session`
+request that selects imported ancestry returns a version-one
+`unsupported_version` error naming version two before mutation or snapshot
+construction. Native sessions remain readable and mutable through either
+version. This per-request gate lets an upgraded hub continue serving existing
+version-one clients without emitting a version-two transcript variant they would
+reject.
 
 Submitted `content` is limited to 1 MiB of UTF-8. The hub applies that boundary
 before application construction or mutation and returns `invalid_request` when
@@ -212,20 +225,20 @@ exact variants are `session_not_found { session_id }`,
 `detail`. An equal replay returns the same success or rejection projection as
 the first handling.
 
-The error-code set in version one is:
+The error-code set in versions one and two is:
 
-| Code                  | Meaning                                                            |
-| --------------------- | ------------------------------------------------------------------ |
-| `malformed_frame`     | JSON, UTF-8, framing, field, or size validation failed.            |
-| `unsupported_version` | The frame version is not one.                                      |
-| `invalid_request`     | A boundary value cannot construct the requested application input. |
-| `not_found`           | The selected session does not exist.                               |
-| `conflicting_reuse`   | A durable command identity already names different intent.         |
-| `rejected`            | The canonical command was durably rejected by current typed state. |
-| `resync_required`     | A follower fell behind the bounded process-local event fan-out.    |
-| `unavailable`         | Infrastructure failed; no requested mutation may have committed.   |
-| `commit_ambiguous`    | Infrastructure obscured whether the requested mutation committed.  |
-| `internal`            | Fail-closed corruption or a hub defect stopped the request.        |
+| Code                  | Meaning                                                                                |
+| --------------------- | -------------------------------------------------------------------------------------- |
+| `malformed_frame`     | JSON, UTF-8, framing, field, or size validation failed.                                |
+| `unsupported_version` | The frame version is unsupported, or the selected representation requires version two. |
+| `invalid_request`     | A boundary value cannot construct the requested application input.                     |
+| `not_found`           | The selected session does not exist.                                                   |
+| `conflicting_reuse`   | A durable command identity already names different intent.                             |
+| `rejected`            | The canonical command was durably rejected by current typed state.                     |
+| `resync_required`     | A follower fell behind the bounded process-local event fan-out.                        |
+| `unavailable`         | Infrastructure failed; no requested mutation may have committed.                       |
+| `commit_ambiguous`    | Infrastructure obscured whether the requested mutation committed.                      |
+| `internal`            | Fail-closed corruption or a hub defect stopped the request.                            |
 
 For `create_session` and `submit_input`, a lost commit response maps to
 `commit_ambiguous`; the client retries the exact command identity and payload to
@@ -245,10 +258,18 @@ A transcript snapshot is read in one PostgreSQL repeatable-read, read-only
 transaction. The transaction observes all of:
 
 - the global last committed outbox sequence, returned as `cursor`; and
-- the selected session's latest authoritative semantic frontier, selected from
-  the tip of persisted turn-start predecessor lineage rather than acceptance
-  order; and
+- the selected session's latest authoritative semantic frontier: the tip of
+  persisted turn-start predecessor lineage when one exists, otherwise the
+  checked `ImportedSessionSeed` frontier for imported ancestry, and otherwise no
+  frontier; and
 - every turn in acceptance order with its authoritative lifecycle state.
+
+Selecting the imported fallback is a purpose-specific semantic-context read. It
+fully validates the immutable seed and imported prefix under the same
+repeatable-read snapshot; ordinary bounded `load_session` calls do not
+materialize that prefix. A queued but not yet started first native turn does not
+hide the fallback. Once a native turn-start frontier exists, normal persisted
+predecessor lineage is authoritative.
 
 One logical snapshot is a bounded message sequence sharing the request identity:
 
@@ -298,10 +319,10 @@ Each `transcript_turn` has `turn_id` and one closed `state` object:
   before a call was prepared; or
 - `reconciliation_required { terminal_frontier_id, terminal_attempt_id, terminal_model_call_id }`.
 
-Each non-text frontier member is one `transcript_entry` with `entry_index`,
-`source_session_id`, `entry_id`, and one closed `entry` object:
+Each non-text native frontier member is one `transcript_entry` with
+`entry_index`, `source_session_id`, `entry_id`, and one closed `entry` object:
 `turn_completed { turn_id }`, `turn_failed { turn_id }`, or
-`turn_cancelled { turn_id }`. A text member begins with
+`turn_cancelled { turn_id }`. A native text member begins with
 `transcript_text_entry { entry_index, source_session_id, entry_id, entry }`. Its
 `entry` is either `user { accepted_input_id, turn_id }` or
 `assistant { turn_id, model_call_id }`. It is followed by one or more
@@ -313,6 +334,32 @@ earlier fragment carries `false`. The content is split only at UTF-8 scalar
 boundaries into fragments of at most 1 MiB of UTF-8; even empty content has one
 final empty fragment. The 1 MiB content bound leaves room below the 8 MiB frame
 limit even when every byte requires worst-case JSON escaping.
+
+The following imported-entry variants exist only in protocol version two. An
+imported semantic entry always identifies its source with
+`imported_conversation_id` and `imported_entry_id` and carries the exact
+`source_speaker` attestation. That attestation is one closed object:
+`not_attested`, `attested_absent`, or `attested { speaker }`, where `speaker` is
+exactly `user` or `assistant`.
+
+An imported `Text` whose value is attested begins with
+`transcript_text_entry { entry_index, source_session_id, entry_id, entry }`. Its
+`entry` is
+`imported { imported_conversation_id, imported_entry_id, source_speaker }`, and
+its exact text follows in the same `transcript_content` fragment sequence used
+for native text, including one final empty fragment for attested empty text.
+
+Every other imported content value, including unattested or explicitly absent
+`Text`, is one `transcript_entry` whose `entry` is
+`imported { imported_conversation_id, imported_entry_id, source_speaker, content_kind }`.
+`content_kind` is one closed string discriminator: `source_event`,
+`source_message_block`, `text`, `tool_call`, `tool_result`, `thinking`,
+`redacted_thinking`, `document`, or `message_content_absent`. This conservative
+projection carries no imported tool fields, results, thinking, media,
+source-event payload, absence detail, or raw record. The complete normalized
+imported content and verbatim raw source remain authoritative only in the
+immutable imported-conversation aggregate; the wire snapshot neither fabricates
+native evidence nor replaces that authority.
 
 `entry_index` is zero-based and contiguous in frontier-member order; the first
 entry is zero and each later entry is exactly its predecessor plus one.
@@ -425,26 +472,26 @@ is therefore terminal in the initial snapshot and cannot leave `send` waiting
 for an event at or below the snapshot cursor. Previously seen transient display
 state may always be replaced by the new snapshot (INV-032).
 
-Version one forwards durable transition events only. Provider token deltas
-remain transient inside the model-runtime boundary and are not added to the
-outbox. The terminal `send` command follows the submitted turn, accepts terminal
-state from the initial snapshot or waits for its durable terminal event, rereads
-the authoritative transcript, and prints the committed assistant text. A client
-that observes `active_awaiting_model_call_recovery` in the initial snapshot
-exits with a typed nonzero recovery-required diagnostic: version one has no
-writer that can complete that wait. When the selected turn instead emits a live
-terminal `ambiguous` model-call transition, `send` rereads the authoritative
-snapshot and produces that same diagnostic if the turn has entered the recovery
-wait. A client disconnect never cancels model work. After each terminal turn
-event, `follow` uses a separate connection to read and validate a fresh
-authoritative transcript before it resumes printing later followed events. That
-side reread does not advance the follow connection's observed cursor: only
-events consumed from the subscribed connection do so, and every buffered event
-remains eligible for ordered presentation. Although the reread may have a cursor
-later than the triggering event, it makes presentation eligible only the
-previously undisplayed semantic material attributable to that exact terminal
-event: assistant text from its named turn and model call plus the exact
-completion marker for `turn_completed`, the exact failure marker for
+Versions one and two forward durable transition events only. Provider token
+deltas remain transient inside the model-runtime boundary and are not added to
+the outbox. The terminal `send` command follows the submitted turn, accepts
+terminal state from the initial snapshot or waits for its durable terminal
+event, rereads the authoritative transcript, and prints the committed assistant
+text. A client that observes `active_awaiting_model_call_recovery` in the
+initial snapshot exits with a typed nonzero recovery-required diagnostic:
+neither version has a writer that can complete that wait. When the selected turn
+instead emits a live terminal `ambiguous` model-call transition, `send` rereads
+the authoritative snapshot and produces that same diagnostic if the turn has
+entered the recovery wait. A client disconnect never cancels model work. After
+each terminal turn event, `follow` uses a separate connection to read and
+validate a fresh authoritative transcript before it resumes printing later
+followed events. That side reread does not advance the follow connection's
+observed cursor: only events consumed from the subscribed connection do so, and
+every buffered event remains eligible for ordered presentation. Although the
+reread may have a cursor later than the triggering event, it makes presentation
+eligible only the previously undisplayed semantic material attributable to that
+exact terminal event: assistant text from its named turn and model call plus the
+exact completion marker for `turn_completed`, the exact failure marker for
 `turn_failed`, the exact cancellation marker for `turn_cancelled`, and no
 semantic material for `turn_refused` or `turn_reconciliation_required`, whose
 terminalization creates no content entry. It does not present material
@@ -456,8 +503,10 @@ being suppressed by a newer side snapshot.
 
 ## Terminal client
 
-The `signalbox` binary is the daily version-one surface. It accepts a global
-`--socket <path>` override or reads `SIGNALBOX_SOCKET_PATH`, and provides:
+The `signalbox` binary in this stack uses version two; pre-stack version-one
+clients remain supported for native sessions as described above. It accepts a
+global `--socket <path>` override or reads `SIGNALBOX_SOCKET_PATH`, and
+provides:
 
 - `create (--model <selection-uuid> | --alias <alias-uuid>) [--command-id <uuid>]`;
 - `list`;
@@ -483,7 +532,7 @@ printed command identity; `send` then also requires the exact
 `--defaults-version`, and the two flags are rejected unless supplied together.
 The client never silently substitutes a new command identity for an ambiguous
 attempt. It uses a fresh nonzero request identity per connection, renders only
-known version-one messages, and exits nonzero on protocol or application errors
+known version-two messages, and exits nonzero on protocol or application errors
 other than the follow-specific `resync_required` control case, which reconnects
 for a fresh snapshot.
 
