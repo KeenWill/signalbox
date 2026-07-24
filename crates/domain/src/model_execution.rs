@@ -210,6 +210,7 @@ pub struct ModelCallExecutionReconstitutionInput {
     origin_contents: Vec<ModelCallOriginContent>,
     pinned_target: Option<PinnedProviderTargetReconstitutionInput>,
     calls: Vec<ModelCallReconstitutionInput>,
+    tool_result_correlations: Vec<ToolResultAttemptCorrelation>,
 }
 
 impl ModelCallExecutionReconstitutionInput {
@@ -233,7 +234,18 @@ impl ModelCallExecutionReconstitutionInput {
             origin_contents,
             pinned_target,
             calls,
+            tool_result_correlations: Vec::new(),
         }
+    }
+
+    /// Supplies exact request and producing-call ownership for every physical
+    /// tool attempt referenced by the current frontier.
+    pub fn with_tool_result_correlations(
+        mut self,
+        correlations: Vec<ToolResultAttemptCorrelation>,
+    ) -> Self {
+        self.tool_result_correlations = correlations;
+        self
     }
 
     /// Supplies the non-starting snapshot named by a steering-consuming call.
@@ -266,6 +278,44 @@ impl ModelCallExecutionReconstitutionInput {
     }
 }
 
+/// Stored ownership facts for one tool attempt referenced by model input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ToolResultAttemptCorrelation {
+    attempt: crate::ToolAttemptId,
+    request: crate::ToolRequestId,
+    producing_call: ModelCallId,
+}
+
+impl ToolResultAttemptCorrelation {
+    /// Captures one exact attempt-to-request-to-producing-call relationship.
+    pub const fn new(
+        attempt: crate::ToolAttemptId,
+        request: crate::ToolRequestId,
+        producing_call: ModelCallId,
+    ) -> Self {
+        Self {
+            attempt,
+            request,
+            producing_call,
+        }
+    }
+
+    /// Returns the physical attempt.
+    pub const fn attempt(&self) -> crate::ToolAttemptId {
+        self.attempt
+    }
+
+    /// Returns the logical request executed by the attempt.
+    pub const fn request(&self) -> crate::ToolRequestId {
+        self.request
+    }
+
+    /// Returns the model call that proposed the request.
+    pub const fn producing_call(&self) -> ModelCallId {
+        self.producing_call
+    }
+}
+
 /// Why live stored execution facts cannot reconstruct the initial aggregate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelCallExecutionReconstitutionFailure {
@@ -287,6 +337,9 @@ pub enum ModelCallExecutionReconstitutionFailure {
     CallSnapshotMismatch,
     /// The supplied frontier entries do not exactly back ordered membership.
     FrontierEntryMismatch,
+    /// Tool-result attempts do not exactly belong to the referenced requests
+    /// and producing model calls.
+    ToolResultCorrelationMismatch,
     /// More than one model call was supplied to the initial-call slice.
     MultipleCalls,
     /// More than one user-content fact names the same accepted input.
@@ -361,6 +414,7 @@ pub struct ModelCallExecution {
     origin_contents: BTreeMap<AcceptedInputId, UserContent>,
     pinned_target: Option<PinnedProviderTarget>,
     current_call: Option<CurrentModelCall>,
+    tool_continuation_frontier: bool,
 }
 
 impl ModelCallExecution {
@@ -777,7 +831,7 @@ impl ModelCallExecution {
 
     fn is_running_tool_continuation(&self) -> bool {
         self.current_attempt.state() == &CurrentTurnAttemptState::Running
-            && frontier_closes_latest_tool_round(&self.starting_snapshot, &self.frontier_entries)
+            && self.tool_continuation_frontier
     }
 
     /// Applies an interrupt after a tool batch has closed every logical
@@ -3144,10 +3198,51 @@ fn reconstitute(
     } else {
         None
     };
+    let referenced_tool_attempts = input
+        .frontier_entries
+        .iter()
+        .filter_map(|entry| match entry.payload() {
+            SemanticTranscriptEntryPayload::ToolExecutionResult { attempt } => Some(*attempt),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let mut tool_result_correlations = BTreeMap::new();
+    for correlation in &input.tool_result_correlations {
+        if tool_result_correlations
+            .insert(correlation.attempt(), *correlation)
+            .is_some()
+        {
+            return Err(fail(
+                input,
+                ModelCallExecutionReconstitutionFailure::ToolResultCorrelationMismatch,
+            ));
+        }
+    }
+    if referenced_tool_attempts.len() != tool_result_correlations.len()
+        || referenced_tool_attempts
+            .iter()
+            .any(|attempt| !tool_result_correlations.contains_key(attempt))
+    {
+        return Err(fail(
+            input,
+            ModelCallExecutionReconstitutionFailure::ToolResultCorrelationMismatch,
+        ));
+    }
     let running_tool_round =
         frontier_contains_tool_round(&input.starting_snapshot, &input.frontier_entries);
-    let running_tool_continuation =
-        frontier_closes_latest_tool_round(&input.starting_snapshot, &input.frontier_entries);
+    let running_tool_continuation = match frontier_closes_latest_tool_round(
+        &input.starting_snapshot,
+        &input.frontier_entries,
+        &tool_result_correlations,
+    ) {
+        Ok(closed) => closed,
+        Err(()) => {
+            return Err(fail(
+                input,
+                ModelCallExecutionReconstitutionFailure::ToolResultCorrelationMismatch,
+            ));
+        }
+    };
     let lifecycle_valid = matches!(
         (
             current_attempt.state(),
@@ -3204,13 +3299,15 @@ fn reconstitute(
         origin_contents,
         pinned_target,
         current_call,
+        tool_continuation_frontier: running_tool_continuation,
     })
 }
 
 fn frontier_closes_latest_tool_round(
     starting_snapshot: &ResolvedContextFrontierSnapshot,
     frontier_entries: &[SemanticTranscriptEntry],
-) -> bool {
+    tool_result_correlations: &BTreeMap<crate::ToolAttemptId, ToolResultAttemptCorrelation>,
+) -> Result<bool, ()> {
     let suffix = &frontier_entries[starting_snapshot.entry_count()..];
     let Some(last_tool_use) = suffix.iter().rposition(|entry| {
         matches!(
@@ -3218,7 +3315,7 @@ fn frontier_closes_latest_tool_round(
             SemanticTranscriptEntryPayload::AssistantToolUse { .. }
         )
     }) else {
-        return false;
+        return Ok(false);
     };
     let SemanticTranscriptEntryPayload::AssistantToolUse { producing_call, .. } =
         suffix[last_tool_use].payload()
@@ -3251,37 +3348,46 @@ fn frontier_closes_latest_tool_round(
         })
         .collect::<Vec<_>>();
     let Some(results_end) = response_end.checked_add(requests.len()) else {
-        return false;
+        return Ok(false);
     };
     if requests.is_empty() || results_end > suffix.len() {
-        return false;
+        return Ok(false);
     }
-    if suffix[response_end..results_end]
-        .iter()
-        .zip(&requests)
-        .any(|(entry, request)| match entry.payload() {
-            SemanticTranscriptEntryPayload::ToolExecutionResult { .. } => false,
+    for (entry, request) in suffix[response_end..results_end].iter().zip(&requests) {
+        let valid = match entry.payload() {
+            SemanticTranscriptEntryPayload::ToolExecutionResult { attempt } => {
+                let Some(correlation) = tool_result_correlations.get(attempt) else {
+                    return Err(());
+                };
+                if correlation.request() != *request
+                    || correlation.producing_call() != producing_call
+                {
+                    return Err(());
+                }
+                true
+            }
             SemanticTranscriptEntryPayload::ToolDenied {
                 request: result_request,
-            } => result_request != request,
-            SemanticTranscriptEntryPayload::ToolClosed { .. } => true,
+            } => result_request == request,
+            SemanticTranscriptEntryPayload::ToolClosed { .. } => false,
             SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::TurnFailed { .. }
             | SemanticTranscriptEntryPayload::AssistantText { .. }
             | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
             | SemanticTranscriptEntryPayload::TurnCompleted { .. }
-            | SemanticTranscriptEntryPayload::TurnCancelled { .. } => true,
-        })
-    {
-        return false;
+            | SemanticTranscriptEntryPayload::TurnCancelled { .. } => false,
+        };
+        if !valid {
+            return Ok(false);
+        }
     }
-    suffix[results_end..].iter().all(|entry| {
+    Ok(suffix[results_end..].iter().all(|entry| {
         matches!(
             entry.payload(),
             SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
         )
-    })
+    }))
 }
 
 fn assistant_entry_call(entry: &SemanticTranscriptEntry) -> Option<ModelCallId> {
@@ -3980,7 +4086,8 @@ mod tests {
         ToolRequestReconstitutionInput, TranscriptAncestry,
         test_support::{
             accepted_input_id, context_frontier_id, direct, model_call_id, provider_model_identity,
-            semantic_transcript_entry_id, session_id, tool_request_id, turn_attempt_id, turn_id,
+            semantic_transcript_entry_id, session_id, tool_attempt_id, tool_request_id,
+            turn_attempt_id, turn_id,
         },
     };
 
@@ -4633,6 +4740,108 @@ mod tests {
             &CurrentTurnAttemptState::Running
         );
         assert_eq!(authorized.call().state(), CurrentModelCallState::InFlight);
+    }
+
+    /// S10 / INV-004 / INV-005: each continuation result must name the
+    /// physical attempt that executed its exact request in the producing
+    /// model-call batch.
+    #[test]
+    fn s10_inv004_inv005_continuation_rejects_duplicate_attempt_for_two_requests() {
+        let initial = active_execution();
+        let producing_call = model_call_id(70);
+        let first_request = tool_request_id(71);
+        let second_request = tool_request_id(72);
+        let first_use = SemanticTranscriptEntry::from_validated_parts(
+            semantic_transcript_entry_id(73),
+            initial.session,
+            SemanticTranscriptEntryPayload::AssistantToolUse {
+                producing_call,
+                request: first_request,
+            },
+        );
+        let second_use = SemanticTranscriptEntry::from_validated_parts(
+            semantic_transcript_entry_id(74),
+            initial.session,
+            SemanticTranscriptEntryPayload::AssistantToolUse {
+                producing_call,
+                request: second_request,
+            },
+        );
+        let shared_attempt = tool_attempt_id(75);
+        let first_result = SemanticTranscriptEntry::from_validated_parts(
+            semantic_transcript_entry_id(76),
+            initial.session,
+            SemanticTranscriptEntryPayload::ToolExecutionResult {
+                attempt: shared_attempt,
+            },
+        );
+        let second_result = SemanticTranscriptEntry::from_validated_parts(
+            semantic_transcript_entry_id(77),
+            initial.session,
+            SemanticTranscriptEntryPayload::ToolExecutionResult {
+                attempt: shared_attempt,
+            },
+        );
+        let continuation = initial
+            .starting_snapshot
+            .derive_appending_candidate(
+                context_frontier_id(78),
+                vec![
+                    first_use.reference(),
+                    second_use.reference(),
+                    first_result.reference(),
+                    second_result.reference(),
+                ],
+            )
+            .expect("the malformed candidate still preserves the starting prefix");
+        let input = ModelCallExecutionReconstitutionInput::new(
+            initial
+                .active_turn
+                .with_phase_for_test(ActiveTurnPhase::Running {
+                    current_attempt: CurrentTurnAttempt::prepared(turn_attempt_id(79))
+                        .begin_running()
+                        .expect("the tool tenure is running"),
+                }),
+            initial.targets,
+            initial.starting_snapshot,
+            vec![
+                initial.frontier_entries[0].clone(),
+                first_use,
+                second_use,
+                first_result,
+                second_result,
+            ],
+            initial
+                .origin_contents
+                .into_iter()
+                .map(|(accepted_input, content)| {
+                    ModelCallOriginContent::from_validated_parts(accepted_input, content)
+                })
+                .collect(),
+            Some(PinnedProviderTargetReconstitutionInput::new(
+                initial.turn,
+                ResolvedProviderTarget::naming(provider_model_identity(8)),
+            )),
+            Vec::new(),
+        )
+        .with_continuation_snapshot(ResolvedContextFrontierReconstitutionInput::new(
+            continuation.frontier().owning_session(),
+            continuation.frontier().snapshot(),
+            continuation.ordered_entries().collect(),
+        ))
+        .with_tool_result_correlations(vec![ToolResultAttemptCorrelation::new(
+            shared_attempt,
+            first_request,
+            producing_call,
+        )]);
+
+        let error = input
+            .reconstitute()
+            .expect_err("one physical attempt cannot resolve two logical requests");
+        assert_eq!(
+            error.failure(),
+            ModelCallExecutionReconstitutionFailure::ToolResultCorrelationMismatch
+        );
     }
 
     /// S11 / INV-005 / INV-014: a prepared continuation belongs to the most

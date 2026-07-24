@@ -1740,7 +1740,20 @@ impl ModelCallExecutionReconstitutionInput {
         self,
         continuation_snapshot: ResolvedContextFrontierReconstitutionInput,
     ) -> Self;
+    pub fn with_tool_result_correlations(
+        self,
+        correlations: Vec<ToolResultAttemptCorrelation>,
+    ) -> Self;
     pub fn reconstitute(self) -> Result<ModelCallExecution, ModelCallExecutionReconstitutionError>;
+}
+pub struct ToolResultAttemptCorrelation { /* private */ }
+impl ToolResultAttemptCorrelation {
+    pub const fn new(
+        attempt: ToolAttemptId,
+        request: ToolRequestId,
+        producing_call: ModelCallId,
+    ) -> Self;
+    // accessors: attempt(), request(), producing_call()
 }
 pub enum ModelCallExecutionReconstitutionFailure {
     TurnIsNotRunning,
@@ -1752,6 +1765,7 @@ pub enum ModelCallExecutionReconstitutionFailure {
     CallSnapshotUnexpected,
     CallSnapshotMismatch,
     FrontierEntryMismatch,
+    ToolResultCorrelationMismatch,
     MultipleCalls,
     DuplicateOriginContent,
     MissingOriginContent,
@@ -3631,6 +3645,7 @@ pub enum StartupScanSessionOutcome {
     Recovered(Box<FailedAcceptedInputTurn>),
     RecoveredModelCall(Box<ModelCallTerminalOutcome>),
     RecoveredToolAttempt(Box<ToolAttemptCrashOutcome>),
+    ResumableToolBatch { turn: TurnId },
     DeferredPendingSteering { accepted_input: AcceptedInputId },
 }
 
@@ -3936,7 +3951,7 @@ pub trait ToolExecutionTransaction {
 | domain: turn_eligibility              | 27                   |
 | domain: turn_attempt                  | 13                   |
 | domain: model_call                    | 12                   |
-| domain: model_execution               | 48                   |
+| domain: model_execution               | 49                   |
 | domain: context_frontier              | 6                    |
 | domain: semantic_entry                | 4                    |
 | domain: tool                          | 37                   |
@@ -3946,7 +3961,7 @@ pub trait ToolExecutionTransaction {
 | domain: applied_interrupt             | 2                    |
 | domain: fatal_mismatch                | 0                    |
 | domain: replace_session_defaults      | 13                   |
-| **signalbox-domain total**            | **295 (+1 free fn)** |
+| **signalbox-domain total**            | **296 (+1 free fn)** |
 | application: create_session           | 8 (incl. 2 traits)   |
 | application: load_session             | 2 (incl. 1 trait)    |
 | application: model_execution          | 30 (incl. 7 traits)  |

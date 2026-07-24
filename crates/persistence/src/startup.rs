@@ -377,7 +377,8 @@ where
         load_active_batch_from_connection(connection, requested_session, active_turn.turn())
             .await
             .map_err(map_tool_loop_error)?
-        && let Some(current) =
+    {
+        let Some(current) =
             batch
                 .requests()
                 .iter()
@@ -385,7 +386,13 @@ where
                     Some(ReconstitutedToolAttempt::Current(current)) => Some(current.clone()),
                     Some(ReconstitutedToolAttempt::Ended(_)) | None => None,
                 })
-    {
+        else {
+            return Ok(TransactionDecision::Rollback(
+                StartupScanSessionOutcome::ResumableToolBatch {
+                    turn: active_turn.turn(),
+                },
+            ));
+        };
         let outcome = current.classify_crash_loss();
         let ended = match &outcome {
             ToolAttemptCrashOutcome::KnownFailed(ended)

@@ -37,7 +37,7 @@ use signalbox_domain::{
     ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget, SemanticTranscriptEntry,
     SemanticTranscriptEntryPayload, SemanticTranscriptEntryRef, SessionId,
     StopRequestedModelCallTurn, ToolApprovalDecision, ToolDecisionSource, ToolRequest,
-    ToolRoundModelCallTurn, TurnId,
+    ToolResultAttemptCorrelation, ToolRoundModelCallTurn, TurnId,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -2410,6 +2410,8 @@ async fn require_live_execution_with_targets(
         .collect::<Vec<_>>();
     let origin_contents =
         load_origin_contents(connection, &frontier_entries, &pending_steering).await?;
+    let tool_result_correlations =
+        load_tool_result_correlations(connection, &frontier_entries).await?;
     let recovered_targets;
     let targets = if let Some(targets) = configured_targets {
         targets.clone()
@@ -2446,7 +2448,8 @@ async fn require_live_execution_with_targets(
         origin_contents,
         pinned_target,
         calls,
-    );
+    )
+    .with_tool_result_correlations(tool_result_correlations);
     if let Some(call_snapshot) = call_snapshot {
         input = input.with_call_snapshot(call_snapshot);
     } else if let Some(continuation_snapshot) = continuation_snapshot {
@@ -2456,6 +2459,51 @@ async fn require_live_execution_with_targets(
         let (_, failure) = error.into_parts();
         ModelCallCorruption::Execution(failure).into()
     })
+}
+
+async fn load_tool_result_correlations(
+    connection: &mut PgConnection,
+    frontier_entries: &[SemanticTranscriptEntry],
+) -> Result<Vec<ToolResultAttemptCorrelation>, ModelCallRepositoryError> {
+    let attempts = frontier_entries
+        .iter()
+        .filter_map(|entry| match entry.payload() {
+            SemanticTranscriptEntryPayload::ToolExecutionResult { attempt } => {
+                Some(attempt.into_uuid())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if attempts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query_as::<_, (Uuid, Uuid, Uuid)>(
+        "SELECT attempt.attempt_id,
+                request.request_id,
+                request.producing_call_id
+           FROM tool_attempt AS attempt
+           JOIN tool_request AS request
+             ON request.request_id = attempt.request_id
+            AND request.session_id = attempt.session_id
+            AND request.turn_id = attempt.turn_id
+          WHERE attempt.attempt_id = ANY($1)",
+    )
+    .bind(&attempts)
+    .fetch_all(connection)
+    .await?;
+    if rows.len() != attempts.len() {
+        return Err(ModelCallCorruption::Inconsistent("tool-result attempt ownership").into());
+    }
+    Ok(rows
+        .into_iter()
+        .map(|(attempt, request, producing_call)| {
+            ToolResultAttemptCorrelation::new(
+                signalbox_domain::ToolAttemptId::from_uuid(attempt),
+                signalbox_domain::ToolRequestId::from_uuid(request),
+                ModelCallId::from_uuid(producing_call),
+            )
+        })
+        .collect())
 }
 
 async fn load_call_snapshot(

@@ -685,6 +685,18 @@ pub enum TurnState {
         /// Ambiguous call awaiting recovery.
         recovery_model_call_id: CanonicalUuid,
     },
+    /// The turn is parked on an owner decision for a tool request.
+    ActiveAwaitingToolApproval {
+        /// Earliest undecided tool request.
+        tool_request_id: CanonicalUuid,
+    },
+    /// The turn is parked on an ambiguous tool attempt.
+    ActiveAwaitingToolRecovery {
+        /// Ended turn attempt that issued the tool effect.
+        ended_attempt_id: CanonicalUuid,
+        /// Ambiguous tool attempt awaiting recovery.
+        recovery_tool_attempt_id: CanonicalUuid,
+    },
     /// The turn terminalized as failed.
     Failed {
         /// Exact terminal frontier.
@@ -728,8 +740,24 @@ pub enum TurnState {
         terminal_frontier_id: CanonicalUuid,
         /// Authoritative terminal attempt.
         terminal_attempt_id: CanonicalUuid,
-        /// Ambiguous terminal call.
-        terminal_model_call_id: CanonicalUuid,
+        /// Exact ambiguous terminal operation.
+        operation: ReconciliationOperation,
+    },
+}
+
+/// Exact operation that made a turn require reconciliation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ReconciliationOperation {
+    /// Ambiguous provider call.
+    ModelCall {
+        /// Exact terminal model call.
+        model_call_id: CanonicalUuid,
+    },
+    /// Ambiguous tool attempt.
+    ToolAttempt {
+        /// Exact terminal tool attempt.
+        tool_attempt_id: CanonicalUuid,
     },
 }
 
@@ -748,6 +776,13 @@ enum RawTurnState {
     ActiveAwaitingModelCallRecovery {
         ended_attempt_id: CanonicalUuid,
         recovery_model_call_id: CanonicalUuid,
+    },
+    ActiveAwaitingToolApproval {
+        tool_request_id: CanonicalUuid,
+    },
+    ActiveAwaitingToolRecovery {
+        ended_attempt_id: CanonicalUuid,
+        recovery_tool_attempt_id: CanonicalUuid,
     },
     Failed {
         terminal_frontier_id: CanonicalUuid,
@@ -775,7 +810,7 @@ enum RawTurnState {
     ReconciliationRequired {
         terminal_frontier_id: CanonicalUuid,
         terminal_attempt_id: CanonicalUuid,
-        terminal_model_call_id: CanonicalUuid,
+        operation: ReconciliationOperation,
     },
 }
 
@@ -805,6 +840,16 @@ impl<'de> Deserialize<'de> for TurnState {
             } => Self::ActiveAwaitingModelCallRecovery {
                 ended_attempt_id,
                 recovery_model_call_id,
+            },
+            RawTurnState::ActiveAwaitingToolApproval { tool_request_id } => {
+                Self::ActiveAwaitingToolApproval { tool_request_id }
+            }
+            RawTurnState::ActiveAwaitingToolRecovery {
+                ended_attempt_id,
+                recovery_tool_attempt_id,
+            } => Self::ActiveAwaitingToolRecovery {
+                ended_attempt_id,
+                recovery_tool_attempt_id,
             },
             RawTurnState::Failed {
                 terminal_frontier_id,
@@ -852,11 +897,11 @@ impl<'de> Deserialize<'de> for TurnState {
             RawTurnState::ReconciliationRequired {
                 terminal_frontier_id,
                 terminal_attempt_id,
-                terminal_model_call_id,
+                operation,
             } => Self::ReconciliationRequired {
                 terminal_frontier_id,
                 terminal_attempt_id,
-                terminal_model_call_id,
+                operation,
             },
         };
         Ok(state)
@@ -881,6 +926,32 @@ impl TurnState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TranscriptEntry {
+    /// Assistant proposed one durable tool request.
+    AssistantToolUse {
+        /// Owning turn.
+        turn_id: CanonicalUuid,
+        /// Producing model call.
+        model_call_id: CanonicalUuid,
+        /// Exact logical tool request.
+        tool_request_id: CanonicalUuid,
+    },
+    /// One physical tool attempt produced the logical result.
+    ToolExecutionResult {
+        /// Exact logical tool request.
+        tool_request_id: CanonicalUuid,
+        /// Exact physical tool attempt.
+        tool_attempt_id: CanonicalUuid,
+    },
+    /// One logical tool request was denied.
+    ToolDenied {
+        /// Exact denied tool request.
+        tool_request_id: CanonicalUuid,
+    },
+    /// One logical tool request closed because its turn ended.
+    ToolClosed {
+        /// Exact closed tool request.
+        tool_request_id: CanonicalUuid,
+    },
     /// Explicit completed-turn marker.
     TurnCompleted {
         /// Completed turn.
@@ -1022,12 +1093,12 @@ pub enum SessionEvent {
         /// Exact terminal frontier.
         terminal_frontier_id: CanonicalUuid,
     },
-    /// Turn stopped with an ambiguous call requiring reconciliation.
+    /// Turn stopped with an ambiguous operation requiring reconciliation.
     TurnReconciliationRequired {
         /// Reconciliation-required turn.
         turn_id: CanonicalUuid,
-        /// Ambiguous terminal call.
-        model_call_id: CanonicalUuid,
+        /// Exact ambiguous terminal operation.
+        operation: ReconciliationOperation,
         /// Exact terminal frontier.
         terminal_frontier_id: CanonicalUuid,
     },
@@ -2611,10 +2682,12 @@ mod tests {
                 state: TurnState::ReconciliationRequired {
                     terminal_frontier_id: uuid(6),
                     terminal_attempt_id: uuid(7),
-                    terminal_model_call_id: uuid(8),
+                    operation: crate::ReconciliationOperation::ModelCall {
+                        model_call_id: uuid(8),
+                    },
                 },
             },
-            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"reconciliation_required","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","terminal_model_call_id":"00000000-0000-0000-0000-000000000008"}}"#,
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"reconciliation_required","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","operation":{"type":"model_call","model_call_id":"00000000-0000-0000-0000-000000000008"}}}"#,
         )?;
         assert_server_message_round_trip(
             request(8)?,
@@ -2743,11 +2816,13 @@ mod tests {
                 session_id: uuid(1),
                 event: SessionEvent::TurnReconciliationRequired {
                     turn_id: uuid(3),
-                    model_call_id: uuid(8),
+                    operation: crate::ReconciliationOperation::ModelCall {
+                        model_call_id: uuid(8),
+                    },
                     terminal_frontier_id: uuid(6),
                 },
             },
-            r#"{"type":"session_event","cursor":"5","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"turn_reconciliation_required","turn_id":"00000000-0000-0000-0000-000000000003","model_call_id":"00000000-0000-0000-0000-000000000008","terminal_frontier_id":"00000000-0000-0000-0000-000000000006"}}"#,
+            r#"{"type":"session_event","cursor":"5","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"turn_reconciliation_required","turn_id":"00000000-0000-0000-0000-000000000003","operation":{"type":"model_call","model_call_id":"00000000-0000-0000-0000-000000000008"},"terminal_frontier_id":"00000000-0000-0000-0000-000000000006"}}"#,
         )?;
         assert_server_message_round_trip(
             request(13)?,

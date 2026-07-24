@@ -2,7 +2,8 @@ use std::io::{self, Write};
 
 use signalbox_process_protocol::{
     CanonicalUuid, CurrentModelCallState, FailedModelCallDisposition, ModelCallDisposition,
-    ModelCallState, SessionEvent, TranscriptEntry, TranscriptTextEntry, TurnState,
+    ModelCallState, ReconciliationOperation, SessionEvent, TranscriptEntry, TranscriptTextEntry,
+    TurnState,
 };
 
 use crate::{
@@ -238,13 +239,17 @@ impl<'a> Output<'a> {
             ),
             SessionEvent::TurnReconciliationRequired {
                 turn_id,
-                model_call_id,
+                operation,
                 terminal_frontier_id,
-            } => writeln!(
-                self.stdout,
-                "event={cursor} session={session_id} turn_reconciliation_required \
-                 turn={turn_id} call={model_call_id} frontier={terminal_frontier_id}"
-            ),
+            } => {
+                let (operation_kind, operation_id) = reconciliation_operation(*operation);
+                writeln!(
+                    self.stdout,
+                    "event={cursor} session={session_id} turn_reconciliation_required \
+                     turn={turn_id} operation={operation_kind} operation_id={operation_id} \
+                     frontier={terminal_frontier_id}"
+                )
+            }
         }
     }
 
@@ -312,6 +317,19 @@ impl<'a> Output<'a> {
                 "turn={turn_id} position={position} \
                  state=active_awaiting_model_call_recovery \
                  attempt={ended_attempt_id} call={recovery_model_call_id}"
+            ),
+            TurnState::ActiveAwaitingToolApproval { tool_request_id } => writeln!(
+                self.stdout,
+                "turn={turn_id} position={position} state=active_awaiting_tool_approval \
+                 request={tool_request_id}"
+            ),
+            TurnState::ActiveAwaitingToolRecovery {
+                ended_attempt_id,
+                recovery_tool_attempt_id,
+            } => writeln!(
+                self.stdout,
+                "turn={turn_id} position={position} state=active_awaiting_tool_recovery \
+                 attempt={ended_attempt_id} tool_attempt={recovery_tool_attempt_id}"
             ),
             TurnState::Failed {
                 terminal_frontier_id,
@@ -381,13 +399,16 @@ impl<'a> Output<'a> {
             TurnState::ReconciliationRequired {
                 terminal_frontier_id,
                 terminal_attempt_id,
-                terminal_model_call_id,
-            } => writeln!(
-                self.stdout,
-                "turn={turn_id} position={position} state=reconciliation_required \
-                 frontier={terminal_frontier_id} attempt={terminal_attempt_id} \
-                 call={terminal_model_call_id}"
-            ),
+                operation,
+            } => {
+                let (operation_kind, operation_id) = reconciliation_operation(*operation);
+                writeln!(
+                    self.stdout,
+                    "turn={turn_id} position={position} state=reconciliation_required \
+                     frontier={terminal_frontier_id} attempt={terminal_attempt_id} \
+                     operation={operation_kind} operation_id={operation_id}"
+                )
+            }
         }
     }
 
@@ -429,6 +450,35 @@ impl<'a> Output<'a> {
                     entry.source_session_id, entry.entry_id
                 )
             }
+            SnapshotEntryKind::Marker(TranscriptEntry::AssistantToolUse {
+                turn_id,
+                model_call_id,
+                tool_request_id,
+            }) => writeln!(
+                self.stdout,
+                "assistant_tool_use turn={turn_id} call={model_call_id} \
+                 request={tool_request_id} source={} entry={}",
+                entry.source_session_id, entry.entry_id
+            ),
+            SnapshotEntryKind::Marker(TranscriptEntry::ToolExecutionResult {
+                tool_request_id,
+                tool_attempt_id,
+            }) => writeln!(
+                self.stdout,
+                "tool_execution_result request={tool_request_id} attempt={tool_attempt_id} \
+                 source={} entry={}",
+                entry.source_session_id, entry.entry_id
+            ),
+            SnapshotEntryKind::Marker(TranscriptEntry::ToolDenied { tool_request_id }) => writeln!(
+                self.stdout,
+                "tool_denied request={tool_request_id} source={} entry={}",
+                entry.source_session_id, entry.entry_id
+            ),
+            SnapshotEntryKind::Marker(TranscriptEntry::ToolClosed { tool_request_id }) => writeln!(
+                self.stdout,
+                "tool_closed request={tool_request_id} source={} entry={}",
+                entry.source_session_id, entry.entry_id
+            ),
         }
     }
 
@@ -517,11 +567,26 @@ impl SnapshotSelection {
                 Self::All | Self::Completed { .. } | Self::Failed { .. } | Self::Cancelled { .. },
                 SnapshotEntryKind::Text(_)
                 | SnapshotEntryKind::Marker(
-                    TranscriptEntry::TurnCompleted { .. }
+                    TranscriptEntry::AssistantToolUse { .. }
+                    | TranscriptEntry::ToolExecutionResult { .. }
+                    | TranscriptEntry::ToolDenied { .. }
+                    | TranscriptEntry::ToolClosed { .. }
+                    | TranscriptEntry::TurnCompleted { .. }
                     | TranscriptEntry::TurnFailed { .. }
                     | TranscriptEntry::TurnCancelled { .. },
                 ),
             ) => false,
+        }
+    }
+}
+
+const fn reconciliation_operation(
+    operation: ReconciliationOperation,
+) -> (&'static str, CanonicalUuid) {
+    match operation {
+        ReconciliationOperation::ModelCall { model_call_id } => ("model_call", model_call_id),
+        ReconciliationOperation::ToolAttempt { tool_attempt_id } => {
+            ("tool_attempt", tool_attempt_id)
         }
     }
 }
@@ -577,7 +642,8 @@ mod tests {
     use signalbox_process_protocol::{
         CanonicalU64, CanonicalUuid, ContentFragment, CurrentModelCall, CurrentModelCallState,
         FailedModelCallDisposition, FailedTerminalModelCall, InputContent, ModelCallState,
-        ServerMessage, SessionEvent, TranscriptEntry, TranscriptTextEntry, TurnState,
+        ReconciliationOperation, ServerMessage, SessionEvent, TranscriptEntry, TranscriptTextEntry,
+        TurnState,
     };
     use uuid::Uuid;
 
@@ -859,11 +925,13 @@ mod tests {
         let rendered = render_snapshot_turn(TurnState::ReconciliationRequired {
             terminal_frontier_id: wire_uuid(2),
             terminal_attempt_id: wire_uuid(3),
-            terminal_model_call_id: wire_uuid(4),
+            operation: ReconciliationOperation::ModelCall {
+                model_call_id: wire_uuid(4),
+            },
         });
 
         expect![[r#"
-            turn=00000000-0000-0000-0000-000000000001 position=1 state=reconciliation_required frontier=00000000-0000-0000-0000-000000000002 attempt=00000000-0000-0000-0000-000000000003 call=00000000-0000-0000-0000-000000000004
+            turn=00000000-0000-0000-0000-000000000001 position=1 state=reconciliation_required frontier=00000000-0000-0000-0000-000000000002 attempt=00000000-0000-0000-0000-000000000003 operation=model_call operation_id=00000000-0000-0000-0000-000000000004
         "#]]
         .assert_eq(&rendered);
     }
@@ -900,12 +968,14 @@ mod tests {
     fn follow_event_renders_reconciliation_required_turn() {
         let rendered = render_event(SessionEvent::TurnReconciliationRequired {
             turn_id: wire_uuid(2),
-            model_call_id: wire_uuid(3),
+            operation: ReconciliationOperation::ModelCall {
+                model_call_id: wire_uuid(3),
+            },
             terminal_frontier_id: wire_uuid(4),
         });
 
         expect![[r#"
-            event=1 session=00000000-0000-0000-0000-000000000001 turn_reconciliation_required turn=00000000-0000-0000-0000-000000000002 call=00000000-0000-0000-0000-000000000003 frontier=00000000-0000-0000-0000-000000000004
+            event=1 session=00000000-0000-0000-0000-000000000001 turn_reconciliation_required turn=00000000-0000-0000-0000-000000000002 operation=model_call operation_id=00000000-0000-0000-0000-000000000003 frontier=00000000-0000-0000-0000-000000000004
         "#]]
         .assert_eq(&rendered);
     }
