@@ -847,7 +847,7 @@ mod tests {
     }
 
     #[test]
-    fn preserves_empty_and_absent_text_fields_and_source_only_files() {
+    fn s28_inv038_preserves_empty_and_absent_text_attestations() {
         let source = concat!(
             "{\"type\":\"user\",\"message\":{\"content\":[",
             "{\"type\":\"text\"},{\"type\":\"text\",\"text\":null},",
@@ -874,7 +874,10 @@ mod tests {
             ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(value))
                 if value.as_str().is_empty()
         ));
+    }
 
+    #[test]
+    fn s28_inv038_preserves_source_only_records() {
         let source_only = ClaudeCodeJsonlConverter
             .convert(
                 conversation(),
@@ -923,6 +926,18 @@ mod tests {
     }
 
     #[test]
+    fn s28_inv038_terminal_lf_does_not_create_an_empty_record() {
+        let imported = ClaudeCodeJsonlConverter
+            .convert(conversation(), b"{\"type\":\"system\"}\n", || {
+                ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(100))
+            })
+            .expect("a terminal LF is only a delimiter");
+
+        assert_eq!(imported.raw_records().len(), 1);
+        assert_eq!(imported.raw_records()[0].bytes(), b"{\"type\":\"system\"}");
+    }
+
+    #[test]
     fn s28_inv038_rejects_blank_lines() {
         let error = ClaudeCodeJsonlConverter
             .convert(conversation(), b"{\"type\":\"system\"}\n\n", || {
@@ -932,6 +947,22 @@ mod tests {
         assert_eq!(
             error.failure(),
             ClaudeCodeJsonlConversionFailure::BlankLine { line: 2 }
+        );
+    }
+
+    #[test]
+    fn s28_inv038_rejects_duplicate_modeled_members() {
+        let error = ClaudeCodeJsonlConverter
+            .convert(
+                conversation(),
+                br#"{"type":"user","type":"assistant"}"#,
+                || ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(100)),
+            )
+            .expect_err("duplicate modeled members must not select a value");
+
+        assert_eq!(
+            error.failure(),
+            ClaudeCodeJsonlConversionFailure::InvalidRecordType { line: 1 }
         );
     }
 
