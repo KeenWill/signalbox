@@ -14,6 +14,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, CompletionFinish, ConversationMessage, DeliveryMode,
@@ -30,6 +31,8 @@ use signalbox_model_runtime_openai::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+
+const OVERSIZED_PROVIDER_RESPONSE_BYTES: usize = 8 * 1024 * 1024 + 1;
 
 /// A loopback server that answers each accepted connection with the next
 /// canned response and records every raw request it read.
@@ -481,6 +484,30 @@ async fn a_redirect_is_never_followed_and_surfaces_as_evidence() {
 }
 
 #[tokio::test]
+async fn buffered_response_overflow_is_typed_body_loss() {
+    let body = vec![b' '; OVERSIZED_PROVIDER_RESPONSE_BYTES];
+    let server = CannedServer::serving(vec![http_response(
+        "200 OK",
+        &[("content-type", "application/json")],
+        &body,
+    )])
+    .await;
+    let runtime = runtime_for(&server.base_url);
+
+    let (report, _) = execute(
+        &runtime,
+        operation("call-buffer-overflow"),
+        CancellationSignal::never(),
+    )
+    .await;
+
+    let TerminalEvidence::BoundaryLoss(loss) = report.evidence else {
+        panic!("an oversized buffered response must fail closed as boundary loss");
+    };
+    assert!(matches!(loss.cause, LossCause::ResponseBodyLost(_)));
+}
+
+#[tokio::test]
 async fn connection_refused_is_proven_unsent() {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -773,6 +800,54 @@ fn base_url_user_information_is_rejected_at_construction() {
     assert!(matches!(
         OpenAiRuntime::new(config, FixedKey),
         Err(OpenAiConstructionError::InvalidBaseUrl { .. })
+    ));
+}
+
+#[test]
+fn plain_http_requires_a_literal_loopback_ip_host() {
+    assert_openai_plain_http_rejected("http://example.com");
+    assert_openai_plain_http_rejected("http://localhost:8080");
+    assert_openai_plain_http_rejected("http://192.0.2.1");
+
+    let mut ipv4_loopback = OpenAiConfig::new();
+    ipv4_loopback.base_url = "http://127.0.0.1:1".to_string();
+    assert!(OpenAiRuntime::new(ipv4_loopback, FixedKey).is_ok());
+
+    let mut ipv6_loopback = OpenAiConfig::new();
+    ipv6_loopback.base_url = "http://[::1]:1".to_string();
+    assert!(OpenAiRuntime::new(ipv6_loopback, FixedKey).is_ok());
+}
+
+#[track_caller]
+fn assert_openai_plain_http_rejected(base_url: &str) {
+    let mut config = OpenAiConfig::new();
+    config.base_url = base_url.to_string();
+
+    assert!(
+        matches!(
+            OpenAiRuntime::new(config, FixedKey),
+            Err(OpenAiConstructionError::InvalidBaseUrl { .. })
+        ),
+        "{base_url} must not be admitted without transport security"
+    );
+}
+
+#[test]
+fn the_default_exchange_timeout_is_ten_minutes() {
+    assert_eq!(
+        OpenAiConfig::new().exchange_timeout,
+        Duration::from_secs(10 * 60)
+    );
+}
+
+#[test]
+fn a_zero_exchange_timeout_is_rejected_at_construction() {
+    let mut config = OpenAiConfig::new();
+    config.exchange_timeout = Duration::ZERO;
+
+    assert!(matches!(
+        OpenAiRuntime::new(config, FixedKey),
+        Err(OpenAiConstructionError::InvalidExchangeTimeout)
     ));
 }
 

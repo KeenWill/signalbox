@@ -39,6 +39,12 @@ allow = [
   "Unicode-3.0",
   "Zlib",
 ]
+# The reqwest rustls platform verifier bundles this fallback root data.
+# Pinning the crate version keeps CDLA-Permissive-2.0 unavailable to every
+# other present or future dependency.
+exceptions = [
+  { allow = ["CDLA-Permissive-2.0"], crate = "webpki-root-certs@1.0.9" },
+]
 
 [sources]
 unknown-registry = "deny"

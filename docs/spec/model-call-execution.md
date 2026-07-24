@@ -1,11 +1,12 @@
 # Model-call execution
 
 This page describes the implemented model-call orchestration chain as verified
-against the implementing stack through PR #175 (`agent/stop-requests`):
-rendering a context frontier into provider messages, the staged prepare /
-authorize-send / commit-observation effects, assistant content and turn
-completion, provider failure classification into physical dispositions, and the
-retry prohibition. Turn and attempt lifecycle law lives in
+against the implementing stack through PR #183
+(`agent/provider-call-security-parser`): rendering a context frontier into
+provider messages, the staged prepare / authorize-send / commit-observation
+effects, assistant content and turn completion, provider failure classification
+into physical dispositions, and the retry prohibition. Turn and attempt
+lifecycle law lives in
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md); semantic
 entries and frontiers in [sessions-and-transcript](sessions-and-transcript.md);
 storage protocol and the outbox in
@@ -430,8 +431,6 @@ prints the semantic transcript; it is deliberately not the client protocol.
 - Same-incarnation retained-evidence reconciliation gets exactly one production
   pass (`reconcile_retained_once`) before fatal escalation; repeated
   same-incarnation drains are exercised only by tests.
-- No timeout budget bounds provider work; a hung stream blocks the attempt until
-  operator restart.
 - No system prompt is composed or sent: the bridge always leaves the runtime
   operation's own `ModelOperation::system` field `None`
   (`crates/model-runtime/src/operation.rs`; `ModelSettings` carries no such

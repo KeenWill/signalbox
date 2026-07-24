@@ -2,12 +2,13 @@
 
 This page specifies the Layer-1 typed model-runtime boundary as implemented in
 `crates/model-runtime`, `crates/model-runtime-anthropic`, and
-`crates/model-runtime-openai`, verified against `main` at commit `bf39f5f`. It
-covers the provider-neutral operation, observation, and evidence vocabulary; SSE
-framing; structured-output and tool decode; `ScriptedModel`; the two provider
-adapters; and the in-process credential-access boundary. Layer-2 authorization
-and evidence classification ([model-call-execution](model-call-execution.md)),
-credential channels, delivery, and rotation discipline
+`crates/model-runtime-openai`, verified against the implementing stack through
+PR #183 (`agent/provider-call-security-parser`). It covers the provider-neutral
+operation, observation, and evidence vocabulary; SSE framing; structured-output
+and tool decode; `ScriptedModel`; the two provider adapters; and the in-process
+credential-access boundary. Layer-2 authorization and evidence classification
+([model-call-execution](model-call-execution.md)), credential channels,
+delivery, and rotation discipline
 ([configuration-and-credentials](configuration-and-credentials.md)), and the
 authoritative transcript commit
 ([sessions-and-transcript](sessions-and-transcript.md)) are owned by those
@@ -235,9 +236,22 @@ Both adapters implement the same shape: at most one `POST` per operation
 (`/v1/messages` for Anthropic with `x-api-key` and `anthropic-version` headers;
 `/v1/chat/completions` for OpenAI with a bearer `Authorization` header),
 hand-rolled serde wire types with no provider SDK dependency, and typed evidence
-out. Construction validates configuration (absolute HTTP(S) base URL with no
-user info, query, or fragment; positive SSE record limit); construction failure
-is a configuration defect, not operation evidence.
+out. Construction validates configuration: the base URL must be absolute HTTPS,
+except that plain HTTP is admitted for an IP-literal loopback host used by
+deterministic tests; user information, a query, or a fragment is forbidden; and
+the SSE record limit and whole-exchange timeout must both be positive.
+Construction failure is a configuration defect, not operation evidence.
+
+Provider traffic uses reqwest 0.13 with default features disabled and only its
+providerless rustls-platform-verifier and byte-stream features enabled. Both
+adapter crates select rustls's ring crypto provider, matching the provider
+selected by the process's SQLx TLS stack, so the unified rustls instance never
+has two implicit provider candidates. Both clients force the rustls backend,
+verify the server certificate and hostname against `rustls-platform-verifier`'s
+platform trust roots, require TLS 1.2 or newer, and carry no custom-root or
+verification-bypass surface. Ambient system and environment proxies are disabled
+and the adapters expose no proxy configuration. Why: provider credentials and
+content must not silently traverse an operator-unreviewed intermediary.
 
 Transport discipline (both adapters — one send is provably one physical
 request):
@@ -249,9 +263,15 @@ request):
   opens a fresh connection. Why: this eliminates the stale-connection replay
   path and makes a connect failure provably precede any request byte, which is
   what lets `ConnectFailed` claim proven-unsent.
-- Connect and whole-exchange timeouts default to none and are caller-owned
-  configuration; a connect timeout is proven-unsent, a post-send timeout is
-  boundary loss.
+- Every request has a positive whole-exchange timeout, covering connection
+  establishment through the complete buffered body or streamed terminal record.
+  The provisional default is ten minutes; callers may configure another positive
+  budget, and may additionally configure a shorter connect timeout. A connect
+  timeout is proven-unsent, while a timeout after send is boundary loss. Why: a
+  provider that stalls forever must not hold a turn attempt forever, while the
+  deliberately generous first budget accommodates long streamed generations
+  until production latency data supports a tighter provider/model-specific
+  policy.
 
 Success is specifically HTTP 200; another 2xx is not recognized terminal
 success. 4xx/5xx responses are classified through each adapter's exhaustive
@@ -262,9 +282,32 @@ unrecognized or absent token falls back to the HTTP-status table, so
 `Unrecognized` is reached only when token and status are both unmapped. OpenAI:
 401 always credential-rejected, then recognized native code, then recognized
 type, then status. Unknown material lands in `Unrecognized` with the native
-facts retained rather than guessed at. Buffered response bodies and streamed
-responses are each bounded at 8 MiB; exceeding a bound is loss/violation
-evidence, not truncated success.
+facts retained rather than guessed at.
+
+All provider-controlled response input is bounded before it can accumulate into
+parsed or retained output. A buffered body and the cumulative bytes of one
+stream are each capped at 8 MiB. SSE framing independently bounds every line
+while copying and every retained record; its default record bound is also 8 MiB.
+Exceeding the buffered bound is response-body-loss evidence, while exceeding the
+cumulative stream or SSE bound is stream-protocol-violation evidence. Complete
+records inside the byte budget are processed before a coalesced over-budget
+suffix, so transport batching cannot erase earlier evidence or a terminal
+marker.
+
+Before serde sees a buffered success body or JSON SSE record, a shared
+allocation-free scanner rejects JSON nested beyond 127 containers, matching
+serde_json's admitted recursion boundary and including unknown fields and
+`RawValue` material. Unknown fields remain tolerated for additive provider
+evolution, but they receive the same byte and nesting limits as known fields.
+Malformed or over-depth HTTP-200 JSON is `ResponseUnintelligible` boundary loss.
+Over-depth streamed material and malformed known-event JSON are terminal stream
+protocol violations; unknown event names remain additively tolerated and their
+bounded payloads are discarded without typed parsing. A malformed or over-depth
+body attached to a definitive 4xx/5xx status cannot erase that definitive
+exchange: the adapter falls back to status classification and retains only
+bounded, credential-sanitized native material. Why: hostile provider output may
+consume only fixed memory/depth budgets and can never be upgraded into
+completion by truncation or permissive parsing.
 
 Stream integrity, Anthropic: the decoder enforces the Messages stream protocol —
 `message_start` first with a complete envelope (discriminators, id, model, input
@@ -370,3 +413,5 @@ failures after staleness handling.
 - The three-kind consumer allowlist (provider adapters, the
   `model-provider-runtime` bridge, the hub composition root) is a review-time
   contract only; no manifest allowlist check enforces it.
+- [Identity, credentials, and resource governance](../open-questions.md#identity-credentials-and-resource-governance)
+  owns controlled provider-proxy and private-root support.
