@@ -44,3 +44,13 @@ pub(crate) const SUBMIT_INPUT_DEFAULTS: &str = "SELECT current_version
            FROM session_current_defaults
           WHERE session_id = $1
           FOR UPDATE";
+
+pub(crate) const OUTBOX_DELIVERY: &str = "SELECT delivered_through
+           FROM outbox_delivery_state
+          WHERE singleton
+          FOR UPDATE";
+
+pub(crate) const HUB_FENCE_GENERATION: &str = "SELECT generation
+           FROM hub_fence_state
+          WHERE singleton
+          FOR UPDATE";

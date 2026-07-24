@@ -1,8 +1,8 @@
 # Turn lifecycle and scheduling
 
-This page specifies the implemented behavior of turns, turn attempts,
-eligibility derivation, the scheduler, and startup recovery as verified against
-the implementing stack through PR #175 (`agent/stop-requests`). Code homes:
+The baseline turn behavior was verified through PR #175 (`agent/stop-requests`).
+This page covers turns, turn attempts, eligibility derivation, the scheduler,
+and startup recovery. Code homes:
 `crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
 `context_frontier,queue_order}.rs`, `crates/application/src/{scheduler,`
 `start_eligible_turn,startup_scan,submit_input}.rs`,
@@ -147,15 +147,29 @@ queued turn, and constructs atomically-committable state:
   `After { immediate_predecessor }` naming the exact terminal turn ordered
   immediately before it;
 - the starting context frontier: the predecessor's terminal frontier with the
-  fresh origin semantic entry appended (prefix-preserving), or a fresh snapshot
-  containing only the origin entry for a first-in-session turn;
+  fresh origin semantic entry appended (prefix-preserving); for a
+  first-in-session turn, the exact frontier identity stored by the session's
+  `ImportedSessionSeed` followed by the origin entry when ancestry is
+  `ImportedConversation`, or only the origin entry when ancestry is `None`;
 - the opaque `AcceptedInputTurnStart` binding lineage and frontier, whose
   constructor is private to validated eligibility (INV-009 — a raw identifier or
   list supplied by a caller is not start authority); and
 - the initial `Prepared` attempt.
 
-Sessions created with transcript ancestry cannot be scheduled yet;
-reconstitution fails with `UnsupportedSessionAncestry` (open edge).
+`SingleSource` native-fork ancestry remains unschedulable and fails
+reconstitution with `UnsupportedSessionAncestry`. Imported ancestry is admitted
+only when its seed satisfies the complete imported-session contract in
+[sessions-and-transcript](sessions-and-transcript.md) (INV-038, INV-039).
+
+Imported ancestry does not alter lifecycle order, eligibility, slot ownership,
+or lineage. Its resume/fork relationship is immutable creation provenance, not a
+scheduler mode. The first native turn is still `FirstInSession`; imported
+entries are a context prefix, not a synthetic predecessor turn. Migration
+`202607240003_imported_session_first_native_frontier.sql` changes only the
+first-frontier lifecycle check: a native session still starts with its one
+origin entry, while an imported session must start with its exact stored seed
+membership followed by that origin entry. All other lifecycle evidence checks
+remain shared.
 
 ## The activation transaction
 
@@ -353,18 +367,23 @@ fixed frontier, and provenance must survive that coincidence.
 Construction authority is sealed: public code cannot assemble a
 `ResolvedContextFrontierSnapshot`, `AcceptedInputTurnStart`, or activated turn
 from raw identifiers; the producers are the sealed domain transitions and
-checked seams — eligibility activation, startup recovery, model-call closure
-(completion, refusal, and known failure in
-`crates/domain/src/model_execution.rs` derive terminal snapshots), and the
-fail-closed reconstitution seams that rebuild a stored snapshot only from its
-complete materialized membership. Persistence materializes complete snapshot
-membership (`context_frontier` + `context_frontier_member`), inserts only; a
-deferred constraint trigger (`context_frontier_requires_complete_membership`)
-re-asserts complete contiguous membership — exact declared count, positions
-`1..count` — at commit, and reconstitution rejects any stored snapshot whose
-resolved membership disagrees with the complete entry set — one identifier can
-never resolve differently. Transcript-ancestry resolution into a first frontier
-is unimplemented (open edge); `TranscriptFrontier` itself is
+checked seams — imported-frontier session creation (which constructs exactly one
+seed frontier from the selected normalized imported prefix), eligibility
+activation, startup recovery, model-call closure (completion, refusal, and known
+failure in `crates/domain/src/model_execution.rs` derive terminal snapshots),
+and the fail-closed reconstitution seams that rebuild a stored snapshot only
+from its complete materialized membership. Persistence materializes complete
+snapshot membership (`context_frontier` + `context_frontier_member`), inserts
+only; a deferred constraint trigger
+(`context_frontier_requires_complete_membership`) re-asserts complete contiguous
+membership — exact declared count, positions `1..count` — at commit, and
+reconstitution rejects any stored snapshot whose resolved membership disagrees
+with the complete entry set — one identifier can never resolve differently.
+Imported ancestry resolves only through the checked session-creation producer;
+its separate one-to-one `ImportedSessionSeed` must name the exact stored
+frontier identity whose membership matches the selected imported prefix.
+Equal-content reminting fails reconstitution. `SingleSource` ancestry resolution
+remains unimplemented. `TranscriptFrontier` itself is
 [sessions-and-transcript](sessions-and-transcript.md) scope.
 
 ## Evidence-bearing reconstitution
@@ -451,15 +470,16 @@ closed, the dispatcher stops starting transactions, and the scheduler stops
 admitting passes. Finite request handlers, the current dispatcher transaction,
 and in-flight scheduler passes share the bounded 30-second grace window to let
 authoritative transactions commit or abort. A clean exit closes the fenced pool,
-removes only this hub's revalidated socket, and releases the advisory locks by
-closing its dedicated guard connection. Window expiry abandons remaining tasks,
-warns, and skips the unbounded pool drain; process exit releases its sessions.
-Why signal-driven shutdown is polish, not correctness: abrupt exit at any point
-is safe because durable rows plus the next guarded startup scan recover work and
-the durable outbox cursor redelivers an uncommitted offer (INV-032, INV-034), so
-the grace window buys only latency. Repositories and services are cheap
-per-invocation clones over the shared pool; no shared locked service instance
-exists.
+waits on the guard session's exclusive current-generation fence so even detached
+pool sessions have ended, removes only this hub's identity-pinned and
+revalidated socket, and releases the advisory locks by closing its dedicated
+guard connection. Window expiry abandons remaining tasks, warns, and skips the
+unbounded pool drain; process exit releases its sessions. Why signal-driven
+shutdown is polish, not correctness: abrupt exit at any point is safe because
+durable rows plus the next guarded startup scan recover work and the durable
+outbox cursor redelivers an uncommitted offer (INV-032, INV-034), so the grace
+window buys only latency. Repositories and services are cheap per-invocation
+clones over the shared pool; no shared locked service instance exists.
 
 ## Open edges
 
@@ -473,8 +493,10 @@ exists.
 - The eligible terminal-failure path (queued turn fixes its start and fails
   without an attempt for a structurally unexecutable configuration) is
   unimplemented; activation is the only eligibility outcome.
-- Ancestry-derived sessions cannot be scheduled (`UnsupportedSessionAncestry`);
-  ancestry-to-first-frontier resolution is unimplemented.
+- Native `SingleSource` ancestry remains unschedulable
+  (`UnsupportedSessionAncestry`); selecting and resolving native fork boundaries
+  is unimplemented. Imported-conversation ancestry has its own exact
+  selected-prefix frontier path and does not close that fork question.
 - Continuation safe points after a call or tool result are not implemented; the
   current execution slice consumes steering only while preparing its one initial
   call. Source terminalization and evidence-free startup recovery reclassify any

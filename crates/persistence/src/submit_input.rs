@@ -29,8 +29,8 @@ use signalbox_domain::{
     SubmitInputAppliedResult, SubmitInputPreparationFailure, SubmitInputReconstitutionFailure,
     SubmitInputReconstitutionInput, SubmitInputRejectedResult, SubmitInputResult,
     SubmitInputTerminalSourceReconstitutionInput, SubmitInputTurnOriginReconstitutionInput,
-    TerminalAttemptEndReconstitutionInput, ToolRequestId, TurnAttemptId, TurnId,
-    UnstoppedAttemptDisposition, UserContent,
+    TerminalAttemptEndReconstitutionInput, ToolRequestId, TranscriptAncestry, TurnAttemptId,
+    TurnId, UnstoppedAttemptDisposition, UserContent,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -49,6 +49,7 @@ use crate::{
         attach_recovery_interrupt_reclassification_candidates, persist_stop_requested,
         persist_terminal_outcome, require_live_execution_for_restart,
     },
+    outbox::{self, OutboxEvent},
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
 };
 
@@ -138,6 +139,8 @@ fn turn_origin_dependency_order(
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+
     use super::*;
 
     #[test]
@@ -173,6 +176,18 @@ mod tests {
             turn_origin_dependency_order([(first, Some(second)), (second, Some(first))]),
             None,
         );
+    }
+
+    #[test]
+    fn lost_commit_response_is_typed_as_ambiguous() {
+        let error = SubmitInputRepositoryError::from_commit_failure(sqlx::Error::Io(
+            io::Error::new(io::ErrorKind::ConnectionReset, "commit response was lost"),
+        ));
+
+        assert!(matches!(
+            error,
+            SubmitInputRepositoryError::CommitAmbiguous(_)
+        ));
     }
 }
 
@@ -264,8 +279,10 @@ impl Error for SubmitInputCorruption {}
 /// A database failure, wrong purpose-specific load, or integrity failure.
 #[derive(Debug)]
 pub enum SubmitInputRepositoryError {
-    /// PostgreSQL could not complete the operation.
+    /// PostgreSQL failed before any commit could have succeeded.
     Database(sqlx::Error),
+    /// PostgreSQL obscured whether the requested commit succeeded.
+    CommitAmbiguous(sqlx::Error),
     /// A purpose-specific load named a valid command of another admitted kind.
     DifferentCommandKind {
         /// The owner-global identifier that names another kind.
@@ -291,6 +308,12 @@ impl fmt::Display for SubmitInputRepositoryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Database(error) => write!(formatter, "SubmitInput database failure: {error}"),
+            Self::CommitAmbiguous(error) => {
+                write!(
+                    formatter,
+                    "SubmitInput commit outcome is ambiguous: {error}"
+                )
+            }
             Self::DifferentCommandKind { command_id } => {
                 write!(
                     formatter,
@@ -316,7 +339,7 @@ impl fmt::Display for SubmitInputRepositoryError {
 impl Error for SubmitInputRepositoryError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Database(error) => Some(error),
+            Self::Database(error) | Self::CommitAmbiguous(error) => Some(error),
             Self::DifferentCommandKind { .. } | Self::AcceptedInputIdentityCollision { .. } => None,
             Self::Corruption(error) => Some(error),
             Self::ModelExecution(error) => Some(error),
@@ -339,6 +362,16 @@ impl From<SubmitInputCorruption> for SubmitInputRepositoryError {
 impl From<ModelCallRepositoryError> for SubmitInputRepositoryError {
     fn from(error: ModelCallRepositoryError) -> Self {
         Self::ModelExecution(Box::new(error))
+    }
+}
+
+impl SubmitInputRepositoryError {
+    fn from_commit_failure(error: sqlx::Error) -> Self {
+        if crate::commit_failure_is_ambiguous(&error) {
+            Self::CommitAmbiguous(error)
+        } else {
+            Self::Database(error)
+        }
     }
 }
 
@@ -381,6 +414,31 @@ impl SubmitInputRepository {
     where
         NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
     {
+        self.handle_with_candidates_and_alias_resolver(
+            command,
+            accepted_input,
+            turn,
+            cancellation_identities,
+            next_reclassified_turn,
+            |_| None,
+        )
+        .await
+    }
+
+    /// Handles one command using hub-minted cancellation/reclassification
+    /// candidates and the deployment's immutable alias definitions.
+    pub async fn handle_with_candidates_and_alias_resolver<NextTurn>(
+        &self,
+        command: SubmitInput,
+        accepted_input: AcceptedInputId,
+        turn: Option<TurnId>,
+        cancellation_identities: CancelledModelCallTurnIdentities,
+        next_reclassified_turn: NextTurn,
+        select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
+    ) -> Result<SubmitInputHandlingOutcome, SubmitInputRepositoryError>
+    where
+        NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
+    {
         let mut transaction = self.pool.begin().await?;
         let decision = handle_in_transaction(
             &mut transaction,
@@ -389,12 +447,16 @@ impl SubmitInputRepository {
             turn,
             cancellation_identities,
             next_reclassified_turn,
+            select_definition,
         )
         .await;
 
         match decision {
             Ok(TransactionDecision::Commit(outcome)) => {
-                transaction.commit().await?;
+                transaction
+                    .commit()
+                    .await
+                    .map_err(SubmitInputRepositoryError::from_commit_failure)?;
                 Ok(outcome)
             }
             Ok(TransactionDecision::Rollback(outcome)) => {
@@ -421,9 +483,11 @@ impl SubmitInputRepository {
             Some(CommandKind::SubmitInput) => {
                 load_from_connection(&mut connection, command_id).await
             }
-            Some(CommandKind::CreateSession | CommandKind::ReplaceSessionDefaults) => {
-                Err(Self::wrong_kind(command_id))
-            }
+            Some(
+                CommandKind::CreateSession
+                | CommandKind::CreateSessionFromImportedFrontier
+                | CommandKind::ReplaceSessionDefaults,
+            ) => Err(Self::wrong_kind(command_id)),
         }
     }
 
@@ -472,6 +536,7 @@ async fn handle_in_transaction<NextTurn>(
     turn: Option<TurnId>,
     cancellation_identities: CancelledModelCallTurnIdentities,
     mut next_reclassified_turn: NextTurn,
+    select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
 ) -> Result<TransactionDecision, SubmitInputRepositoryError>
 where
     NextTurn: FnMut(AcceptedInputId) -> TurnId + Send,
@@ -484,7 +549,11 @@ where
                 require_recorded(connection, command_id).await?,
             )));
         }
-        Some(CommandKind::CreateSession | CommandKind::ReplaceSessionDefaults) => {
+        Some(
+            CommandKind::CreateSession
+            | CommandKind::CreateSessionFromImportedFrontier
+            | CommandKind::ReplaceSessionDefaults,
+        ) => {
             return Ok(TransactionDecision::Rollback(
                 SubmitInputHandlingOutcome::ConflictingReuse { command_id },
             ));
@@ -512,11 +581,13 @@ where
                 &command,
                 require_recorded(connection, command_id).await?,
             ))),
-            Some(CommandKind::CreateSession | CommandKind::ReplaceSessionDefaults) => {
-                Ok(TransactionDecision::Rollback(
-                    SubmitInputHandlingOutcome::ConflictingReuse { command_id },
-                ))
-            }
+            Some(
+                CommandKind::CreateSession
+                | CommandKind::CreateSessionFromImportedFrontier
+                | CommandKind::ReplaceSessionDefaults,
+            ) => Ok(TransactionDecision::Rollback(
+                SubmitInputHandlingOutcome::ConflictingReuse { command_id },
+            )),
             None => Err(SubmitInputCorruption::Inconsistent("winner claim disappeared").into()),
         };
     }
@@ -524,7 +595,8 @@ where
     let PreparedAgainstLockedState {
         prepared,
         scheduling,
-    } = prepare_against_locked_state(connection, command, accepted_input, turn).await?;
+    } = prepare_against_locked_state(connection, command, accepted_input, turn, select_definition)
+        .await?;
     let recorded = prepared.result().clone();
     let interrupt = match prepared.result() {
         SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(origin)) => {
@@ -700,6 +772,7 @@ async fn prepare_against_locked_state(
     command: SubmitInput,
     accepted_input: AcceptedInputId,
     turn: Option<TurnId>,
+    select_definition: impl FnOnce(ModelAlias) -> Option<FrozenAliasDefinition>,
 ) -> Result<PreparedAgainstLockedState, SubmitInputRepositoryError> {
     // Lock-mode constraint: this session-row lock must use the no-key-update
     // mode, not PostgreSQL's strongest row-lock mode. Submit orders the session row before the
@@ -765,7 +838,7 @@ async fn prepare_against_locked_state(
     let scheduling = load_scheduling_projection(connection, session.clone()).await?;
     let active_turn_id = scheduling.active_turn().map(|active| active.turn());
     let prepared = if active_turn_id.is_some() {
-        command.prepare_with_active_turn(&scheduling, accepted_input, turn, |_| None)
+        command.prepare_with_active_turn(&scheduling, accepted_input, turn, select_definition)
     } else {
         let previous_position = sqlx::query_scalar::<_, Decimal>(
             "SELECT acceptance_position
@@ -791,7 +864,7 @@ async fn prepare_against_locked_state(
             accepted_input,
             turn,
             previous_position,
-            |_| None,
+            select_definition,
         )
     };
 
@@ -829,6 +902,20 @@ pub(crate) async fn load_scheduling_projection(
     session: Session,
 ) -> Result<AcceptedInputSchedulingProjection, SubmitInputRepositoryError> {
     let session_id = session.id();
+    let imported_session = if matches!(
+        session.creation_provenance().ancestry(),
+        TranscriptAncestry::ImportedConversation { .. }
+    ) {
+        Some(
+            crate::create_session_from_imported_frontier::load_complete_current(
+                connection, &session,
+            )
+            .await
+            .map_err(map_imported_scheduling_error)?,
+        )
+    } else {
+        None
+    };
     let (queue_count, lifecycle_count): (i64, i64) = sqlx::query_as(
         "SELECT
             (SELECT count(*)
@@ -1953,11 +2040,14 @@ pub(crate) async fn load_scheduling_projection(
             assistant_tool_request_id,
             completed_turn_id
          FROM semantic_transcript_entry
-        WHERE source_session_id = $3
-           OR (source_session_id, semantic_entry_id) IN (
+        WHERE payload_kind <> 'imported_entry'
+          AND (
+            source_session_id = $3
+            OR (source_session_id, semantic_entry_id) IN (
             SELECT required.source_session_id, required.semantic_entry_id
               FROM UNNEST($1::uuid[], $2::uuid[])
                 AS required(source_session_id, semantic_entry_id)
+            )
         )
         ORDER BY source_session_id, semantic_entry_id",
     )
@@ -1967,7 +2057,17 @@ pub(crate) async fn load_scheduling_projection(
     .fetch_all(&mut *connection)
     .await?;
     let mut semantic_entries = Vec::with_capacity(semantic_rows.len());
-    let mut loaded_semantic_entries = BTreeSet::new();
+    let mut loaded_semantic_entries = imported_session
+        .as_ref()
+        .into_iter()
+        .flat_map(|imported| imported.semantic_entries())
+        .map(|entry| {
+            (
+                entry.source_session().into_uuid(),
+                entry.identity().into_uuid(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
     for row in semantic_rows {
         let source_session_uuid: Uuid = required(&row, "source_session_id")?;
         let entry_uuid: Uuid = required(&row, "semantic_entry_id")?;
@@ -2147,20 +2247,43 @@ pub(crate) async fn load_scheduling_projection(
         return Err(SubmitInputCorruption::Missing("scheduling context frontier").into());
     }
 
-    AcceptedInputSchedulingReconstitutionInput::new(
+    let mut input = AcceptedInputSchedulingReconstitutionInput::new(
         session,
         turns,
         semantic_entries,
         snapshots,
         active_acceptance_tail,
-    )
-    .with_model_call_facts(pinned_targets, model_calls)
-    .with_consumed_steering_facts(consumed_steering)
-    .reconstitute()
-    .map_err(|error| {
-        let (_, failure) = error.into_parts();
-        SubmitInputCorruption::Scheduling(failure).into()
-    })
+    );
+    if let Some(imported_session) = imported_session {
+        input = input.with_imported_session(imported_session);
+    }
+    input
+        .with_model_call_facts(pinned_targets, model_calls)
+        .with_consumed_steering_facts(consumed_steering)
+        .reconstitute()
+        .map_err(|error| {
+            let (_, failure) = error.into_parts();
+            SubmitInputCorruption::Scheduling(failure).into()
+        })
+}
+
+fn map_imported_scheduling_error(
+    error: crate::create_session_from_imported_frontier::ImportedSessionRepositoryError,
+) -> SubmitInputRepositoryError {
+    use crate::create_session_from_imported_frontier::ImportedSessionRepositoryError;
+
+    match error {
+        ImportedSessionRepositoryError::Database(error) => {
+            SubmitInputRepositoryError::Database(error)
+        }
+        ImportedSessionRepositoryError::Corruption(_)
+        | ImportedSessionRepositoryError::CommitAmbiguous(_)
+        | ImportedSessionRepositoryError::DifferentCommandKind { .. }
+        | ImportedSessionRepositoryError::Preparation(_)
+        | ImportedSessionRepositoryError::IdentityCollision(_) => {
+            SubmitInputCorruption::Inconsistent("complete imported scheduling projection").into()
+        }
+    }
 }
 
 fn require_applied_interrupt_from_attempt(
@@ -2593,6 +2716,17 @@ async fn insert_prepared(
         .bind(accepted_input_id_to_uuid(applied.accepted_input()))
         .bind(input_position_to_numeric(position))
         .execute(&mut *connection)
+        .await?;
+
+        outbox::append(
+            connection,
+            OutboxEvent::InputAccepted {
+                session: applied.session(),
+                accepted_input: applied.accepted_input(),
+                turn: applied.turn(),
+                acceptance_position: position,
+            },
+        )
         .await?;
     }
 

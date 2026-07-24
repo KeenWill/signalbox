@@ -36,6 +36,394 @@ system's rot.
 
 **Affects.** `crates/persistence/migrations`, migration-writing goal runs.
 
+## 2026-07-24 — Make reviewer-reply timing an explicit pull-request gate
+
+**Context.** The finished-pull-request rules required push-time reviewer
+replies, but expressed the requirement inside a dense paragraph. An agent could
+incorrectly treat the disposition round as stack-wide batching and move to a
+child pull request after pushing fixes without replying on the reviewed pull
+request.
+
+**Decision.** Make the existing timing operationally explicit in
+[AGENTS.md](../AGENTS.md): accepted findings are replied to after their fixing
+commits are pushed; declined findings may be answered immediately or with the
+pull request's disposition round; and all replies and eligible resolutions are
+complete before work moves to another pull request, propagates a stack, or
+requests another review wave.
+
+**Rejected alternatives.** Retaining the compact wording leaves the sequencing
+easy to overlook. Requiring immediate replies to declined findings prevents a
+useful single disposition round without improving traceability.
+
+**Affects.** The finished-pull-request workflow and every future review loop. It
+changes no code, review-wave limit, merge authority, or validation rule.
+
+## 2026-07-24 — Keep ordinary imported-session loads bounded
+
+**Context.** Imported seed correctness requires full comparison with the
+selected imported prefix, but the shared `load_session` boundary is used by
+routine submission, defaults, startup, scheduling, and model-execution paths.
+Loading an unbounded imported aggregate for every ordinary session read would
+violate the bounded `Session` aggregate and amplify lock-held work.
+
+**Decision.** Ordinary imported-session reconstitution reads a constant-size
+proof: the one-to-one seed record and its frontier header must agree with the
+session, and the header count must equal the selected boundary position. Full
+imported-prefix comparison remains mandatory at creation replay and every
+purpose-specific read that resolves imported semantic context, including
+first-turn scheduling and process transcript projection; see
+[sessions-and-transcript](spec/sessions-and-transcript.md) and
+[process-protocol](spec/process-protocol.md).
+
+**Rejected alternatives.** Full prefix validation in every shared session load
+is unbounded and repeatedly scans immutable history. Creation-only validation
+would let purpose-specific reads trust corrupted seed membership. Omitting the
+seed from ordinary reconstitution would fail to detect a missing or cross-wired
+one-to-one link.
+
+**Affects.** INV-002/INV-039; current-session reconstitution, persistence load
+projection, imported creation replay, first-turn scheduling, process transcript
+reads, and PostgreSQL corruption tests.
+
+## 2026-07-24 — Version imported transcript projection as process protocol two
+
+**Context.** Process protocol version one has closed transcript-entry variants,
+and its clients reject unknown variants. Reusing version one for imported
+entries would make an upgraded hub emit frames that an otherwise compatible
+version-one client cannot decode.
+
+**Decision.** Preserve version one's wire vocabulary and add version two with
+the conservative imported transcript-entry variants. The hub admits both
+versions and responds in the request version. When a frame cannot admit its
+declared version, its server error uses version one as the pre-admission
+fallback. A version-one submit, transcript, or follow request selecting imported
+ancestry returns a version-one `unsupported_version` error naming version two
+before mutation or snapshot construction; native sessions remain available
+through both versions. See [process-protocol](spec/process-protocol.md).
+
+**Rejected alternatives.** Extending version one's closed enums would break old
+clients after they accept the frame version. Dropping version-one support would
+needlessly prevent upgraded hubs from serving native sessions to existing
+clients. Rendering imported entries as native variants would fabricate
+provenance, and silently omitting the complete imported prefix would make the
+snapshot incomplete.
+
+**Affects.** S28; INV-033/INV-038/INV-039; process wire types, hub request
+dispatch, terminal-client decoding, imported transcript reads, follow snapshots,
+and compatibility tests.
+
+## 2026-07-24 — Version the imported-value storage encoding
+
+**Context.** PostgreSQL must retain the complete source-neutral structured,
+content, and attestation algebra without introducing provider JSON as a domain
+or durable contract. The loader must reject unknown, partial, contradictory, or
+trailing storage data before domain reconstitution.
+
+**Decision.** Store nested imported values in `bytea` using an adapter-owned
+version-1 encoding: one version byte, closed variant tags, big-endian
+length-framed UTF-8 and collection values, and the same 128-container bound as
+Claude Code conversion. Raw source bytes remain separate authority. The adapter
+decodes every field into domain values and rejects unsupported versions/tags,
+invalid UTF-8 or numbers, impossible lengths, excessive depth, early endings,
+and trailing bytes.
+
+**Rejected alternatives.** `jsonb` would erase lexical source distinctions and
+repeat-member structure. Treating reconstructed provider JSON as a domain value
+would move an edge representation inward. A general serialization dependency
+would expose a library-derived wire shape as an accidental durable contract.
+Fully relational decomposition would multiply schema surface without adding a
+stronger checked boundary.
+
+**Affects.** The imported raw-occurrence and transcript-entry encoding columns,
+Postgres repository, corruption vocabulary, and codec round-trip tests.
+
+## 2026-07-24 — Preserve JSON structure with an edge-owned bounded decoder
+
+**Context.** The Claude Code converter must retain ordered and repeated object
+members plus exact valid number spellings. Deserializing through
+`serde_json::Value` would select one repeated member and move the source away
+from the domain's preservation algebra. JSON string escape and surrogate
+decoding, however, is subtle and already implemented by a focused dependency
+used elsewhere in the workspace.
+
+**Decision.** The Claude Code edge crate owns the small, 128-container-bounded
+JSON structural decoder needed to construct the source-neutral imported value
+algebra directly. It delegates only isolated JSON string-token decoding to the
+existing `serde_json` dependency. Provider types and `serde_json` values do not
+cross the converter boundary.
+
+**Rejected alternatives.** General deserialization into a map-bearing value
+would erase repeated members. Reimplementing Unicode escape decoding would add
+delicate code without improving the contract. A new order-preserving JSON
+dependency would add another representation and dependency for a bounded edge
+task Signalbox can express directly.
+
+**Affects.** The Claude Code version 1 converter implementation and its
+synthetic structure-preservation and depth-bound tests.
+
+## 2026-07-24 — Separate imported ancestry from its materialized seed frontier
+
+**Context.** Imported ancestry identifies the external record and boundary that
+supplied initial semantic context. Session creation also mints one local
+`ContextFrontierId` for the materialized imported prefix. Scheduling must
+recover that exact identity, because equal frontier content does not imply
+frontier identity.
+
+**Decision.** Keep `TranscriptAncestry::ImportedConversation` limited to the
+imported conversation, inclusive entry boundary, and resume/fork relationship.
+Record the generated frontier in a separate immutable, one-to-one
+`ImportedSessionSeed` owned by the created session. The creation transaction
+stores both facts atomically. Creation replay and purpose-specific semantic
+reads reconstitute the seed against the session's imported ancestry and exact
+imported-prefix membership; ordinary session reconstitution uses the bounded
+proof recorded above. Scheduling uses the stored identity and never remints an
+equal-content frontier; see
+[sessions-and-transcript](spec/sessions-and-transcript.md) and
+[turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md).
+
+**Rejected alternatives.** Embedding the local frontier identity in ancestry
+would mix source provenance with Signalbox's materialization artifact. Deriving
+or reminting a frontier from equal membership would lose identity. A generalized
+session-seed abstraction would speculate beyond the imported-session slice.
+
+**Affects.** S28; INV-003/INV-015/INV-039; imported session creation,
+reconstitution, first-turn scheduling, domain/application spines, and
+append-only PostgreSQL representation.
+
+## 2026-07-24 — Authenticate each imported raw-record conversion
+
+**Context.** Exact raw bytes are durable authority, but the stored normalized
+record and its projected entries could otherwise be changed together and still
+pass entry-to-normalized comparison. Reconstitution must detect that
+contradiction without moving the format parser from the recorded edge-owned
+decoder boundary into the domain or persistence adapter.
+
+**Decision.** Every converted raw occurrence carries a SHA-256 conversion digest
+over a fixed domain tag, its exact raw hash, and a closed, length-framed
+encoding of its complete source-neutral structured value. The domain computes
+the digest at conversion, persistence stores it independently from the
+normalized-value encoding, and domain reconstitution derives and compares it
+before trusting the normalized projection; see
+[conversation-import](spec/conversation-import.md).
+
+**Rejected alternatives.** Re-parsing provider JSON in the domain would reverse
+the edge-owned decoder boundary. Adapter-only checking would leave the public
+domain reconstitution path unauthenticated. Hashing the storage codec bytes
+would couple domain integrity to an adapter encoding. Including normalization in
+the source-content digest would change raw-content idempotency.
+
+**Affects.** Imported raw-record domain types and corruption vocabulary, the
+raw-occurrence schema and adapter, domain spine, conversation-import
+specification, and synthetic domain/Postgres corruption tests.
+
+## 2026-07-24 — Snapshot terminal renderer projections
+
+**Context.** Partial substring assertions let missing identities, malformed
+field layout, or unintended extra terminal output pass. The testing-style guide
+requires expect tests when a rendered value's complete shape is the assertion.
+
+**Decision.** Add the repository's existing `expect-test` 1.5 helper as a
+terminal client dev-dependency and snapshot each complete turn and event
+projection changed in this review wave. Keep behavioral law assertions separate.
+
+**Rejected alternatives.** More substring assertions do not close the omitted
+output surface. Whole-structure snapshots would include irrelevant fixtures;
+these snapshots contain only the deterministic rendered value under test.
+
+**Affects.** Terminal-client test dependencies and renderer tests only; terminal
+output and runtime dependencies do not change.
+
+## 2026-07-24 — Release decoded process payloads before response backpressure
+
+**Context.** Cloning a decoded request retained both the frame-owned payload and
+its clone after releasing the inbound-frame permit. Rejected oversized input
+could then remain live while a non-reading peer blocked the error response.
+
+**Decision.** Consume each decoded frame into its request without cloning. Move
+submitted text into application admission, so rejected text is dropped before
+awaiting response output and admitted text reuses the decoded allocation.
+
+**Rejected alternatives.** Keeping the frame until request completion makes the
+frame budget cease to bound its allocation lifetime. Explicitly dropping only
+rejected clones leaves avoidable duplication on successful submissions. Response
+deadlines would add unrelated timing semantics.
+
+**Affects.** Process-protocol frame ownership, submitted-input admission, and
+process-runtime memory retention under response backpressure; wire shapes and
+admission limits do not change.
+
+## 2026-07-23 — Import external conversations as records and seed native sessions
+
+**Context.** External AI transcripts need to become durable Signalbox history
+without claiming that Signalbox accepted their input or authorized, attempted,
+or observed their model and tool effects. Claude Code session JSONL contains
+non-message records, optional metadata, sidechains, text-only vintages,
+structured tool traffic, thinking, and media. Import must be safe to rerun
+without deciding whether, where, or how a future session uses the record.
+
+**Decision.** Adopt the immutable imported-conversation aggregate,
+format-versioned edge-converter seam, exact per-field source attestations,
+content-addressed verbatim raw records, source-neutral maximum-fidelity
+normalization of message content and non-message source events, and later
+session creation from any imported entry boundary as specified by
+[conversation-import](spec/conversation-import.md) and
+[sessions-and-transcript](spec/sessions-and-transcript.md). SHA-256, supplied by
+the narrow `sha2` dependency, keys raw-record deduplication and a
+domain-separated, length-framed source digest makes exact reingestion
+idempotent. Import is pure ingestion: resume-style or fork-style selection is a
+later client-invoked session-creation fact. Both select any addressable imported
+frontier and leave the imported snapshot unchanged. Imported semantic entries
+remain provenance-distinct from native evidence. Initial rendering emits exact
+imported user/assistant text and conservatively omits imported tool, result,
+thinking, and media entries without removing them from the frontier. Claude Code
+JSONL version 1 admits a maximum array/object nesting depth of 128. The required
+top-level record object counts as depth 1, depth 128 is admitted, and attempting
+to enter a container at depth 129 rejects the complete source, as specified by
+[conversation-import](spec/conversation-import.md). This bounds its recursive
+source-neutral JSON decoder.
+
+**Rejected alternatives.** Replaying imports as native turns or copying them
+into native accepted-input/model-call variants would fabricate execution
+evidence. Import-time `import_only`/`adopt_resume`/`adopt_fork` coupling would
+make ingestion choose one future use and one session too early. Normalized-only
+storage would make converter omissions unrecoverable; raw-only storage would
+leave no checked frontier. Flattening absence, repairing parent chains,
+discarding tool/thinking/media payloads, or rendering them as native tool
+traffic would invent or lose facts. Provider JSON in the domain would make every
+later format a schema-wide concern. Non-cryptographic or unframed hashes would
+provide weaker collision and concatenation boundaries. Unbounded recursive JSON
+decoding risks stack exhaustion; adding a stack-growth dependency for this
+edge-format parser is unnecessary at the fixed depth.
+
+**Affects.** S28; INV-001/INV-002/INV-003/INV-005/INV-038/INV-039; conversation
+ingestion and idempotency, raw-record storage, imported frontier selection,
+session ancestry and creation, semantic entries, first native frontier,
+model-input rendering, append-only Postgres storage, the domain/application
+spines, and opt-in content-silent real-transcript validation. Native lifecycle,
+slot locking, execution evidence, retry, and outbox semantics do not change.
+
+## 2026-07-23 — Reserve inbound frame capacity only after bounded read readiness
+
+**Context.** Reserving one of eight frame slots before waiting for input lets
+eight idle clients prevent every later connection from sending a request.
+
+**Decision.** Give each of the at most 128 accepted tasks an explicit 8 KiB
+reader buffer, wait until that buffer observes input, and only then reserve a
+frame slot before accumulating the rest of the frame. This admits at most 1 MiB
+of aggregate pre-slot read-ahead in addition to the existing 64 MiB admitted
+frame bound.
+
+**Rejected alternatives.** Charging idle clients makes the eight-slot budget an
+availability gate. Per-connection read deadlines invent timing semantics.
+Unbounded pre-slot reads merely move the memory defect.
+
+**Affects.** Process-runtime connection scheduling and inbound memory bounds;
+wire framing and the eight-frame concurrency limit do not change.
+
+## 2026-07-23 — Classify snapshot-spool I/O by response exposure
+
+**Context.** Temporary-file creation, write, flush, seek, and read failures were
+classified as peer I/O, so the runtime silently discarded server-side resource
+failures as ordinary client disconnects.
+
+**Decision.** Before any response bytes are exposed, translate spool I/O failure
+to sanitized `unavailable`. During transmission, classify sink failure as
+connection-local peer I/O and source-spool read failure as fatal runtime
+evidence. Close a follow snapshot's file immediately after its transmission.
+
+**Rejected alternatives.** Treating every I/O error as a disconnect hides server
+failure. Making every spool failure fatal denies a request a safe pre-exposure
+infrastructure response. Retaining the file through live follow wastes disk and
+a descriptor.
+
+**Affects.** Session-list and transcript spool errors, follow resource lifetime,
+runtime failure classification, and process-protocol tests.
+
+## 2026-07-23 — Bound process snapshot construction resources
+
+**Context.** A valid deployment has no aggregate session-count or
+transcript-size limit. Materializing every session summary per list request made
+request heap grow with the catalog, while allowing snapshot spooling to occupy
+every application-pool connection could stall mutations, scheduling, and outbox
+delivery.
+
+**Decision.** Spool session lists from a repeatable-read cursor that owns one
+decoded row at a time, then commit before writing the completed temporary file
+to the client. Share one snapshot-reader semaphore across list, transcript, and
+follow snapshot construction, sized to leave two configured application-pool
+connections outside snapshot work. The production pool's baseline ten
+connections therefore admits at most eight concurrent snapshot readers.
+
+**Rejected alternatives.** Complete summary vectors retain catalog-sized heap.
+Writing rows directly to a slow client holds the transaction and pool slot.
+Separate uncoordinated limits can still exhaust the shared pool; reserving only
+one connection leaves scheduling, dispatch, and mutations contending for the
+same last slot.
+
+**Affects.** Process session-list and transcript snapshot construction,
+temporary disk use, process-runtime connection services, and application-pool
+capacity.
+
+## 2026-07-23 — Configure process-socket mode through its retained identity
+
+**Context.** Unix socket bind does not accept a filesystem mode. Temporarily
+changing `umask` is process-wide, so a module-local mutex cannot prevent
+unrelated threads from creating files under the temporary mask.
+
+**Decision.** Bind the socket unlistening inside its verified owner-private
+parent, retain the observed inode at `<socket-path>.identity`, set exact `0600`
+mode through that retained name, and revalidate both names and their modes
+before listening. Never change the process-wide creation mask.
+
+**Rejected alternatives.** A mutex coordinates only participating creators.
+Leaving a restrictive mask installed changes unrelated process behavior.
+Listening before permissioning admits clients before validation.
+
+**Affects.** Guarded local process-socket bind, its tests, and the process
+transport specification.
+
+## 2026-07-23 — Pin compared process-socket identities
+
+**Context.** A device-and-inode comparison cannot prove pathname identity after
+the observed socket has no remaining filesystem link: its inode could be reused
+for a replacement before revalidation or cleanup.
+
+**Decision.** While holding the existing path lock, retain each compared socket
+with a hard link at the reserved adjacent `<socket-path>.identity` name. Reclaim
+an owned socket left there by an abrupt prior exit, fail closed on another
+entry, and hold the active listener's link through public-path removal.
+
+**Rejected alternatives.** Comparing device and inode without retaining the
+inode admits reuse. Opening a socket node as a metadata descriptor is not
+portable to macOS. Random link names leak unbounded directory entries after
+abrupt exits.
+
+**Affects.** Stale-socket recovery, guarded bind, graceful cleanup, and the
+local process-transport specification.
+
+## 2026-07-23 — Bound process-frame JSON container depth
+
+**Context.** The 8 MiB frame limit bounds input bytes, but duplicate-member
+validation retains one key set per open object. A deeply nested frame can
+therefore amplify live allocation before version classification even while
+remaining under the byte cap.
+
+**Decision.** Admit at most 127 simultaneously open JSON objects and arrays,
+including the top-level frame object, and classify deeper input as
+`malformed_frame` before version classification. Duplicate-member validation
+still covers every object within the admitted depth. The value matches the
+existing provider-JSON container boundary and Serde's practical recursion
+boundary.
+
+**Rejected alternatives.** Relying on the byte cap alone permits
+disproportionate scanner memory. Skipping duplicate checks for unsupported
+versions contradicts the closed process grammar. A shallower arbitrary limit
+lacks evidence, while an unbounded or heap-spilling parser preserves the
+amplification.
+
+**Affects.** Process frame decoding, duplicate-member scanning,
+[process-protocol](spec/process-protocol.md), and INV-033 tests.
+
 ## 2026-07-23 — Defer native-snapshot review findings to the rewire inventory
 
 **Context.** The native Swift client entered `clients/native/` as an as-is
@@ -131,6 +519,153 @@ implementation.
 **Affects.** Hub deployment requirements, database configuration, fencing
 documentation, and operator guidance.
 
+## 2026-07-23 — Spool process snapshots outside transcript-sized memory
+
+**Context.** A valid durable transcript has no aggregate size limit, while the
+process runtime admits 128 connections. Fetching every turn and semantic entry
+into vectors before writing a snapshot therefore made valid concurrent reads an
+unbounded heap-allocation path.
+
+**Decision.** Persistence exposes a repeatable-read cursor that validates the
+execution lineage in PostgreSQL and yields one decoded turn or frontier member
+at a time. hubd encodes those items into a secure unnamed temporary file using
+the focused `tempfile` 3.27 dependency, commits the read transaction, then
+streams the completed spool to the client. Per-request heap use is bounded by
+one decoded row, one protocol frame, and fixed I/O buffers.
+
+**Rejected alternatives.** Retaining complete vectors leaves the defect. Holding
+a PostgreSQL snapshot open while writing to an arbitrarily slow client ties
+database capacity and MVCC retention to that client. An aggregate transcript
+limit would make valid durable state unreadable despite the existing bounded
+multi-frame wire representation.
+
+**Affects.** Process transcript reads and follow-snapshot startup, the
+persistence read cursor, hubd's direct dependency set, and temporary disk usage;
+wire messages and authoritative snapshot semantics do not change.
+
+## 2026-07-23 — Spool unbounded transcript snapshots to anonymous files
+
+**Context.** Version one intentionally has no aggregate transcript-snapshot
+limit. Retaining every decoded turn, semantic entry, content fragment, and
+identity set until the terminal count frame lets a valid local peer exhaust
+client memory.
+
+**Decision.** Validate and spool snapshot frames to an owner-private anonymous
+temporary file, then replay that file only after the terminal counts validate.
+Use the narrowly scoped `tempfile` crate for portable create-and-unlink
+lifecycle handling; fixed-width identity indexes remain disk-backed as well.
+
+**Rejected alternatives.** Adding an aggregate wire limit changes the protocol's
+recorded ability to carry growing durable transcripts. Rendering before the end
+frame could expose a malformed partial snapshot. Owning platform-specific
+temporary-file creation repeats subtle permissions and cleanup behavior.
+
+**Affects.** Terminal-client snapshot validation, replay, and its direct
+dependency surface only; server framing and durable transcript size remain
+unchanged.
+
+## 2026-07-23 — Use Clap for the terminal command surface
+
+**Context.** The first terminal client hand-parsed nested commands, mutually
+exclusive model selection, recovery-flag pairing, canonical typed values, help,
+and duplicate options. The owner approved Clap as the better long-term fit for
+this growing daily command surface.
+
+**Decision.** Use Clap 4's derive API with default features disabled and only
+the parsing, help, usage, suggestion, and error-context features enabled.
+Signalbox retains focused value parsers for canonical UUIDs, reserved command
+identities, and shortest unsigned decimal spelling.
+
+**Rejected alternatives.** Extending the handwritten parser duplicates mature
+subcommand and constraint handling. Enabling Clap's full default feature set
+adds color and ancillary behavior the closed local client does not need.
+
+**Affects.** `apps/client` argument parsing, generated help and usage
+diagnostics, direct dependencies, and the lockfile; process messages and command
+semantics do not change.
+
+## 2026-07-23 — Bound concurrent inbound frame buffers at eight
+
+**Context.** The 128 accepted process connections could each retain nearly one 8
+MiB partial frame indefinitely, making the connection-count limit alone admit
+roughly 1 GiB of raw inbound payload before reader and request overhead.
+
+**Decision.** Reserve one of eight shared inbound-frame slots before a
+connection begins accumulating its next frame. A slot is held through frame
+decoding, so raw frame accumulation is bounded at 64 MiB; other accepted
+connections wait without a growing frame accumulator and remain shutdown-aware.
+
+**Rejected alternatives.** Lowering the 8 MiB frame cap changes the recorded
+wire contract. A read deadline invents timing semantics and still permits the
+same peak. Byte-granular reservations add accounting complexity without a
+current need for differently sized concurrent limits.
+
+**Affects.** Process-runtime inbound memory capacity only; accepted-connection
+admission, frame validity, request ordering, and application admission do not
+change.
+
+## 2026-07-23 — Bound accepted process connections at 128
+
+**Context.** A finite socket backlog does not bound tasks after acceptance.
+Long-lived follow streams or idle clients could otherwise cause hubd to retain
+an unbounded number of connection tasks, readers, writers, and fan-out
+receivers.
+
+**Decision.** Own at most 128 accepted process-connection tasks. When the limit
+is full, stop accepting until one task exits; the guarded listener's existing
+128-entry kernel backlog remains the queue for additional local attempts.
+
+**Rejected alternatives.** Leaving accepted tasks unbounded converts local
+connection churn into unbounded memory growth. Closing every attempt above the
+limit makes short bursts fail despite the already bounded listener queue.
+
+**Affects.** Process-protocol connection admission and runtime task ownership;
+application command admission and the wire contract do not change.
+
+## 2026-07-23 — Bound process-protocol input at 1 MiB
+
+**Context.** A submitted input is later reflected inside one queued-turn frame
+and one durable-update frame. Allowing content to consume nearly the entire 8
+MiB inbound frame leaves no room for those larger wrappers and lets an accepted
+value become unrepresentable.
+
+**Decision.** The local process server admits at most 1 MiB of UTF-8 input
+content and rejects a larger value before application construction or mutation.
+At that bound, even one-byte control characters with worst-case JSON escaping
+leave the enclosing version-one server frames below 8 MiB.
+
+**Rejected alternatives.** Relying only on the aggregate frame cap admits values
+that cannot be reflected. Fragmenting queued states and live input events would
+add correlated multi-frame state to two more protocol paths without a daily
+client need. Treating an outbound overflow as hub-fatal lets one connection stop
+unrelated work.
+
+**Affects.** Version-one `submit_input` admission and connection-failure
+isolation; domain content and transcript fragment limits do not change.
+
+## 2026-07-23 — Bound each single-hub guard ping at one second
+
+**Context.** The recorded guard polling cadence does not bound how long one
+`PgConnection::ping` may remain pending. An unbounded response wait would also
+leave fatal guard-loss detection unbounded during a database stall or network
+partition.
+
+**Decision.** Give each guard-check query a separate one-second response
+deadline. A deadline expiry is fatal guard loss for that hub incarnation, just
+like a database error; the runtime does not retry or reacquire in place. Treat
+one second as a provisional operational threshold independent of the polling
+cadence.
+
+**Rejected alternatives.** No query deadline can stall the supervisor
+indefinitely. Retrying within the incarnation delays guarded startup recovery
+without proving that the same session still owns authority. A longer threshold
+widens the ambiguous-health window; a shorter one increases false fatal exits
+under ordinary transient latency before measurements justify that trade.
+
+**Affects.** The response deadline and failure classification of
+`SingleHubGuard::check`; it does not change the polling cadence or the
+generation-fence protocol.
+
 ## 2026-07-23 — Bind follow rereads to their terminal trigger
 
 **Context.** A transcript reread started by one terminal follow event can
@@ -166,6 +701,68 @@ platform-specific exception would make the same protocol path carry different
 trust guarantees.
 
 **Affects.** Local process-socket deployment, validation, and startup tests.
+
+## 2026-07-23 — Bound the local process-socket backlog at 128
+
+**Context.** The guarded Unix listener must select a finite kernel accept queue.
+The value affects only how many already-authenticated local connection attempts
+can wait before hubd accepts them; request concurrency and application admission
+remain separately bounded by runtime task ownership.
+
+**Decision.** Request a backlog of 128 when the verified owner-only process
+socket begins listening. Treat it as a provisional local-transport capacity, not
+a protocol or application limit.
+
+**Rejected alternatives.** Leaving the value implicit would make behavior depend
+on a library default that the raw listen boundary does not provide. One would
+make ordinary local bursts fragile. The platform maximum would add no useful
+bound and is still kernel-clamped.
+
+**Affects.** Only the hub-owned local Unix listener's pending connection queue;
+it does not change framing, request ordering, or durable admission.
+
+## 2026-07-23 — Use Rustix for guarded Unix-socket construction
+
+**Context.** The process socket must remain unlistening until its path identity,
+effective-user ownership, and exact permissions are verified. The standard
+library binds and listens in one operation and exposes neither the effective
+user ID nor a separate safe bind/listen sequence. Workspace code also forbids
+unsafe blocks.
+
+**Decision.** hubd directly uses the already locked Rustix crate with only its
+filesystem, network, process, and standard-library features. Rustix supplies
+safe effective-user lookup and the unlistening Unix socket operations; the
+result is converted to Tokio only after path verification and `listen`.
+
+**Rejected alternatives.** `std::os::unix::net::UnixListener::bind` listens too
+early. A local `libc` adapter would require unsafe code and duplicate a
+well-audited syscall abstraction. A subprocess user-ID lookup would add parsing
+and executable-path failure modes without solving separate bind/listen.
+
+**Affects.** The hub-owned local process transport and its direct dependency
+surface; no domain, persistence, or wire representation changes.
+
+## 2026-07-23 — Reuse Serde and uuid for the closed process wire crate
+
+**Context.** The version-one process boundary needs closed tagged JSON shapes,
+canonical full-range decimal strings, canonical UUID strings, and explicit
+version rejection without leaking domain or storage types. Serde, serde_json,
+and uuid are already pinned elsewhere in the workspace.
+
+**Decision.** The focused `signalbox-process-protocol` crate directly uses those
+three existing dependencies. Serde derives the closed tagged shapes;
+serde_json's `raw_value` feature preserves the version spelling long enough to
+reject an arbitrary integer as unsupported before decoding its payload; and uuid
+parses values behind custom lowercase-hyphenated and command-sentinel checks.
+The crate owns framing and wire validation only.
+
+**Rejected alternatives.** A handwritten JSON parser would duplicate escaping,
+UTF-8, and number handling. Raw string identifiers would defer canonical checks
+to every adapter. A schema generator or protocol framework would add a larger
+toolchain and compatibility policy than exact version one needs.
+
+**Affects.** `crates/process-protocol`, the workspace member inventory, and its
+lockfile package entry; no domain or application public type changes.
 
 ## 2026-07-23 — Trust only root or the hub user in socket ancestry
 
