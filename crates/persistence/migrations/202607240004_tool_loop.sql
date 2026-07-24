@@ -1,5 +1,5 @@
 -- Durable in-turn tool rounds, approval commands, and fenced tool attempts.
--- This migration follows the process-runtime schema merged from main.
+-- This migration follows the imported-session schema merged from main.
 --
 -- Legacy tool-free turns retain the prior commit-boundary assertions. Tool
 -- rounds add their own normalized authority records and are selected by the
