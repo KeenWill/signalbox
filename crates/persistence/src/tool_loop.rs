@@ -373,13 +373,10 @@ impl PostgresToolLoopRepository {
         let mut transaction = self.pool.begin().await?;
         let result = async {
             lock_tool_session(&mut transaction, session).await?;
-            let current = load_current_attempt(&mut transaction, attempt)
+            let batch = load_active_batch_from_connection(&mut transaction, session, turn)
                 .await?
-                .ok_or(ToolLoopCorruption::Missing("prepared tool attempt"))?;
-            if current.session() != session || current.turn() != turn {
-                return Err(ToolLoopCorruption::Inconsistent("attempt ownership").into());
-            }
-            let authorized = current.authorize().map_err(|_| {
+                .ok_or(ToolLoopCorruption::Missing("active tool batch"))?;
+            let authorized = batch.authorize_attempt(attempt).map_err(|_| {
                 ToolLoopRepositoryError::InvalidTransition("tool attempt is not prepared")
             })?;
             mark_issuing_turn_attempt_running(&mut transaction, authorized.attempt()).await?;
@@ -420,16 +417,27 @@ impl PostgresToolLoopRepository {
     ) -> Result<ToolAttemptAuthorizationStatus, ToolLoopRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         lock_tool_session(&mut transaction, session).await?;
-        let current = load_current_attempt(&mut transaction, attempt)
+        let batch = load_active_batch_from_connection(&mut transaction, session, turn)
             .await?
+            .ok_or(ToolLoopCorruption::Missing("active tool batch"))?;
+        let current = batch
+            .requests()
+            .iter()
+            .find_map(|request| match batch.attempt(request.id()) {
+                Some(ReconstitutedToolAttempt::Current(current))
+                    if current.attempt() == attempt =>
+                {
+                    Some(current.clone())
+                }
+                Some(ReconstitutedToolAttempt::Current(_))
+                | Some(ReconstitutedToolAttempt::Ended(_))
+                | None => None,
+            })
             .ok_or(ToolLoopCorruption::Missing("authorized tool attempt"))?;
-        if current.session() != session || current.turn() != turn {
-            return Err(ToolLoopCorruption::Inconsistent("attempt ownership").into());
-        }
         let status = match current.state() {
             CurrentToolAttemptState::Prepared => ToolAttemptAuthorizationStatus::Prepared(current),
             CurrentToolAttemptState::InFlight => ToolAttemptAuthorizationStatus::InFlight(
-                current.resume_in_flight().map_err(|_| {
+                batch.resume_in_flight_attempt(attempt).map_err(|_| {
                     ToolLoopRepositoryError::InvalidTransition(
                         "in-flight authorization could not restore its fence",
                     )
