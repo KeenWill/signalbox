@@ -1505,6 +1505,11 @@ fn probe_header(
     if probe.duplicate_member {
         return Err(FrameDecodeError::malformed(request_id));
     }
+    if contains_duplicate_object_member(content)
+        .map_err(|_| FrameDecodeError::malformed(request_id))?
+    {
+        return Err(FrameDecodeError::malformed(request_id));
+    }
     let Some(version) = probe.version else {
         return Err(FrameDecodeError::malformed(request_id));
     };
@@ -1529,6 +1534,55 @@ fn probe_header(
         return Err(FrameDecodeError::malformed(request_id));
     }
     Ok(ProbedHeader { request_id })
+}
+
+fn contains_duplicate_object_member(content: &[u8]) -> Result<bool, serde_json::Error> {
+    let mut containers: Vec<Option<HashSet<String>>> = Vec::new();
+    let mut index = 0;
+    while index < content.len() {
+        match content[index] {
+            b'{' => {
+                containers.push(Some(HashSet::new()));
+                index += 1;
+            }
+            b'[' => {
+                containers.push(None);
+                index += 1;
+            }
+            b'}' | b']' => {
+                containers.pop();
+                index += 1;
+            }
+            b'"' => {
+                let start = index;
+                index += 1;
+                while index < content.len() {
+                    match content[index] {
+                        b'\\' => index += 2,
+                        b'"' => {
+                            index += 1;
+                            break;
+                        }
+                        _ => index += 1,
+                    }
+                }
+                let mut following = index;
+                while following < content.len() && content[following].is_ascii_whitespace() {
+                    following += 1;
+                }
+                if content.get(following) == Some(&b':')
+                    && let Some(Some(members)) = containers.last_mut()
+                {
+                    let member = serde_json::from_slice::<String>(&content[start..index])?;
+                    if !members.insert(member) {
+                        return Ok(true);
+                    }
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    Ok(false)
 }
 
 fn deserialize_header_probe(content: &[u8]) -> Result<RawHeaderProbe<'_>, serde_json::Error> {
@@ -1688,19 +1742,35 @@ mod tests {
     }
 
     #[test]
-    fn inv033_unknown_missing_and_wrong_typed_fields_fail_explicitly() {
+    fn inv033_unknown_request_fields_fail_explicitly() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"list_sessions","extra":true}}"#,
         );
+    }
+
+    #[test]
+    fn inv033_missing_required_request_fields_fail_explicitly() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"read_transcript"}}"#,
         );
+    }
+
+    #[test]
+    fn inv033_wrong_typed_request_fields_fail_explicitly() {
         assert_client_malformed(
             r#"{"version":1,"request_id":1,"request":{"type":"list_sessions"}}"#,
         );
+    }
+
+    #[test]
+    fn inv033_unknown_tagged_request_variants_fail_explicitly() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"future_request"}}"#,
         );
+    }
+
+    #[test]
+    fn inv033_unknown_top_level_fields_fail_explicitly() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"list_sessions"},"extra":true}"#,
         );
@@ -1721,6 +1791,16 @@ mod tests {
         let error =
             decode_client_line(&line(&future)).expect_err("future version must be rejected first");
         assert_eq!(error.kind(), FrameDecodeErrorKind::UnsupportedVersion);
+        assert_eq!(error.request_id().value(), 9);
+    }
+
+    #[test]
+    fn inv033_nested_duplicates_are_malformed_before_unsupported_version() {
+        let error = decode_client_line(&line(
+            r#"{"version":2,"request_id":"9","request":{"future":1,"future":2}}"#,
+        ))
+        .expect_err("nested duplicate members are malformed for every version");
+        assert_eq!(error.kind(), FrameDecodeErrorKind::MalformedFrame);
         assert_eq!(error.request_id().value(), 9);
     }
 
@@ -2019,16 +2099,13 @@ mod tests {
         );
         let fragments = super::content_fragments(&text).collect::<Vec<_>>();
         assert_eq!(fragments.len(), 2);
-        assert!(
-            fragments
-                .iter()
-                .all(|fragment| fragment.as_str().len() <= MAX_CONTENT_FRAGMENT_BYTES)
-        );
         assert_eq!(
-            fragments
-                .iter()
-                .map(|fragment| fragment.as_str())
-                .collect::<String>(),
+            fragments[0].as_str(),
+            "a".repeat(MAX_CONTENT_FRAGMENT_BYTES - 1)
+        );
+        assert_eq!(fragments[1].as_str(), "\u{1f980}tail");
+        assert_eq!(
+            format!("{}{}", fragments[0].as_str(), fragments[1].as_str()),
             text
         );
     }
