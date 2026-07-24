@@ -2490,7 +2490,7 @@ async fn load_tool_result_correlations(
     let rows = sqlx::query_as::<_, (Uuid, Uuid, Uuid)>(
         "SELECT attempt.attempt_id,
                 request.request_id,
-                request.producing_call_id
+                request.producing_model_call_id
            FROM tool_attempt AS attempt
            JOIN tool_request AS request
              ON request.request_id = attempt.request_id
