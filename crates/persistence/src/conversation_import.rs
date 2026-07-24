@@ -441,8 +441,7 @@ async fn insert_raw_blobs(
     connection: &mut PgConnection,
     raws: &[EncodedRawRecord],
 ) -> Result<(), ImportedConversationRepositoryError> {
-    let mut blobs = raws.iter().collect::<Vec<_>>();
-    blobs.sort_unstable_by_key(|raw| raw.content_hash);
+    let mut blobs = raw_blobs_in_key_order(raws);
     if blobs
         .windows(2)
         .any(|pair| pair[0].content_hash == pair[1].content_hash && pair[0].bytes != pair[1].bytes)
@@ -477,6 +476,12 @@ async fn insert_raw_blobs(
     Ok(())
 }
 
+fn raw_blobs_in_key_order(raws: &[EncodedRawRecord]) -> Vec<&EncodedRawRecord> {
+    let mut blobs = raws.iter().collect::<Vec<_>>();
+    blobs.sort_unstable_by_key(|raw| raw.content_hash);
+    blobs
+}
+
 async fn insert_raw_occurrences(
     connection: &mut PgConnection,
     conversation: ImportedConversationId,
@@ -508,9 +513,7 @@ async fn insert_entries(
     conversation: ImportedConversationId,
     entries: &[EncodedEntry],
 ) -> Result<(), ImportedConversationRepositoryError> {
-    let mut entries = entries.iter().collect::<Vec<_>>();
-    entries.sort_unstable_by_key(|entry| entry.identity);
-    for entry in entries {
+    for entry in entries_in_key_order(entries) {
         sqlx::query(
             "INSERT INTO imported_transcript_entry
                 (imported_conversation_id, imported_entry_position,
@@ -531,6 +534,12 @@ async fn insert_entries(
         .await?;
     }
     Ok(())
+}
+
+fn entries_in_key_order(entries: &[EncodedEntry]) -> Vec<&EncodedEntry> {
+    let mut entries = entries.iter().collect::<Vec<_>>();
+    entries.sort_unstable_by_key(|entry| entry.identity);
+    entries
 }
 
 async fn load_identity_by_source_digest(
@@ -929,5 +938,78 @@ impl From<CodecFailure> for ImportedConversationEncodingCorruption {
             CodecFailure::InvalidJsonNumber => Self::InvalidJsonNumber,
             CodecFailure::ContainerDepthExceeded => Self::ContainerDepthExceeded,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::types::Uuid;
+
+    use super::{
+        EncodedEntry, EncodedRawRecord, ImportedRawRecordConversionDigest, ImportedRawRecordHash,
+        ImportedRawRecordPosition, ImportedRecordEntryPosition, ImportedTranscriptEntryId,
+        ImportedTranscriptPosition, entries_in_key_order, raw_blobs_in_key_order,
+    };
+
+    fn encoded_raw(key: u8) -> EncodedRawRecord {
+        EncodedRawRecord {
+            content_hash: ImportedRawRecordHash::from_bytes([key; 32]),
+            conversion_digest: ImportedRawRecordConversionDigest::from_bytes([0; 32]),
+            bytes: vec![key],
+            normalized: vec![key],
+            declared_entry_count: 1,
+        }
+    }
+
+    fn encoded_entry(key: u128) -> EncodedEntry {
+        EncodedEntry {
+            identity: ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(key)),
+            position: ImportedTranscriptPosition::first(),
+            raw_position: ImportedRawRecordPosition::first(),
+            within_position: ImportedRecordEntryPosition::first(),
+            source_speaker: "not_attested",
+            content: vec![0],
+            source: vec![0],
+        }
+    }
+
+    /// S28 / INV-038: shared raw-blob keys are emitted in one deterministic
+    /// acquisition order independent of physical transcript order.
+    #[test]
+    fn s28_inv038_raw_blob_acquisition_is_content_hash_ordered() {
+        let larger = encoded_raw(2);
+        let smaller = encoded_raw(1);
+        let raws = [larger, smaller];
+
+        let ordered = raw_blobs_in_key_order(&raws);
+
+        assert_eq!(
+            ordered[0].content_hash,
+            ImportedRawRecordHash::from_bytes([1; 32])
+        );
+        assert_eq!(
+            ordered[1].content_hash,
+            ImportedRawRecordHash::from_bytes([2; 32])
+        );
+    }
+
+    /// S28 / INV-001 / INV-038: globally unique entry keys are emitted in one
+    /// deterministic acquisition order independent of transcript order.
+    #[test]
+    fn s28_inv001_inv038_entry_acquisition_is_identity_ordered() {
+        let larger = encoded_entry(2);
+        let smaller = encoded_entry(1);
+        let entries = [larger, smaller];
+
+        let ordered = entries_in_key_order(&entries);
+
+        assert_eq!(
+            ordered[0].identity,
+            ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(1))
+        );
+        assert_eq!(
+            ordered[1].identity,
+            ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(2))
+        );
     }
 }
