@@ -23,10 +23,10 @@ use crate::{
     CurrentTurnAttempt, DeliveryRequest, EndedTurnAttempt, InitialSemanticTranscriptEntryPayload,
     ModelCallDisposition, NonEmptyIssuedOperationRefs, OriginConfiguration, ReconstitutedModelCall,
     ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
-    SemanticTranscriptEntry, SemanticTranscriptEntryId, SemanticTranscriptEntryReconstitutionInput,
-    SemanticTranscriptEntryRef, Session, SessionId, SessionInputPosition, TranscriptAncestry,
-    TurnAttemptId, TurnConfigurationProvenance, TurnDisposition, TurnId,
-    UnstoppedAttemptDisposition, derive_accepted_input_total_order,
+    SemanticTranscriptEntry, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
+    SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session, SessionId,
+    SessionInputPosition, TranscriptAncestry, TurnAttemptId, TurnConfigurationProvenance,
+    TurnDisposition, TurnId, UnstoppedAttemptDisposition, derive_accepted_input_total_order,
 };
 
 /// The lifecycle fact stored for one accepted-input scheduling record.
@@ -3829,7 +3829,23 @@ fn reconstitute_inner(
                     AcceptedInputSchedulingReconstitutionFailure::TerminalSnapshotMissing { turn },
                 )?;
                 if !referenced_snapshots.insert(*terminal_frontier)
-                    || terminal.ordered_entries().ne(source.ordered_entries())
+                    || !source.is_semantic_prefix_of(&terminal)
+                    || terminal.entry_count() == source.entry_count()
+                    || terminal
+                        .ordered_entries()
+                        .skip(source.entry_count())
+                        .any(|entry| {
+                            !matches!(
+                                semantic_entries
+                                    .get(&entry)
+                                    .map(SemanticTranscriptEntry::payload),
+                                Some(
+                                    SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
+                                        | SemanticTranscriptEntryPayload::ToolDenied { .. }
+                                        | SemanticTranscriptEntryPayload::ToolClosed { .. }
+                                )
+                            )
+                        })
                 {
                     return Err(
                         AcceptedInputSchedulingReconstitutionFailure::TerminalFrontierMismatch {
