@@ -640,6 +640,42 @@ mod tests {
         );
     }
 
+    #[track_caller]
+    fn assert_version_one_structured(value: ImportedStructuredValue, expected: &[u8]) {
+        assert_eq!(
+            encode_structured(&value).expect("fixture value must encode"),
+            expected
+        );
+        assert_eq!(
+            decode_structured(expected).expect("literal version-one bytes must decode"),
+            value
+        );
+    }
+
+    #[track_caller]
+    fn assert_version_one_content(content: ImportedTranscriptContent, expected: &[u8]) {
+        assert_eq!(
+            encode_content(&content).expect("fixture content must encode"),
+            expected
+        );
+        assert_eq!(
+            decode_content(expected).expect("literal version-one bytes must decode"),
+            content
+        );
+    }
+
+    #[track_caller]
+    fn assert_version_one_source_metadata(source: ImportedSourceMetadata, expected: &[u8]) {
+        assert_eq!(
+            encode_source_metadata(&source).expect("fixture source must encode"),
+            expected
+        );
+        assert_eq!(
+            decode_source_metadata(expected).expect("literal version-one source bytes must decode"),
+            source
+        );
+    }
+
     #[test]
     fn inv002_structured_encoding_preserves_complete_domain_algebra() {
         let value = ImportedStructuredValue::Object(
@@ -744,56 +780,191 @@ mod tests {
     }
 
     #[test]
-    fn inv002_version_one_structured_bytes_are_pinned() {
-        let value = ImportedStructuredValue::Null;
-        let version_one = [1, 0, 0];
-
-        assert_eq!(
-            encode_structured(&value).expect("fixture value must encode"),
-            version_one
+    fn inv002_version_one_structured_bytes_pin_every_tag_and_ordering() {
+        let value = ImportedStructuredValue::Object(
+            vec![
+                ImportedStructuredObjectMember::new(text("n"), ImportedStructuredValue::Null),
+                ImportedStructuredObjectMember::new(
+                    text("b"),
+                    ImportedStructuredValue::Boolean(true),
+                ),
+                ImportedStructuredObjectMember::new(
+                    text("d"),
+                    ImportedStructuredValue::Number(
+                        ImportedJsonNumber::try_new(String::from("-1"))
+                            .expect("fixture number is valid"),
+                    ),
+                ),
+                ImportedStructuredObjectMember::new(
+                    text("s"),
+                    ImportedStructuredValue::String(text("x")),
+                ),
+                ImportedStructuredObjectMember::new(
+                    text("a"),
+                    ImportedStructuredValue::Array(
+                        vec![ImportedStructuredValue::Boolean(false)].into_boxed_slice(),
+                    ),
+                ),
+            ]
+            .into_boxed_slice(),
         );
-        assert_eq!(
-            decode_structured(&version_one).expect("literal version-one bytes must decode"),
-            value
+        let version_one = [
+            1, 0, 5, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 1, 110, 0, 0, 0, 0, 0, 0, 0, 0,
+            1, 98, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 100, 2, 0, 0, 0, 0, 0, 0, 0, 2, 45, 49, 0, 0, 0,
+            0, 0, 0, 0, 1, 115, 3, 0, 0, 0, 0, 0, 0, 0, 1, 120, 0, 0, 0, 0, 0, 0, 0, 1, 97, 4, 0,
+            0, 0, 0, 0, 0, 0, 1, 1, 0,
+        ];
+
+        assert_version_one_structured(value, &version_one);
+    }
+
+    #[test]
+    fn inv002_version_one_content_bytes_pin_every_tag_and_field_order() {
+        assert_version_one_content(
+            ImportedTranscriptContent::SourceEvent {
+                source_type: attested_text("e"),
+            },
+            &[1, 1, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 101],
+        );
+        assert_version_one_content(
+            ImportedTranscriptContent::Text(ImportedSourceAttestation::NotAttested),
+            &[1, 1, 1, 0],
+        );
+        assert_version_one_content(
+            ImportedTranscriptContent::ToolCall {
+                source_call_id: attested_text("i"),
+                name: ImportedSourceAttestation::AttestedAbsent,
+                input: ImportedSourceAttestation::NotAttested,
+                caller: ImportedSourceAttestation::Attested(ImportedStructuredValue::Null),
+            },
+            &[1, 1, 2, 2, 0, 0, 0, 0, 0, 0, 0, 1, 105, 1, 0, 2, 0],
+        );
+        assert_version_one_content(
+            ImportedTranscriptContent::ToolResult {
+                source_call_id: attested_text("i"),
+                content: ImportedSourceAttestation::Attested(ImportedToolResultValue::Blocks(
+                    vec![
+                        ImportedToolResultBlock::Text(attested_text("t")),
+                        ImportedToolResultBlock::Image(ImportedSourceAttestation::Attested(
+                            ImportedMediaSource::new(
+                                attested_text("k"),
+                                ImportedSourceAttestation::AttestedAbsent,
+                                ImportedSourceAttestation::NotAttested,
+                            ),
+                        )),
+                        ImportedToolResultBlock::ToolReference {
+                            tool_name: attested_text("r"),
+                        },
+                    ]
+                    .into_boxed_slice(),
+                )),
+                is_error: ImportedSourceAttestation::Attested(true),
+            },
+            &[
+                1, 1, 3, 2, 0, 0, 0, 0, 0, 0, 0, 1, 105, 2, 1, 0, 0, 0, 0, 0, 0, 0, 3, 0, 2, 0, 0,
+                0, 0, 0, 0, 0, 1, 116, 1, 2, 2, 0, 0, 0, 0, 0, 0, 0, 1, 107, 1, 0, 2, 2, 0, 0, 0,
+                0, 0, 0, 0, 1, 114, 2, 1,
+            ],
+        );
+        assert_version_one_content(
+            ImportedTranscriptContent::ToolResult {
+                source_call_id: ImportedSourceAttestation::NotAttested,
+                content: ImportedSourceAttestation::Attested(ImportedToolResultValue::Text(text(
+                    "v",
+                ))),
+                is_error: ImportedSourceAttestation::AttestedAbsent,
+            },
+            &[1, 1, 3, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 1, 118, 1],
+        );
+        assert_version_one_content(
+            ImportedTranscriptContent::Thinking {
+                thinking: attested_text("t"),
+                signature: ImportedSourceAttestation::AttestedAbsent,
+            },
+            &[1, 1, 4, 2, 0, 0, 0, 0, 0, 0, 0, 1, 116, 1],
+        );
+        assert_version_one_content(
+            ImportedTranscriptContent::RedactedThinking {
+                data: ImportedSourceAttestation::NotAttested,
+            },
+            &[1, 1, 5, 0],
+        );
+        assert_version_one_content(
+            ImportedTranscriptContent::Document {
+                source: ImportedSourceAttestation::Attested(ImportedMediaSource::new(
+                    ImportedSourceAttestation::NotAttested,
+                    attested_text("m"),
+                    ImportedSourceAttestation::AttestedAbsent,
+                )),
+            },
+            &[1, 1, 6, 2, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 109, 1],
+        );
+        assert_version_one_content(
+            ImportedTranscriptContent::MessageContentAbsent(
+                ImportedMessageContentAbsence::MessageNotAttested,
+            ),
+            &[1, 1, 7, 0],
+        );
+        assert_version_one_content(
+            ImportedTranscriptContent::MessageContentAbsent(
+                ImportedMessageContentAbsence::MessageAttestedAbsent,
+            ),
+            &[1, 1, 7, 1],
+        );
+        assert_version_one_content(
+            ImportedTranscriptContent::MessageContentAbsent(
+                ImportedMessageContentAbsence::ContentNotAttested,
+            ),
+            &[1, 1, 7, 2],
+        );
+        assert_version_one_content(
+            ImportedTranscriptContent::MessageContentAbsent(
+                ImportedMessageContentAbsence::ContentAttestedAbsent,
+            ),
+            &[1, 1, 7, 3],
+        );
+        assert_version_one_content(
+            ImportedTranscriptContent::MessageContentAbsent(
+                ImportedMessageContentAbsence::EmptyBlockArray,
+            ),
+            &[1, 1, 7, 4],
+        );
+        assert_version_one_content(
+            ImportedTranscriptContent::SourceMessageBlock {
+                source_type: attested_text("f"),
+            },
+            &[1, 1, 8, 2, 0, 0, 0, 0, 0, 0, 0, 1, 102],
         );
     }
 
     #[test]
-    fn inv002_version_one_content_bytes_are_pinned() {
-        let content = ImportedTranscriptContent::Text(ImportedSourceAttestation::NotAttested);
-        let version_one = [1, 1, 1, 0];
-
-        assert_eq!(
-            encode_content(&content).expect("fixture content must encode"),
-            version_one
-        );
-        assert_eq!(
-            decode_content(&version_one).expect("literal version-one bytes must decode"),
-            content
-        );
-    }
-
-    #[test]
-    fn inv002_version_one_source_metadata_bytes_are_pinned() {
+    fn inv002_version_one_source_metadata_bytes_pin_field_and_scalar_order() {
         let source = ImportedSourceMetadata::new(
+            attested_text("r"),
+            ImportedSourceAttestation::AttestedAbsent,
             ImportedSourceAttestation::NotAttested,
-            ImportedSourceAttestation::NotAttested,
-            ImportedSourceAttestation::NotAttested,
-            ImportedSourceAttestation::NotAttested,
-            ImportedSourceAttestation::NotAttested,
-            ImportedSourceAttestation::NotAttested,
-            ImportedSourceAttestation::NotAttested,
+            attested_text("t"),
+            ImportedSourceAttestation::Attested(true),
+            ImportedSourceAttestation::Attested(false),
+            ImportedSourceAttestation::Attested(ImportedSpeaker::Assistant),
         );
-        let version_one = [1, 2, 0, 0, 0, 0, 0, 0, 0];
+        let version_one = [
+            1, 2, 2, 0, 0, 0, 0, 0, 0, 0, 1, 114, 1, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 116, 2, 1, 2, 0,
+            2, 1,
+        ];
+        assert_version_one_source_metadata(source, &version_one);
 
-        assert_eq!(
-            encode_source_metadata(&source).expect("fixture source must encode"),
-            version_one
-        );
-        assert_eq!(
-            decode_source_metadata(&version_one)
-                .expect("literal version-one source bytes must decode"),
-            source
+        assert_version_one_source_metadata(
+            ImportedSourceMetadata::new(
+                ImportedSourceAttestation::NotAttested,
+                ImportedSourceAttestation::NotAttested,
+                ImportedSourceAttestation::NotAttested,
+                ImportedSourceAttestation::NotAttested,
+                ImportedSourceAttestation::NotAttested,
+                ImportedSourceAttestation::NotAttested,
+                ImportedSourceAttestation::Attested(ImportedSpeaker::User),
+            ),
+            &[1, 2, 0, 0, 0, 0, 0, 0, 2, 0],
         );
     }
 
