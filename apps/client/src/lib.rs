@@ -513,17 +513,29 @@ fn terminal_snapshot_selection(event: &SessionEvent) -> Option<SnapshotSelection
         SessionEvent::TurnCompleted {
             turn_id,
             model_call_id,
+            completion_entry_id,
             ..
         } => Some(SnapshotSelection::Completed {
             turn_id: *turn_id,
             model_call_id: *model_call_id,
+            terminal_entry_id: *completion_entry_id,
         }),
-        SessionEvent::TurnFailed { turn_id, .. } => {
-            Some(SnapshotSelection::Failed { turn_id: *turn_id })
-        }
-        SessionEvent::TurnCancelled { turn_id, .. } => {
-            Some(SnapshotSelection::Cancelled { turn_id: *turn_id })
-        }
+        SessionEvent::TurnFailed {
+            turn_id,
+            failure_entry_id,
+            ..
+        } => Some(SnapshotSelection::Failed {
+            turn_id: *turn_id,
+            terminal_entry_id: *failure_entry_id,
+        }),
+        SessionEvent::TurnCancelled {
+            turn_id,
+            cancellation_entry_id,
+            ..
+        } => Some(SnapshotSelection::Cancelled {
+            turn_id: *turn_id,
+            terminal_entry_id: *cancellation_entry_id,
+        }),
         SessionEvent::TurnRefused { .. } | SessionEvent::TurnReconciliationRequired { .. } => None,
         SessionEvent::SessionCreated {}
         | SessionEvent::InputAccepted { .. }
@@ -828,8 +840,9 @@ mod tests {
                 terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(3)),
             }),
             Some(SnapshotSelection::Cancelled {
-                turn_id: selected
-            }) if selected == turn_id
+                turn_id: selected,
+                terminal_entry_id,
+            }) if selected == turn_id && terminal_entry_id == CanonicalUuid::from_uuid(Uuid::from_u128(2))
         ));
         assert!(
             terminal_snapshot_selection(&SessionEvent::TurnReconciliationRequired {

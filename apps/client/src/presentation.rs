@@ -19,12 +19,15 @@ pub(crate) enum SnapshotSelection {
     Completed {
         turn_id: CanonicalUuid,
         model_call_id: CanonicalUuid,
+        terminal_entry_id: CanonicalUuid,
     },
     Failed {
         turn_id: CanonicalUuid,
+        terminal_entry_id: CanonicalUuid,
     },
     Cancelled {
         turn_id: CanonicalUuid,
+        terminal_entry_id: CanonicalUuid,
     },
 }
 
@@ -100,6 +103,7 @@ impl<'a> Output<'a> {
         selection: SnapshotSelection,
         render_turns: bool,
     ) -> Result<(), ClientError> {
+        selection.require_terminal_marker(snapshot)?;
         let mut render_content = false;
         for record in snapshot.replay()? {
             match record? {
@@ -438,6 +442,22 @@ impl<'a> Output<'a> {
 }
 
 impl SnapshotSelection {
+    fn require_terminal_marker(self, snapshot: &mut TranscriptSnapshot) -> Result<(), ClientError> {
+        if matches!(self, Self::All) {
+            return Ok(());
+        }
+        for record in snapshot.replay()? {
+            if let SnapshotRecord::Entry(entry) = record?
+                && self.includes_terminal_marker(&entry)
+            {
+                return Ok(());
+            }
+        }
+        Err(ClientError::Protocol(
+            "terminal reread omitted the event's exact marker",
+        ))
+    }
+
     fn includes(self, entry: &SnapshotEntry) -> bool {
         match (self, &entry.kind) {
             (Self::All, _) => true,
@@ -445,6 +465,7 @@ impl SnapshotSelection {
                 Self::Completed {
                     turn_id,
                     model_call_id,
+                    ..
                 },
                 SnapshotEntryKind::Text(TranscriptTextEntry::Assistant {
                     turn_id: entry_turn,
@@ -452,25 +473,48 @@ impl SnapshotSelection {
                 }),
             ) => turn_id == *entry_turn && model_call_id == *entry_call,
             (
-                Self::Completed { turn_id, .. },
+                Self::Completed { .. } | Self::Failed { .. } | Self::Cancelled { .. },
+                SnapshotEntryKind::Marker(_),
+            ) => self.includes_terminal_marker(entry),
+            (
+                Self::Completed { .. } | Self::Failed { .. } | Self::Cancelled { .. },
+                SnapshotEntryKind::Text(_),
+            ) => false,
+        }
+    }
+
+    fn includes_terminal_marker(self, entry: &SnapshotEntry) -> bool {
+        match (self, &entry.kind) {
+            (
+                Self::Completed {
+                    turn_id,
+                    terminal_entry_id,
+                    ..
+                },
                 SnapshotEntryKind::Marker(TranscriptEntry::TurnCompleted {
                     turn_id: entry_turn,
                 }),
             )
             | (
-                Self::Failed { turn_id },
+                Self::Failed {
+                    turn_id,
+                    terminal_entry_id,
+                },
                 SnapshotEntryKind::Marker(TranscriptEntry::TurnFailed {
                     turn_id: entry_turn,
                 }),
             )
             | (
-                Self::Cancelled { turn_id },
+                Self::Cancelled {
+                    turn_id,
+                    terminal_entry_id,
+                },
                 SnapshotEntryKind::Marker(TranscriptEntry::TurnCancelled {
                     turn_id: entry_turn,
                 }),
-            ) => turn_id == *entry_turn,
+            ) => turn_id == *entry_turn && terminal_entry_id == entry.entry_id,
             (
-                Self::Completed { .. } | Self::Failed { .. } | Self::Cancelled { .. },
+                Self::All | Self::Completed { .. } | Self::Failed { .. } | Self::Cancelled { .. },
                 SnapshotEntryKind::Text(_)
                 | SnapshotEntryKind::Marker(
                     TranscriptEntry::TurnCompleted { .. }
@@ -537,7 +581,10 @@ mod tests {
     use uuid::Uuid;
 
     use super::{Output, SnapshotSelection, control_safe};
-    use crate::transcript::{SnapshotIdentitySet, TranscriptSnapshot};
+    use crate::{
+        error::ClientError,
+        transcript::{SnapshotIdentitySet, TranscriptSnapshot},
+    };
 
     #[test]
     fn terminal_safe_text_preserves_line_feed_and_escapes_c0_del_and_c1() {
@@ -652,6 +699,7 @@ mod tests {
                 SnapshotSelection::Completed {
                     turn_id: selected_turn,
                     model_call_id: selected_call,
+                    terminal_entry_id: wire_uuid(12),
                 },
             )
             .expect("selected terminal material must render");
@@ -661,6 +709,100 @@ mod tests {
         assert!(rendered.contains("turn_completed"));
         assert!(!rendered.contains("later reply"));
         assert!(!rendered.contains(&later_turn.to_string()));
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn terminal_reread_rejects_a_missing_exact_marker_before_output() {
+        let selected_turn = wire_uuid(1);
+        let selected_call = wire_uuid(2);
+        let mut snapshot = TranscriptSnapshot::from_messages(
+            12,
+            [
+                ServerMessage::TranscriptTextEntry {
+                    entry_index: CanonicalU64::new(0),
+                    source_session_id: wire_uuid(10),
+                    entry_id: wire_uuid(11),
+                    entry: TranscriptTextEntry::Assistant {
+                        turn_id: selected_turn,
+                        model_call_id: selected_call,
+                    },
+                },
+                ServerMessage::TranscriptContent {
+                    entry_index: CanonicalU64::new(0),
+                    fragment_index: CanonicalU64::new(0),
+                    final_fragment: true,
+                    content_fragment: ContentFragment::try_new("untrusted reply".to_owned())
+                        .expect("short content is valid"),
+                },
+                ServerMessage::TranscriptEntry {
+                    entry_index: CanonicalU64::new(1),
+                    source_session_id: wire_uuid(10),
+                    entry_id: wire_uuid(12),
+                    entry: TranscriptEntry::TurnCompleted {
+                        turn_id: selected_turn,
+                    },
+                },
+            ],
+        )
+        .expect("test snapshot must spool");
+        let mut displayed = SnapshotIdentitySet::new().expect("identity spool must open");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let error = Output::new(&mut stdout, &mut stderr, false)
+            .terminal_material(
+                &mut snapshot,
+                &mut displayed,
+                SnapshotSelection::Completed {
+                    turn_id: selected_turn,
+                    model_call_id: selected_call,
+                    terminal_entry_id: wire_uuid(13),
+                },
+            )
+            .expect_err("a side reread without the event marker must fail closed");
+
+        assert!(matches!(
+            error,
+            ClientError::Protocol("terminal reread omitted the event's exact marker")
+        ));
+        assert!(stdout.is_empty());
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn failed_terminal_reread_rejects_a_different_marker_identity() {
+        let selected_turn = wire_uuid(1);
+        let mut snapshot = TranscriptSnapshot::from_messages(
+            12,
+            [ServerMessage::TranscriptEntry {
+                entry_index: CanonicalU64::new(0),
+                source_session_id: wire_uuid(10),
+                entry_id: wire_uuid(11),
+                entry: TranscriptEntry::TurnFailed {
+                    turn_id: selected_turn,
+                },
+            }],
+        )
+        .expect("test snapshot must spool");
+        let mut displayed = SnapshotIdentitySet::new().expect("identity spool must open");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let error = Output::new(&mut stdout, &mut stderr, false)
+            .terminal_material(
+                &mut snapshot,
+                &mut displayed,
+                SnapshotSelection::Failed {
+                    turn_id: selected_turn,
+                    terminal_entry_id: wire_uuid(12),
+                },
+            )
+            .expect_err("a failed reread must require the event marker");
+
+        assert!(matches!(
+            error,
+            ClientError::Protocol("terminal reread omitted the event's exact marker")
+        ));
+        assert!(stdout.is_empty());
         assert!(stderr.is_empty());
     }
 
@@ -811,6 +953,7 @@ mod tests {
                 &mut displayed,
                 SnapshotSelection::Cancelled {
                     turn_id: selected_turn,
+                    terminal_entry_id: wire_uuid(11),
                 },
             )
             .expect("selected cancellation marker must render");

@@ -138,6 +138,7 @@ const fn error_code_name(code: ErrorCode) -> &'static str {
         ErrorCode::Rejected => "rejected",
         ErrorCode::ResyncRequired => "resync_required",
         ErrorCode::Unavailable => "unavailable",
+        ErrorCode::CommitAmbiguous => "commit_ambiguous",
         ErrorCode::Internal => "internal",
     }
 }

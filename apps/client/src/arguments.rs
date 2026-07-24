@@ -236,7 +236,7 @@ mod tests {
     }
 
     #[test]
-    fn global_options_are_accepted_before_or_after_the_subcommand() {
+    fn socket_option_is_accepted_after_the_subcommand() {
         assert!(matches!(
             parse(["list", "--socket", "/tmp/hub.sock"].map(Into::into)),
             Ok(ParseOutcome::Run(Arguments {
@@ -245,6 +245,10 @@ mod tests {
                 command: Command::List,
             })) if path == Path::new("/tmp/hub.sock")
         ));
+    }
+
+    #[test]
+    fn raw_output_option_is_accepted_after_the_subcommand() {
         assert!(matches!(
             parse(
                 [
