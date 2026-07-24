@@ -10,6 +10,26 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-24 — Reuse serde_json for current_time argument and result JSON
+
+**Context.** The hub-local `current_time` tool must inspect normalized object
+arguments and emit one compact JSON result without exporting a codec type
+through its catalog or executor ports. `serde_json` is already pinned and used
+at adjacent runtime boundaries.
+
+**Decision.** Add the existing focused `serde_json` dependency directly to
+`signalbox-hubd` for `current_time` argument-shape decoding and result
+serialization. Keep every serde value private to the tool adapter.
+
+**Rejected alternatives.** Hand-parse or hand-escape JSON: either duplicates
+security-sensitive codec behavior. Move JSON values into the application port:
+that would leak a framework representation across the boundary. Return an ad-hoc
+text format: it would weaken the declared tool result contract.
+
+**Affects.** `apps/hubd/Cargo.toml`, `apps/hubd/src/current_time.rs`, and the
+lockfile dependency edge; no new resolved package or public serde type is
+introduced.
+
 ## 2026-07-24 — Use jiff for IANA time-zone conversion
 
 **Context.** `current_time` must resolve IANA names, apply historical offsets,
@@ -861,7 +881,8 @@ normalized arguments and admitted text results; crash classification follows
 recorded effect class, and a known crash failure materializes proposal-ordered
 tool closure before `TurnFailed`; and the proposal-ordered all-resolved boundary
 atomically projects results, consumes steering, and prepares the next model
-call. `current_time` is the first effect-free auto tool with an injected clock.
+call. `current_time` is the first effect-free auto tool, with an injected clock
+and IANA conversion supplied by the focused `jiff` dependency.
 
 **Rejected alternatives.** Making each round a new turn would fragment one
 conversational outcome and misplace `TurnCompleted`. Process-local approvals or

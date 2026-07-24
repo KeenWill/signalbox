@@ -326,13 +326,46 @@ mod tests {
         ));
     }
 
-    /// S15 / INV-024: the result uses only the injected instant, defaults to
-    /// UTC, and emits the exact compact whole-second contract.
+    /// S15 / INV-024: changing only the injected instant changes the observed
+    /// whole-second time without consulting ambient wall-clock state.
     #[test]
-    fn s15_inv024_current_time_uses_injected_instant_and_defaults_to_utc() {
+    fn s15_inv024_current_time_uses_only_the_injected_instant() {
+        let first = current_time_evidence(
+            SystemTime::UNIX_EPOCH,
+            &arguments(r#"{"timezone":"UTC"}"#),
+            &clock_failure_detail(),
+        )
+        .expect("first injected instant returns evidence");
+        let second = current_time_evidence(
+            SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1),
+            &arguments(r#"{"timezone":"UTC"}"#),
+            &clock_failure_detail(),
+        )
+        .expect("second injected instant returns evidence");
+
+        assert_ne!(first, second);
+        assert!(matches!(
+            second,
+            ToolExecutorEvidence::CompletedText(ref result)
+                if result.contains("1970-01-01T00:00:01+00:00")
+        ));
+    }
+
+    /// S15: an omitted timezone resolves to the exact UTC default.
+    #[test]
+    fn s15_current_time_defaults_to_utc() {
+        let resolved = resolve_arguments(&arguments("{}"))
+            .expect("the empty object selects the default timezone");
+
+        assert_eq!(resolved.canonical_name, "UTC");
+    }
+
+    /// S15: successful output is the exact compact JSON contract.
+    #[test]
+    fn s15_current_time_result_encoding_is_exact_and_compact() {
         let evidence = current_time_evidence(
             SystemTime::UNIX_EPOCH,
-            &arguments("{}"),
+            &arguments(r#"{"timezone":"UTC"}"#),
             &clock_failure_detail(),
         )
         .expect("valid UTC execution returns evidence");
