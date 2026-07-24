@@ -271,11 +271,11 @@ impl ToolBatch {
             .iter()
             .find(|candidate| candidate.id() == request)
         else {
-            return Ok(PreparedToolBatchDecision::rejected(
-                self,
-                command.prepare_request_not_found(),
-                waiting_on,
-            ));
+            return Err(ToolBatchDecisionError {
+                batch: Box::new(self),
+                command,
+                failure: ToolBatchDecisionFailure::CommandCorrelationMismatch,
+            });
         };
         if self.approvals.contains_key(&request) {
             return Ok(PreparedToolBatchDecision::rejected(
@@ -1548,6 +1548,32 @@ mod tests {
             error.batch().phase(),
             ToolBatchPhase::Executing {
                 turn_attempt: turn_attempt_id(12)
+            }
+        );
+    }
+
+    /// S10 / INV-012: one active batch cannot turn an existing request from a
+    /// different aggregate into an owner-global not-found result.
+    #[test]
+    fn s10_inv012_out_of_batch_decision_is_a_correlation_error() {
+        let command = DecideToolRequest::new(
+            DurableCommandId::from_uuid(uuid::Uuid::from_u128(20)),
+            tool_request_id(99),
+            ToolApprovalDecision::Approve,
+        );
+        let error = awaiting_batch()
+            .prepare_owner_decision(command, None)
+            .expect_err("batch-local absence cannot establish global absence");
+
+        assert_eq!(
+            error.failure(),
+            ToolBatchDecisionFailure::CommandCorrelationMismatch
+        );
+        assert_eq!(error.command().request(), tool_request_id(99));
+        assert_eq!(
+            error.batch().phase(),
+            ToolBatchPhase::AwaitingApproval {
+                request: tool_request_id(10)
             }
         );
     }

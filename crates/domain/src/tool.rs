@@ -5,7 +5,7 @@
 //! execution lives in `tool_attempt`; persistence, registry lookup, and
 //! executor selection remain outside the domain boundary.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::IgnoredAny};
 
 use crate::{
     AssistantText, DurableCommandId, ModelCallId, SessionId, ToolAttemptId, ToolRequestId, TurnId,
@@ -131,25 +131,24 @@ impl NormalizedToolArguments {
             });
         }
 
-        let mut deserializer = serde_json::Deserializer::from_str(&value);
-        deserializer.disable_recursion_limit();
-        let decoded = {
-            let deserializer = serde_stacker::Deserializer::new(&mut deserializer);
-            serde_json::Value::deserialize(deserializer)
-        };
-        let Ok(decoded) = decoded else {
-            return Ok(Self {
-                kind: ToolArgumentsKind::Undecodable,
-                value,
-            });
-        };
-        if deserializer.end().is_err() {
-            drop_json_value_iteratively(decoded);
+        if !is_complete_json(&value) {
             return Ok(Self {
                 kind: ToolArgumentsKind::Undecodable,
                 value,
             });
         }
+        let mut deserializer = serde_json::Deserializer::from_str(&value);
+        deserializer.disable_recursion_limit();
+        let deserializer = serde_stacker::Deserializer::new(&mut deserializer);
+        let decoded = match serde_json::Value::deserialize(deserializer) {
+            Ok(decoded) => decoded,
+            Err(_) => {
+                return Err(ToolArgumentsError {
+                    value,
+                    failure: ToolArgumentsFailure::CanonicalizationFailed,
+                });
+            }
+        };
         let mut canonical = Vec::with_capacity(value.len());
         let mut serializer = serde_json::Serializer::new(&mut canonical);
         let serializer = serde_stacker::Serializer::new(&mut serializer);
@@ -211,6 +210,16 @@ impl NormalizedToolArguments {
     pub fn into_parts(self) -> (ToolArgumentsKind, String) {
         (self.kind, self.value)
     }
+}
+
+fn is_complete_json(value: &str) -> bool {
+    let mut deserializer = serde_json::Deserializer::from_str(value);
+    deserializer.disable_recursion_limit();
+    let decoded = {
+        let deserializer = serde_stacker::Deserializer::new(&mut deserializer);
+        IgnoredAny::deserialize(deserializer)
+    };
+    decoded.is_ok() && deserializer.end().is_ok()
 }
 
 fn drop_json_value_iteratively(value: serde_json::Value) {
@@ -688,7 +697,10 @@ pub struct ToolApprovalResolutionReconstitutionInput {
 enum StoredToolApprovalEvidence {
     OwnerCommand(PreparedDecideToolRequest),
     PolicyAuto(ToolRequestId),
-    SessionBlanket(ToolRequestId),
+    SessionBlanket {
+        request: ToolRequestId,
+        frozen_posture: DangerousToolAutoApproval,
+    },
 }
 
 impl ToolApprovalResolutionReconstitutionInput {
@@ -706,10 +718,17 @@ impl ToolApprovalResolutionReconstitutionInput {
         }
     }
 
-    /// Supplies one request-bound frozen-session-blanket approval.
-    pub const fn session_blanket(request: ToolRequestId) -> Self {
+    /// Supplies one request-bound session-blanket approval and the exact
+    /// dangerous posture frozen for its turn.
+    pub const fn session_blanket(
+        request: ToolRequestId,
+        frozen_posture: DangerousToolAutoApproval,
+    ) -> Self {
         Self {
-            evidence: StoredToolApprovalEvidence::SessionBlanket(request),
+            evidence: StoredToolApprovalEvidence::SessionBlanket {
+                request,
+                frozen_posture,
+            },
         }
     }
 
@@ -746,9 +765,14 @@ impl ToolApprovalResolutionReconstitutionInput {
             StoredToolApprovalEvidence::PolicyAuto(request) => {
                 Some(ToolApprovalResolution::policy_auto(*request))
             }
-            StoredToolApprovalEvidence::SessionBlanket(request) => {
-                Some(ToolApprovalResolution::session_blanket(*request))
-            }
+            StoredToolApprovalEvidence::SessionBlanket {
+                request,
+                frozen_posture: DangerousToolAutoApproval::ApproveAll,
+            } => Some(ToolApprovalResolution::session_blanket(*request)),
+            StoredToolApprovalEvidence::SessionBlanket {
+                frozen_posture: DangerousToolAutoApproval::Disabled,
+                ..
+            } => None,
         };
         match resolution {
             Some(resolution) => Ok(resolution),
@@ -1245,6 +1269,48 @@ mod tests {
 
         assert_eq!(normalized.kind(), ToolArgumentsKind::Json);
         assert_eq!(normalized.as_str(), value);
+    }
+
+    /// S10 / INV-005: malformed input is classified before any recursively
+    /// owned JSON tree exists, even after a deeply nested complete child.
+    #[test]
+    fn s10_inv005_deep_partial_json_is_dropped_stack_safely() {
+        let depth = 100_000;
+        let value = format!("[{}null{},!]", "[".repeat(depth), "]".repeat(depth));
+        let normalized = NormalizedToolArguments::try_from_provider_text(value.clone())
+            .expect("bounded malformed text remains exact evidence");
+
+        assert_eq!(normalized.kind(), ToolArgumentsKind::Undecodable);
+        assert_eq!(normalized.as_str(), value);
+    }
+
+    /// S10 / INV-020: a restored session-blanket approval requires the
+    /// approve-all posture frozen for that turn.
+    #[test]
+    fn s10_inv020_session_blanket_reconstitution_requires_frozen_authority() {
+        let request = tool_request_id(4);
+        let restored = ToolApprovalResolutionReconstitutionInput::session_blanket(
+            request,
+            DangerousToolAutoApproval::ApproveAll,
+        )
+        .reconstitute()
+        .expect("the exact frozen approve-all posture restores blanket authority");
+        let rejected = ToolApprovalResolutionReconstitutionInput::session_blanket(
+            request,
+            DangerousToolAutoApproval::Disabled,
+        )
+        .reconstitute()
+        .expect_err("a disabled frozen posture cannot restore blanket authority");
+
+        assert_eq!(restored.request(), request);
+        assert_eq!(restored.source(), ToolDecisionSource::SessionBlanket);
+        assert_eq!(
+            rejected.input(),
+            &ToolApprovalResolutionReconstitutionInput::session_blanket(
+                request,
+                DangerousToolAutoApproval::Disabled,
+            )
+        );
     }
 
     /// S10 / INV-020: only the owner-command preparation path can construct
