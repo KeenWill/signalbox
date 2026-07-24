@@ -1414,16 +1414,15 @@ mod tests {
             &mut self,
             _session: SessionId,
             _turn: TurnId,
-            _attempt: ToolAttemptId,
+            attempt: ToolAttemptId,
         ) -> Result<AuthorizedToolAttempt, Self::Error> {
             self.events.lock().expect("event lock").push("authorize");
             if self.ambiguous_authorization {
                 self.authorization_committed = true;
                 return Err(FakeError::CommitAmbiguous);
             }
-            self.prepared
-                .clone()
-                .authorize()
+            self.batch
+                .authorize_attempt(attempt)
                 .map_err(|_| FakeError::Ordinary)
         }
 
@@ -1431,14 +1430,13 @@ mod tests {
             &mut self,
             _session: SessionId,
             _turn: TurnId,
-            _attempt: ToolAttemptId,
+            attempt: ToolAttemptId,
         ) -> Result<ToolAttemptAuthorizationStatus, Self::Error> {
             self.events.lock().expect("event lock").push("reread");
             if self.authorization_committed {
                 Ok(ToolAttemptAuthorizationStatus::InFlight(
-                    self.prepared
-                        .clone()
-                        .authorize()
+                    self.batch
+                        .authorize_attempt(attempt)
                         .map_err(|_| FakeError::Ordinary)?,
                 ))
             } else {
@@ -1472,9 +1470,8 @@ mod tests {
                 return Err(FakeError::Ordinary);
             }
             let authorized = self
-                .prepared
-                .clone()
-                .authorize()
+                .batch
+                .authorize_attempt(self.prepared.attempt())
                 .map_err(|_| FakeError::Ordinary)?;
             let ended = authorized
                 .into_parts()
@@ -1812,11 +1809,11 @@ mod tests {
     fn assert_ambiguity_admission(effect_class: ToolEffectClass, expected: ToolAttemptObservation) {
         let (batch, _) = prepared_batch("{}", effect_class);
         let current = match batch.attempt(batch.requests()[0].id()) {
-            Some(signalbox_domain::ReconstitutedToolAttempt::Current(current)) => current.clone(),
+            Some(signalbox_domain::ReconstitutedToolAttempt::Current(current)) => current,
             _ => panic!("fixture has one prepared attempt"),
         };
-        let authorized = current
-            .authorize()
+        let authorized = batch
+            .authorize_attempt(current.attempt())
             .expect("prepared fixture authorizes exactly once");
         let expected_correlation = authorized.correlation();
         let invocation = ToolExecutionInvocation::try_new(
