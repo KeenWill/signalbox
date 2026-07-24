@@ -1016,22 +1016,6 @@ where
                 ),
             },
         };
-        if let Some(error) = preflight {
-            let ended = self
-                .transaction
-                .commit_preflight_error(
-                    prepared.session(),
-                    prepared.turn(),
-                    prepared.attempt(),
-                    error,
-                )
-                .await
-                .map_err(ToolExecutionServiceError::PreflightCommit)?;
-            return Ok(ToolExecutionServiceOutcome::PreflightFailed(Box::new(
-                ended,
-            )));
-        }
-        let definition = definition.ok_or(ToolExecutionServiceError::CatalogDrift)?;
         let dispatch_permit = self.gate.acquire(prepared.turn()).await;
         let Some(revalidated_batch) = self
             .transaction
@@ -1054,6 +1038,22 @@ where
             return Err(ToolExecutionServiceError::CatalogDrift);
         }
         let prepared = revalidated.clone();
+        if let Some(error) = preflight {
+            let ended = self
+                .transaction
+                .commit_preflight_error(
+                    prepared.session(),
+                    prepared.turn(),
+                    prepared.attempt(),
+                    error,
+                )
+                .await
+                .map_err(ToolExecutionServiceError::PreflightCommit)?;
+            return Ok(ToolExecutionServiceOutcome::PreflightFailed(Box::new(
+                ended,
+            )));
+        }
+        let definition = definition.ok_or(ToolExecutionServiceError::CatalogDrift)?;
         let authorized = match self
             .transaction
             .authorize_attempt(prepared.session(), prepared.turn(), prepared.attempt())
@@ -1884,6 +1884,51 @@ mod tests {
                 .execute(batch.session(), batch.turn())
                 .await
                 .expect("consumed attempt is cleanly absent"),
+            ToolExecutionServiceOutcome::NoWork
+        );
+        let (_, _, _, executor, _, _) = service.into_parts();
+        assert_eq!(executor.calls, 0);
+        assert!(events.lock().expect("event lock").is_empty());
+    }
+
+    /// INV-011 / INV-037: pure preflight evidence shares the interrupt gate
+    /// and cannot commit against a checkpoint an interrupt already consumed.
+    #[tokio::test]
+    async fn inv011_inv037_preflight_revalidates_interrupt_consumed_attempt() {
+        let (batch, _) = prepared_batch("{}", ToolEffectClass::EffectFree);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let prepared = match batch.attempt(batch.requests()[0].id()) {
+            Some(signalbox_domain::ReconstitutedToolAttempt::Current(current)) => current.clone(),
+            _ => panic!("fixture has one prepared attempt"),
+        };
+        let transaction = FakeTransaction {
+            batch: batch.clone(),
+            prepared,
+            events: Arc::clone(&events),
+            dispatch_consumed_after_first_load: true,
+            load_count: 0,
+            ambiguous_authorization: false,
+            authorization_committed: false,
+            commit_failures: 0,
+            committed: false,
+        };
+        let executor = RecordingExecutor {
+            events: Arc::clone(&events),
+            calls: 0,
+        };
+        let mut service = ToolExecutionService::new(
+            FixedIds::new(),
+            transaction,
+            NoToolCatalog,
+            executor,
+            InProcessToolDispatchGate::default(),
+        );
+
+        assert_eq!(
+            service
+                .execute(batch.session(), batch.turn())
+                .await
+                .expect("consumed preflight checkpoint is cleanly absent"),
             ToolExecutionServiceOutcome::NoWork
         );
         let (_, _, _, executor, _, _) = service.into_parts();

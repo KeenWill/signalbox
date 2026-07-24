@@ -1814,6 +1814,44 @@ async fn inv006_inv011_inv037_interrupt_closes_checkpointed_tool_execution()
     .fetch_one(&pool)
     .await?;
     assert_eq!(disposition, "cancelled");
+
+    let selection = signalbox_domain::DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5));
+    let provider = ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6));
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        ResolvedProviderTarget::naming(provider),
+    )])
+    .expect("one continuation target forms a catalog");
+    let stale_continuation = PostgresToolLoopRepository::with_model_calls(
+        pool.clone(),
+        targets,
+        model_credential_reference(),
+    )
+    .prepare_continuation(
+        fixture.session,
+        fixture.turn,
+        fixture.call,
+        signalbox_application::ToolContinuationIdentities::new(
+            vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                seed + 29,
+            ))],
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 30)),
+            ModelCallId::from_uuid(Uuid::from_u128(seed + 31)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 32)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 33)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 34)),
+        ),
+        |_| panic!("an interrupted batch cannot consume steering"),
+    )
+    .await?;
+    assert_eq!(
+        stale_continuation,
+        signalbox_application::PrepareToolContinuationOutcome::NoWork,
+        "an interrupt that consumed the batch makes a stale continuation hint no work"
+    );
+
     let mut cancellation_dispatched = false;
     drain_outbox(&pool, |event| {
         if matches!(
