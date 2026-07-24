@@ -1281,6 +1281,20 @@ async fn s10_inv005_tool_argument_representation_is_database_checked() -> Result
     .await?;
     assert_eq!(stored, (String::from("json"), String::from(canonical)));
 
+    let depth = 512;
+    let deep = format!("{}null{}", "[".repeat(depth), "]".repeat(depth));
+    let (_, _, _, deep_request) =
+        checkpoint_confirmed_tool_round(&pool, seed + 0x1000, "current_time", &deep).await?;
+    let stored_deep: (String, String) = sqlx::query_as(
+        "SELECT arguments_kind, arguments_text
+           FROM tool_request
+          WHERE request_id = $1",
+    )
+    .bind(deep_request.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(stored_deep, (String::from("json"), deep));
+
     for (offset, kind, text) in [
         (0_u128, "json", "{broken"),
         (1, "json", r#"{"b":2,"a":1}"#),
@@ -1309,6 +1323,60 @@ async fn s10_inv005_tool_argument_representation_is_database_checked() -> Result
             Some("tool_request_arguments_representation")
         );
     }
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S10 / INV-012: a replayed not-earliest receipt can name only an earlier
+/// request from the same producing round.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s10_inv012_decision_receipt_rejects_cross_round_earliest_request()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x73c0;
+    let (_, _, _, requested) =
+        checkpoint_confirmed_tool_round(&pool, seed, "current_time", "{}").await?;
+    let (_, _, _, foreign_earlier) =
+        checkpoint_confirmed_tool_round(&pool, seed + 0x100, "current_time", "{}").await?;
+    let mut transaction = pool.begin().await?;
+    let command = Uuid::from_u128(seed + 0x200);
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'decide_tool_request', 1, transaction_timestamp())",
+    )
+    .bind(command)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO decide_tool_request_command
+            (command_id, command_kind, storage_version, request_id,
+             decision_kind, denial_reason, result_kind, rejection_kind,
+             result_earliest_undecided_request_id)
+         VALUES ($1, 'decide_tool_request', 1, $2,
+                 'approve', NULL, 'rejected',
+                 'not_earliest_undecided', $3)",
+    )
+    .bind(command)
+    .bind(requested.into_uuid())
+    .bind(foreign_earlier.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    let error =
+        sqlx::query("SET CONSTRAINTS decide_tool_request_command_requires_effect IMMEDIATE")
+            .execute(&mut *transaction)
+            .await
+            .expect_err("a recorded blocker from another round is corruption");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("decide_tool_request_command_earliest_correlation")
+    );
+    transaction.rollback().await?;
 
     pool.close().await;
     drop(container);
@@ -1746,6 +1814,44 @@ async fn inv006_inv011_inv037_interrupt_closes_checkpointed_tool_execution()
     .fetch_one(&pool)
     .await?;
     assert_eq!(disposition, "cancelled");
+
+    let selection = signalbox_domain::DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5));
+    let provider = ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6));
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        ResolvedProviderTarget::naming(provider),
+    )])
+    .expect("one continuation target forms a catalog");
+    let stale_continuation = PostgresToolLoopRepository::with_model_calls(
+        pool.clone(),
+        targets,
+        model_credential_reference(),
+    )
+    .prepare_continuation(
+        fixture.session,
+        fixture.turn,
+        fixture.call,
+        signalbox_application::ToolContinuationIdentities::new(
+            vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                seed + 29,
+            ))],
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 30)),
+            ModelCallId::from_uuid(Uuid::from_u128(seed + 31)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 32)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 33)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 34)),
+        ),
+        |_| panic!("an interrupted batch cannot consume steering"),
+    )
+    .await?;
+    assert_eq!(
+        stale_continuation,
+        signalbox_application::PrepareToolContinuationOutcome::NoWork,
+        "an interrupt that consumed the batch makes a stale continuation hint no work"
+    );
+
     let mut cancellation_dispatched = false;
     drain_outbox(&pool, |event| {
         if matches!(
@@ -1769,7 +1875,7 @@ async fn inv006_inv011_inv037_interrupt_closes_checkpointed_tool_execution()
 
 /// INV-006 / INV-025 / INV-029 / INV-037: an interrupt against an external
 /// tool recovery wait releases the slot as reconciliation-required while
-/// retaining the exact ambiguous tool attempt and equal-content frontier.
+/// retaining the exact ambiguous tool attempt and closing its logical request.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv006_inv025_inv029_inv037_interrupt_preserves_tool_recovery_ambiguity()
@@ -1885,6 +1991,11 @@ async fn inv006_inv025_inv029_inv037_interrupt_preserves_tool_recovery_ambiguity
     assert!(snapshot.entries().iter().any(|entry| matches!(
         entry,
         ProcessTranscriptEntry::AssistantToolUse { request: stored, .. }
+            if *stored == request
+    )));
+    assert!(snapshot.entries().iter().any(|entry| matches!(
+        entry,
+        ProcessTranscriptEntry::ToolClosed { request: stored, .. }
             if *stored == request
     )));
     let mut dispatched = false;

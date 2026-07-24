@@ -139,13 +139,13 @@ pub enum ToolExecutionErrorKind {
 pub struct ToolExecutionErrorDetail(String);
 
 impl ToolExecutionErrorDetail {
-    /// Checks a nonempty, trimmed, control-free detail.
+    /// Checks a nonempty, POSIX-trimmed, control-free detail.
     pub fn try_new(value: String) -> Result<Self, ToolExecutionErrorDetailError> {
         let failure = if value.is_empty() {
             Some(ToolExecutionErrorDetailFailure::Empty)
         } else if value.len() > MAX_TOOL_ERROR_DETAIL_BYTES {
             Some(ToolExecutionErrorDetailFailure::TooLong { bytes: value.len() })
-        } else if value.trim() != value {
+        } else if has_surrounding_posix_whitespace(&value) {
             Some(ToolExecutionErrorDetailFailure::SurroundingWhitespace)
         } else {
             value
@@ -180,7 +180,7 @@ pub enum ToolExecutionErrorDetailFailure {
         /// The observed UTF-8 byte count.
         bytes: usize,
     },
-    /// Leading or trailing Unicode whitespace was present.
+    /// Leading or trailing POSIX whitespace was present.
     SurroundingWhitespace,
     /// At least one Unicode control scalar was present.
     ContainsControl,
@@ -191,6 +191,17 @@ pub enum ToolExecutionErrorDetailFailure {
 pub struct ToolExecutionErrorDetailError {
     value: String,
     failure: ToolExecutionErrorDetailFailure,
+}
+
+fn has_surrounding_posix_whitespace(value: &str) -> bool {
+    value
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r'))
+        || value
+            .as_bytes()
+            .last()
+            .is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r'))
 }
 
 impl ToolExecutionErrorDetailError {
@@ -858,6 +869,24 @@ mod tests {
 
     fn prepared(effect_class: ToolEffectClass) -> CurrentToolAttempt {
         approved_request().prepare_attempt(tool_attempt_id(6), turn_attempt_id(7), effect_class)
+    }
+
+    /// S12: persisted error detail rejects POSIX edge whitespace while
+    /// preserving admitted nonbreaking-space evidence exactly.
+    #[test]
+    fn s12_error_detail_rejects_posix_edges_and_preserves_nonbreaking_space() {
+        for value in [" failed", "failed\n", "\tfailed", "failed\u{000b}"] {
+            assert_eq!(
+                ToolExecutionErrorDetail::try_new(String::from(value))
+                    .expect_err("POSIX edge whitespace is rejected")
+                    .failure(),
+                ToolExecutionErrorDetailFailure::SurroundingWhitespace
+            );
+        }
+
+        let admitted = ToolExecutionErrorDetail::try_new(String::from("\u{00a0}failed\u{00a0}"))
+            .expect("nonbreaking space is not POSIX whitespace");
+        assert_eq!(admitted.as_str(), "\u{00a0}failed\u{00a0}");
     }
 
     /// S12 / INV-004 / INV-011 / INV-021: result application requires the

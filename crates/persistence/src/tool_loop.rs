@@ -733,9 +733,11 @@ impl PostgresToolLoopRepository {
         let mut transaction = self.pool.begin().await?;
         let result = async {
             lock_tool_session(&mut transaction, session).await?;
-            let batch = load_active_batch_from_connection(&mut transaction, session, turn)
-                .await?
-                .ok_or(ToolLoopCorruption::Missing("active tool batch"))?;
+            let Some(batch) =
+                load_active_batch_from_connection(&mut transaction, session, turn).await?
+            else {
+                return Ok(PrepareToolContinuationOutcome::NoWork);
+            };
             let turn_attempt = match batch.phase() {
                 signalbox_domain::ToolBatchPhase::Executing { turn_attempt }
                     if batch.producing_call() == producing_call =>

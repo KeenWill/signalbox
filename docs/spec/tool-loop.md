@@ -93,10 +93,10 @@ replacement never changes queued, active, or completed work (INV-008).
 An owner decision is the canonical `DecideToolRequest` command: owner-global
 `DurableCommandId`, exact `ToolRequestId`, and either `Approve` or
 `Deny { reason }`. A denial reason is absent or 1–1024 bytes of non-control
-Unicode with no leading/trailing whitespace; it is therefore safe to render
-without copying unbounded or terminal-control content. Equality excludes only
-the command identifier. Registry lookup precedes current-state validation; equal
-replay returns the recorded applied-or-rejected result, cross-kind or
+Unicode with no leading/trailing POSIX whitespace; it is therefore safe to
+render without copying unbounded or terminal-control content. Equality excludes
+only the command identifier. Registry lookup precedes current-state validation;
+equal replay returns the recorded applied-or-rejected result, cross-kind or
 different-payload reuse conflicts, and a pre-commit failure claims no identity
 (INV-012).
 
@@ -141,8 +141,12 @@ unattended execution.
 The registry is advisory input to policy and execution, never request-content
 authority. A model may propose an unknown name; fail-closed policy requires
 confirmation, and an approved unknown request produces a typed `UnknownTool`
-error without invoking an executor. A declaration added or removed after the
-request was recorded does not rewrite its name or arguments.
+error without invoking an executor. Because the attempt schema requires a closed
+effect class, preparation records `EffectFree` as a non-dispatching sentinel
+when no declaration exists. The preflight transaction closes that attempt before
+authorization and before the executor boundary; the sentinel is not a claim that
+an unknown tool is safe to run. A declaration added or removed after the request
+was recorded does not rewrite its name or arguments.
 
 Effect class controls crash classification, not permission identity. A
 crash-lost prepared attempt, or an in-flight attempt declared `EffectFree`,
@@ -219,10 +223,15 @@ the turn. Physical ambiguity remains a turn-level recovery wait and does not
 become an ordinary error result.
 
 An interrupt against a tool recovery wait does not reinterpret or erase the
-ambiguous attempt. It terminalizes the turn as `ReconciliationRequired` with an
-equal-content frontier, the exact tool attempt as its ambiguity set, and the
-applied-interrupt proof; the typed lifecycle and outbox boundaries retain the
-tool-attempt reference instead of fabricating a model call (INV-006, INV-025,
+ambiguous attempt. It materializes exactly one reference-only result per request
+in proposal order: completed or known-failed attempts use `ToolExecutionResult`,
+denials use `ToolDenied`, and the ambiguous request plus any request without an
+ordinary result use `ToolClosed`. The turn then terminalizes as
+`ReconciliationRequired` on that prefix-extending frontier, with the exact tool
+attempt as its ambiguity set and the applied-interrupt proof. Logical closure
+therefore leaves a provider-renderable conversation while the typed lifecycle
+and outbox boundaries retain the physical tool-attempt uncertainty instead of
+fabricating a model call or an execution result (INV-005, INV-006, INV-025,
 INV-029, INV-037).
 
 The schema independently enforces no live tool attempt while the lifecycle is
@@ -280,6 +289,16 @@ preserving the existing staged-call discipline. If the call completes with
 another tool batch the loop repeats in the same turn; if it proposes no tools,
 its assistant text and `TurnCompleted` marker terminalize the turn.
 
+At most 32 provider rounds in one turn may complete with tool requests. The
+application counts distinct producing calls for the current turn, so every
+multi-request batch counts once and inherited tool history from earlier turns
+does not count. After the thirty-second batch resolves, the ordinary
+continuation transaction still projects all results and creates its fresh
+`Prepared` call; model execution closes that checkpoint as `KnownFailed` before
+provider capability preparation or send. The normal known-failure boundary then
+fails the turn honestly. This durable-content bound avoids wall-clock policy and
+ensures a model-controlled chain cannot retain the progressing slot forever.
+
 If an applied stop terminalizes before continuation, the same materialization
 algorithm appends results for executed and denied requests, closes every request
 that did not complete ordinary execution as `ToolClosed` in proposal order, then
@@ -312,7 +331,12 @@ depend on process-local wake memory.
 Running phases use the staged tool-attempt crash classification above; parked
 external-effect ambiguity is never automatically retried. Version one permits
 only proof-bearing interruption to terminalize that wait as reconciliation
-required; resolving evidence and accepted-risk continuation remain open.
+required; resolving evidence and accepted-risk continuation remain open. When
+restart observes a running batch whose requests are already durably resolved and
+which has no current turn attempt or continuation call, it reports that batch as
+resumable work. The next scheduler pass performs the ordinary atomic result
+projection and continuation preparation instead of failing the turn or waiting
+for process-local wake state.
 
 ## Provider bridge and `current_time`
 
@@ -349,6 +373,9 @@ The first compiled tool is `current_time`:
   read wall clock; and
 - success is text containing a compact JSON object with `datetime` as an RFC
   3339 timestamp to whole seconds and `timezone` as the selected canonical name.
+  A recognized zone at an instant whose historical offset contains nonzero
+  seconds closes as a typed execution failure because RFC 3339 cannot represent
+  that offset without changing the instant.
 
 An unknown time zone or wrong argument shape produces `InvalidArguments` error
 evidence. An injected instant outside the supported civil-time range produces
