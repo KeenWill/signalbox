@@ -12,12 +12,15 @@ use signalbox_application::{
     ModelCallExecutionError, ModelCallExecutionOutcome, ModelCallExecutionService,
     ModelCallProvider, OperatorFailureClass, ScriptedModelCallError, ScriptedModelCallProvider,
     ScriptedModelCallStep, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
-    StartEligibleTurnService, StartEligibleTurnTransaction, UuidV7ModelCallExecutionIdGenerator,
+    StartEligibleTurnService, StartEligibleTurnTransaction, ToolCatalog, ToolExecutionService,
+    ToolExecutionServiceError, ToolExecutionServiceOutcome, ToolExecutor,
+    UuidV7ModelCallExecutionIdGenerator, UuidV7ToolLoopIdGenerator,
 };
 use signalbox_domain::{ActivatedAcceptedInputTurn, AssistantText, SessionId};
 use signalbox_persistence::model_execution::{
     ModelCallRepositoryError, PostgresModelCallRepository,
 };
+use signalbox_persistence::tool_loop::{PostgresToolLoopRepository, ToolLoopRepositoryError};
 use tokio::sync::watch;
 
 mod configuration;
@@ -414,6 +417,58 @@ pub type PostgresProviderModelExecutionError<ProviderError> = RetainedModelExecu
     >,
 >;
 
+/// Classified failure while alternating provider calls and serialized tool
+/// stages within one turn.
+#[derive(Debug)]
+pub enum PostgresProviderToolLoopExecutionError<ProviderError, ExecutorError> {
+    /// Model-call execution or same-incarnation reconciliation failed.
+    Model(Box<PostgresProviderModelExecutionError<ProviderError>>),
+    /// Tool preparation, execution, evidence commit, or continuation failed.
+    Tool(ToolExecutionServiceError<ToolLoopRepositoryError, ExecutorError>),
+}
+
+impl<ProviderError, ExecutorError> fmt::Display
+    for PostgresProviderToolLoopExecutionError<ProviderError, ExecutorError>
+where
+    ProviderError: fmt::Display,
+    ExecutorError: fmt::Display,
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Model(error) => error.fmt(formatter),
+            Self::Tool(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl<ProviderError, ExecutorError> Error
+    for PostgresProviderToolLoopExecutionError<ProviderError, ExecutorError>
+where
+    ProviderError: Error + 'static,
+    ExecutorError: Error + 'static,
+{
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Model(error) => Some(error),
+            Self::Tool(error) => Some(error),
+        }
+    }
+}
+
+impl<ProviderError, ExecutorError> ClassifyOperatorFailure
+    for PostgresProviderToolLoopExecutionError<ProviderError, ExecutorError>
+where
+    ProviderError: ClassifyOperatorFailure,
+    ExecutorError: ClassifyOperatorFailure,
+{
+    fn operator_failure_class(&self) -> OperatorFailureClass {
+        match self {
+            Self::Model(error) => error.operator_failure_class(),
+            Self::Tool(error) => error.operator_failure_class(),
+        }
+    }
+}
+
 /// Production execution factory over PostgreSQL orchestration and one cloned
 /// provider-port adapter per activation.
 #[derive(Clone, Debug)]
@@ -434,6 +489,24 @@ impl<Provider> PostgresProviderModelExecution<Provider> {
             repository,
             gate,
             provider,
+        }
+    }
+
+    /// Adds serialized tool execution and continuation to the provider
+    /// composition without changing the provider-facing application boundary.
+    pub fn with_tool_loop<Catalog, Executor>(
+        self,
+        tool_repository: PostgresToolLoopRepository,
+        catalog: Catalog,
+        executor: Executor,
+    ) -> PostgresProviderToolLoopExecution<Provider, Catalog, Executor> {
+        PostgresProviderToolLoopExecution {
+            model_repository: self.repository,
+            tool_repository,
+            gate: self.gate,
+            provider: self.provider,
+            catalog,
+            executor,
         }
     }
 }
@@ -485,6 +558,114 @@ where
                     | ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(_)
                     | ModelCallExecutionOutcome::ObservationCommitted(_)
                     | ModelCallExecutionOutcome::ObservationAlreadyCommitted(_) => return Ok(()),
+                }
+            }
+        }
+    }
+}
+
+/// Production execution factory alternating provider calls with serialized
+/// PostgreSQL-backed tool stages until the turn parks or terminalizes.
+#[derive(Clone, Debug)]
+pub struct PostgresProviderToolLoopExecution<Provider, Catalog, Executor> {
+    model_repository: PostgresModelCallRepository,
+    tool_repository: PostgresToolLoopRepository,
+    gate: InProcessAttemptDispatchGate,
+    provider: Provider,
+    catalog: Catalog,
+    executor: Executor,
+}
+
+impl<Provider, Catalog, Executor> ActivatedTurnExecution
+    for PostgresProviderToolLoopExecution<Provider, Catalog, Executor>
+where
+    Provider: ModelCallProvider + Clone + Send + 'static,
+    Provider::Capability: Send,
+    Provider::Error: Send + 'static,
+    Catalog: ToolCatalog + Clone + Send + 'static,
+    Executor: ToolExecutor + Clone + Send + 'static,
+    Executor::Error: Send + 'static,
+{
+    type Error = PostgresProviderToolLoopExecutionError<Provider::Error, Executor::Error>;
+
+    fn execute(
+        &self,
+        activated: Box<ActivatedAcceptedInputTurn>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let model_repository = self.model_repository.clone();
+        let tool_repository = self.tool_repository.clone();
+        let gate = self.gate.clone();
+        let provider = self.provider.clone();
+        let catalog = self.catalog.clone();
+        let executor = self.executor.clone();
+        async move {
+            let session = activated.session();
+            let turn = activated.turn();
+            drop(activated);
+            let mut model = ModelCallExecutionService::new(
+                UuidV7ModelCallExecutionIdGenerator,
+                model_repository.clone(),
+                model_repository.clone(),
+                model_repository.clone(),
+                model_repository,
+                provider,
+                gate,
+            )
+            .with_tool_catalog(catalog.clone());
+            let mut tools = ToolExecutionService::new(
+                UuidV7ToolLoopIdGenerator,
+                tool_repository,
+                catalog,
+                executor,
+            );
+
+            loop {
+                let model_outcome = match model.execute(session).await {
+                    Ok(outcome) => outcome,
+                    Err(error) if model.retained_state().is_some() => {
+                        reconcile_retained_once(error, model.execute(session))
+                            .await
+                            .map_err(|error| {
+                                PostgresProviderToolLoopExecutionError::Model(Box::new(error))
+                            })?
+                    }
+                    Err(error) => {
+                        return Err(PostgresProviderToolLoopExecutionError::Model(Box::new(
+                            RetainedModelExecutionError::Primary(error),
+                        )));
+                    }
+                };
+                match model_outcome {
+                    ModelCallExecutionOutcome::Checkpointed(_) => continue,
+                    ModelCallExecutionOutcome::TargetUnavailable(_)
+                    | ModelCallExecutionOutcome::PendingSteering { .. }
+                    | ModelCallExecutionOutcome::CapabilityKnownFailure(_)
+                    | ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(_) => {
+                        return Ok(());
+                    }
+                    ModelCallExecutionOutcome::NoWork
+                    | ModelCallExecutionOutcome::ObservationCommitted(_)
+                    | ModelCallExecutionOutcome::ObservationAlreadyCommitted(_) => {}
+                }
+
+                loop {
+                    let tool_outcome = tools
+                        .execute(session, turn)
+                        .await
+                        .map_err(PostgresProviderToolLoopExecutionError::Tool)?;
+                    match tool_outcome {
+                        ToolExecutionServiceOutcome::AttemptCheckpointed(_)
+                        | ToolExecutionServiceOutcome::PreflightFailed(_)
+                        | ToolExecutionServiceOutcome::ObservationCommitted(_)
+                        | ToolExecutionServiceOutcome::CrashClassified(_) => continue,
+                        ToolExecutionServiceOutcome::ContinuationCheckpointed(_) => break,
+                        ToolExecutionServiceOutcome::NoWork
+                        | ToolExecutionServiceOutcome::AwaitingApproval(_)
+                        | ToolExecutionServiceOutcome::AwaitingRecovery(_)
+                        | ToolExecutionServiceOutcome::ContinuationTargetUnavailable(_) => {
+                            return Ok(());
+                        }
+                    }
                 }
             }
         }
