@@ -17,29 +17,38 @@ use std::{
 };
 
 use signalbox_application::{
-    ClassifyOperatorFailure, EligibilityPass, EligibilityWorkSource, InProcessAttemptDispatchGate,
-    InProcessEligibilityWorkSource, ModelCallCredentialReference, OperatorFailureClass,
-    SchedulerLoop, StartEligibleTurnService, StartupScanService,
-    UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
+    ClassifyOperatorFailure, InProcessAttemptDispatchGate, InProcessEligibilityWorkSource,
+    ModelCallCredentialReference, OperatorFailureClass, SchedulerLoop, SchedulerLoopExit,
+    StartEligibleTurnService, StartupScanService, UuidV7StartEligibleTurnIdGenerator,
+    UuidV7StartupScanIdGenerator,
 };
+#[cfg(test)]
+use signalbox_application::{EligibilityPass, EligibilityWorkSource};
 use signalbox_domain::{SessionId, TurnId};
 use signalbox_hubd::{
-    ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, FatalExecutionSupervisor,
-    FileCredentialAccess, HubModelConfiguration, PostgresProviderModelExecution,
+    ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, FatalExecutionSupervisor, FencedHubDatabase,
+    FencedHubDatabaseError, FileCredentialAccess, HubModelConfiguration, LocalProcessListener,
+    PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError,
 };
 use signalbox_model_provider_runtime::RuntimeModelCallProvider;
 use signalbox_model_runtime::CredentialReference;
 use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
 use signalbox_persistence::{
-    connect_production, migrate, model_execution::PostgresModelCallRepository,
-    scheduler::PostgresEligibilitySweep, start_eligible_turn::StartEligibleTurnRepository,
-    startup::PostgresStartupScanRepository,
+    migrate, model_execution::PostgresModelCallRepository, scheduler::PostgresEligibilitySweep,
+    start_eligible_turn::StartEligibleTurnRepository, startup::PostgresStartupScanRepository,
 };
-use tokio::{pin, select, sync::oneshot, time::timeout};
+use tokio::{
+    pin, select,
+    sync::{oneshot, watch},
+    task::{JoinError, JoinSet},
+    time::{sleep, timeout},
+};
 
 const GRACEFUL_SHUTDOWN_WINDOW: Duration = Duration::from_secs(30);
 const MODEL_CONFIGURATION_FILE_ENVIRONMENT: &str = "SIGNALBOX_CONFIG_FILE";
 const ANTHROPIC_API_KEY_FILE_ENVIRONMENT: &str = "ANTHROPIC_API_KEY_FILE";
+const PROCESS_SOCKET_PATH_ENVIRONMENT: &str = "SIGNALBOX_SOCKET_PATH";
+const GUARD_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RuntimePhase {
@@ -47,7 +56,9 @@ enum RuntimePhase {
     DatabaseConnection,
     Migration,
     StartupScan,
+    SocketBinding,
     Scheduling,
+    Runtime,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -113,6 +124,7 @@ struct HubConfiguration {
     database_url: String,
     model_configuration_file: PathBuf,
     anthropic_api_key_file: PathBuf,
+    process_socket_path: PathBuf,
 }
 
 impl HubConfiguration {
@@ -121,6 +133,7 @@ impl HubConfiguration {
             env::var_os("DATABASE_URL"),
             env::var_os(MODEL_CONFIGURATION_FILE_ENVIRONMENT),
             env::var_os(ANTHROPIC_API_KEY_FILE_ENVIRONMENT),
+            env::var_os(PROCESS_SOCKET_PATH_ENVIRONMENT),
         )
     }
 
@@ -128,6 +141,7 @@ impl HubConfiguration {
         database_url: Option<OsString>,
         model_configuration_file: Option<OsString>,
         anthropic_api_key_file: Option<OsString>,
+        process_socket_path: Option<OsString>,
     ) -> Result<Self, HubRuntimeError> {
         let database_url = database_url
             .ok_or_else(|| HubRuntimeError::infrastructure(RuntimePhase::Configuration))?
@@ -138,11 +152,13 @@ impl HubConfiguration {
         }
         let model_configuration_file = required_path(model_configuration_file)?;
         let anthropic_api_key_file = required_path(anthropic_api_key_file)?;
+        let process_socket_path = required_path(process_socket_path)?;
 
         Ok(Self {
             database_url,
             model_configuration_file,
             anthropic_api_key_file,
+            process_socket_path,
         })
     }
 
@@ -156,6 +172,10 @@ impl HubConfiguration {
 
     fn anthropic_api_key_file(&self) -> PathBuf {
         self.anthropic_api_key_file.clone()
+    }
+
+    fn process_socket_path(&self) -> &Path {
+        &self.process_socket_path
     }
 }
 
@@ -176,8 +196,12 @@ enum ShutdownOutcome {
     SignalListenerFailed,
     ExecutionFailed,
     ExecutionFailedAfterGraceWindow,
+    GuardLost,
+    RuntimeFailed,
+    RuntimeFailedAfterGraceWindow,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SchedulerStopCause {
     Requested,
@@ -185,10 +209,35 @@ enum SchedulerStopCause {
     ExecutionFailed,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuntimeStopCause {
+    Requested,
+    SignalListenerFailed,
+    ExecutionFailed,
+    GuardLost,
+    ProcessRuntimeFailed,
+    SchedulerFailed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuntimeDrainOutcome {
+    Complete,
+    GraceWindowExpired,
+    GuardLost,
+}
+
+enum RuntimeTaskExit {
+    Scheduler(SchedulerLoopExit),
+    Process(Result<(), ProcessRuntimeError>),
+}
+
 const fn should_close_pool(outcome: &Result<ShutdownOutcome, HubRuntimeError>) -> bool {
     matches!(
         outcome,
-        Ok(ShutdownOutcome::Clean | ShutdownOutcome::ExecutionFailed) | Err(_)
+        Ok(ShutdownOutcome::Clean
+            | ShutdownOutcome::ExecutionFailed
+            | ShutdownOutcome::RuntimeFailed)
+            | Err(_)
     )
 }
 
@@ -208,6 +257,7 @@ where
     Ok(schedule().await)
 }
 
+#[cfg(test)]
 async fn run_scheduler_until_shutdown<WorkSource, Pass, Shutdown>(
     mut scheduler: SchedulerLoop<WorkSource, Pass>,
     shutdown: Shutdown,
@@ -246,6 +296,53 @@ where
     }
 }
 
+async fn wait_for_guard_loss(database: &mut FencedHubDatabase) {
+    loop {
+        sleep(GUARD_CHECK_INTERVAL).await;
+        if database.check_guard().await.is_err() {
+            return;
+        }
+    }
+}
+
+fn runtime_task_completed_cleanly(completed: Result<RuntimeTaskExit, JoinError>) -> bool {
+    matches!(
+        completed,
+        Ok(RuntimeTaskExit::Scheduler(SchedulerLoopExit::Shutdown))
+            | Ok(RuntimeTaskExit::Process(Ok(())))
+    )
+}
+
+const fn completed_runtime_outcome(
+    cause: RuntimeStopCause,
+    drain: RuntimeDrainOutcome,
+) -> ShutdownOutcome {
+    match (cause, drain) {
+        (_, RuntimeDrainOutcome::GuardLost) | (RuntimeStopCause::GuardLost, _) => {
+            ShutdownOutcome::GuardLost
+        }
+        (RuntimeStopCause::Requested, RuntimeDrainOutcome::Complete) => ShutdownOutcome::Clean,
+        (RuntimeStopCause::Requested, RuntimeDrainOutcome::GraceWindowExpired) => {
+            ShutdownOutcome::GraceWindowExpired
+        }
+        (RuntimeStopCause::SignalListenerFailed, _) => ShutdownOutcome::SignalListenerFailed,
+        (RuntimeStopCause::ExecutionFailed, RuntimeDrainOutcome::Complete) => {
+            ShutdownOutcome::ExecutionFailed
+        }
+        (RuntimeStopCause::ExecutionFailed, RuntimeDrainOutcome::GraceWindowExpired) => {
+            ShutdownOutcome::ExecutionFailedAfterGraceWindow
+        }
+        (
+            RuntimeStopCause::ProcessRuntimeFailed | RuntimeStopCause::SchedulerFailed,
+            RuntimeDrainOutcome::Complete,
+        ) => ShutdownOutcome::RuntimeFailed,
+        (
+            RuntimeStopCause::ProcessRuntimeFailed | RuntimeStopCause::SchedulerFailed,
+            RuntimeDrainOutcome::GraceWindowExpired,
+        ) => ShutdownOutcome::RuntimeFailedAfterGraceWindow,
+    }
+}
+
 async fn shutdown_requested() -> bool {
     #[cfg(unix)]
     {
@@ -281,14 +378,24 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
     let provider =
         RuntimeModelCallProvider::new(anthropic, model_configuration.runtime_model_catalog());
     let model_targets = model_configuration.target_catalog();
-    let pool = connect_production(configuration.database_url())
+    let mut database = FencedHubDatabase::connect_production(configuration.database_url())
         .await
-        .map_err(|_| HubRuntimeError::infrastructure(RuntimePhase::DatabaseConnection))?;
+        .map_err(|error| {
+            let phase = match error {
+                FencedHubDatabaseError::InitializeFence(_) => RuntimePhase::Migration,
+                FencedHubDatabaseError::ParseOptions(_)
+                | FencedHubDatabaseError::ConnectBootstrap(_)
+                | FencedHubDatabaseError::AcquireGuard(_)
+                | FencedHubDatabaseError::AdvanceFence(_)
+                | FencedHubDatabaseError::ConnectFencedPool(_) => RuntimePhase::DatabaseConnection,
+            };
+            HubRuntimeError::infrastructure(phase)
+        })?;
+    let pool = database.pool().clone();
 
     let migration_pool = pool.clone();
     let scan_pool = pool.clone();
-    let scheduler_pool = pool.clone();
-    let outcome = migrate_scan_then_schedule(
+    let startup = migrate_scan_then_schedule(
         async move {
             migrate(&migration_pool)
                 .await
@@ -326,63 +433,143 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
                 Err(HubRuntimeError::recovery_blocked(blocker_count))
             }
         },
-        || async move {
-            let sweep = PostgresEligibilitySweep::new(scheduler_pool.clone());
-            let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
-            let (execution, fatal_execution) =
-                FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
-                    PostgresModelCallRepository::new(
-                        scheduler_pool.clone(),
-                        model_targets,
-                        credential_reference,
-                    ),
-                    InProcessAttemptDispatchGate::default(),
-                    provider,
-                ));
-            let pass = ActivatedTurnPass::new(
-                StartEligibleTurnService::new(
-                    UuidV7StartEligibleTurnIdGenerator,
-                    StartEligibleTurnRepository::new(scheduler_pool),
-                ),
-                execution,
-            );
-            let scheduler = SchedulerLoop::new(work_source, pass);
-            tracing::info!(
-                phase = ?RuntimePhase::Scheduling,
-                "hub scheduler started"
-            );
-            let fatal_shutdown = fatal_execution.clone();
-            let outcome = run_scheduler_until_shutdown(
-                scheduler,
-                async move {
-                    select! {
-                        listener_failed = shutdown_requested() => {
-                            if listener_failed {
-                                SchedulerStopCause::SignalListenerFailed
-                            } else {
-                                SchedulerStopCause::Requested
-                            }
-                        }
-                        () = fatal_shutdown.wait() => SchedulerStopCause::ExecutionFailed,
-                    }
-                },
-                GRACEFUL_SHUTDOWN_WINDOW,
-            )
-            .await;
-            drop(eligibility_nudge);
-            outcome
-        },
+        || std::future::ready(()),
     )
     .await;
-
-    // A timed-out scheduler may still hold a connection. Waiting for that
-    // checkout here would silently extend the shutdown window that just
-    // expired. Dropping the pool is safe because startup recovery owns any
-    // abandoned durable work.
-    if should_close_pool(&outcome) {
-        pool.close().await;
+    if let Err(error) = startup {
+        let _ = database.close().await;
+        return Err(error);
     }
-    outcome
+
+    let listener = match LocalProcessListener::bind(configuration.process_socket_path()) {
+        Ok(listener) => listener,
+        Err(_) => {
+            let _ = database.close().await;
+            return Err(HubRuntimeError::infrastructure(RuntimePhase::SocketBinding));
+        }
+    };
+    tracing::info!(
+        phase = ?RuntimePhase::SocketBinding,
+        "hub startup phase completed"
+    );
+
+    let scheduler_pool = pool.clone();
+    let sweep = PostgresEligibilitySweep::new(scheduler_pool.clone());
+    let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
+    let process_runtime = ProcessRuntime::new(
+        listener,
+        scheduler_pool.clone(),
+        eligibility_nudge,
+        model_configuration,
+    );
+    let (execution, fatal_execution) =
+        FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
+            PostgresModelCallRepository::new(
+                scheduler_pool.clone(),
+                model_targets,
+                credential_reference,
+            ),
+            InProcessAttemptDispatchGate::default(),
+            provider,
+        ));
+    let pass = ActivatedTurnPass::new(
+        StartEligibleTurnService::new(
+            UuidV7StartEligibleTurnIdGenerator,
+            StartEligibleTurnRepository::new(scheduler_pool),
+        ),
+        execution,
+    );
+    let mut scheduler = SchedulerLoop::new(work_source, pass);
+    let (scheduler_shutdown, scheduler_shutdown_receiver) = oneshot::channel();
+    let (process_shutdown, process_shutdown_receiver) = watch::channel(false);
+    let mut runtime_tasks = JoinSet::new();
+    runtime_tasks.spawn(async move {
+        RuntimeTaskExit::Scheduler(
+            scheduler
+                .run_until(async move {
+                    let _ = scheduler_shutdown_receiver.await;
+                })
+                .await,
+        )
+    });
+    runtime_tasks.spawn(async move {
+        RuntimeTaskExit::Process(process_runtime.run(process_shutdown_receiver).await)
+    });
+    tracing::info!(phase = ?RuntimePhase::Scheduling, "hub runtime started");
+
+    let outcome = {
+        let guard_loss = wait_for_guard_loss(&mut database);
+        pin!(guard_loss);
+        let mut cause = select! {
+            listener_failed = shutdown_requested() => {
+                if listener_failed {
+                    RuntimeStopCause::SignalListenerFailed
+                } else {
+                    RuntimeStopCause::Requested
+                }
+            }
+            () = fatal_execution.wait() => RuntimeStopCause::ExecutionFailed,
+            () = &mut guard_loss => RuntimeStopCause::GuardLost,
+            completed = runtime_tasks.join_next() => {
+                match completed {
+                    Some(Ok(RuntimeTaskExit::Process(result))) => {
+                        drop(result);
+                        RuntimeStopCause::ProcessRuntimeFailed
+                    }
+                    Some(Ok(RuntimeTaskExit::Scheduler(_))) | Some(Err(_)) | None => {
+                        RuntimeStopCause::SchedulerFailed
+                    }
+                }
+            }
+        };
+
+        if cause == RuntimeStopCause::GuardLost {
+            runtime_tasks.abort_all();
+            while runtime_tasks.join_next().await.is_some() {}
+            ShutdownOutcome::GuardLost
+        } else {
+            let _ = scheduler_shutdown.send(());
+            let _ = process_shutdown.send(true);
+            let (drain, components_clean) = {
+                let drain_tasks = async {
+                    let mut clean = true;
+                    while let Some(completed) = runtime_tasks.join_next().await {
+                        clean &= runtime_task_completed_cleanly(completed);
+                    }
+                    clean
+                };
+                pin!(drain_tasks);
+                select! {
+                    () = &mut guard_loss => (RuntimeDrainOutcome::GuardLost, false),
+                    result = timeout(GRACEFUL_SHUTDOWN_WINDOW, &mut drain_tasks) => {
+                        match result {
+                            Ok(clean) => (RuntimeDrainOutcome::Complete, clean),
+                            Err(_) => (RuntimeDrainOutcome::GraceWindowExpired, false),
+                        }
+                    }
+                }
+            };
+            if drain != RuntimeDrainOutcome::Complete {
+                runtime_tasks.abort_all();
+                while runtime_tasks.join_next().await.is_some() {}
+            } else if !components_clean {
+                cause = RuntimeStopCause::ProcessRuntimeFailed;
+            }
+            completed_runtime_outcome(cause, drain)
+        }
+    };
+
+    // A timed-out component may still have held a connection before its task
+    // was aborted. Waiting for an ordinary pool drain here would silently
+    // extend the shutdown window. Guard loss is different: tasks are cancelled
+    // immediately and the old fenced sessions must be terminated before
+    // returning control to process exit.
+    if outcome == ShutdownOutcome::GuardLost {
+        let _ = database.close().await;
+    } else if should_close_pool(&Ok(outcome)) && database.close().await.is_err() {
+        return Ok(ShutdownOutcome::RuntimeFailed);
+    }
+    Ok(outcome)
 }
 
 fn install_tracing_subscriber() {
@@ -436,6 +623,34 @@ async fn main() -> ExitCode {
             );
             ExitCode::FAILURE
         }
+        Ok(ShutdownOutcome::GuardLost) => {
+            let error = HubRuntimeError::infrastructure(RuntimePhase::Runtime);
+            tracing::error!(
+                phase = ?error.phase,
+                failure_class = ?error.failure_class,
+                "database guard was lost; fenced runtime cancelled immediately"
+            );
+            ExitCode::FAILURE
+        }
+        Ok(ShutdownOutcome::RuntimeFailed) => {
+            let error = HubRuntimeError::infrastructure(RuntimePhase::Runtime);
+            tracing::error!(
+                phase = ?error.phase,
+                failure_class = ?error.failure_class,
+                "hub runtime component failed"
+            );
+            ExitCode::FAILURE
+        }
+        Ok(ShutdownOutcome::RuntimeFailedAfterGraceWindow) => {
+            let error = HubRuntimeError::infrastructure(RuntimePhase::Runtime);
+            tracing::error!(
+                phase = ?error.phase,
+                failure_class = ?error.failure_class,
+                grace_window_seconds = GRACEFUL_SHUTDOWN_WINDOW.as_secs(),
+                "hub runtime component failed and shutdown grace expired; abandoning in-flight work"
+            );
+            ExitCode::FAILURE
+        }
         Err(error) => {
             tracing::error!(
                 phase = ?error.phase,
@@ -471,8 +686,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        HubConfiguration, HubRuntimeError, RuntimePhase, SchedulerStopCause, ShutdownOutcome,
-        migrate_scan_then_schedule, run_scheduler_until_shutdown, should_close_pool,
+        HubConfiguration, HubRuntimeError, RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause,
+        SchedulerStopCause, ShutdownOutcome, completed_runtime_outcome, migrate_scan_then_schedule,
+        run_scheduler_until_shutdown, should_close_pool,
     };
 
     #[tokio::test]
@@ -539,6 +755,7 @@ mod tests {
                 None,
                 Some(OsString::from("models.toml")),
                 Some(OsString::from("key")),
+                Some(OsString::from("/tmp/signalbox.sock")),
             )
             .err(),
             Some(HubRuntimeError::infrastructure(RuntimePhase::Configuration))
@@ -548,6 +765,17 @@ mod tests {
                 Some(OsString::from("postgres://secret")),
                 Some(OsString::from("")),
                 Some(OsString::from("key")),
+                Some(OsString::from("/tmp/signalbox.sock")),
+            )
+            .err(),
+            Some(HubRuntimeError::infrastructure(RuntimePhase::Configuration))
+        );
+        assert_eq!(
+            HubConfiguration::from_values(
+                Some(OsString::from("postgres://secret")),
+                Some(OsString::from("models.toml")),
+                Some(OsString::from("key")),
+                None,
             )
             .err(),
             Some(HubRuntimeError::infrastructure(RuntimePhase::Configuration))
@@ -557,6 +785,7 @@ mod tests {
             Some(OsString::from("postgres://secret")),
             Some(OsString::from("models.toml")),
             Some(OsString::from("key")),
+            Some(OsString::from("/tmp/signalbox.sock")),
         )
         .expect("nonempty deployment values are accepted before I/O");
         assert_eq!(configuration.database_url(), "postgres://secret");
@@ -567,6 +796,10 @@ mod tests {
         assert_eq!(
             configuration.anthropic_api_key_file(),
             std::path::PathBuf::from("key")
+        );
+        assert_eq!(
+            configuration.process_socket_path(),
+            std::path::Path::new("/tmp/signalbox.sock")
         );
     }
 
@@ -817,10 +1050,41 @@ mod tests {
         assert!(!should_close_pool(&Ok(
             ShutdownOutcome::ExecutionFailedAfterGraceWindow
         )));
+        assert!(!should_close_pool(&Ok(ShutdownOutcome::GuardLost)));
+        assert!(!should_close_pool(&Ok(
+            ShutdownOutcome::RuntimeFailedAfterGraceWindow
+        )));
         assert!(should_close_pool(&Ok(ShutdownOutcome::ExecutionFailed)));
+        assert!(should_close_pool(&Ok(ShutdownOutcome::RuntimeFailed)));
         assert!(should_close_pool(&Ok(ShutdownOutcome::Clean)));
         assert!(should_close_pool(&Err(HubRuntimeError::infrastructure(
             RuntimePhase::Migration
         ))));
+    }
+
+    #[test]
+    fn runtime_stop_causes_preserve_grace_and_fencing_policy() {
+        assert_eq!(
+            completed_runtime_outcome(RuntimeStopCause::Requested, RuntimeDrainOutcome::Complete),
+            ShutdownOutcome::Clean
+        );
+        assert_eq!(
+            completed_runtime_outcome(
+                RuntimeStopCause::ExecutionFailed,
+                RuntimeDrainOutcome::GraceWindowExpired
+            ),
+            ShutdownOutcome::ExecutionFailedAfterGraceWindow
+        );
+        assert_eq!(
+            completed_runtime_outcome(
+                RuntimeStopCause::ProcessRuntimeFailed,
+                RuntimeDrainOutcome::GraceWindowExpired
+            ),
+            ShutdownOutcome::RuntimeFailedAfterGraceWindow
+        );
+        assert_eq!(
+            completed_runtime_outcome(RuntimeStopCause::Requested, RuntimeDrainOutcome::GuardLost),
+            ShutdownOutcome::GuardLost
+        );
     }
 }
