@@ -9,11 +9,11 @@ use std::{error::Error, fmt, future::Future};
 
 use signalbox_application::{
     ClassifyOperatorFailure, EligibilityPass, InProcessAttemptDispatchGate,
-    ModelCallExecutionError, ModelCallExecutionOutcome, ModelCallExecutionService,
-    ModelCallProvider, OperatorFailureClass, ScriptedModelCallError, ScriptedModelCallProvider,
-    ScriptedModelCallStep, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
-    StartEligibleTurnService, StartEligibleTurnTransaction, ToolCatalog, ToolExecutionService,
-    ToolExecutionServiceError, ToolExecutionServiceOutcome, ToolExecutor,
+    InProcessToolDispatchGate, ModelCallExecutionError, ModelCallExecutionOutcome,
+    ModelCallExecutionService, ModelCallProvider, OperatorFailureClass, ScriptedModelCallError,
+    ScriptedModelCallProvider, ScriptedModelCallStep, StartEligibleTurnIdGenerator,
+    StartEligibleTurnOutcome, StartEligibleTurnService, StartEligibleTurnTransaction, ToolCatalog,
+    ToolExecutionService, ToolExecutionServiceError, ToolExecutionServiceOutcome, ToolExecutor,
     UuidV7ModelCallExecutionIdGenerator, UuidV7ToolLoopIdGenerator,
 };
 use signalbox_domain::{ActivatedAcceptedInputTurn, AssistantText, SessionId};
@@ -130,13 +130,13 @@ where
 async fn reconcile_retained_once<Outcome, ExecutionError, Execution>(
     original_error: ExecutionError,
     execution: Execution,
-) -> Result<Outcome, RetainedModelExecutionError<ExecutionError>>
+) -> Result<Outcome, RetainedExecutionError<ExecutionError>>
 where
     Execution: Future<Output = Result<Outcome, ExecutionError>>,
 {
     match execution.await {
         Ok(outcome) => Ok(outcome),
-        Err(reconciliation_error) => Err(RetainedModelExecutionError::Reconciliation {
+        Err(reconciliation_error) => Err(RetainedExecutionError::Reconciliation {
             original: original_error,
             reconciliation: reconciliation_error,
         }),
@@ -146,7 +146,7 @@ where
 /// Execution failure retaining both the causal stage error and a failed
 /// same-incarnation retained-state reconciliation.
 #[derive(Debug)]
-pub enum RetainedModelExecutionError<ExecutionError> {
+pub enum RetainedExecutionError<ExecutionError> {
     /// Execution failed without a retained-state reconciliation failure.
     Primary(ExecutionError),
     /// The causal stage failed and its one authoritative reconciliation also
@@ -159,7 +159,7 @@ pub enum RetainedModelExecutionError<ExecutionError> {
     },
 }
 
-impl<ExecutionError> RetainedModelExecutionError<ExecutionError> {
+impl<ExecutionError> RetainedExecutionError<ExecutionError> {
     /// Borrows the causal stage failure.
     pub const fn original(&self) -> &ExecutionError {
         match self {
@@ -179,7 +179,7 @@ impl<ExecutionError> RetainedModelExecutionError<ExecutionError> {
     }
 }
 
-impl<ExecutionError> fmt::Display for RetainedModelExecutionError<ExecutionError>
+impl<ExecutionError> fmt::Display for RetainedExecutionError<ExecutionError>
 where
     ExecutionError: fmt::Display,
 {
@@ -197,7 +197,7 @@ where
     }
 }
 
-impl<ExecutionError> Error for RetainedModelExecutionError<ExecutionError>
+impl<ExecutionError> Error for RetainedExecutionError<ExecutionError>
 where
     ExecutionError: Error + 'static,
 {
@@ -206,7 +206,7 @@ where
     }
 }
 
-impl<ExecutionError> ClassifyOperatorFailure for RetainedModelExecutionError<ExecutionError>
+impl<ExecutionError> ClassifyOperatorFailure for RetainedExecutionError<ExecutionError>
 where
     ExecutionError: ClassifyOperatorFailure,
 {
@@ -225,6 +225,9 @@ where
         }
     }
 }
+
+/// Backwards-compatible name for retained model-call execution evidence.
+pub type RetainedModelExecutionError<ExecutionError> = RetainedExecutionError<ExecutionError>;
 
 const fn is_fatal_failure_class(failure: OperatorFailureClass) -> bool {
     matches!(
@@ -417,6 +420,11 @@ pub type PostgresProviderModelExecutionError<ProviderError> = RetainedModelExecu
     >,
 >;
 
+/// Classified tool execution failure, including a failed same-incarnation
+/// reconciliation of retained executor evidence.
+pub type PostgresProviderToolExecutionError<ExecutorError> =
+    RetainedExecutionError<ToolExecutionServiceError<ToolLoopRepositoryError, ExecutorError>>;
+
 /// Classified failure while alternating provider calls and serialized tool
 /// stages within one turn.
 #[derive(Debug)]
@@ -424,7 +432,7 @@ pub enum PostgresProviderToolLoopExecutionError<ProviderError, ExecutorError> {
     /// Model-call execution or same-incarnation reconciliation failed.
     Model(Box<PostgresProviderModelExecutionError<ProviderError>>),
     /// Tool preparation, execution, evidence commit, or continuation failed.
-    Tool(ToolExecutionServiceError<ToolLoopRepositoryError, ExecutorError>),
+    Tool(Box<PostgresProviderToolExecutionError<ExecutorError>>),
 }
 
 impl<ProviderError, ExecutorError> fmt::Display
@@ -497,13 +505,15 @@ impl<Provider> PostgresProviderModelExecution<Provider> {
     pub fn with_tool_loop<Catalog, Executor>(
         self,
         tool_repository: PostgresToolLoopRepository,
+        tool_dispatch_gate: InProcessToolDispatchGate,
         catalog: Catalog,
         executor: Executor,
     ) -> PostgresProviderToolLoopExecution<Provider, Catalog, Executor> {
         PostgresProviderToolLoopExecution {
             model_repository: self.repository,
             tool_repository,
-            gate: self.gate,
+            model_gate: self.gate,
+            tool_gate: tool_dispatch_gate,
             provider: self.provider,
             catalog,
             executor,
@@ -570,7 +580,8 @@ where
 pub struct PostgresProviderToolLoopExecution<Provider, Catalog, Executor> {
     model_repository: PostgresModelCallRepository,
     tool_repository: PostgresToolLoopRepository,
-    gate: InProcessAttemptDispatchGate,
+    model_gate: InProcessAttemptDispatchGate,
+    tool_gate: InProcessToolDispatchGate,
     provider: Provider,
     catalog: Catalog,
     executor: Executor,
@@ -594,7 +605,8 @@ where
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
         let model_repository = self.model_repository.clone();
         let tool_repository = self.tool_repository.clone();
-        let gate = self.gate.clone();
+        let model_gate = self.model_gate.clone();
+        let tool_gate = self.tool_gate.clone();
         let provider = self.provider.clone();
         let catalog = self.catalog.clone();
         let executor = self.executor.clone();
@@ -609,7 +621,7 @@ where
                 model_repository.clone(),
                 model_repository,
                 provider,
-                gate,
+                model_gate,
             )
             .with_tool_catalog(catalog.clone());
             let mut tools = ToolExecutionService::new(
@@ -617,20 +629,33 @@ where
                 tool_repository,
                 catalog,
                 executor,
-            );
+            )
+            .with_dispatch_gate(tool_gate);
             let mut run_tools = true;
             let mut return_if_tools_absent = false;
 
             loop {
                 if run_tools {
-                    let tool_outcome = tools
-                        .execute(session, turn)
-                        .await
-                        .map_err(PostgresProviderToolLoopExecutionError::Tool)?;
+                    let tool_outcome = match tools.execute(session, turn).await {
+                        Ok(outcome) => outcome,
+                        Err(error) if tools.retained_state().is_some() => {
+                            reconcile_retained_once(error, tools.execute(session, turn))
+                                .await
+                                .map_err(|error| {
+                                    PostgresProviderToolLoopExecutionError::Tool(Box::new(error))
+                                })?
+                        }
+                        Err(error) => {
+                            return Err(PostgresProviderToolLoopExecutionError::Tool(Box::new(
+                                RetainedExecutionError::Primary(error),
+                            )));
+                        }
+                    };
                     match tool_outcome {
                         ToolExecutionServiceOutcome::AttemptCheckpointed(_)
                         | ToolExecutionServiceOutcome::PreflightFailed(_)
                         | ToolExecutionServiceOutcome::ObservationCommitted(_)
+                        | ToolExecutionServiceOutcome::ObservationAlreadyCommitted(_)
                         | ToolExecutionServiceOutcome::CrashClassified(_) => {
                             return_if_tools_absent = true;
                             continue;

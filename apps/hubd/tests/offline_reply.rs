@@ -9,11 +9,11 @@ use std::{error::Error, process::Command, time::Duration};
 use signalbox_application::{
     ClassifyOperatorFailure, CorrelatedToolExecutorEvidence, CreateSessionOutcome,
     CreateSessionRequest, CreateSessionService, InProcessAttemptDispatchGate,
-    InProcessEligibilityWorkSource, ModelCallCredentialReference, NoToolCatalog,
-    OperatorFailureClass, SchedulerLoop, SchedulerLoopExit, StartEligibleTurnService,
-    SubmitInputOutcome, SubmitInputRequest, SubmitInputService, ToolExecutionInvocation,
-    ToolExecutor, UuidV7SessionIdGenerator, UuidV7StartEligibleTurnIdGenerator,
-    UuidV7SubmitInputIdGenerator,
+    InProcessEligibilityWorkSource, InProcessToolDispatchGate, ModelCallCredentialReference,
+    NoToolCatalog, OperatorFailureClass, SchedulerLoop, SchedulerLoopExit,
+    StartEligibleTurnService, SubmitInputOutcome, SubmitInputRequest, SubmitInputService,
+    ToolExecutionInvocation, ToolExecutor, UuidV7SessionIdGenerator,
+    UuidV7StartEligibleTurnIdGenerator, UuidV7SubmitInputIdGenerator,
 };
 use signalbox_domain::{
     DeliveryRequest, DirectModelSelection, DurableCommandId, ModelSelectionOverride,
@@ -153,11 +153,13 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
 
     let sweep = PostgresEligibilitySweep::new(pool.clone());
     let (nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
+    let tool_dispatch_gate = InProcessToolDispatchGate::default();
     let mut submit = SubmitInputService::new(
         UuidV7SubmitInputIdGenerator,
         SubmitInputRepository::new(pool.clone()),
         nudge,
-    );
+    )
+    .with_tool_dispatch_gate(tool_dispatch_gate.clone());
     let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
         SubmitInputAppliedResult::TurnOrigin(origin),
     )) = submit
@@ -220,6 +222,7 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
                 targets,
                 credential_reference,
             ),
+            tool_dispatch_gate,
             NoToolCatalog,
             UnexpectedToolExecutor,
         ),
