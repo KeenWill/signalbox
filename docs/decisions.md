@@ -10,6 +10,59 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-24 — Keep ordinary imported-session loads bounded
+
+**Context.** Imported seed correctness requires full comparison with the
+selected imported prefix, but the shared `load_session` boundary is used by
+routine submission, defaults, startup, scheduling, and model-execution paths.
+Loading an unbounded imported aggregate for every ordinary session read would
+violate the bounded `Session` aggregate and amplify lock-held work.
+
+**Decision.** Ordinary imported-session reconstitution reads a constant-size
+proof: the one-to-one seed record and its frontier header must agree with the
+session, and the header count must equal the selected boundary position. Full
+imported-prefix comparison remains mandatory at creation replay and every
+purpose-specific read that resolves imported semantic context, including
+first-turn scheduling and process transcript projection; see
+[sessions-and-transcript](spec/sessions-and-transcript.md) and
+[process-protocol](spec/process-protocol.md).
+
+**Rejected alternatives.** Full prefix validation in every shared session load
+is unbounded and repeatedly scans immutable history. Creation-only validation
+would let purpose-specific reads trust corrupted seed membership. Omitting the
+seed from ordinary reconstitution would fail to detect a missing or cross-wired
+one-to-one link.
+
+**Affects.** INV-002/INV-039; current-session reconstitution, persistence load
+projection, imported creation replay, first-turn scheduling, process transcript
+reads, and PostgreSQL corruption tests.
+
+## 2026-07-24 — Version imported transcript projection as process protocol two
+
+**Context.** Process protocol version one has closed transcript-entry variants,
+and its clients reject unknown variants. Reusing version one for imported
+entries would make an upgraded hub emit frames that an otherwise compatible
+version-one client cannot decode.
+
+**Decision.** Preserve version one's wire vocabulary and add version two with
+the conservative imported transcript-entry variants. The hub admits both
+versions and responds in the request version. A version-one submit, transcript,
+or follow request selecting imported ancestry returns a version-one
+`unsupported_version` error naming version two before mutation or snapshot
+construction; native sessions remain available through both versions. See
+[process-protocol](spec/process-protocol.md).
+
+**Rejected alternatives.** Extending version one's closed enums would break old
+clients after they accept the frame version. Dropping version-one support would
+needlessly prevent upgraded hubs from serving native sessions to existing
+clients. Rendering imported entries as native variants would fabricate
+provenance, and silently omitting the complete imported prefix would make the
+snapshot incomplete.
+
+**Affects.** S28; INV-033/INV-038/INV-039; process wire types, hub request
+dispatch, terminal-client decoding, imported transcript reads, follow snapshots,
+and compatibility tests.
+
 ## 2026-07-24 — Separate imported ancestry from its materialized seed frontier
 
 **Context.** Imported ancestry identifies the external record and boundary that
