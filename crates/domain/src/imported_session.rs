@@ -1634,6 +1634,52 @@ mod tests {
         assert_eq!(error.input(), &unchanged);
     }
 
+    #[track_caller]
+    fn assert_prepared_imported_entry(
+        semantic: &SemanticTranscriptEntry,
+        imported: &crate::ImportedTranscriptEntry,
+        session: SessionId,
+    ) {
+        assert_eq!(semantic.source_session(), session);
+        assert_eq!(
+            semantic.payload(),
+            &SemanticTranscriptEntryPayload::Imported {
+                imported_entry: imported.identity(),
+                source_speaker: imported.source_speaker().clone(),
+                content: imported.content().clone(),
+            }
+        );
+    }
+
+    #[track_caller]
+    fn assert_seed_reconstitution_failure(
+        input: ImportedSessionReconstitutionInput,
+        expected: ImportedSessionSeedReconstitutionFailure,
+    ) {
+        let unchanged = input.clone();
+        let error = input
+            .reconstitute()
+            .expect_err("the corrupted imported seed must fail");
+        assert_eq!(
+            error.failure(),
+            ImportedSessionReconstitutionFailure::Seed(expected)
+        );
+        assert_eq!(error.input(), &unchanged);
+    }
+
+    #[track_caller]
+    fn assert_creation_reconstitution_failure(
+        input: CreateSessionFromImportedFrontierReconstitutionInput,
+        expected: CreateSessionFromImportedFrontierReconstitutionFailure,
+    ) {
+        let unchanged = input.clone();
+        let error = input
+            .reconstitute()
+            .expect_err("the corrupted imported creation must fail");
+        assert_eq!(error.failure(), expected);
+        assert_eq!(error.input(), &unchanged);
+    }
+
     /// S28 / INV-015 / INV-038 / INV-039: preparation projects every exact
     /// imported prefix member once, in order, and couples it to one exact
     /// separately identified seed frontier.
@@ -1642,9 +1688,11 @@ mod tests {
         let conversation = conversation(1);
         let command = command_for(&conversation);
         let calls = Cell::new(0_u128);
+        let session = session_id(3);
+        let seed_frontier = context_frontier_id(4);
 
         let prepared = command
-            .prepare(&conversation, session_id(3), context_frontier_id(4), || {
+            .prepare(&conversation, session, seed_frontier, || {
                 let next = calls.get() + 1;
                 calls.set(next);
                 semantic_transcript_entry_id(next)
@@ -1653,14 +1701,11 @@ mod tests {
 
         assert_eq!(calls.get(), 2);
         assert_eq!(prepared.semantic_entries().len(), 2);
-        assert_eq!(prepared.imported_seed().session(), session_id(3));
-        assert_eq!(
-            prepared.imported_seed().seed_frontier(),
-            context_frontier_id(4)
-        );
+        assert_eq!(prepared.imported_seed().session(), session);
+        assert_eq!(prepared.imported_seed().seed_frontier(), seed_frontier);
         assert_eq!(
             prepared.seed_snapshot().frontier().snapshot(),
-            context_frontier_id(4)
+            seed_frontier
         );
         assert_eq!(
             prepared
@@ -1673,21 +1718,16 @@ mod tests {
                 .map(SemanticTranscriptEntry::reference)
                 .collect::<Vec<_>>()
         );
-        for (semantic, imported) in prepared
-            .semantic_entries()
-            .iter()
-            .zip(conversation.entries())
-        {
-            assert_eq!(semantic.source_session(), session_id(3));
-            assert_eq!(
-                semantic.payload(),
-                &SemanticTranscriptEntryPayload::Imported {
-                    imported_entry: imported.identity(),
-                    source_speaker: imported.source_speaker().clone(),
-                    content: imported.content().clone(),
-                }
-            );
-        }
+        assert_prepared_imported_entry(
+            &prepared.semantic_entries()[0],
+            &conversation.entries()[0],
+            session,
+        );
+        assert_prepared_imported_entry(
+            &prepared.semantic_entries()[1],
+            &conversation.entries()[1],
+            session,
+        );
     }
 
     /// S28 / INV-012 / INV-039: mismatched target identities fail before any
@@ -2110,18 +2150,16 @@ mod tests {
     fn s28_inv002_inv003_inv015_inv038_inv039_seed_corruption_matrix_is_complete() {
         let (imported_conversation, _, prepared) = prepared_fixture();
         let other_conversation = conversation(2);
-        let mut cases = Vec::new();
 
         let mut ancestry_not_imported = current_input(&imported_conversation, &prepared);
         ancestry_not_imported.provenance = SessionCreationProvenance::new(
             SessionCreationCause::OwnerInitiated,
             TranscriptAncestry::None,
         );
-        cases.push((
-            "ancestry not imported",
+        assert_seed_reconstitution_failure(
             ancestry_not_imported,
             ImportedSessionSeedReconstitutionFailure::AncestryNotImported,
-        ));
+        );
 
         let mut conversation_mismatch = current_input(&imported_conversation, &prepared);
         conversation_mismatch.provenance = SessionCreationProvenance::new(
@@ -2134,38 +2172,34 @@ mod tests {
                 relationship: crate::ImportedSessionRelationship::Resume,
             },
         );
-        cases.push((
-            "imported conversation mismatch",
+        assert_seed_reconstitution_failure(
             conversation_mismatch,
             ImportedSessionSeedReconstitutionFailure::ImportedConversationMismatch,
-        ));
+        );
 
         let mut frontier_not_found = current_input(&imported_conversation, &prepared);
         frontier_not_found.imported_conversation =
             alternate_conversation_with_same_identity(&imported_conversation);
-        cases.push((
-            "imported frontier not found",
+        assert_seed_reconstitution_failure(
             frontier_not_found,
             ImportedSessionSeedReconstitutionFailure::ImportedFrontierNotFound,
-        ));
+        );
 
         let mut missing_snapshot = current_input(&imported_conversation, &prepared);
         missing_snapshot.seed_snapshots.clear();
-        cases.push((
-            "missing seed snapshot",
+        assert_seed_reconstitution_failure(
             missing_snapshot,
             ImportedSessionSeedReconstitutionFailure::MissingSeedSnapshot,
-        ));
+        );
 
         let mut duplicate_snapshot = current_input(&imported_conversation, &prepared);
         duplicate_snapshot
             .seed_snapshots
             .push(duplicate_snapshot.seed_snapshots[0].clone());
-        cases.push((
-            "duplicate seed snapshot",
+        assert_seed_reconstitution_failure(
             duplicate_snapshot,
             ImportedSessionSeedReconstitutionFailure::DuplicateSeedSnapshot,
-        ));
+        );
 
         let mut snapshot_session_mismatch = current_input(&imported_conversation, &prepared);
         let snapshot = &snapshot_session_mismatch.seed_snapshots[0];
@@ -2175,11 +2209,10 @@ mod tests {
                 snapshot.snapshot(),
                 snapshot.ordered_entries().to_vec(),
             );
-        cases.push((
-            "seed snapshot session mismatch",
+        assert_seed_reconstitution_failure(
             snapshot_session_mismatch,
             ImportedSessionSeedReconstitutionFailure::SeedSnapshotSessionMismatch,
-        ));
+        );
 
         let mut semantic_session_mismatch = current_input(&imported_conversation, &prepared);
         let semantic = semantic_session_mismatch.semantic_entries[0].clone();
@@ -2189,13 +2222,12 @@ mod tests {
                 session_id(99),
                 semantic.payload().clone(),
             );
-        cases.push((
-            "semantic entry source session mismatch",
+        assert_seed_reconstitution_failure(
             semantic_session_mismatch,
             ImportedSessionSeedReconstitutionFailure::SemanticEntrySourceSessionMismatch {
                 entry: semantic.identity(),
             },
-        ));
+        );
 
         let mut duplicate_semantic = current_input(&imported_conversation, &prepared);
         let first_identity = duplicate_semantic.semantic_entries[0].identity();
@@ -2205,13 +2237,12 @@ mod tests {
             second.source_session(),
             second.payload().clone(),
         );
-        cases.push((
-            "duplicate semantic entry",
+        assert_seed_reconstitution_failure(
             duplicate_semantic,
             ImportedSessionSeedReconstitutionFailure::DuplicateSemanticEntry {
                 entry: first_identity,
             },
-        ));
+        );
 
         let mut semantic_not_imported = current_input(&imported_conversation, &prepared);
         let semantic = semantic_not_imported.semantic_entries[0].clone();
@@ -2222,13 +2253,12 @@ mod tests {
                 accepted_input: accepted_input_id(99),
             },
         );
-        cases.push((
-            "semantic entry not imported",
+        assert_seed_reconstitution_failure(
             semantic_not_imported,
             ImportedSessionSeedReconstitutionFailure::SemanticEntryNotImported {
                 entry: semantic.identity(),
             },
-        ));
+        );
 
         let mut speaker_mismatch = current_input(&imported_conversation, &prepared);
         let semantic = speaker_mismatch.semantic_entries[0].clone();
@@ -2249,13 +2279,12 @@ mod tests {
                 content,
             },
         );
-        cases.push((
-            "imported speaker mismatch",
+        assert_seed_reconstitution_failure(
             speaker_mismatch,
             ImportedSessionSeedReconstitutionFailure::ImportedSpeakerMismatch {
                 entry: semantic.identity(),
             },
-        ));
+        );
 
         let mut malformed_snapshot = current_input(&imported_conversation, &prepared);
         let snapshot = &malformed_snapshot.seed_snapshots[0];
@@ -2265,22 +2294,10 @@ mod tests {
             snapshot.snapshot(),
             vec![duplicate, duplicate],
         );
-        cases.push((
-            "malformed seed snapshot",
+        assert_seed_reconstitution_failure(
             malformed_snapshot,
             ImportedSessionSeedReconstitutionFailure::SeedSnapshotMalformed,
-        ));
-
-        for (name, input, expected) in cases {
-            let unchanged = input.clone();
-            let error = input.reconstitute().expect_err(name);
-            assert_eq!(
-                error.failure(),
-                ImportedSessionReconstitutionFailure::Seed(expected),
-                "{name}"
-            );
-            assert_eq!(error.input(), &unchanged, "{name}");
-        }
+        );
     }
 
     /// S28 / INV-002 / INV-003 / INV-008 / INV-012 / INV-039: every
@@ -2289,15 +2306,13 @@ mod tests {
     #[test]
     fn s28_inv002_inv003_inv008_inv012_inv039_creation_corruption_matrix_is_complete() {
         let (conversation, command, prepared) = prepared_fixture();
-        let mut cases = Vec::new();
 
         let mut result_mismatch = creation_input(&conversation, command, &prepared);
         result_mismatch.result_session = session_id(99);
-        cases.push((
-            "session result mismatch",
+        assert_creation_reconstitution_failure(
             result_mismatch,
             CreateSessionFromImportedFrontierReconstitutionFailure::SessionResultMismatch,
-        ));
+        );
 
         let mut provenance_mismatch = creation_input(&conversation, command, &prepared);
         provenance_mismatch.provenance = SessionCreationProvenance::new(
@@ -2307,44 +2322,33 @@ mod tests {
                 relationship: crate::ImportedSessionRelationship::Fork,
             },
         );
-        cases.push((
-            "provenance mismatch",
+        assert_creation_reconstitution_failure(
             provenance_mismatch,
             CreateSessionFromImportedFrontierReconstitutionFailure::ProvenanceMismatch,
-        ));
+        );
 
         let mut defaults_session_mismatch = creation_input(&conversation, command, &prepared);
         defaults_session_mismatch.defaults_session = session_id(99);
-        cases.push((
-            "defaults session mismatch",
+        assert_creation_reconstitution_failure(
             defaults_session_mismatch,
             CreateSessionFromImportedFrontierReconstitutionFailure::DefaultsSessionMismatch,
-        ));
+        );
 
         let mut defaults_version_mismatch = creation_input(&conversation, command, &prepared);
         defaults_version_mismatch.defaults_version = SessionConfigurationDefaultsVersion::first()
             .checked_next()
             .expect("version one has a successor");
-        cases.push((
-            "defaults version is not first",
+        assert_creation_reconstitution_failure(
             defaults_version_mismatch,
             CreateSessionFromImportedFrontierReconstitutionFailure::DefaultsVersionIsNotFirst,
-        ));
+        );
 
         let mut defaults_mismatch = creation_input(&conversation, command, &prepared);
         defaults_mismatch.defaults = defaults(99);
-        cases.push((
-            "defaults mismatch",
+        assert_creation_reconstitution_failure(
             defaults_mismatch,
             CreateSessionFromImportedFrontierReconstitutionFailure::DefaultsMismatch,
-        ));
-
-        for (name, input, expected) in cases {
-            let unchanged = input.clone();
-            let error = input.reconstitute().expect_err(name);
-            assert_eq!(error.failure(), expected, "{name}");
-            assert_eq!(error.input(), &unchanged, "{name}");
-        }
+        );
     }
 
     /// S28 / INV-039: a different selected imported boundary cannot
