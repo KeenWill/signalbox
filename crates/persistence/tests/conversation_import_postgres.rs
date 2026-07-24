@@ -135,9 +135,34 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String
     Ok((container, pool, database_url))
 }
 
-async fn insert_imported_seed_base(
+#[derive(Clone, Copy)]
+/// Named behavior facts returned by the plumbing-only resume fixture.
+///
+/// Both arrays preserve the selected imported frontier's prefix order.
+struct ImportedSeedFacts {
+    conversation: Uuid,
+    imported_prefix: [Uuid; 2],
+    session: Uuid,
+    semantic_prefix: [Uuid; 2],
+    seed_frontier: Uuid,
+}
+
+async fn insert_imported_resume_seed_base(
     transaction: &mut Transaction<'_, sqlx::Postgres>,
-) -> Result<(), sqlx::Error> {
+) -> Result<ImportedSeedFacts, sqlx::Error> {
+    let facts = ImportedSeedFacts {
+        conversation: Uuid::from_u128(0x1000_0000_0000_4000_8000_0000_0000_0039),
+        imported_prefix: [
+            Uuid::from_u128(0x2000_0000_0000_4000_8000_0000_0000_0039),
+            Uuid::from_u128(0x2000_0000_0000_4000_8000_0000_0000_0040),
+        ],
+        session: Uuid::from_u128(0x4000_0000_0000_4000_8000_0000_0000_0039),
+        semantic_prefix: [
+            Uuid::from_u128(0x6000_0000_0000_4000_8000_0000_0000_0039),
+            Uuid::from_u128(0x6000_0000_0000_4000_8000_0000_0000_0040),
+        ],
+        seed_frontier: Uuid::from_u128(0x7000_0000_0000_4000_8000_0000_0000_0039),
+    };
     sqlx::raw_sql(
         "INSERT INTO imported_raw_source_record (content_hash, raw_bytes)
          VALUES (decode(repeat('11', 32), 'hex'), decode('01', 'hex'));
@@ -229,26 +254,25 @@ async fn insert_imported_seed_base(
     )
     .execute(&mut **transaction)
     .await?;
-    Ok(())
+    Ok(facts)
 }
 
 async fn insert_exact_seed_members(
     transaction: &mut Transaction<'_, sqlx::Postgres>,
+    facts: ImportedSeedFacts,
 ) -> Result<(), sqlx::Error> {
-    sqlx::raw_sql(
+    sqlx::query(
         "INSERT INTO context_frontier_member
             (owning_session_id, context_frontier_id, member_position,
              source_session_id, semantic_entry_id)
          VALUES
-            ('40000000-0000-4000-8000-000000000039',
-             '70000000-0000-4000-8000-000000000039', 1,
-             '40000000-0000-4000-8000-000000000039',
-             '60000000-0000-4000-8000-000000000039'),
-            ('40000000-0000-4000-8000-000000000039',
-             '70000000-0000-4000-8000-000000000039', 2,
-             '40000000-0000-4000-8000-000000000039',
-             '60000000-0000-4000-8000-000000000040');",
+            ($1, $2, 1, $1, $3),
+            ($1, $2, 2, $1, $4)",
     )
+    .bind(facts.session)
+    .bind(facts.seed_frontier)
+    .bind(facts.semantic_prefix[0])
+    .bind(facts.semantic_prefix[1])
     .execute(&mut **transaction)
     .await?;
     Ok(())
@@ -261,15 +285,16 @@ async fn insert_exact_seed_members(
 async fn inv039_exact_imported_session_seed_commits() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let mut transaction = pool.begin().await?;
-    insert_imported_seed_base(&mut transaction).await?;
-    insert_exact_seed_members(&mut transaction).await?;
+    let seed = insert_imported_resume_seed_base(&mut transaction).await?;
+    insert_exact_seed_members(&mut transaction, seed).await?;
     sqlx::query(
         "INSERT INTO imported_session_seed
             (session_id, seed_context_frontier_id)
          VALUES
-            ('40000000-0000-4000-8000-000000000039',
-             '70000000-0000-4000-8000-000000000039')",
+            ($1, $2)",
     )
+    .bind(seed.session)
+    .bind(seed.seed_frontier)
     .execute(&mut *transaction)
     .await?;
     transaction.commit().await?;
@@ -297,8 +322,8 @@ async fn inv039_exact_imported_session_seed_commits() -> Result<(), Box<dyn Erro
 async fn inv039_imported_ancestry_without_seed_is_rejected() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let mut transaction = pool.begin().await?;
-    insert_imported_seed_base(&mut transaction).await?;
-    insert_exact_seed_members(&mut transaction).await?;
+    let seed = insert_imported_resume_seed_base(&mut transaction).await?;
+    insert_exact_seed_members(&mut transaction, seed).await?;
     let error = transaction
         .commit()
         .await
@@ -322,26 +347,28 @@ async fn inv039_imported_ancestry_without_seed_is_rejected() -> Result<(), Box<d
 async fn inv039_reordered_imported_seed_members_are_rejected() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let mut transaction = pool.begin().await?;
-    insert_imported_seed_base(&mut transaction).await?;
-    sqlx::raw_sql(
+    let seed = insert_imported_resume_seed_base(&mut transaction).await?;
+    sqlx::query(
         "INSERT INTO context_frontier_member
             (owning_session_id, context_frontier_id, member_position,
              source_session_id, semantic_entry_id)
          VALUES
-            ('40000000-0000-4000-8000-000000000039',
-             '70000000-0000-4000-8000-000000000039', 1,
-             '40000000-0000-4000-8000-000000000039',
-             '60000000-0000-4000-8000-000000000040'),
-            ('40000000-0000-4000-8000-000000000039',
-             '70000000-0000-4000-8000-000000000039', 2,
-             '40000000-0000-4000-8000-000000000039',
-             '60000000-0000-4000-8000-000000000039');
-         INSERT INTO imported_session_seed
-            (session_id, seed_context_frontier_id)
-         VALUES
-            ('40000000-0000-4000-8000-000000000039',
-             '70000000-0000-4000-8000-000000000039');",
+            ($1, $2, 1, $1, $3),
+            ($1, $2, 2, $1, $4)",
     )
+    .bind(seed.session)
+    .bind(seed.seed_frontier)
+    .bind(seed.semantic_prefix[1])
+    .bind(seed.semantic_prefix[0])
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO imported_session_seed
+            (session_id, seed_context_frontier_id)
+         VALUES ($1, $2)",
+    )
+    .bind(seed.session)
+    .bind(seed.seed_frontier)
     .execute(&mut *transaction)
     .await?;
     let error = transaction
@@ -472,15 +499,16 @@ async fn inv039_seed_frontier_member_truncate_is_rejected() -> Result<(), Box<dy
 async fn inv039_committed_seed_rejects_late_prefix_inserts() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let mut transaction = pool.begin().await?;
-    insert_imported_seed_base(&mut transaction).await?;
-    insert_exact_seed_members(&mut transaction).await?;
+    let seed = insert_imported_resume_seed_base(&mut transaction).await?;
+    insert_exact_seed_members(&mut transaction, seed).await?;
     sqlx::query(
         "INSERT INTO imported_session_seed
             (session_id, seed_context_frontier_id)
          VALUES
-            ('40000000-0000-4000-8000-000000000039',
-             '70000000-0000-4000-8000-000000000039')",
+            ($1, $2)",
     )
+    .bind(seed.session)
+    .bind(seed.seed_frontier)
     .execute(&mut *transaction)
     .await?;
     transaction.commit().await?;
@@ -490,11 +518,12 @@ async fn inv039_committed_seed_rejects_late_prefix_inserts() -> Result<(), Box<d
             (source_session_id, semantic_entry_id, payload_kind,
              imported_conversation_id, imported_transcript_entry_id)
          VALUES
-            ('40000000-0000-4000-8000-000000000039',
-             '60000000-0000-4000-8000-000000000041', 'imported_entry',
-             '10000000-0000-4000-8000-000000000039',
-             '20000000-0000-4000-8000-000000000039')",
+            ($1, $2, 'imported_entry', $3, $4)",
     )
+    .bind(seed.session)
+    .bind(Uuid::from_u128(0x6000_0000_0000_4000_8000_0000_0000_0041))
+    .bind(seed.conversation)
+    .bind(seed.imported_prefix[0])
     .execute(&pool)
     .await
     .expect_err("a committed imported semantic prefix is sealed");
