@@ -5,6 +5,7 @@
 
 mod conversation_import;
 mod create_session;
+mod create_session_from_imported_frontier;
 mod load_session;
 mod model_execution;
 mod operator_failure;
@@ -23,6 +24,12 @@ pub use create_session::{
     CreateSessionError, CreateSessionOutcome, CreateSessionRequest, CreateSessionService,
     CreateSessionTransaction, InvalidDurableCommandId, SessionIdGenerator,
     UuidV7SessionIdGenerator,
+};
+pub use create_session_from_imported_frontier::{
+    CreateSessionFromImportedFrontierIdGenerator, CreateSessionFromImportedFrontierOutcome,
+    CreateSessionFromImportedFrontierRequest, CreateSessionFromImportedFrontierService,
+    CreateSessionFromImportedFrontierTransaction,
+    UuidV7CreateSessionFromImportedFrontierIdGenerator,
 };
 pub use load_session::{LoadSessionService, SessionReader};
 pub use model_execution::{

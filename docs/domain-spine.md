@@ -2981,6 +2981,80 @@ impl<Generator: SessionIdGenerator, Transaction: CreateSessionTransaction>
 }
 ```
 
+## application: create_session_from_imported_frontier
+
+```rust
+pub struct CreateSessionFromImportedFrontierRequest { /* private */ }
+impl CreateSessionFromImportedFrontierRequest {
+    pub fn try_new(
+        command_id: DurableCommandId,
+        imported_frontier: ImportedTranscriptFrontier,
+        relationship: ImportedSessionRelationship,
+        initial_configuration_defaults: SessionConfigurationDefaults,
+    ) -> Result<Self, InvalidDurableCommandId>;
+    // accessors: command_id(), imported_frontier(), relationship(),
+    //   initial_configuration_defaults()
+}
+
+pub trait CreateSessionFromImportedFrontierIdGenerator {
+    fn next_session_id(&mut self) -> SessionId;
+    fn next_semantic_entry_id(&mut self) -> SemanticTranscriptEntryId;
+    fn next_context_frontier_id(&mut self) -> ContextFrontierId;
+}
+
+pub struct UuidV7CreateSessionFromImportedFrontierIdGenerator;
+// Default; impl CreateSessionFromImportedFrontierIdGenerator
+
+pub enum CreateSessionFromImportedFrontierOutcome {
+    Applied(CreateSessionFromImportedFrontierAppliedResult),
+    ImportedConversationNotFound {
+        conversation: ImportedConversationId,
+    },
+    ImportedFrontierNotFound {
+        frontier: ImportedTranscriptFrontier,
+    },
+    ConflictingReuse {
+        command_id: DurableCommandId,
+    },
+}
+
+pub trait CreateSessionFromImportedFrontierTransaction {
+    type Error;
+
+    fn handle<NextSemanticEntryId>(
+        &mut self,
+        command: CreateSessionFromImportedFrontier,
+        session: SessionId,
+        seed_frontier: ContextFrontierId,
+        next_semantic_entry_id: NextSemanticEntryId,
+    ) -> impl Future<
+        Output = Result<CreateSessionFromImportedFrontierOutcome, Self::Error>,
+    > + Send
+    where
+        NextSemanticEntryId: FnMut() -> SemanticTranscriptEntryId + Send;
+}
+
+pub struct CreateSessionFromImportedFrontierService<Generator, Transaction> {
+    /* private */
+}
+impl<Generator, Transaction>
+    CreateSessionFromImportedFrontierService<Generator, Transaction>
+{
+    pub const fn new(ids: Generator, transaction: Transaction) -> Self;
+    pub fn into_parts(self) -> (Generator, Transaction);
+}
+impl<
+    Generator: CreateSessionFromImportedFrontierIdGenerator + Send,
+    Transaction: CreateSessionFromImportedFrontierTransaction,
+> CreateSessionFromImportedFrontierService<Generator, Transaction>
+{
+    pub async fn execute(
+        &mut self,
+        request: CreateSessionFromImportedFrontierRequest,
+    ) -> Result<CreateSessionFromImportedFrontierOutcome, Transaction::Error>;
+}
+```
+
 ## application: load_session
 
 ```rust
@@ -3669,39 +3743,40 @@ impl<
 
 ## Inventory
 
-| Module                                | Public types         |
-| ------------------------------------- | -------------------- |
-| domain: lib.rs identities             | 11                   |
-| domain: actor                         | 1                    |
-| domain: imported_conversation         | 29                   |
-| domain: session                       | 21                   |
-| domain: imported_session              | 18                   |
-| domain: configuration                 | 19                   |
-| domain: accepted_input                | 5                    |
-| domain: delivery_request              | 2                    |
-| domain: user_content                  | 4                    |
-| domain: submit_input                  | 15                   |
-| domain: queue_order                   | 5 (+1 free fn)       |
-| domain: turn_lifecycle                | 10                   |
-| domain: turn_eligibility              | 27                   |
-| domain: turn_attempt                  | 13                   |
-| domain: model_call                    | 12                   |
-| domain: model_execution               | 41                   |
-| domain: context_frontier              | 6                    |
-| domain: semantic_entry                | 4                    |
-| domain: provider_evidence             | 5                    |
-| domain: applied_interrupt             | 2                    |
-| domain: fatal_mismatch                | 0                    |
-| domain: replace_session_defaults      | 13                   |
-| **signalbox-domain total**            | **263 (+1 free fn)** |
-| application: conversation_import      | 8 (incl. 3 traits)   |
-| application: create_session           | 8 (incl. 2 traits)   |
-| application: load_session             | 2 (incl. 1 trait)    |
-| application: model_execution          | 28 (incl. 7 traits)  |
-| application: operator_failure         | 2 (incl. 1 trait)    |
-| application: replace_session_defaults | 4 (incl. 1 trait)    |
-| application: scheduler                | 12 (incl. 4 traits)  |
-| application: start_eligible_turn      | 5 (incl. 2 traits)   |
-| application: startup_scan             | 7 (incl. 2 traits)   |
-| application: submit_input             | 7 (incl. 2 traits)   |
-| **signalbox-application total**       | **83**               |
+| Module                                             | Public types         |
+| -------------------------------------------------- | -------------------- |
+| domain: lib.rs identities                          | 11                   |
+| domain: actor                                      | 1                    |
+| domain: imported_conversation                      | 29                   |
+| domain: session                                    | 21                   |
+| domain: imported_session                           | 18                   |
+| domain: configuration                              | 19                   |
+| domain: accepted_input                             | 5                    |
+| domain: delivery_request                           | 2                    |
+| domain: user_content                               | 4                    |
+| domain: submit_input                               | 15                   |
+| domain: queue_order                                | 5 (+1 free fn)       |
+| domain: turn_lifecycle                             | 10                   |
+| domain: turn_eligibility                           | 27                   |
+| domain: turn_attempt                               | 13                   |
+| domain: model_call                                 | 12                   |
+| domain: model_execution                            | 41                   |
+| domain: context_frontier                           | 6                    |
+| domain: semantic_entry                             | 4                    |
+| domain: provider_evidence                          | 5                    |
+| domain: applied_interrupt                          | 2                    |
+| domain: fatal_mismatch                             | 0                    |
+| domain: replace_session_defaults                   | 13                   |
+| **signalbox-domain total**                         | **263 (+1 free fn)** |
+| application: conversation_import                   | 8 (incl. 3 traits)   |
+| application: create_session                        | 8 (incl. 2 traits)   |
+| application: create_session_from_imported_frontier | 6 (incl. 2 traits)   |
+| application: load_session                          | 2 (incl. 1 trait)    |
+| application: model_execution                       | 28 (incl. 7 traits)  |
+| application: operator_failure                      | 2 (incl. 1 trait)    |
+| application: replace_session_defaults              | 4 (incl. 1 trait)    |
+| application: scheduler                             | 12 (incl. 4 traits)  |
+| application: start_eligible_turn                   | 5 (incl. 2 traits)   |
+| application: startup_scan                          | 7 (incl. 2 traits)   |
+| application: submit_input                          | 7 (incl. 2 traits)   |
+| **signalbox-application total**                    | **89**               |
