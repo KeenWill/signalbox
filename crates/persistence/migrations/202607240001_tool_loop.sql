@@ -3213,7 +3213,6 @@ BEGIN
          WHERE issuing_turn_attempt_id = lifecycle.terminal_attempt_id
            AND turn_id = lifecycle.turn_id
            AND session_id = lifecycle.session_id
-           AND effect_class = 'effect_free'
            AND state_kind = 'terminal'
            AND terminal_disposition_kind = 'known_failed'
            AND error_kind = 'crash_lost'
