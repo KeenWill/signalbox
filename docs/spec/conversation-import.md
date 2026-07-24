@@ -171,7 +171,20 @@ domain or application crates.
 `ClaudeCodeJsonlConverter` implements
 `ClaudeCodeSessionJsonl { converter_version: 1 }`. It parses one JSON object per
 nonempty line, raw-preserves every record, and processes records in physical
-file order:
+file order. Version 1 scans for LF bytes. An LF ends and is excluded from a
+record; an immediately preceding CR is also excluded as the other half of a CRLF
+delimiter. A CR anywhere else remains record content. Nonempty bytes after the
+final delimiter form a final unterminated record, while a terminal LF or CRLF
+does not create another record. An empty delimited record rejects the complete
+conversion.
+
+The parser retains object-member order and duplicate names in the complete
+normalized source object. At every object level, repeating a member name that
+version 1 consults to produce a normalized entry or attestation rejects the
+complete conversion. Duplicate names inside otherwise unmodeled structured
+values remain preserved and do not acquire fabricated selection semantics.
+
+Records then normalize as follows:
 
 1. A top-level record whose `type` is neither `user` nor `assistant` produces
    one `SourceEvent` containing its type attestation and complete normalized
