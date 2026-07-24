@@ -57,6 +57,19 @@ identifiers refer to [scenarios.md](scenarios.md).
   [sessions-and-transcript](spec/sessions-and-transcript.md). Blocks those
   extensions. (S02, S17, S28)
 
+## Conversation import
+
+- **Exact mappings for additional source formats.** Codex sessions and older
+  backup formats have no converter. A later slice must select each source
+  format's exact mapping and converter version, with synthetic fixtures and
+  persistence round-trip coverage. The accepted format-versioned converter seam
+  remains fixed, and no later converter may reinterpret Claude Code version 1.
+  (S28)
+- **Import discovery and operational surfaces.** Directory traversal, file
+  watching, bulk-import policy, source-size admission, client presentation, and
+  raw-record access are not implemented. Their interfaces, limits, and
+  authorization remain undecided. (S28)
+
 ## Delegation
 
 - **Parent cancellation propagation to active delegated children.** Leaning:
