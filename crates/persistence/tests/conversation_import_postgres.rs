@@ -391,6 +391,53 @@ async fn s28_inv039_seed_link_can_precede_semantic_prefix() -> Result<(), Box<dy
     Ok(())
 }
 
+/// S28 / INV-039: a seed link inserted by a nested transaction still belongs to
+/// its top-level transaction, so the remaining prefix may be assembled after the
+/// savepoint is released.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s28_inv039_savepoint_seed_link_can_precede_semantic_prefix() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let mut transaction = pool.begin().await?;
+    let seed = insert_imported_resume_seed_scaffolding(&mut transaction).await?;
+
+    sqlx::query("SAVEPOINT insert_seed_link")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        "INSERT INTO imported_session_seed
+            (session_id, seed_context_frontier_id)
+         VALUES ($1, $2)",
+    )
+    .bind(seed.session)
+    .bind(seed.seed_frontier)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query("RELEASE SAVEPOINT insert_seed_link")
+        .execute(&mut *transaction)
+        .await?;
+
+    insert_imported_semantic_prefix(&mut transaction, seed).await?;
+    insert_exact_seed_members(&mut transaction, seed).await?;
+    transaction.commit().await?;
+
+    let stored: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM imported_session_seed),
+            (SELECT count(*) FROM semantic_transcript_entry
+              WHERE payload_kind = 'imported_entry'),
+            (SELECT count(*) FROM context_frontier_member)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(stored, (1, 2, 2));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S28 / INV-039: the one-to-one seed link can precede its imported session;
 /// the deferred ancestry check validates the final cross-table facts.
 #[tokio::test]

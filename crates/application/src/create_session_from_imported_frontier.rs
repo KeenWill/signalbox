@@ -220,13 +220,12 @@ mod tests {
     };
 
     use signalbox_domain::{
-        CreateSessionFromImportedFrontierAppliedResult, DirectModelSelection, ImportedConversation,
-        ImportedConversationFormat, ImportedConversationId, ImportedRawRecordPosition,
-        ImportedRawSourceRecord, ImportedRecordEntryPosition, ImportedSourceAttestation,
-        ImportedSourceMetadata, ImportedSpeaker, ImportedStructuredObjectMember,
-        ImportedStructuredValue, ImportedText, ImportedTranscriptContent,
-        ImportedTranscriptEntryId, ImportedTranscriptEntryInput, ImportedTranscriptPosition,
-        ModelSelectionRequest,
+        DirectModelSelection, ImportedConversation, ImportedConversationFormat,
+        ImportedConversationId, ImportedRawRecordPosition, ImportedRawSourceRecord,
+        ImportedRecordEntryPosition, ImportedSourceAttestation, ImportedSourceMetadata,
+        ImportedSpeaker, ImportedStructuredObjectMember, ImportedStructuredValue, ImportedText,
+        ImportedTranscriptContent, ImportedTranscriptEntryId, ImportedTranscriptEntryInput,
+        ImportedTranscriptPosition, ModelSelectionRequest,
     };
     use uuid::{Uuid, Variant, Version};
 
@@ -682,19 +681,47 @@ mod tests {
     fn s28_inv012_equal_replay_discards_fresh_fixed_candidates() {
         let conversation = imported_conversation();
         let selected = frontier(&conversation);
-        let recorded_session = session_id(99);
-        let recorded = CreateSessionFromImportedFrontierOutcome::Applied(applied_result(
-            &conversation,
+        let replayed_command = command_id(1);
+        let replayed_relationship = ImportedSessionRelationship::Resume;
+        let replayed_defaults = defaults(20);
+        let replayed_request = CreateSessionFromImportedFrontierRequest::try_new(
+            replayed_command,
             selected,
-            recorded_session,
-        ));
+            replayed_relationship,
+            replayed_defaults,
+        )
+        .expect("fixture request is admitted");
+        let recorded_session = session_id(99);
+        let recorded_frontier = context_frontier_id(90);
+        let mut recorded_entries = [semantic_entry_id(100), semantic_entry_id(101)].into_iter();
+        let recorded = CreateSessionFromImportedFrontierOutcome::Applied(
+            DomainCreateSessionFromImportedFrontier::new(
+                replayed_command,
+                selected,
+                replayed_relationship,
+                replayed_defaults,
+            )
+            .prepare(&conversation, recorded_session, recorded_frontier, || {
+                recorded_entries
+                    .next()
+                    .expect("fixture supplies each recorded semantic entry")
+            })
+            .expect("fixture target prepares")
+            .applied_result(),
+        );
+        assert_eq!(
+            recorded_entries.next(),
+            None,
+            "fixture must supply exactly the selected imported prefix"
+        );
+        let fresh_session = session_id(30);
+        let fresh_frontier = context_frontier_id(40);
         let mut service = CreateSessionFromImportedFrontierService::new(
-            FakeIds::new([session_id(30)], [], [context_frontier_id(40)]),
+            FakeIds::new([fresh_session], [], [fresh_frontier]),
             FakeTransaction::returning([FakeResponse::Return(recorded)]),
         );
 
-        let outcome = run_ready(service.execute(request(command_id(1), selected)))
-            .expect("equal replay succeeds");
+        let outcome = run_ready(service.execute(replayed_request)).expect("equal replay succeeds");
         assert_eq!(outcome, recorded);
         let (ids, transaction) = service.into_parts();
         assert_eq!(ids.session_calls, 1);
@@ -709,8 +736,9 @@ mod tests {
     fn s28_inv012_conflicting_reuse_is_typed_and_not_retried() {
         let conversation = imported_conversation();
         let selected = frontier(&conversation);
+        let conflicting_command = command_id(1);
         let expected = CreateSessionFromImportedFrontierOutcome::ConflictingReuse {
-            command_id: command_id(1),
+            command_id: conflicting_command,
         };
         let mut service = CreateSessionFromImportedFrontierService::new(
             FakeIds::new([session_id(30)], [], [context_frontier_id(40)]),
@@ -718,7 +746,7 @@ mod tests {
         );
 
         assert_eq!(
-            run_ready(service.execute(request(command_id(1), selected))),
+            run_ready(service.execute(request(conflicting_command, selected))),
             Ok(expected)
         );
         let (ids, transaction) = service.into_parts();
@@ -785,28 +813,5 @@ mod tests {
         assert_eq!(ids.frontier_calls, 1);
         assert_eq!(ids.semantic_entry_calls, 0);
         assert_eq!(transaction.observed.len(), 1);
-    }
-
-    fn applied_result(
-        conversation: &ImportedConversation,
-        selected: ImportedTranscriptFrontier,
-        session: SessionId,
-    ) -> CreateSessionFromImportedFrontierAppliedResult {
-        DomainCreateSessionFromImportedFrontier::new(
-            command_id(1),
-            selected,
-            ImportedSessionRelationship::Resume,
-            defaults(20),
-        )
-        .prepare(conversation, session, context_frontier_id(90), {
-            let mut next = 100_u128;
-            move || {
-                let identity = semantic_entry_id(next);
-                next += 1;
-                identity
-            }
-        })
-        .expect("fixture target prepares")
-        .applied_result()
     }
 }
