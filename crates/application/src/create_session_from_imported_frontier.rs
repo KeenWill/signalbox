@@ -570,18 +570,21 @@ mod tests {
     fn s28_request_preserves_the_complete_caller_payload() {
         let conversation = imported_conversation();
         let selected = frontier(&conversation);
+        let identity = command_id(1);
+        let relationship = ImportedSessionRelationship::Fork;
+        let initial_defaults = defaults(20);
         let request = CreateSessionFromImportedFrontierRequest::try_new(
-            command_id(1),
+            identity,
             selected,
-            ImportedSessionRelationship::Fork,
-            defaults(20),
+            relationship,
+            initial_defaults,
         )
         .expect("fixture request is admitted");
 
-        assert_eq!(request.command_id(), command_id(1));
+        assert_eq!(request.command_id(), identity);
         assert_eq!(request.imported_frontier(), selected);
-        assert_eq!(request.relationship(), ImportedSessionRelationship::Fork);
-        assert_eq!(request.initial_configuration_defaults(), defaults(20));
+        assert_eq!(request.relationship(), relationship);
+        assert_eq!(request.initial_configuration_defaults(), initial_defaults);
     }
 
     /// S28 / INV-001 / INV-002: production generation supplies fresh UUIDv7
@@ -589,22 +592,34 @@ mod tests {
     #[test]
     fn s28_inv001_inv002_production_generator_supplies_fresh_uuid_v7_candidates() {
         let mut generator = UuidV7CreateSessionFromImportedFrontierIdGenerator;
-        let first_session = generator.next_session_id();
-        let first_entry = generator.next_semantic_entry_id();
-        let first_frontier = generator.next_context_frontier_id();
-        let second_session = generator.next_session_id();
-        let second_entry = generator.next_semantic_entry_id();
-        let second_frontier = generator.next_context_frontier_id();
+        let first_session = generator.next_session_id().into_uuid();
+        let first_entry = generator.next_semantic_entry_id().into_uuid();
+        let first_frontier = generator.next_context_frontier_id().into_uuid();
+        let second_session = generator.next_session_id().into_uuid();
+        let second_entry = generator.next_semantic_entry_id().into_uuid();
+        let second_frontier = generator.next_context_frontier_id().into_uuid();
 
         assert_ne!(first_session, second_session);
+        assert_ne!(first_session, first_entry);
+        assert_ne!(first_session, first_frontier);
+        assert_ne!(first_session, second_entry);
+        assert_ne!(first_session, second_frontier);
         assert_ne!(first_entry, second_entry);
+        assert_ne!(first_entry, first_frontier);
+        assert_ne!(first_entry, second_session);
+        assert_ne!(first_entry, second_frontier);
         assert_ne!(first_frontier, second_frontier);
-        assert_uuid_v7(first_session.into_uuid());
-        assert_uuid_v7(first_entry.into_uuid());
-        assert_uuid_v7(first_frontier.into_uuid());
-        assert_uuid_v7(second_session.into_uuid());
-        assert_uuid_v7(second_entry.into_uuid());
-        assert_uuid_v7(second_frontier.into_uuid());
+        assert_ne!(first_frontier, second_session);
+        assert_ne!(first_frontier, second_entry);
+        assert_ne!(second_session, second_entry);
+        assert_ne!(second_session, second_frontier);
+        assert_ne!(second_entry, second_frontier);
+        assert_uuid_v7(first_session);
+        assert_uuid_v7(first_entry);
+        assert_uuid_v7(first_frontier);
+        assert_uuid_v7(second_session);
+        assert_uuid_v7(second_entry);
+        assert_uuid_v7(second_frontier);
     }
 
     /// S28 / INV-038 / INV-039: one invocation passes fixed candidates once
