@@ -148,9 +148,9 @@ queued turn, and constructs atomically-committable state:
   immediately before it;
 - the starting context frontier: the predecessor's terminal frontier with the
   fresh origin semantic entry appended (prefix-preserving); for a
-  first-in-session turn, the session's exact selected imported-prefix frontier
-  followed by the origin entry when ancestry is `ImportedConversation`, or only
-  the origin entry when ancestry is `None`;
+  first-in-session turn, the exact frontier identity stored by the session's
+  `ImportedSessionSeed` followed by the origin entry when ancestry is
+  `ImportedConversation`, or only the origin entry when ancestry is `None`;
 - the opaque `AcceptedInputTurnStart` binding lineage and frontier, whose
   constructor is private to validated eligibility (INV-009 — a raw identifier or
   list supplied by a caller is not start authority); and
@@ -375,8 +375,11 @@ membership — exact declared count, positions `1..count` — at commit, and
 reconstitution rejects any stored snapshot whose resolved membership disagrees
 with the complete entry set — one identifier can never resolve differently.
 Imported ancestry resolves only through the checked session-creation producer;
-`SingleSource` ancestry resolution remains unimplemented. `TranscriptFrontier`
-itself is [sessions-and-transcript](sessions-and-transcript.md) scope.
+its separate one-to-one `ImportedSessionSeed` must name the exact stored
+frontier identity whose membership matches the selected imported prefix.
+Equal-content reminting fails reconstitution. `SingleSource` ancestry resolution
+remains unimplemented. `TranscriptFrontier` itself is
+[sessions-and-transcript](sessions-and-transcript.md) scope.
 
 ## Evidence-bearing reconstitution
 

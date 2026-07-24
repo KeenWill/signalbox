@@ -291,7 +291,8 @@ impl ImportedTranscriptEntryInput {
 }
 
 pub struct ImportedTranscriptEntry { /* private */ }
-// sealed: ImportedConversationReconstitutionInput::reconstitute
+// sealed: ImportedConversation::from_converted_records or
+// ImportedConversationReconstitutionInput::reconstitute
 impl ImportedTranscriptEntry {
     // accessors: identity(), conversation(), position(), raw_record_position(),
     //   record_entry_position(), source_speaker(), content(), source()
