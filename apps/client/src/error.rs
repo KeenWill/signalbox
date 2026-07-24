@@ -35,6 +35,10 @@ impl ClientError {
 
     pub(crate) fn mutation(self) -> Self {
         match self {
+            Self::Remote {
+                code: ErrorCode::CommitAmbiguous,
+                ..
+            } => Self::AmbiguousMutation,
             Self::Remote { .. } => self,
             Self::Io(_)
             | Self::Encode(_)
@@ -188,13 +192,21 @@ impl fmt::Display for RejectionDisplay {
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
+    use signalbox_process_protocol::{ErrorCode, ErrorDetail};
 
     use super::ClientError;
 
     #[test]
-    fn ambiguous_mutation_names_the_complete_replay_inputs() {
+    fn commit_ambiguous_mutation_names_the_complete_replay_inputs() {
+        let error = ClientError::remote(
+            ErrorCode::CommitAmbiguous,
+            "the commit response was lost".to_owned(),
+            ErrorDetail::none(),
+        )
+        .mutation();
+
         expect![[r#"
             the mutation outcome may be ambiguous; retry the original command with the same arguments and exact input, using any printed recovery values"#]]
-        .assert_eq(&ClientError::AmbiguousMutation.to_string());
+        .assert_eq(&error.to_string());
     }
 }

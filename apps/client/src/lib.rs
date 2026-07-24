@@ -184,7 +184,7 @@ async fn create(
             code,
             message,
             detail,
-        } => Err(ClientError::remote(code, message, detail)),
+        } => Err(ClientError::remote(code, message, detail).mutation()),
         _ => Err(ClientError::Protocol("create returned an unexpected response").mutation()),
     }
 }
@@ -305,7 +305,7 @@ async fn submit_input(
             code,
             message,
             detail,
-        } => Err(ClientError::remote(code, message, detail)),
+        } => Err(ClientError::remote(code, message, detail).mutation()),
         _ => Err(ClientError::Protocol("submit returned an unexpected response").mutation()),
     }
 }
