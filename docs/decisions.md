@@ -204,6 +204,36 @@ deadlines would add unrelated timing semantics.
 process-runtime memory retention under response backpressure; wire shapes and
 admission limits do not change.
 
+## 2026-07-24 — Bind imported sessions to immutable seed provenance
+
+**Context.** The conversation-import decision separates pure ingestion from
+later session creation, but the durable link between a created session and its
+materialized imported prefix, and the repository-safe validation boundary for
+source transcripts, need an explicit record.
+
+**Decision.** Store one separate immutable `ImportedSessionSeed` for each
+imported-ancestry session, binding that session one-to-one to the exact local
+frontier that materializes its selected prefix. Committed test fixtures are
+synthetic. Validation against owner transcripts is explicit local opt-in and
+never prints transcript content. An owner-private importer was studied read-only
+as provenance and background only; it is not normative authority, and the public
+repository does not reproduce its private vocabulary or design details. The
+persistence adapter advances new imported-content encodings to version 2 for the
+generic message/result block tags while retaining decoding of the original
+closed version-1 content vocabulary.
+
+**Rejected alternatives.** Deriving seed provenance from whichever native turn
+happens to exist would lose the creation-time boundary and fail for a newly
+created or merely queued session. Committing real transcripts would expose
+private content. Treating private prior art as a public design source would
+violate the repository's public-source boundary. Extending version 1 in place
+would make rollback and mixed-version readers interpret one version
+inconsistently.
+
+**Affects.** Imported-session storage and reconstitution, synthetic and opt-in
+import tests, the imported-content adapter encoding, and the provenance boundary
+of the conversation-import stack.
+
 ## 2026-07-23 — Import external conversations as records and seed native sessions
 
 **Context.** External AI transcripts need to become durable Signalbox history
@@ -225,24 +255,14 @@ domain-separated, length-framed source digest makes exact reingestion
 idempotent. Import is pure ingestion: resume-style or fork-style selection is a
 later client-invoked session-creation fact. Both select any addressable imported
 frontier and leave the imported snapshot unchanged. Imported semantic entries
-remain provenance-distinct from native evidence. A separate immutable one-to-one
-`ImportedSessionSeed` binds each imported session to the exact local frontier
-materializing its selected prefix. Initial rendering emits exact imported
-user/assistant text and conservatively omits imported tool, result, thinking,
-and media entries without removing them from the frontier. Claude Code JSONL
-version 1 admits a maximum array/object nesting depth of 128. The required
+remain provenance-distinct from native evidence. Initial rendering emits exact
+imported user/assistant text and conservatively omits imported tool, result,
+thinking, and media entries without removing them from the frontier. Claude Code
+JSONL version 1 admits a maximum array/object nesting depth of 128. The required
 top-level record object counts as depth 1, depth 128 is admitted, and attempting
 to enter a container at depth 129 rejects the complete source, as specified by
 [conversation-import](spec/conversation-import.md). This bounds its recursive
-source-neutral JSON decoder. Committed fixtures are synthetic; local validation
-against real transcripts is explicit opt-in and content-silent.
-
-Read-only study of the owner's unmerged `llm_hub` importer informed the
-content-hash deduplication boundary, its
-`import_only`/`adopt_resume`/`adopt_fork` vocabulary, native-event format
-survey, and opt-in real-transcript test pattern. Signalbox reimplements those
-useful ideas through its Rust domain and persistence seams; it does not inherit
-the prior import-time adoption coupling.
+source-neutral JSON decoder.
 
 **Rejected alternatives.** Replaying imports as native turns or copying them
 into native accepted-input/model-call variants would fabricate execution
