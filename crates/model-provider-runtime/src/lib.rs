@@ -789,6 +789,15 @@ mod tests {
         })
     }
 
+    #[track_caller]
+    fn assert_invalid_tool_proposal_closes(evidence: TerminalEvidence) {
+        assert_eq!(
+            classify_terminal(evidence, &[], "model-exact")
+                .expect("invalid proposal has a durable terminal classification"),
+            ModelCallTerminalObservation::KnownFailed
+        );
+    }
+
     fn tool_completion(model: &str) -> TerminalEvidence {
         TerminalEvidence::Completed(CompletionEvidence {
             exchange: ExchangeFacts::default(),
@@ -1150,13 +1159,9 @@ mod tests {
             usage: TokenUsage::unreported(),
         });
 
-        for evidence in [invalid_name, oversized_arguments, mismatched_finish] {
-            assert_eq!(
-                classify_terminal(evidence, &[], "model-exact")
-                    .expect("invalid proposal has a durable terminal classification"),
-                ModelCallTerminalObservation::KnownFailed
-            );
-        }
+        assert_invalid_tool_proposal_closes(invalid_name);
+        assert_invalid_tool_proposal_closes(oversized_arguments);
+        assert_invalid_tool_proposal_closes(mismatched_finish);
     }
 
     /// INV-014: either early or terminal provider-model mismatch prevents
