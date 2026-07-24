@@ -80,9 +80,11 @@ The hub owns at most 128 accepted connection tasks. At that limit it leaves new
 connections in the bounded listener backlog until an active task exits, then
 resumes accepting. The limit counts long-lived follow connections and ordinary
 request connections alike. At most eight connection tasks may accumulate an
-inbound frame simultaneously; the others wait without a growing frame
-accumulator. Together with the 8 MiB frame cap, this bounds aggregate raw
-inbound-frame accumulation at 64 MiB.
+inbound frame simultaneously. An idle connection holds no frame slot: each
+connection may buffer at most 8 KiB while waiting for its first byte, then
+reserves a slot before extending that buffered prefix into a frame. This bounds
+pre-admission read-ahead across 128 tasks at 1 MiB and aggregate admitted raw
+frame accumulation at 64 MiB.
 
 Why: the first client needs a small local process boundary, while remote access
 would require an authenticated identity and revocation design that does not yet
@@ -259,7 +261,12 @@ and streams the completed file. A slow client therefore holds neither a
 PostgreSQL snapshot nor transcript-sized heap state. Per request, heap retention
 is bounded by one decoded row, one protocol frame, and fixed I/O buffers;
 temporary disk usage follows the complete encoded transcript size. Projection or
-spool failure exposes no partial snapshot sequence.
+spool failure before transmission returns `unavailable` and exposes no partial
+snapshot sequence. Once transmission starts, peer-write failure closes only that
+connection, while an unexpected read failure from the completed spool is fatal
+runtime evidence because a valid snapshot has already begun. A follow request
+closes the spool immediately after transmitting the snapshot, before waiting for
+live events.
 
 Session-list, transcript-read, and follow-snapshot construction share bounded
 admission that reserves application-pool capacity for non-snapshot work. The

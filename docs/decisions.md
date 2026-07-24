@@ -10,6 +10,43 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-23 — Reserve inbound frame capacity only after bounded read readiness
+
+**Context.** Reserving one of eight frame slots before waiting for input lets
+eight idle clients prevent every later connection from sending a request.
+
+**Decision.** Give each of the at most 128 accepted tasks an explicit 8 KiB
+reader buffer, wait until that buffer observes input, and only then reserve a
+frame slot before accumulating the rest of the frame. This admits at most 1 MiB
+of aggregate pre-slot read-ahead in addition to the existing 64 MiB admitted
+frame bound.
+
+**Rejected alternatives.** Charging idle clients makes the eight-slot budget an
+availability gate. Per-connection read deadlines invent timing semantics.
+Unbounded pre-slot reads merely move the memory defect.
+
+**Affects.** Process-runtime connection scheduling and inbound memory bounds;
+wire framing and the eight-frame concurrency limit do not change.
+
+## 2026-07-23 — Classify snapshot-spool I/O by response exposure
+
+**Context.** Temporary-file creation, write, flush, seek, and read failures were
+classified as peer I/O, so the runtime silently discarded server-side resource
+failures as ordinary client disconnects.
+
+**Decision.** Before any response bytes are exposed, translate spool I/O failure
+to sanitized `unavailable`. During transmission, classify sink failure as
+connection-local peer I/O and source-spool read failure as fatal runtime
+evidence. Close a follow snapshot's file immediately after its transmission.
+
+**Rejected alternatives.** Treating every I/O error as a disconnect hides server
+failure. Making every spool failure fatal denies a request a safe pre-exposure
+infrastructure response. Retaining the file through live follow wastes disk and
+a descriptor.
+
+**Affects.** Session-list and transcript spool errors, follow resource lifetime,
+runtime failure classification, and process-protocol tests.
+
 ## 2026-07-23 — Bound process snapshot construction resources
 
 **Context.** A valid deployment has no aggregate session-count or

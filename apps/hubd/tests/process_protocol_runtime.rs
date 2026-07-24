@@ -14,7 +14,9 @@ use std::{
 };
 
 use signalbox_application::InProcessEligibilityWorkSource;
-use signalbox_hubd::{HubModelConfiguration, LocalProcessListener, ProcessRuntime};
+use signalbox_hubd::{
+    HubModelConfiguration, LocalProcessListener, ProcessRuntime, ProcessRuntimeError,
+};
 use signalbox_persistence::{
     local_test_connection_options, migrate, scheduler::PostgresEligibilitySweep,
 };
@@ -35,6 +37,7 @@ use tokio::{
         unix::{OwnedReadHalf, OwnedWriteHalf},
     },
     sync::watch,
+    task::JoinHandle,
     time::timeout,
 };
 use uuid::Uuid;
@@ -154,52 +157,131 @@ fn command() -> Result<CommandId, Box<dyn Error>> {
     Ok(CommandId::try_from_uuid(Uuid::now_v7())?)
 }
 
-/// S24 / INV-032: the guarded process runtime serves every
-/// version-one operation, and a follow subscription formed before its snapshot
-/// observes the next committed outbox event strictly above that snapshot's
-/// cursor.
-#[tokio::test]
-#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s24_process_runtime_serves_snapshot_first_follow_without_a_race()
--> Result<(), Box<dyn Error>> {
-    let (container, pool) = postgres().await?;
-    let socket_directory = SocketDirectory::create()?;
-    let listener = LocalProcessListener::bind(socket_directory.socket())?;
-    let sweep = PostgresEligibilitySweep::new(pool.clone());
-    let (eligibility_nudge, _work_source) = InProcessEligibilityWorkSource::new(sweep);
-    let model_configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
-    let runtime = ProcessRuntime::new(
-        listener,
-        pool.clone(),
-        eligibility_nudge,
-        model_configuration,
-    );
-    let (shutdown, shutdown_receiver) = watch::channel(false);
-    let runtime_task = tokio::spawn(runtime.run(shutdown_receiver));
+struct RunningRuntime {
+    container: ContainerAsync<Postgres>,
+    pool: PgPool,
+    socket_directory: SocketDirectory,
+    shutdown: watch::Sender<bool>,
+    runtime_task: JoinHandle<Result<(), ProcessRuntimeError>>,
+    _work_source: InProcessEligibilityWorkSource<PostgresEligibilitySweep>,
+}
 
-    let mut commands = Connection::connect(socket_directory.socket()).await?;
-    let alias_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
-    commands
+impl RunningRuntime {
+    async fn start() -> Result<Self, Box<dyn Error>> {
+        let (container, pool) = postgres().await?;
+        let socket_directory = SocketDirectory::create()?;
+        let listener = LocalProcessListener::bind(socket_directory.socket())?;
+        let sweep = PostgresEligibilitySweep::new(pool.clone());
+        let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
+        let model_configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
+        let runtime = ProcessRuntime::new(
+            listener,
+            pool.clone(),
+            eligibility_nudge,
+            model_configuration,
+        );
+        let (shutdown, shutdown_receiver) = watch::channel(false);
+        let runtime_task = tokio::spawn(runtime.run(shutdown_receiver));
+        Ok(Self {
+            container,
+            pool,
+            socket_directory,
+            shutdown,
+            runtime_task,
+            _work_source: work_source,
+        })
+    }
+
+    fn socket(&self) -> &Path {
+        self.socket_directory.socket()
+    }
+
+    async fn stop(self) -> Result<(), Box<dyn Error>> {
+        self.shutdown.send(true)?;
+        timeout(Duration::from_secs(10), self.runtime_task).await???;
+        self.pool.close().await;
+        self.socket_directory.cleanup()?;
+        drop(self.container);
+        Ok(())
+    }
+}
+
+async fn create_alias_session(
+    connection: &mut Connection,
+) -> Result<CanonicalUuid, Box<dyn Error>> {
+    connection
         .request(
             1,
             ClientRequest::CreateSession {
                 command_id: command()?,
-                initial_model_selection: ModelSelection::Alias { alias_id },
+                initial_model_selection: ModelSelection::Alias {
+                    alias_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+                },
             },
         )
         .await?;
-    let session_id = match commands.response().await?.message() {
-        ServerMessage::SessionCreated { session_id } => *session_id,
-        message => return Err(io::Error::other(format!("unexpected create: {message:?}")).into()),
-    };
+    match connection.response().await?.message() {
+        ServerMessage::SessionCreated { session_id } => Ok(*session_id),
+        message => Err(io::Error::other(format!(
+            "unexpected create-session fixture response: {message:?}"
+        ))
+        .into()),
+    }
+}
 
-    commands.request(2, ClientRequest::ListSessions {}).await?;
+async fn submit_first_input(
+    connection: &mut Connection,
+    session_id: CanonicalUuid,
+    content: String,
+) -> Result<(CanonicalUuid, CanonicalUuid), Box<dyn Error>> {
+    connection
+        .request(
+            2,
+            ClientRequest::SubmitInput {
+                command_id: command()?,
+                session_id,
+                content: InputContent::new(content),
+                expected_defaults_version: CanonicalU64::new(1),
+            },
+        )
+        .await?;
+    match connection.response().await?.message() {
+        ServerMessage::InputSubmitted {
+            session_id: submitted_session,
+            accepted_input_id,
+            acceptance_position,
+            turn_id,
+        } if *submitted_session == session_id && acceptance_position.value() == 1 => {
+            Ok((*accepted_input_id, *turn_id))
+        }
+        message => Err(io::Error::other(format!(
+            "unexpected first-input fixture response: {message:?}"
+        ))
+        .into()),
+    }
+}
+
+async fn response_within(connection: &mut Connection) -> Result<ServerFrame, Box<dyn Error>> {
+    timeout(Duration::from_secs(5), connection.response()).await?
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn process_runtime_lists_the_alias_session_projection() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let alias_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+
+    connection
+        .request(2, ClientRequest::ListSessions {})
+        .await?;
+
+    let start = response_within(&mut connection).await?;
+    assert!(matches!(start.message(), ServerMessage::SessionsStart {}));
+    let summary = response_within(&mut connection).await?;
     assert!(matches!(
-        commands.response().await?.message(),
-        ServerMessage::SessionsStart {}
-    ));
-    assert!(matches!(
-        commands.response().await?.message(),
+        summary.message(),
         ServerMessage::SessionSummary {
             session_id: listed,
             defaults_version,
@@ -210,14 +292,26 @@ async fn s24_process_runtime_serves_snapshot_first_follow_without_a_race()
             && defaults_version.value() == 1
             && *listed_alias == alias_id
     ));
+    let end = response_within(&mut connection).await?;
     assert!(matches!(
-        commands.response().await?.message(),
+        end.message(),
         ServerMessage::SessionsEnd { session_count } if session_count.value() == 1
     ));
 
-    commands
+    drop(connection);
+    runtime.stop().await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn process_runtime_rejects_oversized_submitted_input() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+
+    connection
         .request(
-            30,
+            2,
             ClientRequest::SubmitInput {
                 command_id: command()?,
                 session_id,
@@ -226,89 +320,106 @@ async fn s24_process_runtime_serves_snapshot_first_follow_without_a_race()
             },
         )
         .await?;
+
+    let response = response_within(&mut connection).await?;
     assert!(matches!(
-        commands.response().await?.message(),
+        response.message(),
         ServerMessage::Error {
             code: ErrorCode::InvalidRequest,
             ..
         }
     ));
 
-    commands
-        .request(
-            3,
-            ClientRequest::SubmitInput {
-                command_id: command()?,
-                session_id,
-                content: InputContent::new("x".repeat(MAX_SUBMITTED_INPUT_BYTES)),
-                expected_defaults_version: CanonicalU64::new(1),
-            },
-        )
-        .await?;
-    let first_turn = match commands.response().await?.message() {
-        ServerMessage::InputSubmitted {
-            session_id: submitted_session,
-            acceptance_position,
-            turn_id,
-            ..
-        } if *submitted_session == session_id && acceptance_position.value() == 1 => *turn_id,
-        message => {
-            return Err(io::Error::other(format!("unexpected first submit: {message:?}")).into());
-        }
-    };
+    drop(connection);
+    runtime.stop().await
+}
 
-    let mut transcript = Connection::connect(socket_directory.socket()).await?;
-    transcript
-        .request(4, ClientRequest::ReadTranscript { session_id })
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn process_runtime_admits_exact_limit_submitted_input() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+
+    let _submitted = submit_first_input(
+        &mut connection,
+        session_id,
+        "x".repeat(MAX_SUBMITTED_INPUT_BYTES),
+    )
+    .await?;
+
+    drop(connection);
+    runtime.stop().await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn process_runtime_reads_one_queued_transcript_snapshot() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let content = "queued input".to_owned();
+    let (accepted_input, turn) =
+        submit_first_input(&mut connection, session_id, content.clone()).await?;
+
+    connection
+        .request(3, ClientRequest::ReadTranscript { session_id })
         .await?;
-    let transcript_cursor = match transcript.response().await?.message() {
+
+    let start = response_within(&mut connection).await?;
+    assert!(matches!(
+        start.message(),
         ServerMessage::TranscriptSnapshotStart {
             session_id: snapshot_session,
             cursor,
-        } if *snapshot_session == session_id => cursor.value(),
-        message => {
-            return Err(
-                io::Error::other(format!("unexpected transcript start: {message:?}")).into(),
-            );
-        }
-    };
-    let mut saw_first_turn = false;
-    timeout(Duration::from_secs(5), async {
-        loop {
-            match transcript.response().await?.message() {
-                ServerMessage::TranscriptTurn {
-                    turn_id,
-                    acceptance_position,
-                    state:
-                        TurnState::Queued {
-                            content,
-                            accepted_input_id: _,
-                        },
-                } if *turn_id == first_turn
-                    && acceptance_position.value() == 1
-                    && content.as_str().len() == MAX_SUBMITTED_INPUT_BYTES
-                    && content.as_str().bytes().all(|byte| byte == b'x') =>
-                {
-                    saw_first_turn = true;
-                }
-                ServerMessage::TranscriptSnapshotEnd {
-                    session_id: snapshot_session,
-                    cursor,
-                    ..
-                } if *snapshot_session == session_id && cursor.value() == transcript_cursor => {
-                    return Ok::<(), Box<dyn Error>>(());
-                }
-                ServerMessage::Error { code, .. } => {
-                    return Err(io::Error::other(format!("transcript failed: {code:?}")).into());
-                }
-                _ => {}
-            }
-        }
-    })
-    .await??;
-    assert!(saw_first_turn);
+        } if *snapshot_session == session_id && cursor.value() == 2
+    ));
+    let queued_turn = response_within(&mut connection).await?;
+    assert!(matches!(
+        queued_turn.message(),
+        ServerMessage::TranscriptTurn {
+            turn_id,
+            acceptance_position,
+            state:
+                TurnState::Queued {
+                    accepted_input_id,
+                    content: projected_content,
+                },
+        } if *turn_id == turn
+            && acceptance_position.value() == 1
+            && *accepted_input_id == accepted_input
+            && projected_content.as_str() == content
+    ));
+    let end = response_within(&mut connection).await?;
+    assert!(matches!(
+        end.message(),
+        ServerMessage::TranscriptSnapshotEnd {
+            session_id: snapshot_session,
+            cursor,
+            turn_count,
+            entry_count,
+        } if *snapshot_session == session_id
+            && cursor.value() == 2
+            && turn_count.value() == 1
+            && entry_count.value() == 0
+    ));
 
-    let mut follow = Connection::connect(socket_directory.socket()).await?;
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S24 / INV-032: a follow subscription formed before its snapshot observes
+/// the next committed outbox event strictly above that snapshot's cursor.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s24_process_runtime_follow_snapshot_handoff_has_no_race() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut commands = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut commands).await?;
+    let first_content = "x".repeat(MAX_SUBMITTED_INPUT_BYTES);
+    let (first_accepted_input, first_turn) =
+        submit_first_input(&mut commands, session_id, first_content.clone()).await?;
+    let mut follow = Connection::connect(runtime.socket()).await?;
     follow
         .request(5, ClientRequest::FollowSession { session_id })
         .await?;
@@ -336,32 +447,51 @@ async fn s24_process_runtime_serves_snapshot_first_follow_without_a_race()
             },
         )
         .await?;
-    assert!(matches!(
-        commands.response().await?.message(),
+    let second_accepted_input = match commands.response().await?.message() {
         ServerMessage::InputSubmitted {
             session_id: submitted_session,
+            accepted_input_id,
             acceptance_position,
             ..
-        } if *submitted_session == session_id && acceptance_position.value() == 2
+        } if *submitted_session == session_id && acceptance_position.value() == 2 => {
+            *accepted_input_id
+        }
+        message => {
+            return Err(io::Error::other(format!("unexpected second submit: {message:?}")).into());
+        }
+    };
+
+    let queued_turn = response_within(&mut follow).await?;
+    assert!(matches!(
+        queued_turn.message(),
+        ServerMessage::TranscriptTurn {
+            turn_id,
+            acceptance_position,
+            state:
+                TurnState::Queued {
+                    accepted_input_id,
+                    content: projected_content,
+                },
+        } if *turn_id == first_turn
+            && acceptance_position.value() == 1
+            && *accepted_input_id == first_accepted_input
+            && projected_content.as_str() == first_content
+    ));
+    let snapshot_end = response_within(&mut follow).await?;
+    assert!(matches!(
+        snapshot_end.message(),
+        ServerMessage::TranscriptSnapshotEnd {
+            session_id: snapshot_session,
+            cursor,
+            turn_count,
+            entry_count,
+        } if *snapshot_session == session_id
+            && cursor.value() == follow_cursor
+            && turn_count.value() == 1
+            && entry_count.value() == 0
     ));
 
-    timeout(Duration::from_secs(5), async {
-        loop {
-            if matches!(
-                follow.response().await?.message(),
-                ServerMessage::TranscriptSnapshotEnd {
-                    session_id: snapshot_session,
-                    cursor,
-                    ..
-                } if *snapshot_session == session_id && cursor.value() == follow_cursor
-            ) {
-                return Ok::<(), Box<dyn Error>>(());
-            }
-        }
-    })
-    .await??;
-
-    let followed = timeout(Duration::from_secs(5), follow.response()).await??;
+    let followed = response_within(&mut follow).await?;
     assert!(matches!(
         followed.message(),
         ServerMessage::SessionEvent {
@@ -369,23 +499,19 @@ async fn s24_process_runtime_serves_snapshot_first_follow_without_a_race()
             session_id: event_session,
             event:
                 SessionEvent::InputAccepted {
+                    accepted_input_id,
                     acceptance_position,
                     content,
                     ..
                 },
         } if cursor.value() > follow_cursor
             && *event_session == session_id
+            && *accepted_input_id == second_accepted_input
             && acceptance_position.value() == 2
             && content.as_str() == "second input"
     ));
 
-    shutdown.send(true)?;
-    timeout(Duration::from_secs(10), runtime_task).await???;
     drop(commands);
-    drop(transcript);
     drop(follow);
-    pool.close().await;
-    socket_directory.cleanup()?;
-    drop(container);
-    Ok(())
+    runtime.stop().await
 }
