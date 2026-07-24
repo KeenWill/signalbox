@@ -12,7 +12,7 @@ with the model-runtime crates it composes
 
 ## Process configuration
 
-`signalbox-hubd` reads exactly three deployment values from the process
+`signalbox-hubd` reads exactly four deployment values from the process
 environment at startup:
 
 - `DATABASE_URL` — complete PostgreSQL connection URL. Production connections
@@ -22,6 +22,9 @@ environment at startup:
 - `SIGNALBOX_CONFIG_FILE` — path to the static model/alias catalog (below).
 - `ANTHROPIC_API_KEY_FILE` — path to the file whose bytes are the current
   Anthropic API key value.
+- `SIGNALBOX_SOCKET_PATH` — local Unix-socket path for the version-one
+  [process protocol](process-protocol.md), which owns its binding and trust
+  semantics.
 
 A missing or empty value, an unreadable or invalid catalog file, or a failed
 Anthropic runtime construction fails startup at the `Configuration` phase,
@@ -43,7 +46,9 @@ page owns those transport defaults, positive caller-level exchange-timeout
 overrides, and the whole-exchange bound. Startup ordering, recovery scanning,
 and shutdown policy are
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) scope;
-migration behavior is [persistence-protocol](persistence-protocol.md) scope.
+migration behavior is [persistence-protocol](persistence-protocol.md) scope, and
+the socket boundary and single-hub guard are
+[process-protocol](process-protocol.md) material.
 
 The local `signalbox-debug` harness reads `SIGNALBOX_DEBUG_DATABASE_URL` plus
 the same two file variables in its `--anthropic` mode; it is a development
