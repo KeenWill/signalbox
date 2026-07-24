@@ -10,6 +10,24 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-23 — Configure process-socket mode through its retained identity
+
+**Context.** Unix socket bind does not accept a filesystem mode. Temporarily
+changing `umask` is process-wide, so a module-local mutex cannot prevent
+unrelated threads from creating files under the temporary mask.
+
+**Decision.** Bind the socket unlistening inside its verified owner-private
+parent, retain the observed inode at `<socket-path>.identity`, set exact `0600`
+mode through that retained name, and revalidate both names and their modes
+before listening. Never change the process-wide creation mask.
+
+**Rejected alternatives.** A mutex coordinates only participating creators.
+Leaving a restrictive mask installed changes unrelated process behavior.
+Listening before permissioning admits clients before validation.
+
+**Affects.** Guarded local process-socket bind, its tests, and the process
+transport specification.
+
 ## 2026-07-23 — Pin compared process-socket identities
 
 **Context.** A device-and-inode comparison cannot prove pathname identity after

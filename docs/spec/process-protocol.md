@@ -38,10 +38,11 @@ with exact `0600` permissions, takes its nonblocking exclusive advisory file
 lock, and holds that lock through final socket cleanup. Failure to open, verify,
 or lock the sidecar fails without touching the socket path. The sidecar remains
 after shutdown so a later hub can lock the same inode. While holding that
-lifetime path lock, the hub also reclaims an owned socket left at the reserved
-`<socket-path>.identity` name by an abrupt prior exit; another entry at that
-name fails startup without modification. It then handles the final path as
-follows:
+lifetime path lock, the hub also reclaims a retained socket left at the reserved
+`<socket-path>.identity` name by an abrupt prior exit only when the public and
+reserved names still identify the same owned socket. An orphaned or differently
+paired entry at the reserved name fails startup without modification. It then
+handles the final path as follows:
 
 1. an absent entry is available;
 2. an entry that is not a socket fails startup without modification;
@@ -55,20 +56,20 @@ follows:
 
 The path lock makes the final revalidation and removal indivisible with respect
 to another conforming hub. The bind itself must still create a new socket and
-never replace another entry. The hub creates an unlistening Unix stream socket
-and binds it under a serialized, restored process creation mask so the path
-entry is born with exact owner-only `0600` permissions; it performs no later
-pathname-following permission change. It then verifies that the socket's local
-address is the resolved path, captures the new path entry's socket type,
-effective-user ownership, device, inode, and mode with `lstat`, and verifies
-with a second `lstat` that the same socket entry remains before calling
-`listen`; no connection can be queued before that sequence completes. A hard
-link at the reserved identity name retains that identity for the listener
-lifetime so its device and inode cannot be recycled. Any address, identity,
-ownership, or permission mismatch fails startup and removes no raced entry.
-Graceful shutdown keeps the listener and identity link live while a final
-`lstat` proves the public path still names this hub's socket and removes that
-path, then releases the identity link and path lock.
+never replace another entry. The hub binds a new unlistening Unix stream socket
+inside the verified owner-private parent, captures its socket type,
+effective-user ownership, device, and inode with `lstat`, and retains that inode
+with a hard link at the reserved identity name. Without changing the
+process-wide creation mask, it sets exact owner-only `0600` permissions through
+the retained name, then verifies that both names still identify that socket with
+the required mode and that the descriptor's local address is the resolved path
+before calling `listen`; no connection can be queued before that sequence
+completes. The identity link remains for the listener lifetime so the device and
+inode cannot be recycled. Any address, identity, ownership, or permission
+mismatch fails startup and removes no raced entry. Graceful shutdown keeps the
+listener and identity link live while a final `lstat` proves the public path
+still names this hub's socket and removes that path, then releases the identity
+link and path lock.
 
 The transport is local-machine and single-user only. Version one's lack of
 protocol authentication is provisional; it has no authorization exchange or
