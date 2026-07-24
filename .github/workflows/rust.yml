@@ -27,8 +27,8 @@ jobs:
           python3 -m venv /tmp/mdformat-venv
           /tmp/mdformat-venv/bin/pip install --quiet -r tooling/requirements-mdformat.txt
           /tmp/mdformat-venv/bin/mdformat --check *.md docs/
-      # Conservative inventory for the session-lock protocol recorded in the
-      # 2026-07-20 decision-log entry. The checksum makes changes to the small
+      # Conservative inventory for the recorded session-lock protocols. The
+      # checksum makes changes to the small
       # reviewed inventory explicit; the scan rejects strongest-mode row-lock
       # clauses anywhere else in production Rust. This deliberately performs
       # no Rust or SQL parsing.
@@ -37,7 +37,7 @@ jobs:
           inventory_hash="$(sha256sum \
             crates/persistence/src/lock_inventory.rs | cut -d ' ' -f 1)"
           test "$inventory_hash" = \
-            b3a3864d92443345e67690e5a261a2429a4b9114a874ce05102f3cdc4a00c357
+            82aff1f60b03d2bccfcafc3b4110fffd48e0b7f59831567da89404b0e7c63f2f
           unexpected="$(git ls-files -z 'crates/persistence/src/*.rs' \
             | xargs -0 perl -0777 -ne '
               next if $ARGV =~ m{/lock_inventory[.]rs$};
@@ -90,4 +90,20 @@ jobs:
         run: >-
           cargo test -p signalbox-hubd
           --test offline_reply
+          -- --ignored --test-threads=1
+      - name: Run hubd process-substrate Postgres tests
+        run: >-
+          cargo test -p signalbox-hubd
+          --test process_substrate
+          -- --ignored --test-threads=1
+      - name: Run hubd process-runtime Postgres tests
+        run: >-
+          cargo test -p signalbox-hubd
+          --test process_protocol_runtime
+          -- --ignored --test-threads=1
+      - name: Run terminal client offline end-to-end test
+        run: >-
+          cargo test -p signalbox-client
+          --test end_to_end
+          terminal_client_completes_an_offline_scripted_conversation
           -- --ignored --test-threads=1

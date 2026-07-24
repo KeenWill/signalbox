@@ -255,8 +255,10 @@ durable-transition events after that cursor, and treats streamed drafts as
 replaceable transient content (INV-032). The publication mechanism inside the
 hub is the transactional outbox; its implemented storage foundation and
 same-transaction appends are owned by
-[persistence-protocol](spec/persistence-protocol.md), while the publisher and
-the client-facing protocol remain future work.
+[persistence-protocol](spec/persistence-protocol.md). The local version-one
+publisher and client boundary are owned by
+[process-protocol](spec/process-protocol.md); transient-draft relay and remote
+transports remain future work.
 
 ## Destination features
 
