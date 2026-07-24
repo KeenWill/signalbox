@@ -1227,8 +1227,6 @@ pub(crate) async fn load_scheduling_projection(
                                 .into());
                             }
                             required_model_calls.insert(round_call);
-                            required_frontiers
-                                .insert(batch.yielded_snapshot().frontier().snapshot().into_uuid());
                         }
                         phase
                     }
@@ -1341,8 +1339,6 @@ pub(crate) async fn load_scheduling_projection(
                                 "tool approval wait evidence",
                             ))?;
                         required_model_calls.insert(round_call);
-                        required_frontiers
-                            .insert(batch.yielded_snapshot().frontier().snapshot().into_uuid());
                         ActiveTurnSchedulingReconstitutionInput::awaiting_approval(
                             lifecycle_turn,
                             wait,
@@ -1389,8 +1385,6 @@ pub(crate) async fn load_scheduling_projection(
                                 "tool recovery wait evidence",
                             ))?;
                         required_model_calls.insert(round_call);
-                        required_frontiers
-                            .insert(batch.yielded_snapshot().frontier().snapshot().into_uuid());
                         match (end_variant.as_deref(), end_disposition.as_deref()) {
                             (Some("without_stop"), Some("ambiguous")) => {
                                 ActiveTurnSchedulingReconstitutionInput::awaiting_tool_recovery(
@@ -1985,6 +1979,18 @@ pub(crate) async fn load_scheduling_projection(
             turn_id_from_uuid(required(&row, "expected_active_turn_id")?),
         ));
     }
+
+    let assistant_model_calls = sqlx::query_scalar::<_, Uuid>(
+        "SELECT DISTINCT producing_model_call_id
+           FROM semantic_transcript_entry
+          WHERE source_session_id = $1
+            AND payload_kind IN ('assistant_text', 'assistant_tool_use')
+          ORDER BY producing_model_call_id",
+    )
+    .bind(session_id_to_uuid(session_id))
+    .fetch_all(&mut *connection)
+    .await?;
+    required_model_calls.extend(assistant_model_calls);
 
     let required_model_call_ids = required_model_calls.iter().copied().collect::<Vec<_>>();
     let model_call_rows = sqlx::query(

@@ -1153,6 +1153,21 @@ async fn s02_s10_s11_inv005_inv006_inv019_inv027_tool_round_survives_restart_and
     let seed = 0x7400;
     let (fixture, model_repository, observation, request) =
         checkpoint_confirmed_tool_round(&pool, seed, "current_time", "{}").await?;
+    let mut scheduling_probe = StartEligibleTurnService::new(
+        FixedStartEligibleTurnIds::new(
+            [SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                seed + 30,
+            ))],
+            [ContextFrontierId::from_uuid(Uuid::from_u128(seed + 31))],
+            [TurnAttemptId::from_uuid(Uuid::from_u128(seed + 32))],
+        ),
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    assert_eq!(
+        scheduling_probe.execute(fixture.session).await?,
+        StartEligibleTurnOutcome::NoEligibleTurn,
+        "the scheduler reloads the parked tool round without inventing work"
+    );
     assert_eq!(
         model_repository
             .reread_terminal_observation(fixture.session, &observation)
