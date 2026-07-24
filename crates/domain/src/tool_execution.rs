@@ -8,8 +8,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    ActiveTurnPhase, ApprovedToolRequest, CurrentToolAttempt, CurrentToolAttemptState,
-    DecideToolRequest, DecideToolRequestResult, PreparedDecideToolRequest,
+    ActiveTurnPhase, ApprovedToolRequest, AuthorizedToolAttempt, CurrentToolAttempt,
+    CurrentToolAttemptState, DecideToolRequest, DecideToolRequestResult, PreparedDecideToolRequest,
     ReconstitutedToolAttempt, ResolvedContextFrontierSnapshot, SemanticTranscriptEntry,
     SemanticTranscriptEntryId, SemanticTranscriptEntryPayload, SessionId, ToolApprovalDecision,
     ToolApprovalResolution, ToolAttemptEnd, ToolAttemptId, ToolEffectClass, ToolExecutionErrorKind,
@@ -424,6 +424,64 @@ impl ToolBatch {
         Ok(PreparedToolAttempt {
             attempt: approved.prepare_attempt(attempt, turn_attempt, effect_class),
         })
+    }
+
+    /// Authorizes one exact prepared attempt only through this freshly
+    /// validated complete batch.
+    pub fn authorize_attempt(
+        &self,
+        attempt: ToolAttemptId,
+    ) -> Result<AuthorizedToolAttempt, ToolBatchExecutionError> {
+        if !matches!(self.phase, ToolBatchPhase::Executing { .. }) {
+            return Err(ToolBatchExecutionError {
+                failure: ToolBatchExecutionFailure::NotExecuting,
+            });
+        }
+        let current = self
+            .attempts
+            .values()
+            .find_map(|candidate| match candidate {
+                ReconstitutedToolAttempt::Current(current) if current.attempt() == attempt => {
+                    Some(current.clone())
+                }
+                ReconstitutedToolAttempt::Current(_) | ReconstitutedToolAttempt::Ended(_) => None,
+            })
+            .ok_or(ToolBatchExecutionError {
+                failure: ToolBatchExecutionFailure::AttemptMissing,
+            })?;
+        current.authorize().map_err(|_| ToolBatchExecutionError {
+            failure: ToolBatchExecutionFailure::AttemptStageMismatch,
+        })
+    }
+
+    /// Restores in-flight authority after an ambiguous authorization
+    /// acknowledgement only through this freshly validated complete batch.
+    pub fn resume_in_flight_attempt(
+        &self,
+        attempt: ToolAttemptId,
+    ) -> Result<AuthorizedToolAttempt, ToolBatchExecutionError> {
+        if !matches!(self.phase, ToolBatchPhase::Executing { .. }) {
+            return Err(ToolBatchExecutionError {
+                failure: ToolBatchExecutionFailure::NotExecuting,
+            });
+        }
+        let current = self
+            .attempts
+            .values()
+            .find_map(|candidate| match candidate {
+                ReconstitutedToolAttempt::Current(current) if current.attempt() == attempt => {
+                    Some(current.clone())
+                }
+                ReconstitutedToolAttempt::Current(_) | ReconstitutedToolAttempt::Ended(_) => None,
+            })
+            .ok_or(ToolBatchExecutionError {
+                failure: ToolBatchExecutionFailure::AttemptMissing,
+            })?;
+        current
+            .resume_in_flight()
+            .map_err(|_| ToolBatchExecutionError {
+                failure: ToolBatchExecutionFailure::AttemptStageMismatch,
+            })
     }
 
     /// Builds one proposal-ordered reference-only result entry per request.
@@ -923,6 +981,10 @@ pub enum ToolBatchExecutionFailure {
     NotExecuting,
     /// One attempt already remains prepared or in flight.
     LiveAttemptPresent,
+    /// The requested current attempt is absent from the complete batch.
+    AttemptMissing,
+    /// The requested attempt is not in the required durable stage.
+    AttemptStageMismatch,
     /// Every approved request has terminal attempt evidence.
     ReadyForContinuation,
     /// A prior crash-lost attempt requires turn-level failure.
@@ -1094,15 +1156,20 @@ fn reconstitute_batch(
             ));
         }
     }
-    if requests
+    if let Some(first_undecided) = requests
         .iter()
-        .take(approvals.len())
-        .any(|request| !approvals.contains_key(&request.id()))
+        .position(|request| !approvals.contains_key(&request.id()))
     {
-        return Err(fail(
-            input,
-            ToolBatchReconstitutionFailure::ApprovalInventoryMismatch,
-        ));
+        if requests.iter().skip(first_undecided + 1).any(|request| {
+            approvals.get(&request.id()).is_some_and(|approval| {
+                approval.source() == crate::ToolDecisionSource::OwnerCommand
+            })
+        }) {
+            return Err(fail(
+                input,
+                ToolBatchReconstitutionFailure::ApprovalInventoryMismatch,
+            ));
+        }
     }
     let expected_issuing_attempt = match input.phase {
         ToolBatchPhaseReconstitutionInput::Executing { turn_attempt } => Some(turn_attempt),
@@ -1345,6 +1412,16 @@ mod tests {
         .expect("owner decisions are implemented")
     }
 
+    fn automatic_approval(request: ToolRequestId) -> ToolApprovalResolution {
+        ToolApprovalResolutionReconstitutionInput::new(
+            request,
+            ToolApprovalDecision::Approve,
+            ToolDecisionSource::PolicyAuto,
+        )
+        .reconstitute()
+        .expect("automatic approval is implemented")
+    }
+
     fn yielded_snapshot() -> ResolvedContextFrontierSnapshot {
         ResolvedContextFrontierSnapshot::try_from_candidate(
             session_id(1),
@@ -1423,6 +1500,35 @@ mod tests {
         assert_eq!(
             error.failure(),
             ToolBatchReconstitutionFailure::ApprovalInventoryMismatch
+        );
+    }
+
+    /// S10 / INV-010 / INV-020: model-call completion may freeze automatic
+    /// approval for a later request while an earlier confirmation still waits.
+    #[test]
+    fn s10_inv010_inv020_later_automatic_approval_survives_reconstitution() {
+        let first = request(10, 0);
+        let second = request(11, 1);
+        let batch = ToolBatchReconstitutionInput::new(
+            session_id(1),
+            turn_id(2),
+            model_call_id(3),
+            yielded_snapshot(),
+            vec![first.clone(), second.clone()],
+            vec![automatic_approval(second.id())],
+            vec![],
+            ToolBatchPhaseReconstitutionInput::AwaitingApproval {
+                request: first.id(),
+            },
+        )
+        .reconstitute()
+        .expect("later frozen policy authority does not bypass the earlier wait");
+
+        assert_eq!(
+            batch
+                .approval(second.id())
+                .map(ToolApprovalResolution::source),
+            Some(ToolDecisionSource::PolicyAuto)
         );
     }
 
