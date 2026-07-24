@@ -17,6 +17,22 @@ pub const HUB_FENCE_MIGRATION_VERSION: i64 = 202607230001;
 const HUB_FENCE_NAMESPACE: u64 = 1_396_852_273;
 
 /// One positive durable hub-pool generation.
+///
+/// A retained value cannot call the retired free pool-construction boundary:
+///
+/// ```compile_fail
+/// use signalbox_persistence::hub_fence::{
+///     HubFenceGeneration, connect_fenced_pool,
+/// };
+/// use sqlx::postgres::PgConnectOptions;
+///
+/// async fn cannot_reopen(
+///     options: PgConnectOptions,
+///     retired: HubFenceGeneration,
+/// ) {
+///     let _ = connect_fenced_pool(options, retired).await;
+/// }
+/// ```
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct HubFenceGeneration(u64);
 
@@ -157,6 +173,23 @@ pub async fn advance_hub_fence(
         connection,
         generation: HubFenceGeneration(next),
     })
+}
+
+/// Waits until no session retains `generation`'s shared fence, then holds its
+/// exclusive fence on `connection`.
+///
+/// Clean shutdown calls this only after globally closing the generation's
+/// pool. Retaining the exclusive lock until the singleton guard session closes
+/// prevents a detached pool session from escaping guard release.
+pub async fn retire_hub_fence_generation(
+    connection: &mut PgConnection,
+    generation: HubFenceGeneration,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(advisory_key(generation.get()))
+        .execute(connection)
+        .await?;
+    Ok(())
 }
 
 fn decode_generation(stored: Decimal) -> Result<HubFenceGeneration, HubFenceCorruption> {

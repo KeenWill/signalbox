@@ -10,6 +10,25 @@ are proposed as a specification diff at the bottom of the implementing stack and
 recorded here (see `AGENTS.md`). Unresolved questions live in
 [open-questions.md](open-questions.md).
 
+## 2026-07-23 — Pin compared process-socket identities
+
+**Context.** A device-and-inode comparison cannot prove pathname identity after
+the observed socket has no remaining filesystem link: its inode could be reused
+for a replacement before revalidation or cleanup.
+
+**Decision.** While holding the existing path lock, retain each compared socket
+with a hard link at the reserved adjacent `<socket-path>.identity` name. Reclaim
+an owned socket left there by an abrupt prior exit, fail closed on another
+entry, and hold the active listener's link through public-path removal.
+
+**Rejected alternatives.** Comparing device and inode without retaining the
+inode admits reuse. Opening a socket node as a metadata descriptor is not
+portable to macOS. Random link names leak unbounded directory entries after
+abrupt exits.
+
+**Affects.** Stale-socket recovery, guarded bind, graceful cleanup, and the
+local process-transport specification.
+
 ## 2026-07-23 — Bound process-frame JSON container depth
 
 **Context.** The 8 MiB frame limit bounds input bytes, but duplicate-member
