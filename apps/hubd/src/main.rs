@@ -25,8 +25,8 @@ use signalbox_application::{
 use signalbox_domain::{SessionId, TurnId};
 use signalbox_hubd::{
     ANTHROPIC_CREDENTIAL_REFERENCE, ActivatedTurnPass, CurrentTimeTool, FatalExecutionSupervisor,
-    FileCredentialAccess, HubModelConfiguration, PostgresProviderModelExecution,
-    SystemCurrentTimeClock,
+    FileCredentialAccess, HubModelConfiguration, PostgresContinuationToolLoopRepository,
+    PostgresProviderModelExecution, SystemCurrentTimeClock,
 };
 use signalbox_model_provider_runtime::RuntimeModelCallProvider;
 use signalbox_model_runtime::CredentialReference;
@@ -34,7 +34,7 @@ use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
 use signalbox_persistence::{
     connect_production, migrate, model_execution::PostgresModelCallRepository,
     scheduler::PostgresEligibilitySweep, start_eligible_turn::StartEligibleTurnRepository,
-    startup::PostgresStartupScanRepository, tool_loop::PostgresToolLoopRepository,
+    startup::PostgresStartupScanRepository,
 };
 use tokio::{pin, select, sync::oneshot, time::timeout};
 
@@ -345,7 +345,7 @@ async fn run_hub() -> Result<ShutdownOutcome, HubRuntimeError> {
                     provider,
                 )
                 .with_tool_loop(
-                    PostgresToolLoopRepository::with_model_calls(
+                    PostgresContinuationToolLoopRepository::new(
                         scheduler_pool.clone(),
                         model_targets,
                         credential_reference,
