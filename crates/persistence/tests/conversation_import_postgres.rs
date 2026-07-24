@@ -30,13 +30,14 @@ use signalbox_domain::{
     ImportedTranscriptPosition,
 };
 use signalbox_persistence::{
+    MIGRATOR,
     conversation_import::{
         ImportedConversationCorruption, ImportedConversationIdentityCollision,
         ImportedConversationRepository, ImportedConversationRepositoryError,
     },
     local_test_connection_options, migrate,
 };
-use sqlx::{PgPool, Transaction, postgres::PgPoolOptions, types::Uuid};
+use sqlx::{PgPool, Transaction, migrate::Migrate, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
     postgres::Postgres,
     testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
@@ -134,6 +135,38 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String
         .connect_with(local_test_connection_options(&database_url)?)
         .await?;
     migrate(&pool).await?;
+    Ok((container, pool, database_url))
+}
+
+async fn postgres_before_codex_format()
+-> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>> {
+    let container = Postgres::default()
+        .with_db_name(DATABASE_NAME)
+        .with_user(DATABASE_USER)
+        .with_password(DATABASE_PASSWORD)
+        .with_fsync_enabled()
+        .with_tag(POSTGRES_IMAGE_TAG)
+        .start()
+        .await?;
+    let host = container.get_host().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let database_url =
+        format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(local_test_connection_options(&database_url)?)
+        .await?;
+    let mut connection = pool.acquire().await?;
+    connection
+        .ensure_migrations_table("_sqlx_migrations")
+        .await?;
+    for migration in MIGRATOR
+        .iter()
+        .take_while(|migration| migration.version < 202607240005)
+    {
+        connection.apply("_sqlx_migrations", migration).await?;
+    }
+    drop(connection);
     Ok((container, pool, database_url))
 }
 
@@ -865,7 +898,8 @@ async fn s28_inv038_import_round_trip_is_idempotent_and_restart_safe() -> Result
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s28_inv038_codex_rollout_round_trip_is_idempotent_and_restart_safe()
 -> Result<(), Box<dyn Error>> {
-    let (container, pool, database_url) = migrated_postgres().await?;
+    let (container, pool, database_url) = postgres_before_codex_format().await?;
+    migrate(&pool).await?;
     let source = concat!(
         "{\"timestamp\":\"t0\",\"type\":\"response_item\",\"payload\":",
         "{\"type\":\"message\",\"role\":\"user\",\"content\":",
