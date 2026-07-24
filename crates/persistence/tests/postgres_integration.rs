@@ -463,6 +463,57 @@ where
     }
 }
 
+async fn corrupt_ended_attempt_disposition(
+    pool: &PgPool,
+    attempt: TurnAttemptId,
+    disposition: &'static str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("ALTER TABLE turn_attempt DISABLE TRIGGER USER")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET end_disposition = $1
+          WHERE turn_attempt_id = $2",
+    )
+    .bind(disposition)
+    .bind(attempt.into_uuid())
+    .execute(pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_attempt ENABLE TRIGGER USER")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn rewind_outbox_delivery_before(
+    pool: &PgPool,
+    sequence: Decimal,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "ALTER TABLE outbox_delivery_state
+         DISABLE TRIGGER outbox_delivery_advances_prefix",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE outbox_delivery_state
+            SET delivered_through = $1 - 1,
+                last_delivery_xid = pg_current_xact_id()
+          WHERE singleton",
+    )
+    .bind(sequence)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE outbox_delivery_state
+         ENABLE TRIGGER outbox_delivery_advances_prefix",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Inserts the complete pre-outbox session record family for allocator tests.
 ///
 /// The command and model identities derive from the one session seed.
@@ -14187,6 +14238,177 @@ async fn s01_inv032_terminal_model_call_dispatch_requires_exact_disposition()
     .fetch_one(&pool)
     .await?;
     assert_eq!(authoritative, ("terminal".into(), Some("ambiguous".into())));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S01 / INV-032: a completed-turn event is dispatchable only while the
+/// lifecycle's terminal attempt retains a completion-compatible disposition.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s01_inv032_completed_dispatch_requires_exact_terminal_attempt()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0xea0;
+    let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::Completed {
+            assistant_text: vec![
+                AssistantText::try_new(String::from("completed response"))
+                    .expect("fixture assistant text is admitted"),
+            ],
+        });
+    repository
+        .apply_terminal_observation(
+            fixture.session,
+            observation,
+            ModelCallTerminalIdentities::Completed(CompletedModelCallIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    seed + 22,
+                ))],
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 23)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 24)),
+            )),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+
+    let sequence = sqlx::query_scalar(
+        "SELECT event_sequence
+           FROM turn_completed_outbox_event
+          WHERE turn_id = $1",
+    )
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    corrupt_ended_attempt_disposition(&pool, fixture.attempt, "known_failure").await?;
+    rewind_outbox_delivery_before(&pool, sequence).await?;
+
+    assert!(matches!(
+        OutboxDispatcher::new(pool.clone())
+            .dispatch_next(|_| panic!("a completion with a mismatched attempt must not be offered"))
+            .await,
+        Err(OutboxDispatchError::Corruption(
+            OutboxCorruption::InvalidTerminalEventCorrelation
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S01 / INV-032: a refused-turn event is dispatchable only while the
+/// lifecycle's terminal attempt retains a refusal-compatible disposition.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s01_inv032_refused_dispatch_requires_exact_terminal_attempt() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0xeb0;
+    let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::Refused);
+    repository
+        .apply_terminal_observation(
+            fixture.session,
+            observation,
+            ModelCallTerminalIdentities::Refused(RefusedModelCallTurnIdentities::new(
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 22)),
+            )),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+
+    let sequence = sqlx::query_scalar(
+        "SELECT event_sequence
+           FROM turn_refused_outbox_event
+          WHERE turn_id = $1",
+    )
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    corrupt_ended_attempt_disposition(&pool, fixture.attempt, "turn_completed").await?;
+    rewind_outbox_delivery_before(&pool, sequence).await?;
+
+    assert!(matches!(
+        OutboxDispatcher::new(pool.clone())
+            .dispatch_next(|_| panic!("a refusal with a mismatched attempt must not be offered"))
+            .await,
+        Err(OutboxDispatchError::Corruption(
+            OutboxCorruption::InvalidTerminalEventCorrelation
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S04 / S07 / INV-032 / INV-037: a reconciliation-required event is
+/// dispatchable only while its terminal attempt retains exact ambiguity and
+/// interrupt provenance.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s04_inv032_reconciliation_dispatch_requires_exact_terminal_attempt()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0xec0;
+    let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            input_with_delivery(
+                seed + 19,
+                seed + 1,
+                "stop before ambiguous result",
+                DeliveryRequest::Interrupt {
+                    expected_active_turn: fixture.turn,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 20)),
+            Some(TurnId::from_uuid(Uuid::from_u128(seed + 21))),
+        )
+        .await?;
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::Ambiguous);
+    repository
+        .apply_terminal_observation(
+            fixture.session,
+            observation,
+            ModelCallTerminalIdentities::Ambiguous(AmbiguousModelCallTurnIdentities::new(
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 22)),
+            )),
+            |_| panic!("Ambiguous creates no pending-steering successors"),
+        )
+        .await?;
+
+    let sequence = sqlx::query_scalar(
+        "SELECT event_sequence
+           FROM turn_reconciliation_required_outbox_event
+          WHERE turn_id = $1",
+    )
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    corrupt_ended_attempt_disposition(&pool, fixture.attempt, "cancelled").await?;
+    rewind_outbox_delivery_before(&pool, sequence).await?;
+
+    assert!(matches!(
+        OutboxDispatcher::new(pool.clone())
+            .dispatch_next(|_| {
+                panic!("reconciliation with a mismatched attempt must not be offered")
+            })
+            .await,
+        Err(OutboxDispatchError::Corruption(
+            OutboxCorruption::InvalidTerminalEventCorrelation
+        ))
+    ));
 
     pool.close().await;
     drop(container);

@@ -19,6 +19,9 @@ pub const PROTOCOL_VERSION: u64 = 1;
 /// Maximum encoded frame size, including its final newline.
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
+/// Maximum number of simultaneously open JSON objects and arrays in one frame.
+pub const MAX_JSON_CONTAINER_DEPTH: usize = 127;
+
 /// Maximum UTF-8 bytes in one transcript content fragment.
 pub const MAX_CONTENT_FRAGMENT_BYTES: usize = 1024 * 1024;
 
@@ -1538,16 +1541,27 @@ fn probe_header(
     Ok(ProbedHeader { request_id })
 }
 
-fn contains_duplicate_object_member(content: &[u8]) -> Result<bool, serde_json::Error> {
+enum DuplicateMemberScanError {
+    InvalidMemberName,
+    NestingLimitExceeded,
+}
+
+fn contains_duplicate_object_member(content: &[u8]) -> Result<bool, DuplicateMemberScanError> {
     let mut containers: Vec<Option<HashSet<String>>> = Vec::new();
     let mut index = 0;
     while index < content.len() {
         match content[index] {
             b'{' => {
+                if containers.len() == MAX_JSON_CONTAINER_DEPTH {
+                    return Err(DuplicateMemberScanError::NestingLimitExceeded);
+                }
                 containers.push(Some(HashSet::new()));
                 index += 1;
             }
             b'[' => {
+                if containers.len() == MAX_JSON_CONTAINER_DEPTH {
+                    return Err(DuplicateMemberScanError::NestingLimitExceeded);
+                }
                 containers.push(None);
                 index += 1;
             }
@@ -1575,7 +1589,8 @@ fn contains_duplicate_object_member(content: &[u8]) -> Result<bool, serde_json::
                 if content.get(following) == Some(&b':')
                     && let Some(Some(members)) = containers.last_mut()
                 {
-                    let member = serde_json::from_slice::<String>(&content[start..index])?;
+                    let member = serde_json::from_slice::<String>(&content[start..index])
+                        .map_err(|_| DuplicateMemberScanError::InvalidMemberName)?;
                     if !members.insert(member) {
                         return Ok(true);
                     }
@@ -1636,9 +1651,10 @@ mod tests {
         CurrentModelCall, CurrentModelCallState, ErrorCode, ErrorDetail,
         FailedModelCallDisposition, FailedTerminalModelCall, FrameDecodeErrorKind,
         FrameEncodeError, FrameValidationError, InputContent, MAX_CONTENT_FRAGMENT_BYTES,
-        ModelCallDisposition, ModelCallState, ModelSelection, PROTOCOL_VERSION, RejectionDetail,
-        RequestId, ServerFrame, ServerMessage, SessionEvent, TranscriptEntry, TranscriptTextEntry,
-        TurnState, decode_client_line, decode_server_line, encode_client_line, encode_server_line,
+        MAX_JSON_CONTAINER_DEPTH, ModelCallDisposition, ModelCallState, ModelSelection,
+        PROTOCOL_VERSION, RejectionDetail, RequestId, ServerFrame, ServerMessage, SessionEvent,
+        TranscriptEntry, TranscriptTextEntry, TurnState, decode_client_line, decode_server_line,
+        encode_client_line, encode_server_line,
     };
     use uuid::Uuid;
 
@@ -1696,6 +1712,15 @@ mod tests {
         assert_eq!(error.request_id().value(), 9);
     }
 
+    fn unsupported_version_with_nested_object_payload(payload_depth: usize) -> String {
+        let payload = format!(
+            "{}0{}",
+            r#"{"future":"#.repeat(payload_depth),
+            "}".repeat(payload_depth)
+        );
+        format!("{{\"version\":2,\"request_id\":\"9\",\"request\":{payload}}}")
+    }
+
     #[track_caller]
     fn assert_command_sentinel_rejected(command_id: &str) {
         let json = format!(
@@ -1719,9 +1744,17 @@ mod tests {
     fn assert_server_message_round_trip(
         request_id: RequestId,
         message: ServerMessage,
+        expected_message_json: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let request_id_value = request_id.value();
         let frame = ServerFrame::try_new(request_id, message)?;
-        assert_eq!(decode_server_line(&encode_server_line(&frame)?)?, frame);
+        let encoded = encode_server_line(&frame)?;
+        let expected = format!(
+            "{{\"version\":1,\"request_id\":\"{request_id_value}\",\"message\":{}}}\n",
+            expected_message_json
+        );
+        assert_eq!(String::from_utf8(encoded.clone())?, expected);
+        assert_eq!(decode_server_line(&encoded)?, frame);
         Ok(())
     }
 
@@ -1786,13 +1819,23 @@ mod tests {
         assert_client_malformed(
             r#"{"version":1.0,"request_id":"9","request":{"type":"list_sessions"}}"#,
         );
-        let nested_payload = format!("{}0{}", "[".repeat(200), "]".repeat(200));
-        let future = format!(
-            "{{\"version\":2,\"request_id\":\"9\",\"request\":{nested_payload},\"new_v2_field\":true}}"
-        );
-        let error =
-            decode_client_line(&line(&future)).expect_err("future version must be rejected first");
+    }
+
+    #[test]
+    fn inv033_unsupported_version_is_classified_at_the_container_depth_limit() {
+        let future = unsupported_version_with_nested_object_payload(MAX_JSON_CONTAINER_DEPTH - 1);
+        let error = decode_client_line(&line(&future))
+            .expect_err("the maximum admitted depth reaches version classification");
         assert_eq!(error.kind(), FrameDecodeErrorKind::UnsupportedVersion);
+        assert_eq!(error.request_id().value(), 9);
+    }
+
+    #[test]
+    fn inv033_container_depth_beyond_the_limit_is_malformed() {
+        let future = unsupported_version_with_nested_object_payload(MAX_JSON_CONTAINER_DEPTH);
+        let error =
+            decode_client_line(&line(&future)).expect_err("excessive nesting must be rejected");
+        assert_eq!(error.kind(), FrameDecodeErrorKind::MalformedFrame);
         assert_eq!(error.request_id().value(), 9);
     }
 
@@ -1870,36 +1913,71 @@ mod tests {
     }
 
     #[test]
-    fn inv033_terminal_turn_optional_evidence_is_closed_and_correlated()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn inv033_failed_terminal_shape_requires_nullable_attempt_member() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_model_call":null}}}"#,
         );
+    }
+
+    #[test]
+    fn inv033_failed_terminal_shape_requires_nullable_call_member() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":null}}}"#,
         );
+    }
+
+    #[test]
+    fn inv033_failed_terminal_call_requires_an_attempt() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":null,"terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000003","disposition":"known_failed"}}}}"#,
         );
+    }
+
+    #[test]
+    fn inv033_failed_terminal_call_accepts_only_failure_dispositions() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"completed"}}}}"#,
         );
+    }
+
+    #[test]
+    fn inv033_failed_terminal_call_rejects_unknown_members() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"known_failed","extra":true}}}}"#,
         );
+    }
+
+    #[test]
+    fn inv033_cancelled_terminal_shape_requires_nullable_call_member() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"cancelled","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003"}}}"#,
         );
+    }
+
+    #[test]
+    fn inv033_turn_cancelled_event_rejects_unknown_members() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"session_event","cursor":"1","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"turn_cancelled","turn_id":"00000000-0000-0000-0000-000000000002","cancellation_entry_id":"00000000-0000-0000-0000-000000000003","terminal_frontier_id":"00000000-0000-0000-0000-000000000004","extra":true}}}"#,
         );
+    }
+
+    #[test]
+    fn inv033_cancellation_requested_state_rejects_unknown_members() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"session_event","cursor":"1","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"model_call_transition","turn_id":"00000000-0000-0000-0000-000000000002","model_call_id":"00000000-0000-0000-0000-000000000003","state":{"type":"cancellation_requested","extra":true}}}}"#,
         );
+    }
+
+    #[test]
+    fn inv033_nested_terminal_duplicate_members_are_rejected() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":null,"terminal_model_call":null}}}"#,
         );
+    }
 
+    #[test]
+    fn inv033_in_memory_failed_terminal_call_requires_an_attempt()
+    -> Result<(), Box<dyn std::error::Error>> {
         let invalid = ServerFrame::try_new(
             request(1)?,
             ServerMessage::TranscriptTurn {
@@ -2111,11 +2189,14 @@ mod tests {
     }
 
     #[test]
-    fn s24_content_fragmentation_preserves_empty_and_multibyte_text_exactly() {
+    fn s24_content_fragmentation_preserves_empty_text_exactly() {
         let empty = super::content_fragments("").collect::<Vec<_>>();
         assert_eq!(empty.len(), 1);
         assert_eq!(empty[0].as_str(), "");
+    }
 
+    #[test]
+    fn s24_content_fragmentation_preserves_multibyte_boundaries_exactly() {
         let text = format!(
             "{}\u{1f980}tail",
             "a".repeat(MAX_CONTENT_FRAGMENT_BYTES - 1)
@@ -2291,13 +2372,14 @@ mod tests {
     }
 
     #[test]
-    fn inv033_server_message_family_round_trips_closed_shapes()
+    fn inv033_server_message_family_has_exact_closed_wire_shapes()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_server_message_round_trip(
             request(1)?,
             ServerMessage::SessionCreated {
                 session_id: uuid(1),
             },
+            r#"{"type":"session_created","session_id":"00000000-0000-0000-0000-000000000001"}"#,
         )?;
         assert_server_message_round_trip(
             request(2)?,
@@ -2307,8 +2389,13 @@ mod tests {
                 acceptance_position: CanonicalU64::new(1),
                 turn_id: uuid(3),
             },
+            r#"{"type":"input_submitted","session_id":"00000000-0000-0000-0000-000000000001","accepted_input_id":"00000000-0000-0000-0000-000000000002","acceptance_position":"1","turn_id":"00000000-0000-0000-0000-000000000003"}"#,
         )?;
-        assert_server_message_round_trip(request(3)?, ServerMessage::SessionsStart {})?;
+        assert_server_message_round_trip(
+            request(3)?,
+            ServerMessage::SessionsStart {},
+            r#"{"type":"sessions_start"}"#,
+        )?;
         assert_server_message_round_trip(
             request(4)?,
             ServerMessage::SessionSummary {
@@ -2316,12 +2403,14 @@ mod tests {
                 defaults_version: CanonicalU64::new(1),
                 model_selection: ModelSelection::Alias { alias_id: uuid(4) },
             },
+            r#"{"type":"session_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"1","model_selection":{"kind":"alias","alias_id":"00000000-0000-0000-0000-000000000004"}}"#,
         )?;
         assert_server_message_round_trip(
             request(5)?,
             ServerMessage::SessionsEnd {
                 session_count: CanonicalU64::new(1),
             },
+            r#"{"type":"sessions_end","session_count":"1"}"#,
         )?;
         assert_server_message_round_trip(
             request(6)?,
@@ -2329,6 +2418,7 @@ mod tests {
                 session_id: uuid(1),
                 cursor: CanonicalU64::new(5),
             },
+            r#"{"type":"transcript_snapshot_start","session_id":"00000000-0000-0000-0000-000000000001","cursor":"5"}"#,
         )?;
         assert_server_message_round_trip(
             request(7)?,
@@ -2341,6 +2431,7 @@ mod tests {
                     terminal_model_call_id: uuid(8),
                 },
             },
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"refused","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","terminal_model_call_id":"00000000-0000-0000-0000-000000000008"}}"#,
         )?;
         assert_server_message_round_trip(
             request(14)?,
@@ -2352,6 +2443,7 @@ mod tests {
                     content: InputContent::new("queued request".to_owned()),
                 },
             },
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"queued","accepted_input_id":"00000000-0000-0000-0000-000000000002","content":"queued request"}}"#,
         )?;
         assert_server_message_round_trip(
             request(15)?,
@@ -2363,6 +2455,7 @@ mod tests {
                     current_model_call: None,
                 },
             },
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"active_running","current_attempt_id":"00000000-0000-0000-0000-000000000007","current_model_call":null}}"#,
         )?;
         assert_server_message_round_trip(
             request(16)?,
@@ -2377,6 +2470,7 @@ mod tests {
                     )),
                 },
             },
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"active_running","current_attempt_id":"00000000-0000-0000-0000-000000000007","current_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000008","state":{"type":"prepared"}}}}"#,
         )?;
         assert_server_message_round_trip(
             request(17)?,
@@ -2391,6 +2485,7 @@ mod tests {
                     )),
                 },
             },
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"active_running","current_attempt_id":"00000000-0000-0000-0000-000000000007","current_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000008","state":{"type":"in_flight"}}}}"#,
         )?;
         assert_server_message_round_trip(
             request(20)?,
@@ -2405,6 +2500,7 @@ mod tests {
                     )),
                 },
             },
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"active_running","current_attempt_id":"00000000-0000-0000-0000-000000000007","current_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000008","state":{"type":"cancellation_requested"}}}}"#,
         )?;
         assert_server_message_round_trip(
             request(21)?,
@@ -2417,6 +2513,7 @@ mod tests {
                     terminal_model_call: None,
                 },
             },
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":null,"terminal_model_call":null}}"#,
         )?;
         assert_server_message_round_trip(
             request(22)?,
@@ -2429,6 +2526,7 @@ mod tests {
                     terminal_model_call: None,
                 },
             },
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","terminal_model_call":null}}"#,
         )?;
         assert_server_message_round_trip(
             request(23)?,
@@ -2444,6 +2542,7 @@ mod tests {
                     )),
                 },
             },
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000008","disposition":"known_failed"}}}"#,
         )?;
         assert_server_message_round_trip(
             request(24)?,
@@ -2459,6 +2558,7 @@ mod tests {
                     )),
                 },
             },
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000008","disposition":"cancelled"}}}"#,
         )?;
         assert_server_message_round_trip(
             request(25)?,
@@ -2471,6 +2571,7 @@ mod tests {
                     terminal_model_call_id: None,
                 },
             },
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"cancelled","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","terminal_model_call_id":null}}"#,
         )?;
         assert_server_message_round_trip(
             request(26)?,
@@ -2483,6 +2584,7 @@ mod tests {
                     terminal_model_call_id: Some(uuid(8)),
                 },
             },
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"cancelled","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","terminal_model_call_id":"00000000-0000-0000-0000-000000000008"}}"#,
         )?;
         assert_server_message_round_trip(
             request(27)?,
@@ -2495,6 +2597,7 @@ mod tests {
                     terminal_model_call_id: uuid(8),
                 },
             },
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","state":{"type":"reconciliation_required","terminal_frontier_id":"00000000-0000-0000-0000-000000000006","terminal_attempt_id":"00000000-0000-0000-0000-000000000007","terminal_model_call_id":"00000000-0000-0000-0000-000000000008"}}"#,
         )?;
         assert_server_message_round_trip(
             request(8)?,
@@ -2504,6 +2607,7 @@ mod tests {
                 entry_id: uuid(9),
                 entry: TranscriptEntry::TurnCompleted { turn_id: uuid(3) },
             },
+            r#"{"type":"transcript_entry","entry_index":"0","source_session_id":"00000000-0000-0000-0000-000000000001","entry_id":"00000000-0000-0000-0000-000000000009","entry":{"type":"turn_completed","turn_id":"00000000-0000-0000-0000-000000000003"}}"#,
         )?;
         assert_server_message_round_trip(
             request(28)?,
@@ -2513,6 +2617,7 @@ mod tests {
                 entry_id: uuid(9),
                 entry: TranscriptEntry::TurnCancelled { turn_id: uuid(3) },
             },
+            r#"{"type":"transcript_entry","entry_index":"0","source_session_id":"00000000-0000-0000-0000-000000000001","entry_id":"00000000-0000-0000-0000-000000000009","entry":{"type":"turn_cancelled","turn_id":"00000000-0000-0000-0000-000000000003"}}"#,
         )?;
         assert_server_message_round_trip(
             request(9)?,
@@ -2525,6 +2630,7 @@ mod tests {
                     model_call_id: uuid(8),
                 },
             },
+            r#"{"type":"transcript_text_entry","entry_index":"1","source_session_id":"00000000-0000-0000-0000-000000000001","entry_id":"00000000-0000-0000-0000-00000000000a","entry":{"type":"assistant","turn_id":"00000000-0000-0000-0000-000000000003","model_call_id":"00000000-0000-0000-0000-000000000008"}}"#,
         )?;
         assert_server_message_round_trip(
             request(10)?,
@@ -2534,6 +2640,7 @@ mod tests {
                 final_fragment: true,
                 content_fragment: ContentFragment::try_new("reply".to_owned())?,
             },
+            r#"{"type":"transcript_content","entry_index":"1","fragment_index":"0","final_fragment":true,"content_fragment":"reply"}"#,
         )?;
         assert_server_message_round_trip(
             request(11)?,
@@ -2543,6 +2650,7 @@ mod tests {
                 turn_count: CanonicalU64::new(1),
                 entry_count: CanonicalU64::new(2),
             },
+            r#"{"type":"transcript_snapshot_end","session_id":"00000000-0000-0000-0000-000000000001","cursor":"5","turn_count":"1","entry_count":"2"}"#,
         )?;
         assert_server_message_round_trip(
             request(12)?,
@@ -2557,6 +2665,7 @@ mod tests {
                     },
                 },
             },
+            r#"{"type":"session_event","cursor":"6","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"model_call_transition","turn_id":"00000000-0000-0000-0000-000000000003","model_call_id":"00000000-0000-0000-0000-000000000008","state":{"type":"terminal","disposition":"refused"}}}"#,
         )?;
         assert_server_message_round_trip(
             request(29)?,
@@ -2569,6 +2678,7 @@ mod tests {
                     state: ModelCallState::CancellationRequested {},
                 },
             },
+            r#"{"type":"session_event","cursor":"6","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"model_call_transition","turn_id":"00000000-0000-0000-0000-000000000003","model_call_id":"00000000-0000-0000-0000-000000000008","state":{"type":"cancellation_requested"}}}"#,
         )?;
         assert_server_message_round_trip(
             request(18)?,
@@ -2582,6 +2692,7 @@ mod tests {
                     content: InputContent::new("accepted request".to_owned()),
                 },
             },
+            r#"{"type":"session_event","cursor":"2","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"input_accepted","accepted_input_id":"00000000-0000-0000-0000-000000000002","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","content":"accepted request"}}"#,
         )?;
         assert_server_message_round_trip(
             request(19)?,
@@ -2593,6 +2704,7 @@ mod tests {
                     current_attempt_id: uuid(7),
                 },
             },
+            r#"{"type":"session_event","cursor":"3","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"turn_activated","turn_id":"00000000-0000-0000-0000-000000000003","current_attempt_id":"00000000-0000-0000-0000-000000000007"}}"#,
         )?;
         assert_server_message_round_trip(
             request(30)?,
@@ -2605,6 +2717,7 @@ mod tests {
                     terminal_frontier_id: uuid(6),
                 },
             },
+            r#"{"type":"session_event","cursor":"4","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"turn_cancelled","turn_id":"00000000-0000-0000-0000-000000000003","cancellation_entry_id":"00000000-0000-0000-0000-000000000009","terminal_frontier_id":"00000000-0000-0000-0000-000000000006"}}"#,
         )?;
         assert_server_message_round_trip(
             request(31)?,
@@ -2617,6 +2730,7 @@ mod tests {
                     terminal_frontier_id: uuid(6),
                 },
             },
+            r#"{"type":"session_event","cursor":"5","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"turn_reconciliation_required","turn_id":"00000000-0000-0000-0000-000000000003","model_call_id":"00000000-0000-0000-0000-000000000008","terminal_frontier_id":"00000000-0000-0000-0000-000000000006"}}"#,
         )?;
         assert_server_message_round_trip(
             request(13)?,
@@ -2625,6 +2739,7 @@ mod tests {
                 message: "not found".to_owned(),
                 detail: ErrorDetail::none(),
             },
+            r#"{"type":"error","code":"not_found","message":"not found"}"#,
         )?;
         Ok(())
     }

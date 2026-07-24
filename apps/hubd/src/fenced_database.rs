@@ -3,7 +3,10 @@
 use std::{error::Error, fmt, mem};
 
 use signalbox_persistence::{
-    hub_fence::{HubFenceError, HubFenceGeneration, advance_hub_fence, initialize_hub_fence},
+    hub_fence::{
+        HubFenceError, HubFenceGeneration, advance_hub_fence, initialize_hub_fence,
+        retire_hub_fence_generation,
+    },
     production_connection_options,
 };
 use sqlx::{
@@ -85,9 +88,16 @@ impl FencedHubDatabase {
     /// and only then releases the singleton guard.
     pub async fn close(mut self) -> Result<(), SingleHubGuardError> {
         self.pool.close().await;
-        let Some(guard) = self.guard.take() else {
+        let Some(guard) = self.guard.as_mut() else {
             return Err(SingleHubGuardError::GuardLost(None));
         };
+        retire_hub_fence_generation(guard.connection_mut(), self.generation)
+            .await
+            .map_err(|error| SingleHubGuardError::GuardLost(Some(error)))?;
+        let guard = self
+            .guard
+            .take()
+            .ok_or(SingleHubGuardError::GuardLost(None))?;
         guard.close().await
     }
 }
