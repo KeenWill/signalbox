@@ -65,9 +65,12 @@ boundary.
 
 Each occurrence also carries the complete source JSON object normalized into the
 source-neutral structured-value algebra. Non-message records produce a typed
-`SourceEvent` entry rather than being dropped or recast as conversation text.
-The normalized sequence and every entry's raw-record reference make each
-conversion decision traceable back to exact source bytes.
+`SourceEvent` entry rather than being dropped or recast as conversation text. A
+source-defined message block without a more specific normalized variant produces
+a typed `SourceMessageBlock`, so its boundary and type remain explicit while the
+complete normalized owning record retains every block field. The normalized
+sequence and every entry's raw-record reference make each conversion decision
+traceable back to exact source bytes.
 
 ## Source attestations and normalized content
 
@@ -100,6 +103,8 @@ The closed normalized content vocabulary is:
 
 - `SourceEvent`, retaining the source record-type attestation and complete
   normalized record for a non-message record;
+- `SourceMessageBlock`, retaining the source block-type attestation and complete
+  normalized owning record for a source-defined message block;
 - `Text`, retaining attested exact user or assistant text or the field's precise
   typed absence;
 - `ToolCall`, retaining independently attested source call identity, tool name,
@@ -181,19 +186,22 @@ file order:
    or null message, omitted or null content, or empty content array produces one
    precisely distinguished `MessageContentAbsent` entry.
 4. `text`, `tool_use`, `tool_result`, `thinking`, `redacted_thinking`, and
-   `document` blocks map to their corresponding normalized variants. Tool-result
-   arrays admit ordered `text`, `image`, and `tool_reference` blocks. All
-   modeled fields retain their exact decoded or structured values and typed
-   attestations; a `text` or image-result block whose value is omitted or null
-   remains that block with precise typed absence.
+   `document` blocks map to their corresponding normalized variants. A
+   `fallback` block maps to `SourceMessageBlock`; its `from` and `to` objects
+   remain in the complete normalized owning record. Tool-result arrays admit
+   ordered `text`, `image`, and `tool_reference` blocks. All modeled fields
+   retain their exact decoded or structured values and typed attestations; a
+   `text` or image-result block whose value is omitted or null remains that
+   block with precise typed absence.
 5. An unknown content shape, content-block type, or tool-result block type fails
    the complete conversion rather than being silently dropped or guessed.
 
 This vocabulary is informed by an opt-in structural survey across local Claude
 Code transcript vintages: some files carry only user/final-response text, while
 others contain structured tool traffic, signed thinking, image results, tool
-references, document blocks, attachments, and administrative source events. No
-surveyed transcript content or path is copied into the repository.
+references, document blocks, model-fallback notices, attachments, and
+administrative source events. No surveyed transcript content or path is copied
+into the repository.
 
 Malformed JSON, a blank line, invalid UTF-8, unsupported content, an identity
 collision inside the candidate set, a position overflow, JSON deeper than 128
