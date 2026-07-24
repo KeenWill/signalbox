@@ -808,7 +808,7 @@ mod tests {
     }
 
     #[test]
-    fn preserves_each_distinct_message_absence() {
+    fn s28_inv038_preserves_each_distinct_message_absence() {
         let source = concat!(
             "{\"type\":\"user\"}\n",
             "{\"type\":\"user\",\"message\":null}\n",
