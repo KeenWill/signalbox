@@ -660,6 +660,7 @@ impl ModelCallExecution {
                     .get(accepted_input)
                     .map(|content| (*accepted_input, content.clone())),
                 SemanticTranscriptEntryPayload::TurnFailed { .. }
+                | SemanticTranscriptEntryPayload::Imported { .. }
                 | SemanticTranscriptEntryPayload::AssistantText { .. }
                 | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
                 | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
@@ -3065,6 +3066,7 @@ fn reconstitute(
                 Some(*accepted_input)
             }
             SemanticTranscriptEntryPayload::TurnFailed { .. }
+            | SemanticTranscriptEntryPayload::Imported { .. }
             | SemanticTranscriptEntryPayload::AssistantText { .. }
             | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
             | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
@@ -3432,6 +3434,7 @@ fn frontier_closes_latest_tool_round(
             | SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::TurnFailed { .. }
+            | SemanticTranscriptEntryPayload::Imported { .. }
             | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
             | SemanticTranscriptEntryPayload::ToolDenied { .. }
             | SemanticTranscriptEntryPayload::ToolClosed { .. }
@@ -3465,6 +3468,7 @@ fn frontier_closes_latest_tool_round(
             SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
             | SemanticTranscriptEntryPayload::TurnFailed { .. }
+            | SemanticTranscriptEntryPayload::Imported { .. }
             | SemanticTranscriptEntryPayload::AssistantText { .. }
             | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
             | SemanticTranscriptEntryPayload::TurnCompleted { .. }
@@ -3491,6 +3495,7 @@ fn assistant_entry_call(entry: &SemanticTranscriptEntry) -> Option<ModelCallId> 
         SemanticTranscriptEntryPayload::OriginAcceptedInput { .. }
         | SemanticTranscriptEntryPayload::SteeringAcceptedInput { .. }
         | SemanticTranscriptEntryPayload::TurnFailed { .. }
+        | SemanticTranscriptEntryPayload::Imported { .. }
         | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
         | SemanticTranscriptEntryPayload::ToolDenied { .. }
         | SemanticTranscriptEntryPayload::ToolClosed { .. }

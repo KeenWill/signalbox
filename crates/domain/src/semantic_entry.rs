@@ -5,7 +5,8 @@
 //! boundaries that validate the referenced facts.
 
 use crate::{
-    AcceptedInputId, ModelCallId, NonEmptyUnicodeText, NonEmptyUnicodeTextError,
+    AcceptedInputId, ImportedSourceAttestation, ImportedSpeaker, ImportedTranscriptContent,
+    ImportedTranscriptEntryId, ModelCallId, NonEmptyUnicodeText, NonEmptyUnicodeTextError,
     SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId, ToolRequestId, TurnId,
 };
 
@@ -37,6 +38,15 @@ impl AssistantText {
 /// The complete semantic transcript-entry payload set.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum SemanticTranscriptEntryPayload {
+    /// One exact normalized entry projected from immutable imported history.
+    Imported {
+        /// The immutable imported entry that remains content authority.
+        imported_entry: ImportedTranscriptEntryId,
+        /// The exact speaker attestation retained by conversion.
+        source_speaker: ImportedSourceAttestation<ImportedSpeaker>,
+        /// The exact maximum-fidelity normalized imported content.
+        content: ImportedTranscriptContent,
+    },
     /// The exact accepted input whose origin turn became eligible.
     OriginAcceptedInput {
         /// The immutable accepted-input identity.
