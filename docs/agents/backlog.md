@@ -67,12 +67,18 @@ predecessor's approval UX policy (oldest-first queue, approve-fast
 deny-deliberate, error-aware requeue, durable decision audit) is the reference
 for the client half that follows.
 
-## Session metadata and archival [blocked-on: owner design pass] [size: M]
+## Session metadata, tags, and visibility [blocked-on: owner design pass] [size: M-L]
 
 Owns: session satellite tables, list projection, additive protocol frames.
 Collides-with: little — parallel-safe against turn machinery. Titles, tags,
-archive/restore, filtered and paginated listing: the daily-driver ergonomics the
-terminal client needs next.
+archive/restore, filtered and paginated listing — plus visibility control for
+the automation era: sessions spawned by automations and background work must not
+crowd the interactive default view, while monitor surfaces see everything and
+can hop into any session. Start simple: creation cause and actor attribution
+already distinguish owner-initiated from automation-spawned sessions for free,
+so the default view is "sessions with recent owner interaction" plus manual tags
+as the override; expressive filter rules stay an open edge. Owner-flagged high
+priority — the daily-driver item.
 
 ## Monitor stream [blocked-on: client stack merge] [size: M]
 
@@ -130,7 +136,10 @@ permission-downgrade on re-registration) is designed in from day one.
 
 Owns: delegated creation cause (typed, rejected today), child-result delivery,
 delegation tools. Collides-with: session creation + tool loop. The orchestrator
-tier: sessions spawning linked sessions.
+tier: sessions spawning linked sessions. Includes the owner's "tangent" move:
+fork from any frontier point of any session — including an automation-spawned
+one — into a new session with different runner and tool capabilities; the same
+seed-from-frontier machinery the import milestone builds, with retargeting.
 
 ## Remote transport and real auth [blocked-on: owner design pass] [size: L]
 
@@ -149,6 +158,15 @@ the operator/monitor role; needs-attention triage first.
 Owns: compat endpoint surface. Collides-with: transport surfaces. One endpoint
 makes every OpenAI-speaking tool a Signalbox client; also a conversation-import
 seam.
+
+## Automation triggers [blocked-on: tool loop; channel integrations; owner design pass] [size: XL]
+
+Owns: trigger/condition machinery, automation session provenance. Collides-with:
+broad — late-stage item. Standing automations that create and drive sessions
+from input conditions (mail arriving, schedules, watched states). The owner's
+private adapters (for example email infrastructure) stay outside the repo as
+plugins; Signalbox owns the trigger seam, session provenance, and the visibility
+classification they rely on.
 
 ## Client SDK [blocked-on: protocol stabilization] [size: M]
 
